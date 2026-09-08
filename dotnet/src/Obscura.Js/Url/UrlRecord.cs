@@ -187,6 +187,15 @@ public sealed class UrlRecord
 
     internal UrlRecord CloneRecord() => (UrlRecord)MemberwiseClone();
 
+    /// <summary>Rebuilds the parsed host from the stored offsets and discriminant.</summary>
+    internal ParsedHost HostSnapshot() => HostKind switch
+    {
+        HostKind.Domain => ParsedHost.FromDomain(Serialization[HostStart..HostEnd]),
+        HostKind.Ipv4 => ParsedHost.FromIpv4(HostV4),
+        HostKind.Ipv6 => ParsedHost.FromIpv6(HostV6!),
+        _ => ParsedHost.FromDomain(string.Empty),
+    };
+
     // ---------------------------------------------------------------- setters
 
     /// <summary>
@@ -348,7 +357,7 @@ public sealed class UrlRecord
         var hostSubstr = host;
         if (!host.StartsWith('[') || !host.EndsWith(']'))
         {
-            var colon = host.IndexOf(':', StringComparison.Ordinal);
+            var colon = host.IndexOf(':');
             if (colon == 0)
             {
                 return false;

@@ -156,13 +156,16 @@ public static class Idna
 
         if (ascii)
         {
-            // An already-ASCII label may still be a Punycode label; it has to decode for the
-            // domain to be valid, which is what rejects inputs such as "xn--a".
+            // An already-ASCII label may still be a Punycode label. UTS 46 decodes it, checks
+            // that the result is valid, and requires the re-encoding to be identical; that
+            // round trip is what rejects inputs such as "xn--a" (which decodes to U+0080).
             if (label.StartsWith("xn--", StringComparison.Ordinal))
             {
                 if (!Punycode.Decode(label[4..], out var decoded)
                     || decoded.Length == 0
-                    || decoded.IndexOf('\uFFFD') >= 0)
+                    || !IsValidDecodedLabel(decoded)
+                    || !Punycode.Encode(Normalize(decoded), out var reencoded)
+                    || !label[4..].SequenceEqual(reencoded))
                 {
                     return false;
                 }
@@ -179,6 +182,62 @@ public static class Idna
 
         sb.Append("xn--").Append(encoded);
         return true;
+    }
+
+    /// <summary>
+    /// The subset of UTS 46 label validity we can decide without the mapping table: a decoded
+    /// Punycode label must be non-ASCII, and must not carry controls, noncharacters, lone
+    /// surrogates, or the forbidden-domain ASCII set.
+    /// </summary>
+    private static bool IsValidDecodedLabel(string decoded)
+    {
+        var sawNonAscii = false;
+        for (var i = 0; i < decoded.Length; i++)
+        {
+            var c = decoded[i];
+            if (c < 0x80)
+            {
+                if (IsForbiddenDomainCodePoint(c))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            sawNonAscii = true;
+            if (c is >= '\u007F' and <= '\u009F' or '\uFFFD')
+            {
+                return false;
+            }
+
+            if (c is >= '\uFDD0' and <= '\uFDEF')
+            {
+                return false;
+            }
+
+            if (char.IsHighSurrogate(c))
+            {
+                if (i + 1 >= decoded.Length || !char.IsLowSurrogate(decoded[i + 1]))
+                {
+                    return false;
+                }
+
+                var cp = char.ConvertToUtf32(c, decoded[i + 1]);
+                if ((cp & 0xFFFE) == 0xFFFE)
+                {
+                    return false;
+                }
+
+                i++;
+            }
+            else if (char.IsLowSurrogate(c) || (c & 0xFFFE) == 0xFFFE)
+            {
+                return false;
+            }
+        }
+
+        return sawNonAscii;
     }
 
     /// <summary>

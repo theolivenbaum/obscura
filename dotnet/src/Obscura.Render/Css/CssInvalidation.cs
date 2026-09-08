@@ -926,3 +926,99 @@ public static class CssInvalidationBuilder
         return false;
     }
 }
+
+/// <summary>
+/// Builds an <see cref="InvalidationMap"/> from stylesheet sources.
+/// </summary>
+/// <remarks>
+/// This reproduces the invalidation-recording half of Rust's
+/// <c>Stylesheet::parse</c>, including its rule-order accounting: a rule whose
+/// selector the matcher cannot compile advances the source order only when it
+/// still needs conservative tracking. The selector-compilation predicate is a
+/// seam because the selector engine lives in <c>Obscura.Dom</c>; the default
+/// accepts every selector, which matches the reference matcher for all syntax
+/// it supports.
+/// </remarks>
+public static class CssInvalidationMapBuilder
+{
+    public static InvalidationMap Build(
+        IEnumerable<string> sources,
+        (float Width, float Height) viewport,
+        CssMediaType mediaType = CssMediaType.Screen,
+        Func<string, bool>? selectorCompiles = null)
+    {
+        selectorCompiles ??= static _ => true;
+        var map = new InvalidationMap();
+        var order = 0;
+        var conditions = CssParser.NewConditionArena();
+        var layers = new LayerRegistry();
+
+        foreach (var source in sources)
+        {
+            var parsed = CssParser.ParseStylesheetForViewportPreservingContainersInLayer(
+                source,
+                viewport,
+                mediaType,
+                conditions,
+                ContainerConditionId.None,
+                layers,
+                null);
+
+            foreach (var rule in parsed)
+            {
+                var selector = rule.Selector;
+                if (selector.StartsWith(CssAtRules.KeyframesSelectorPrefix, StringComparison.Ordinal)
+                    || selector.StartsWith(CssAtRules.WebkitKeyframesSelectorPrefix, StringComparison.Ordinal))
+                {
+                    order++;
+                    continue;
+                }
+
+                if (selector.StartsWith(CssAtRules.PropertyRegistrationSelectorPrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var trimmed = selector.Trim();
+                var pseudoBase = CssSelectorText.StripPseudoElement(trimmed, "before")
+                    ?? CssSelectorText.StripPseudoElement(trimmed, "after")
+                    ?? CssSelectorText.StripPseudoElement(trimmed, "placeholder");
+
+                if (pseudoBase is not null)
+                {
+                    if (selectorCompiles(pseudoBase))
+                    {
+                        CssInvalidationBuilder.NoteSelectorForInvalidation(map, pseudoBase, order);
+                        CssInvalidationBuilder.NoteDeclarationAttributeDependencies(map, rule.Declarations, order);
+                    }
+                    else if (CssSelectorText.SelectorRequiresConservativeTracking(pseudoBase))
+                    {
+                        // Keep correctness metadata for relative/structural syntax
+                        // that the current selector matcher cannot yet compile.
+                        CssInvalidationBuilder.NoteSelectorForInvalidation(map, pseudoBase, order);
+                    }
+
+                    order++;
+                    continue;
+                }
+
+                if (!selectorCompiles(selector))
+                {
+                    if (CssSelectorText.SelectorRequiresConservativeTracking(selector))
+                    {
+                        CssInvalidationBuilder.NoteSelectorForInvalidation(map, selector, order);
+                        order++;
+                    }
+
+                    continue;
+                }
+
+                CssInvalidationBuilder.NoteSelectorForInvalidation(map, selector, order);
+                CssInvalidationBuilder.NoteDeclarationAttributeDependencies(map, rule.Declarations, order);
+                order++;
+            }
+        }
+
+        return map;
+    }
+}

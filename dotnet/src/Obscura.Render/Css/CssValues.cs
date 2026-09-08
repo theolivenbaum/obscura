@@ -3,6 +3,10 @@ using System.Text;
 
 namespace Obscura.Render.Css;
 
+// ContainerType, GeneratedCounterStyle, GeneratedContentItem and
+// AnimationEffectImpact are the shared lib.rs types; they live in the parent
+// Obscura.Render namespace (Core/) and resolve here without a using directive.
+
 /// <summary>
 /// CSS media type used while selecting conditional author rules.
 /// </summary>
@@ -25,65 +29,6 @@ internal enum LengthAxis
 {
     Width,
     Height,
-}
-
-/// <summary>
-/// Size containment mode of a query container.
-/// </summary>
-/// <remarks>
-/// SHARED TYPE: the Rust original lives in <c>obscura-render/src/lib.rs</c> as
-/// <c>crate::ContainerType</c>. Defined here so the CSS port stands alone; the
-/// coordinator should collapse this into the real one when lib.rs lands.
-/// </remarks>
-public enum ContainerType
-{
-    Normal,
-    InlineSize,
-    Size,
-}
-
-/// <summary>
-/// Counter presentation styles supported by generated content.
-/// </summary>
-/// <remarks>
-/// SHARED TYPE: Rust <c>crate::GeneratedCounterStyle</c> from lib.rs.
-/// </remarks>
-public enum GeneratedCounterStyle
-{
-    Decimal,
-    DecimalLeadingZero,
-    LowerAlpha,
-    UpperAlpha,
-    LowerRoman,
-    UpperRoman,
-}
-
-/// <summary>
-/// One item of a parsed <c>content</c> declaration.
-/// </summary>
-/// <remarks>
-/// SHARED TYPE: Rust <c>crate::GeneratedContentItem</c> from lib.rs.
-/// </remarks>
-public abstract record GeneratedContentItem
-{
-    public sealed record Text(string Value) : GeneratedContentItem;
-
-    public sealed record Counter(string Name, GeneratedCounterStyle Style) : GeneratedContentItem;
-
-    public sealed record Counters(string Name, string Separator, GeneratedCounterStyle Style)
-        : GeneratedContentItem;
-}
-
-/// <summary>
-/// Whether an animated property forces relayout or only repaint.
-/// </summary>
-/// <remarks>
-/// SHARED TYPE: Rust <c>crate::AnimationEffectImpact</c> from lib.rs.
-/// </remarks>
-public enum AnimationEffectImpact
-{
-    Paint,
-    Geometry,
 }
 
 /// <summary>

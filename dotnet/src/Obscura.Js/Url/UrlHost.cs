@@ -62,7 +62,7 @@ public readonly struct ParsedHost
     /// <summary><see href="https://url.spec.whatwg.org/#host-serializing"/>.</summary>
     public override string ToString() => Kind switch
     {
-        HostKind.Domain => Domain,
+        HostKind.Domain => Domain ?? string.Empty,
         HostKind.Ipv4 => SerializeIpv4(V4),
         HostKind.Ipv6 => "[" + SerializeIpv6(V6!) + "]",
         _ => string.Empty,

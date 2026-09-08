@@ -181,7 +181,7 @@ public static class CssColor
             var trimmed = text.Trim();
             if (trimmed.EndsWith('%'))
             {
-                return CssNumber.ParseFloat(trimmed[..^1]) is { } percent ? ToByte(percent * 2.55f) : null;
+                return CssNumber.ParseFloat(trimmed.AsSpan()[..^1]) is { } percent ? ToByte(percent * 2.55f) : null;
             }
 
             return CssNumber.ParseFloat(trimmed) is { } value ? ToByte(value) : null;
@@ -291,7 +291,7 @@ public static class CssColor
         {
             var trimmed = text.Trim();
             return trimmed.EndsWith('%')
-                ? CssNumber.ParseFloat(trimmed[..^1]) is { } percent ? percent / 100f : null
+                ? CssNumber.ParseFloat(trimmed.AsSpan()[..^1]) is { } percent ? percent / 100f : null
                 : CssNumber.ParseFloat(trimmed);
         }
     }
@@ -357,7 +357,7 @@ public static class CssColor
             if (lastSpace >= 0)
             {
                 var tail = trimmed[(lastSpace + 1)..].Trim();
-                if (tail.EndsWith('%') && CssNumber.ParseFloat(tail[..^1]) is { } percent)
+                if (tail.EndsWith('%') && CssNumber.ParseFloat(tail.AsSpan()[..^1]) is { } percent)
                 {
                     var head = ParseForScheme(trimmed[..lastSpace].Trim(), darkScheme);
                     return head is null ? null : (head.Value, percent / 100f);
