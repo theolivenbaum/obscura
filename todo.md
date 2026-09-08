@@ -106,8 +106,12 @@ The largest component. Split into stages; each stage is independently testable.
 - [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (14769)
 - [ ] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3200)
 - [ ] `paint.rs` -> rasterization onto Skia: fills, strokes, images, SVG, canvas, effects (9721)
-- [ ] `border.rs` -> border and outline painting (452)
-- [ ] `lib.rs` -> the public render API, screenshots, animation sampling (2914)
+- [x] `border.rs` -> border and outline painting (452) - ported inside
+      `Core/Border.cs`, because `LayoutStyle.BorderModel`/`.Outline` are fields
+      of these types and could not be stubbed. Its 3 tests are green.
+- [x] `lib.rs` -> core types: `LayoutStyle` (189 fields), geometry, `Affine2`,
+      `Dimension`, style enums, background, generated content, animation,
+      capture limits, and the `LayoutStyle`->taffy style mapping (2914)
 - [ ] Fonts: embedded font assets + Skia/HarfBuzz typeface and shaping integration
 - [ ] Unit tests ported (`layout_test.rs`)
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare

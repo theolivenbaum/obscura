@@ -15,11 +15,19 @@
 // Tests gated on the `parse` or `serde` cargo features are not ported: neither
 // feature is part of this port (Obscura parses CSS in Obscura.Render.Css, and
 // styles never cross a serialization boundary).
+namespace Obscura.Render.Tests;
+
+// These usings sit inside the namespace on purpose: Obscura.Render (the computed
+// style port) declares its own Display/BoxSizing/Dimension/Clear/Float types, and a
+// compilation-unit-level alias loses to a type declared in an enclosing namespace.
 using System.Runtime.CompilerServices;
 using Obscura.Render.Layout;
 using Xunit;
-
-namespace Obscura.Render.Tests;
+using BoxSizing = Obscura.Render.Layout.BoxSizing;
+using Clear = Obscura.Render.Layout.Clear;
+using Dimension = Obscura.Render.Layout.Dimension;
+using Display = Obscura.Render.Layout.Display;
+using Float = Obscura.Render.Layout.Float;
 
 // ---------------------------------------------------------------------------
 // vendor/taffy/src/style/alignment.rs

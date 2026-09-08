@@ -53,6 +53,14 @@ Read `todo.md` for the live port status and the ordered work queue.
   (central package management is on). Never pin a version in a `.csproj`.
 - SkiaSharp 4.x paths are immutable: build with `SKPathBuilder` and `Detach()`,
   not the obsolete mutable `SKPath` methods.
+- **`MathF` is not `f32`.** Rust's `f32::min`/`f32::max` ignore NaN, while
+  `MathF.Min`/`MathF.Max` propagate it, and `f32::round` is half-away-from-zero
+  while `MathF.Round` is banker's rounding. Every one of these in the render
+  layer must go through `Obscura.Render.F32` instead. This is silent when wrong:
+  it produces slightly different geometry rather than an error.
+- **The render layer is `float`, never `double`.** The Rust engine is f32
+  throughout, and f64 accumulation diverges visibly in layout and paint. The one
+  exception is capture-dimension checking, which is f64 in Rust too.
 
 ## Layout
 
