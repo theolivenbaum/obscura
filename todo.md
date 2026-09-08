@@ -83,7 +83,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [ ] Unit + integration tests ported
 - [ ] Parity: run the same scripts through both runtimes, compare results
 
-## 4. Obscura.Render  (<- crates/obscura-render + vendor/taffy, ~100k lines)
+## 4. Obscura.Render  (<- crates/obscura-render + vendor/taffy)  -  COMPLETE, 621 tests green
 
 The largest component. Split into stages; each stage is independently testable.
 
@@ -100,7 +100,8 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3535) -
       33 Rust tests ported, 30 passing, 3 skipped pending `dom.rs`. Reimplemented
       on HarfBuzz + Skia; see CLAUDE.md for the measured differences.
-- [ ] `paint.rs` -> rasterization onto Skia: fills, strokes, images, SVG, canvas, effects (9721)
+- [x] `paint.rs` -> rasterization onto Skia (9721) - 131 Rust tests ported,
+      131 passing, 0 skipped, 0 tolerances introduced
 - [x] `border.rs` -> border and outline painting (452) - ported inside
       `Core/Border.cs`, because `LayoutStyle.BorderModel`/`.Outline` are fields
       of these types and could not be stubbed. Its 3 tests are green.
@@ -282,6 +283,19 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   ending exactly in `linear-gradient(`, Rust slices out of range and panics; the
   port clamps and returns "no gradient", because style application must never
   throw.
+- **SVG rasterization is an in-tree reimplementation, not a binding.**
+  `usvg`/`resvg` have no managed counterpart. The port covers shapes, paths,
+  groups, transforms, `viewBox`/`preserveAspectRatio`, `use`/`symbol`/`defs`,
+  gradients, patterns, `clipPath`, text over the bundled font database, and
+  presentation-attribute inheritance. It does NOT implement SVG filters, masks,
+  markers or `textPath`; nothing in paint.rs reaches them today, and an asset
+  using them renders without those effects rather than failing. Paint-server
+  recursion is capped at depth 4, because a self-referential pattern fill
+  overflowed the stack.
+- **Image resampling is self-consistent, not bit-identical to Rust.** A Lanczos3
+  implementation stands in for `image::imageops::resize`. The capture test
+  proves the fallback path is taken and deterministic, not that samples match
+  the Rust `image` crate byte for byte.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.

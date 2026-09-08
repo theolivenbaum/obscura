@@ -614,7 +614,7 @@ internal static class SvgRenderer
                 IsAntialias = true,
                 Style = SKPaintStyle.Fill,
             };
-            canvas.DrawText(content, originX, y, font, paint);
+            canvas.DrawText(content, originX, y, SKTextAlign.Left, font, paint);
         }
 
         if (state.Stroke is { } stroke && state.StrokeWidth > 0f)
@@ -626,7 +626,7 @@ internal static class SvgRenderer
                 Style = SKPaintStyle.Stroke,
                 StrokeWidth = state.StrokeWidth,
             };
-            canvas.DrawText(content, originX, y, font, paint);
+            canvas.DrawText(content, originX, y, SKTextAlign.Left, font, paint);
         }
     }
 

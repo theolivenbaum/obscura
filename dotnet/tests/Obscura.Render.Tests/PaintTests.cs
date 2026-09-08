@@ -12,10 +12,12 @@ namespace Obscura.Render.Tests;
 /// source order with the Rust names preserved.
 /// </summary>
 /// <remarks>
-/// PIXEL TOLERANCE. Skia and tiny-skia anti-alias by a few coverage counts (CLAUDE.md records
-/// this), so a Rust assertion of exact equality on an anti-aliased edge becomes the same
-/// property with an explicit tolerance here. Every such place carries a comment naming the
-/// tolerance; the assertions themselves are otherwise unchanged.
+/// PIXEL TOLERANCE. Skia and tiny-skia anti-alias by a few coverage counts, so a Rust
+/// assertion of exact equality on an anti-aliased edge would become the same property with an
+/// explicit tolerance here, carrying a comment naming it. No test needed that: every Rust
+/// exact-pixel assertion holds exactly against Skia too, and the only tolerances below
+/// (&lt;8 per channel on the sticky-scroll samples, +/-5 against Chromium on the radial
+/// ellipse, +/-2 on the print-economy grey) are the Rust test's own.
 /// </remarks>
 public class PaintTests
 {
@@ -69,23 +71,6 @@ public class PaintTests
         string.Join(";", style.TransformOps.Select(static op => op.ToString()));
 
     private static string Invariant(FormattableString value) => value.ToString(CultureInfo.InvariantCulture);
-
-    /// <summary>Number of pixels differing by more than <paramref name="tolerance"/> per channel.</summary>
-    private static int ChannelDifferences(Pixmap a, Pixmap b, int tolerance)
-    {
-        byte[] left = a.Data();
-        byte[] right = b.Data();
-        int differing = 0;
-        for (int index = 0; index < Math.Min(left.Length, right.Length); index++)
-        {
-            if (Math.Abs(left[index] - right[index]) > tolerance)
-            {
-                differing++;
-            }
-        }
-
-        return differing;
-    }
 
     [Fact]
     public void NativeShadowFlatTreePaintsShadowAndSlottedContentOnly()
