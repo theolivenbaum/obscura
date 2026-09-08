@@ -158,6 +158,19 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   and Fonts 2.x+ moved off Apache-2.0 to the Six Labors Split License, and
   Drawing 3.x fails the build outright without a license key. Only the frozen
   older versions are Apache-2.0, and they do not form a compatible set.
+- **`set_v8_flags` maps flags onto typed constraints instead of passing a flag
+  string to V8.** ClearScript does not expose `v8::V8::set_flags_from_string`;
+  it surfaces the same settings as `V8RuntimeConstraints` properties and a small
+  `V8GlobalFlags` enum. The heap-sizing flags an embedder actually uses
+  (`--max-old-space-size`, `--max-semi-space-size`, `--max-young-generation-size`)
+  and a few global toggles map across; anything else is reported through
+  `V8Flags.Warned` and ignored rather than silently dropped. The late-call
+  refusal is preserved exactly, because a late flag call aborts the process.
+- **`System.Text.Encoding.CodePages` is an approved managed dependency.**
+  .NET Core ships only UTF-8/16/32, ASCII and Latin-1 in box, and
+  `encoding.rs` needs the whole WHATWG legacy set (GBK, Big5, Shift_JIS,
+  EUC-JP/KR, windows-125x, ISO-8859-x). The package is Microsoft-published
+  managed IL with no native component, so it does not widen the native set.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.
