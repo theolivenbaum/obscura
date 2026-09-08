@@ -35,9 +35,24 @@ public static class BootstrapLoader
 
         engine.Execute(new DocumentInfo("bootstrap.js"), BootstrapSource.Text);
 
-        // deno_core hides globalThis.Deno after setup so page script can never
-        // reach Deno.core.ops; the shim keeps its own captured reference.
-        engine.Execute("bootstrap-postamble", "delete globalThis.Deno; delete globalThis.__obscura_deno_core;");
+        // Drop the op-table handoff, exactly as `take_ops_handoff` does in
+        // runtime.rs: the host has the table already, and page script must never
+        // reach it through `__obscura_core_handoff`.
+        //
+        // `globalThis.Deno` itself stays. bootstrap.js is one IIFE that resolves
+        // `Deno.core.ops.<op>` at *call* time on more than thirty lines
+        // (_scheduleAfter, the console bridge, every layout and image op), so
+        // deleting it does not hide the ops - it breaks setTimeout, console and
+        // CSSOM the first time page script touches them. It is made
+        // non-enumerable instead so it does not show up in Object.keys(window).
+        engine.Execute("bootstrap-postamble", """
+            delete globalThis.__obscura_core_handoff;
+            delete globalThis.__obscura_deno_core;
+            try {
+              Object.defineProperty(globalThis, 'Deno',
+                { value: globalThis.Deno, writable: false, enumerable: false, configurable: false });
+            } catch (_) {}
+            """);
         return shim;
     }
 }

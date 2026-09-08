@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Obscura.Dom;
+using Obscura.Js.Modules;
 using Obscura.Net;
 using Obscura.Render;
 using Obscura.Render.Css;

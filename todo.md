@@ -78,8 +78,10 @@ vendored variable-font coordinate fix needs to carry over.
   - [ ] fetch / network ops
   - [ ] render-facing ops (layout geometry, computed style, canvas, image metadata, WAAPI)
 - [ ] `frame.rs` -> child-frame realms (1352)
-- [ ] `module_loader.rs` + `import_map.rs` -> ES module loading (783)
-- [ ] `write_stream.rs`, `markdown.rs`, `v8_flags.rs`, `cdp_watchdog.rs` (461)
+- [x] `module_loader.rs` + `import_map.rs` -> ES module loading (783)
+- [x] `write_stream.rs`, `markdown.rs`, `v8_flags.rs`, `cdp_watchdog.rs` (461) -
+      64 tests, 6 ported from Rust and 58 new, since three of these four files
+      shipped with no in-file tests at all
 - [ ] Unit + integration tests ported
 - [ ] Parity: run the same scripts through both runtimes, compare results
 
@@ -296,6 +298,22 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   implementation stands in for `image::imageops::resize`. The capture test
   proves the fallback path is taken and deterministic, not that samples match
   the Rust `image` crate byte for byte.
+- **ClearScript cannot tell a static import from a dynamic one.** deno_core's
+  loader gets an `is_dyn_import` flag; `DocumentLoader` does not, and
+  `engine.Compile` triggers no loads, so a compile/evaluate split cannot
+  separate them either. The port brackets static roots with
+  `BeginStaticGraph()`; a top-level `import()` inside such a bracket is
+  misclassified as static. Leaving the bracket off counts every load, which is
+  the conservative direction. This is the one place the module port is a
+  heuristic rather than a port.
+- **`document.write` re-parses the accumulated stream per call.** AngleSharp
+  exposes no resumable tree builder, so the stream identifies nodes by
+  child-index path instead of arena id and costs O(whole stream) per write
+  rather than O(new text). The algorithm is otherwise ported unchanged. Whether
+  an element is still open is recovered with a text probe rather than
+  html5ever's `trace_handles`, so inside `<table>` the open set is approximate
+  where foster-parenting moves the probe; it only matters for `script` and
+  `template`, which are not foster-parented.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.
