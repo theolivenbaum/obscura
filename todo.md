@@ -68,7 +68,13 @@ vendored variable-font coordinate fix needs to carry over.
 ## 3. Obscura.Js  (<- crates/obscura-js, ~44k lines; 15.8k of it is shared JS)
 
 - [x] Share `bootstrap.js` with the Rust tree by linking it as an embedded resource
-- [ ] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript: isolate lifetime, realms, watchdog (3704)
+- [~] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript (3704)
+      - [x] 80 of 95 public methods; watchdog, heap cap, event loop, CDP object
+            store, module graphs, frame realms
+      - [ ] the 15 `screenshot_*`/render-seeding methods (the Page-capture
+            boundary) - 29 tests skipped naming them
+      - [ ] **404 of 455 tests are unwritten**, not blocked. Bodies are kept as
+            Rust comments. This is the largest gap in the port.
 - [x] `ops.rs` -> the 52 ops (3101) - 52/52 ops and 67/67 `op_dom` commands,
       both mechanically diffed against the protocol doc
   - [x] `op_dom` command dispatcher (67 commands)
@@ -80,7 +86,7 @@ vendored variable-font coordinate fix needs to carry over.
         limit, 301/302/303 GET downgrade, CORS preflight, capped body read)
   - [x] render-facing ops (layout geometry, computed style, canvas, image
         metadata, WAAPI)
-- [ ] `frame.rs` -> child-frame realms (1352)
+- [x] `frame.rs` -> child-frame realms (1352)
 - [x] `module_loader.rs` + `import_map.rs` -> ES module loading (783)
 - [x] `write_stream.rs`, `markdown.rs`, `v8_flags.rs`, `cdp_watchdog.rs` (461) -
       64 tests, 6 ported from Rust and 58 new, since three of these four files
@@ -325,6 +331,26 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **`op_fetch_url` has no stealth branch.** Rust routes scripted fetch through
   `StealthHttpClient::send_single`; the deferred stealth transport has no
   equivalent, so scripted fetch falls through to the ordinary client.
+- **Cross-realm objects cannot be shared.** ClearScript refuses a `ScriptObject`
+  from another engine, so `publish_realm_objects` cannot hand the page a
+  frame's live `window`/`document`. Same-origin `contentWindow.someGlobal` and
+  `contentDocument` do not resolve to the frame's real objects. The port
+  registers an empty entry rather than a copy, because a copy would look live
+  and silently not be.
+- **No ICU locale control.** Rust calls `v8::icu::set_default_locale("en-US")`;
+  ClearScript exposes no ICU entry point. `Intl.*` and `resolvedOptions().locale`
+  can therefore leak the host locale while `navigator.language` reports en-US,
+  which is a regression of issue #734.
+- **The heap cap only exists once configured.** Rust arms at V8's own default
+  limit, so an unconfigured page is still protected; here protection begins only
+  after `--max-old-space-size` or `SetHeapLimit`, and below that V8's internal
+  OOM still aborts the process. The violation policy is also load-bearing:
+  `Exception` raises an ordinary script error that page JS can simply catch,
+  defeating the cap, so the port uses the uncatchable `Interrupt` plus a
+  raise-collect-restore recovery.
+- **Every frame re-parses bootstrap.js.** There is no snapshot equivalent, so a
+  frame realm cannot be restored from a prebuilt context. Correctness holds;
+  per-frame startup cost does not.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.
