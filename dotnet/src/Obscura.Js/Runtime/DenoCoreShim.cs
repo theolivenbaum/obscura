@@ -15,8 +15,8 @@ namespace Obscura.Js.Runtime;
 /// </remarks>
 public sealed class DenoCoreShim
 {
-    private readonly Dictionary<long, TimerEntry> _timers = [];
-    private long _nextTimerId = 1;
+    /// <summary>Pending host timers. The embedder pumps them; they never fire on their own.</summary>
+    public TimerQueue Timers { get; } = new();
 
     /// <summary>The bound op table exposed as <c>Deno.core.ops</c>.</summary>
     public required object Ops { get; init; }
@@ -27,7 +27,6 @@ public sealed class DenoCoreShim
     /// <summary>Callback registered via <c>setHandledPromiseRejectionHandler</c>.</summary>
     public object? HandledRejectionHandler { get; private set; }
 
-    internal sealed record TimerEntry(object Callback, double DelayMs, bool Repeat, long Generation);
 
     /// <summary>
     /// Queues a user timer. Mirrors deno_core's signature
@@ -35,23 +34,16 @@ public sealed class DenoCoreShim
     /// id <c>cancelTimer</c> accepts.
     /// </summary>
     [ScriptMember("queueUserTimer")]
-    public double QueueUserTimer(double realmId, bool repeat, double delayMs, object callback)
-    {
-        var id = _nextTimerId++;
-        _timers[id] = new TimerEntry(callback, delayMs, repeat, (long)realmId);
-        return id;
-    }
+    public double QueueUserTimer(double realmId, bool repeat, double delayMs, object callback) =>
+        Timers.Add(delayMs, repeat, callback);
 
     /// <summary>Cancels a timer previously returned by <see cref="QueueUserTimer"/>.</summary>
     [ScriptMember("cancelTimer")]
-    public void CancelTimer(double id) => _timers.Remove((long)id);
+    public void CancelTimer(double id) => Timers.Cancel((long)id);
 
     [ScriptMember("setUnhandledPromiseRejectionHandler")]
     public void SetUnhandledPromiseRejectionHandler(object handler) => UnhandledRejectionHandler = handler;
 
     [ScriptMember("setHandledPromiseRejectionHandler")]
     public void SetHandledPromiseRejectionHandler(object handler) => HandledRejectionHandler = handler;
-
-    /// <summary>Timers that are due, oldest deadline first. Drives the event loop.</summary>
-    internal IReadOnlyDictionary<long, TimerEntry> Timers => _timers;
 }

@@ -41,6 +41,9 @@
     <PackageVersion Include="System.CommandLine" Version="2.0.11" />
     <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.11" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+    <!-- Legacy (non-Unicode) code pages for the WHATWG charset set used by
+         obscura-net/encoding.rs. Managed IL only; no native component. -->
+    <PackageVersion Include="System.Text.Encoding.CodePages" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup Label="Test">

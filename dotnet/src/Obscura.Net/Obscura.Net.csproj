@@ -6,7 +6,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Obscura.Dom/Obscura.Dom.csproj" />
+    <!-- Legacy charset decoding (GBK, Big5, Shift_JIS, EUC-JP/KR, windows-125x,
+         ISO-8859-x). .NET Core ships only UTF-8/16/32, ASCII and Latin-1 in box;
+         encoding.rs needs the whole WHATWG legacy set. 100% managed IL. -->
+    <PackageReference Include="System.Text.Encoding.CodePages" />
   </ItemGroup>
 
   <!-- Tracker blocklist shared with the Rust tree; linked, not copied. -->
@@ -15,5 +18,9 @@
       <Link>Resources/pgl_domains.txt</Link>
       <LogicalName>Obscura.Net.pgl_domains.txt</LogicalName>
     </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Obscura.Net.Tests" />
   </ItemGroup>
 </Project>
