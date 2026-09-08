@@ -121,6 +121,73 @@ public sealed partial class DomTree
         return SelectorMatching.MatchesSelectorList(selectorList, new DomElement(this, nid), context);
     }
 
+    // The reference API returns Result<_, String> and op_dom branches on the error (a bad selector
+    // yields an empty result rather than a thrown JS error). These mirror that shape so callers do
+    // not have to catch.
+
+    /// <summary>Query variant that reports an invalid selector instead of throwing.</summary>
+    public bool TryQuerySelector(string selector, out NodeId? result, out string? error) =>
+        TryQuerySelectorFrom(Document, selector, out result, out error);
+
+    /// <summary>Query variant that reports an invalid selector instead of throwing.</summary>
+    public bool TryQuerySelectorFrom(NodeId root, string selector, out NodeId? result, out string? error)
+    {
+        try
+        {
+            result = QuerySelectorFrom(root, selector);
+            error = null;
+            return true;
+        }
+        catch (SelectorParseException e)
+        {
+            result = null;
+            error = e.Message;
+            return false;
+        }
+    }
+
+    /// <summary>Query variant that reports an invalid selector instead of throwing.</summary>
+    public bool TryQuerySelectorAll(string selector, out List<NodeId> results, out string? error) =>
+        TryQuerySelectorAllFrom(Document, selector, out results, out error);
+
+    /// <summary>Query variant that reports an invalid selector instead of throwing.</summary>
+    public bool TryQuerySelectorAllFrom(
+        NodeId root,
+        string selector,
+        out List<NodeId> results,
+        out string? error)
+    {
+        try
+        {
+            results = QuerySelectorAllFrom(root, selector);
+            error = null;
+            return true;
+        }
+        catch (SelectorParseException e)
+        {
+            results = [];
+            error = e.Message;
+            return false;
+        }
+    }
+
+    /// <summary>Match variant that reports an invalid selector instead of throwing.</summary>
+    public bool TryMatchesSelector(NodeId nid, string selector, out bool matches, out string? error)
+    {
+        try
+        {
+            matches = MatchesSelector(nid, selector);
+            error = null;
+            return true;
+        }
+        catch (SelectorParseException e)
+        {
+            matches = false;
+            error = e.Message;
+            return false;
+        }
+    }
+
     /// <summary>
     /// Parse a single selector once for repeated single-element matching, and precompute its
     /// specificity, ancestor hashes, and "subject key" (the rightmost id/class/attribute/tag used to

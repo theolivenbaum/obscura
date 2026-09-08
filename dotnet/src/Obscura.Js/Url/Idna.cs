@@ -76,25 +76,84 @@ public static class Idna
 
         // 1. UTS 46 mapping, restricted to the classes we can decide without the full table.
         var mapped = new StringBuilder(domain.Length);
-        foreach (var c in domain)
+        for (var i = 0; i < domain.Length; i++)
         {
+            var c = domain[i];
             switch (c)
             {
-                case '\u00AD':      // SOFT HYPHEN: ignored
-                case '\u200B':      // ZERO WIDTH SPACE: ignored
-                case '\uFEFF':      // ZERO WIDTH NO-BREAK SPACE: ignored
-                    continue;
+                case '\u00AD':      // SOFT HYPHEN
+                case '\u200B':      // ZERO WIDTH SPACE
+                case >= '\u2060' and <= '\u2064':   // WORD JOINER, invisible operators
+                case >= '\u206A' and <= '\u206F':   // deprecated format controls
+                case '\uFEFF':      // ZERO WIDTH NO-BREAK SPACE
+                    continue;        // "ignored" in the UTS 46 mapping table
+
                 case '\u3002':      // IDEOGRAPHIC FULL STOP
                 case '\uFF0E':      // FULLWIDTH FULL STOP
                 case '\uFF61':      // HALFWIDTH IDEOGRAPHIC FULL STOP
                     mapped.Append('.');
                     continue;
-                case '\uFFFD':
+
+                // disallowed_STD3_mapped to U+0020: the deny list then rejects the space.
+                case '\u00A0':
+                case '\u1680':
+                case '\u2028':
+                case '\u2029':
+                case '\u202F':
+                case '\u205F':
+                case '\u3000':
+                case >= '\u2000' and <= '\u200A':
+                    mapped.Append(' ');
+                    continue;
+
+                case '\u017F':      // LATIN SMALL LETTER LONG S
+                    mapped.Append('s');
+                    continue;
+                case '\u212A':      // KELVIN SIGN
+                    mapped.Append('k');
+                    continue;
+                case '\u212B':      // ANGSTROM SIGN
+                    mapped.Append('\u00E5');
+                    continue;
+                case '\u1E9E':      // LATIN CAPITAL LETTER SHARP S (nontransitional)
+                    mapped.Append('\u00DF');
+                    continue;
+                case '\u0130':      // LATIN CAPITAL LETTER I WITH DOT ABOVE
+                    mapped.Append("i\u0307");
+                    continue;
+
+                // Disallowed outright: C1 controls, the noncharacter blocks, the zero-width
+                // space, the joiners (CheckJoiners rejects them outside a valid context, which
+                // is every context this port can recognize), and the invisible operators.
+                case >= '\u0080' and <= '\u009F':
+                case '\u200C':
+                case '\u200D':
+                case >= '\uFDD0' and <= '\uFDEF':
+                case >= '\uFFF9' and <= '\uFFFD':
+                case '\uFFFE':
+                case '\uFFFF':
                     return false;
+
+                // Fullwidth forms map onto their ASCII counterparts.
+                case >= '\uFF01' and <= '\uFF5E':
+                    mapped.Append(AsciiLower((char)(c - 0xFEE0)));
+                    continue;
+
                 default:
-                    if (char.IsSurrogate(c))
+                    if (char.IsHighSurrogate(c) && i + 1 < domain.Length && char.IsLowSurrogate(domain[i + 1]))
                     {
-                        mapped.Append(c);   // validated as a pair by the Punycode codec
+                        // Reject the two noncharacters at the end of every astral plane.
+                        if ((char.ConvertToUtf32(c, domain[i + 1]) & 0xFFFE) == 0xFFFE)
+                        {
+                            return false;
+                        }
+
+                        mapped.Append(c).Append(domain[i + 1]);
+                        i++;
+                    }
+                    else if (char.IsSurrogate(c))
+                    {
+                        return false;   // a lone surrogate is never a valid domain
                     }
                     else
                     {
@@ -241,8 +300,8 @@ public static class Idna
     }
 
     /// <summary>
-    /// NFC, when the runtime can do it. Invariant globalization builds may refuse to
-    /// normalize non-ASCII text; an unnormalized label is better than a failed parse.
+    /// NFC. This cannot go through <c>string.Normalize</c>: the build sets
+    /// <c>InvariantGlobalization</c>, where it silently does nothing.
     /// </summary>
     private static string Normalize(string value)
     {
@@ -250,14 +309,7 @@ public static class Idna
         {
             if (c > 0x7F)
             {
-                try
-                {
-                    return value.Normalize(NormalizationForm.FormC);
-                }
-                catch (Exception ex) when (ex is not (OutOfMemoryException or StackOverflowException))
-                {
-                    return value;
-                }
+                return UnicodeNormalization.ToNfc(value);
             }
         }
 

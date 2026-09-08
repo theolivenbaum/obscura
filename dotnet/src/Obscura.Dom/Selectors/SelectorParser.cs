@@ -564,10 +564,10 @@ public static class SelectorParser
             var lower = AsciiLowercase(name);
             switch (lower)
             {
-                case "before":
-                    return (new PseudoElementComponent(PseudoElement.Before), Combinator.PseudoElement);
-                case "after":
-                    return (new PseudoElementComponent(PseudoElement.After), Combinator.PseudoElement);
+                // ::before / ::after are deliberately NOT parsed here. The reference selector
+                // implementation supplies no pseudo-element parser, so any `::pseudo` other than
+                // ::slotted() fails the whole selector list; the render cascade compiles the base
+                // selector without its pseudo-element instead.
                 case "slotted":
                 {
                     ExpectOpenParen();

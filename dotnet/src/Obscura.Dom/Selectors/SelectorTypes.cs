@@ -29,12 +29,12 @@ public enum PseudoClass
     FocusWithin,
     Enabled,
     Disabled,
+    Checked,
     /// <summary>
     /// <c>:link</c> / <c>:any-link</c>: an <c>&lt;a&gt;</c>/<c>&lt;area&gt;</c> with an
     /// <c>href</c>. Extremely common, so treating it as unsupported silently drops the whole rule
     /// from the cascade, not just the pseudo-class.
     /// </summary>
-    Checked,
     Link,
     /// <summary>
     /// <c>:visited</c>. We have no browsing history, so this never matches, the same fallback real
@@ -68,8 +68,11 @@ public readonly record struct NthData(NthType Type, int A, int B)
 
     public bool IsFromEnd => Type is NthType.LastChild or NthType.LastOfType;
 
-    /// <summary>Whether this can only ever select the first (or last) element child.</summary>
-    public bool IsSimpleEdge => A == 0 && B == 1;
+    /// <summary>
+    /// Whether this is an edge selector that is not <c>:*-of-type</c> or <c>:only-*</c>: it can
+    /// only ever select the first (or last) element child.
+    /// </summary>
+    public bool IsSimpleEdge => A == 0 && B == 1 && !IsOfType && !IsOnly;
 
     public static NthData First(bool ofType) =>
         new(ofType ? NthType.OfType : NthType.Child, 0, 1);

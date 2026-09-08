@@ -38,14 +38,19 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
 
-## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)
+## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81 tests green  -  81/81 tests green
 
-- [~] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots (1640)
-- [~] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree (698)
-- [~] `selector.rs` -> selector parsing, matching, specificity (1252)
-- [~] `serialize.rs` -> `innerHTML` / `outerHTML` serialization (331)
-- [ ] Unit tests ported
-- [ ] Parity: parse + serialize a corpus through both engines
+- [x] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots
+- [x] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree
+- [x] `selector.rs` -> selector parsing, matching, specificity (`Obscura.Dom.Selectors`)
+- [x] `serialize.rs` -> `innerHTML` / `outerHTML` serialization
+- [x] Unit tests ported (81 facts: 29 tree, 14 tree_sink, 31 selector, 7 serialize)
+- [~] Parity: parse + serialize a corpus through both engines. Validated ad hoc against
+      `target/release/obscura` over `render-repros/**`: 57/64 fixtures byte-identical for
+      parse + serialize (the other 7 differ only where the Rust run executed page script or
+      injected engine markup), and 3323 (selector, fixture) `querySelectorAll` count
+      comparisons over the 57 script-free fixtures with no semantic divergence. A standing
+      parity test needs `Obscura.Cli`, which the harness shells out to.
 
 ## 2. Obscura.Net  (<- crates/obscura-net, ~5.6k lines)  -  94/94 tests green
 
@@ -67,7 +72,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [ ] `ops.rs` -> the 52 ops (3101)
   - [ ] `op_dom` command dispatcher (~90 commands)
   - [x] crypto ops (`digest`, `hmac`, `aes-gcm/cbc/ctr`, `pbkdf2`, `hkdf`, `random_bytes`) - 30 tests green
-  - [~] URL ops (`parse`, `set`, `resolve`, `encode_query`) - needs a real WHATWG parser, `System.Uri` is not spec-compliant
+  - [x] URL ops (`parse`, `set`, `resolve`, `encode_query`) - WHATWG parser written in tree with Punycode; `System.Uri` is not spec-compliant
   - [ ] fetch / network ops
   - [ ] render-facing ops (layout geometry, computed style, canvas, image metadata, WAAPI)
 - [ ] `frame.rs` -> child-frame realms (1352)
@@ -80,7 +85,7 @@ vendored variable-font coordinate fix needs to carry over.
 
 The largest component. Split into stages; each stage is independently testable.
 
-- [~] `css.rs` -> CSS tokenizer, parser, values, at-rules (4431)
+- [x] `css.rs` -> CSS tokenizer, parser, values, at-rules (4431)
 - [ ] `style.rs` -> cascade, specificity, inheritance, computed style (8615)
 - [ ] `vendor/taffy` -> layout algorithms: block, flexbox, grid (20520)
 - [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (14769)
@@ -147,7 +152,20 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   surfaces and logs that TLS impersonation is inactive.
 - **HTML parsing delegates to AngleSharp** instead of porting `html5ever`.
   AngleSharp is fully managed and spec-compliant; its DOM is adapted into
-  Obscura's arena tree at parse time and never escapes `Obscura.Dom`.
+  Obscura's arena tree at parse time and never escapes `Obscura.Dom`. Two behaviors
+  html5ever exposed through its `TreeSink` are reimplemented on the adapter because
+  AngleSharp has no equivalent: declarative shadow roots
+  (`<template shadowrootmode>`, including the valid-shadow-host allowlist) and the
+  MathML `annotation-xml` integration-point flag, which is recomputed from the
+  element's `encoding` attribute. Quirks mode comes from `IDocument.CompatMode`,
+  which is `BackCompat` for full quirks only, matching `QuirksMode::Quirks`.
+- **`DomTree.GetNode` returns the live arena node, not a clone.** Rust's
+  `get_node` clones and offers `with_node_mut` for mutation; in C# the node is a
+  class, so one accessor covers both and op_dom mutates through it directly.
+- **Selector queries throw `SelectorParseException` on an invalid selector**, where
+  Rust returns `Result<_, String>`. `TryQuerySelector*` / `TryMatchesSelector`
+  mirror the Rust shape; `op_dom` must use those (or catch) so a bad selector
+  yields an empty result rather than a JS error, as it does today.
 - **Rasterization uses SkiaSharp, not a hand-written managed rasterizer.**
   Decided after the Apache-2.0 review below. This adds `libSkiaSharp` and
   `libHarfBuzzSharp` to the native dependency set (V8 plus two). The trade is

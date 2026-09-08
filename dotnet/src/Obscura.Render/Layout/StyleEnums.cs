@@ -1,5 +1,7 @@
 // Port of the plain keyword enums from vendor/taffy/src/style/mod.rs, block.rs,
 // flex.rs and float.rs.
+using EFloatDirection = Obscura.Render.Layout.FloatDirection;
+
 namespace Obscura.Render.Layout;
 
 /// <summary>Sets the layout used for the children of this node.</summary>
@@ -150,10 +152,10 @@ public static class FloatExtensions
     public static bool IsFloated(this Float self) => self is Float.Left or Float.Right;
 
     /// <summary>Converts <see cref="Float"/> into a nullable <see cref="FloatDirection"/>.</summary>
-    public static FloatDirection? FloatDirection(this Float self) => self switch
+    public static EFloatDirection? FloatDirection(this Float self) => self switch
     {
-        Float.Left => Layout.FloatDirection.Left,
-        Float.Right => Layout.FloatDirection.Right,
+        Float.Left => EFloatDirection.Left,
+        Float.Right => EFloatDirection.Right,
         _ => null,
     };
 }

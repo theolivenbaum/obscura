@@ -672,9 +672,9 @@ public sealed class LayoutStyle
     /// Rust keeps the opaque <c>calc()</c> handles embedded in grid track sizing functions
     /// alive here until every Taffy layout pass has completed. The managed port does not need
     /// the keepalive (the GC owns those objects), so this exists only to preserve the field
-    /// shape for the style port.
+    /// shape for the style port. Allocated lazily so the common element pays nothing.
     /// </summary>
-    internal List<object>[] GridCalcExpressions = [[], [], [], []];
+    internal List<object>[]? GridCalcExpressions;
 
     /// <summary>
     /// Track sizing functions for columns created outside the explicit grid. An empty list is
@@ -1223,7 +1223,9 @@ public sealed class LayoutStyle
         copy.FontVariationSettings = FontVariationSettings is null ? null : [.. FontVariationSettings];
         copy.GridTemplateColumns = [.. GridTemplateColumns.Select(static c => c.Clone())];
         copy.GridTemplateRows = [.. GridTemplateRows.Select(static c => c.Clone())];
-        copy.GridCalcExpressions = [[.. GridCalcExpressions[0]], [.. GridCalcExpressions[1]], [.. GridCalcExpressions[2]], [.. GridCalcExpressions[3]]];
+        copy.GridCalcExpressions = GridCalcExpressions is null
+            ? null
+            : [.. GridCalcExpressions.Select(static bucket => new List<object>(bucket))];
         copy.GridAutoColumns = [.. GridAutoColumns];
         copy.GridAutoRows = [.. GridAutoRows];
         copy.GridAreas = GridAreas is null ? null : [.. GridAreas.Select(static row => new List<string>(row))];

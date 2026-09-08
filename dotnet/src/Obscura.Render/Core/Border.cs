@@ -33,18 +33,6 @@ public static class BorderSides
         _ => null,
     };
 
-    /// <summary>Expand a CSS 1-4 value list in top-right-bottom-left order.</summary>
-    public static Sides<T>? ExpandSides<T>(IReadOnlyList<T> values)
-    {
-        T[] copy = new T[values.Count];
-        for (int i = 0; i < values.Count; i++)
-        {
-            copy[i] = values[i];
-        }
-
-        return ExpandSides<T>(copy.AsSpan());
-    }
-
     internal static float UsedWidth(float specified, BorderStyle style) =>
         style.IsVisible() ? F32.Max(specified, 0f) : 0f;
 }

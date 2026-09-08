@@ -101,7 +101,7 @@ public enum ClipPathFillRule
 /// resolution used by browser engines and avoids baking responsive polygon geometry into
 /// computed style.
 /// </remarks>
-public sealed class ClipPathPolygon
+public sealed class ClipPathPolygon : IEquatable<ClipPathPolygon>
 {
     public ClipPathPolygon()
     {
@@ -118,6 +118,46 @@ public sealed class ClipPathPolygon
     public List<(Dimension X, Dimension Y)> Points = [];
 
     public ClipPathPolygon Clone() => new(FillRule, [.. Points]);
+
+    /// <summary>Rust derives <c>PartialEq</c>, so equality is structural over the points.</summary>
+    public bool Equals(ClipPathPolygon? other) =>
+        other is not null
+        && FillRule == other.FillRule
+        && ListEquality.SequenceEqual(Points, other.Points);
+
+    public override bool Equals(object? obj) => Equals(obj as ClipPathPolygon);
+
+    public override int GetHashCode() => HashCode.Combine(FillRule, Points.Count);
+}
+
+/// <summary>
+/// Structural list comparison, so ported types keep Rust's derived <c>PartialEq</c> semantics
+/// instead of falling back to reference equality on the backing <see cref="List{T}"/>.
+/// </summary>
+internal static class ListEquality
+{
+    public static bool SequenceEqual<T>(List<T>? left, List<T>? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left is null || right is null || left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (!EqualityComparer<T>.Default.Equals(left[i], right[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
 
 /// <summary>
@@ -159,18 +199,40 @@ public abstract record BackgroundGradientLayer
     {
         public override BackgroundGradientLayer DeepClone() =>
             new Linear(Angle, [.. Stops], [.. StopPositions], Repeating);
+
+        public bool Equals(Linear? other) =>
+            other is not null
+            && Angle.Equals(other.Angle)
+            && Repeating == other.Repeating
+            && ListEquality.SequenceEqual(Stops, other.Stops)
+            && ListEquality.SequenceEqual(StopPositions, other.StopPositions);
+
+        public override int GetHashCode() => HashCode.Combine(Angle, Repeating, Stops.Count);
     }
 
     public sealed record Radial((float X, float Y) Center, List<GradientStop> Stops)
         : BackgroundGradientLayer
     {
         public override BackgroundGradientLayer DeepClone() => new Radial(Center, [.. Stops]);
+
+        public bool Equals(Radial? other) =>
+            other is not null && Center.Equals(other.Center) && ListEquality.SequenceEqual(Stops, other.Stops);
+
+        public override int GetHashCode() => HashCode.Combine(Center, Stops.Count);
     }
 
     public sealed record Conic(float Angle, (float X, float Y) Center, List<GradientStop> Stops)
         : BackgroundGradientLayer
     {
         public override BackgroundGradientLayer DeepClone() => new Conic(Angle, Center, [.. Stops]);
+
+        public bool Equals(Conic? other) =>
+            other is not null
+            && Angle.Equals(other.Angle)
+            && Center.Equals(other.Center)
+            && ListEquality.SequenceEqual(Stops, other.Stops);
+
+        public override int GetHashCode() => HashCode.Combine(Angle, Center, Stops.Count);
     }
 }
 

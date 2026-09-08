@@ -1,5 +1,5 @@
-using Obscura.Render;
-using Obscura.Render.Css;
+using Xunit;
+using RgbaColor = Obscura.Render.Css.RgbaColor;
 
 namespace Obscura.Render.Tests;
 
@@ -201,8 +201,8 @@ public class RenderCoreTests
     [Fact]
     public void SideExpansionFollowsCssTrblRules()
     {
-        Assert.Equal(Sides<int>.All(1), BorderSides.ExpandSides<int>([1]));
-        Assert.Equal(new Sides<int>(1, 2, 3, 2), BorderSides.ExpandSides<int>([1, 2, 3]));
+        Assert.Equal(Sides<int>.All(1), BorderSides.ExpandSides<int>([1])!.Value);
+        Assert.Equal(new Sides<int>(1, 2, 3, 2), BorderSides.ExpandSides<int>([1, 2, 3])!.Value);
         Assert.Null(BorderSides.ExpandSides<int>([]));
         Assert.Null(BorderSides.ExpandSides<int>([1, 2, 3, 4, 5]));
     }
@@ -263,8 +263,8 @@ public class RenderCoreTests
 
         Affine2 composed = Affine2.Translate(10f, 20f).Then(Affine2.Scale(2f, 3f));
         (float x, float y) = composed.MapPoint(1f, 1f);
-        Assert.Equal(12f, x, 5);
-        Assert.Equal(23f, y, 5);
+        Assert.True(MathF.Abs(x - 12f) < 1e-5f, $"x={x}");
+        Assert.True(MathF.Abs(y - 23f) < 1e-5f, $"y={y}");
     }
 
     [Fact]
@@ -275,8 +275,9 @@ public class RenderCoreTests
         Assert.True(MathF.Abs(x) < 1e-6f);
         Assert.True(MathF.Abs(y - 1f) < 1e-6f);
 
-        Affine2 inverse = Assert.NotNull(rotate.Inverse());
-        (float bx, float by) = inverse.MapPoint(x, y);
+        Affine2? maybeInverse = rotate.Inverse();
+        Assert.NotNull(maybeInverse);
+        (float bx, float by) = maybeInverse.Value.MapPoint(x, y);
         Assert.True(MathF.Abs(bx - 1f) < 1e-5f);
         Assert.True(MathF.Abs(by) < 1e-5f);
 
@@ -297,7 +298,7 @@ public class RenderCoreTests
     {
         Rect a = new(0f, 0f, 10f, 10f);
         Rect b = new(5f, 5f, 10f, 10f);
-        Assert.Equal(new Rect(5f, 5f, 5f, 5f), a.Intersect(b));
+        Assert.Equal(new Rect(5f, 5f, 5f, 5f), a.Intersect(b)!.Value);
         Assert.Equal(new Rect(0f, 0f, 15f, 15f), a.Union(b));
         // Touching edges do not intersect: the overlap would be degenerate.
         Assert.Null(a.Intersect(new Rect(10f, 0f, 5f, 5f)));
@@ -359,17 +360,17 @@ public class RenderCoreTests
     [Fact]
     public void ReplacedIntrinsicNaturalSizeFollowsCssImagesDefaultObjectSize()
     {
-        Assert.Equal((40f, 20f), ReplacedIntrinsic.FromDimensions(40f, 20f).NaturalSize());
-        Assert.Equal(2f, ReplacedIntrinsic.FromDimensions(40f, 20f).Ratio);
-        Assert.Equal((300f, 150f), new ReplacedIntrinsic(null, null, null).NaturalSize());
-        Assert.Equal((40f, 150f), new ReplacedIntrinsic(40f, null, null).NaturalSize());
-        Assert.Equal((300f, 40f), new ReplacedIntrinsic(null, 40f, null).NaturalSize());
-        Assert.Equal((40f, 20f), new ReplacedIntrinsic(40f, null, 2f).NaturalSize());
-        Assert.Equal((80f, 40f), new ReplacedIntrinsic(null, 40f, 2f).NaturalSize());
+        Assert.Equal((40f, 20f), ReplacedIntrinsic.FromDimensions(40f, 20f).NaturalSize()!.Value);
+        Assert.Equal(2f, ReplacedIntrinsic.FromDimensions(40f, 20f).Ratio!.Value);
+        Assert.Equal((300f, 150f), new ReplacedIntrinsic(null, null, null).NaturalSize()!.Value);
+        Assert.Equal((40f, 150f), new ReplacedIntrinsic(40f, null, null).NaturalSize()!.Value);
+        Assert.Equal((300f, 40f), new ReplacedIntrinsic(null, 40f, null).NaturalSize()!.Value);
+        Assert.Equal((40f, 20f), new ReplacedIntrinsic(40f, null, 2f).NaturalSize()!.Value);
+        Assert.Equal((80f, 40f), new ReplacedIntrinsic(null, 40f, 2f).NaturalSize()!.Value);
         // A wide ratio-only resource is bounded by the 300px default width...
-        Assert.Equal((300f, 100f), new ReplacedIntrinsic(null, null, 3f).NaturalSize());
+        Assert.Equal((300f, 100f), new ReplacedIntrinsic(null, null, 3f).NaturalSize()!.Value);
         // ...and a narrow one by the 150px default height.
-        Assert.Equal((150f, 150f), new ReplacedIntrinsic(null, null, 1f).NaturalSize());
+        Assert.Equal((150f, 150f), new ReplacedIntrinsic(null, null, 1f).NaturalSize()!.Value);
     }
 
     // ------------------------------------------------------------- animation
@@ -417,11 +418,11 @@ public class RenderCoreTests
         };
         state.RegisterWaapi(animation);
 
-        Assert.Equal(new Obscura.Dom.NodeId(3), state.WaapiNode(7));
+        Assert.Equal(new Obscura.Dom.NodeId(3), state.WaapiNode(7)!.Value);
         Assert.Contains(new Obscura.Dom.NodeId(3), state.WaapiNodes());
 
         Assert.True(state.SetWaapiCurrentTime(7, 500f, 250f));
-        Assert.Equal(250f, animation.HoldTimeMs);
+        Assert.Equal(250f, animation.HoldTimeMs!.Value);
         Assert.Equal(250f, animation.StartTimeMs);
 
         Assert.True(state.SetWaapiPlayState(7, WaapiPlayState.Running, 900f));
@@ -430,7 +431,7 @@ public class RenderCoreTests
 
         Assert.True(state.FinishWaapi(7));
         Assert.Equal(WaapiPlayState.Finished, animation.PlayState);
-        Assert.Equal(2000f, animation.HoldTimeMs);
+        Assert.Equal(2000f, animation.HoldTimeMs!.Value);
 
         Assert.True(state.CancelWaapi(7));
         Assert.False(state.CancelWaapi(7));
@@ -522,7 +523,7 @@ public class RenderCoreTests
         Assert.False(style.WidthFitContent);
 
         Assert.Equal(6, style.SizeExpressions.Length);
-        Assert.All(style.SizeExpressions, Assert.Null);
+        Assert.All(style.SizeExpressions, static value => Assert.Null(value));
         Assert.Equal(4, style.MarginAuto.Length);
         Assert.DoesNotContain(true, style.MarginAuto);
         Assert.Equal(4, style.MarginPercent.Length);
@@ -535,9 +536,9 @@ public class RenderCoreTests
         Assert.Equal(4, style.InsetExpressions.Length);
         Assert.Equal(2, style.IndividualTranslateExpressions.Length);
 
-        Assert.Equal(default, style.Margin);
-        Assert.Equal(default, style.Padding);
-        Assert.Equal(default, style.Border);
+        Assert.Equal(default(Edges), style.Margin);
+        Assert.Equal(default(Edges), style.Padding);
+        Assert.Equal(default(Edges), style.Border);
 
         // The two non-zero struct defaults: `medium none currentcolor`.
         Assert.Equal(BorderModel.Default, style.BorderModel);
@@ -550,7 +551,7 @@ public class RenderCoreTests
         Assert.Empty(style.BackgroundGradientLayers);
         Assert.Equal(BackgroundOrigin.PaddingBox, style.BackgroundOrigin);
         Assert.Equal(BackgroundClip.BorderBox, style.BackgroundClip);
-        Assert.Equal(default, style.BackgroundPosition);
+        Assert.Equal(default(BackgroundPosition), style.BackgroundPosition);
         Assert.Null(style.BackgroundRepeat);
         Assert.False(style.BackgroundClipText);
         Assert.Null(style.Color);
@@ -580,7 +581,7 @@ public class RenderCoreTests
         Assert.False(style.PositionSticky);
         Assert.False(style.OverflowHidden);
         Assert.False(style.OverflowScrollContainer);
-        Assert.Equal(0, style.ScrollbarGutters);
+        Assert.Equal(0, (int)style.ScrollbarGutters);
 
         Assert.Null(style.Float);
         Assert.Null(style.VisibilityHidden);
@@ -621,7 +622,7 @@ public class RenderCoreTests
         Assert.Null(style.IndividualTranslate);
         Assert.Null(style.IndividualRotate);
         Assert.Null(style.IndividualScale);
-        Assert.Equal(0, style.ContainingBlockTriggers);
+        Assert.Equal(0, (int)style.ContainingBlockTriggers);
         Assert.Null(style.TransformOrigin);
         Assert.Null(style.BoxShadow);
     }
@@ -648,7 +649,7 @@ public class RenderCoreTests
         LayoutStyle copy = style.Clone();
         Assert.Equal(Dimension.Px(10f), copy.Width);
         Assert.Equal("calc(100% - 1rem)", copy.SizeExpressions[0]);
-        Assert.Equal(0.25f, copy.MarginPercent[3]);
+        Assert.Equal(0.25f, copy.MarginPercent[3]!.Value);
 
         copy.ContainerNames.Add("panel");
         copy.TransformOps.Clear();
@@ -664,7 +665,7 @@ public class RenderCoreTests
         Assert.Single(style.CounterReset);
         Assert.Equal(2, style.GridAreas![0].Count);
         Assert.Equal("calc(100% - 1rem)", style.SizeExpressions[0]);
-        Assert.Equal(0.25f, style.MarginPercent[3]);
+        Assert.Equal(0.25f, style.MarginPercent[3]!.Value);
         Assert.Equal(Dimension.Px(1f), style.BeforePseudo!.Width);
         Assert.Single(((BackgroundGradientLayer.Radial)style.BackgroundGradientLayers[0]).Stops);
     }
@@ -718,7 +719,7 @@ public class RenderCoreTests
         Assert.True(style.EstablishesPositioningContainingBlock());
         // Clearing one trigger leaves the others intact.
         style.ContainingBlockTriggers &= unchecked((ushort)~ContainingBlockTrigger.Filter);
-        Assert.Equal(ContainingBlockTrigger.Transform, style.ContainingBlockTriggers);
+        Assert.Equal(ContainingBlockTrigger.Transform, (int)style.ContainingBlockTriggers);
         Assert.True(style.EstablishesPositioningContainingBlock());
     }
 }
