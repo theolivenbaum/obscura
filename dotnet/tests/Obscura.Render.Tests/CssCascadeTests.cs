@@ -491,12 +491,29 @@ public sealed class CssCascadeTests
         Assert.Equal((2f, 3f), style.IndividualScale);
     }
 
-    [Fact(Skip = "needs dom.rs's layout_dom, which is a later port stage")]
+    [Fact]
     public void AnimationT0GeometryReachesTheRealLayoutPass()
     {
-        // Rust: crate::dom::layout_dom over an animated flex row. Restore this
-        // once dom.rs lands; the sampled geometry itself is covered by
-        // AnimationSamplesGeometryTransformAndPaintPropertiesAtT0.
+        DomTree tree = HtmlParsing.ParseHtml(
+            """
+                <style>
+                    html,body { margin:0 }
+                    #row { display:flex }
+                    @keyframes size {
+                        from { width:300px; height:20px }
+                        to { width:400px; height:40px }
+                    }
+                    #target { width:50px; animation:size 10s both }
+                    #sibling { width:10px; height:10px }
+                </style>
+                <div id="row"><div id="target"></div><div id="sibling"></div></div>
+            """);
+        NodeId target = tree.GetElementById("target")!.Value;
+        NodeId sibling = tree.GetElementById("sibling")!.Value;
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Assert.Equal(300f, laid.Rects[target].Width);
+        Assert.Equal(20f, laid.Rects[target].Height);
+        Assert.Equal(300f, laid.Rects[sibling].X);
     }
 
     [Fact]

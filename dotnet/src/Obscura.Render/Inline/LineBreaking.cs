@@ -49,7 +49,6 @@ public enum BreakClass
     RegionalIndicator,  // RI
     ComplexContext,     // SA
     Unknown,            // XX
-    After,              // the class Blink uses for the `|` tailoring; U+2010-like "after" break
 }
 
 /// <summary>

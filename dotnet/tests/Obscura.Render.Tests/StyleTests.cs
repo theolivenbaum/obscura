@@ -1,3 +1,4 @@
+using Obscura.Dom;
 using Obscura.Render;
 using Obscura.Render.Css;
 using Xunit;
@@ -1633,9 +1634,29 @@ public class ComputedStyleTests
         }
     }
 
-    [Fact(Skip = "Blocked on the dom.rs port: needs obscura_dom::tree_sink::parse_html plus crate::dom::layout_dom.")]
+    [Fact]
     public void BoxSizingInitialRestoresContentBoxGeometryAfterUniversalReset()
     {
+        DomTree tree = HtmlParsing.ParseHtml(
+            """
+            <style>
+                * { box-sizing: border-box }
+                body { margin: 0 }
+                .parent { width: 600px }
+                .form {
+                    box-sizing: initial;
+                    width: 100%;
+                    max-width: 435px;
+                    padding: 15px;
+                }
+            </style>
+            <div class="parent"><form id="form" class="form"></form></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        NodeId form = tree.QuerySelector("#form")!.Value;
+
+        Assert.Equal(BoxSizing.ContentBox, laid.Styles[form].BoxSizing);
+        Assert.Equal(465f, laid.Rects[form].Width);
     }
 
     [Fact]

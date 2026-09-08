@@ -95,7 +95,8 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] `vendor/taffy` -> layout algorithms: block, flexbox, grid (20520) - 116
       tests green, including the vendored grid shrink-to-fit correction, which
       2 ported tests pin (stubbing the fix turns them red)
-- [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (14769)
+- [x] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry
+      (14769) - 135 Rust tests ported, 135 passing, 0 skipped
 - [x] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3535) -
       33 Rust tests ported, 30 passing, 3 skipped pending `dom.rs`. Reimplemented
       on HarfBuzz + Skia; see CLAUDE.md for the measured differences.
@@ -108,7 +109,8 @@ The largest component. Split into stages; each stage is independently testable.
       capture limits, and the `LayoutStyle`->taffy style mapping (2914)
 - [x] Fonts: embedded font assets, WOFF1/WOFF2 decoding, variable-font axes
       carried through both shaping and rasterization
-- [ ] Unit tests ported (`layout_test.rs`)
+- [x] Unit tests ported. Only skip left in Obscura.Render.Tests is the cascade
+      microbenchmark Rust itself marks `#[ignore]`.
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare
 
 ## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)

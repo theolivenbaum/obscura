@@ -452,13 +452,14 @@ public sealed class TextShaper(FontDatabase database)
     /// </summary>
     private static bool BreakAllPair(BreakClass before, BreakClass after, bool afterVerticalLine)
     {
-        bool afterVertical = after == BreakClass.After && afterVerticalLine;
+        // Rust's `BreakClass::After` is UAX#14 class BA, which this port names `BreakAfter`.
+        bool afterVertical = after == BreakClass.BreakAfter && afterVerticalLine;
         bool alLike = after is BreakClass.Ambiguous or BreakClass.Alphabetic or BreakClass.Hyphen
             or BreakClass.Numeric or BreakClass.OpenPunctuation or BreakClass.Prefix
             or BreakClass.ComplexContext or BreakClass.HebrewLetter || afterVertical;
         return before switch
         {
-            BreakClass.Ambiguous or BreakClass.Alphabetic or BreakClass.After or BreakClass.Numeric
+            BreakClass.Ambiguous or BreakClass.Alphabetic or BreakClass.BreakAfter or BreakClass.Numeric
                 or BreakClass.ComplexContext or BreakClass.Symbol or BreakClass.HebrewLetter => alLike,
             BreakClass.ClosePunctuation => after is BreakClass.Ambiguous or BreakClass.Alphabetic
                 or BreakClass.Hyphen or BreakClass.Numeric or BreakClass.Prefix

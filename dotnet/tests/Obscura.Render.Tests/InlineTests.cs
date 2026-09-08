@@ -888,37 +888,62 @@ public class InlineTests
             "atomic inline participation must not disable shaping inside the box");
     }
 
-    [Fact(Skip = "Needs crate::dom::layout_dom (dom.rs), which is not ported yet. The inline half "
-        + "of this assertion - per-span metrics reaching shaping - is exercised by "
-        + "VariableGlyphCacheKeysIncludeWeightAxis, which shapes two differently styled child "
-        + "spans in one buffer.")]
+    [Fact]
     public void InlineDescendantKeepsItsComputedFontMetrics()
     {
-        // Rust body, preserved verbatim so this can be restored once dom.rs lands:
-        //
-        //   let tree = obscura_dom::parse_html(
-        //       r#"<style>
-        //           #copy { font-size:16px; line-height:20px }
-        //           #big { font-size:2em; line-height:1.5 }
-        //       </style>
-        //       <p id="copy">small <a id="big">large</a></p>"#);
-        //   let laid = crate::dom::layout_dom(&tree, (500.0, 200.0));
-        //   assert_eq!(laid.styles[&big].font_size, Some(32.0));
-        //   let item = laid.ifc_items[&copy];
-        //   let glyph_sizes = laid.text_engine.items[item].buffer.layout_runs()
-        //       .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_size)).collect::<Vec<_>>();
-        //   assert!(glyph_sizes.iter().any(|size| (*size - 16.0).abs() < 0.01));
-        //   assert!(glyph_sizes.iter().any(|size| (*size - 32.0).abs() < 0.01));
+        DomTree tree = HtmlParsing.ParseHtml(
+            """
+            <style>
+                #copy { font-size:16px; line-height:20px }
+                #big { font-size:2em; line-height:1.5 }
+            </style>
+            <p id="copy">small <a id="big">large</a></p>
+            """);
+        NodeId copy = tree.GetElementById("copy")!.Value;
+        NodeId big = tree.GetElementById("big")!.Value;
+        DomLayout laid = RenderDom.LayoutDom(tree, (500f, 200f));
+
+        Assert.Equal(32f, laid.Styles[big].FontSize);
+        int item = laid.IfcItems[copy];
+        List<float> glyphSizes = [];
+        foreach (LayoutRun run in laid.TextEngine.Items[item].Buffer.LayoutRuns())
+        {
+            foreach (LayoutGlyph glyph in run.Glyphs)
+            {
+                glyphSizes.Add(glyph.FontSize);
+            }
+        }
+
+        Assert.True(
+            glyphSizes.Exists(size => MathF.Abs(size - 16f) < 0.01f),
+            $"base text should shape at 16px: {string.Join(", ", glyphSizes)}");
+        Assert.True(
+            glyphSizes.Exists(size => MathF.Abs(size - 32f) < 0.01f),
+            $"inline descendant should shape at 32px: {string.Join(", ", glyphSizes)}");
     }
 
-    [Fact(Skip = "Needs crate::dom::layout_dom (dom.rs) and the CSS cascade for the UA sheet's "
-        + "white-space:pre on <pre>; neither is ported yet.")]
+    [Fact]
     public void PreformattedNewlinesPreserveAuthoredLineCount()
     {
-        // Rust body, preserved so this can be restored once dom.rs and the UA sheet land. It
-        // lays out a <pre><code>, a white-space:pre-wrap div, and a white-space:normal div over
-        // the same three authored lines at 200px / 16px/24px monospace, then asserts the first
-        // two are 72px tall (three line boxes) and the third is 24px (one).
+        DomTree tree = HtmlParsing.ParseHtml(
+            "<style>\n"
+            + "    html,body { margin:0 }\n"
+            + "    .box { margin:0; width:200px; font:16px/24px monospace }\n"
+            + "    #explicit { white-space:pre-wrap }\n"
+            + "    #normal { white-space:normal }\n"
+            + "</style>\n"
+            + "<pre id=\"ua\" class=\"box\"><code>alpha\nbeta\ngamma</code></pre>\n"
+            + "<div id=\"explicit\" class=\"box\">alpha\nbeta\ngamma</div>\n"
+            + "<div id=\"normal\" class=\"box\">alpha\nbeta\ngamma</div>");
+        DomLayout laid = RenderDom.LayoutDom(tree, (400f, 300f));
+        Rect Get(string id) => laid.Rects[tree.GetElementById(id)!.Value];
+
+        Assert.Equal(WhiteSpace.Pre, laid.Styles[tree.GetElementById("ua")!.Value].WhiteSpace);
+        Assert.Equal(
+            WhiteSpace.PreWrap, laid.Styles[tree.GetElementById("explicit")!.Value].WhiteSpace);
+        Assert.True(MathF.Abs(Get("ua").Height - 72f) < 0.01f, $"{Get("ua")}");
+        Assert.True(MathF.Abs(Get("explicit").Height - 72f) < 0.01f, $"{Get("explicit")}");
+        Assert.True(MathF.Abs(Get("normal").Height - 24f) < 0.01f, $"{Get("normal")}");
     }
 
     private static List<string> ShapedLineTexts(TextBuffer buffer)
@@ -1012,15 +1037,26 @@ public class InlineTests
             $"balance should tighten the effective wrap width: {balancedWidth}");
     }
 
-    [Fact(Skip = "Needs crate::dom::layout_dom (dom.rs) and the text-wrap/text-wrap-style cascade "
-        + "in style.rs; neither is ported yet. This test asserts only cascade behavior, no inline "
-        + "layout.")]
+    [Fact]
     public void TextWrapStyleIsInheritedAndCanBeReset()
     {
-        // Rust body, preserved so this can be restored once dom.rs and the style.rs cascade
-        // land. It asserts that `text-wrap: balance` on an ancestor computes to
-        // TextWrapStyle::Balance on a descendant heading, and that `text-wrap-style: auto` on a
-        // sibling resets it to TextWrapStyle::Auto. No inline layout is involved.
+        DomTree tree = HtmlParsing.ParseHtml(
+            """
+            <style>
+                #outer { text-wrap:balance }
+                #reset { text-wrap-style:auto }
+            </style>
+            <div id="outer">
+                <h1 id="inherited">balanced heading words</h1>
+                <h1 id="reset">ordinary heading words</h1>
+            </div>
+            """);
+        NodeId inherited = tree.GetElementById("inherited")!.Value;
+        NodeId reset = tree.GetElementById("reset")!.Value;
+        DomLayout laid = RenderDom.LayoutDom(tree, (500f, 300f));
+
+        Assert.Equal(TextWrapStyle.Balance, laid.Styles[inherited].TextWrapStyle);
+        Assert.Equal(TextWrapStyle.Auto, laid.Styles[reset].TextWrapStyle);
     }
 
     [Fact]
