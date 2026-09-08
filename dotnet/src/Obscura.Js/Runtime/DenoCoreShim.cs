@@ -22,10 +22,98 @@ public sealed class DenoCoreShim
     public required object Ops { get; init; }
 
     /// <summary>Callback registered via <c>setUnhandledPromiseRejectionHandler</c>.</summary>
+    /// <remarks>
+    /// Storing this is not enough: nothing in V8 calls it on its own. The engine's
+    /// <c>PromiseRejectionCallback</c> has to be wired to invoke it, or the
+    /// <c>PromiseRejectionEvent</c> the shim builds is never dispatched and
+    /// <c>window.onunhandledrejection</c> silently never fires. See
+    /// <see cref="AttachTo"/>.
+    /// </remarks>
     public object? UnhandledRejectionHandler { get; private set; }
 
     /// <summary>Callback registered via <c>setHandledPromiseRejectionHandler</c>.</summary>
     public object? HandledRejectionHandler { get; private set; }
+
+    /// <summary>
+    /// Routes V8's promise-rejection events into the handlers the shim registered.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// deno_core installs V8's <c>PromiseRejectCallback</c> and calls the host handler
+    /// from it. ClearScript surfaces the same callback, so the wiring is direct, but
+    /// the REPORT MUST BE DEFERRED. V8 raises <c>RejectedWithoutHandler</c> at the
+    /// instant of rejection, which is before a synchronous <c>.catch()</c> on the very
+    /// next expression has attached. Reporting eagerly therefore fires
+    /// <c>unhandledrejection</c> for <c>Promise.reject(x).catch(...)</c>, which no
+    /// browser does. Rejections are collected here and flushed at the microtask
+    /// checkpoint by <see cref="FlushRejections"/>, which is where HTML specifies the
+    /// event fires.
+    /// </para>
+    /// <para>
+    /// Browsers report an unhandled rejection WITHOUT terminating the page's event
+    /// loop, so a throwing handler is contained rather than propagated.
+    /// </para>
+    /// </remarks>
+    public void AttachTo(V8ScriptEngine engine, ScriptObject tracker)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(tracker);
+        _tracker = tracker;
+
+        // Hand the tracker the two handlers bootstrap.js registered, so delivery
+        // happens entirely inside JS and the promise argument keeps its identity.
+        tracker.InvokeMethod("setHandlers", UnhandledRejectionHandler!, HandledRejectionHandler!);
+
+        engine.PromiseRejectionCallback = (kind, promise, value) =>
+        {
+            try
+            {
+                switch (kind)
+                {
+                    case V8PromiseRejectionEventKind.RejectedWithoutHandler:
+                        tracker.InvokeMethod("rejected", promise!, value!);
+                        break;
+                    case V8PromiseRejectionEventKind.HandlerAddedAfterRejection:
+                        tracker.InvokeMethod("handlerAdded", promise!, value!);
+                        break;
+                    default:
+                        // The remaining kinds are re-settlement attempts, which
+                        // browsers do not surface.
+                        break;
+                }
+            }
+            catch (Exception ex) when (ex is not ScriptInterruptedException)
+            {
+                RejectionDeliveryFailed?.Invoke(ex);
+            }
+        };
+    }
+
+    /// <summary>
+    /// Reports rejections still unhandled at the microtask checkpoint. The event loop
+    /// calls this after draining microtasks.
+    /// </summary>
+    public void FlushRejections()
+    {
+        if (_tracker is null)
+        {
+            return;
+        }
+        try
+        {
+            _tracker.InvokeMethod("flush");
+        }
+        catch (Exception ex) when (ex is not ScriptInterruptedException)
+        {
+            // A failure delivering the event must not take down the loop.
+            RejectionDeliveryFailed?.Invoke(ex);
+        }
+    }
+
+    private ScriptObject? _tracker;
+
+    /// <summary>Diagnostics for a handler that threw while delivering a rejection.</summary>
+    public event Action<Exception>? RejectionDeliveryFailed;
 
 
     /// <summary>

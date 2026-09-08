@@ -63,10 +63,87 @@ public static class HtmlParsing
         var root = tree.NewNode(NodeData.Element(QualName.Html("html")));
         tree.AppendChild(tree.Document, root);
 
-        var context = CreateContextElement(contextName);
-        var nodes = Parser.ParseFragment(html, context);
+        var nodes = IsForeign(contextName)
+            ? ParseForeignFragment(html, contextName)
+            : Parser.ParseFragment(html, CreateContextElement(contextName));
         Adapt(tree, root, nodes);
         return tree;
+    }
+
+    private static bool IsForeign(QualName name) =>
+        string.Equals(name.Ns, Namespaces.Svg, StringComparison.Ordinal)
+        || string.Equals(name.Ns, Namespaces.MathMl, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Parse a fragment whose context element lives in SVG or MathML.
+    /// </summary>
+    /// <remarks>
+    /// AngleSharp's <c>ParseFragment</c> does not enter foreign-content mode for a
+    /// namespaced context element: it returns the children in the HTML namespace with
+    /// lowercased names, so <c>svg.innerHTML = "&lt;linearGradient/&gt;"</c> yields an
+    /// xhtml <c>lineargradient</c>. html5ever honors the context's namespace.
+    ///
+    /// Parsing the markup nested inside a literal foreign root does put the tree builder
+    /// in foreign-content mode, so the fragment is wrapped, parsed as ordinary body
+    /// content, and then unwrapped. Case-sensitive foreign tag names and the
+    /// namespace both survive that round trip.
+    /// </remarks>
+    private static INodeList ParseForeignFragment(string html, QualName contextName)
+    {
+        var isSvg = string.Equals(contextName.Ns, Namespaces.Svg, StringComparison.Ordinal);
+        var rootTag = isSvg ? "svg" : "math";
+        var local = contextName.Local;
+
+        // A context that is itself the foreign root needs one level of wrapping; anything
+        // deeper (svg:g, svg:defs) needs its own element too, so the insertion mode
+        // matches the real parent.
+        var nested = !string.Equals(local, rootTag, StringComparison.OrdinalIgnoreCase);
+        var wrapped = nested
+            ? $"<{rootTag}><{local}>{html}</{local}></{rootTag}>"
+            : $"<{rootTag}>{html}</{rootTag}>";
+
+        var outer = Parser.ParseFragment(wrapped, CreateContextElement(QualName.Html("body")));
+
+        IElement? host = null;
+        foreach (var node in outer)
+        {
+            if (node is IElement element
+                && string.Equals(element.LocalName, rootTag, StringComparison.OrdinalIgnoreCase))
+            {
+                host = element;
+                break;
+            }
+        }
+        if (host is null)
+        {
+            // The wrapper did not survive parsing (malformed input); fall back rather than
+            // throwing, since fragment parsing must always produce a tree.
+            return Parser.ParseFragment(html, CreateContextElement(contextName));
+        }
+
+        if (nested)
+        {
+            foreach (var child in host.Children)
+            {
+                if (string.Equals(child.LocalName, local, StringComparison.OrdinalIgnoreCase))
+                {
+                    return child.ChildNodes;
+                }
+            }
+            return EmptyNodeList.Instance;
+        }
+        return host.ChildNodes;
+    }
+
+    /// <summary>An empty <see cref="INodeList"/> for a wrapper that produced no content.</summary>
+    private sealed class EmptyNodeList : INodeList
+    {
+        internal static readonly EmptyNodeList Instance = new();
+        public INode this[int index] => throw new ArgumentOutOfRangeException(nameof(index));
+        public int Length => 0;
+        public IEnumerator<INode> GetEnumerator() => Enumerable.Empty<INode>().GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        public void ToHtml(TextWriter writer, AngleSharp.IMarkupFormatter formatter) { }
     }
 
     private static IElement CreateContextElement(QualName name)

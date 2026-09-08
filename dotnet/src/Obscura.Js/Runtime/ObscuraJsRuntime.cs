@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using Microsoft.ClearScript;
 using Microsoft.ClearScript.V8;
 using Obscura.Js.Modules;
+using Obscura.Net;
 
 namespace Obscura.Js.Runtime;
 
@@ -51,6 +52,7 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
     private readonly V8ScriptEngine _engine;
     private readonly DenoCoreShim _shim;
     private readonly ObscuraModuleLoader _moduleLoader;
+    private readonly ObscuraHttpClient _standaloneModuleClient;
     private readonly V8IsolateHandle _isolateHandle;
     private readonly Dictionary<string, string> _objectStore = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _evaluationRecipes = new(StringComparer.Ordinal);
@@ -78,7 +80,19 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
             EnableInterruptPropagation = true,
         };
 
-        _moduleLoader = new ObscuraModuleLoader(baseUrl, proxyUrl);
+        // The loader must fetch a module graph over the page's own client once the
+        // host installs one, or a module travels a different transport than the
+        // document that imported it: no page cookies, no configured identity
+        // headers, no request/response callbacks, and the standalone client's SSRF
+        // policy instead of the page's. The reference reaches into the page state
+        // per load, and this closure is the same seam.
+        _standaloneModuleClient = new ObscuraHttpClient(new CookieJar(), proxyUrl);
+        // The loader and op_add_import_map must share ONE map. Giving the loader its
+        // own meant a <script type="importmap"> registered by page script wrote into
+        // the state's map while the loader kept reading an empty one, so every
+        // page-authored import map was silently ignored. Rust shares a single
+        // Rc<RefCell<ImportMap>> for exactly this reason.
+        _moduleLoader = new ObscuraModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine);
         ApplyHeapLimit(constraints);
@@ -175,6 +189,11 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
         engine.EnableRuntimeInterruptPropagation = true;
         engine.AllowReflection = false;
         _moduleLoader.Install(engine);
+        // Wrap the loader so the runtime sees which module URLs a graph actually
+        // pulled in. The loader itself records only URLs it fetched, and a module
+        // already in its document cache - the case that matters here - is served
+        // without a fetch.
+        engine.DocumentSettings.Loader = new RecordingModuleLoader(_moduleLoader, this);
         return engine;
     }
 
@@ -600,6 +619,94 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
         _realms.Clear();
         _engine.Dispose();
         _v8.Dispose();
+    }
+
+    /// <summary>
+    /// The network context one module fetch runs on. The page's client when the
+    /// host wired one, and a loader-owned client with its own cookie jar
+    /// otherwise, so a runtime with no page transport still resolves modules.
+    /// </summary>
+    private ModuleNetworkContext ModuleNetwork()
+    {
+        var page = _ops.Page;
+        return page.HttpClient is { } client
+            ? ModuleNetworkContext.From(client, page.StealthClient, page.Callbacks)
+            : ModuleNetworkContext.From(_standaloneModuleClient, null, null);
+    }
+
+    /// <summary>
+    /// Every module URL an evaluating graph asked the loader for, in order.
+    /// </summary>
+    private readonly List<string> _requestedModuleUrls = [];
+
+    internal int RequestedModuleUrlMark
+    {
+        get { lock (_requestedModuleUrls) { return _requestedModuleUrls.Count; } }
+    }
+
+    internal string[] RequestedModuleUrlsSince(int mark)
+    {
+        lock (_requestedModuleUrls)
+        {
+            return mark >= _requestedModuleUrls.Count
+                ? []
+                : _requestedModuleUrls.Skip(mark).Distinct(StringComparer.Ordinal).ToArray();
+        }
+    }
+
+    private void NoteModuleRequested(Uri? url)
+    {
+        if (url is null)
+        {
+            return;
+        }
+        lock (_requestedModuleUrls)
+        {
+            _requestedModuleUrls.Add(url.ToString());
+        }
+    }
+
+    /// <summary>
+    /// A pass-through <see cref="DocumentLoader"/> that tells the runtime which
+    /// module URLs an evaluating graph reached for.
+    /// </summary>
+    /// <remarks>
+    /// Browser module-map semantics are per URL, not per root: a module pulled in
+    /// as a dependency must not run its body again when a later
+    /// <c>&lt;script type="module"&gt;</c> names it as a root. The runtime can only
+    /// enforce that if it knows the graph, and ClearScript reports a graph edge
+    /// only through the document loader.
+    /// </remarks>
+    private sealed class RecordingModuleLoader(ObscuraModuleLoader inner, ObscuraJsRuntime owner)
+        : DocumentLoader
+    {
+        public override Document LoadDocument(
+            DocumentSettings settings,
+            DocumentInfo? sourceInfo,
+            string specifier,
+            DocumentCategory category,
+            DocumentContextCallback contextCallback)
+        {
+            var document = inner.LoadDocument(settings, sourceInfo, specifier, category, contextCallback);
+            owner.NoteModuleRequested(document.Info.Uri);
+            return document;
+        }
+
+        public override async Task<Document> LoadDocumentAsync(
+            DocumentSettings settings,
+            DocumentInfo? sourceInfo,
+            string specifier,
+            DocumentCategory category,
+            DocumentContextCallback contextCallback)
+        {
+            var document = await inner
+                .LoadDocumentAsync(settings, sourceInfo, specifier, category, contextCallback)
+                .ConfigureAwait(false);
+            owner.NoteModuleRequested(document.Info.Uri);
+            return document;
+        }
+
+        public override void DiscardCachedDocuments() => inner.DiscardCachedDocuments();
     }
 
     internal void RegisterRealm(FrameRealm realm) => _realms.Add(realm);

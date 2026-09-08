@@ -3,9 +3,14 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Browser</RootNamespace>
     <AssemblyName>Obscura.Browser</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Obscura.Js/Obscura.Js.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 </Project>

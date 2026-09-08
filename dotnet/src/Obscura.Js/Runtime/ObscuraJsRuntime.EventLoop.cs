@@ -67,10 +67,24 @@ public sealed partial class ObscuraJsRuntime
         }
     }
 
-    private LoopTick PumpTick(out string? taskError)
+    private LoopTick PumpTick(out string? taskError) => PumpTick(out taskError, out _);
+
+    /// <summary>
+    /// Runs one batch of ready work. <paramref name="ranTimers"/> reports
+    /// whether a timer batch was delivered, which is what the single-turn
+    /// entry points use to decide whether the turn still owes the caller one.
+    /// </summary>
+    private LoopTick PumpTick(out string? taskError, out bool ranTimers)
     {
         taskError = null;
+        ranTimers = false;
         PerformMicrotaskCheckpoint();
+
+        // HTML fires unhandledrejection at the microtask checkpoint, not at the
+        // instant of rejection: a synchronous .catch() on the next expression must
+        // still count as handled. The shim collects rejections; this is where they
+        // become events.
+        _shim.FlushRejections();
 
         // Posted tasks first: the shim treats op_posted_task as the task source
         // that must run before the next timer batch, which is what keeps a
@@ -96,6 +110,7 @@ public sealed partial class ObscuraJsRuntime
         var due = Timers.TakeDue();
         if (due.Count > 0)
         {
+            ranTimers = true;
             foreach (var callback in due)
             {
                 try
@@ -143,11 +158,12 @@ public sealed partial class ObscuraJsRuntime
     private async Task<LoopTick> ParkAsync(TimeSpan cap)
     {
         var next = Timers.NextDelayMs();
-        var delay = next is { } ms ? TimeSpan.FromMilliseconds(Math.Max(1, ms)) : TimeSpan.FromMilliseconds(1);
-        if (delay > cap)
-        {
-            delay = cap;
-        }
+        // Task.Delay resolves against a coarser clock than the timer queue and
+        // can complete a fraction of a millisecond early, which leaves the very
+        // timer the park was sized for still not due. deno_core parks on that
+        // timer's own waker and cannot wake early, so round the wait up.
+        var wanted = next is { } ms ? Math.Ceiling(Math.Max(1, ms)) + 1 : 1;
+        var delay = TimeSpan.FromMilliseconds(Math.Min(wanted, cap.TotalMilliseconds));
         if (delay > TimeSpan.Zero)
         {
             await Task.Delay(delay).ConfigureAwait(false);
@@ -196,14 +212,25 @@ public sealed partial class ObscuraJsRuntime
     {
         BeginJavaScriptTask();
         PerformMicrotaskCheckpoint();
-        var tick = PumpTick(out var error);
+        var tick = PumpTick(out var error, out var ranTimers);
         if (error is not null)
         {
             throw new JsRuntimeException(error);
         }
-        if (tick == LoopTick.Waiting)
+        if (tick != LoopTick.Idle && !ranTimers)
         {
             await ParkAsync(TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+            // deno_core answers Pending for "work remains", so the reference's
+            // poll_fn parks on the waker and polls a second time before it
+            // reports the turn: one turn always delivers the next ready batch.
+            // Returning straight after the first pump instead cost a whole
+            // turn whenever the next timer was a millisecond away, and a
+            // caller counting turns saw the loop skip every other one.
+            PumpTick(out var wakeError);
+            if (wakeError is not null)
+            {
+                throw new JsRuntimeException(wakeError);
+            }
             return false;
         }
         return tick == LoopTick.Idle;
@@ -251,9 +278,10 @@ public sealed partial class ObscuraJsRuntime
             IsolateHandleForWatchdog, TimeSpan.FromMilliseconds(AutonomousTaskWatchdogMs));
         LoopTick tick;
         string? error;
+        bool ranTimers;
         try
         {
-            tick = PumpTick(out error);
+            tick = PumpTick(out error, out ranTimers);
         }
         catch (ScriptInterruptedException)
         {
@@ -270,9 +298,33 @@ public sealed partial class ObscuraJsRuntime
         {
             throw new JsRuntimeException(error);
         }
-        if (tick == LoopTick.Waiting)
+        if (tick != LoopTick.Idle && !ranTimers)
         {
             await ParkAsync(TimeSpan.FromMilliseconds(50)).ConfigureAwait(false);
+            // Rust's poll_fn re-polls after the wake and only then reports the
+            // turn, so a turn that had to wait for a timer still delivers it.
+            var wakeWatchdog = CdpWatchdog.Arm(
+                IsolateHandleForWatchdog, TimeSpan.FromMilliseconds(AutonomousTaskWatchdogMs));
+            string? wakeError;
+            try
+            {
+                PumpTick(out wakeError);
+            }
+            catch (ScriptInterruptedException)
+            {
+                CdpWatchdog.Disarm(wakeWatchdog);
+                CancelTermination();
+                throw new JsRuntimeException("autonomous browser task exceeded its task budget");
+            }
+            if (CdpWatchdog.Disarm(wakeWatchdog))
+            {
+                CancelTermination();
+                throw new JsRuntimeException("autonomous browser task exceeded its task budget");
+            }
+            if (wakeError is not null && IsFatalEventLoopError(wakeError))
+            {
+                throw new JsRuntimeException(wakeError);
+            }
             return false;
         }
         return tick == LoopTick.Idle && error is null;
@@ -598,7 +650,7 @@ public sealed partial class ObscuraJsRuntime
     public bool HasPendingLoadDelayingScripts() =>
         EvaluateBool("globalThis.__obscura_hasPendingLoadDelayingScripts?.() === true");
 
-    private double? NextPendingTimeoutDelayMs()
+    internal double? NextPendingTimeoutDelayMs()
     {
         try
         {

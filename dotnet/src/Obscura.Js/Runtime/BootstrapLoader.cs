@@ -41,6 +41,41 @@ public static class BootstrapLoader
 
         engine.Execute(new DocumentInfo("bootstrap.js"), BootstrapSource.Text);
 
+        // The shim registers its rejection handlers while bootstrap.js runs, so the
+        // tracker and the engine callback are installed afterwards, once there is
+        // something to call.
+        //
+        // Promise identity is tracked in JS rather than in managed code: the host
+        // sees each promise through a fresh ClearScript wrapper per callback, so
+        // reference equality on the managed side does not identify the same promise
+        // across the rejection and the later handler-attached event. A JS Map keyed
+        // by the promise itself does.
+        var tracker = (ScriptObject)engine.Evaluate("rejection-tracker", """
+            (function () {
+              const pending = new Map();
+              const reported = new Set();
+              let unhandled = null, handled = null;
+              return {
+                setHandlers(u, h) { unhandled = u; handled = h; },
+                rejected(p, reason) { if (!reported.has(p)) pending.set(p, reason); },
+                handlerAdded(p, value) {
+                  if (pending.delete(p)) return;
+                  if (reported.delete(p) && typeof handled === 'function') handled(p, value);
+                },
+                flush() {
+                  if (pending.size === 0) return;
+                  const due = Array.from(pending.entries());
+                  pending.clear();
+                  for (const [p, reason] of due) {
+                    reported.add(p);
+                    if (typeof unhandled === 'function') unhandled(p, reason);
+                  }
+                }
+              };
+            })()
+            """);
+        shim.AttachTo(engine, tracker);
+
         // Drop the op-table handoff, exactly as `take_ops_handoff` does in
         // runtime.rs: the host has the table already, and page script must never
         // reach it through `__obscura_core_handoff`.

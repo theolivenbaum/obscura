@@ -71,8 +71,10 @@ vendored variable-font coordinate fix needs to carry over.
 - [~] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript (3704)
       - [x] 80 of 95 public methods; watchdog, heap cap, event loop, CDP object
             store, module graphs, frame realms
-      - [ ] the 15 `screenshot_*`/render-seeding methods (the Page-capture
-            boundary) - 29 tests skipped naming them
+      - [x] the 15 `screenshot_*`/render-seeding methods (the Page-capture
+            boundary), in `Runtime/ObscuraJsRuntime.Capture.cs`, plus
+            `RuntimeCanvasSurfaceSource` and `WithSyncRenderLoadingDisabled`.
+            The 29 tests that named them are written and green.
       - [ ] **404 of 455 tests are unwritten**, not blocked. Bodies are kept as
             Rust comments. This is the largest gap in the port.
 - [x] `ops.rs` -> the 52 ops (3101) - 52/52 ops and 67/67 `op_dom` commands,
@@ -125,13 +127,21 @@ The largest component. Split into stages; each stage is independently testable.
       microbenchmark Rust itself marks `#[ignore]`.
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare
 
-## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)
+## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  87/92 tests green  -  87/92 tests green, 5 skipped on Obscura.Js gaps
 
-- [ ] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (4591)
-- [ ] `context.rs` -> `BrowserContext` (269)
-- [ ] `lifecycle.rs`, `profiles.rs`, `fork_virtual_url.rs` (188)
-- [ ] `pdf.rs` -> raster PDF export (1027)
-- [ ] Integration tests ported
+- [x] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (4591),
+      split across `Page.cs`, `Page.Navigation.cs`, `Page.Frames.cs`,
+      `Page.Scripts.cs`, `Page.Stylesheets.cs`, `Page.Network.cs`,
+      `Page.Capture.cs`, `Page.Evaluate.cs`, plus the free functions in
+      `PageHelpers.cs` and the URL helpers in `PageUrl.cs`
+- [x] `context.rs` -> `BrowserContext` (269)
+- [x] `lifecycle.rs`, `profiles.rs`, `fork_virtual_url.rs` (188) - the fork's
+      `sync_virtual_url` lives on `Page` as `SyncVirtualUrl`
+- [x] `pdf.rs` -> raster PDF export (1027), on SkiaSharp for JPEG encode and
+      PNG/JPEG decode instead of the `image` crate
+- [x] Unit + integration tests ported: all 92 Rust tests (74 page.rs, 10 pdf.rs,
+      4 context.rs, 4 across `tests/`), 87 green, 5 skipped on named Obscura.Js
+      gaps (see Known deviations)
 - [ ] Parity: navigate a fixture corpus, compare DOM + text + links
 
 ## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)
@@ -160,6 +170,15 @@ The largest component. Split into stages; each stage is independently testable.
 - [ ] `crates/obscura` -> embeddable library API (`Obscura` project) (2224)
 - [ ] Integration tests ported
 - [ ] Parity: CLI golden-output tests for every `--dump` mode
+
+## Open issues
+
+- **Two Obscura.Js tests fail under full-solution load but pass in isolation.**
+  The project alone is 830/849 green; a solution-wide run loses two, a different
+  pair each time, all timing-sensitive. The first prepared render on a fresh
+  process costs ~300ms in embedded font initialization against ~1ms once warm,
+  so tests that schedule work tens of milliseconds apart collapse two events into
+  one when the host is loaded. Fix the latency rather than the tests.
 
 ## 9. Validation
 
@@ -354,3 +373,80 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.
+
+- **`Page` is `IDisposable` and assigning `Page.Js` disposes the previous
+  runtime.** Rust drops the old `Option<ObscuraJsRuntime>` on assignment and the
+  isolate goes with it; ClearScript needs an explicit `Dispose`, and a leaked
+  `V8ScriptEngine` wedges the process. The property setter therefore has the
+  side effect Rust's move already had, which is what makes `init_js`,
+  `suspend_js` and `navigate_blank` port line for line.
+- **`PageError` is an exception, not a return value.** Every Rust caller of
+  `navigate*` branches on `Err`, so `PageException` carries a `PageErrorKind`
+  and, for `TooManyClientNavigations`, the limit; the messages are the ones
+  `thiserror` renders. Same for `RasterPdfError` -> `RasterPdfException`.
+- **The navigation deadline is a `CancellationTokenSource`, not a dropped
+  future.** `tokio::time::timeout` cancels the inner future at its next await
+  point; the port threads the token into every HTTP call and awaits on the
+  navigation path, which cancels at the same points. A cancelled navigation sets
+  `LifecycleState.Failed` and reports the same
+  `navigation exceeded {ms}ms deadline` message.
+- **`RasterPage` releases its raster explicitly instead of relying on the GC.**
+  Rust's `page_rasters_are_released_before_capturing_the_next_page` proves the
+  previous page's decoded raster is gone with a `Weak` probe. A managed
+  equivalent would depend on when the GC runs, so `encode_pdf_pages` calls
+  `RasterPage.Release()` in a `finally` before requesting the next page and the
+  test asserts on that. Same invariant, deterministic.
+- **`Obscura.Browser` takes a direct `SkiaSharp` reference** for the PDF
+  exporter's JPEG encode and PNG decode, which is what the `image` crate does
+  for `pdf.rs`. No new native dependency: it is the same `libSkiaSharp` the
+  render layer already loads.
+- **The browser test suite sets `OBSCURA_ALLOW_PRIVATE_NETWORK=1` once, in a
+  module initializer.** Every fixture server binds 127.0.0.1. Page-driven
+  fetches go through the context's client, which the fixtures build with
+  `allowPrivateNetwork: true`, but the ES-module loader owns a standalone client
+  whose only opt-in is the environment variable - in Rust too. The Rust suite
+  ends up relying on the variable being set process-wide by the handful of tests
+  that set it explicitly; the port sets it up front rather than depending on
+  test order.
+
+### Bugs found in the layers below Obscura.Browser (not fixed here)
+
+Each of these is pinned by a written-but-skipped test in
+`Obscura.Browser.Tests` or `Obscura.Js.Tests`, with the blocker named in the
+skip reason.
+
+- **`op_frame_document_ready` records the wrong parent frame.** It reads the
+  calling realm from `ObscuraOps.RealmState()`, which resolves
+  `RealmStates.Current` - and the runtime only sets that around *synchronous*
+  host entries into a realm. `bootstrap.js` calls the op from inside
+  `fetch(...).then(...)` in `_loadIframeSrc`, so a frame created by a frame's
+  script is queued with `parentFrameId = 0` (the page) instead of its real
+  parent. Rust reads the parent from V8's entered-or-microtask context, which is
+  correct for an async continuation. Consequences: `window.parent`/`top` in a
+  doubly-nested frame point at the page, and the detach sweep cannot discard a
+  grandchild when its parent frame is removed. Pinned by
+  `PageTests.DetachingAParentDiscardsItsQueuedDescendantWork`.
+- **There are two import maps.** `ObscuraJsRuntime` builds
+  `new ObscuraModuleLoader(baseUrl, proxyUrl)`, which allocates its own
+  `new ImportMap()`, while `op_add_import_map` writes into
+  `ObscuraState.ImportMap`. Any import map registered from page JavaScript (a
+  script-inserted `<script type="importmap">`) is therefore silently dropped;
+  only maps registered through `ObscuraJsRuntime.AddImportMap` (the path `Page`
+  uses for parser-discovered maps) take effect. Rust shares one
+  `Rc<RefCell<ImportMap>>` between the op state and the loader
+  (`runtime.rs`: `let import_map = state.borrow().import_map.clone();`). Pinned
+  by `PageTests.DynamicallyInsertedImportMapControlsLaterDynamicImport` and
+  `PageTests.DynamicImportMapUsesLiveDocumentBaseAtInsertion`.
+- **`unhandledrejection` is never dispatched.** `DenoCoreShim` stores the
+  callback `Deno.core.setUnhandledPromiseRejectionHandler` registers and nothing
+  ever invokes it, so the `PromiseRejectionEvent` bootstrap.js builds never
+  fires. The other half of the invariant already holds: a rejected background
+  promise does not stop the page event loop. Pinned by
+  `UnhandledRejectionTests.RejectedBackgroundPromiseDoesNotStopThePageEventLoop`.
+- **A dynamic `import()` is resolved synchronously.** ClearScript runs
+  `DocumentLoader` while the calling script is still executing, so a lazy module
+  graph is fetched inside the script-execution phase instead of being left as
+  post-load work; deno_core defers it to the event loop. This is the same root
+  cause as the existing "ClearScript cannot tell a static import from a dynamic
+  one" deviation, but it also changes *when* the work happens. Pinned by
+  `PageTests.LazyModuleGraphIsPostLoadWorkUntilCallerSettles`.

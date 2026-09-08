@@ -56,9 +56,56 @@ public sealed partial class ObscuraJsRuntime
     /// </summary>
     internal void BindRealmOps(ScriptObject ops, ObscuraState state)
     {
+        ArgumentNullException.ThrowIfNull(ops);
         _ = state;
         _ops.BindTo(ops);
+        // A frame realm cannot use the host timer queue (see TimerQueue), so
+        // bootstrap.js schedules every frame timer as `op_sleep(...).then(...)`.
+        // That has to count as work in flight or the page's loop reports idle
+        // and returns before any frame timer is due, which silently drops every
+        // setTimeout a frame makes.
+        ops.SetProperty("op_sleep", (Func<object?, Task>)(millis => RealmSleepAsync(millis)));
     }
+
+    /// <summary>
+    /// <c>op_sleep</c> for a frame realm, counted as an async op in flight.
+    /// </summary>
+    /// <remarks>
+    /// The op is held open for a short grace period past the delay: the promise
+    /// resolves once this task completes, and the frame's callback runs in the
+    /// microtask that follows. Releasing the op at the instant the task
+    /// completes would let the loop observe idle in between and return with the
+    /// callback still queued.
+    /// </remarks>
+    private async Task RealmSleepAsync(object? millis)
+    {
+        var delay = millis switch
+        {
+            null => 0.0,
+            double number => number,
+            IConvertible convertible => convertible.ToDouble(CultureInfo.InvariantCulture),
+            _ => 0.0,
+        };
+        if (!double.IsFinite(delay) || delay < 0)
+        {
+            delay = 0;
+        }
+        var scope = TrackAsyncOp();
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(delay)).ConfigureAwait(false);
+        }
+        finally
+        {
+            _ = Task.Delay(RealmSleepReleaseGraceMs).ContinueWith(
+                _ => scope.Dispose(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+    }
+
+    private const int RealmSleepReleaseGraceMs = 5;
 
     /// <summary>
     /// Queues one posted-task delivery onto this runtime's event loop.

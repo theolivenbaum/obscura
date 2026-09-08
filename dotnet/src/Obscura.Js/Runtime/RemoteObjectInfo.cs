@@ -57,6 +57,14 @@ public sealed class PreparedModule
     /// </summary>
     public string? EntrySpecifier { get; init; }
 
+    /// <summary>
+    /// The URL this module reports as <c>import.meta.url</c> and uses as the
+    /// referrer for its relative imports. Unlike <see cref="EntrySpecifier"/>
+    /// it is also set for an inline module, whose module URL is the document
+    /// base URL even though several inline modules share it.
+    /// </summary>
+    public string? ModuleUrl { get; init; }
+
     /// <summary>Every specifier that becomes evaluated with this root.</summary>
     public required IReadOnlyList<string> GraphSpecifiers { get; init; }
 }

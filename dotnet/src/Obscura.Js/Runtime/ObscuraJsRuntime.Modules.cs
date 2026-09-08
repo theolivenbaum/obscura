@@ -71,6 +71,7 @@ public sealed partial class ObscuraJsRuntime
             ModuleId = moduleId,
             Description = $"Module {url}",
             EntrySpecifier = specifier.ToString(),
+            ModuleUrl = specifier.ToString(),
             GraphSpecifiers = graphSpecifiers.Distinct(StringComparer.Ordinal).ToArray(),
         };
     }
@@ -108,6 +109,7 @@ public sealed partial class ObscuraJsRuntime
             ModuleId = moduleId,
             Description = "Inline module",
             EntrySpecifier = null,
+            ModuleUrl = specifier,
             GraphSpecifiers = graphSpecifiers.Distinct(StringComparer.Ordinal).ToArray(),
         });
     }
@@ -179,10 +181,12 @@ public sealed partial class ObscuraJsRuntime
 
         BeginJavaScriptTask();
         var source = _preparedSources.GetValueOrDefault(prepared.ModuleId, string.Empty);
-        var name = prepared.EntrySpecifier ?? _moduleLoader.BaseUrl;
+        var name = prepared.ModuleUrl ?? prepared.EntrySpecifier ?? _moduleLoader.BaseUrl;
         var info = Uri.TryCreate(name, UriKind.Absolute, out var uri)
             ? new DocumentInfo(uri) { Category = ModuleCategory.Standard }
             : new DocumentInfo(name) { Category = ModuleCategory.Standard };
+        var settledKey = $"__obscura_moduleSettled_{prepared.ModuleId}";
+        var loadMark = RequestedModuleUrlMark;
 
         string? outcome;
         var clock = Stopwatch.StartNew();
@@ -193,17 +197,14 @@ public sealed partial class ObscuraJsRuntime
         using var staticGraph = _moduleLoader.BeginStaticGraph();
         try
         {
-            _engine.Execute(info, source);
-            // Top-level await leaves the module's promise pending; the graph is
-            // only finished once the loop has drained what it queued.
+            _engine.Execute(info, Instrument(source, name, settledKey));
+            // Top-level await leaves the module's promise pending, so the graph
+            // is only finished once the settled marker has run.
             var remaining = budgetMs > (ulong)clock.ElapsedMilliseconds
                 ? budgetMs - (ulong)clock.ElapsedMilliseconds
                 : 0;
-            if (remaining > 0)
-            {
-                await RunEventLoopBoundedAsync(Math.Min(remaining, budgetMs)).ConfigureAwait(false);
-            }
-            outcome = null;
+            outcome = await DrainUntilModuleSettledAsync(settledKey, remaining, prepared.Description)
+                .ConfigureAwait(false);
         }
         catch (ScriptInterruptedException)
         {
@@ -218,8 +219,121 @@ public sealed partial class ObscuraJsRuntime
             outcome = $"{prepared.Description} eval error: {error.Message}";
         }
 
+        ClearSettledMarker(settledKey);
+        if (outcome is null)
+        {
+            // Every module this graph pulled in has now run its body. A later
+            // root naming one of them is the browser's module-map no-op, not a
+            // second evaluation (#591).
+            foreach (var dependency in RequestedModuleUrlsSince(loadMark))
+            {
+                _evaluatedModuleSpecifiers.TryAdd(dependency, null);
+            }
+        }
         _moduleEvaluations[prepared.ModuleId] = outcome;
         return outcome;
+    }
+
+    /// <summary>
+    /// Wrap a module body so its URL and its completion are observable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ClearScript's V8 build leaves <c>import.meta</c> empty - it carries only
+    /// ClearScript's own <c>setResult</c> hook and no <c>url</c> - so the module
+    /// URL deno_core supplies for free is seeded here instead. <c>??=</c> keeps
+    /// a future ClearScript that does populate it authoritative.
+    /// </para>
+    /// <para>
+    /// The trailing assignment is the port's stand-in for deno_core's module
+    /// evaluation promise, which ClearScript's entry point does not hand back:
+    /// it runs when the module body finishes, which for a top-level-await
+    /// module is after its awaits resolve.
+    /// </para>
+    /// <para>
+    /// The prologue stays on the module's first physical line so every later
+    /// line keeps its number in a stack trace, and it is skipped for a source
+    /// that opens with a hashbang, which must stay at offset zero.
+    /// </para>
+    /// </remarks>
+    private static string Instrument(string source, string moduleUrl, string settledKey)
+    {
+        var marker = $"\n;globalThis[{JsStringLiteral(settledKey)}] = true;";
+        return source.StartsWith("#!", StringComparison.Ordinal)
+            ? source + marker
+            : $"import.meta.url ??= {JsStringLiteral(moduleUrl)};" + source + marker;
+    }
+
+    /// <summary>
+    /// Drive the loop until the module body has finished, mirroring the
+    /// reference's poll of the module's evaluation promise.
+    /// </summary>
+    /// <remarks>
+    /// The reference polls the event loop and the evaluation promise together
+    /// and returns the moment the promise settles, so an ordinary module does
+    /// not wait on the timers and intervals it started. Draining to idle
+    /// instead would spend the whole budget on any module that leaves an
+    /// interval armed, and report that as an evaluation timeout.
+    /// </remarks>
+    private async Task<string?> DrainUntilModuleSettledAsync(string settledKey, ulong budgetMs, string what)
+    {
+        var clock = Stopwatch.StartNew();
+        while (true)
+        {
+            LoopTick tick;
+            string? error;
+            try
+            {
+                tick = PumpTick(out error);
+            }
+            catch (ScriptInterruptedException)
+            {
+                return $"{what} evaluation timed out after {budgetMs}ms";
+            }
+            if (error is not null && IsFatalEventLoopError(error))
+            {
+                return error;
+            }
+            if (ModuleSettled(settledKey))
+            {
+                return null;
+            }
+            if ((ulong)clock.ElapsedMilliseconds >= budgetMs)
+            {
+                return $"{what} evaluation timed out after {budgetMs}ms";
+            }
+            if (tick != LoopTick.Progressed)
+            {
+                // Only future work is left, so the module is waiting on a timer
+                // or an in-flight op; park exactly as the loop does.
+                await ParkAsync(TimeSpan.FromMilliseconds(5)).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private bool ModuleSettled(string settledKey)
+    {
+        try
+        {
+            return _engine.Global.GetProperty(settledKey) is bool flag && flag;
+        }
+        catch (ScriptEngineException)
+        {
+            return false;
+        }
+    }
+
+    private void ClearSettledMarker(string settledKey)
+    {
+        try
+        {
+            _engine.Global.DeleteProperty(settledKey);
+        }
+        catch (ScriptEngineException)
+        {
+            // The marker is bookkeeping; a page that broke globalThis is not
+            // a module-evaluation failure.
+        }
     }
 
     /// <summary>
