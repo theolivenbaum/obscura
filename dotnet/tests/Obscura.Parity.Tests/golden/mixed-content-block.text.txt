@@ -1,0 +1,8 @@
+Block children of a mixed-content block must stay FULL WIDTH (not shrink to content),
+and inline runs must wrap as text, not one word per line.
+
+leading inline text that should wrap across the full width of this container as a normal paragraph would
+block child: must span the full 400px
+trailing inline text after the block child
+
+contentless wrapper w/ abs fill

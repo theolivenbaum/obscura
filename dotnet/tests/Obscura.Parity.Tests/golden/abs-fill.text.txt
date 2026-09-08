@@ -1,0 +1,27 @@
+Every colored area below must FILL its box. Before P0 all were 0x0 (blank).
+
+A rel(auto-width)+BLOCK, abs inset:0:
+
+
+
+
+
+B rel+FLEX, abs inset:0:
+
+
+
+
+
+C rel+GRID, abs inset:0:
+
+
+
+
+
+D abs width:100%/height:100%:
+
+
+
+
+
+E padding-hack ratio + abs fill IMG:

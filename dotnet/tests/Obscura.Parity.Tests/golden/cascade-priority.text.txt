@@ -1,0 +1,13 @@
+Every bar must be green and about 320px wide.
+
+stylesheet important beats later normal
+
+stylesheet important beats inline normal
+
+inline important beats stylesheet important
+
+inline important beats later inline normal
+
+important custom property wins
+
+author CSS beats a presentational hint

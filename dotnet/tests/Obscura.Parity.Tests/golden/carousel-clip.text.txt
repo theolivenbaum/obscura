@@ -1,0 +1,21 @@
+Track translated -300px: ONLY slide TWO (green) may be visible.
+
+
+
+ONE
+
+TWO
+
+THREE
+
+
+
+Control (transform:none): only slide ONE (red) visible.
+
+
+
+ONE
+
+TWO
+
+THREE

@@ -1,0 +1,3 @@
+fixed 200auto col
+
+second row same colx

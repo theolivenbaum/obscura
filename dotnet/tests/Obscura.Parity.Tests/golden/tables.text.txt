@@ -1,0 +1,41 @@
+T1: td width:200px must set the whole COLUMN to 200px:
+
+
+
+fixed 200auto col
+
+second row same colx
+
+
+
+T2: tr background must show behind its cells' gaps:
+
+
+
+normalrow
+
+HIGHLIGHTEDROW
+
+
+
+T3: cell text CENTERS vertically by default; top/bottom explicit:
+
+
+
+default middleexplicit topexplicit bottom
+
+
+
+T4: col width=150 must size column 1:
+
+
+
+col 150auto
+
+
+
+T5: percent width cell 50% of a 400px table (~198px):
+
+
+
+halfrest

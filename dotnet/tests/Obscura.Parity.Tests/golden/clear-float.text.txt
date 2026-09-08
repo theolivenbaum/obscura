@@ -1,0 +1,10 @@
+clear:both must drop BELOW the float at full width (orange bar under the blue thumb):
+
+
+
+
+short text beside the float.
+
+CLEARED: full width below
+
+after content flows normally.

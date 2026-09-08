@@ -1,0 +1,19 @@
+Left content-box outer size: 230x100. Right border-box outer size: 200x70.
+
+
+content-box
+
+border-box
+
+
+Inside a 400px parent: content-box 50% outer width 230; border-box 50% outer width 200.
+
+
+50% content-box
+
+50% border-box
+
+
+The common html border-box / universal inherit reset stays 200x70.
+
+inherited border-box
