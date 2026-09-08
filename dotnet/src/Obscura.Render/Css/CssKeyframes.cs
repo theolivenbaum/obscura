@@ -398,8 +398,26 @@ public static class CssKeyframes
             return false;
         }
 
-        var resolved = new List<(float Offset, T Value)>(track);
-        resolved.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
+        // Rust sorts with `sort_by`, which is stable: at a duplicate offset the
+        // later keyframe must stay later, because it is the outgoing value.
+        // List<T>.Sort is introsort and is not stable, so order by a decorated
+        // index instead.
+        var resolved = new List<(float Offset, T Value)>(track.Count);
+        var order = new int[track.Count];
+        for (var index = 0; index < track.Count; index++)
+        {
+            order[index] = index;
+        }
+
+        Array.Sort(order, (left, right) =>
+        {
+            var byOffset = track[left].Offset.CompareTo(track[right].Offset);
+            return byOffset != 0 ? byOffset : left.CompareTo(right);
+        });
+        foreach (var index in order)
+        {
+            resolved.Add(track[index]);
+        }
         if (resolved[0].Offset > 0f)
         {
             resolved.Insert(0, (0f, underlying));

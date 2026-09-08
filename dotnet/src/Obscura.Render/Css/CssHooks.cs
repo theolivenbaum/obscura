@@ -1,3 +1,5 @@
+using Obscura.Dom.Selectors;
+
 namespace Obscura.Render.Css;
 
 /// <summary>
@@ -6,10 +8,11 @@ namespace Obscura.Render.Css;
 /// and selector parsing (Rust <c>obscura_dom::selector::parse_selector</c>).
 /// </summary>
 /// <remarks>
-/// SHARED SEAM: both are delegates so this port has no dependency on the
-/// style.rs or dom.rs ports. The defaults are self-contained approximations;
-/// the coordinator should install the real implementations once those
-/// components land, at which point <c>@supports</c> behavior becomes exact.
+/// <see cref="SelectorParses"/> is wired to Obscura.Dom's real selector parser
+/// and <see cref="SupportsDeclaration"/> to the style.rs port's
+/// <see cref="Obscura.Render.ComputedStyle.SupportsDeclaration"/>, so
+/// <c>@supports</c> behavior is exact. They stay delegates so an embedder (or a
+/// test) can still substitute another oracle.
 /// </remarks>
 public static class CssHost
 {
@@ -18,15 +21,19 @@ public static class CssHost
     /// declaration. Drives <c>@supports</c> and keyframe declaration filtering.
     /// </summary>
     public static Func<string, string, bool> SupportsDeclaration { get; set; } =
-        CssSupportsOracle.SupportsDeclaration;
+        Obscura.Render.ComputedStyle.SupportsDeclaration;
 
-    /// <summary>Whether a selector parses, driving <c>@supports selector(...)</c>.</summary>
+    /// <summary>
+    /// Whether a selector parses, driving <c>@supports selector(...)</c>.
+    /// Wired to <see cref="SelectorParser"/>, the same parser the cascade
+    /// compiles rule selectors with (Rust <c>obscura_dom::selector::parse_selector</c>).
+    /// </summary>
     public static Func<string, bool> SelectorParses { get; set; } = CssSupportsOracle.SelectorParses;
 
     /// <summary>Restore the built-in defaults. Used by tests.</summary>
     public static void ResetToDefaults()
     {
-        SupportsDeclaration = CssSupportsOracle.SupportsDeclaration;
+        SupportsDeclaration = Obscura.Render.ComputedStyle.SupportsDeclaration;
         SelectorParses = CssSupportsOracle.SelectorParses;
     }
 }
@@ -51,92 +58,11 @@ internal static class CssSupportsOracle
         Invalid,
     }
 
-    public static bool SelectorParses(string selector)
-    {
-        selector = selector.Trim();
-        if (selector.Length == 0)
-        {
-            return false;
-        }
-
-        // A syntax-level check standing in for the selector engine: balanced
-        // delimiters, no empty compound around a combinator, no trailing
-        // combinator.
-        var depthParen = 0;
-        var depthBracket = 0;
-        char? quote = null;
-        var previousSignificant = '\0';
-        for (var index = 0; index < selector.Length; index++)
-        {
-            var character = selector[index];
-            if (quote is { } active)
-            {
-                if (character == '\\')
-                {
-                    index++;
-                }
-                else if (character == active)
-                {
-                    quote = null;
-                }
-
-                continue;
-            }
-
-            switch (character)
-            {
-                case '\\':
-                    index++;
-                    break;
-                case '"':
-                case '\'':
-                    quote = character;
-                    break;
-                case '(':
-                    depthParen++;
-                    break;
-                case ')':
-                    depthParen--;
-                    if (depthParen < 0)
-                    {
-                        return false;
-                    }
-
-                    break;
-                case '[':
-                    depthBracket++;
-                    break;
-                case ']':
-                    depthBracket--;
-                    if (depthBracket < 0)
-                    {
-                        return false;
-                    }
-
-                    break;
-                case '>':
-                case '+':
-                case '~':
-                    if (depthParen == 0 && depthBracket == 0
-                        && previousSignificant is '>' or '+' or '~' or ',')
-                    {
-                        return false;
-                    }
-
-                    break;
-            }
-
-            if (!CssText.IsWhitespace(character))
-            {
-                previousSignificant = character;
-            }
-        }
-
-        return quote is null
-            && depthParen == 0
-            && depthBracket == 0
-            && previousSignificant is not ('>' or '+' or '~' or ',');
-    }
+    /// <summary>
+    /// Rust <c>obscura_dom::selector::parse_selector(inner).is_ok()</c>.
+    /// </summary>
+    public static bool SelectorParses(string selector) =>
+        SelectorParser.TryParse(selector.Trim(), out var list, out _) && list.Count != 0;
 
     public static bool SupportsDeclaration(string rawName, string rawValue)
     {
@@ -261,6 +187,13 @@ internal static class CssSupportsOracle
         "line-height" => lower == "normal" || FiniteNumber(value) || Dimension(value, auto: false),
         "border-spacing" => Dimensions(value, auto: false, max: 2),
         "animation" or "animation-name" => value.Trim().Length != 0,
+        "transform" => CssText.EqualsAscii(value, "none") || ComputedStyle.ParseTransformOps(value) is not null,
+        "translate" => lower == "none" || Dimensions(value, auto: false, max: 3),
+        "rotate" => lower == "none" || ComputedStyle.AngleDegrees(value) is not null,
+        "scale" => lower == "none" || ScaleFactors(value),
+        "border-color" => BorderColors(value),
+        "border-top-color" or "border-right-color" or "border-bottom-color" or "border-left-color"
+            or "outline-color" => BorderColorToken(value),
 
         // Everything else needs a validator that lives in the unported part of
         // style.rs. Answer conservatively rather than optimistically.
@@ -268,6 +201,47 @@ internal static class CssSupportsOracle
     };
 
     private static bool FiniteNumber(string value) => CssNumber.ParseFiniteFloat(value.Trim()) is not null;
+
+    private static bool ScaleFactors(string value)
+    {
+        var tokens = value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length is 0 or > 2)
+        {
+            return false;
+        }
+
+        foreach (var token in tokens)
+        {
+            if (ComputedStyle.ScaleNumber(token) is null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool BorderColorToken(string value) =>
+        CssText.EqualsAscii(value.Trim(), "currentcolor") || CssColor.Parse(value) is not null;
+
+    private static bool BorderColors(string value)
+    {
+        var tokens = ComputedStyle.SplitWsParen(value);
+        if (tokens.Count is 0 or > 4)
+        {
+            return false;
+        }
+
+        foreach (var token in tokens)
+        {
+            if (!BorderColorToken(token))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool Dimension(string value, bool auto)
     {

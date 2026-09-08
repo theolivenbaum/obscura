@@ -87,28 +87,13 @@ vendored variable-font coordinate fix needs to carry over.
 
 The largest component. Split into stages; each stage is independently testable.
 
-- [~] `css.rs` -> CSS tokenizer, parser, values, at-rules (4431)
-  - [x] tokenizer, values, color, length, declarations, selector text,
-        invalidation map, at-rules, `@supports`, media and container queries,
-        keyframes compilation, stylesheet parsing - 46 tests green
-  - [ ] the indexed cascade (`Stylesheet`, `StylesheetCache`, `Rule`,
-        `PseudoRuleMap`, `ShadowSlottedScope`, `ContainerQueryEvaluator`) and
-        the animation sampler (~1400 lines). Deferred at port time because they
-        need `CompiledSelector`/`Matcher` from Obscura.Dom and `LayoutStyle`
-        from the render core, both of which have since landed. 36 of css.rs's
-        79 tests are blocked on this.
-  - [ ] wire `CssHost.SelectorParses` to the real Obscura.Dom selector parser
-        (currently a syntax-only approximation)
-  - [ ] wire `CssHost.SupportsDeclaration` to `style.rs`'s oracle when style
-        lands; the built-in one answers false for properties whose validators
-        live in the unported half of style.rs, so `@supports` is currently
-        under-permissive rather than wrong
+- [x] `css.rs` -> CSS tokenizer, parser, values, at-rules, indexed cascade,
+      container-query evaluator and animation sampler (4431) - 79 tests, 2
+      skipped (one is `#[ignore]` in Rust, one needs `dom.rs`)
 - [ ] `style.rs` -> cascade, specificity, inheritance, computed style (8615)
-- [~] `vendor/taffy` -> layout algorithms: block, flexbox, grid (20520)
-  - [x] geometry, style, tree, cache, traits, `CompactLength`, block, flexbox,
-        float, leaf - 82 tests green
-  - [ ] grid (`compute/grid/**`, `style/grid.rs`). Data types are in place;
-        `GridLayoutDispatch.Compute` is a null hook that throws today.
+- [x] `vendor/taffy` -> layout algorithms: block, flexbox, grid (20520) - 116
+      tests green, including the vendored grid shrink-to-fit correction, which
+      2 ported tests pin (stubbing the fix turns them red)
 - [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (14769)
 - [ ] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3200)
 - [ ] `paint.rs` -> rasterization onto Skia: fills, strokes, images, SVG, canvas, effects (9721)

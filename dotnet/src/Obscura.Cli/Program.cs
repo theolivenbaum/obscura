@@ -1,21 +1,25 @@
-using Microsoft.ClearScript.V8;
-using Obscura.Js;
-using Obscura.Js.Runtime;
+using System.CommandLine;
+using Obscura.Cli.CommandLine;
 
-using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
-BootstrapLoader.Install(engine, ops =>
+var root = CliDefinition.Build();
+
+// Subcommand behavior is ported per command; until a command is ported it must
+// fail loudly rather than exit 0 having done nothing, which would make the CLI
+// parity tests pass against an engine that never ran.
+foreach (var command in root.Subcommands)
 {
-    foreach (var name in BootstrapSource.OpNames)
+    var name = command.Name;
+    command.SetAction(_ =>
     {
-        var n = name;
-        ops.SetProperty(n, new Func<object?, object?, object?, object?, object?>((a, b, c, d) =>
-            n is "op_async_runtime_available" or "op_runtime_events_enabled" ? false : ""));
-    }
+        Console.Error.WriteLine($"obscura: '{name}' is not implemented in the .NET port yet");
+        return 70; // EX_SOFTWARE
+    });
+}
+
+root.SetAction(_ =>
+{
+    Console.Error.WriteLine("obscura: no subcommand given (try 'fetch', 'serve', 'scrape' or 'mcp')");
+    return 64; // EX_USAGE
 });
-Console.WriteLine("== V8 / bootstrap.js ==");
-Console.WriteLine("window/document = " + engine.Evaluate("typeof window + '/' + typeof document"));
-Console.WriteLine("Deno hidden     = " + engine.Evaluate("typeof globalThis.Deno"));
-Console.WriteLine();
-Console.WriteLine("== Skia ==");
-Console.WriteLine(Obscura.Render.SkiaSmoke.Probe());
-return 0;
+
+return root.Parse(args).Invoke();

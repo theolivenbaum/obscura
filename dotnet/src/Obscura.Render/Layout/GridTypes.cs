@@ -197,9 +197,19 @@ public readonly record struct TrackSizingFunction(MinTrackSizingFunction Min, Ma
     public static TrackSizingFunction MinMax(MinTrackSizingFunction min, MaxTrackSizingFunction max) =>
         new(min, max);
 
-    /// <summary>Shorthand for <c>minmax(0, Nfr)</c>.</summary>
+    /// <summary>
+    /// Shorthand for a flexible track, i.e. <c>minmax(auto, Nfr)</c>.
+    /// </summary>
+    /// <remarks>
+    /// taffy's <c>impl FromFr for TrackSizingFunction</c> uses a MIN sizing function of
+    /// <c>auto</c>, not <c>0</c> (see the "min sizing function of flex sizing functions is AUTO"
+    /// assertion in <c>compute/grid/explicit_grid.rs</c>'s <c>test_initialize_grid_tracks</c>).
+    /// </remarks>
     public static TrackSizingFunction Flex(float flexFraction) =>
-        new(MinTrackSizingFunction.Zero, MaxTrackSizingFunction.FromFr(flexFraction));
+        new(MinTrackSizingFunction.Auto, MaxTrackSizingFunction.FromFr(flexFraction));
+
+    /// <summary>Alias of <see cref="Flex"/>, matching taffy's <c>TrackSizingFunction::from_fr</c>.</summary>
+    public static TrackSizingFunction FromFr(float flexFraction) => Flex(flexFraction);
 
     /// <summary>A fixed-length track.</summary>
     public static TrackSizingFunction FromLength(float val) =>
