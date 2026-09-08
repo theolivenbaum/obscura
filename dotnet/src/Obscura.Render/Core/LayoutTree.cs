@@ -86,12 +86,10 @@ public static class ImageCapability
 /// The standalone layout entry point declared in <c>obscura-render/src/lib.rs</c>.
 /// </summary>
 /// <remarks>
-/// PORT STATUS: NOT YET IMPLEMENTED. The Rust body builds a taffy tree, sets the grid
-/// <c>calc()</c> resolver from <c>style.rs</c>, computes layout, and reads the border boxes
-/// back. It is blocked on <c>Obscura.Render.Layout.TaffyTree</c> (the vendored taffy port) and
-/// on <c>Obscura.Render.Style</c>'s grid calc context. The signature is declared here so the
-/// taffy agent has the exact contract to fill in; the method throws until then rather than
-/// returning geometry that would silently be wrong.
+/// PARTIAL: the taffy tree build, layout and border-box readback are ported. The Rust body also
+/// primes <c>style::set_grid_calc_context</c> for every node and installs
+/// <c>style::resolve_grid_calc</c> on the tree, so grid track sizing functions containing
+/// <c>calc()</c> cannot resolve until the style component lands.
 /// </remarks>
 public static class RenderLayout
 {
@@ -102,9 +100,6 @@ public static class RenderLayout
     public static NodeRect Layout(LayoutNode root, (float Width, float Height) viewport)
     {
         ArgumentNullException.ThrowIfNull(root);
-        _ = viewport;
-        throw new NotImplementedException(
-            "obscura-render lib.rs `layout()` is blocked on the taffy port "
-            + "(Obscura.Render.Layout.TaffyTree) and the style.rs grid calc resolver.");
+        return TaffyStyleMapping.LayoutRoot(root, viewport);
     }
 }

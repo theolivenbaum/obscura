@@ -64,7 +64,7 @@ public class RenderCoreTests
         Height = Dimension.Px(h),
     };
 
-    [Fact(Skip = "blocked on the taffy port: RenderLayout.Layout is not implemented yet")]
+    [Fact]
     public void BlockChildrenStackVertically()
     {
         // A 1000px-wide viewport, two fixed-size block children: they should stack top-to-bottom
@@ -98,7 +98,7 @@ public class RenderCoreTests
         Assert.Fail("port pending: needs style.rs compute_style and the taffy layout engine");
     }
 
-    [Fact(Skip = "blocked on the taffy port: RenderLayout.Layout is not implemented yet")]
+    [Fact]
     public void BlockAutoMarginsAbsorbHorizontalFreeSpace()
     {
         LayoutStyle centered = new()
@@ -125,7 +125,7 @@ public class RenderCoreTests
         Assert.True(MathF.Abs(output.Children[1].BorderBox.X - 650f) < 0.01f);
     }
 
-    [Fact(Skip = "blocked on the taffy port: RenderLayout.Layout is not implemented yet")]
+    [Fact]
     public void NegativeFlexMarginOverlaysWithoutShiftingItems()
     {
         LayoutStyle main = MakeBox(Display.Block, 900f, 200f);
@@ -149,7 +149,7 @@ public class RenderCoreTests
             $"overlay shifted to {output.Children[1].BorderBox}");
     }
 
-    [Fact(Skip = "blocked on the taffy port: RenderLayout.Layout is not implemented yet")]
+    [Fact]
     public void FlexRowLaysOutHorizontally()
     {
         LayoutNode root = new(
@@ -173,7 +173,7 @@ public class RenderCoreTests
             $"flex row should place children horizontally: c0.x={output.Children[0].BorderBox.X} c1.x={output.Children[1].BorderBox.X}");
     }
 
-    [Fact(Skip = "blocked on the taffy port: RenderLayout.Layout is not implemented yet")]
+    [Fact]
     public void PaddingExpandsContentBoxButNotBorderBox()
     {
         LayoutNode contentBox = new(
