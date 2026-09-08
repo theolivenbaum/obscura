@@ -47,16 +47,17 @@ vendored variable-font coordinate fix needs to carry over.
 - [ ] Unit tests ported
 - [ ] Parity: parse + serialize a corpus through both engines
 
-## 2. Obscura.Net  (<- crates/obscura-net, ~5.6k lines)
+## 2. Obscura.Net  (<- crates/obscura-net, ~5.6k lines)  -  94/94 tests green
 
-- [~] `encoding.rs` -> charset detection and transcoding (429)
-- [~] `cookies.rs` -> `CookieJar`, parsing, domain/path matching, persistence (1281)
-- [~] `robots.rs` -> robots.txt fetch/cache/match (172)
-- [ ] `blocklist.rs` + `pgl_domains.txt` -> tracker blocklist (77)
-- [~] `client.rs` -> HTTP client, redirects, SSRF gate, decompression (1747)
-- [~] `interceptor.rs` -> request interception types (15)
+- [x] `encoding.rs` -> charset detection and transcoding (429)
+- [x] `cookies.rs` -> `CookieJar`, parsing, domain/path matching, persistence (1281)
+- [x] `robots.rs` -> robots.txt fetch/cache/match (172)
+- [x] `blocklist.rs` + `pgl_domains.txt` -> tracker blocklist (77)
+- [x] `client.rs` -> HTTP client, redirects, SSRF gate, decompression (2847)
+- [x] `interceptor.rs` -> request interception types (15)
 - [ ] `wreq_client.rs` -> stealth transport (710) **deferred, see Known deviations**
-- [ ] Unit tests ported
+      (`IStealthHttpClient` + `UnavailableStealthHttpClient` keep the seam)
+- [x] Unit tests ported (94 facts, all green)
 - [ ] Parity: cookie jar and SSRF decisions over a shared fixture table
 
 ## 3. Obscura.Js  (<- crates/obscura-js, ~44k lines; 15.8k of it is shared JS)
@@ -166,11 +167,48 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   and a few global toggles map across; anything else is reported through
   `V8Flags.Warned` and ignored rather than silently dropped. The late-call
   refusal is preserved exactly, because a late flag call aborts the process.
-- **`System.Text.Encoding.CodePages` is an approved managed dependency.**
-  .NET Core ships only UTF-8/16/32, ASCII and Latin-1 in box, and
-  `encoding.rs` needs the whole WHATWG legacy set (GBK, Big5, Shift_JIS,
-  EUC-JP/KR, windows-125x, ISO-8859-x). The package is Microsoft-published
-  managed IL with no native component, so it does not widen the native set.
+- **Legacy code pages need no package on net10.0.** `encoding.rs` needs the whole
+  WHATWG legacy set (GBK, Big5, Shift_JIS, EUC-JP/KR, windows-125x, ISO-8859-x),
+  which older .NET Core releases only had via `System.Text.Encoding.CodePages`.
+  On `net10.0` `CodePagesEncodingProvider` is in the shared framework, so
+  `Obscura.Net` registers the provider and takes no package reference at all;
+  the `PackageVersion` entry in `Directory.Packages.props` is unused and can be
+  dropped.
+  The three pages the framework still lacks (ISO-8859-10, ISO-8859-14,
+  ISO-8859-16) plus `x-user-defined` are served from in-tree 96-entry index
+  tables in `Encoding/SingleByteTables.cs`.
+- **The WHATWG label table is ported in tree.** `encoding_rs::Encoding::for_label`
+  has no .NET equivalent (`Encoding.GetEncoding("gbk")` resolves to code page 936
+  whose `WebName` is `gb2312`, not the canonical `GBK`), so
+  `Encoding/WhatwgEncoding.cs` carries the standard's label -> canonical-name
+  table and maps canonical names onto code pages. `label_name` and
+  `document.characterSet` therefore report the WHATWG spelling, as in Rust.
+- **`ObscuraHttpClient` follows redirects by hand and owns cookies.**
+  `SocketsHttpHandler` is configured with `AllowAutoRedirect = false` and
+  `UseCookies = false` so the SSRF gate, the CORS check and the `CookieJar` see
+  every hop, exactly as the reqwest client does with `Policy::none()`.
+- **The DNS-time SSRF guard is a `ConnectCallback`, not a resolver plug-in.**
+  reqwest takes a `dns_resolver`; `SocketsHttpHandler` has no equivalent, so
+  `SsrfGuardResolver` resolves the name and checks every returned address inside
+  `SocketsHttpHandler.ConnectCallback` before the socket is dialled. Same
+  deny-set, same failure message, and it covers redirect hops because each hop
+  opens its own connection through the same callback. There is one transport
+  rather than reqwest + wreq, so the two-implementation drift risk is gone.
+- **`SSL_CERT_FILE` / `SSL_CERT_DIR` roots are additive and cached per value.**
+  .NET has no `add_root_certificate`, so the roots are applied through a
+  `RemoteCertificateValidationCallback` that first honours the platform trust
+  store and only then rebuilds the chain against the configured roots with
+  `X509ChainTrustMode.CustomRootTrust`. Rust caches the parsed roots once per
+  process in a `OnceLock`; the port keys the cache on the current
+  `(SSL_CERT_FILE, SSL_CERT_DIR)` values so tests that change the environment in
+  one process still see the right store.
+- **Request header order is not reproduced.** The Rust client builds a `HeaderMap`
+  in Chrome's navigation order; `HttpRequestMessage` serializes in its own order.
+  Every header value matches; only the ordering differs, which the stealth
+  surfaces would care about and the tracked TLS gap already covers.
+- **`Obscura.Net` no longer references `Obscura.Dom`.** `crates/obscura-net` has no
+  `obscura-dom` dependency; the scaffold's project reference was removed so the
+  two areas can be built and tested independently.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.

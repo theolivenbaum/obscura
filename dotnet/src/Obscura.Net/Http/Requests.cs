@@ -223,6 +223,12 @@ public sealed record ResourceRequest
     public ResourceRequest WithMaxResponseBytes(long maxResponseBytes) =>
         this with { MaxResponseBytes = maxResponseBytes };
 
+    /// <summary>
+    /// A by-value copy, matching Rust's <c>Clone</c>. Records reserve the name
+    /// <c>Clone</c>, so the copy helper is called <c>Copy</c> here.
+    /// </summary>
+    public ResourceRequest Copy() => this with { };
+
     internal string Destination() => ResourceType switch
     {
         ResourceType.Document => "document",

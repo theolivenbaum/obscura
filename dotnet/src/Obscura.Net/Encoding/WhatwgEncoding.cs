@@ -6,9 +6,10 @@ namespace Obscura.Net;
 /// The WHATWG Encoding Standard's label table and decoders, standing in for the
 /// Rust <c>encoding_rs</c> crate. Labels resolve to a canonical encoding name
 /// exactly as <c>Encoding::for_label</c> does, and decoding goes through the
-/// matching .NET code page (legacy pages come from
-/// <c>System.Text.Encoding.CodePages</c>) or an in-tree single byte table for
-/// the handful of pages .NET does not ship.
+/// matching .NET code page (the legacy, non-Unicode pages come from
+/// <c>CodePagesEncodingProvider</c>, which is in the net10.0 shared framework -
+/// no package reference needed) or an in-tree single byte table for the handful
+/// of pages .NET does not ship.
 /// </summary>
 public sealed class WhatwgEncoding
 {
@@ -99,7 +100,7 @@ public sealed class WhatwgEncoding
     }
 
     /// <summary>UTF-8, the default for every detection path.</summary>
-    public static WhatwgEncoding Utf8 { get; } = ForName("UTF-8")!;
+    public static WhatwgEncoding Utf8 => ForName("UTF-8")!;
 
     /// <summary>
     /// Decode with BOM sniffing, matching <c>Encoding::decode</c>: a leading
