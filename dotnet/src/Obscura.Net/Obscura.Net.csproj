@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Obscura.Net</RootNamespace>
+    <AssemblyName>Obscura.Net</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Obscura.Dom/Obscura.Dom.csproj" />
+  </ItemGroup>
+
+  <!-- Tracker blocklist shared with the Rust tree; linked, not copied. -->
+  <ItemGroup>
+    <EmbeddedResource Include="../../../crates/obscura-net/src/pgl_domains.txt">
+      <Link>Resources/pgl_domains.txt</Link>
+      <LogicalName>Obscura.Net.pgl_domains.txt</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,52 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <!-- The ONLY native dependency in the tree: the V8 build shipped by
+       ClearScript. Everything below it is 100% managed IL. Adding another
+       native package needs a decision recorded in todo.md first. -->
+  <ItemGroup Label="V8 (native)">
+    <PackageVersion Include="Microsoft.ClearScript.V8" Version="7.5.1.1" />
+    <PackageVersion Include="Microsoft.ClearScript.V8.Native.linux-x64" Version="7.5.1.1" />
+    <PackageVersion Include="Microsoft.ClearScript.V8.Native.linux-arm64" Version="7.5.1.1" />
+    <PackageVersion Include="Microsoft.ClearScript.V8.Native.osx-x64" Version="7.5.1.1" />
+    <PackageVersion Include="Microsoft.ClearScript.V8.Native.osx-arm64" Version="7.5.1.1" />
+    <PackageVersion Include="Microsoft.ClearScript.V8.Native.win-x64" Version="7.5.1.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Rasterization and text (native: libSkiaSharp, libHarfBuzzSharp)">
+    <!-- Skia backs the paint layer. tiny-skia (the Rust engine's rasterizer) is
+         itself a port of Skia's, so painting onto Skia keeps anti-aliasing,
+         blending, and path semantics closer to the reference than a hand-written
+         rasterizer would. Skia also supplies the image codecs (PNG/JPEG/WebP/GIF),
+         which removes the need for a separate managed codec package.
+         NoDependencies avoids linking system fontconfig/freetype so the build
+         still runs on distroless, matching the Rust image. -->
+    <PackageVersion Include="SkiaSharp" Version="4.151.2" />
+    <PackageVersion Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.151.2" />
+    <PackageVersion Include="SkiaSharp.NativeAssets.macOS" Version="4.151.2" />
+    <PackageVersion Include="SkiaSharp.NativeAssets.Win32" Version="4.151.2" />
+    <!-- Complex-script shaping, standing in for rustybuzz/cosmic-text. -->
+    <PackageVersion Include="SkiaSharp.HarfBuzz" Version="4.151.2" />
+    <PackageVersion Include="HarfBuzzSharp.NativeAssets.Linux" Version="14.2.1.102" />
+    <PackageVersion Include="HarfBuzzSharp.NativeAssets.macOS" Version="14.2.1.102" />
+    <PackageVersion Include="HarfBuzzSharp.NativeAssets.Win32" Version="14.2.1.102" />
+  </ItemGroup>
+
+  <ItemGroup Label="Managed">
+    <PackageVersion Include="AngleSharp" Version="1.8.0" />
+    <PackageVersion Include="System.CommandLine" Version="2.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test">
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+  </ItemGroup>
+
+</Project>

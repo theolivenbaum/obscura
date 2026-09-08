@@ -1,0 +1,24 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Obscura.Browser/Obscura.Browser.csproj" />
+    <Project Path="src/Obscura.Cdp/Obscura.Cdp.csproj" />
+    <Project Path="src/Obscura.Cli/Obscura.Cli.csproj" />
+    <Project Path="src/Obscura.Dom/Obscura.Dom.csproj" />
+    <Project Path="src/Obscura.Js/Obscura.Js.csproj" />
+    <Project Path="src/Obscura.Mcp/Obscura.Mcp.csproj" />
+    <Project Path="src/Obscura.Net/Obscura.Net.csproj" />
+    <Project Path="src/Obscura.Render/Obscura.Render.csproj" />
+    <Project Path="src/Obscura/Obscura.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Obscura.Browser.Tests/Obscura.Browser.Tests.csproj" />
+    <Project Path="tests/Obscura.Cdp.Tests/Obscura.Cdp.Tests.csproj" />
+    <Project Path="tests/Obscura.Cli.Tests/Obscura.Cli.Tests.csproj" />
+    <Project Path="tests/Obscura.Dom.Tests/Obscura.Dom.Tests.csproj" />
+    <Project Path="tests/Obscura.Js.Tests/Obscura.Js.Tests.csproj" />
+    <Project Path="tests/Obscura.Mcp.Tests/Obscura.Mcp.Tests.csproj" />
+    <Project Path="tests/Obscura.Net.Tests/Obscura.Net.Tests.csproj" />
+    <Project Path="tests/Obscura.Parity.Tests/Obscura.Parity.Tests.csproj" />
+    <Project Path="tests/Obscura.Render.Tests/Obscura.Render.Tests.csproj" />
+  </Folder>
+</Solution>

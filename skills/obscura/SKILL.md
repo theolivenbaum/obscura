@@ -1,14 +1,28 @@
 ---
 name: obscura
-description: Operate and validate Obscura for JavaScript page loading, stealth browsing, anti-fingerprinting, tracker blocking, screenshots and visual comparison, CDP automation with Puppeteer or Playwright, screencasting, PDF export, MCP browser interaction, and web extraction. Use when running Obscura against deterministic fixtures or real sites, diagnosing rendering, geometry, resource, identity, or transport failures, or choosing the correct CLI, CDP, MCP, rendering, or stealth workflow.
+description: Operate and validate Obscura for JavaScript page loading, stealth browsing, anti-fingerprinting, tracker blocking, screenshots and visual comparison, CDP automation with Puppeteer or Playwright, screencasting, PDF export, MCP browser interaction, and web extraction. Covers both the Rust engine and the C# / .NET 10 port. Use when running either engine against deterministic fixtures or real sites, diagnosing rendering, geometry, resource, identity, or transport failures, or choosing the correct CLI, CDP, MCP, rendering, or stealth workflow.
 ---
 
 # Obscura
 
-Use Obscura as a lightweight, stealth-capable Rust headless browser for
-automation. It embeds V8, owns the DOM and rendering pipeline, and exposes
-Chrome DevTools Protocol workflows without launching Chromium. Treat rendering
-and stealth as first-class, complementary capabilities.
+Use Obscura as a lightweight, stealth-capable headless browser for automation.
+It embeds V8, owns the DOM and rendering pipeline, and exposes Chrome DevTools
+Protocol workflows without launching Chromium. Treat rendering and stealth as
+first-class, complementary capabilities.
+
+## Which engine
+
+The repository currently holds two implementations of the same engine:
+
+- **Rust** (`crates/`) - the reference implementation and the behavioral
+  authority. Build it for anything that needs to be definitive.
+- **C# / .NET 10** (`dotnet/`) - the in-progress port. See `todo.md` for what is
+  ported and `CLAUDE.md` for the porting rules.
+
+Both expose the same CLI, CDP, and MCP surfaces, so every workflow below applies
+to either binary. When results differ, the Rust engine is right; treat the
+difference as a port bug and record it. For porting work specifically, use the
+`obscura-port` skill.
 
 ## Build variants
 
@@ -35,6 +49,16 @@ CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo build --release -p obscura-cli --bi
 
 Use `./target/release/obscura` in the commands below when working from source.
 
+Build the C# port instead with:
+
+```bash
+cd dotnet && dotnet build -c Release
+```
+
+Its CLI is `dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura`, and it takes the
+same arguments as the Rust binary. The port needs no build features: rendering is
+always compiled in, and `--stealth` is a runtime flag as it is in the Rust build.
+
 ## Use stealth
 
 The stealth build keeps the complete rendering, screenshot, screencast, PDF,
@@ -52,6 +76,11 @@ obscura serve --stealth --port 9222
 ```
 
 The runtime flag needs a `render,stealth` build for the wreq/BoringSSL transport.
+
+**On the C# port, TLS-level impersonation is not available.** `--stealth` there
+applies the JavaScript, header, and browser-identity surfaces, but not the
+wreq/BoringSSL ClientHello fingerprint, because that needs a native TLS stack the
+port does not take. Use the Rust binary when a test depends on TLS fingerprinting.
 
 ## Fetch, evaluate, and capture
 
@@ -123,7 +152,10 @@ fixture. Do not introduce hostname-specific rendering logic.
 ## Set expectations accurately
 
 Obscura supports many common layout and paint paths but is not a bundled Chrome
-build. Long-tail CSS, service workers, some Web APIs, native media, GPU or
+build. The C# port additionally rasterizes through Skia rather than tiny-skia and
+shapes through HarfBuzz rather than cosmic-text, so anti-aliasing and glyph
+positioning can differ slightly from the Rust engine even where layout agrees;
+judge port output against the Rust engine, not against Chromium. Long-tail CSS, service workers, some Web APIs, native media, GPU or
 compositor effects, PDF structure, and platform font rasterization can differ
 from Chromium. Preserve the project's existing positioning and published
 benchmark claims when editing its documentation. Use the benchmark suite and
