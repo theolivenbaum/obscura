@@ -37,7 +37,7 @@ internal static class FontTables
     public static FaceMetrics ReadFaceMetrics(SKTypeface typeface)
     {
         float unitsPerEm = typeface.UnitsPerEm > 0 ? typeface.UnitsPerEm : 1000f;
-        byte[]? head = typeface.GetTableData(HeadTag);
+        byte[]? head = TryGetTable(typeface, HeadTag);
         if (head is { Length: >= 20 })
         {
             ushort upem = BinaryPrimitives.ReadUInt16BigEndian(head.AsSpan(18));
@@ -50,7 +50,7 @@ internal static class FontTables
         short ascender = 0;
         short descender = 0;
         short lineGap = 0;
-        byte[]? hhea = typeface.GetTableData(HheaTag);
+        byte[]? hhea = TryGetTable(typeface, HheaTag);
         if (hhea is { Length: >= 10 })
         {
             ascender = BinaryPrimitives.ReadInt16BigEndian(hhea.AsSpan(4));
@@ -58,7 +58,7 @@ internal static class FontTables
             lineGap = BinaryPrimitives.ReadInt16BigEndian(hhea.AsSpan(8));
         }
 
-        byte[]? os2 = typeface.GetTableData(Os2Tag);
+        byte[]? os2 = TryGetTable(typeface, Os2Tag);
         if (os2 is { Length: >= 78 })
         {
             ushort version = BinaryPrimitives.ReadUInt16BigEndian(os2.AsSpan(0));
@@ -81,7 +81,7 @@ internal static class FontTables
     /// <summary>The face's variation axes, straight from <c>fvar</c>.</summary>
     public static IReadOnlyList<FontAxis> ReadAxes(SKTypeface typeface)
     {
-        byte[]? fvar = typeface.GetTableData(FvarTag);
+        byte[]? fvar = TryGetTable(typeface, FvarTag);
         if (fvar is null || fvar.Length < 16)
         {
             return [];
@@ -112,6 +112,27 @@ internal static class FontTables
         }
 
         return axes;
+    }
+
+    /// <summary>Skia throws for a table the face does not have; absence is not an error here.</summary>
+    private static byte[]? TryGetTable(SKTypeface typeface, uint tag)
+    {
+        foreach (uint present in typeface.GetTableTags())
+        {
+            if (present == tag)
+            {
+                try
+                {
+                    return typeface.GetTableData(tag);
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+            }
+        }
+
+        return null;
     }
 
     private static float ReadFixed(byte[] data, int offset) =>

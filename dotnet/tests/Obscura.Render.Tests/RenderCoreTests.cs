@@ -88,14 +88,42 @@ public class RenderCoreTests
             $"blocks should stack: c0.y={output.Children[0].BorderBox.Y} c1.y={output.Children[1].BorderBox.Y}");
     }
 
-    [Fact(Skip = "blocked on the taffy port and on style.rs compute_style")]
+    [Fact]
     public void GridCalcTracksResolveAgainstContainerWidth()
     {
-        // Rust builds the grid style with `crate::style::compute_style("div", Some(...))`.
-        // Port this once Obscura.Render.Style lands; it asserts that
-        //   minmax(0,calc((100% - (50rem + 20vw))/2)) 1fr minmax(0,...)
-        // resolves to 176 / 1088 at a 1440px viewport and 220 / 1000 at a 1000px viewport.
-        Assert.Fail("port pending: needs style.rs compute_style and the taffy layout engine");
+        // A calc() track that mixes percentage, rem and vw has to be resolved
+        // against the container at layout time, not folded at parse time: the
+        // same style laid out at two viewport widths must give two answers.
+        LayoutStyle grid = ComputedStyle.Compute(
+            "div",
+            "display:grid;width:1440px;height:20px;" +
+            "grid-template-columns:" +
+            "minmax(0,calc((100% - (50rem + 20vw))/2)) 1fr " +
+            "minmax(0,calc((100% - (50rem + 20vw))/2))");
+
+        static LayoutNode Child() => LayoutNode.Leaf(ComputedStyle.Compute("div", "display:block;height:10px"));
+
+        NodeRect output = RenderLayout.Layout(
+            new LayoutNode(grid, null, [Child(), Child(), Child()]),
+            (1440f, 100f));
+
+        Assert.True(MathF.Abs(output.Children[0].BorderBox.Width - 176f) < 0.01f,
+            $"expected 176, got {output.Children[0].BorderBox.Width}");
+        Assert.True(MathF.Abs(output.Children[1].BorderBox.X - 176f) < 0.01f,
+            $"expected x=176, got {output.Children[1].BorderBox.X}");
+        Assert.True(MathF.Abs(output.Children[1].BorderBox.Width - 1088f) < 0.01f,
+            $"expected 1088, got {output.Children[1].BorderBox.Width}");
+
+        NodeRect resized = RenderLayout.Layout(
+            new LayoutNode(grid, null, [Child(), Child(), Child()]),
+            (1000f, 100f));
+
+        Assert.True(MathF.Abs(resized.Children[0].BorderBox.Width - 220f) < 0.01f,
+            $"expected 220, got {resized.Children[0].BorderBox.Width}");
+        Assert.True(MathF.Abs(resized.Children[1].BorderBox.X - 220f) < 0.01f,
+            $"expected x=220, got {resized.Children[1].BorderBox.X}");
+        Assert.True(MathF.Abs(resized.Children[1].BorderBox.Width - 1000f) < 0.01f,
+            $"expected 1000, got {resized.Children[1].BorderBox.Width}");
     }
 
     [Fact]

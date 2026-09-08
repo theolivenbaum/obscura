@@ -90,7 +90,8 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] `css.rs` -> CSS tokenizer, parser, values, at-rules, indexed cascade,
       container-query evaluator and animation sampler (4431) - 79 tests, 2
       skipped (one is `#[ignore]` in Rust, one needs `dom.rs`)
-- [ ] `style.rs` -> cascade, specificity, inheritance, computed style (8615)
+- [x] `style.rs` -> cascade, specificity, inheritance, computed style (8615) -
+      86 Rust tests ported, 85 passing, 1 skipped pending `dom.rs`
 - [x] `vendor/taffy` -> layout algorithms: block, flexbox, grid (20520) - 116
       tests green, including the vendored grid shrink-to-fit correction, which
       2 ported tests pin (stubbing the fix turns them red)
@@ -266,6 +267,16 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   against the real list's ~10,000). The algorithm is complete, and the implicit
   wildcard rule makes every single-label TLD correct, but a missing multi-label
   suffix would let `document.domain` relax one label further than the reference.
+- **Grid `calc()` handles use a weak registry, not a raw pointer.** Rust hands
+  taffy the `Arc` address as the opaque handle. Managed objects have no stable
+  address, so the port allocates an aligned counter handle and keeps a weak
+  registry that the resolver looks up; `LayoutStyle` still owns the strong
+  references exactly as in Rust. A handle whose expression has been collected
+  resolves to 0.
+- **`parse_linear_gradient` does not reproduce a Rust panic.** For a value
+  ending exactly in `linear-gradient(`, Rust slices out of range and panics; the
+  port clamps and returns "no gradient", because style application must never
+  throw.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.

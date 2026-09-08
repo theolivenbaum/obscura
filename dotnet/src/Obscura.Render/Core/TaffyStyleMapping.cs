@@ -22,9 +22,12 @@ internal static class TaffyStyleMapping
     internal static Layout.TaffyTree<TNodeContext> NewTaffyTree<TNodeContext>()
     {
         Layout.TaffyTree<TNodeContext> tree = new();
-        // Rust also installs `style::resolve_grid_calc` here so opaque `calc()` handles inside
-        // grid track sizing functions can be resolved. That resolver belongs to the style
-        // component; wire it up from there once it lands.
+        // Every opaque handle is backed by an expression retained in the LayoutStyle
+        // map/input tree, which outlives all computations on this tree. Without this
+        // resolver taffy falls back to its default, which returns 0 for every calc()
+        // handle, so a grid track like minmax(0, calc(...)) silently collapses to zero
+        // width instead of failing.
+        tree.SetCalcResolver(ComputedStyle.ResolveGridCalc);
         return tree;
     }
 
@@ -312,6 +315,14 @@ internal static class TaffyStyleMapping
 
     internal static NodeRect LayoutRoot(LayoutNode root, (float Width, float Height) viewport)
     {
+        // Grid calc() handles carry no units of their own; they are evaluated
+        // against an em/rem/vw/vh context that has to be installed on every
+        // style in the tree before layout runs. Skipping this does not fail
+        // loudly: viewport-relative terms simply evaluate to zero, so a track
+        // like calc((100% - (50rem + 20vw))/2) comes out too wide.
+        var rootFontSize = root.Style.FontSize ?? 16f;
+        InitializeGridCalcContexts(root, rootFontSize, rootFontSize, viewport.Width / 100f, viewport.Height / 100f);
+
         Layout.TaffyTree<object> tree = NewTaffyTree<object>();
         TaffyNodeId rootId = BuildNode(tree, root);
         tree.ComputeLayout(
@@ -320,6 +331,21 @@ internal static class TaffyStyleMapping
                 Layout.AvailableSpace.Definite(viewport.Width),
                 Layout.AvailableSpace.Definite(viewport.Height)));
         return ReadNode(tree, rootId);
+    }
+
+    private static void InitializeGridCalcContexts(
+        LayoutNode node,
+        float inheritedFontSize,
+        float rootFontSize,
+        float vw,
+        float vh)
+    {
+        var fontSize = node.Style.FontSize ?? inheritedFontSize;
+        ComputedStyle.SetGridCalcContext(node.Style, fontSize, rootFontSize, vw, vh);
+        foreach (var child in node.Children)
+        {
+            InitializeGridCalcContexts(child, fontSize, rootFontSize, vw, vh);
+        }
     }
 
     private static TaffyNodeId BuildNode(Layout.TaffyTree<object> tree, LayoutNode node)
