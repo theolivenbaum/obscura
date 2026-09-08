@@ -6,6 +6,27 @@ Rules and conventions: see `CLAUDE.md`.
 Legend: `[ ]` not started, `[~]` in progress, `[x]` ported + tests green,
 `[P]` parity-validated against the Rust binary.
 
+Line counts below are **code lines, excluding `#[cfg(test)]` blocks**, measured
+from the Rust tree. The raw file sizes are much larger and misleading: the Rust
+tree is 86k lines of code and 62k lines of tests. Scope of the port:
+
+| Area | Code | Rust tests |
+|---|---:|---:|
+| obscura-render | 42,555 | 29,497 |
+| vendor/taffy (layout, patched) | 20,520 | 2,498 |
+| obscura-cdp | 13,788 | 4,497 |
+| obscura-js | 8,565 | 19,574 |
+| obscura-browser | 5,794 | 3,982 |
+| obscura-net | 3,632 | 1,925 |
+| obscura-dom | 3,503 | 1,708 |
+| obscura-cli | 3,108 | 726 |
+| obscura-mcp | 2,754 | 398 |
+| obscura (library API) | 2,224 | 0 |
+| **Total** | **~106,400** | **~64,800** |
+
+vendor/cosmic-text (10,450) is mostly replaced by Skia + HarfBuzz; only its
+vendored variable-font coordinate fix needs to carry over.
+
 ## 0. Setup
 
 - [x] Review the Rust source and map the architecture
@@ -19,33 +40,33 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` ported + tests green,
 
 ## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)
 
-- [ ] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots (2345)
-- [ ] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree (698)
-- [ ] `selector.rs` -> selector parsing, matching, specificity (1824)
-- [ ] `serialize.rs` -> `innerHTML` / `outerHTML` serialization (331)
+- [~] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots (1640)
+- [~] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree (698)
+- [~] `selector.rs` -> selector parsing, matching, specificity (1252)
+- [~] `serialize.rs` -> `innerHTML` / `outerHTML` serialization (331)
 - [ ] Unit tests ported
 - [ ] Parity: parse + serialize a corpus through both engines
 
 ## 2. Obscura.Net  (<- crates/obscura-net, ~5.6k lines)
 
-- [ ] `encoding.rs` -> charset detection and transcoding (429)
-- [ ] `cookies.rs` -> `CookieJar`, parsing, domain/path matching, persistence (1281)
-- [ ] `robots.rs` -> robots.txt fetch/cache/match (172)
+- [~] `encoding.rs` -> charset detection and transcoding (429)
+- [~] `cookies.rs` -> `CookieJar`, parsing, domain/path matching, persistence (1281)
+- [~] `robots.rs` -> robots.txt fetch/cache/match (172)
 - [ ] `blocklist.rs` + `pgl_domains.txt` -> tracker blocklist (77)
-- [ ] `client.rs` -> HTTP client, redirects, SSRF gate, decompression (2847)
-- [ ] `interceptor.rs` -> request interception types (15)
+- [~] `client.rs` -> HTTP client, redirects, SSRF gate, decompression (1747)
+- [~] `interceptor.rs` -> request interception types (15)
 - [ ] `wreq_client.rs` -> stealth transport (710) **deferred, see Known deviations**
 - [ ] Unit tests ported
 - [ ] Parity: cookie jar and SSRF decisions over a shared fixture table
 
 ## 3. Obscura.Js  (<- crates/obscura-js, ~44k lines; 15.8k of it is shared JS)
 
-- [ ] Vendor `bootstrap.js` unchanged + staleness check in the build
-- [ ] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript: isolate lifetime, realms, watchdog (19055)
-- [ ] `ops.rs` -> the ~53 ops (6169)
+- [x] Share `bootstrap.js` with the Rust tree by linking it as an embedded resource
+- [ ] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript: isolate lifetime, realms, watchdog (3704)
+- [ ] `ops.rs` -> the 52 ops (3101)
   - [ ] `op_dom` command dispatcher (~90 commands)
-  - [ ] crypto ops (`digest`, `hmac`, `aes-gcm/cbc/ctr`, `pbkdf2`, `hkdf`, `random_bytes`)
-  - [ ] URL ops (`parse`, `set`, `resolve`, `encode_query`)
+  - [x] crypto ops (`digest`, `hmac`, `aes-gcm/cbc/ctr`, `pbkdf2`, `hkdf`, `random_bytes`) - 30 tests green
+  - [~] URL ops (`parse`, `set`, `resolve`, `encode_query`) - needs a real WHATWG parser, `System.Uri` is not spec-compliant
   - [ ] fetch / network ops
   - [ ] render-facing ops (layout geometry, computed style, canvas, image metadata, WAAPI)
 - [ ] `frame.rs` -> child-frame realms (1352)
@@ -58,12 +79,12 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` ported + tests green,
 
 The largest component. Split into stages; each stage is independently testable.
 
-- [ ] `css.rs` -> CSS tokenizer, parser, values, at-rules (10350)
-- [ ] `style.rs` -> cascade, specificity, inheritance, computed style (10956)
-- [ ] `vendor/taffy` -> layout algorithms: block, flexbox, grid (33543)
-- [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (20660)
-- [ ] `inline.rs` -> line breaking, text shaping, bidi, inline layout (4983)
-- [ ] `paint.rs` -> rasterization onto Skia: fills, strokes, images, SVG, canvas, effects (17219)
+- [~] `css.rs` -> CSS tokenizer, parser, values, at-rules (4431)
+- [ ] `style.rs` -> cascade, specificity, inheritance, computed style (8615)
+- [ ] `vendor/taffy` -> layout algorithms: block, flexbox, grid (20520)
+- [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (14769)
+- [ ] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3200)
+- [ ] `paint.rs` -> rasterization onto Skia: fills, strokes, images, SVG, canvas, effects (9721)
 - [ ] `border.rs` -> border and outline painting (452)
 - [ ] `lib.rs` -> the public render API, screenshots, animation sampling (2914)
 - [ ] Fonts: embedded font assets + Skia/HarfBuzz typeface and shaping integration
@@ -72,7 +93,7 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)
 
-- [ ] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (8026)
+- [ ] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (4591)
 - [ ] `context.rs` -> `BrowserContext` (269)
 - [ ] `lifecycle.rs`, `profiles.rs`, `fork_virtual_url.rs` (188)
 - [ ] `pdf.rs` -> raster PDF export (1027)
@@ -81,7 +102,7 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)
 
-- [ ] `server.rs` -> WebSocket server, sessions, targets (2125)
+- [ ] `server.rs` -> WebSocket server, sessions, targets (1730)
 - [ ] `dispatch.rs` -> method routing (1273)
 - [ ] `types.rs`, `util.rs`, `cookie_params.rs` (440)
 - [ ] domains: `page` (3179), `runtime` (835), `dom` (788), `target` (540),
@@ -93,14 +114,14 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## 7. Obscura.Mcp  (<- crates/obscura-mcp, ~3.2k lines)
 
-- [ ] `lib.rs` -> stdio MCP server and tools (2401)
+- [ ] `lib.rs` -> stdio MCP server and tools (2077)
 - [ ] `http.rs` -> HTTP/SSE transport (462)
 - [ ] Integration tests ported
 - [ ] Parity: identical tool listings and tool-call results
 
 ## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)
 
-- [ ] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (2672)
+- [ ] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (1946)
 - [ ] `worker.rs` -> the `obscura-worker` binary for parallel scrape (165)
 - [ ] `crates/obscura` -> embeddable library API (`Obscura` project) (2224)
 - [ ] Integration tests ported
