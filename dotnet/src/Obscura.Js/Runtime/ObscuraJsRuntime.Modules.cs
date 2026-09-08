@@ -186,6 +186,11 @@ public sealed partial class ObscuraJsRuntime
 
         string? outcome;
         var clock = Stopwatch.StartNew();
+        // Every load that arrives inside this bracket belongs to a statically
+        // declared graph; anything outside it is an import() continuation, which
+        // is the distinction deno_core gets from is_dyn_import and ClearScript
+        // does not report at all.
+        using var staticGraph = _moduleLoader.BeginStaticGraph();
         try
         {
             _engine.Execute(info, source);

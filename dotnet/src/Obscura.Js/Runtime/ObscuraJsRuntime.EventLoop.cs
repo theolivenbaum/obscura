@@ -72,6 +72,27 @@ public sealed partial class ObscuraJsRuntime
         taskError = null;
         PerformMicrotaskCheckpoint();
 
+        // Posted tasks first: the shim treats op_posted_task as the task source
+        // that must run before the next timer batch, which is what keeps a
+        // rendering checkpoint ahead of the callbacks it schedules.
+        var posted = DrainPostedTasks();
+        foreach (var deliver in posted)
+        {
+            try
+            {
+                deliver(0);
+            }
+            catch (ScriptInterruptedException)
+            {
+                throw;
+            }
+            catch (ScriptEngineException error)
+            {
+                taskError ??= $"Event loop error: {error.Message}";
+            }
+            PerformMicrotaskCheckpoint();
+        }
+
         var due = Timers.TakeDue();
         if (due.Count > 0)
         {
@@ -96,9 +117,27 @@ public sealed partial class ObscuraJsRuntime
             return LoopTick.Progressed;
         }
 
-        return Timers.Count > 0 || HasPendingAsyncOps || HasPendingNetworkRequests()
+        if (posted.Length > 0)
+        {
+            return LoopTick.Progressed;
+        }
+
+        return Timers.Count > 0 || _postedTasks.Count > 0 || HasPendingAsyncOps || HasPendingNetworkRequests()
             ? LoopTick.Waiting
             : LoopTick.Idle;
+    }
+
+    private Action<double>[] DrainPostedTasks()
+    {
+        if (_postedTasks.Count == 0)
+        {
+            return [];
+        }
+        // Snapshot before running: a task that posts another belongs to the next
+        // turn, or a self-reposting scheduler starves everything after it.
+        var drained = _postedTasks.ToArray();
+        _postedTasks.Clear();
+        return drained;
     }
 
     private async Task<LoopTick> ParkAsync(TimeSpan cap)
@@ -186,22 +225,30 @@ public sealed partial class ObscuraJsRuntime
 
         BeginJavaScriptTask();
 
-        var checkpointWatchdog = ArmWatchdog(TimeSpan.FromMilliseconds(AutonomousTaskWatchdogMs));
+        // The shared CDP watchdog (cdp_watchdog.rs), not the per-call one: this
+        // turn is armed only around synchronous V8 entry, and a long parked
+        // timer must not look like a hung task merely because the runtime is
+        // asleep waiting for it.
+        var checkpointWatchdog = CdpWatchdog.Arm(
+            IsolateHandleForWatchdog, TimeSpan.FromMilliseconds(AutonomousTaskWatchdogMs));
         try
         {
             PerformMicrotaskCheckpoint();
         }
         catch (ScriptInterruptedException)
         {
-            DisarmWatchdog(checkpointWatchdog);
+            CdpWatchdog.Disarm(checkpointWatchdog);
+            CancelTermination();
             throw new JsRuntimeException("autonomous microtask checkpoint exceeded its task budget");
         }
-        if (DisarmWatchdog(checkpointWatchdog))
+        if (CdpWatchdog.Disarm(checkpointWatchdog))
         {
+            CancelTermination();
             throw new JsRuntimeException("autonomous microtask checkpoint exceeded its task budget");
         }
 
-        var watchdog = ArmWatchdog(TimeSpan.FromMilliseconds(AutonomousTaskWatchdogMs));
+        var watchdog = CdpWatchdog.Arm(
+            IsolateHandleForWatchdog, TimeSpan.FromMilliseconds(AutonomousTaskWatchdogMs));
         LoopTick tick;
         string? error;
         try
@@ -210,11 +257,13 @@ public sealed partial class ObscuraJsRuntime
         }
         catch (ScriptInterruptedException)
         {
-            DisarmWatchdog(watchdog);
+            CdpWatchdog.Disarm(watchdog);
+            CancelTermination();
             throw new JsRuntimeException("autonomous browser task exceeded its task budget");
         }
-        if (DisarmWatchdog(watchdog))
+        if (CdpWatchdog.Disarm(watchdog))
         {
+            CancelTermination();
             throw new JsRuntimeException("autonomous browser task exceeded its task budget");
         }
         if (error is not null && IsFatalEventLoopError(error))

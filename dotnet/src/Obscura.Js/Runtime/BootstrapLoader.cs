@@ -23,14 +23,20 @@ public static class BootstrapLoader
 
         var shim = new DenoCoreShim { Ops = ops };
         engine.AddHostObject("__obscura_deno_core", HostItemFlags.PrivateAccess, shim);
+        // The shim closes over the host object in a private const rather than
+        // reading it off the global on every call, which is what lets the global
+        // be removed below without breaking the four members.
         engine.Execute("bootstrap-preamble", """
-            globalThis.Deno = { core: {
-              ops: __obscura_deno_core.Ops,
-              queueUserTimer: (r, rep, d, cb) => __obscura_deno_core.queueUserTimer(r, rep, d, cb),
-              cancelTimer: (id) => __obscura_deno_core.cancelTimer(id),
-              setUnhandledPromiseRejectionHandler: (h) => __obscura_deno_core.setUnhandledPromiseRejectionHandler(h),
-              setHandledPromiseRejectionHandler: (h) => __obscura_deno_core.setHandledPromiseRejectionHandler(h),
-            } };
+            globalThis.Deno = (function () {
+              const host = __obscura_deno_core;
+              return { core: {
+                ops: host.Ops,
+                queueUserTimer: (r, rep, d, cb) => host.queueUserTimer(r, rep, d, cb),
+                cancelTimer: (id) => host.cancelTimer(id),
+                setUnhandledPromiseRejectionHandler: (h) => host.setUnhandledPromiseRejectionHandler(h),
+                setHandledPromiseRejectionHandler: (h) => host.setHandledPromiseRejectionHandler(h),
+              } };
+            })();
             """);
 
         engine.Execute(new DocumentInfo("bootstrap.js"), BootstrapSource.Text);

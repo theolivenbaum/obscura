@@ -69,14 +69,17 @@ vendored variable-font coordinate fix needs to carry over.
 
 - [x] Share `bootstrap.js` with the Rust tree by linking it as an embedded resource
 - [ ] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript: isolate lifetime, realms, watchdog (3704)
-- [ ] `ops.rs` -> the 52 ops (3101)
-  - [ ] `op_dom` command dispatcher (~90 commands)
+- [x] `ops.rs` -> the 52 ops (3101) - 52/52 ops and 67/67 `op_dom` commands,
+      both mechanically diffed against the protocol doc
+  - [x] `op_dom` command dispatcher (67 commands)
   - [x] crypto ops (`digest`, `hmac`, `aes-gcm/cbc/ctr`, `pbkdf2`, `hkdf`, `random_bytes`) - 30 tests green
   - [x] URL ops (`parse`, `set`, `resolve`, `encode_query`) - WHATWG parser
         written in tree with Punycode, diffed against the real Rust `url` crate
         over 51,038 cases with 0 mismatches on the curated set
-  - [ ] fetch / network ops
-  - [ ] render-facing ops (layout geometry, computed style, canvas, image metadata, WAAPI)
+  - [x] fetch / network ops (interception, per-hop SSRF re-validation, 20-hop
+        limit, 301/302/303 GET downgrade, CORS preflight, capped body read)
+  - [x] render-facing ops (layout geometry, computed style, canvas, image
+        metadata, WAAPI)
 - [ ] `frame.rs` -> child-frame realms (1352)
 - [x] `module_loader.rs` + `import_map.rs` -> ES module loading (783)
 - [x] `write_stream.rs`, `markdown.rs`, `v8_flags.rs`, `cdp_watchdog.rs` (461) -
@@ -314,6 +317,14 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   html5ever's `trace_handles`, so inside `<table>` the open set is approximate
   where foster-parenting moves the probe; it only matters for `script` and
   `template`, which are not foster-parented.
+- **Two op payloads cannot be byte-matched, and neither can be.**
+  `op_computed_style` and the `op_fetch_url` header map are built by Rust from a
+  `HashMap`, whose iteration order is randomized per process. No byte parity is
+  achievable in either direction; the key sets and values match, and the port
+  uses insertion order.
+- **`op_fetch_url` has no stealth branch.** Rust routes scripted fetch through
+  `StealthHttpClient::send_single`; the deferred stealth transport has no
+  equivalent, so scripted fetch falls through to the ordinary client.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.

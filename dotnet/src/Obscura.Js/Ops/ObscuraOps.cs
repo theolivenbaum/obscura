@@ -40,13 +40,16 @@ public interface IPostedTaskSpawner
 /// a V8 engine.
 /// </para>
 /// </remarks>
-public sealed class ObscuraOps(ObscuraState page)
+public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
 {
     /// <summary>The page's own realm state; frame 0.</summary>
     public ObscuraState Page { get; } = page;
 
-    /// <summary>Per-frame realm states, when the page has child frames.</summary>
-    public RealmStates Realms { get; } = new();
+    /// <summary>
+    /// Per-frame realm states, when the page has child frames. Pass the runtime's
+    /// own registry so ops and realm construction agree on which state is which.
+    /// </summary>
+    public RealmStates Realms { get; } = realms ?? new RealmStates();
 
     /// <summary>Set by the runtime before page script runs.</summary>
     public IPostedTaskSpawner? TaskSpawner { get; set; }

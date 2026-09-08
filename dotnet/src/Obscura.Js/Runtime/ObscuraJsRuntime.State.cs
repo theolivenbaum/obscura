@@ -20,34 +20,60 @@ namespace Obscura.Js.Runtime;
 public sealed partial class ObscuraJsRuntime
 {
     /// <summary>
-    /// Installed once by the ops layer. The runtime calls it for the page realm
-    /// and for every frame realm, with that realm's own state.
+    /// The bound op table, and the page state it acts on.
     /// </summary>
     /// <remarks>
-    /// This is the port of <c>build_extension()</c>: deno_core binds ops
-    /// through an extension, ClearScript through a plain object handed to
-    /// <c>bootstrap.js</c> as <c>Deno.core.ops</c>. Keeping it a hook rather
-    /// than a direct call is what lets the runtime be built and tested without
-    /// the whole op surface present.
+    /// This is the port of <c>build_extension()</c>: deno_core binds ops through
+    /// an extension into the main context only, ClearScript through a plain
+    /// object the bootstrap loader exposes as <c>Deno.core.ops</c>. One instance
+    /// serves every realm of this page - the ops resolve the calling realm from
+    /// the frame id its bootstrap closure passes, which is what
+    /// <c>share_ops_with_realm</c> achieves in Rust by handing the child realm
+    /// the parent's bound function objects.
     /// </remarks>
-    public static Action<ScriptObject, ObscuraState, ObscuraJsRuntime>? OpTableBinder { get; set; }
+    private readonly ObscuraOps _ops = new(new ObscuraState());
 
     /// <summary>The page realm's state. Frame realms have their own.</summary>
-    public ObscuraState State { get; } = new();
+    public ObscuraState State => _ops.Page;
 
     /// <summary>The table ops consult to find the calling realm's document.</summary>
-    public RealmStates RealmStates { get; } = new();
+    public RealmStates RealmStates => _ops.Realms;
+
+    /// <summary>The op table itself, for a host that needs to reach an op directly.</summary>
+    public ObscuraOps Ops => _ops;
 
     partial void BindOps(ScriptObject ops, bool mainRealm)
     {
-        if (mainRealm)
-        {
-            BindRealmOps(ops, State);
-        }
+        _ = mainRealm;
+        _ops.BindTo(ops);
     }
 
-    internal void BindRealmOps(ScriptObject ops, ObscuraState state) =>
-        OpTableBinder?.Invoke(ops, state, this);
+    /// <summary>
+    /// Binds the op table into a frame realm. The same table: a frame's ops must
+    /// see the same page state, the same pending-frame queue and the same
+    /// in-flight counter as the page, and they select the frame's own document by
+    /// the frame id the realm passes.
+    /// </summary>
+    internal void BindRealmOps(ScriptObject ops, ObscuraState state)
+    {
+        _ = state;
+        _ops.BindTo(ops);
+    }
+
+    /// <summary>
+    /// Queues one posted-task delivery onto this runtime's event loop.
+    /// </summary>
+    /// <remarks>
+    /// <c>op_posted_task</c> is the shim's macrotask source. deno_core spawns it
+    /// onto the Tokio local set; here it lands in a host queue the pump drains,
+    /// which keeps it a task and not a microtask - the distinction the shim
+    /// relies on to keep recursive schedulers from starving timers.
+    /// </remarks>
+    void IPostedTaskSpawner.Spawn(Action<double> deliver)
+    {
+        ArgumentNullException.ThrowIfNull(deliver);
+        _postedTasks.Enqueue(deliver);
+    }
 
     partial void BeginAnimationTask() => RenderState.BeginAnimationTask(State);
 

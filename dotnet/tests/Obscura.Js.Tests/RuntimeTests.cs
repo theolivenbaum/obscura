@@ -56,12 +56,13 @@ internal sealed class RuntimeFixture : IDisposable
 /// names.
 /// </summary>
 /// <remarks>
-/// A skipped test names the exact thing it waits on and keeps the Rust body as
-/// a comment, so switching it on is a translation and not an archaeology
-/// exercise. Most of them wait on one thing: the op table, which
-/// <c>ops.rs</c> binds through
-/// <see cref="ObscuraJsRuntime.OpTableBinder"/>. Without it bootstrap.js loads
-/// and plain JavaScript runs, but every DOM surface it exposes is inert.
+/// Every skipped test keeps its Rust body as a comment and says exactly why it
+/// is skipped, so switching one on is a translation and not an archaeology
+/// exercise. Most are skipped for the plainest reason there is - the C# body has
+/// not been written yet - and not because anything blocks them: the op table is
+/// bound, bootstrap.js loads, the DOM answers and frame realms run. The ones
+/// that are genuinely blocked say what blocks them: a missing HTTP fixture, the
+/// unported screenshot family, or a ClearScript limit named in the port report.
 /// </remarks>
 public sealed class RuntimeTests
 {
@@ -77,7 +78,7 @@ public sealed class RuntimeTests
     // SEC-503 / #820 — createObjectURL must reject non-Blob input (an object
     // that merely has a .text() method, e.g. Response) with a TypeError, as
     // Chrome does; a real Blob is still accepted.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CreateObjectUrlRejectsNonBlobInput()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -112,7 +113,7 @@ public sealed class RuntimeTests
     // set_platform must not allow a backslash-before-quote to break out of the
     // JS string literal (injection), and set_user_agent must not silently fail
     // on a control character; both must store the value verbatim.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ProfileSettersEscapeBackslashAndControlCharacters()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -148,7 +149,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void FunctionToStringHasNativeFunctionShape()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -248,7 +249,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentDomainGetterAndValidRelaxationMatchEffectiveHost()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -287,7 +288,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentDomainRejectsUnrelatedChildAndPublicSuffixHosts()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -328,7 +329,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentDomainDetachedAndHostlessSettersThrowSecurityError()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -381,7 +382,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task StringTimeoutHandlerExecutesInGlobalScope()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -401,7 +402,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task StringTimeoutDeclarationsReachGlobalScope()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -429,7 +430,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task StringIntervalHandlerRepeatsAndCanClearItself()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -452,7 +453,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ZeroDelayTimerRunsAsATaskAfterMicrotasks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -480,7 +481,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task SchedulerPostTaskObservesPriorityFifoAndTaskBoundaries()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -542,7 +543,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task SchedulerAbortDelayAndYieldFollowTaskState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -624,7 +625,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerOnmessageBindingsDoNotMutateWindow()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -668,7 +669,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerInitializesOnceAndRetainsMessageState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -701,7 +702,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerScopesKeepCountersAndHandlersIndependent()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -740,7 +741,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerDeliversToHandlerAndListenerWithoutReinitializing()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -787,7 +788,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerQueuesMessagesWhileSourceIsLoading()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -821,7 +822,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerTerminationDiscardsQueuedMessages()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -854,7 +855,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerSourcePreservesStrictModeInMessageClosures()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -899,7 +900,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerInitializationErrorDoesNotRerunSource()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -941,7 +942,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WorkerStartupReplyDoesNotOvertakeQueuedMessages()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -984,7 +985,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task SelfRequeueingMessageChannelYieldsToTimers()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1023,7 +1024,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task MessagePortQueuesUntilStartAndClonesAtPostTime()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1080,7 +1081,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task MessagePortOnmessageStartsAndYieldsBetweenMessages()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1114,7 +1115,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task MessagePortDropsOldDocumentPayloadsBeforeFreshDelivery()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1152,7 +1153,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task MessagePortCloseDiscardsDeliveryAlreadyQueuedForATask()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1182,7 +1183,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task MessagePortHandlerAndListenerFollowRegistrationOrder()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1223,7 +1224,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task MessagePortInternalStateIsHiddenAndIgnoresOwnPropertyTampering()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1267,7 +1268,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void MessagePortHasBrowserShapedConstructionAndCloneErrors()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1295,7 +1296,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task BroadcastChannelDeliversIndependentPostTimeClonesToMatchingPeers()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1358,7 +1359,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task BroadcastChannelHandlersFollowRegistrationOrderAndTaskTiming()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1400,7 +1401,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task BroadcastChannelCloseCancelsDeliveryAndClosedPostThrows()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1449,7 +1450,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PerformanceNowIsMonotonicUnderBurstyCalls()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1473,7 +1474,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PerformanceNowDoesNotOutrunElapsedTime()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1494,7 +1495,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TimeOriginNeverLandsInTheFuture()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1519,7 +1520,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ChildnodeHelpersCoerceNonStringPrimitivesToText()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1547,7 +1548,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ReplaceStateWithoutUrlPreservesCurrentLocation()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1565,7 +1566,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PushStateWithoutUrlPreservesCurrentLocation()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1583,7 +1584,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void HistoryExposesTheWebPlatformConstructorAndPrototype()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1619,7 +1620,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StyleAttributeParsesIntoStyleObject()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1644,7 +1645,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SetStyleAttributeUpdatesStyleObject()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1662,7 +1663,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NullNamespaceStyleAttributeStaysInSync()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1680,7 +1681,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SettingStylePropertyUpdatesTheAttributeAndSerialization()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1705,7 +1706,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StyleObjectReflectsExternalAttributeChange()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1726,7 +1727,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CloneNodeDeepPreservesContextSensitiveElements()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1748,7 +1749,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CloneNodeDeepCopiesChildrenAndAttributes()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1766,7 +1767,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CloneNodeDeepPreservesTableRows()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1788,7 +1789,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CloneNodeShallowCopiesAttributesWithoutChildren()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1806,7 +1807,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CloneNodeCopiesJsAssignedInlineStyles()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1824,7 +1825,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CloneNodeDeepCopiesTemplateContent()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1842,7 +1843,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertAdjacentHtmlParsesTableFragments()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1860,7 +1861,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertAdjacentHtmlPositionIsCaseInsensitive()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1876,7 +1877,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertAdjacentHtmlRejectsInvalidPosition()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1892,7 +1893,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertAdjacentHtmlKeepsLeadingCommentsInTableContexts()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1912,7 +1913,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertAdjacentHtmlUsesTheInsertionElementAsContext()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1932,7 +1933,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SetAttributeNsIsRetrievableByNamespaceAndLocalName()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1948,7 +1949,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RemoveAttributeNsRemovesByNamespace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1964,7 +1965,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void GetAttributeNsReadsPlainAttributesWithNullNamespace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1981,7 +1982,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NamespacedAttributeKeepsItsQualifiedName()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1997,7 +1998,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ParsedXlinkAttributeIsAvailableThroughBothApis()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2015,7 +2016,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SetAttributeUpdatesAParsedNamespacedAttributeInPlace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2038,7 +2039,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SetAttributeNsValidatesNamespaceConstraints()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2059,7 +2060,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DomParserFlagsMalformedXmlWithParsererror()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2075,7 +2076,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DomParserAcceptsWellFormedXml()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2091,7 +2092,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DomParserHtmlNeverGetsParsererror()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2108,7 +2109,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CustomElementUpgradeRunsClassConstructorOnExistingElement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2150,7 +2151,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ShadowRootChildrenExposeParentSiblingsAndComposedRoot()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2280,7 +2281,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ShadowRootIdentityAndChildrenAreNativeTreeBacked()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2374,7 +2375,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CreateElementSynchronouslyConstructsAnExistingDefinition()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2430,7 +2431,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CreatedForeignElementKeepsNativeQualifiedNameThroughClone()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2453,7 +2454,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SvgPathUsesTheStandardInterfaceChain()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2512,7 +2513,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ForeignInnerHtmlAndContextualFragmentsKeepSvgNamespace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2535,7 +2536,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ThrowingCustomElementConstructorMarksUpgradeFailedWithoutConnecting()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2576,52 +2577,36 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestDocumentTitle()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_document_title() {
-                let mut rt = setup_runtime("<html><head><title>Test</title></head><body></body></html>");
-                let title = rt.evaluate("document.title").unwrap();
-                assert_eq!(title, serde_json::json!("Test"));
+        using var fixture = RuntimeFixture.Setup("<html><head><title>Test</title></head><body></body></html>");
+        var rt = fixture.Runtime;
+        Assert.Equal("Test", rt.Evaluate("document.title")!.GetValue<string>());
 
-                let result = rt
-                    .evaluate(
-                        r#"
-                        (function() {
-                          document.title = "A <new> title";
-                          return [
-                            document.title,
-                            document.querySelector("head > title").textContent,
-                            document.querySelectorAll("title").length
-                          ];
-                        })()
-                        "#,
-                    )
-                    .unwrap();
-                assert_eq!(
-                    result,
-                    serde_json::json!(["A <new> title", "A <new> title", 1])
-                );
+        var result = rt.Evaluate(@"
+                (function() {
+                  document.title = 'A <new> title';
+                  return [
+                    document.title,
+                    document.querySelector('head > title').textContent,
+                    document.querySelectorAll('title').length
+                  ];
+                })()");
+        var array = Assert.IsType<JsonArray>(result);
+        Assert.Equal("A <new> title", array[0]!.GetValue<string>());
+        Assert.Equal("A <new> title", array[1]!.GetValue<string>());
+        Assert.Equal(1.0, array[2]!.GetValue<double>());
 
-                let normalized = rt
-                    .evaluate(
-                        r#"
-                        (function() {
-                          document.querySelector("title").textContent = "  live\n\tDOM   title  ";
-                          return document.title;
-                        })()
-                        "#,
-                    )
-                    .unwrap();
-                assert_eq!(normalized, serde_json::json!("live DOM title"));
-            }
-        */
+        var normalized = rt.Evaluate(@"
+                (function() {
+                  document.querySelector('title').textContent = '  live\n\tDOM   title  ';
+                  return document.title;
+                })()");
+        Assert.Equal("live DOM title", normalized!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentTitleSetterCreatesMissingTitleElement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2669,7 +2654,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentReferrerHasExplicitNavigationState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2691,7 +2676,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void GlobalWindowHasBrowserConstructorIdentity()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2715,7 +2700,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WindowNamedAccessExposesIdsAndEligibleNames()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2761,7 +2746,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WindowNamedAccessTracksDynamicIdsAndFragmentParsing()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2838,7 +2823,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ExplicitViewportIsDistinctFromFingerprintedScreen()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2864,7 +2849,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ScreenOverrideIsIndependentLiveAndPreservesScreenIdentity()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2908,7 +2893,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void MatchMediaEvaluatesQueryListsConjunctionsRangesAndOrientation()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2947,7 +2932,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void MatchMediaMatchesAreLiveAcrossViewportResizes()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -2989,7 +2974,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ComputedStyleAccessDoesNotGetShadowedByInlineStyleProxy()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3030,7 +3015,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void HyperlinkContentAttributesReflectThroughTheIdlSurface()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3083,7 +3068,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void OrdinaryInlineKeepsComputedSizesButUsesContentGeometry()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3200,7 +3185,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ComputedStyleUsesRendererStylesheetCascadeAndInvalidates()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3297,7 +3282,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WebkitTruncationComputedNamesUseNativeSupportAndVendorPrefixes()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3352,7 +3337,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ComputedTypographyUsesResolvedRendererValues()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3401,7 +3386,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ComputedStyleExposesCascadedCustomPropertiesAndInvalidates()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3476,7 +3461,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IdleEventLoopFlushesResolvedPromiseContinuations()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3502,7 +3487,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopDoesNotWaitForAnalyticsInterval()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3527,7 +3512,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FixedDurationEventLoopYieldsFromContinuouslyReadyTasks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3571,7 +3556,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ZeroDelayIntervalCreatedByTimerYieldsToEmbedder()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3619,7 +3604,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TopLevelZeroDelayIntervalClampsAfterSixTicks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3669,7 +3654,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task DeeplyNestedIntervalInheritsTheTimerTaskNesting()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3759,7 +3744,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task AdaptiveObservationDeadlineDoesNotTerminateTheActiveTask()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3798,7 +3783,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopYieldsFromContinuouslyReadyNonVisualWork()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3836,7 +3821,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopBoundsASingleUnyieldingCallbackDrain()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3892,7 +3877,7 @@ public sealed class RuntimeTests
         Assert.Equal(2.0, rt.Evaluate("1 + 1")!.GetValue<double>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopRetainsDelayedNetworkAndDomUpdate()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3930,7 +3915,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopAllowsFetchHydrationWithinNetworkGrace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -3974,7 +3959,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopBoundsAHangingPageRequest()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4010,7 +3995,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopGivesPostGraceDomActivityAQuietWindow()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4053,7 +4038,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescenceIgnoresAnotherPagesSharedClientRequest()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4084,7 +4069,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopRetainsNearTermRenderTimeout()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4112,7 +4097,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task QuiescentEventLoopBoundsContinuousVisualMutations()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4145,7 +4130,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void FontFaceSetTracksAuthoredAndScriptCreatedFaces()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4240,7 +4225,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FontFaceLoadUpdatesStatusSetReadinessAndMatching()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4292,7 +4277,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AnimationFrameRequiresACallableCallback()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4317,7 +4302,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task AnimationFramesAreOrderedBatchesWithRenderingTimestamps()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4381,7 +4366,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task RenderingOpportunityOrdersRafResizeAndIntersectionPhases()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4416,7 +4401,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task RafGeometryMutationReachesSettledIntersectionBeforeNextFrame()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4470,7 +4455,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task CancelAnimationFrameRemovesPendingAndCurrentBatchCallbacks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4504,7 +4489,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task SelfRequeueingAnimationFrameYieldsToTimerTasks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4552,53 +4537,28 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestDocumentUrl()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_document_url() {
-                let mut rt = setup_runtime("<html><body></body></html>");
-                let url = rt.evaluate("document.URL").unwrap();
-                assert_eq!(url, serde_json::json!("http://example.com/test"));
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        Assert.Equal("http://example.com/test", fixture.Runtime.Evaluate("document.URL")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestQuerySelector()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_query_selector() {
-                let mut rt = setup_runtime("<html><body><h1>Hello</h1><p>World</p></body></html>");
-                let text = rt
-                    .evaluate("document.querySelector('h1').textContent")
-                    .unwrap();
-                assert_eq!(text, serde_json::json!("Hello"));
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<html><body><h1>Hello</h1><p>World</p></body></html>");
+        Assert.Equal("Hello", fixture.Runtime.Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestQuerySelectorAll()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_query_selector_all() {
-                let mut rt = setup_runtime("<ul><li>A</li><li>B</li><li>C</li></ul>");
-                let count = rt
-                    .evaluate("document.querySelectorAll('li').length")
-                    .unwrap();
-                assert_eq!(count.as_f64().unwrap() as i64, 3);
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<ul><li>A</li><li>B</li><li>C</li></ul>");
+        Assert.Equal(3, (long)fixture.Runtime.Evaluate("document.querySelectorAll('li').length")!.GetValue<double>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CssSupportsMatchesCapabilitiesAndBooleanConditions()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4649,23 +4609,14 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestGetElementById()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_get_element_by_id() {
-                let mut rt = setup_runtime(r#"<div id="test">Content</div>"#);
-                let tag = rt
-                    .evaluate("document.getElementById('test').tagName")
-                    .unwrap();
-                assert_eq!(tag, serde_json::json!("DIV"));
-            }
-        */
+        using var fixture = RuntimeFixture.Setup(@"<div id=""test"">Content</div>");
+        Assert.Equal("DIV", fixture.Runtime.Evaluate("document.getElementById('test').tagName")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AttributesNamedNodeMapIsLive()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4712,7 +4663,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ScriptCreatedAttributeReadsStayCoherentAcrossMutationApis()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4753,7 +4704,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StructuralCacheTracksDetachReparentAndRejectedMutations()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4831,7 +4782,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementScrollMethodsUpdateScrollOffsets()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4874,7 +4825,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentFragmentGetElementByIdSearchesDescendants()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4923,7 +4874,7 @@ public sealed class RuntimeTests
     /// while FILTER_SKIP only skips the node and leaves descendants eligible.
     /// Collapsing both into "not accepted" let a TreeWalker yield nodes from
     /// inside a subtree the page explicitly rejected.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerFilterRejectPrunesTheWholeSubtree()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4959,7 +4910,7 @@ public sealed class RuntimeTests
 
     /// Issue #462: previousNode() must walk reverse document order until a node
     /// is accepted, not give up as soon as the first candidate is filtered out.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PreviousNodeWalksReverseDocumentOrder()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -4997,7 +4948,7 @@ public sealed class RuntimeTests
 
     /// Issue #462: a backward walk must retrace a forward walk exactly, and stop
     /// at the root without ever returning it.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PreviousNodeRetracesAFullForwardWalk()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5041,7 +4992,7 @@ public sealed class RuntimeTests
 
     /// Issue #462: FILTER_REJECT prunes a subtree in the backward direction too
     /// — the descent into a rejected node's last children must stop.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PreviousNodeHonoursFilterRejectSubtreePruning()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5082,7 +5033,7 @@ public sealed class RuntimeTests
     /// Issue #475: parentNode() must never surface a node above `root`. With
     /// currentNode at root, the old guard stepped to root's own parent and
     /// returned it — escaping the walker's subtree entirely.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerParentNodeDoesNotEscapeAboveRoot()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5109,7 +5060,7 @@ public sealed class RuntimeTests
     /// Issue #475: when the accepted ancestor is `root` itself, parentNode()
     /// returns it and moves currentNode there — the old `parent !== root` guard
     /// wrongly excluded it.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerParentNodeCanReturnTheRoot()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5135,7 +5086,7 @@ public sealed class RuntimeTests
 
     /// Issue #475: parentNode() climbs past a skipped ancestor to the first
     /// accepted one, instead of stopping at the immediate parent.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerParentNodeClimbsPastSkippedAncestors()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5169,7 +5120,7 @@ public sealed class RuntimeTests
     }
 
     /// leak TreeWalker's pruning into it.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NodeIteratorTreatsFilterRejectAsSkip()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5206,7 +5157,7 @@ public sealed class RuntimeTests
     /// Issue #467: a NodeIterator starts *before* its root, so the first
     /// nextNode() returns the root itself. Aliasing createTreeWalker silently
     /// dropped exactly the element the iterator was rooted at.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NodeIteratorYieldsTheRootNodeFirst()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5233,7 +5184,7 @@ public sealed class RuntimeTests
 
     /// Issue #467: the NodeIterator interface surface, and that TreeWalker-only
     /// members are not exposed on it.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NodeIteratorExposesItsOwnInterface()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5286,7 +5237,7 @@ public sealed class RuntimeTests
 
     /// Issue #467: previousNode() retraces the iterator, and the root is the
     /// last node it yields going backwards.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NodeIteratorPreviousNodeRetracesTheWalk()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5321,7 +5272,7 @@ public sealed class RuntimeTests
     /// Issue #463: `<template>` contents are parsed into the node's
     /// `template_contents` document, but no op exposed it, so `.content` handed
     /// back a fabricated empty fragment and the parsed markup was unreachable.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TemplateContentExposesParsedMarkup()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5371,7 +5322,7 @@ public sealed class RuntimeTests
     /// insertion mode, which synthesizes head and body. The importer must keep
     /// both; it previously returned the synthesized body and dropped the head
     /// (so a <title>/<meta> assigned this way vanished).
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentelementInnerHtmlKeepsHeadAndBody()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5394,7 +5345,7 @@ public sealed class RuntimeTests
     /// Regression guard: innerHTML on an ordinary element still imports the
     /// parsed nodes directly (no head/body is synthesized for a div context),
     /// so the fix above must not change the common case.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void OrdinaryElementInnerHtmlImportsContentDirectly()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5416,7 +5367,7 @@ public sealed class RuntimeTests
     /// Issue #463: the same must hold for a template that arrives via innerHTML
     /// rather than the initial document parse — that is how most frameworks
     /// inject templates.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TemplateContentWorksForTemplatesAddedViaInnerHtml()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5449,7 +5400,7 @@ public sealed class RuntimeTests
     /// Issue #463: a template built with createElement has no parsed contents,
     /// so `.content` must allocate a backing fragment on demand and round-trip
     /// through innerHTML.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TemplateContentRoundTripsForCreatedTemplates()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5483,7 +5434,7 @@ public sealed class RuntimeTests
     /// markup silently disappears from outerHTML/innerHTML round-trips — and
     /// `cloneNode(true)`, which round-trips through outer_html, yields an empty
     /// template.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TemplateContentsSurviveSerializationAndClone()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5519,7 +5470,7 @@ public sealed class RuntimeTests
 
     /// Issue #468: window.scrollTo/scrollBy/scroll were no-op stubs, so the
     /// dominant infinite-scroll idiom never advanced the page offset.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WindowScrollMethodsMoveThePageOffset()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5554,7 +5505,7 @@ public sealed class RuntimeTests
 
     /// Issue #468: the page offset is one value, readable and writable through
     /// either `window.scrollY` or `document.scrollingElement.scrollTop`.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WindowScrollOffsetIsSharedWithTheScrollingElement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5582,7 +5533,7 @@ public sealed class RuntimeTests
 
     /// Issue #468: a scroll event must reach listeners on both the window and
     /// the document — that is the signal lazy loaders wait for.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WindowScrollFiresAScrollEvent()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5612,7 +5563,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RenderedWindowScrollClampsAndGeometryIsViewportRelative()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5821,7 +5772,7 @@ public sealed class RuntimeTests
     /// boxes expose descendant overflow but cannot move; an actual scrolling
     /// box includes trailing padding. A clip boundary suppresses propagation
     /// only on its clipped axis, and ordinary inline boxes expose zero metrics.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementScrollMetricsMatchChromiumOverflowOracles()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -5986,7 +5937,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementScrollOffsetsFollowChromiumBoxAndDomLifecycles()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -6062,7 +6013,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void FixedPanelsScrollLocallyAndTransformedDescendantsRemainSupported()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -6136,7 +6087,7 @@ public sealed class RuntimeTests
     /// animation libraries commonly measure a fixed 100vh sentinel through
     /// clientHeight; the old synthetic 100x20 fallback collapsed all of their
     /// viewport-relative trigger ranges.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RenderedClientMetricsUseTheLivePaddingBox()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -6238,7 +6189,7 @@ public sealed class RuntimeTests
     /// dimensions happen to be zero. Blink and Gecko return an all-zero
     /// bounding rect and no client rects for display:none/detached elements;
     /// a laid-out zero-size box still contributes one client rect.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RenderedCssomRectsDistinguishNoBoxFromZeroSizeBox()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -6309,7 +6260,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NonRenderCssomRectsKeepCompatibilityGeometry()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -6339,7 +6290,7 @@ public sealed class RuntimeTests
     /// root scroll offsets. This keeps sticky distinct from fixed positioning,
     /// verifies subtree movement, bottom-only sticking, and the containing
     /// block's lower boundary without depending on a live site.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RootScrollStickyGeometryMatchesChromiumConstraints()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -6419,7 +6370,7 @@ public sealed class RuntimeTests
     /// Chromium 150 horizontal reference for the same constraint algorithm:
     /// the sticky subtree pins at x=20, remains distinct from fixed, then
     /// leaves with its 500px containing block at the right boundary.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RootScrollStickySupportsTheInlineAxis()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7113,7 +7064,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RenderedLayoutCacheIsInvalidatedByStyleMutations()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7159,7 +7110,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementTextContentReplacementRecomputesEmptySelector()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7280,7 +7231,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WaapiPauseSeekAndCancelPreserveAuthoredInlineStyle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7323,7 +7274,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WaapiZeroDurationFinishesAsynchronouslyAndFiresLifecycle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7355,7 +7306,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task WaapiPositiveInfiniteIterationsRemainActive()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7822,7 +7773,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CssomGeometrySamplesLiveDocumentTime()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7902,7 +7853,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CssomAnimationSampleIsFrozenWithinOneJavascriptTask()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -7933,7 +7884,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TimerCallbackStartsAFreshLazyAnimationSample()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8267,7 +8218,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void RootOverflowClipPreservesCssomScrollRange()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8310,7 +8261,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task RenderedWindowScrollEventsRequireActualMovement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8376,7 +8327,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FingerprintedScreenDoesNotInventADeviceScaleFactor()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8406,7 +8357,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResizeObserverReportsRealBoxesOnlyWhenSelectedSizeChanges()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8500,7 +8451,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResizeObserverBatchesUniqueTargetsIntoOneNativeLayoutRead()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8608,7 +8559,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResizeObserverSelectedBoxAndViewportLifecycleMatchChromium()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8670,7 +8621,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ScrollingDoesNotRemeasureResizeObserverTargets()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8731,7 +8682,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResizeObserverDisconnectIsReusableAndInlineBoxesAreEmpty()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8796,7 +8747,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResizeObserverSelfResizeIsDepthBoundedWithoutTimerSpin()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8853,7 +8804,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverTracksViewportThresholdCrossings()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -8908,7 +8859,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverBatchesUniqueClipGraphIntoOneNativeLayoutRead()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9017,7 +8968,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverDeliversDocumentBatchBeforeCallbackPostedTasks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9063,7 +9014,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionDeliveryRecoversAcrossDocumentReplacement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9109,7 +9060,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverElementRootUsesLivePaddingBoxAndScroll()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9182,7 +9133,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverClipsThroughIntermediateOverflowAncestors()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9251,7 +9202,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverInitialGeometryWaitsForOneRenderCheckpoint()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9307,7 +9258,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverHonorsRootMarginZeroAreaAndNoFakeRefires()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9384,7 +9335,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverDoesNotRefireWhileTargetStaysIntersecting()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9436,7 +9387,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverCanBeReusedAfterDisconnect()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9495,7 +9446,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverRecomputesAfterStyleMutationAndResize()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9548,7 +9499,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task IntersectionObserverRecomputesAfterRootScroll()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9592,7 +9543,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ScrollIntoViewAlignsTheRootViewportAndClamps()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9653,7 +9604,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ScrollIntoViewEmitsEventsOnlyWhenTheRootMoves()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9718,7 +9669,7 @@ public sealed class RuntimeTests
 
     /// Issue #469: FILTER_SKIP leaves a skipped node's children eligible, so
     /// firstChild()/lastChild() must descend into them. FILTER_REJECT must not.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerChildMoversDescendOnSkipButNotOnReject()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9756,7 +9707,7 @@ public sealed class RuntimeTests
 
     /// Issue #469: nextSibling()/previousSibling() must descend into a skipped
     /// sibling's subtree rather than stepping straight over it.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerSiblingMoversDescendIntoSkippedSiblings()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9795,7 +9746,7 @@ public sealed class RuntimeTests
     }
 
     /// Issue #469: the backward sibling mover descends to *last* children.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TreeWalkerPreviousSiblingDescendsToLastChild()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9828,7 +9779,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AppendChildFlattensDocumentFragment()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9869,7 +9820,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertBeforeFlattensDocumentFragmentInOrder()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9909,7 +9860,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ReplaceChildFlattensDocumentFragmentAndRemovesOldChild()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9952,23 +9903,15 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestInnerHtml()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_inner_html() {
-                let mut rt = setup_runtime(r#"<div id="x"><p>Hello</p></div>"#);
-                let html = rt
-                    .evaluate("document.getElementById('x').innerHTML")
-                    .unwrap();
-                assert!(html.as_str().unwrap().contains("<p>"));
-            }
-        */
+        using var fixture = RuntimeFixture.Setup(@"<div id=""x""><p>Hello</p></div>");
+        var html = fixture.Runtime.Evaluate("document.getElementById('x').innerHTML")!.GetValue<string>();
+        Assert.Contains("<p>", html, StringComparison.Ordinal);
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TemplateInnerHtmlPreservesTableFragments()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -9996,7 +9939,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentExposesParentNodeElementChildrenApi()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10016,7 +9959,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AtobDecodesLargePayloadWithoutArgumentStackOverflow()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10033,7 +9976,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NavigationApiUpdatesCurrentEntryState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10066,7 +10009,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InlineStylesheetCssomListsAndRulesAreLiveSameObjects()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10200,7 +10143,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StylesheetCssomMutationsUpdateTheLiveCascade()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10271,7 +10214,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AdoptedStylesheetsMaterializeIntoTheDocument()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10320,7 +10263,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ShadowStylesheetListsAndAdoptionAreLiveAcrossRoots()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10416,7 +10359,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ShadowAdoptedStylesheetsApplyAndSyncTheLiveCascade()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10488,7 +10431,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void UnavailableWebglContextDoesNotClaimSuccess()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10691,31 +10634,21 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestScriptExecution()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_script_execution() {
-                let mut rt = setup_runtime("<ul><li>A</li><li>B</li></ul>");
-                rt.execute_script(
-                    "test",
-                    r#"
-                    globalThis.__result = [];
-                    document.querySelectorAll('li').forEach(function(el) {
-                        globalThis.__result.push(el.textContent);
-                    });
-                "#,
-                )
-                .unwrap();
-                let result = rt.evaluate("globalThis.__result").unwrap();
-                assert_eq!(result, serde_json::json!(["A", "B"]));
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<ul><li>A</li><li>B</li></ul>");
+        var rt = fixture.Runtime;
+        rt.ExecuteScript("test", @"
+            globalThis.__result = [];
+            document.querySelectorAll('li').forEach(function(el) {
+                globalThis.__result.push(el.textContent);
+            });
+        ");
+        Assert.Equal("[\"A\",\"B\"]", rt.Evaluate("globalThis.__result")!.ToJsonString());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void PageVarDeclarationsDoNotCollideWithDomInterfaces()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10747,7 +10680,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DynamicScriptStatusBridgeIsHiddenAndIdle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10805,39 +10738,26 @@ public sealed class RuntimeTests
     /// the runtime so that subsequent scripts (or DOM queries) collapse to
     /// empty. The reporter saw `--dump text` return 1 byte after offside.js
     /// crashed; that cascade should never happen.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void ScriptTypeerrorDoesNotPoisonSubsequentExecution()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn script_typeerror_does_not_poison_subsequent_execution() {
-                let mut rt = setup_runtime("<html><body><p id=hit>BODY_TEXT</p></body></html>");
+        using var fixture = RuntimeFixture.Setup("<html><body><p id=hit>BODY_TEXT</p></body></html>");
+        var rt = fixture.Runtime;
 
-                // 1. First script throws the same flavor of error offside.js produced
-                //    (`Cannot read properties of undefined (reading 'classList')`).
-                let err = rt
-                    .execute_script("buggy", "var x; x.classList.add('y');")
-                    .unwrap_err();
-                assert!(
-                    err.contains("classList") || err.contains("undefined"),
-                    "expected classList/undefined error, got: {}",
-                    err
-                );
+        // 1. The first script throws the same flavour of error offside.js produced.
+        var error = Assert.Throws<JsRuntimeException>(() =>
+            rt.ExecuteScript("buggy", "var x; x.classList.add('y');"));
+        Assert.True(
+            error.Message.Contains("classList", StringComparison.Ordinal)
+            || error.Message.Contains("undefined", StringComparison.Ordinal),
+            $"expected classList/undefined error, got: {error.Message}");
 
-                // 2. The runtime must still be usable: a follow-up script runs.
-                rt.execute_script("ok", "globalThis.__after_error = 'still alive';")
-                    .unwrap();
-                let result = rt.evaluate("globalThis.__after_error").unwrap();
-                assert_eq!(result, serde_json::json!("still alive"));
+        // 2. The runtime must still be usable: a follow-up script runs.
+        rt.ExecuteScript("ok", "globalThis.__after_error = 'still alive';");
+        Assert.Equal("still alive", rt.Evaluate("globalThis.__after_error")!.GetValue<string>());
 
-                // 3. DOM queries still work after the script error.
-                let text = rt
-                    .evaluate("document.querySelector('#hit').textContent")
-                    .unwrap();
-                assert_eq!(text, serde_json::json!("BODY_TEXT"));
-            }
-        */
+        // 3. DOM queries still work after the script error.
+        Assert.Equal("BODY_TEXT", rt.Evaluate("document.querySelector('#hit').textContent")!.GetValue<string>());
     }
 
     /// Regression test for #355: an explicit `throw` in one inline <script> must
@@ -10862,7 +10782,7 @@ public sealed class RuntimeTests
     /// `el.style` (CSSStyleDeclaration) and `el.dataset` (DOMStringMap), `_props`
     /// must not leak, and cssText must serialize dashed names with a trailing
     /// semicolon.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StyleAndDatasetSupportInOperatorAndKeys()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10908,7 +10828,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DomStringMapIsExposedAndBacksDataset()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10958,7 +10878,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StyleDeclarationReflectsAndRemovesParsedAttributes()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -10992,7 +10912,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SelectAddAndOptionTextUpdateTheLiveDom()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11036,7 +10956,7 @@ public sealed class RuntimeTests
 
     /// Regression for #105: `element.querySelector` and `querySelectorAll`
     /// must scope to the receiver's subtree, not the whole document.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementQuerySelectorIsScopedToSubtree()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11065,7 +10985,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentEvaluateExposesBasicXpathResult()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11085,7 +11005,7 @@ public sealed class RuntimeTests
     /// Regression for #105: `document.forms` / `images` / `links` must be
     /// live, not hardcoded `[]`. jQuery 1.x's submit-event setup iterates
     /// `document.forms` and crashes when it's empty for pages that have forms.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentFormsImagesLinksAreLive()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11119,7 +11039,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11246,7 +11166,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task ImageLifecycleCacheIsSeparatedByCorsCredentialsProfile()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11397,7 +11317,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ParserImageDataSrcMutationDoesNotRestartLifecycle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11461,7 +11381,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ParserImageDataSrcIsInertUntilScriptAssignsSrc()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11530,7 +11450,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ParserImageLifecycleUsesSharedRenderResource()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11608,7 +11528,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ParserImageFailureCompletesAndRejectsDecode()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11818,7 +11738,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task StableCachedImageGettersDoNotQueueResizeGeometryWork()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11892,7 +11812,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ParserImageSourceReplacementCancelsQueuedCompletion()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -11952,7 +11872,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResponsivePictureLifecycleTracksViewportDensityAndSourceMedia()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12071,7 +11991,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResponsiveSrcsetSizesUsesRendererSelectedCurrentSrc()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12141,7 +12061,7 @@ public sealed class RuntimeTests
 
     /// Regression for #105: `HTMLFormElement` must expose `.elements` so
     /// frameworks that probe form field collections work.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void HtmlFormElementExposesElementsCollection()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12165,7 +12085,7 @@ public sealed class RuntimeTests
 
     /// Regression for #105: `Element.prepend` must actually insert at the
     /// start, not silently no-op.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementPrependInsertsAtStart()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12196,7 +12116,7 @@ public sealed class RuntimeTests
 
     /// Regression for #105: `isEqualNode` compares structure, not identity.
     /// Framework diff algorithms rely on this.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void IsEqualNodeDoesStructuralCompare()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12223,7 +12143,7 @@ public sealed class RuntimeTests
     /// in CLAUDE.md: bootstrap.js was passing (parent, new, ref) but `_dom`
     /// forwards only two args, silently dropping `ref`. With the fix,
     /// `insertBefore` actually inserts.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertBeforeInsertsNodeAtCorrectPosition()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12248,35 +12168,21 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestConsoleLog()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_console_log() {
-                let mut rt = setup_runtime("<html><body></body></html>");
-                rt.execute_script("test", "console.log('Hello from V8!')")
-                    .unwrap();
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        fixture.Runtime.ExecuteScript("test", "console.log('Hello from V8!')");
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestLocation()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_location() {
-                let mut rt = setup_runtime("<html><body></body></html>");
-                let href = rt.evaluate("location.href").unwrap();
-                assert_eq!(href, serde_json::json!("http://example.com/test"));
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        Assert.Equal("http://example.com/test", fixture.Runtime.Evaluate("location.href")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestButtonClickDispatchesListener()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12299,7 +12205,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLabelClickActivatesItsLabeledControl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12324,7 +12230,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLabelClickHonorsTheAssociationRules()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12359,7 +12265,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLabelActivationDoesNotDoubleFireOrRecurse()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12392,7 +12298,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestClickRespectsDisabledControlsAndInteractiveContent()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12427,7 +12333,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCheckboxIndeterminateIsIdlOnlyAndClearedByActivation()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12476,7 +12382,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDisabledOnlyAppliesToDisableableElements()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12511,7 +12417,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLabelForwardingUsesInteractiveContentNotLabelable()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12544,7 +12450,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestRadioActivationMovesTheCheckedPeerAndRevertsOnCancel()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12585,7 +12491,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDisabledFieldsetExemptionIsTheFirstLegendChildOnly()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12625,7 +12531,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLabelClickRunsCheckboxPreClickActivation()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12664,7 +12570,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDispatchMouseEventRunsListener()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12688,7 +12594,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLocationHrefAssignmentUpdatesNavigationState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12712,7 +12618,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestLocationNavigationCoercesUrlObjects()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12752,7 +12658,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestSubmitButtonClickHandlerCanPreventDefaultAndNavigate()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12787,7 +12693,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task ResponseBodyExposesStreamAndConsumptionState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12835,7 +12741,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestNavigator()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12859,22 +12765,12 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public async Task TestCallFunctionOnNoArgs()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            async fn test_call_function_on_no_args() {
-                let mut rt = setup_runtime("<html><head><title>Test</title></head><body></body></html>");
-                let result = rt
-                    .call_function_on("() => document.title", None, &[], true)
-                    .await
-                    .unwrap();
-                assert_eq!(result.value.unwrap(), serde_json::json!("Test"));
-            }
-        */
-        await Task.CompletedTask;
+        using var fixture = RuntimeFixture.Setup("<html><head><title>Test</title></head><body></body></html>");
+        var result = await fixture.Runtime.CallFunctionOnAsync("() => document.title", null, [], returnByValue: true);
+        Assert.Equal("Test", result.Value!.GetValue<string>());
     }
 
     [Fact]
@@ -12929,40 +12825,24 @@ public sealed class RuntimeTests
         Assert.Equal(3, (long)result2.Value!.GetValue<double>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public async Task TestEvaluateForCdpDetectsNode()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            async fn test_evaluate_for_cdp_detects_node() {
-                let mut rt = setup_runtime("<html><body><h1>Hello</h1></body></html>");
-                let result = rt
-                    .evaluate_for_cdp("document.querySelector('h1')", false, false)
-                    .await
-                    .unwrap();
-                assert_eq!(result.subtype.as_deref(), Some("node"));
-                assert_eq!(result.js_type, "object");
-                assert!(result.object_id.is_some());
-            }
-        */
-        await Task.CompletedTask;
+        using var fixture = RuntimeFixture.Setup("<html><body><h1>Hello</h1></body></html>");
+        var result = await fixture.Runtime.EvaluateForCdpAsync(
+            "document.querySelector('h1')", returnByValue: false, awaitPromise: false);
+        Assert.Equal("node", result.Subtype);
+        Assert.Equal("object", result.JsType);
+        Assert.NotNull(result.ObjectId);
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public async Task TestEvaluateForCdpDetectsDocument()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            async fn test_evaluate_for_cdp_detects_document() {
-                let mut rt = setup_runtime("<html><body></body></html>");
-                let result = rt.evaluate_for_cdp("document", false, false).await.unwrap();
-                assert_eq!(result.subtype.as_deref(), Some("node"));
-                assert_eq!(result.class_name, "HTMLDocument");
-            }
-        */
-        await Task.CompletedTask;
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var result = await fixture.Runtime.EvaluateForCdpAsync("document", returnByValue: false, awaitPromise: false);
+        Assert.Equal("node", result.Subtype);
+        Assert.Equal("HTMLDocument", result.ClassName);
     }
 
     [Fact]
@@ -12973,7 +12853,7 @@ public sealed class RuntimeTests
         Assert.Equal(42, (long)result.Value!.GetValue<double>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TestEvaluateForCdpAwaitsTimerPromise()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -12995,7 +12875,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TestEvaluateForCdpCanAwaitBeyondLegacyFiveSecondCap()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13159,7 +13039,7 @@ public sealed class RuntimeTests
         Assert.Equal(8.0, evaluated.Value!.GetValue<double>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TestCallFunctionOnDomInteraction()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13183,7 +13063,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestInnerHtmlSetter()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13222,7 +13102,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestInnerHtmlWithNested()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13255,7 +13135,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestInputValue()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13284,45 +13164,31 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestSequentialRuntimeSwap()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_sequential_runtime_swap() {
-                let mut rt1 = setup_runtime("<html><body><h1>Page1</h1></body></html>");
-                let title1 = rt1
-                    .evaluate("document.querySelector('h1').textContent")
-                    .unwrap();
-                assert_eq!(title1, serde_json::json!("Page1"));
+        DomTree? dom1;
+        using (var first = RuntimeFixture.Setup("<html><body><h1>Page1</h1></body></html>"))
+        {
+            Assert.Equal("Page1", first.Runtime.Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
+            dom1 = first.Runtime.TakeDom();
+        }
 
-                let dom1 = rt1.take_dom();
-                drop(rt1);
+        using (var second = RuntimeFixture.Setup("<html><body><h1>Page2</h1></body></html>"))
+        {
+            Assert.Equal("Page2", second.Runtime.Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
+        }
 
-                let mut rt2 = setup_runtime("<html><body><h1>Page2</h1></body></html>");
-                let title2 = rt2
-                    .evaluate("document.querySelector('h1').textContent")
-                    .unwrap();
-                assert_eq!(title2, serde_json::json!("Page2"));
-                drop(rt2);
-
-                if let Some(dom) = dom1 {
-                    let mut rt1b = ObscuraJsRuntime::new();
-                    rt1b.set_dom(dom);
-                    rt1b.set_url("http://example.com");
-                    rt1b.set_title("Page1");
-                    rt1b.run_page_init();
-                    let title1b = rt1b
-                        .evaluate("document.querySelector('h1').textContent")
-                        .unwrap();
-                    assert_eq!(title1b, serde_json::json!("Page1"));
-                }
-            }
-        */
+        Assert.NotNull(dom1);
+        using var restored = new ObscuraJsRuntime();
+        restored.SetDom(dom1);
+        restored.SetUrl("http://example.com");
+        restored.SetTitle("Page1");
+        restored.RunPageInit();
+        Assert.Equal("Page1", restored.Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCheckboxChecked()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13350,7 +13216,7 @@ public sealed class RuntimeTests
     // setter, leaving that per-instance tracker stale, so the following input
     // event reads as a genuine change and onChange fires. A plain assignment
     // keeps the tracker in sync and suppresses onChange.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void SetFieldValueBypassesInstanceValueWrapper()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13395,7 +13261,7 @@ public sealed class RuntimeTests
     // only on window (not Document/Element), that check fails and React falls
     // back to a legacy change-detection path, so controlled-input onChange never
     // fires. These must be present on document and Element.prototype too.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void GlobalEventHandlersPresentOnDocumentAndElement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13424,7 +13290,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestMatchesAndClosest()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13450,7 +13316,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ShallowElementClonePreservesInterfaceAttributesAndIsolation()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13499,7 +13365,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DeepDocumentElementCloneStaysAnIndependentHtmlElement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13588,7 +13454,7 @@ public sealed class RuntimeTests
         Assert.Equal(84, (long)result.Value!.GetValue<double>());
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieReadsHttpCookies()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13615,7 +13481,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieExcludesHttponly()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13642,7 +13508,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieSetterStoresInJar()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13664,7 +13530,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieDeleteViaMaxAge()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13692,7 +13558,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieJsAndHttpMerge()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13720,7 +13586,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieEmptyWhenNoCookies()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13734,7 +13600,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentCookieNoJarReturnsEmpty()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13748,7 +13614,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentWriteAppendsToBody()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13773,7 +13639,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentWriteln()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13788,7 +13654,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentWriteMultipleArgs()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13804,7 +13670,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentOpenClearsBody()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13819,7 +13685,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentWriteHtmlElements()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13841,7 +13707,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestUrlRelativeResolution()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13886,7 +13752,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void BaseHrefGovernsDomUrlReflection()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13920,7 +13786,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ARelativeLocationAssignmentFollowsTheBase()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13938,7 +13804,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void WithoutBaseHrefResolutionStaysOnTheDocumentUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -13978,7 +13844,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void BaseElementHrefReflectsTheResolvedUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14001,7 +13867,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TheFirstBaseWithAnHrefWins()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14022,7 +13888,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AnEmptyBaseHrefResolvesToTheDocumentUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14042,7 +13908,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ACrossOriginBaseMovesTheTargetButNotThePageOrigin()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14068,7 +13934,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void BaseHrefRejectsADataUrlBase()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14094,7 +13960,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void BaseResolutionFollowsTheUrlSetByPushState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14115,7 +13981,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ARelativeBaseHrefResolvesAgainstThePushStateUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14140,7 +14006,7 @@ public sealed class RuntimeTests
     /// Guards the cache in `document_base_url_memoized`. Without it, each of these reads walked
     /// the tree and ran the selector engine, and `a.href` went from a field read to O(nodes).
     /// The bound is deliberately loose: it should catch the regression, not watch the allocator.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void AnchorHrefReadsDoNotScaleWithDocumentSize()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14173,7 +14039,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TheBaseMemoStillSeesABaseElementAddedLater()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14205,7 +14071,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TheBaseMemoNoticesAChangedHrefAttribute()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14229,7 +14095,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task BaseHrefGovernsFetchAndXhrTargets()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14278,7 +14144,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TestFetchUrlInputDecodesBinaryBodyBase64()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14327,7 +14193,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FetchAndXhrForwardBrowserCredentialsModes()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14410,7 +14276,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FetchPreservesBinaryBodySourcesAtTheOpBoundary()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14512,7 +14378,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FetchFormUrlencodedAndXhrBodiesReachTheOpAsBytes()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14653,7 +14519,7 @@ public sealed class RuntimeTests
     /// the twentieth hop must still succeed:
     /// https://fetch.spec.whatwg.org/#http-redirect-fetch
     /// WPT covers the same pair in `fetch/api/redirect/redirect-count.any.js`.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FetchFollowsTheTwentiethRedirect()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14678,7 +14544,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FetchResponseReportsTheFinalRedirectUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14727,7 +14593,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task StealthFetchResponseReportsTheFinalRedirectUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14762,7 +14628,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task XhrResponseUrlReportsTheFinalRedirectUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14800,7 +14666,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task Fetch302ResponseUsesTheFinalGetMethod()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14813,7 +14679,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task Fetch307ResponsePreservesThePostMethod()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14826,7 +14692,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task SameOriginNoCorsRedirectKeepsResponseIdentity()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14856,7 +14722,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task CrossOriginNoCorsRedirectFiltersResponseIdentity()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14886,7 +14752,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task StealthCrossOriginNoCorsFiltersResponseIdentity()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14923,7 +14789,7 @@ public sealed class RuntimeTests
 
     /// The other end of the same pair: the twenty-first redirect must
     /// fail. `fetch` reports a rejected result as a `TypeError`.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task FetchRejectsTheTwentyFirstRedirect()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -14955,7 +14821,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task DynamicLinkedStylesheetEntersTheLiveDomWithImportsRebased()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15049,7 +14915,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task UnsuccessfulDynamicScriptResponseFiresErrorWithoutEvaluatingBody()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15103,7 +14969,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task DynamicClassicScriptsAreAsyncByDefaultButHonorAsyncFalseOrder()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15169,7 +15035,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TestResponseArrayBufferPreservesTypedArrayView()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15201,7 +15067,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TestWasmInstantiateStreamingUsesResponseArrayBuffer()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15233,7 +15099,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestTextDecoderRespectsTypedArrayView()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15249,7 +15115,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentDoctype()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15269,7 +15135,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestDocumentDoctypeNullWhenMissing()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15283,7 +15149,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestXmlSerializerDoctype()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15299,7 +15165,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestXmlSerializerElement()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15317,7 +15183,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCreateEventCustomEventHasInitMethod()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15333,7 +15199,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestInitCustomEventSetsFields()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15361,7 +15227,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCreateEventReturnsCorrectClass()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15397,7 +15263,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void CssstyledeclarationIsAUsableGlobalInterface()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15418,7 +15284,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCreateEventRejectsUnknownInterface()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15443,7 +15309,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void EventConstructorMatchesWebidlConformance()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15478,7 +15344,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestPromiseRejectionEventRequiresPromise()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15514,7 +15380,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCreateEventRejectsPromiseRejectionEvent()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15539,7 +15405,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestCreateEventSupportsLegacyEventAliases()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15568,7 +15434,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestStorageEventConstructorAndLegacyFactory()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15620,29 +15486,17 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact]
     public void TestHtmlToMarkdownHeadings()
     {
-        // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn test_html_to_markdown_headings() {
-                let mut rt =
-                    setup_runtime("<html><body><h1>Title</h1><h2>Sub</h2><p>Body</p></body></html>");
-                let md = rt
-                    .evaluate(crate::HTML_TO_MARKDOWN_JS)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_string();
-                assert!(md.contains("# Title"), "missing H1: {}", md);
-                assert!(md.contains("## Sub"), "missing H2: {}", md);
-                assert!(md.contains("Body"), "missing paragraph text: {}", md);
-            }
-        */
+        using var fixture = RuntimeFixture.Setup("<html><body><h1>Title</h1><h2>Sub</h2><p>Body</p></body></html>");
+        var md = fixture.Runtime.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        Assert.Contains("# Title", md, StringComparison.Ordinal);
+        Assert.Contains("## Sub", md, StringComparison.Ordinal);
+        Assert.Contains("Body", md, StringComparison.Ordinal);
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestHtmlToMarkdownLinksAndInline()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15669,7 +15523,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestHtmlToMarkdownLists()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15692,7 +15546,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestHtmlToMarkdownSkipsScriptAndStyle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15715,7 +15569,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestPageContentPuppeteerPattern()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15735,7 +15589,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestElementFromPointIsFunction()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15751,7 +15605,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestElementFromPointInViewportReturnsBody()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15767,7 +15621,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestElementFromPointOutOfViewportReturnsNull()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15787,7 +15641,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestElementsFromPointReturnsArray()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15807,7 +15661,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TestElementFromPointNonNumericReturnsNull()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15825,7 +15679,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task EntryModuleHttpFailureIsNotEvaluatedAsEmptySource()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15854,7 +15708,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task DependencyPreparedAsRootIsEvaluatedOnlyOnce()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -15919,7 +15773,7 @@ public sealed class RuntimeTests
         }
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task DescendantModuleUsesPageCookieIdentityAndHeaders()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16000,7 +15854,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task CrossOriginModuleDescendantDoesNotGainModuleOriginCookies()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16089,7 +15943,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task DescendantModuleFollowsPageClientRedirects()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16135,7 +15989,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task ImportMapResolvesPrefixStaticAndExactDynamicImports()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16194,7 +16048,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task ImportMapDoesNotRemapExternalRootModuleUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16232,7 +16086,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task InlineModulesExposeDocumentBaseAsImportMetaUrl()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16265,7 +16119,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the module-loader port: the Rust test stands up an HTTP server and exercises module_loader.rs / import_map.rs, which are separate files with their own port")]
+    [Fact(Skip = "blocked: the Rust test stands up a local HTTP server for the module graph, and this port has no test-server fixture yet")]
     public async Task ClassicScriptUrlIsDynamicImportReferrer()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16405,7 +16259,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task SuccessfulInlineModuleDoesNotWaitForIntervalIdle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16479,7 +16333,7 @@ public sealed class RuntimeTests
     /// action timeout fires. Without a layout engine we can't compute it
     /// properly, so the stub always returns true — still strictly better
     /// than the undefined path.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementCheckVisibilityIsCallable()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16503,7 +16357,7 @@ public sealed class RuntimeTests
     /// Playwright's `getByRole` / `getByLabel` locators resolve via ARIA
     /// reflection properties. Without the getters those locators always
     /// fail. Reflect the underlying aria-* attributes.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementAriaReflectionPropertiesReadAriaAttrs()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16534,7 +16388,7 @@ public sealed class RuntimeTests
     /// navigator.serviceWorker (ServiceWorkerContainer). Both are EventTargets
     /// in real browsers; missing the method crashed the app bundle with
     /// "addEventListener is not a function".
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void NavigatorEventtargetStubsExposeAddEventListener()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16576,7 +16430,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void TextCodecStreamsExposeBrowserShape()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16615,7 +16469,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task TextEncoderStreamPipeThroughDeliversHydrationData()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16670,7 +16524,7 @@ public sealed class RuntimeTests
     /// right spot. Tests `insertAdjacentText` exists, is callable, and that
     /// inserted content remains literal text — angle brackets must not be
     /// parsed as markup, which is the whole point of the API.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementInsertAdjacentTextPolyfill()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16707,7 +16561,7 @@ public sealed class RuntimeTests
     /// was missing alongside `insertAdjacentText`. Verify all four positions
     /// place the given element correctly and that the inserted element is
     /// returned (per spec — that's the contract callers rely on for chaining).
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementInsertAdjacentElementPolyfill()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16751,7 +16605,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ConsoleLogErrorDoesNotTriggerPrepareStackTrace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16777,7 +16631,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ElementAriaReflectionSettersWriteThrough()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16803,7 +16657,7 @@ public sealed class RuntimeTests
     /// Framework schedulers commonly subclass EventTarget for their own
     /// lifecycle events. These targets have no backing DOM node, but must
     /// still deliver callbacks (including object, once, and signal listeners).
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void StandaloneEventTargetDeliversFrameworkLifecycleEvents()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16863,7 +16717,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void MediaTextTracksExposeLoadedWebvttCues()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16908,7 +16762,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void UnsupportedMediaCapabilitiesAndReadinessAreHonest()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -16955,7 +16809,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void HtmlStringScriptsRemainInertWhenConnected()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17026,7 +16880,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ConnectedInsertionPreparesDynamicScriptSubtreesOnce()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17074,7 +16928,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ScriptClonePreservesStartedState()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17115,7 +16969,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ContextualFragmentAndDocumentWriteKeepExecutableScriptPolicy()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17149,7 +17003,7 @@ public sealed class RuntimeTests
 
     // One stream per document. The tokenizer carries its state across the calls.
     // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteJoinsAnElementSplitAcrossCalls()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17174,7 +17028,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteJoinsATagNameSplitAcrossCalls()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17199,7 +17053,7 @@ public sealed class RuntimeTests
     }
 
     // The shape the UI5 cachebuster writes: "<script", one per attribute, then ">".
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteRunsAScriptSplitAcrossCalls()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17228,7 +17082,7 @@ public sealed class RuntimeTests
 
     // A script in the <head> inserts behind itself, so that what it writes runs before what
     // the parser saw after it.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteInsertsAtTheWritingScriptsPosition()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17262,7 +17116,7 @@ public sealed class RuntimeTests
     }
 
     // Holding back until the close would lose everything written after it. It belongs inside.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteShowsAnElementThatIsNeverClosed()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17285,7 +17139,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteGrowsAnOpenElementAcrossCalls()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17317,7 +17171,7 @@ public sealed class RuntimeTests
     }
 
     // Writing goes through the same insertion steps as any other insertion.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteReportsToMutationObservers()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17353,7 +17207,7 @@ public sealed class RuntimeTests
     // also goes there in the fragment branch. AGENTS.md requires whoever touches insertBefore
     // to check them: the order of reference node versus parent nid is easy to break. The test
     // also pins that every insertion is reported exactly once, not twice.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void ChildNodeMethodsPlaceNodesAndReportOnce()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17401,7 +17255,7 @@ public sealed class RuntimeTests
     }
 
     // insertBefore reported no mutation at all, appendChild did.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void InsertBeforeReportsToMutationObservers()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17431,7 +17285,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteRegistersWindowNamedAccess()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17453,7 +17307,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void DocumentWriteKeepsCallOrderAtTheInsertionPoint()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17483,7 +17337,7 @@ public sealed class RuntimeTests
     /// noise in a browser. The bounded event loop must report it and keep
     /// driving later tasks instead of dying on the error and starving every
     /// pending timer.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public async Task UnhandledRejectionDoesNotStarveLaterTasks()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17516,7 +17370,7 @@ public sealed class RuntimeTests
     /// #734: ICU inherits the host OS locale when no default is set, so
     /// Intl.resolvedOptions() contradicted navigator.language on any host
     /// whose OS locale is not en-US. The pinned default must win.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void IntlLocaleMatchesNavigatorLanguageRegardlessOfHost()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17545,7 +17399,7 @@ public sealed class RuntimeTests
     // Momentic POC / Playwright getByLabel: the label association getters must
     // link <label for> to its control and expose element.labels, both for
     // for-linked and wrapping labels.
-    [Fact(Skip = "blocked on the op table: this test drives bootstrap.js through op_dom and the other ops, which ops.rs binds through ObscuraJsRuntime.OpTableBinder")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Nothing blocks it - the op table is bound and equivalent DOM tests pass - it simply has not been written in C# yet")]
     public void LabelControlAndLabelsLinkLabelableElements()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -17594,210 +17448,120 @@ public sealed class RuntimeTests
 
     // ---- crates/obscura-js/src/frame.rs ----
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void FrameHasItsOwnRealmDomAndOrigin()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn frame_has_its_own_realm_dom_and_origin() {
-                let mut parent = page(
-                    "https://parent.example/page",
-                    "<html><body><h1>Parent</h1></body></html>",
-                );
-                parent
-                    .execute_script("p", "globalThis.marker = 'parent';")
-                    .unwrap();
+        using var page = RuntimeFixture.Page("https://parent.example/page", "<html><body><h1>Parent</h1></body></html>");
+        var parent = page.Runtime;
+        parent.ExecuteScript("p", "globalThis.marker = 'parent';");
 
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "https://child.example/frame",
-                    "<html><body><h1>Child</h1></body></html>",
-                )
-                .expect("frame realm");
+        using var frame = FrameRealm.Create(
+            parent, 1, 0, "https://child.example/frame", "<html><body><h1>Child</h1></body></html>");
+        Assert.NotNull(frame);
 
-                frame
-                    .execute_script(&mut parent, "globalThis.marker = 'child';")
-                    .unwrap();
+        frame.ExecuteScript("globalThis.marker = 'child';");
 
-                // Separate realm: own globals, own DOM, own URL.
-                assert_eq!(
-                    frame
-                        .evaluate(&mut parent, "document.querySelector('h1').textContent")
-                        .unwrap(),
-                    serde_json::json!("Child")
-                );
-                assert_eq!(
-                    frame.evaluate(&mut parent, "globalThis.marker").unwrap(),
-                    serde_json::json!("child")
-                );
-                assert_eq!(
-                    frame.evaluate(&mut parent, "location.href").unwrap(),
-                    serde_json::json!("https://child.example/frame")
-                );
+        // Separate realm: own globals, own DOM, own URL.
+        Assert.Equal("Child", frame.Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
+        Assert.Equal("child", frame.Evaluate("globalThis.marker")!.GetValue<string>());
+        Assert.Equal("https://child.example/frame", frame.Evaluate("location.href")!.GetValue<string>());
 
-                // The parent keeps its own document and globals throughout.
-                assert_eq!(
-                    parent
-                        .evaluate("document.querySelector('h1').textContent")
-                        .unwrap(),
-                    serde_json::json!("Parent")
-                );
-                assert_eq!(
-                    parent.evaluate("globalThis.marker").unwrap(),
-                    serde_json::json!("parent")
-                );
+        // The parent keeps its own document and globals throughout.
+        Assert.Equal("Parent", parent.Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
+        Assert.Equal("parent", parent.Evaluate("globalThis.marker")!.GetValue<string>());
 
-                assert_eq!(frame.origin(), "https://child.example");
-                assert_eq!(frame.frame_id(), 1);
-                assert!(!frame.is_same_origin_as("https://parent.example"));
-                assert!(frame.is_same_origin_as("https://child.example"));
-            }
-        */
+        Assert.Equal("https://child.example", frame.Origin);
+        Assert.Equal(1u, frame.FrameId);
+        Assert.False(frame.IsSameOriginAs("https://parent.example"));
+        Assert.True(frame.IsSameOriginAs("https://child.example"));
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void FrameUsesItsEmbeddingViewport()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn frame_uses_its_embedding_viewport() {
-                let mut parent = page(
-                    "https://parent.example/page",
-                    "<html><body><iframe style='width:300px;height:65px'></iframe></body></html>",
-                );
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "https://child.example/frame",
-                    "<html><body></body></html>",
-                )
-                .expect("frame realm");
+        using var page = RuntimeFixture.Page(
+            "https://parent.example/page",
+            "<html><body><iframe style='width:300px;height:65px'></iframe></body></html>");
+        using var frame = FrameRealm.Create(
+            page.Runtime, 1, 0, "https://child.example/frame", "<html><body></body></html>");
+        Assert.NotNull(frame);
 
-                frame.set_viewport(&mut parent, 300.0, 65.0).unwrap();
-                assert_eq!(
-                    frame
-                        .evaluate(
-                            &mut parent,
-                            "[innerWidth,innerHeight,visualViewport.width,visualViewport.height]",
-                        )
-                        .unwrap(),
-                    serde_json::json!([300, 65, 300, 65]),
-                );
-            }
-        */
+        frame.SetViewport(300.0, 65.0);
+        Assert.Equal(
+            "[300,65,300,65]",
+            frame.Evaluate("[innerWidth,innerHeight,visualViewport.width,visualViewport.height]")!.ToJsonString());
     }
 
     /// A frame must not look like a different browser than its parent. Anti-bot
     /// code fingerprints inside the frame and compares it with the top document.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void FrameInheritsTheParentBrowserIdentity()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn frame_inherits_the_parent_browser_identity() {
-                let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TestAgent/150.0.0.0";
-                let mut parent = ObscuraJsRuntime::new();
-                parent.set_user_agent(user_agent);
-                parent.set_platform("Win32", "Windows", "19.0.0");
-                parent.set_dom(parse_html("<html><body></body></html>"));
-                parent.set_url("https://parent.example/");
-                parent.run_page_init();
+        const string UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TestAgent/150.0.0.0";
+        using var parentFixture = RuntimeFixture.Blank();
+        var parent = parentFixture.Runtime;
+        parent.SetUserAgent(UserAgent);
+        parent.SetPlatform("Win32", "Windows", "19.0.0");
+        parent.SetDom(HtmlParsing.ParseHtml("<html><body></body></html>"));
+        parent.SetUrl("https://parent.example/");
+        parent.RunPageInit();
 
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "https://child.example/f",
-                    "<html><body></body></html>",
-                )
-                .expect("frame realm");
+        using var frame = FrameRealm.Create(
+            parent, 1, 0, "https://child.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
 
-                for surface in [
-                    "navigator.userAgent",
-                    "navigator.platform",
-                    "navigator.userAgentData.platform",
-                ] {
-                    assert_eq!(
-                        frame.evaluate(&mut parent, surface).unwrap(),
-                        parent.evaluate(surface).unwrap(),
-                        "frame and parent disagree on {surface}"
-                    );
-                }
-                assert_eq!(
-                    frame.evaluate(&mut parent, "navigator.userAgent").unwrap(),
-                    serde_json::json!(user_agent)
-                );
-            }
-        */
+        foreach (var surface in new[] { "navigator.userAgent", "navigator.platform", "navigator.userAgentData.platform" })
+        {
+            Assert.Equal(
+                parent.Evaluate(surface)!.ToJsonString(),
+                frame.Evaluate(surface)!.ToJsonString());
+        }
+        Assert.Equal(UserAgent, frame.Evaluate("navigator.userAgent")!.GetValue<string>());
     }
 
     /// The capability the frame realm exists for: scripts that arrived with the
     /// frame's document run, in order, against the frame's own DOM.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void FrameRunsItsDocumentScriptsInOrder()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn frame_runs_its_document_scripts_in_order() {
-                let mut parent = page("https://parent.example/", "<html><body></body></html>");
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "https://child.example/dir/page",
-                    r#"<html><body><div id="out"></div>
-                       <script>window.log = ['inline1'];</script>
-                       <script src="first.js"></script>
-                       <script src="/second.js"></script>
-                       <script>window.log.push('inline2');
-                               document.getElementById('out').textContent = window.log.join(',');</script>
-                       </body></html>"#,
-                )
-                .expect("frame realm");
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        var parent = page.Runtime;
+        using var frame = FrameRealm.Create(
+            parent, 1, 0, "https://child.example/dir/page",
+            @"<html><body><div id=""out""></div>
+               <script>window.log = ['inline1'];</script>
+               <script src=""first.js""></script>
+               <script src=""/second.js""></script>
+               <script>window.log.push('inline2');
+                       document.getElementById('out').textContent = window.log.join(',');</script>
+               </body></html>");
+        Assert.NotNull(frame);
 
-                let requested = RefCell::new(Vec::new());
-                let problems = frame.run_document_scripts(&mut parent, |url| {
-                    requested.borrow_mut().push(url.to_string());
-                    match url {
-                        "https://child.example/dir/first.js" => Some("window.log.push('ext1');".into()),
-                        "https://child.example/second.js" => Some("window.log.push('ext2');".into()),
-                        _ => None,
-                    }
-                });
+        var requested = new List<string>();
+        var problems = frame.RunDocumentScripts(url =>
+        {
+            requested.Add(url);
+            return url switch
+            {
+                "https://child.example/dir/first.js" => "window.log.push('ext1');",
+                "https://child.example/second.js" => "window.log.push('ext2');",
+                _ => null,
+            };
+        });
 
-                assert!(problems.is_empty(), "unexpected problems: {problems:?}");
-                // Relative and root-relative src resolve against the frame's URL, not
-                // the parent's.
-                assert_eq!(
-                    requested.into_inner(),
-                    vec![
-                        "https://child.example/dir/first.js".to_string(),
-                        "https://child.example/second.js".to_string(),
-                    ]
-                );
-                assert_eq!(
-                    frame
-                        .evaluate(&mut parent, "document.getElementById('out').textContent")
-                        .unwrap(),
-                    serde_json::json!("inline1,ext1,ext2,inline2")
-                );
-                // The frame's document writes never touch the parent's DOM.
-                assert_eq!(
-                    parent.evaluate("document.body.innerHTML").unwrap(),
-                    serde_json::json!("")
-                );
-            }
-        */
+        Assert.Empty(problems);
+        // Relative and root-relative src resolve against the frame's URL, not the parent's.
+        Assert.Equal(
+            new[] { "https://child.example/dir/first.js", "https://child.example/second.js" },
+            requested);
+        Assert.Equal(
+            "inline1,ext1,ext2,inline2",
+            frame.Evaluate("document.getElementById('out').textContent")!.GetValue<string>());
+        // The frame's document writes never touch the parent's DOM.
+        Assert.Equal("", parent.Evaluate("document.body.innerHTML")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public async Task FramePostedTaskRunsInItsCreationRealm()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -17843,7 +17607,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public async Task DroppingFrameCancelsItsQueuedPostedTask()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -17931,7 +17695,7 @@ public sealed class RuntimeTests
         await Task.CompletedTask;
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public void FrameBodyOnloadContentAttributeReflectsToWindow()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -17975,96 +17739,77 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void OneBadFrameScriptDoesNotStopTheRest()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn one_bad_frame_script_does_not_stop_the_rest() {
-                let mut parent = page("https://parent.example/", "<html><body></body></html>");
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "https://child.example/",
-                    r#"<html><body>
-                       <script>window.log = ['a'];</script>
-                       <script>throw new Error('boom');</script>
-                       <script src="missing.js"></script>
-                       <script type="module">window.log.push('module');</script>
-                       <script>window.log.push('b');</script>
-                       </body></html>"#,
-                )
-                .expect("frame realm");
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        using var frame = FrameRealm.Create(
+            page.Runtime, 1, 0, "https://child.example/",
+            @"<html><body>
+               <script>window.log = ['a'];</script>
+               <script>throw new Error('boom');</script>
+               <script src=""missing.js""></script>
+               <script type=""module"">window.log.push('module');</script>
+               <script>window.log.push('b');</script>
+               </body></html>");
+        Assert.NotNull(frame);
 
-                let problems = frame.run_document_scripts(&mut parent, |_| None);
+        var problems = frame.RunDocumentScripts(_ => null);
 
-                assert_eq!(
-                    frame.evaluate(&mut parent, "window.log.join(',')").unwrap(),
-                    serde_json::json!("a,b")
-                );
-                assert_eq!(problems.len(), 3, "problems: {problems:?}");
-                assert!(problems.iter().any(|p| p.contains("boom")), "{problems:?}");
-                assert!(
-                    problems.iter().any(|p| p.contains("missing.js")),
-                    "{problems:?}"
-                );
-                assert!(problems.iter().any(|p| p.contains("module")), "{problems:?}");
-            }
-        */
+        Assert.Equal("a,b", frame.Evaluate("window.log.join(',')")!.GetValue<string>());
+        Assert.Equal(3, problems.Count);
+        Assert.Contains(problems, p => p.Contains("boom", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.Contains("missing.js", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.Contains("module", StringComparison.Ordinal));
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void ManyFramesCanBeAliveAtOnce()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn many_frames_can_be_alive_at_once() {
-                let mut parent = page("https://parent.example/", "<html><body></body></html>");
-                let frames: Vec<FrameRealm> = (0..4)
-                    .map(|index| {
-                        FrameRealm::new(
-                            &mut parent,
-                            // Frame ids start at 1: 0 names the page itself, which is
-                            // what a DOM call from an unframed realm reports.
-                            index + 1,
-                            0,
-                            &format!("https://f{index}.example/"),
-                            &format!("<html><body><h1>{index}</h1></body></html>"),
-                        )
-                        .expect("frame realm")
-                    })
-                    .collect();
-
-                for (index, frame) in frames.iter().enumerate() {
-                    frame
-                        .execute_script(&mut parent, &format!("globalThis.n = {index};"))
-                        .unwrap();
-                }
-                // Out-of-order access must be safe: each frame carries its own state.
-                for (index, frame) in frames.iter().enumerate().rev() {
-                    assert_eq!(
-                        frame.evaluate(&mut parent, "globalThis.n").unwrap().as_f64(),
-                        Some(index as f64)
-                    );
-                    assert_eq!(
-                        frame
-                            .evaluate(&mut parent, "document.querySelector('h1').textContent")
-                            .unwrap(),
-                        serde_json::json!(index.to_string())
-                    );
-                }
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        var parent = page.Runtime;
+        var frames = new List<FrameRealm>();
+        try
+        {
+            for (var index = 0u; index < 4; index++)
+            {
+                // Frame ids start at 1: 0 names the page itself, which is what a
+                // DOM call from an unframed realm reports.
+                var frame = FrameRealm.Create(
+                    parent, index + 1, 0,
+                    $"https://f{index}.example/",
+                    $"<html><body><h1>{index}</h1></body></html>");
+                Assert.NotNull(frame);
+                frames.Add(frame);
             }
-        */
+
+            for (var index = 0; index < frames.Count; index++)
+            {
+                frames[index].ExecuteScript($"globalThis.n = {index};");
+            }
+            // Out-of-order access must be safe: each frame carries its own state.
+            for (var index = frames.Count - 1; index >= 0; index--)
+            {
+                Assert.Equal(index, (int)frames[index].Evaluate("globalThis.n")!.GetValue<double>());
+                Assert.Equal(
+                    index.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    frames[index].Evaluate("document.querySelector('h1').textContent")!.GetValue<string>());
+            }
+        }
+        finally
+        {
+            foreach (var frame in frames)
+            {
+                frame.Dispose();
+            }
+        }
     }
 
     /// The hard case. A frame's deferred work re-enters JavaScript from the
     /// event loop, long after the host last called into the frame, so nothing
     /// can have made the frame "current" for it. It has to find its own
     /// document anyway.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public async Task AFramesDeferredWorkStillSeesTheFramesDocument()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18115,7 +17860,7 @@ public sealed class RuntimeTests
     /// and queueing from a snapshot realm dereferences uninitialized memory,
     /// which aborts the process rather than failing a test. This is the guard
     /// against that path ever being restored.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public async Task AFrameTimerFiresWithoutDenoCoresTimerQueue()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18147,7 +17892,7 @@ public sealed class RuntimeTests
 
     /// Frame timers run on a separate queue from the page's, so cancelling one
     /// has its own path and its own way to go wrong.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public async Task ClearTimeoutCancelsAFrameTimer()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18185,7 +17930,7 @@ public sealed class RuntimeTests
 
     /// V8 reports the frame as the microtask context, so a promise continuation
     /// resolves ops against the frame without any help from the host.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public async Task AFramesPromiseContinuationSeesTheFramesDocument()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18224,7 +17969,7 @@ public sealed class RuntimeTests
     // used to null-deref deno_core's global callbacks (which read per-context
     // state from V8 embedder slots) and segfault the whole process. The realm
     // must now alias the main realm's state so these run without crashing.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public void AFrameRejectionDoesNotCrashTheProcess()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18248,7 +17993,7 @@ public sealed class RuntimeTests
         */
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public void AFrameDynamicImportDoesNotCrashTheProcess()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18278,7 +18023,7 @@ public sealed class RuntimeTests
     /// carry the frame's origin. Turnstile and every widget like it drop an
     /// untrusted message silently, so an untrusted delivery is not a cosmetic
     /// difference, it is the widget hanging forever.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public void AFramePostsToItsParentAsATrustedMessage()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18331,7 +18076,7 @@ public sealed class RuntimeTests
     /// restricted to a specific origin must be dropped when the receiving realm
     /// has a different origin, and delivered when the origins match. Before the
     /// fix the argument was discarded end-to-end, so the first message leaked.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public void PostMessageHonoursTargetOrigin()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18407,7 +18152,7 @@ public sealed class RuntimeTests
     /// reviewer warned about): an explicit origin that matches the loaded frame
     /// is delivered, the wildcard is always delivered (including to an opaque
     /// about:blank frame), and only a genuine mismatch is dropped.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "ClearScript refuses a script object across engines, so a frame realm's live window and document cannot be published into the page realm; see the port report")]
     public void PostMessageIntoAFrameDoesNotOverDrop()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18483,41 +18228,23 @@ public sealed class RuntimeTests
 
     /// `parent === window` is how a document decides it is top-level, so a
     /// framed realm must not see itself as the top.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void AFramedRealmDoesNotLookTopLevel()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn a_framed_realm_does_not_look_top_level() {
-                let mut parent = page("https://parent.example/", "<html><body></body></html>");
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    2,
-                    0,
-                    "https://child.example/f",
-                    "<html><body></body></html>",
-                )
-                .expect("frame realm");
-                assert_eq!(
-                    frame
-                        .evaluate(&mut parent, "[parent === window, top === window]")
-                        .unwrap(),
-                    serde_json::json!([false, false]),
-                );
-                // The page itself really is the top and must still say so.
-                assert_eq!(
-                    parent.evaluate("[parent === window, top === window]").unwrap(),
-                    serde_json::json!([true, true]),
-                );
-            }
-        */
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        var parent = page.Runtime;
+        using var frame = FrameRealm.Create(
+            parent, 2, 0, "https://child.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
+        Assert.Equal("[false,false]", frame.Evaluate("[parent === window, top === window]")!.ToJsonString());
+        // The page itself really is the top and must still say so.
+        Assert.Equal("[true,true]", parent.Evaluate("[parent === window, top === window]")!.ToJsonString());
     }
 
     /// Script can post in a synchronous loop while the host only drains between
     /// event loop turns, and this queue is on the process heap rather than
     /// V8's, where the heap-limit guard would never see it.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "not translated yet: the Rust body is kept below verbatim. Frame realms work - the neighbouring frame tests pass - this one simply has not been written in C# yet")]
     public void AFloodOfMessagesCannotGrowTheQueueWithoutBound()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18560,7 +18287,7 @@ public sealed class RuntimeTests
     /// It must also not read as anything: V8 severs a global proxy when its
     /// context goes, which is the same thing a browser does to a WindowProxy
     /// when it discards a browsing context.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact(Skip = "ClearScript refuses a script object across engines, so a frame realm's live window and document cannot be published into the page realm; see the port report")]
     public void ADiscardedRealmLeavesThePageSafeToRun()
     {
         // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
@@ -18670,62 +18397,32 @@ public sealed class RuntimeTests
     /// A cross-origin frame must stay opaque. Nothing about it is published to
     /// the page, and V8's own access check answers `undefined` for anything the
     /// page reaches for, because the two realms keep different security tokens.
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void ACrossOriginFrameIsNotReachableFromThePage()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn a_cross_origin_frame_is_not_reachable_from_the_page() {
-                let mut parent = page("https://parent.example/", "<html><body></body></html>");
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "https://other.example/f",
-                    "<html><body></body></html>",
-                )
-                .expect("frame realm");
-                frame
-                    .execute_script(&mut parent, "globalThis.secret = 'do-not-leak';")
-                    .unwrap();
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        var parent = page.Runtime;
+        using var frame = FrameRealm.Create(
+            parent, 1, 0, "https://other.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
+        frame.ExecuteScript("globalThis.secret = 'do-not-leak';");
 
-                assert_eq!(
-                    parent
-                        .evaluate("globalThis.__obscura_frameObjects[1] === undefined")
-                        .unwrap(),
-                    serde_json::json!(true),
-                    "a cross-origin frame was published to the page"
-                );
-                // The frame still works on its own side.
-                assert_eq!(
-                    frame.evaluate(&mut parent, "globalThis.secret").unwrap(),
-                    serde_json::json!("do-not-leak"),
-                );
-            }
-        */
+        Assert.True(
+            parent.Evaluate("globalThis.__obscura_frameObjects === undefined || globalThis.__obscura_frameObjects[1] === undefined")!.GetValue<bool>(),
+            "a cross-origin frame was published to the page");
+        // The frame still works on its own side.
+        Assert.Equal("do-not-leak", frame.Evaluate("globalThis.secret")!.GetValue<string>());
     }
 
-    [Fact(Skip = "blocked on the op table: a frame realm needs op_dom and op_sleep bound through ObscuraJsRuntime.OpTableBinder before its document or timers work")]
+    [Fact]
     public void OpaqueOriginFramesAreNeverSameOrigin()
     {
-        // Ported from crates/obscura-js/src/frame.rs. The Rust body is kept verbatim so the test
-        // can be switched on without being reconstructed from scratch.
-        /*
-            fn opaque_origin_frames_are_never_same_origin() {
-                let mut parent = page("https://parent.example/", "<html><body></body></html>");
-                let frame = FrameRealm::new(
-                    &mut parent,
-                    1,
-                    0,
-                    "about:blank",
-                    "<html><body></body></html>",
-                )
-                .expect("frame realm");
-                assert_eq!(frame.origin(), "null");
-                assert!(!frame.is_same_origin_as("null"));
-                assert!(!frame.is_same_origin_as("https://parent.example"));
-            }
-        */
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        using var frame = FrameRealm.Create(
+            page.Runtime, 1, 0, "about:blank", "<html><body></body></html>");
+        Assert.NotNull(frame);
+        Assert.Equal("null", frame.Origin);
+        Assert.False(frame.IsSameOriginAs("null"));
+        Assert.False(frame.IsSameOriginAs("https://parent.example"));
     }
 }

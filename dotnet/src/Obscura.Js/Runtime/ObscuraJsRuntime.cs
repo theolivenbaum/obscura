@@ -36,7 +36,7 @@ namespace Obscura.Js.Runtime;
 /// mandatory: a leaked <see cref="V8ScriptEngine"/> wedges the host.
 /// </para>
 /// </remarks>
-public sealed partial class ObscuraJsRuntime : IDisposable
+public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPostedTaskSpawner
 {
     private const ulong DefaultCdpAwaitTimeoutMs = 30_000;
 
@@ -45,11 +45,13 @@ public sealed partial class ObscuraJsRuntime : IDisposable
     // fixed-wait path while retaining an absolute backstop for infinite script.
     private const ulong SynchronousTaskFloorMs = 5_000;
     private const ulong WatchdogSchedulingMarginMs = 500;
+    private const long HeapLimitRecoveryHeadroomBytes = 64 * 1024 * 1024;
 
     private readonly V8Runtime _v8;
     private readonly V8ScriptEngine _engine;
     private readonly DenoCoreShim _shim;
     private readonly ObscuraModuleLoader _moduleLoader;
+    private readonly V8IsolateHandle _isolateHandle;
     private readonly Dictionary<string, string> _objectStore = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _evaluationRecipes = new(StringComparer.Ordinal);
     private readonly Dictionary<long, string?> _moduleEvaluations = [];
@@ -57,6 +59,8 @@ public sealed partial class ObscuraJsRuntime : IDisposable
     private readonly List<FrameRealm> _realms = [];
     private ulong _objectCounter;
     private int _pendingAsyncOps;
+    private long _heapLimitBytes;
+    private readonly Queue<Action<double>> _postedTasks = new();
     private bool _disposed;
 
     private ObscuraJsRuntime(string baseUrl, string? proxyUrl)
@@ -76,10 +80,12 @@ public sealed partial class ObscuraJsRuntime : IDisposable
 
         _moduleLoader = new ObscuraModuleLoader(baseUrl, proxyUrl);
         _engine = CreateRealmEngine();
+        _isolateHandle = new V8IsolateHandle(_engine);
         ApplyHeapLimit(constraints);
 
         // The ops layer supplies the op table; a build without it still boots
         // bootstrap.js, which is what makes the runtime testable on its own.
+        _ops.TaskSpawner = this;
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
         InitializeObjectStore(_engine);
     }
@@ -103,6 +109,13 @@ public sealed partial class ObscuraJsRuntime : IDisposable
 
     /// <summary>The isolate every realm of this page shares.</summary>
     internal V8Runtime Isolate => _v8;
+
+    /// <summary>
+    /// This runtime's isolate, as the shared CDP watchdog names it. Stable for
+    /// the isolate's life, so a per-command watchdog can be armed without
+    /// borrowing the runtime.
+    /// </summary>
+    public IIsolateHandle IsolateHandleForWatchdog => _isolateHandle;
 
     /// <summary>The <c>Deno.core</c> shim installed in the main realm.</summary>
     internal DenoCoreShim Shim => _shim;
@@ -177,16 +190,23 @@ public sealed partial class ObscuraJsRuntime : IDisposable
     /// <para>
     /// Rust installs a near-heap-limit callback that terminates the running
     /// script and raises the limit just enough for V8 to unwind instead of
-    /// aborting the process, then restores the limit and re-arms.
-    /// ClearScript exposes no near-heap-limit callback. Its equivalent is
+    /// aborting the process, then restores the limit and re-arms. ClearScript
+    /// exposes no near-heap-limit callback; its equivalent is
     /// <see cref="V8ScriptEngine.MaxRuntimeHeapSize"/> sampled every
-    /// <see cref="V8ScriptEngine.RuntimeHeapSizeSampleInterval"/>, and the
-    /// policy choice is what makes it usable:
-    /// <see cref="V8RuntimeViolationPolicy.Exception"/> raises a catchable
-    /// script error and leaves the isolate alive, so the page survives an OOM
-    /// exactly as it does in Rust, while the default
-    /// <see cref="V8RuntimeViolationPolicy.Interrupt"/> tears the runtime down
-    /// permanently and every later evaluation fails.
+    /// <see cref="V8ScriptEngine.RuntimeHeapSizeSampleInterval"/>.
+    /// </para>
+    /// <para>
+    /// The policy choice is the load-bearing part, and it is the opposite of
+    /// what it looks like.
+    /// <see cref="V8RuntimeViolationPolicy.Exception"/> raises an ordinary
+    /// script error, which page script catches - a hostile allocator can sit in
+    /// <c>try { for(;;) alloc() } catch {}</c> and never yield, which is exactly
+    /// what the cap exists to stop.
+    /// <see cref="V8RuntimeViolationPolicy.Interrupt"/> is uncatchable, like
+    /// Rust's terminate_execution, and the runtime it leaves behind is only
+    /// *apparently* dead: raising the ceiling, collecting, and restoring it
+    /// brings the isolate back, which is the same unwind-then-restore dance the
+    /// Rust callback performs. See <see cref="RecoverHeapLimit"/>.
     /// </para>
     /// <para>
     /// The difference that remains: Rust's callback fires at V8's *own* default
@@ -210,18 +230,45 @@ public sealed partial class ObscuraJsRuntime : IDisposable
     /// </summary>
     public void SetHeapLimit(long bytes)
     {
-        if (bytes <= 0)
+        _heapLimitBytes = Math.Max(0, bytes);
+        if (_heapLimitBytes == 0)
         {
             _engine.MaxRuntimeHeapSize = UIntPtr.Zero;
             return;
         }
-        _engine.MaxRuntimeHeapSize = (UIntPtr)bytes;
+        _engine.MaxRuntimeHeapSize = (UIntPtr)_heapLimitBytes;
         _engine.RuntimeHeapSizeSampleInterval = TimeSpan.FromMilliseconds(10);
-        _engine.RuntimeHeapSizeViolationPolicy = V8RuntimeViolationPolicy.Exception;
+        _engine.RuntimeHeapSizeViolationPolicy = V8RuntimeViolationPolicy.Interrupt;
     }
 
     private static bool IsHeapLimitFailure(Exception error) =>
         error.Message.Contains("exceeded its memory limit", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Restore the configured heap ceiling after the emergency headroom has let
+    /// a terminated allocation unwind, so a second hostile script cannot grow
+    /// the isolate without bound.
+    /// </summary>
+    private bool RecoverHeapLimit()
+    {
+        if (_heapLimitBytes == 0)
+        {
+            return false;
+        }
+        // Raise first: collecting while still over the ceiling trips the guard
+        // again and the isolate never comes back.
+        _engine.MaxRuntimeHeapSize = (UIntPtr)(_heapLimitBytes + HeapLimitRecoveryHeadroomBytes);
+        try
+        {
+            _engine.CollectGarbage(exhaustive: true);
+        }
+        catch (ScriptEngineException)
+        {
+            // Nothing more to reclaim; the restore below still re-arms the cap.
+        }
+        _engine.MaxRuntimeHeapSize = (UIntPtr)_heapLimitBytes;
+        return true;
+    }
 
     // ------------------------------------------------------------ watchdog
 
@@ -300,10 +347,12 @@ public sealed partial class ObscuraJsRuntime : IDisposable
         }
         catch (ScriptEngineException error)
         {
-            throw new JsRuntimeException(
-                IsHeapLimitFailure(error)
-                    ? "JavaScript heap limit exceeded; execution terminated"
-                    : $"JS error: Uncaught {error.Message}");
+            if (IsHeapLimitFailure(error))
+            {
+                RecoverHeapLimit();
+                throw new JsRuntimeException("JavaScript heap limit exceeded; execution terminated");
+            }
+            throw new JsRuntimeException($"JS error: Uncaught {error.Message}");
         }
     }
 
@@ -328,6 +377,7 @@ public sealed partial class ObscuraJsRuntime : IDisposable
         {
             if (IsHeapLimitFailure(error))
             {
+                RecoverHeapLimit();
                 throw new JsRuntimeException("JavaScript heap limit exceeded; execution terminated");
             }
             RecordUncaughtException(error, name);

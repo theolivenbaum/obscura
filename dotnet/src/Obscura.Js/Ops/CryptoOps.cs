@@ -150,9 +150,39 @@ public static class CryptoOps
         return output;
     }
 
+    /// <summary>
+    /// Generous upper bounds on PBKDF2 parameters.
+    /// </summary>
+    /// <remarks>
+    /// WebCrypto imposes no limit, but page JS drives this op on the single-threaded
+    /// runtime: an unbounded iteration count pins the V8 isolate (blocking every other
+    /// CDP command on the connection) and a huge output length forces an unbounded
+    /// allocation. Both caps sit far above any legitimate use - OWASP recommends
+    /// ~600k iterations and derived keys are tens of bytes.
+    /// </remarks>
+    public const uint Pbkdf2MaxIterations = 10_000_000;
+
+    /// <inheritdoc cref="Pbkdf2MaxIterations"/>
+    public const uint Pbkdf2MaxOutputBytes = 1024 * 1024;
+
     /// <summary>PBKDF2. <paramref name="length"/> is the output in bytes.</summary>
-    public static byte[] Pbkdf2(string hash, byte[] password, byte[] salt, uint iterations, uint length) =>
-        Rfc2898DeriveBytes.Pbkdf2(password, salt, (int)iterations, HashName(hash, "PBKDF2"), (int)length);
+    public static byte[] Pbkdf2(string hash, byte[] password, byte[] salt, uint iterations, uint length)
+    {
+        if (iterations > Pbkdf2MaxIterations)
+        {
+            throw new CryptoOperationException(
+                $"PBKDF2 iteration count {iterations} exceeds the supported maximum of {Pbkdf2MaxIterations}");
+        }
+
+        if (length > Pbkdf2MaxOutputBytes)
+        {
+            throw new CryptoOperationException(
+                $"PBKDF2 output length {length} bytes exceeds the supported maximum of {Pbkdf2MaxOutputBytes}");
+        }
+
+        return Rfc2898DeriveBytes.Pbkdf2(
+            password, salt, (int)iterations, HashName(hash, "PBKDF2"), (int)length);
+    }
 
     /// <summary>
     /// HKDF. <paramref name="length"/> is the output in bytes. An empty salt
