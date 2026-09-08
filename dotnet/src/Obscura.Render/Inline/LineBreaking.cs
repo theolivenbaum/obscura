@@ -525,24 +525,34 @@ public static class LineBreaking
         >= 0xFE00 and <= 0xFE0F => BreakClass.CombiningMark,
         >= 0x1F000 and <= 0x1F0FF => BreakClass.Ideographic,
         >= 0xE0100 and <= 0xE01EF => BreakClass.CombiningMark,
-        _ => Rune.IsValid(ch) && CharUnicodeInfo.GetUnicodeCategory(ch) switch
-        {
-            UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark
-                or UnicodeCategory.EnclosingMark => true,
-            _ => false,
-        }
-            ? BreakClass.CombiningMark
-            : ch < 0x0080 ? BreakClass.Alphabetic : DefaultClass(ch),
+        _ => ClassFromCategory(ch),
     };
 
-    private static BreakClass DefaultClass(int ch)
+    /// <summary>
+    /// Fall back to the general category for anything the explicit ranges above do not name.
+    /// </summary>
+    private static BreakClass ClassFromCategory(int ch)
     {
         if (!Rune.IsValid(ch))
         {
             return BreakClass.Unknown;
         }
 
-        return CharUnicodeInfo.GetUnicodeCategory(ch) switch
+        UnicodeCategory category = CharUnicodeInfo.GetUnicodeCategory(ch);
+        if (category is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark
+            or UnicodeCategory.EnclosingMark)
+        {
+            return BreakClass.CombiningMark;
+        }
+
+        // Remaining ASCII is punctuation the ranges above already cover the interesting parts
+        // of; treating the rest as alphabetic keeps `a@b` and similar from acquiring a break.
+        if (ch < 0x0080)
+        {
+            return BreakClass.Alphabetic;
+        }
+
+        return category switch
         {
             UnicodeCategory.SpaceSeparator => BreakClass.BreakAfter,
             UnicodeCategory.DecimalDigitNumber or UnicodeCategory.LetterNumber

@@ -265,6 +265,13 @@ public static class Inline
     };
 
     /// <summary>
+    /// The used size of a replaced element whose preferred width and height are both auto,
+    /// with its min/max constraints transferred through the preferred aspect ratio.
+    /// </summary>
+    internal static Size<float> ConstrainedAutoReplacedSize(float width, float height, LayoutStyle style) =>
+        ReplacedItem.FromStyle(width, height, style).Size(new Size<float?>(null, null));
+
+    /// <summary>
     /// HTML's default object size for replaced media whose intrinsic metadata is not available
     /// yet. Canvas dimensions and decoded video metadata can replace these defaults before
     /// layout when present.
@@ -689,12 +696,70 @@ public static class Inline
     }
 
     /// <summary>
-    /// Rust's <c>char::to_uppercase</c> is full Unicode uppercasing, so a single scalar can
-    /// expand (German sharp s becomes "SS"). Invariant culture keeps the mapping locale-free.
+    /// Rust's <c>char::to_uppercase</c> applies Unicode's <em>full</em> uppercase mapping, so a
+    /// single scalar can expand: German sharp s becomes "SS" and the Latin ligatures decompose.
     /// </summary>
-    private static string ToUpper(Rune rune) =>
-        rune.ToString().ToUpper(CultureInfo.InvariantCulture);
+    /// <remarks>
+    /// .NET's invariant <c>ToUpper</c> is the <em>simple</em> (one-to-one) mapping and leaves
+    /// all of these unchanged, which would make <c>text-transform: uppercase</c> measure
+    /// narrower than both Chromium and the Rust engine. The unconditional expansions from
+    /// Unicode's SpecialCasing data are applied here first.
+    /// <para>
+    /// Not implemented: the Greek iota-subscript block (U+1F80-U+1FFC), whose uppercase
+    /// mappings append U+0399. Greek polytonic text under <c>text-transform: uppercase</c> will
+    /// measure narrower here than in the Rust engine.
+    /// </para>
+    /// </remarks>
+    private static string ToUpper(Rune rune) => rune.Value switch
+    {
+        0x00DF => "SS",
+        0x0149 => "\u02BCN",
+        0x01F0 => "J\u030C",
+        0x0390 => "\u0399\u0308\u0301",
+        0x03B0 => "\u03A5\u0308\u0301",
+        0x0587 => "\u0535\u0552",
+        0x1E96 => "H\u0331",
+        0x1E97 => "T\u0308",
+        0x1E98 => "W\u030A",
+        0x1E99 => "Y\u030A",
+        0x1E9A => "A\u02BE",
+        0x1F50 => "\u03A5\u0313",
+        0x1F52 => "\u03A5\u0313\u0300",
+        0x1F54 => "\u03A5\u0313\u0301",
+        0x1F56 => "\u03A5\u0313\u0342",
+        0x1FB6 => "\u0391\u0342",
+        0x1FC6 => "\u0397\u0342",
+        0x1FD2 => "\u0399\u0308\u0300",
+        0x1FD3 => "\u0399\u0308\u0301",
+        0x1FD6 => "\u0399\u0342",
+        0x1FD7 => "\u0399\u0308\u0342",
+        0x1FE2 => "\u03A5\u0308\u0300",
+        0x1FE3 => "\u03A5\u0308\u0301",
+        0x1FE4 => "\u03A1\u0313",
+        0x1FE6 => "\u03A5\u0342",
+        0x1FE7 => "\u03A5\u0308\u0342",
+        0x1FF6 => "\u03A9\u0342",
+        0xFB00 => "FF",
+        0xFB01 => "FI",
+        0xFB02 => "FL",
+        0xFB03 => "FFI",
+        0xFB04 => "FFL",
+        0xFB05 or 0xFB06 => "ST",
+        0xFB13 => "\u0544\u0546",
+        0xFB14 => "\u0544\u0535",
+        0xFB15 => "\u0544\u053B",
+        0xFB16 => "\u054E\u0546",
+        0xFB17 => "\u0544\u053D",
+        _ => rune.ToString().ToUpper(CultureInfo.InvariantCulture),
+    };
 
-    private static string ToLower(Rune rune) =>
-        rune.ToString().ToLower(CultureInfo.InvariantCulture);
+    /// <summary>
+    /// Full lowercase mapping. Only U+0130 expands unconditionally, and .NET's invariant
+    /// lowercase leaves it unchanged.
+    /// </summary>
+    private static string ToLower(Rune rune) => rune.Value switch
+    {
+        0x0130 => "i\u0307",
+        _ => rune.ToString().ToLower(CultureInfo.InvariantCulture),
+    };
 }

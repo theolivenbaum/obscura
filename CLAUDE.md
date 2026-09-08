@@ -163,6 +163,37 @@ dotnet test -c Release tests/Obscura.Dom.Tests          # one area
   converted to a JS error or a null return, never allowed to escape.
 - **Commits/PRs/comments:** short and factual, no em dashes, no AI filler.
 
+## Text layout: where the port cannot match the reference exactly
+
+`inline.rs` shapes with `cosmic-text` and rasterizes with `swash`. The port uses
+HarfBuzz and Skia instead, so it reproduces observable results rather than
+internals. These are the known differences, and they are the first place to look
+when C# layout drifts from Rust:
+
+- **Line breaking is a subset of UAX#14.** Rust uses `unicode-linebreak`'s
+  complete pair table. The port hand-implements LB2-LB8a, LB9-LB12a, LB13-LB19,
+  LB21-LB28, LB30a/b. Missing: the LB25 numeric-regex expansion, LB20a, and
+  Southeast-Asian dictionary breaking for Thai/Khmer/Lao. Symptom: a wrap one
+  word early or late in non-Latin or numeric-heavy text.
+- **Bidi is reduced.** No explicit embedding controls (RLE/LRE/PDF), no isolates
+  (LRI/RLI/FSI/PDI), no N1/N2 neutral resolution. Pure-LTR text takes an exact
+  fast path; mixed-direction paragraphs can reorder differently.
+- **Glyph positions match; per-pixel coverage does not.** swash and Skia
+  anti-alias differently by a few counts. Treat ink sums as tripwires, never as
+  equality assertions.
+- **Variable faces carrying `MVAR`** can differ slightly in ascent/descent, and
+  therefore baseline position, because the port reads base-face metrics where
+  `ttf-parser` applies MVAR deltas.
+- **`text-transform: uppercase` omits the Greek iota-subscript block**
+  (U+1F80-U+1FFC); polytonic Greek measures narrower than in Rust.
+- **Text offsets are UTF-16 code units, not UTF-8 bytes.** This is consistent
+  end to end inside the inline layer, but anything crossing into `dom.rs` or
+  `paint.rs` that assumes byte offsets must be adapted.
+- **Never hand HarfBuzz a blob over managed memory.** Doing so makes shaping
+  depend on when the GC runs: the same input intermittently produced different
+  glyph selection and advances. Font tables are copied to unmanaged memory with
+  `MemoryMode.Duplicate`. Do not undo this.
+
 ## Load-bearing invariants (carried over from the Rust engine)
 
 - **DOM mutation arg order:** `insertBefore` / `replaceChild` in `bootstrap.js`

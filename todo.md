@@ -96,7 +96,9 @@ The largest component. Split into stages; each stage is independently testable.
       tests green, including the vendored grid shrink-to-fit correction, which
       2 ported tests pin (stubbing the fix turns them red)
 - [ ] `dom.rs` -> render tree construction, fragmentation, scrolling, geometry (14769)
-- [ ] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3200)
+- [x] `inline.rs` -> line breaking, text shaping, bidi, inline layout (3535) -
+      33 Rust tests ported, 30 passing, 3 skipped pending `dom.rs`. Reimplemented
+      on HarfBuzz + Skia; see CLAUDE.md for the measured differences.
 - [ ] `paint.rs` -> rasterization onto Skia: fills, strokes, images, SVG, canvas, effects (9721)
 - [x] `border.rs` -> border and outline painting (452) - ported inside
       `Core/Border.cs`, because `LayoutStyle.BorderModel`/`.Outline` are fields
@@ -104,7 +106,8 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] `lib.rs` -> core types: `LayoutStyle` (189 fields), geometry, `Affine2`,
       `Dimension`, style enums, background, generated content, animation,
       capture limits, and the `LayoutStyle`->taffy style mapping (2914)
-- [ ] Fonts: embedded font assets + Skia/HarfBuzz typeface and shaping integration
+- [x] Fonts: embedded font assets, WOFF1/WOFF2 decoding, variable-font axes
+      carried through both shaping and rasterization
 - [ ] Unit tests ported (`layout_test.rs`)
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare
 

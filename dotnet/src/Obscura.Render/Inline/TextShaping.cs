@@ -515,7 +515,11 @@ public sealed class TextShaper(FontDatabase database)
 
         TextAttrs attrs = attrsList.GetSpan(startRun);
         FaceRecord? selected = attrs.FontId is { } id ? _database.Face(id) : null;
-        List<FaceRecord> order = [.. _database.FallbackOrder(attrs.FontId, attrs.Family)];
+        List<FaceRecord> order = [.. _database.FallbackOrder(
+            attrs.FontId,
+            attrs.Family,
+            attrs.Weight,
+            attrs.Style != FaceStyle.Normal)];
         if (order.Count == 0)
         {
             return;

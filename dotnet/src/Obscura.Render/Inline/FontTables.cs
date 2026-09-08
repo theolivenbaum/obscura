@@ -23,12 +23,31 @@ internal static class FontTables
     /// <summary>fsSelection bit 7: prefer the OS/2 typographic metrics over hhea.</summary>
     private const ushort UseTypoMetrics = 1 << 7;
 
+    /// <summary>
+    /// Build a HarfBuzz face over a private copy of the font bytes.
+    /// </summary>
+    /// <remarks>
+    /// The copy is not optional: HarfBuzz keeps the blob for the life of the face, and handing
+    /// it managed memory makes shaping depend on when the GC runs. That shows up as
+    /// intermittently different glyph selection, not as a crash.
+    /// </remarks>
     public static HbFace CreateHarfBuzzFace(byte[] data, int index)
     {
-        var stream = new MemoryStream(data, writable: false);
-        HarfBuzzSharp.Blob blob = HarfBuzzSharp.Blob.FromStream(stream);
-        blob.MakeImmutable();
-        return new HbFace(blob, index);
+        IntPtr buffer = System.Runtime.InteropServices.Marshal.AllocHGlobal(data.Length);
+        try
+        {
+            System.Runtime.InteropServices.Marshal.Copy(data, 0, buffer, data.Length);
+            using var blob = new HarfBuzzSharp.Blob(
+                buffer,
+                data.Length,
+                HarfBuzzSharp.MemoryMode.Duplicate);
+            blob.MakeImmutable();
+            return new HbFace(blob, index);
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);
+        }
     }
 
     /// <summary>

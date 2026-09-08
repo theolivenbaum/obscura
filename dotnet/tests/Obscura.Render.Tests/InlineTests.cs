@@ -466,7 +466,7 @@ public class InlineTests
     [Fact]
     public void KeepAllNeverInsertsControlsInsideGraphemeClusters()
     {
-        const string Source = "각각 がが \U0001F468‍\U0001F469‍\U0001F467‍\U0001F466 \U0001F44D\U0001F3FD";
+        const string Source = "각각 か\u3099か\u3099 \U0001F468‍\U0001F469‍\U0001F467‍\U0001F466 \U0001F44D\U0001F3FD";
         DomTree tree = HtmlParsing.ParseHtml($"<p id='copy'>{Source}</p>");
         NodeId copy = tree.GetElementById("copy")!.Value;
         var baseStyle = new LayoutStyle
@@ -894,12 +894,31 @@ public class InlineTests
         + "spans in one buffer.")]
     public void InlineDescendantKeepsItsComputedFontMetrics()
     {
+        // Rust body, preserved verbatim so this can be restored once dom.rs lands:
+        //
+        //   let tree = obscura_dom::parse_html(
+        //       r#"<style>
+        //           #copy { font-size:16px; line-height:20px }
+        //           #big { font-size:2em; line-height:1.5 }
+        //       </style>
+        //       <p id="copy">small <a id="big">large</a></p>"#);
+        //   let laid = crate::dom::layout_dom(&tree, (500.0, 200.0));
+        //   assert_eq!(laid.styles[&big].font_size, Some(32.0));
+        //   let item = laid.ifc_items[&copy];
+        //   let glyph_sizes = laid.text_engine.items[item].buffer.layout_runs()
+        //       .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_size)).collect::<Vec<_>>();
+        //   assert!(glyph_sizes.iter().any(|size| (*size - 16.0).abs() < 0.01));
+        //   assert!(glyph_sizes.iter().any(|size| (*size - 32.0).abs() < 0.01));
     }
 
     [Fact(Skip = "Needs crate::dom::layout_dom (dom.rs) and the CSS cascade for the UA sheet's "
         + "white-space:pre on <pre>; neither is ported yet.")]
     public void PreformattedNewlinesPreserveAuthoredLineCount()
     {
+        // Rust body, preserved so this can be restored once dom.rs and the UA sheet land. It
+        // lays out a <pre><code>, a white-space:pre-wrap div, and a white-space:normal div over
+        // the same three authored lines at 200px / 16px/24px monospace, then asserts the first
+        // two are 72px tall (three line boxes) and the third is 24px (one).
     }
 
     private static List<string> ShapedLineTexts(TextBuffer buffer)
@@ -998,6 +1017,10 @@ public class InlineTests
         + "layout.")]
     public void TextWrapStyleIsInheritedAndCanBeReset()
     {
+        // Rust body, preserved so this can be restored once dom.rs and the style.rs cascade
+        // land. It asserts that `text-wrap: balance` on an ancestor computes to
+        // TextWrapStyle::Balance on a descendant heading, and that `text-wrap-style: auto` on a
+        // sibling resets it to TextWrapStyle::Auto. No inline layout is involved.
     }
 
     [Fact]

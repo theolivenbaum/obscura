@@ -303,10 +303,16 @@ public sealed class FontDatabase : IDisposable
     }
 
     /// <summary>
-    /// Faces to try for a cluster, in order: the requested face, then any other face declaring
-    /// the same family, then everything else in load order.
+    /// Faces to try for a cluster, in order: the requested face, then the rest of the requested
+    /// family, then everything else in load order.
     /// </summary>
-    public IEnumerable<FaceRecord> FallbackOrder(FontId? preferred, string? familyName)
+    /// <remarks>
+    /// When no exact resource was pinned, the family's own faces are ordered by CSS font
+    /// matching (style first, then the asymmetric missing-weight search), which is what
+    /// cosmic-text's family matcher does before its fallback iterator runs. Without that a bold
+    /// paragraph with no authored <c>font-family</c> would shape against the regular face.
+    /// </remarks>
+    public IEnumerable<FaceRecord> FallbackOrder(FontId? preferred, string? familyName, ushort weight, bool italic)
     {
         FaceRecord? first = preferred is { } id ? Face(id) : null;
         if (first is not null)
@@ -316,10 +322,72 @@ public sealed class FontDatabase : IDisposable
 
         if (familyName is not null)
         {
+            List<FaceRecord> family = [];
             foreach (FaceRecord face in _faces)
             {
                 if (!ReferenceEquals(face, first)
                     && string.Equals(face.FamilyName, familyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    family.Add(face);
+                }
+            }
+
+            if (first is null && family.Count > 1)
+            {
+                List<FaceRecord> styled = [];
+                foreach (FaceRecord face in family)
+                {
+                    if ((face.Style != FaceStyle.Normal) == italic)
+                    {
+                        styled.Add(face);
+                    }
+                }
+
+                List<FaceRecord> candidates = styled.Count > 0 ? styled : family;
+                List<ushort> available = new(candidates.Count);
+                foreach (FaceRecord face in candidates)
+                {
+                    available.Add(face.Weight);
+                }
+
+                ushort matched = FontAssets.MatchFontWeight(weight, available);
+                foreach (FaceRecord face in candidates)
+                {
+                    if (face.Weight == matched)
+                    {
+                        family.Remove(face);
+                        family.Insert(0, face);
+                        break;
+                    }
+                }
+            }
+
+            foreach (FaceRecord face in family)
+            {
+                yield return face;
+            }
+        }
+
+        // cosmic-text consults its platform fallback lists before walking the rest of the
+        // database. Of the families on the Unix list only these two are ever bundled, so
+        // honoring them here keeps a missing glyph landing on the same face the Rust engine
+        // chooses instead of on an unrelated Liberation style.
+        foreach (string common in CommonFallbackFamilies)
+        {
+            foreach (FaceRecord face in _faces)
+            {
+                if (ReferenceEquals(face, first))
+                {
+                    continue;
+                }
+
+                if (familyName is not null
+                    && string.Equals(face.FamilyName, familyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (string.Equals(face.FamilyName, common, StringComparison.OrdinalIgnoreCase))
                 {
                     yield return face;
                 }
@@ -339,9 +407,32 @@ public sealed class FontDatabase : IDisposable
                 continue;
             }
 
-            yield return face;
+            bool common = false;
+            foreach (string name in CommonFallbackFamilies)
+            {
+                if (string.Equals(face.FamilyName, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    common = true;
+                    break;
+                }
+            }
+
+            if (!common)
+            {
+                yield return face;
+            }
         }
     }
+
+    /// <summary>
+    /// The families from cosmic-text's Unix <c>common_fallback</c> list that this engine
+    /// actually bundles, in that list's order.
+    /// </summary>
+    private static readonly string[] CommonFallbackFamilies =
+    [
+        FontAssets.SystemFamily,
+        FontAssets.EmojiFamily,
+    ];
 
     public void Dispose()
     {
