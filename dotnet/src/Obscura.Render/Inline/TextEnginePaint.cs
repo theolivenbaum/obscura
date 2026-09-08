@@ -146,7 +146,7 @@ public sealed partial class TextEngine
                 RgbaColor color = glyph.Color ?? new RgbaColor(0, 0, 0, 255);
                 if (printEconomy)
                 {
-                    color = PrintEconomyColor(color);
+                    color = RenderPaint.PrintEconomyColor(color);
                 }
 
                 if (underlined)
@@ -316,7 +316,7 @@ public sealed partial class TextEngine
 
                         if (printEconomy)
                         {
-                            RgbaColor adjusted = PrintEconomyColor(new RgbaColor(r, g, b, 255));
+                            RgbaColor adjusted = RenderPaint.PrintEconomyColor(new RgbaColor(r, g, b, 255));
                             (r, g, b) = (adjusted.R, adjusted.G, adjusted.B);
                         }
 
@@ -473,40 +473,4 @@ public sealed partial class TextEngine
         }
     }
 
-    /// <summary>
-    /// Darken near-white ink for the print-economy capture path.
-    /// </summary>
-    /// <remarks>
-    /// RECONCILIATION NOTE: <c>paint.rs</c> owns <c>print_economy_color</c> in the Rust tree.
-    /// This copy exists because the inline paint path calls it and the paint port has not
-    /// landed; the paint agent should keep one definition.
-    /// </remarks>
-    internal static RgbaColor PrintEconomyColor(RgbaColor color)
-    {
-        const int MinDifferenceSquared = 65_025;
-        int Difference(byte target)
-        {
-            int dr = color.R - target;
-            int dg = color.G - target;
-            int db = color.B - target;
-            return (dr * dr) + (dg * dg) + (db * db);
-        }
-
-        if (Difference(255) > MinDifferenceSquared)
-        {
-            return color;
-        }
-
-        float max = Math.Max(color.R, Math.Max(color.G, color.B)) / 255f;
-        if (max <= float.Epsilon)
-        {
-            return color;
-        }
-
-        float scale = F32.Max(max - 0.33f, 0f) / max;
-        byte Adjusted(byte component) =>
-            (byte)Math.Min((ushort)(component / 255f * scale * 256f), (ushort)255);
-
-        return new RgbaColor(Adjusted(color.R), Adjusted(color.G), Adjusted(color.B), color.A);
-    }
 }
