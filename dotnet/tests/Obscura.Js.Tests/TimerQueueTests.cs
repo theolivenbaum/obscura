@@ -87,12 +87,16 @@ public sealed class TimerQueueTests
         // catch-up firings: the next deadline is measured from the firing
         // instant, not from the missed one. Pausing for many intervals and
         // then pumping must yield exactly one callback, not one per interval.
+        // A 250ms interval paused across ~5 intervals. The assertion is on the
+        // count from ONE pump: catch-up would yield one callback per missed
+        // interval. The interval is deliberately long relative to test
+        // scheduling jitter, so the re-armed deadline cannot pass before the
+        // second pump and make this flaky.
         var q = new TimerQueue();
-        q.Add(5, repeat: true, new object());
-        System.Threading.Thread.Sleep(120);
+        q.Add(250, repeat: true, new object());
+        System.Threading.Thread.Sleep(1200);
 
         Assert.Single(q.TakeDue());
-        // Re-armed 5ms out, so nothing is due again immediately.
         Assert.Empty(q.TakeDue());
         Assert.Equal(1, q.Count);
     }

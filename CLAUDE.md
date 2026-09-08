@@ -58,6 +58,11 @@ Read `todo.md` for the live port status and the ordered work queue.
   while `MathF.Round` is banker's rounding. Every one of these in the render
   layer must go through `Obscura.Render.F32` instead. This is silent when wrong:
   it produces slightly different geometry rather than an error.
+- **Layout rounding is a third thing again.** taffy defines its own
+  `round` as `floor(v + 0.5)`, half towards positive infinity. That is neither
+  `MathF.Round` (half to even) nor `F32.Round` (half away from zero), and the
+  three disagree at negative midpoints: `round(-2.5)` is -2 for taffy and -3 for
+  `F32.Round`. Layout rounding must use `Obscura.Render.Layout.Sys.Round`.
 - **The render layer is `float`, never `double`.** The Rust engine is f32
   throughout, and f64 accumulation diverges visibly in layout and paint. The one
   exception is capture-dimension checking, which is f64 in Rust too.
