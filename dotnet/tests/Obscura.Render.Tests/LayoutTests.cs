@@ -1211,3 +1211,194 @@ public class FloatContextTests
         Assert.Equal(50.0f, later.Y);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Algorithm smoke tests.
+//
+// block.rs, flexbox.rs and float.rs carry no `#[cfg(test)] mod tests` upstream
+// (taffy validates them with generated fixtures under tests/), so these check
+// that the ported algorithms produce the CSS-correct geometry for a handful of
+// basic cases. They are not ports of upstream tests.
+// ---------------------------------------------------------------------------
+
+public class LayoutAlgorithmSmokeTests
+{
+    [Fact]
+    public void FlexRowGrowSplitsFreeSpaceEvenly()
+    {
+        var taffy = new TaffyTree<object>();
+        var child0 = taffy.NewLeaf(new Style { FlexGrow = 1.0f });
+        var child1 = taffy.NewLeaf(new Style { FlexGrow = 1.0f });
+        var root = taffy.NewWithChildren(
+            new Style { Size = GeometryExtensions.SizeFromLengths(100.0f, 100.0f) },
+            [child0, child1]);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        Assert.Equal(new Size<float>(50.0f, 100.0f), taffy.GetLayout(child0).Size);
+        Assert.Equal(new Point<float>(0.0f, 0.0f), taffy.GetLayout(child0).Location);
+        Assert.Equal(new Size<float>(50.0f, 100.0f), taffy.GetLayout(child1).Size);
+        Assert.Equal(new Point<float>(50.0f, 0.0f), taffy.GetLayout(child1).Location);
+    }
+
+    [Fact]
+    public void FlexCentersOnBothAxes()
+    {
+        var taffy = new TaffyTree<object>();
+        var child = taffy.NewLeaf(new Style { Size = GeometryExtensions.SizeFromLengths(20.0f, 20.0f) });
+        var root = taffy.NewWithChildren(
+            new Style
+            {
+                Size = GeometryExtensions.SizeFromLengths(100.0f, 100.0f),
+                JustifyContent = AlignContent.Center,
+                AlignItems = AlignItems.Center,
+            },
+            [child]);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        Assert.Equal(new Point<float>(40.0f, 40.0f), taffy.GetLayout(child).Location);
+    }
+
+    [Fact]
+    public void FlexWrapMovesTheThirdItemToASecondLine()
+    {
+        var taffy = new TaffyTree<object>();
+        var children = new NodeId[3];
+        for (int i = 0; i < children.Length; i++)
+        {
+            children[i] = taffy.NewLeaf(new Style { Size = GeometryExtensions.SizeFromLengths(40.0f, 10.0f) });
+        }
+
+        var root = taffy.NewWithChildren(
+            new Style
+            {
+                Size = new Size<Dimension>(Dimension.FromLength(100.0f), Dimension.Auto),
+                FlexWrap = FlexWrap.Wrap,
+            },
+            children);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        Assert.Equal(new Point<float>(0.0f, 0.0f), taffy.GetLayout(children[0]).Location);
+        Assert.Equal(new Point<float>(40.0f, 0.0f), taffy.GetLayout(children[1]).Location);
+        Assert.Equal(new Point<float>(0.0f, 10.0f), taffy.GetLayout(children[2]).Location);
+        Assert.Equal(new Size<float>(100.0f, 20.0f), taffy.GetLayout(root).Size);
+    }
+
+    [Fact]
+    public void AbsolutelyPositionedFlexChildUsesItsInsets()
+    {
+        var taffy = new TaffyTree<object>();
+        var abs = taffy.NewLeaf(new Style
+        {
+            Position = Position.Absolute,
+            Size = GeometryExtensions.SizeFromLengths(10.0f, 10.0f),
+            Inset = new Rect<LengthPercentageAuto>(
+                LengthPercentageAuto.FromLength(5.0f),
+                LengthPercentageAuto.Auto,
+                LengthPercentageAuto.FromLength(7.0f),
+                LengthPercentageAuto.Auto),
+        });
+        var root = taffy.NewWithChildren(
+            new Style { Size = GeometryExtensions.SizeFromLengths(100.0f, 100.0f) }, [abs]);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        Assert.Equal(new Point<float>(5.0f, 7.0f), taffy.GetLayout(abs).Location);
+    }
+
+    [Fact]
+    public void BlockChildrenStackAndStretchToTheContainerWidth()
+    {
+        var taffy = new TaffyTree<object>();
+        var child0 = taffy.NewLeaf(new Style
+        {
+            Display = Display.Block,
+            Size = new Size<Dimension>(Dimension.Auto, Dimension.FromLength(20.0f)),
+        });
+        var child1 = taffy.NewLeaf(new Style
+        {
+            Display = Display.Block,
+            Size = new Size<Dimension>(Dimension.Auto, Dimension.FromLength(30.0f)),
+        });
+        var root = taffy.NewWithChildren(
+            new Style { Display = Display.Block, Size = GeometryExtensions.SizeFromLengths(100.0f, 100.0f) },
+            [child0, child1]);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        Assert.Equal(new Size<float>(100.0f, 20.0f), taffy.GetLayout(child0).Size);
+        Assert.Equal(new Point<float>(0.0f, 0.0f), taffy.GetLayout(child0).Location);
+        Assert.Equal(new Size<float>(100.0f, 30.0f), taffy.GetLayout(child1).Size);
+        Assert.Equal(new Point<float>(0.0f, 20.0f), taffy.GetLayout(child1).Location);
+    }
+
+    [Fact]
+    public void AdjacentBlockMarginsCollapse()
+    {
+        var taffy = new TaffyTree<object>();
+
+        static Style Child(float marginTop, float marginBottom) => new()
+        {
+            Display = Display.Block,
+            Size = new Size<Dimension>(Dimension.Auto, Dimension.FromLength(20.0f)),
+            Margin = new Rect<LengthPercentageAuto>(
+                LengthPercentageAuto.Zero,
+                LengthPercentageAuto.Zero,
+                LengthPercentageAuto.FromLength(marginTop),
+                LengthPercentageAuto.FromLength(marginBottom)),
+        };
+
+        var child0 = taffy.NewLeaf(Child(0.0f, 20.0f));
+        var child1 = taffy.NewLeaf(Child(20.0f, 0.0f));
+        var root = taffy.NewWithChildren(
+            new Style
+            {
+                Display = Display.Block,
+                Size = new Size<Dimension>(Dimension.FromLength(100.0f), Dimension.Auto),
+            },
+            [child0, child1]);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        // 20px bottom margin collapses with the 20px top margin, so the gap is 20 not 40.
+        Assert.Equal(0.0f, taffy.GetLayout(child0).Location.Y);
+        Assert.Equal(40.0f, taffy.GetLayout(child1).Location.Y);
+        Assert.Equal(60.0f, taffy.GetLayout(root).Size.Height);
+    }
+
+    [Fact]
+    public void FloatedBoxIsPlacedAndExtendsTheRootHeight()
+    {
+        var taffy = new TaffyTree<object>();
+        var floated = taffy.NewLeaf(new Style
+        {
+            Display = Display.Block,
+            Float = Float.Left,
+            Size = GeometryExtensions.SizeFromLengths(40.0f, 40.0f),
+        });
+        var inflow = taffy.NewLeaf(new Style
+        {
+            Display = Display.Block,
+            Size = new Size<Dimension>(Dimension.Auto, Dimension.FromLength(20.0f)),
+        });
+        var root = taffy.NewWithChildren(
+            new Style
+            {
+                Display = Display.Block,
+                Size = new Size<Dimension>(Dimension.FromLength(100.0f), Dimension.Auto),
+            },
+            [floated, inflow]);
+
+        taffy.ComputeLayout(root, GeometryExtensions.SizeMaxContent);
+
+        Assert.Equal(new Size<float>(40.0f, 40.0f), taffy.GetLayout(floated).Size);
+        Assert.Equal(new Point<float>(0.0f, 0.0f), taffy.GetLayout(floated).Location);
+
+        // A block box in the same BFC is not shortened by the float (only line boxes are), but the
+        // root's height must still grow to contain the float.
+        Assert.Equal(new Size<float>(100.0f, 20.0f), taffy.GetLayout(inflow).Size);
+        Assert.Equal(40.0f, taffy.GetLayout(root).Size.Height);
+    }
+}
