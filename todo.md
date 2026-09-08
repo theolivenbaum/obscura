@@ -38,7 +38,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
 
-## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81 tests green  -  81/81 tests green
+## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green  -  81/81 tests green
 
 - [x] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots
 - [x] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree
@@ -242,6 +242,23 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **`Obscura.Net` no longer references `Obscura.Dom`.** `crates/obscura-net` has no
   `obscura-dom` dependency; the scaffold's project reference was removed so the
   two areas can be built and tested independently.
+- **Obscura.Dom selector-engine differences**, all verified as behavior-preserving:
+  - The bloom filter uses one djb2 hash where Rust uses two different hashers.
+    Self-consistent between the selector and element sides, so the only effect
+    is a marginally higher false-positive rate, never a missed match.
+  - No `NthIndexCache`; `:nth-*` indices are recomputed per match. Performance
+    only, identical results.
+  - `GetNode` returns the live node rather than Rust's clone plus
+    `with_node_mut`. One accessor covers read and write.
+  - Declarative shadow roots and the MathML integration-point flag are
+    reimplemented on the AngleSharp adapter, because AngleSharp implements
+    neither html5ever hook.
+  - Carried over faithfully and worth knowing because they look like bugs:
+    `::before`/`::after`, `::part()` and namespace-prefixed selectors are parse
+    errors, `:scope` falls back to `:root`, and `:visited`/`:hover`/`:active`/
+    `:focus*` never match. Confirmed against the Rust binary that a parse error
+    yields an empty NodeList rather than an exception, so `op_dom` must use the
+    `Try*` query variants.
 - **One process, many isolates.** ClearScript allows multiple V8 isolates per
   process, so the Rust "one isolate per process" constraint (and the
   process-per-test requirement) does not apply. Tests run in-process.
