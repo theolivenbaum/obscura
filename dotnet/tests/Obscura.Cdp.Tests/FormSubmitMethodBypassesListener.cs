@@ -72,8 +72,8 @@ public sealed class FormSubmitMethodBypassesListener
                 session);
 
             Obscura.Browser.Page page = ctx.GetPageMut(pageId)!;
-            Assert.Equal("/submitted", page.Url!.AbsolutePath);
-            Assert.Equal("?q=1", page.Url!.Query);
+            Assert.Equal("/submitted", page.Url!.Path);
+            Assert.Equal("q=1", page.Url!.Query);
         }
     }
 
@@ -113,7 +113,7 @@ public sealed class FormSubmitMethodBypassesListener
                 session);
 
             Obscura.Browser.Page page = ctx.GetPageMut(pageId)!;
-            Assert.NotEqual("/submitted", page.Url!.AbsolutePath);
+            Assert.NotEqual("/submitted", page.Url!.Path);
         }
     }
 
@@ -159,7 +159,7 @@ public sealed class FormSubmitMethodBypassesListener
                 session);
 
             Obscura.Browser.Page page = ctx.GetPageMut(pageId)!;
-            Assert.NotEqual("/submitted", page.Url!.AbsolutePath);
+            Assert.NotEqual("/submitted", page.Url!.Path);
         }
     }
 

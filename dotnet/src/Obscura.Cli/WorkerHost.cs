@@ -153,13 +153,22 @@ public static class WorkerHost
                         var info = await page
                             .EvaluateForCdpWithTimeoutAsync(expression, true, true, 30_000)
                             .ConfigureAwait(false);
-                        result = info.Value is not null
-                            ? info.Value.DeepClone()
+                        // Rust: `match info.value { Some(v) => v, None => description }`.
+                        // HasValue is that Option's is_some, so Some(Value::Null)
+                        // answers JSON null instead of the string "null".
+                        result = info.HasValue
+                            ? info.Value?.DeepClone()
                             : JsonValue.Create(info.Description);
                     }
-                    catch (Exception error) when (error is Obscura.Js.Runtime.JsRuntimeException
-                        or InvalidOperationException or TimeoutException)
+                    // Rust matches `Err(_) => Value::Null`, so every failure mode
+                    // becomes a successful reply carrying null rather than
+                    // ending the command loop. Narrowing this to a few exception
+                    // types would let an unexpected one kill the worker, and the
+                    // parent would report "Read failed" for what the reference
+                    // answers.
+                    catch (Exception error) when (error is not OutOfMemoryException)
                     {
+                        Log.Debug($"evaluate failed: {error.Message}");
                         result = null;
                     }
                     response = Success(result);

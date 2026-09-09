@@ -81,11 +81,11 @@ public sealed partial class Page
             }
             catch (JsRuntimeException)
             {
-                return UndefinedRemoteObject(null);
+                return UndefinedRemoteObject();
             }
         }
 
-        return UndefinedRemoteObject(Evaluate(expression));
+        return ValueRemoteObject(Evaluate(expression));
     }
 
     public async Task<RemoteObjectInfo> EvaluateForCdpWithTimeoutAsync(
@@ -100,7 +100,7 @@ public sealed partial class Page
                 .EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, awaitTimeoutMs)
                 .ConfigureAwait(false);
         }
-        return UndefinedRemoteObject(Evaluate(expression));
+        return ValueRemoteObject(Evaluate(expression));
     }
 
     public async Task<RemoteObjectInfo> CallFunctionOnForCdpAsync(
@@ -112,7 +112,7 @@ public sealed partial class Page
     {
         if (Js is not { } js)
         {
-            return UndefinedRemoteObject(null);
+            return UndefinedRemoteObject();
         }
         try
         {
@@ -122,7 +122,7 @@ public sealed partial class Page
         }
         catch (JsRuntimeException)
         {
-            return UndefinedRemoteObject(null);
+            return UndefinedRemoteObject();
         }
     }
 
@@ -222,7 +222,32 @@ public sealed partial class Page
         Js?.SetRuntimeEventsEnabled(enabled);
     }
 
-    private static RemoteObjectInfo UndefinedRemoteObject(JsonNode? value) => new(
+    /// <summary>
+    /// The <c>value: None</c> remote object Rust builds when a runtime call fails,
+    /// and when <c>callFunctionOn</c> is asked of a page with no JavaScript realm.
+    /// </summary>
+    private static RemoteObjectInfo UndefinedRemoteObject() => new(
+        Thrown: false,
+        JsType: "undefined",
+        Subtype: null,
+        ClassName: string.Empty,
+        Description: string.Empty,
+        ObjectId: null,
+        Value: null);
+
+    /// <summary>
+    /// The remote object for a page with no JavaScript realm, where the answer
+    /// comes from <see cref="Evaluate"/>'s small static table instead.
+    /// </summary>
+    /// <remarks>
+    /// Rust builds this arm with <c>value: Some(val)</c>, and its <c>evaluate</c>
+    /// returns a <c>serde_json::Value</c> rather than an <c>Option</c>, so an
+    /// unmatched expression is <c>Some(Value::Null)</c> and the reply carries
+    /// <c>{"type":"undefined","value":null}</c>. Sharing one helper with
+    /// <see cref="UndefinedRemoteObject"/> dropped the key, because a null
+    /// <see cref="JsonNode"/> cannot say which of the two it is.
+    /// </remarks>
+    private static RemoteObjectInfo ValueRemoteObject(JsonNode? value) => new(
         Thrown: false,
         JsType: value?.GetValueKind() switch
         {
@@ -235,5 +260,8 @@ public sealed partial class Page
         ClassName: string.Empty,
         Description: string.Empty,
         ObjectId: null,
-        Value: value);
+        Value: value)
+    {
+        HasValue = true,
+    };
 }

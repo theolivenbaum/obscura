@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 
 using Obscura.Browser;
 using Obscura.Js.Runtime;
+using Obscura.Js.Url;
 using Obscura.Render;
 
 using BrowserPage = Obscura.Browser.Page;
@@ -18,34 +19,19 @@ public static partial class Page
     /// <summary>Seconds since the Unix epoch, matching Rust's <c>as_secs_f64</c>.</summary>
     private static double Timestamp() => (DateTime.UtcNow - DateTime.UnixEpoch).TotalSeconds;
 
-    /// <summary>Rust's <c>Url::parse</c>: absolute only, no base.</summary>
-    private static Uri? TryParseUrl(string? value) =>
-        value is not null && Uri.TryCreate(value, UriKind.Absolute, out Uri? url) ? url : null;
-
     /// <summary>
-    /// <c>Origin::ascii_serialization</c> as the Rust <c>url</c> crate computes it: a
-    /// tuple origin for the special schemes and the literal <c>"null"</c> for every
-    /// opaque one (<c>data:</c>, <c>file:</c>, <c>about:</c>).
+    /// Rust's <c>Url::parse</c>: absolute only, no base.
     /// </summary>
-    private static string AsciiOrigin(Uri url)
-    {
-        string scheme = url.Scheme;
-        int? defaultPort = scheme switch
-        {
-            "http" or "ws" => 80,
-            "https" or "wss" => 443,
-            "ftp" => 21,
-            _ => null,
-        };
-        if (defaultPort is null || url.Host.Length == 0)
-        {
-            return "null";
-        }
-
-        return url.Port == defaultPort
-            ? $"{scheme}://{url.Host}"
-            : $"{scheme}://{url.Host}:{url.Port.ToString(CultureInfo.InvariantCulture)}";
-    }
+    /// <remarks>
+    /// The WHATWG parser, not <see cref="Uri"/>. <see cref="Uri"/> percent-encodes
+    /// <c>&lt;</c>, <c>&gt;</c> and space in the opaque path of a cannot-be-a-base URL,
+    /// so <c>data:text/html,&lt;b&gt;a b&lt;/b&gt;</c> came back re-spelled, and it
+    /// classifies hosts differently from the <c>url</c> crate (an IDN host stays
+    /// Unicode in <c>Uri.Host</c>, and <c>blob:</c> has no inner origin) - both of which
+    /// reach the wire through <c>securityOrigin</c>.
+    /// </remarks>
+    private static UrlRecord? TryParseUrl(string? value) =>
+        value is null ? null : UrlRecord.Parse(value);
 
     /// <summary>
     /// CDP frame ids are strings, while a realm is identified by number, so a child's
@@ -56,27 +42,42 @@ public static partial class Page
     internal static string ChildFrameId(string pageFrameId, uint frameId) =>
         $"{pageFrameId}-frame-{frameId.ToString(CultureInfo.InvariantCulture)}";
 
-    private static bool IsLocalhost(Uri url)
+    /// <summary>
+    /// The Rust <c>is_localhost</c>: a <c>localhost</c> domain (or a subdomain of one),
+    /// an IPv4 loopback (127.0.0.0/8) or the IPv6 loopback.
+    /// </summary>
+    /// <remarks>
+    /// Only <c>http</c> and <c>ws</c> consult this, and for those special schemes the
+    /// parser has already canonicalized the host, so the literal forms are separable
+    /// from a domain by their serialization: an IPv6 host is bracketed and an IPv4 host
+    /// is a dotted quad. <c>IPAddress.IsLoopback</c> is deliberately not used - it also
+    /// accepts the IPv4-mapped <c>::ffff:127.0.0.1</c>, which Rust's
+    /// <c>Ipv6Addr::is_loopback</c> does not.
+    /// </remarks>
+    private static bool IsLocalhost(UrlRecord url)
     {
-        string host = url.Host;
-        if (host.Length == 0)
+        if (url.HostStr is not { Length: > 0 } host)
         {
             return false;
         }
 
-        return url.HostNameType switch
+        if (host.Length > 2 && host[0] == '[' && host[^1] == ']')
         {
-            UriHostNameType.Dns =>
-                host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
-                || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase),
-            UriHostNameType.IPv4 or UriHostNameType.IPv6 =>
-                System.Net.IPAddress.TryParse(host.Trim('[', ']'), out System.Net.IPAddress? address)
-                && System.Net.IPAddress.IsLoopback(address),
-            _ => false,
-        };
+            return System.Net.IPAddress.TryParse(host[1..^1], out System.Net.IPAddress? v6)
+                && v6.Equals(System.Net.IPAddress.IPv6Loopback);
+        }
+
+        if (System.Net.IPAddress.TryParse(host, out System.Net.IPAddress? v4)
+            && v4.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            return v4.GetAddressBytes()[0] == 127;
+        }
+
+        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string SecureContextType(Uri url) => url.Scheme switch
+    private static string SecureContextType(UrlRecord url) => url.Scheme switch
     {
         "https" or "wss" or "file" or "about" => "Secure",
         "http" or "ws" when IsLocalhost(url) => "SecureLocalhost",
@@ -98,8 +99,12 @@ public static partial class Page
         string url,
         string mimeType)
     {
-        Uri? parsed = TryParseUrl(url);
-        string securityOrigin = parsed is null ? "null" : AsciiOrigin(parsed);
+        UrlRecord? parsed = TryParseUrl(url);
+        // `Origin::ascii_serialization()`, ungated: the crate answers "null" for every
+        // opaque origin (`data:`, `file:`, `about:`, any non-special scheme) and resolves
+        // a `blob:` URL to the origin of the URL in its path, so page.rs needs no scheme
+        // check here and neither does this.
+        string securityOrigin = parsed is null ? "null" : parsed.AsciiOrigin;
         string secureContext = parsed is null ? "InsecureScheme" : SecureContextType(parsed);
         var frame = new JsonObject
         {

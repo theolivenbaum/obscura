@@ -35,12 +35,10 @@ public static class ServeCommand
         {
             Log.Info($"User-Agent: {ua}");
         }
-        if (args.Stealth)
-        {
-            // The stealth TLS transport has no managed equivalent, so only the
-            // tracker-blocking and identity halves are active here.
-            Log.Info("Stealth mode enabled (tracker blocking)");
-        }
+        // Rust logs "Stealth mode enabled (...)" here, in the Serve arm only.
+        // Program.cs already logs the port's equivalent line, with the TLS gap
+        // named, for every subcommand; repeating it here would put two stealth
+        // lines on stderr for `-v serve --stealth` where Rust prints one.
 
         if (serve.Workers > 1)
         {
@@ -139,23 +137,71 @@ public static class ServeCommand
 
         await Task.Delay(500).ConfigureAwait(false);
 
-        if (!IPAddress.TryParse(host, out var address))
-        {
-            throw new CliException($"invalid --host '{host}'");
-        }
-        var listener = new TcpListener(address, port);
-        listener.Start();
+        var listener = Bind(host, port);
         Log.Info(string.Create(
             CultureInfo.InvariantCulture, $"Load balancer on {host}:{port}, {workers} workers"));
 
-        var nextWorker = 0;
+        // Rust keeps this counter in a u16 and advances it with wrapping_add, so
+        // the round-robin sequence resumes from 0 after 65535 connections rather
+        // than from wherever a wider counter would land.
+        ushort nextWorker = 0;
         while (true)
         {
             var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
             var workerPort = port + 1 + (nextWorker % workers);
-            nextWorker = nextWorker == int.MaxValue ? 0 : nextWorker + 1;
+            nextWorker = unchecked((ushort)(nextWorker + 1));
+            Log.Debug(string.Create(
+                CultureInfo.InvariantCulture,
+                $"Routing {client.Client.RemoteEndPoint} to worker port {workerPort}"));
             _ = Task.Run(() => ProxyAsync(client, workerPort));
         }
+    }
+
+    /// <summary>
+    /// Bind the balancer to <paramref name="host"/>, which may be a name.
+    /// </summary>
+    /// <remarks>
+    /// Rust binds a <c>(&amp;str, u16)</c>, and tokio resolves it and tries each
+    /// resolved address in turn, so <c>--host localhost</c> works there. A plain
+    /// <see cref="IPAddress.TryParse"/> would reject it.
+    /// </remarks>
+    private static TcpListener Bind(string host, int port)
+    {
+        IPAddress[] candidates;
+        if (IPAddress.TryParse(host, out var literal))
+        {
+            candidates = [literal];
+        }
+        else
+        {
+            try
+            {
+                candidates = Dns.GetHostAddresses(host);
+            }
+            catch (Exception error) when (error is SocketException or ArgumentException)
+            {
+                throw new CliException($"invalid --host '{host}': {error.Message}");
+            }
+        }
+
+        Exception? last = null;
+        foreach (var address in candidates)
+        {
+            var listener = new TcpListener(address, port);
+            try
+            {
+                listener.Start();
+                return listener;
+            }
+            catch (SocketException error)
+            {
+                last = error;
+                listener.Dispose();
+            }
+        }
+        throw new CliException(
+            $"cannot bind {host}:{port.ToString(CultureInfo.InvariantCulture)}"
+            + (last is null ? ": no addresses resolved" : $": {last.Message}"));
     }
 
     private static async Task ProxyAsync(TcpClient client, int workerPort)
@@ -190,21 +236,39 @@ public static class ServeCommand
 
             using (worker)
             {
-                try
-                {
-                    var clientStream = client.GetStream();
-                    var workerStream = worker.GetStream();
-                    // Both directions run until either side closes, which is what
-                    // tokio's copy_bidirectional does.
-                    await Task.WhenAny(
-                        clientStream.CopyToAsync(workerStream),
-                        workerStream.CopyToAsync(clientStream)).ConfigureAwait(false);
-                }
-                catch (Exception error) when (error is IOException or ObjectDisposedException
-                    or InvalidOperationException or SocketException)
-                {
-                    // A half-closed proxy connection is ordinary.
-                }
+                // tokio's copy_bidirectional copies each direction to EOF, shuts
+                // the destination's write half down, and returns only once BOTH
+                // directions are done. Completing on the first one instead would
+                // tear down a connection whose peer is still sending: a client
+                // that half-closes after its request would never get the reply.
+                await Task.WhenAll(
+                    PumpAsync(client, worker),
+                    PumpAsync(worker, client)).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>One direction of the bidirectional copy, with the half-close.</summary>
+    private static async Task PumpAsync(TcpClient from, TcpClient to)
+    {
+        try
+        {
+            await from.GetStream().CopyToAsync(to.GetStream()).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException
+            or InvalidOperationException or SocketException)
+        {
+            // A half-closed proxy connection is ordinary.
+        }
+        finally
+        {
+            try
+            {
+                to.Client.Shutdown(SocketShutdown.Send);
+            }
+            catch (Exception error) when (error is SocketException or ObjectDisposedException)
+            {
+                // The peer is already gone.
             }
         }
     }

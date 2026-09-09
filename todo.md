@@ -38,7 +38,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
 
-## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green  -  81/81 tests green
+## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green
 
 - [x] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots
 - [x] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree
@@ -127,7 +127,7 @@ The largest component. Split into stages; each stage is independently testable.
       microbenchmark Rust itself marks `#[ignore]`.
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare
 
-## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  87/92 tests green  -  87/92 tests green, 5 skipped on Obscura.Js gaps
+## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  91/96 tests green, 5 skipped on Obscura.Js gaps
 
 - [x] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (4591),
       split across `Page.cs`, `Page.Navigation.cs`, `Page.Frames.cs`,
@@ -141,20 +141,32 @@ The largest component. Split into stages; each stage is independently testable.
       PNG/JPEG decode instead of the `image` crate
 - [x] Unit + integration tests ported: all 92 Rust tests (74 page.rs, 10 pdf.rs,
       4 context.rs, 4 across `tests/`), 87 green, 5 skipped on named Obscura.Js
-      gaps (see Known deviations)
+      gaps (see Known deviations), plus 4 written for the `UrlRecord` migration
+- [x] URLs go through `Obscura.Js.Url.UrlRecord`, not `System.Uri`. `Page.Url` is
+      a `UrlRecord`, `PageUrl` sits on the ported WHATWG parser, and
+      `Page.UrlString()` returns its serialization, so a `data:` URL on the CDP
+      wire and in `location.href` matches the reference. `Obscura.Browser.NetUrl`
+      is the remaining conversion at the `Obscura.Net` boundary (see Open issues)
 - [ ] Parity: navigate a fixture corpus, compare DOM + text + links
 
-## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)
+## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)  -  279/279 tests green
 
 - [x] `server.rs` -> WebSocket server, sessions, targets (1730)
 - [x] `dispatch.rs` -> method routing (1273)
 - [x] `types.rs`, `util.rs`, `cookie_params.rs` (440)
-- [ ] domains: `page` (3179), `runtime` (835), `dom` (788), `target` (540),
+- [x] domains: `page` (3179), `runtime` (835), `dom` (788), `target` (540),
       `pdf` (535), `accessibility` (524), `emulation` (456), `input` (438),
       `network` (430), `domsnapshot` (416), `io` (283), `fetch` (224),
-      `storage` (124), `browser` (42), `lp` (21)
-- [ ] Integration tests ported (27 files)
-- [ ] Parity: drive both servers with the same CDP script, diff the messages
+      `storage` (124), `browser` (42), `lp` (21). The dispatch table matches the
+      Rust one method for method. The four core domains were re-audited arm by
+      arm and field by field; `target` and the 30 in-file unit tests needed
+      nothing, and four wire-visible divergences were fixed (see the commit).
+- [x] Integration tests ported: all 27 files, 70 Rust tests -> 279 facts
+- [P] Parity: both servers driven with the same script over raw WebSocket -
+      40/40 command responses byte-identical, 111/111 events in identical order.
+      The two exceptions are response-header ordering, which comes off a Rust
+      `HashMap` and is nondeterministic per process, and header sets the two
+      HTTP clients normalize differently.
 
 ## 7. Obscura.Mcp  (<- crates/obscura-mcp, ~3.2k lines)
 
@@ -164,49 +176,83 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] Integration tests ported (16 found, 16 ported, 16 passing)
 - [ ] Parity: identical tool listings and tool-call results
 
-## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)
+## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)  -  177/178 tests green
 
-- [ ] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (1946)
-- [ ] `worker.rs` -> the `obscura-worker` binary for parallel scrape (165)
-- [ ] `crates/obscura` -> embeddable library API (`Obscura` project) (2224)
-- [ ] Integration tests ported
-- [ ] Parity: CLI golden-output tests for every `--dump` mode
+- [x] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (1946).
+      `serve` had five real defects, `scrape` one protocol bug, and every
+      numeric option went through a parser that could kill the process where
+      clap prints a usage error; see the commit.
+- [x] `worker.rs` -> the `obscura-worker` binary for parallel scrape (165)
+- [x] `crates/obscura` -> embeddable library API (`Obscura` project) (2224) -
+      diffed item by item; every public type, method and property present
+- [x] Integration tests ported: every file under `crates/obscura-cli/tests` and
+      `crates/obscura/tests` now has a same-named counterpart. One fact skipped,
+      the stealth-transport wire assertion that is a recorded deliberate gap.
+- [P] Parity: `scripts/parity-sweep.sh` is 320/320 byte-identical across
+      text/links/html/markdown/assets, and `scripts/parity-sweep-scrape.sh`
+      drives 169 `scrape`/`serve`/worker cases at 165 identical. The 4 that
+      differ are both outside the CLI: the ClearScript script-name suffix in a
+      thrown error's stack, and the platform io error string for a missing file.
 
 ## Open issues
 
-- **`Obscura.Browser` serializes URLs through `System.Uri`, which is not
-  WHATWG-compliant.** `PageUrl.TryParse` returns a `System.Uri` and
-  `Page.UrlString()` reads `AbsoluteUri`, which percent-encodes `<`, `>` and
-  space in a cannot-be-a-base URL's opaque path. Reproduced:
+- **`Url::parse` failure reasons are collapsed into one message.** The `url`
+  crate's `ParseError` has a distinct `Display` per variant and `page.rs` reports
+  it verbatim; `UrlParser.Parse` returns `UrlRecord?` with no error channel, so
+  `Page.Navigation` hardcodes one string and every rejected URL reports
+  "relative URL without a base". Diffed against the reference binary:
 
-      Rust url crate:  data:text/html,<b>a b</b>
-      System.Uri:      data:text/html,%3Cb%3Ea%20b%3C/b%3E
+      http://              rust: empty host                        port: relative URL without a base
+      http://a:99999/      rust: invalid port number               port: relative URL without a base
+      http://[fe80::1      rust: invalid IPv6 address              port: relative URL without a base
+      https://xn--/        rust: invalid international domain name  port: relative URL without a base
 
-  Every `data:` URL on the CDP wire therefore differs from the reference:
-  `Page.frameNavigated`, `Page.getFrameTree`, DOMSnapshot `documentURL`/
-  `baseURL`, Runtime origins, `Target.getTargets`. Found independently by two
-  agents diffing against the running Rust server. `Obscura.Js.Url.UrlRecord` is
-  the already-ported WHATWG parser and is what Browser should serialize through;
-  this is a type migration across ~77 references in 7 files, deferred only
-  because agents were live in that project.
+  The classification is right in every case (all four are rejected, and the
+  error kind is `InvalidUrl`); only the reason is lost. Fixing it means threading
+  a reason out of `UrlParser` and `UrlHost`, which have 9 and ~25 failure
+  returns respectively, so it is its own piece of work rather than a one-liner.
+- **`Obscura.Net` still speaks `System.Uri`, so URLs are reserialized at the
+  transport boundary.** `Obscura.Browser` now keeps `UrlRecord` throughout, but
+  `Response.Url`, `Request.Url` and every `ObscuraHttpClient` entry point take a
+  `System.Uri`, and `Obscura.Browser.NetUrl` converts in both directions. In Rust
+  there is no such boundary: `obscura-net` takes and returns the `url` crate's
+  `Url`. The visible effect left is the error text for a host `UrlRecord` accepts
+  and `System.Uri` rejects (`http://a..b/`: the reference reports a DNS-shaped
+  transport failure, the port reports one too but with the BCL's wording).
+  Removing it means moving `Obscura.Js/Url/**` into a project both `Obscura.Net`
+  and `Obscura.Js` can reference - `Obscura.Js` depends on `Obscura.Net`, so it
+  cannot go the other way. That mirrors the Rust tree, where `url` is a crate
+  both depend on.
 - **`Runtime.evaluate` drops an explicit `"value": null`.** Rust returns
   `{"type":"object","subtype":"null","description":"null","value":null}`; the
   port omits the key, so a client reading `result.value` gets `undefined` where
   Chrome and Rust give `null`.
 
-- **Two Obscura.Js tests fail under full-solution load but pass in isolation.**
-  The project alone is 830/849 green; a solution-wide run loses two, a different
-  pair each time, all timing-sensitive. The first prepared render on a fresh
-  process costs ~300ms in embedded font initialization against ~1ms once warm,
-  so tests that schedule work tens of milliseconds apart collapse two events into
-  one when the host is loaded. Fix the latency rather than the tests.
+- **Two Obscura.Js tests are timing-flaky, and not only under solution load.**
+  830 of 849 is the clean result, but three consecutive runs of that project
+  alone gave 2 failures, then 1, then 0, so the earlier note that they pass in
+  isolation was optimistic. The pair that showed up:
+  `OpsTests.Read_body_capped_rejects_oversized_streamed_body` and
+  `RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop`. The
+  first prepared render on a fresh process costs ~300ms in embedded font
+  initialization against ~1ms once warm, so tests that schedule work tens of
+  milliseconds apart collapse two events into one when the host is busy. Fix the
+  latency rather than the tests.
 
 ## 9. Validation
 
 - [x] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
 - [x] `scripts/parity-sweep.sh` drives both engines over every fixture:
       **320 of 320 outputs byte-identical** (64 fixtures x text/links/html/
-      markdown/assets), plus 17 of 17 `--eval` expressions
+      markdown/assets). It now checks exit status as well, and reports a signal
+      death separately rather than scoring it as a parity result - which is how
+      the CLI's teardown segfault stayed hidden behind a green sweep.
+- [x] `scripts/parity-sweep-scrape.sh` covers `scrape`, `serve` and the worker
+      protocol: 169 cases, **165 identical**, the 4 remaining both traced to
+      recorded deviations outside the CLI
+- [x] `Obscura.Parity.Tests`: **306 of 307**, one skipped. Includes the 17
+      `--eval` expressions and `UrlSerializationParityTests`, which pins page-URL
+      serialization over 13 opaque-path cases.
 - [ ] Obstacle course (companion repo `obscura-benchmark`) at 33/33
 - [ ] Performance comparison vs the Rust build on the standard pages
 - [ ] Re-enable CI as .NET workflows (rename off `.disabled`, rewrite for dotnet)
@@ -390,6 +436,57 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   `Exception` raises an ordinary script error that page JS can simply catch,
   defeating the cap, so the port uses the uncatchable `Interrupt` plus a
   raise-collect-restore recovery.
+- **The CLI exited on a signal after succeeding, and now does not.** About one
+  run in ten exited 139 (SIGSEGV) having produced complete, byte-identical
+  output: the crash lands in native shutdown after `main` returns and after
+  stdout is flushed. Localized by rate: 0 of 150 for `--version`, which builds
+  no isolate, against 17 of 150 for `fetch about:blank` and 20 of 150 for a
+  `--dump`, so it tracks having created a V8 isolate rather than anything about
+  the page. It predates this branch (the base commit measured 19 and 12 crashes
+  per 320 sweep cases against 15 and 7 for the current build), and it was
+  invisible because the sweep compared stdout without checking exit status.
+  `ProcessExit.Immediately` ends the process with libc `_exit` once the streams
+  are flushed, which skips the `atexit` chain the crash lives in.
+  `Environment.Exit` does not help (26 of 150) because it still runs that chain.
+
+  Stressed, with the pre-fix commit built as a matched control and both binaries
+  run back to back on the same machine state:
+
+      serial, fetch about:blank      pre-fix 29/150 and 16/150   fixed 0/150 twice
+      serial, 1500 runs              -                           fixed 0/1500
+      4-way parallel, mixed, 3000    pre-fix 4/3000              fixed 0/3000
+
+  The parallel harness is the weaker test and it is worth knowing why: process
+  contention widens the window the race needs, so the same fault that fires
+  about 15% of the time serially fires 0.13% of the time under four-way
+  parallelism. Measure this one serially.
+
+  Pinned by `ProcessExitTests`, deliberately probabilistic, and
+  `scripts/parity-sweep.sh` now reports a signal death instead of scoring it as
+  a parity result. No new native dependency: libc is the platform.
+- **ClearScript names V8 script documents its own way, so `Error.stack` text
+  differs.** Line and column always match; only the script name does. Two
+  symptoms, one cause, both measured against the reference binary:
+  - A `file:` script URL loses its scheme, because ClearScript names a
+    URI-based document by `Uri.LocalPath` when the URI is a file URI:
+
+        rust:  at inner (file:///tmp/stack.html:2:26)
+        port:  at inner (/tmp/stack.html:2:26)
+
+    `http`, `https` and `about` URLs print verbatim and do not diverge.
+  - A host-internal script (`<eval>`, `<eval-remote>`, `<done?>`) is named, not
+    URI-based, and ClearScript appends a uniqueness counter and a transient
+    marker: `<eval> [5] [temp]` where deno_core reuses `<eval>` every time.
+    `DocumentFlags.None` drops the ` [temp]` but not the counter, so the name is
+    still unstable per call.
+
+  There is no supported fix. `DocumentInfo` exposes `Name` and `Uri` as
+  getter-only with two mutually exclusive constructors, so a document cannot
+  carry a URI and an overridden name; `ScriptEngine.DocumentNameManager` is
+  internal. Naming file scripts by string instead would trade the missing scheme
+  for the uniquifier and also drop the URI V8 uses as `import()`'s referrer.
+  This is visible to a page that parses `Error.stack`, and on the CDP wire in
+  `RemoteObject.description` and `exceptionDetails.exception.description`.
 - **Every frame re-parses bootstrap.js.** There is no snapshot equivalent, so a
   frame realm cannot be restored from a prebuilt context. Correctness holds;
   per-frame startup cost does not.

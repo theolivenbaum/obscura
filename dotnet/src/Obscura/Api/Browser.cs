@@ -7,10 +7,24 @@ namespace Obscura.Api;
 
 /// <summary>The embeddable Obscura browser session.</summary>
 /// <remarks>
+/// <para>
 /// Port of <c>crates/obscura/src/browser.rs</c>. Rust returns
 /// <c>Result&lt;Self, Error&gt;</c> from every constructor even though none of
 /// them can fail today; the port keeps the shape without the pointless result,
 /// and throws <see cref="ObscuraException"/> if construction ever does fail.
+/// </para>
+/// <para>
+/// One item of <c>crates/obscura/src/lib.rs</c> has no direct equivalent: its
+/// <c>pub use</c> of the interception types (<c>InterceptedRequest</c>,
+/// <c>InterceptResolution</c>, <c>RequestCallback</c>, <c>RequestInfo</c>,
+/// <c>ResourceType</c>, <c>Response</c>, <c>ResponseCallback</c>) re-exports
+/// them from the crate root. C# has no exported re-export: a <c>using X = Y;</c>
+/// alias is file scoped. The types themselves are public and reachable, from
+/// <c>Obscura.Browser</c> and <c>Obscura.Net</c>, which this assembly references
+/// transitively, so an embedder adds a second <c>using</c> rather than losing
+/// access. <see cref="Page.EnableInterception"/>, <see cref="Page.OnRequest"/>
+/// and <see cref="Page.OnResponse"/> are the entry points that use them.
+/// </para>
 /// </remarks>
 public sealed class Browser
 {

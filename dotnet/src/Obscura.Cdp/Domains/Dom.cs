@@ -537,7 +537,10 @@ public static class Dom
         if (double.IsFinite(value) && Math.Truncate(value) == value
             && value >= long.MinValue && value <= long.MaxValue)
         {
-            return JsonValue.Create((long)value);
+            // Rust's `n as i64` saturates, and `i64::MAX as f64` rounds up, so the
+            // upper bound above admits one double that a C# cast would wrap to
+            // long.MinValue instead. Saturate the same way.
+            return JsonValue.Create(value >= 9223372036854775808.0 ? long.MaxValue : (long)value);
         }
 
         return JsonValue.Create(value);

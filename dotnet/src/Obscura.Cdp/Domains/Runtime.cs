@@ -675,11 +675,15 @@ public static class Runtime
             obj["objectId"] = objectId;
         }
 
-        if (info.Value is { } value)
+        // Rust writes the key whenever `value` is Some, including Some(Value::Null),
+        // so a client reading result.value gets null for a null result as Chrome
+        // reports it, and nothing at all for undefined or a handle-only object.
+        if (info.HasValue)
         {
-            obj["value"] = value.DeepClone();
+            obj["value"] = info.Value?.DeepClone();
         }
 
         return obj;
     }
+
 }

@@ -85,8 +85,8 @@ public sealed class CdpClickSubmitParity
             sessionId);
 
         Obscura.Browser.Page page = ctx.GetPageMut(pageId)!;
-        Assert.Equal("/submitted", page.Url!.AbsolutePath);
-        Assert.Equal("?vacancy_id=123&message=hello&agree=yes", page.Url!.Query);
+        Assert.Equal("/submitted", page.Url!.Path);
+        Assert.Equal("vacancy_id=123&message=hello&agree=yes", page.Url!.Query);
         Assert.Contains(
             "submitted",
             page.Evaluate("document.body.textContent").AsStringOr(string.Empty),

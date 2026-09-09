@@ -9,7 +9,7 @@ using Obscura.Js.Runtime;
 if (WorkerHost.IsWorkerProcess())
 {
     Log.SetFilter("warn");
-    return await WorkerHost.RunAsync().ConfigureAwait(false);
+    return ProcessExit.Immediately(await WorkerHost.RunAsync().ConfigureAwait(false));
 }
 
 // Pin the process timezone before V8/ICU reads it. V8 sources the zone for both
@@ -46,8 +46,10 @@ if (parse.Errors.Count > 0)
 }
 
 // --help / --version are actions on the parse result; when one is present it
-// owns the invocation and there is no subcommand to run.
-if (parse.Action is not null)
+// owns the invocation and there is no subcommand to run. The root's own action
+// is only a marker that no subcommand was named, so it falls through to the
+// bare-server path below.
+if (parse.Action is not null and not CliDefinition.NoSubcommandAction)
 {
     return parse.Invoke();
 }
@@ -116,17 +118,30 @@ catch (NotPortedException error)
     // Loud on purpose: exiting 0 here would let a CLI parity test pass against
     // an engine that never ran.
     Console.Error.WriteLine($"obscura: {error.Message}");
-    return 70; // EX_SOFTWARE
+    return ProcessExit.Immediately(70); // EX_SOFTWARE
 }
 catch (CliException error)
 {
     // What the Rust runtime prints for an anyhow error returned from main.
     Console.Error.WriteLine($"Error: {error.Message}");
-    return 1;
+    return ProcessExit.Immediately(1);
+}
+catch (Exception error)
+{
+    // Rust's `main` returns `anyhow::Result<()>`, so EVERY error out of a
+    // command prints "Error: <message>" and exits 1, not just the ones the CLI
+    // raised itself. Without this arm an error from a lower layer escaped as an
+    // unhandled exception: `serve --host localhost` printed a .NET stack trace
+    // and aborted where the reference prints
+    // "Error: invalid --host 'localhost': invalid IP address syntax" and exits 1.
+    // The type and stack are still available under -v, which anyhow's
+    // RUST_BACKTRACE=1 output is the counterpart of.
+    Console.Error.WriteLine($"Error: {error.Message}");
+    Log.Debug($"unhandled {error.GetType().FullName}: {error}");
+    return ProcessExit.Immediately(1);
 }
 
-Console.Out.Flush();
-return 0;
+return ProcessExit.Immediately(0);
 
 static void InstallVersionAction(RootCommand root)
 {

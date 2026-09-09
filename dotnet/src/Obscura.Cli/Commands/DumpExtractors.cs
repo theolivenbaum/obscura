@@ -408,8 +408,7 @@ public static class DumpExtractors
     /// The page URL as the <c>url</c> crate's port sees it, which is what
     /// <c>Url::join</c> resolves relative references against.
     /// </summary>
-    internal static UrlRecord? BaseUrl(Page page) =>
-        page.Url is { } url ? UrlRecord.Parse(url.AbsoluteUri) : null;
+    internal static UrlRecord? BaseUrl(Page page) => page.Url;
 
     /// <summary>
     /// <c>query_selector_all(...).unwrap_or_default()</c>: an invalid selector

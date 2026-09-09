@@ -14,7 +14,7 @@ namespace Obscura.Cli.Tests;
 /// interception API on the embeddable <c>Page</c> (issue #306), including the
 /// interception channel and the passive per-page callbacks.
 /// </summary>
-public sealed class InterceptionTests : IDisposable
+public sealed class InterceptionTests
 {
     /// <summary>
     /// Minimal HTTP/1.1 server: <c>/</c> returns HTML that fires
@@ -94,14 +94,6 @@ public sealed class InterceptionTests : IDisposable
             _shutdown.Dispose();
         }
     }
-
-    public InterceptionTests() =>
-        // Every fixture binds loopback; the module-scoped opt-in the browser
-        // suite uses is not in force here.
-        Environment.SetEnvironmentVariable("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
-
-    public void Dispose() =>
-        Environment.SetEnvironmentVariable("OBSCURA_ALLOW_PRIVATE_NETWORK", null);
 
     /// <summary>Drain the interception channel, resolving every request.</summary>
     private static void ResolveAll(

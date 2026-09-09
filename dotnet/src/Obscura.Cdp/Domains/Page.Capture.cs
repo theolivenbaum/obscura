@@ -84,6 +84,21 @@ public static partial class Page
             ?? throw new DomainError($"Invalid parameters: {name} must be a boolean");
     }
 
+    /// <summary>
+    /// Rust's <c>f32 as u64</c>: saturating, and NaN becomes zero. A C# cast of an
+    /// out-of-range float is undefined, which would silently wrap a huge dimension into
+    /// a plausible one and slip past the size guards.
+    /// </summary>
+    private static ulong SaturateToU64(float value)
+    {
+        if (float.IsNaN(value) || value <= 0.0f)
+        {
+            return 0UL;
+        }
+
+        return value >= 18446744073709551616.0f ? ulong.MaxValue : (ulong)value;
+    }
+
     private static double ScreenshotNumber(JsonObject clip, string name)
     {
         if (!clip.TryGetPropertyValue(name, out JsonNode? node))
@@ -366,8 +381,10 @@ public static partial class Page
                 "Page.captureScreenshot received an invalid full-page region");
         }
 
-        ulong nativeWidth = (ulong)MathF.Ceiling(width);
-        ulong nativeHeight = (ulong)MathF.Ceiling(height);
+        // Rust's `f32 as u64` saturates; a C# cast of an out-of-range float is undefined,
+        // so the guards below would be reading a wrapped value rather than a huge one.
+        ulong nativeWidth = SaturateToU64(MathF.Ceiling(width));
+        ulong nativeHeight = SaturateToU64(MathF.Ceiling(height));
         double outputWidthValue = Math.Round((double)width * scale, MidpointRounding.AwayFromZero);
         double outputHeightValue = Math.Round((double)height * scale, MidpointRounding.AwayFromZero);
         if (nativeWidth == 0
@@ -386,8 +403,16 @@ public static partial class Page
 
         var outputWidth = (uint)outputWidthValue;
         var outputHeight = (uint)outputHeightValue;
-        ulong nativePixels = checked(nativeWidth * nativeHeight);
-        ulong outputPixels = checked((ulong)outputWidth * outputHeight);
+        // `checked_mul(..).ok_or(..)`: a size that does not fit is answered as a protocol
+        // error, not raised. Both operands are non-zero here (rejected above), and the
+        // output product is two u32s so it always fits.
+        if (nativeWidth > ulong.MaxValue / nativeHeight)
+        {
+            throw new DomainError("Page.captureScreenshot long PNG size overflow");
+        }
+
+        ulong nativePixels = nativeWidth * nativeHeight;
+        ulong outputPixels = (ulong)outputWidth * outputHeight;
         if (nativePixels > MaxLongPngPixels || outputPixels > MaxLongPngPixels)
         {
             throw new DomainError(

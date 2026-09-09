@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Obscura.Js.Url;
 using Obscura.Net;
 
 namespace Obscura.Browser;
@@ -8,7 +9,7 @@ namespace Obscura.Browser;
 internal sealed record StylesheetImport(string Url, string? Media);
 
 /// <summary>A fetched stylesheet plus the imports it declares.</summary>
-internal sealed record LoadedStylesheet(Uri ResponseUrl, IReadOnlyList<StylesheetImport> Imports, string Rules);
+internal sealed record LoadedStylesheet(UrlRecord ResponseUrl, IReadOnlyList<StylesheetImport> Imports, string Rules);
 
 /// <summary>Where a materialized author sheet is inserted.</summary>
 internal abstract record AuthorStylesheetTarget
@@ -194,14 +195,14 @@ internal static partial class PageHelpers
     /// </remarks>
     internal static bool CrossSchemeToFile(string from, string to)
     {
-        Uri? target = PageUrl.TryParse(to);
+        UrlRecord? target = PageUrl.TryParse(to);
         bool toIsFile = target is not null
             && string.Equals(target.Scheme, "file", StringComparison.OrdinalIgnoreCase);
         if (!toIsFile)
         {
             return false;
         }
-        Uri? source = PageUrl.TryParse(from);
+        UrlRecord? source = PageUrl.TryParse(from);
         return source is null || !string.Equals(source.Scheme, "file", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -216,9 +217,9 @@ internal static partial class PageHelpers
     /// Real Chrome allows <c>data:</c> subresources by default; Instagram and most
     /// Meta properties depend on this for their inline bootstrap scripts.
     /// </remarks>
-    internal static bool SubresourceAllowed(Uri? pageUrl, string resource)
+    internal static bool SubresourceAllowed(UrlRecord? pageUrl, string resource)
     {
-        Uri? target = PageUrl.TryParse(resource);
+        UrlRecord? target = PageUrl.TryParse(resource);
         if (target is null)
         {
             return false;
@@ -240,7 +241,7 @@ internal static partial class PageHelpers
     /// Direct navigations bypass this helper and use an empty referrer.
     /// Referrer-Policy overrides are not yet plumbed through the navigation request.
     /// </remarks>
-    internal static string NavigationReferrer(Uri source, Uri target)
+    internal static string NavigationReferrer(UrlRecord source, UrlRecord target)
     {
         bool sourceWeb = source.Scheme is "http" or "https";
         bool targetWeb = target.Scheme is "http" or "https";
@@ -307,10 +308,10 @@ internal static partial class PageHelpers
         return output.ToString();
     }
 
-    internal static (string Key, Uri Url) CanonicalStylesheetUrl(Uri url)
+    internal static (string Key, UrlRecord Url) CanonicalStylesheetUrl(UrlRecord url)
     {
-        Uri stripped = PageUrl.WithoutFragment(url);
-        return (stripped.AbsoluteUri, stripped);
+        UrlRecord stripped = PageUrl.WithoutFragment(url);
+        return (stripped.Href, stripped);
     }
 
     /// <summary>
@@ -341,7 +342,7 @@ internal static partial class PageHelpers
         var output = new StringBuilder();
         foreach (StylesheetImport import in sheet.Imports)
         {
-            Uri? importUrl = PageUrl.TryJoin(sheet.ResponseUrl, import.Url);
+            UrlRecord? importUrl = PageUrl.TryJoin(sheet.ResponseUrl, import.Url);
             if (importUrl is null)
             {
                 continue;
@@ -375,7 +376,7 @@ internal static partial class PageHelpers
     /// browsers, not the document URL; failing to rebase them drops common
     /// background, mask, cursor and font assets from nested theme directories.
     /// </remarks>
-    internal static string RebaseCssUrls(string css, Uri baseUrl)
+    internal static string RebaseCssUrls(string css, UrlRecord baseUrl)
     {
         var output = new StringBuilder(css.Length);
         int index = 0;
@@ -432,7 +433,7 @@ internal static partial class PageHelpers
                 && PageUrl.TryParse(value) is null
                 && PageUrl.TryJoin(baseUrl, value) is { } joined)
             {
-                resolved = joined.AbsoluteUri;
+                resolved = joined.Href;
             }
 
             if (resolved is not null)
@@ -465,7 +466,7 @@ internal static partial class PageHelpers
     /// Linked sheets have already been rebased before materialization; inline
     /// declarations are resolved against the document base here.
     /// </remarks>
-    internal static List<string> CssResourceUrls(string css, Uri baseUrl)
+    internal static List<string> CssResourceUrls(string css, UrlRecord baseUrl)
     {
         List<string> urls = [];
         int index = 0;
@@ -534,7 +535,7 @@ internal static partial class PageHelpers
     /// Shared by the generic scan and the <c>@font-face</c> path so the two cannot
     /// disagree about quoting, fragments, <c>data:</c> or an unresolved <c>var()</c>.
     /// </remarks>
-    internal static void PushCssUrl(string raw, Uri baseUrl, List<string> urls)
+    internal static void PushCssUrl(string raw, UrlRecord baseUrl, List<string> urls)
     {
         string value = Unquote(raw.Trim());
         if (value.Length == 0
@@ -551,7 +552,7 @@ internal static partial class PageHelpers
         url = PageUrl.WithoutFragment(url);
         if (url.Scheme is "http" or "https")
         {
-            urls.Add(url.AbsoluteUri);
+            urls.Add(url.Href);
         }
     }
 
@@ -568,7 +569,7 @@ internal static partial class PageHelpers
     /// stripping the query and fragment. A malformed block is left to the normal
     /// scanner so this cannot swallow the rules that follow it.
     /// </remarks>
-    internal static (int Length, List<string> Sources)? CssFontFaceRule(ReadOnlySpan<char> css, Uri baseUrl)
+    internal static (int Length, List<string> Sources)? CssFontFaceRule(ReadOnlySpan<char> css, UrlRecord baseUrl)
     {
         const string Marker = "@font-face";
         if (css.Length < Marker.Length || !css[..Marker.Length].Equals(Marker, StringComparison.OrdinalIgnoreCase))
@@ -852,9 +853,9 @@ internal static partial class PageHelpers
         return 0;
     }
 
-    internal static ResourceType RenderResourceType(Uri url)
+    internal static ResourceType RenderResourceType(UrlRecord url)
     {
-        string path = url.AbsolutePath.ToLowerInvariant();
+        string path = url.Path.ToLowerInvariant();
         foreach (string extension in FontExtensions)
         {
             if (path.EndsWith(extension, StringComparison.Ordinal))

@@ -12,8 +12,8 @@ namespace Obscura.Cli.Tests;
 
 /// <summary>
 /// Tests for the embeddable library API (<c>crates/obscura</c> -&gt; the
-/// <c>Obscura</c> project), including the port of
-/// <c>crates/obscura/tests/attribute_injection.rs</c>.
+/// <c>Obscura</c> project). The named integration-test files under
+/// <c>crates/obscura/tests/</c> have their own counterparts beside this one.
 /// </summary>
 /// <remarks>
 /// These belong in an <c>Obscura.Tests</c> project. They live here because
@@ -35,50 +35,11 @@ public sealed class ObscuraApiTests
     private static string? Text(JsonNode? node) =>
         node?.GetValueKind() == JsonValueKind.String ? node.GetValue<string>() : null;
 
-    // SEC-007 / #583: Element.Attribute must escape the attribute name before
-    // interpolating it into page JS. A name containing a quote must not be able
-    // to break out of the getAttribute('{name}') string literal and run
-    // arbitrary JS, the same guarantee QuerySelector already gives for selectors.
-    [Fact]
-    public async Task Attribute_name_cannot_inject_js()
-    {
-        var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
-        await page.GotoAsync("data:text/html,<div id=x data-safe=ok></div>");
-
-        // Canary the injection would flip from 0 to 1.
-        page.Evaluate("globalThis.__pwned = 0");
-
-        var element = page.QuerySelector("#x");
-        Assert.NotNull(element);
-
-        // The payload breaks out of getAttribute('{name}') while staying a
-        // single valid expression, carrying the assignment by concatenation:
-        //   el.getAttribute('x' + (globalThis.__pwned = 1) + '')
-        _ = element!.Attribute("x' + (globalThis.__pwned = 1) + '");
-
-        var pwned = page.Evaluate("globalThis.__pwned");
-        Assert.NotEqual(1.0, Number(pwned));
-    }
-
-    [Fact]
-    public async Task Attribute_reads_ordinary_names()
-    {
-        var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
-        await page.GotoAsync("data:text/html,<div id=x data-safe=ok></div>");
-
-        var element = page.QuerySelector("#x");
-        Assert.NotNull(element);
-        // Escaping must not break reading a normal attribute name.
-        Assert.Equal("ok", element!.Attribute("data-safe"));
-    }
-
     [Fact]
     public async Task Query_selector_returns_null_for_a_missing_element()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(Fixture);
         Assert.Null(page.QuerySelector("#nope"));
     }
@@ -87,7 +48,7 @@ public sealed class ObscuraApiTests
     public async Task Page_exposes_url_title_and_content()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(Fixture);
 
         Assert.StartsWith("data:text/html,", page.Url, StringComparison.Ordinal);
@@ -99,7 +60,7 @@ public sealed class ObscuraApiTests
     public async Task Element_text_and_click_work_through_the_handle()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(
             "data:text/html,<button id=b onclick=\"globalThis.__hits=(globalThis.__hits||0)+1\">Go</button>");
 
@@ -123,7 +84,7 @@ public sealed class ObscuraApiTests
     public async Task Click_on_a_handle_from_a_previous_document_reports_element_not_found()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(Fixture);
 
         var element = page.QuerySelector("#x");
@@ -140,7 +101,7 @@ public sealed class ObscuraApiTests
     public async Task Wait_for_selector_resolves_when_the_node_appears()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(Fixture);
 
         // Inserted by an already-run script, so it is present on the first poll.
@@ -167,7 +128,7 @@ public sealed class ObscuraApiTests
     public async Task Wait_for_selector_does_not_pump_the_event_loop()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(
             "data:text/html,<html><body><script>" +
             "setTimeout(()=>{const d=document.createElement('div');d.id='late';" +
@@ -187,7 +148,7 @@ public sealed class ObscuraApiTests
     public async Task Wait_for_selector_times_out_with_the_rust_message()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync(Fixture);
 
         var error = await Assert.ThrowsAsync<ObscuraException>(
@@ -200,7 +161,7 @@ public sealed class ObscuraApiTests
     public async Task Goto_reports_a_navigation_error_rather_than_a_page_exception()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         var error = await Assert.ThrowsAsync<ObscuraException>(
             () => page.GotoAsync("file:///definitely/not/here.html"));
         Assert.Equal(ObscuraErrorKind.Navigation, error.Kind);
@@ -211,7 +172,7 @@ public sealed class ObscuraApiTests
     public async Task Settle_lets_scheduled_work_run_between_evaluations()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         await page.GotoAsync("data:text/html,<html><body><p id=p>before</p></body></html>");
 
         page.Evaluate("setTimeout(()=>{document.getElementById('p').textContent='after'},10)");
@@ -223,7 +184,7 @@ public sealed class ObscuraApiTests
     public async Task Preload_script_runs_before_the_pages_own_scripts()
     {
         var browser = ApiBrowser.New();
-        var page = await browser.NewPageAsync();
+        using var page = await browser.NewPageAsync();
         page.AddPreloadScript("globalThis.__preloaded = 'yes'");
         await page.GotoAsync(
             "data:text/html,<html><body><script>globalThis.__saw=globalThis.__preloaded</script></body></html>");
@@ -253,8 +214,8 @@ public sealed class ObscuraApiTests
     public async Task Pages_from_one_browser_are_independent_realms()
     {
         var browser = ApiBrowser.New();
-        var first = await browser.NewPageAsync();
-        var second = await browser.NewPageAsync();
+        using var first = await browser.NewPageAsync();
+        using var second = await browser.NewPageAsync();
         Assert.NotSame(first, second);
 
         await first.GotoAsync("data:text/html,<html><head><title>one</title></head><body></body></html>");
@@ -298,6 +259,33 @@ public sealed class ObscuraApiTests
                 File.Delete(path);
             }
         }
+    }
+
+    /// <summary>
+    /// The Rust <c>Cookie</c> derives <c>Serialize</c> with no rename, so its
+    /// JSON keys are the Rust field names, <c>http_only</c> included.
+    /// </summary>
+    [Fact]
+    public void Cookie_serializes_with_the_rust_field_names()
+    {
+        var json = JsonSerializer.Serialize(new Cookie
+        {
+            Name = "session",
+            Value = "abc",
+            Domain = "example.com",
+            Path = "/",
+            Secure = true,
+            HttpOnly = true,
+        });
+        Assert.Equal(
+            "{\"name\":\"session\",\"value\":\"abc\",\"domain\":\"example.com\","
+            + "\"path\":\"/\",\"secure\":true,\"http_only\":true}",
+            json);
+
+        var round = JsonSerializer.Deserialize<Cookie>(json);
+        Assert.NotNull(round);
+        Assert.Equal("session", round!.Name);
+        Assert.True(round.HttpOnly);
     }
 
     [Fact]

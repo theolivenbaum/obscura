@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using Obscura.Dom;
 using Obscura.Js.Runtime;
+using Obscura.Js.Url;
 using Obscura.Net;
 
 namespace Obscura.Browser;
@@ -157,7 +158,7 @@ public sealed partial class Page
                     ? srcUrl
                     : PageUrl.TryParse(script.BaseUrl) is { } scriptBase
                         && PageUrl.TryJoin(scriptBase, srcUrl) is { } joined
-                        ? joined.AbsoluteUri
+                        ? joined.Href
                         : srcUrl;
 
             if (!PageHelpers.SubresourceAllowed(Url, fullUrl))
@@ -175,14 +176,14 @@ public sealed partial class Page
             fetchTasks.Add((i, fullUrl));
         }
 
-        Uri scriptInitiator = Url ?? new Uri("about:blank");
+        UrlRecord scriptInitiator = Url ?? PageUrl.TryParse("about:blank")!;
         var fetchFactories =
             new List<Func<Task<(int Index, string Url, Response Response)?>>>(fetchTasks.Count);
         foreach ((int index, string url) in fetchTasks)
         {
             fetchFactories.Add(async () =>
             {
-                Uri parsed = PageUrl.TryParse(url) ?? new Uri("about:blank");
+                UrlRecord parsed = PageUrl.TryParse(url) ?? PageUrl.TryParse("about:blank")!;
                 if (string.Equals(parsed.Scheme, "data", StringComparison.Ordinal))
                 {
                     // data: URIs are inline; decode locally, no network fetch.
@@ -202,7 +203,7 @@ public sealed partial class Page
                     };
                     return (index, url, new Response
                     {
-                        Url = parsed,
+                        Url = NetUrl.From(parsed),
                         Status = 200,
                         Headers = headers,
                         Body = body,
@@ -210,11 +211,12 @@ public sealed partial class Page
                     });
                 }
 
-                ResourceRequest request = ResourceRequest.Subresource(ResourceType.Script, scriptInitiator);
+                ResourceRequest request =
+                    ResourceRequest.Subresource(ResourceType.Script, NetUrl.From(scriptInitiator));
                 try
                 {
                     Response response = await HttpClient
-                        .FetchResourceWithCallbacksAsync(parsed, request, _callbacks, cancellationToken)
+                        .FetchResourceWithCallbacksAsync(NetUrl.From(parsed), request, _callbacks, cancellationToken)
                         .ConfigureAwait(false);
                     return (index, url, response);
                 }
@@ -379,7 +381,7 @@ public sealed partial class Page
                                 ? src
                                 : PageUrl.TryParse(script.BaseUrl) is { } moduleBase
                                     && PageUrl.TryJoin(moduleBase, src) is { } joined
-                                    ? joined.AbsoluteUri
+                                    ? joined.Href
                                     : src;
                         if (Js is not { } moduleRuntime)
                         {
@@ -580,7 +582,7 @@ public sealed partial class Page
             {
                 return;
             }
-            string executionUrl = value.Response.Url.AbsoluteUri;
+            string executionUrl = NetUrl.To(value.Response.Url).Href;
             RecordNetworkEventWithBody(
                 value.Url,
                 "GET",
@@ -632,7 +634,7 @@ public sealed partial class Page
     {
         List<NodeId> scriptIds = dom.TryQuerySelectorAll("script", out List<NodeId> found, out _) ? found : [];
         Dictionary<uint, string> basesAtScript = [];
-        Uri? activeBase = PageUrl.TryParse(documentUrl);
+        UrlRecord? activeBase = PageUrl.TryParse(documentUrl);
         bool foundBase = false;
         foreach (NodeId nid in dom.Descendants(dom.Document))
         {
@@ -654,7 +656,7 @@ public sealed partial class Page
             }
             else if (string.Equals(element.Name.Local, "script", StringComparison.Ordinal))
             {
-                basesAtScript[nid.Raw] = activeBase?.AbsoluteUri ?? documentUrl;
+                basesAtScript[nid.Raw] = activeBase?.Href ?? documentUrl;
             }
         }
 
