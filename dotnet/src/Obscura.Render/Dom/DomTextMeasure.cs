@@ -12,6 +12,7 @@ internal static class DomTextMeasure
 {
     private static readonly Lock Gate = new();
     private static readonly Dictionary<string, SKFont> Fonts = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, float> HeightScales = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Text width for layout, from real glyph metrics of the deterministic bundled face.
@@ -82,7 +83,12 @@ internal static class DomTextMeasure
 
         lock (Gate)
         {
-            font.Size = size;
+            // Measure in font units and scale once, rather than measuring at the
+            // height-scaled size: Skia quantizes advances at a fractional size, which
+            // left three of seven calibration cases a pixel off the reference, and
+            // ab_glyph's own arithmetic is a single scale applied to unit advances.
+            int unitsPerEm = font.Typeface.UnitsPerEm;
+            font.Size = unitsPerEm;
             ReadOnlySpan<char> visible = buffer[..length];
             ushort[] glyphs = font.GetGlyphs(visible);
             if (glyphs.Length == 0)
@@ -91,19 +97,77 @@ internal static class DomTextMeasure
             }
 
             float[] widths = font.GetGlyphWidths(glyphs);
-            float total = 0f;
+            float units = 0f;
             foreach (float advance in widths)
             {
-                total += advance;
+                units += advance;
             }
 
-            return total;
+            SKFontMetrics metrics = font.Metrics;
+            float height = -metrics.Ascent + metrics.Descent;
+            return height > 0f ? units * size / height : units * size / unitsPerEm;
         }
     }
 
-    private static SKFont FallbackFont(string? family)
+    /// <summary>
+    /// The Skia font size that reproduces ab_glyph's <c>PxScale</c> for a CSS px size.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ab_glyph scales by the font's <em>height</em>, not its em square:
+    /// <c>PxScale::from(px)</c> makes hhea's ascender-minus-descender <c>px</c> tall,
+    /// where <see cref="SKFont.Size"/> makes the em square <c>px</c> tall. For
+    /// Liberation Sans that is 2288 units against 2048, so every advance the reference
+    /// reports is 10.5% narrower than Skia's at the same nominal size, and its ascent
+    /// is shorter by the same factor. The ratio is per face: Liberation Sans 1.1172,
+    /// Serif 1.1074, Mono 1.1328, DejaVu Sans 1.1641.
+    /// </para>
+    /// <para>
+    /// This is not a cosmetic difference. <c>text_width</c> sizes auto-width
+    /// <c>&lt;button&gt;</c> and <c>&lt;select&gt;</c> boxes, so measuring em-based made
+    /// the port's buttons ~11% wider than the reference's - 211px against 196px for the
+    /// same label - which changed where text wrapped and cascaded into different
+    /// document heights. Applying it to drawing as well keeps the static-font glyphs and
+    /// their baseline the size the reference paints.
+    /// </para>
+    /// <para>
+    /// Skia reports hhea's values verbatim in <see cref="SKFontMetrics"/>, checked
+    /// against the raw table for all four bundled faces, so the factor is read from
+    /// metrics rather than by parsing hhea by hand.
+    /// </para>
+    /// </remarks>
+    internal static float HeightScaledSize(string? family, float cssPx) =>
+        cssPx * HeightScale(FallbackFaceStem(family));
+
+    private static float HeightScale(string stem)
     {
-        string stem = FallbackFaceStem(family);
+        lock (Gate)
+        {
+            if (HeightScales.TryGetValue(stem, out float cached))
+            {
+                return cached;
+            }
+        }
+
+        SKFont font = FallbackFontByStem(stem);
+        float scale;
+        lock (Gate)
+        {
+            int unitsPerEm = font.Typeface.UnitsPerEm;
+            font.Size = unitsPerEm;
+            SKFontMetrics metrics = font.Metrics;
+            float height = -metrics.Ascent + metrics.Descent;
+            scale = height > 0f && unitsPerEm > 0 ? unitsPerEm / height : 1f;
+            HeightScales[stem] = scale;
+        }
+
+        return scale;
+    }
+
+    private static SKFont FallbackFont(string? family) => FallbackFontByStem(FallbackFaceStem(family));
+
+    private static SKFont FallbackFontByStem(string stem)
+    {
         lock (Gate)
         {
             if (Fonts.TryGetValue(stem, out SKFont? cached))

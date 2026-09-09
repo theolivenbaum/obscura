@@ -450,6 +450,21 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   against the real list's ~10,000). The algorithm is complete, and the implicit
   wildcard rule makes every single-label TLD correct, but a missing multi-label
   suffix would let `document.domain` relax one label further than the reference.
+- **`DomTextMeasure` reproduces ab_glyph's height-based scale, not Skia's em-based
+  one.** `PxScale::from(px)` sizes a glyph so hhea's ascender-minus-descender is
+  `px` tall; `SKFont.Size` sizes the em square. Liberation Sans is 2288 units
+  against a 2048 em, so measuring em-based made every advance 10.5% wider than
+  the reference reports, per face: Sans 1.1172, Serif 1.1074, Mono 1.1328, DejaVu
+  Sans 1.1641. Since `text_width` sizes auto-width `<button>` and `<select>`
+  boxes, RenderLab's "Launch simulated demo" button was 211px against the
+  reference's 196px, the label wrapped differently, and the document came out 16px
+  shorter at a 640px viewport - a 21.8% whole-page pixel difference, because every
+  row below the divergence was offset. Now 2.2%, which is edge shading. Advances
+  are summed in font units and scaled once, because Skia quantizes at a fractional
+  size and left three of seven calibration cases a pixel out. `PaintText.DrawText`
+  takes the same conversion, or the static-font glyphs would be drawn 11% larger
+  than the reference paints them and sit on a different baseline. Pinned by
+  `DomTextMeasureScaleTests`.
 - **Grid `calc()` handles use a weak registry, not a raw pointer.** Rust hands
   taffy the `Arc` address as the opaque handle. Managed objects have no stable
   address, so the port allocates an aligned counter handle and keeps a weak
