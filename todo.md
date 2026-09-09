@@ -340,6 +340,29 @@ have created one.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Rounded corners were parabolas
+
+Every rounded box in both engines was a squircle. `rounded_rect_path_radii` /
+`RoundedRectPathRadii` built each corner as a quadratic Bezier whose single
+control point sat on the corner itself, which is a parabola: its midpoint is
+6.1% further from the corner centre than a quarter circle, so `border-radius:50%`
+did not draw a circle and the bulge grew with the radius. Corners are now cubic
+approximations with control points at `4/3*(sqrt(2)-1)` of the radius along the
+tangents. A 40px circle's worst departure from a true circle: 2.32px before,
+0.51px after, against Chromium's own 0.70px.
+
+One builder per engine feeds both the fills and the clip masks, so it was a
+single change on each side. On blur.html the plain-circle cell went 1.80 to 0.20
+against Chromium and the blurred-shadow cell 3.48 to 1.40, a shadow inheriting
+the shape it is cast from.
+
+Worth recording how it was found: a reader looked at the parity page and asked
+why the first frame's shadow blob was a rounded square where Chromium's was
+round. The first answer here was that the shape error belonged to the old shadow
+algorithm, on the strength of the new halo tracking Chromium closely. That was
+wrong - the halo comparison was too coarse to show a 1.2px bulge, and the plain
+circle sitting beside it in the same image had carried the same error all along.
+
 ### Known deviation: backdrop-filter edge band
 
 Two details decide how a `backdrop-filter` panel's edges look, and both were
