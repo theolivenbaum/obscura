@@ -211,18 +211,6 @@ The largest component. Split into stages; each stage is independently testable.
   error kind is `InvalidUrl`); only the reason is lost. Fixing it means threading
   a reason out of `UrlParser` and `UrlHost`, which have 9 and ~25 failure
   returns respectively, so it is its own piece of work rather than a one-liner.
-- **`RemoteObjectInfo.Value` cannot tell "no value" from "the value is JSON
-  null".** Rust carries `value: Option<serde_json::Value>`; the port carries
-  `JsonNode?`, and a JSON null inside a `JsonNode` graph *is* a C# null
-  reference, so `None` and `Some(Value::Null)` arrive identical. Two consequences:
-  `Obscura.Cdp`'s `Runtime.evaluate` rebuilds the distinction by inference (no
-  objectId with type `object` and subtype `null` is uniquely the by-value null
-  arm) rather than reading it, and `Obscura.Browser`'s `Page.Evaluate` JS-less
-  fallback still omits the key where Rust writes `{"type":"undefined","value":null}`
-  - unreachable from CDP, since a CDP page always has a JS runtime, but wrong.
-  The fix is a presence flag on the record, which is 8 construction sites and 3
-  read sites across `Obscura.Js`, `Obscura.Cdp`, `Obscura.Browser` and
-  `Obscura.Cli`; it would let the Cdp inference be deleted.
 - **`Obscura.Net` still speaks `System.Uri`, so URLs are reserialized at the
   transport boundary.** `Obscura.Browser` now keeps `UrlRecord` throughout, but
   `Response.Url`, `Request.Url` and every `ObscuraHttpClient` entry point take a
@@ -240,12 +228,16 @@ The largest component. Split into stages; each stage is independently testable.
   port omits the key, so a client reading `result.value` gets `undefined` where
   Chrome and Rust give `null`.
 
-- **Two Obscura.Js tests fail under full-solution load but pass in isolation.**
-  The project alone is 830/849 green; a solution-wide run loses two, a different
-  pair each time, all timing-sensitive. The first prepared render on a fresh
-  process costs ~300ms in embedded font initialization against ~1ms once warm,
-  so tests that schedule work tens of milliseconds apart collapse two events into
-  one when the host is loaded. Fix the latency rather than the tests.
+- **Two Obscura.Js tests are timing-flaky, and not only under solution load.**
+  830 of 849 is the clean result, but three consecutive runs of that project
+  alone gave 2 failures, then 1, then 0, so the earlier note that they pass in
+  isolation was optimistic. The pair that showed up:
+  `OpsTests.Read_body_capped_rejects_oversized_streamed_body` and
+  `RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop`. The
+  first prepared render on a fresh process costs ~300ms in embedded font
+  initialization against ~1ms once warm, so tests that schedule work tens of
+  milliseconds apart collapse two events into one when the host is busy. Fix the
+  latency rather than the tests.
 
 ## 9. Validation
 

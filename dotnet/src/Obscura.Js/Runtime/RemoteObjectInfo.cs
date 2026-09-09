@@ -18,7 +18,27 @@ public sealed record RemoteObjectInfo(
     string ClassName,
     string Description,
     string? ObjectId,
-    JsonNode? Value);
+    JsonNode? Value)
+{
+    /// <summary>
+    /// Whether <see cref="Value"/> is present at all: Rust's <c>Option::is_some</c>,
+    /// true even when the value itself is JSON null.
+    /// </summary>
+    /// <remarks>
+    /// Rust carries <c>value: Option&lt;serde_json::Value&gt;</c>, and a JSON null
+    /// inside a <see cref="JsonNode"/> graph <em>is</em> a null reference, so
+    /// <c>None</c> and <c>Some(Value::Null)</c> are indistinguishable from
+    /// <see cref="Value"/> alone. Consumers read this instead of null-checking:
+    /// <c>Runtime.evaluate</c> must emit a present <c>"value": null</c> for a null
+    /// result, the way Chrome does, and the scrape worker must answer JSON null
+    /// rather than falling back to the description.
+    ///
+    /// It defaults to <c>Value is not null</c>, which is right everywhere the value
+    /// is a real node or genuinely absent; only a deliberate <c>Some(Value::Null)</c>
+    /// has to say so.
+    /// </remarks>
+    public bool HasValue { get; init; } = Value is not null;
+}
 
 /// <summary>
 /// CDP remote objects that can be rebuilt when a page's V8 runtime is

@@ -153,18 +153,12 @@ public static class WorkerHost
                         var info = await page
                             .EvaluateForCdpWithTimeoutAsync(expression, true, true, 30_000)
                             .ConfigureAwait(false);
-                        // Rust reads `info.value`, an Option that is Some even
-                        // when the value itself is JSON null, and only falls back
-                        // to the description when it is None. A JsonNode has no
-                        // representation for a bare JSON null other than a null
-                        // reference, so those two cases collapse here and
-                        // `Thrown` is what separates them: a thrown value (or a
-                        // rejected promise) is exactly where Rust has None and
-                        // uses the description. Without this, `--eval null` and
-                        // `--eval undefined` reported the string "null".
-                        result = info.Value is null && info.Thrown
-                            ? JsonValue.Create(info.Description)
-                            : info.Value?.DeepClone();
+                        // Rust: `match info.value { Some(v) => v, None => description }`.
+                        // HasValue is that Option's is_some, so Some(Value::Null)
+                        // answers JSON null instead of the string "null".
+                        result = info.HasValue
+                            ? info.Value?.DeepClone()
+                            : JsonValue.Create(info.Description);
                     }
                     // Rust matches `Err(_) => Value::Null`, so every failure mode
                     // becomes a successful reply carrying null rather than

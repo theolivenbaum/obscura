@@ -741,14 +741,21 @@ public sealed partial class ObscuraJsRuntime
 
     internal static RemoteObjectInfo InfoFromJson(JsonNode? value) => value switch
     {
-        null => new RemoteObjectInfo(false, "object", "null", string.Empty, "null", null, null),
+        // Rust stores Some(Value::Null) here, not None, so the value is present.
+        null => new RemoteObjectInfo(false, "object", "null", string.Empty, "null", null, null)
+        {
+            HasValue = true,
+        },
         JsonArray array => new RemoteObjectInfo(
             false, "object", "array", "Array",
             $"Array({array.Count.ToString(CultureInfo.InvariantCulture)})", null, value.DeepClone()),
         JsonObject => new RemoteObjectInfo(false, "object", null, "Object", "Object", null, value.DeepClone()),
         _ => value.GetValueKind() switch
         {
-            JsonValueKind.Null => new RemoteObjectInfo(false, "object", "null", string.Empty, "null", null, null),
+            JsonValueKind.Null => new RemoteObjectInfo(false, "object", "null", string.Empty, "null", null, null)
+            {
+                HasValue = true,
+            },
             JsonValueKind.True or JsonValueKind.False => new RemoteObjectInfo(
                 false, "boolean", null, string.Empty,
                 value.GetValue<bool>() ? "true" : "false", null, value.DeepClone()),

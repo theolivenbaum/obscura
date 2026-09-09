@@ -2307,4 +2307,54 @@ public sealed class PageTests
         Assert.Equal("https://example.test:8443/robots.txt", PageUrl.RobotsUrl(url).Href);
         Assert.Equal("https://example.test:8443/deep/page?x=1#f", url.Href);
     }
+
+    /// <summary>
+    /// The JS-less <c>evaluate_for_cdp</c> arm reports its value as present, even
+    /// when that value is JSON null.
+    /// </summary>
+    /// <remarks>
+    /// Rust builds this arm with <c>value: Some(val)</c>, and its <c>evaluate</c>
+    /// returns a <c>serde_json::Value</c> rather than an <c>Option</c>, so an
+    /// expression outside the small static table is <c>Some(Value::Null)</c> and
+    /// the reply carries <c>{"type":"undefined","value":null}</c>. The port shared
+    /// one helper with the failure arm, where Rust has <c>None</c>, and a null
+    /// <see cref="System.Text.Json.Nodes.JsonNode"/> cannot say which it is - so
+    /// the key was dropped and a client reading <c>result.value</c> saw undefined.
+    /// </remarks>
+    [Fact]
+    public async Task JsLessEvaluateForCdpReportsItsValueAsPresent()
+    {
+        using Page page = PageFixtures.NewPage("js-less-eval");
+        page.Title = "T";
+        page.Url = UrlRecord.Parse("https://example.test/a")!;
+
+        RemoteObjectInfo known = await page.EvaluateForCdpAsync("document.title", true, false);
+        Assert.True(known.HasValue);
+        Assert.Equal("string", known.JsType);
+        Assert.Equal("T", known.Value?.GetValue<string>());
+
+        // Outside the static table: Rust still says Some, carrying null.
+        RemoteObjectInfo unknown = await page.EvaluateForCdpAsync("1+1", true, false);
+        Assert.True(unknown.HasValue);
+        Assert.Equal("undefined", unknown.JsType);
+        Assert.Null(unknown.Value);
+    }
+
+    /// <summary>
+    /// The failure arm is Rust's <c>value: None</c>, so the key must stay absent.
+    /// This is the half that a single shared helper got right, and it has to keep
+    /// being right now that the two are separate.
+    /// </summary>
+    [Fact]
+    public async Task CallFunctionOnWithoutARealmReportsNoValue()
+    {
+        using Page page = PageFixtures.NewPage("js-less-callfn");
+
+        RemoteObjectInfo info = await page.CallFunctionOnForCdpAsync(
+            "function(){ return 1; }", null, [], true, false);
+
+        Assert.False(info.HasValue);
+        Assert.Equal("undefined", info.JsType);
+        Assert.Null(info.Value);
+    }
 }
