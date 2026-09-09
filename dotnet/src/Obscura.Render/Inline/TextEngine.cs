@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Obscura.Dom;
 using Obscura.Render.Layout;
@@ -597,6 +598,41 @@ public sealed partial class TextEngine : IDisposable
     /// the selected webfont's fractional advance or every token accumulates a pixel of
     /// horizontal drift against browser geometry.
     /// </remarks>
+    /// <summary>
+    /// Max-content width of a form control's label, shaped through exactly the path that
+    /// will lay the label out, so the control's box fits its own text.
+    /// </summary>
+    /// <remarks>
+    /// <c>&lt;button&gt;</c> sizes its auto width from its label in the control pass, but the
+    /// label itself is real inline content shaped here. Measuring it with
+    /// <see cref="DomTextMeasure.TextWidth"/> instead mixed two notions of font size:
+    /// ab_glyph's <c>PxScale</c> is height-based (hhea ascender minus descender), the
+    /// shaper's is em-based, and Liberation Sans is 2288 units against a 2048 em. The box
+    /// came out 10.5% narrower than the text it had to hold, so a two-word label wrapped
+    /// inside its own button while layout still reported a single line.
+    /// <para>
+    /// The item is pushed only to be shaped and is removed again, so it cannot reach layout
+    /// or paint. Letter spacing is applied by the shaper, so callers must not add it twice.
+    /// </para>
+    /// </remarks>
+    public float MeasureControlLabel(string text, LayoutStyle style)
+    {
+        if (text.Length == 0)
+        {
+            return 0f;
+        }
+
+        if (PushGeneratedText(text, style) is not { } index)
+        {
+            return 0f;
+        }
+
+        float width = MeasureWord(index).Width;
+        Debug.Assert(index + 1 == _items.Count, "measurement item must be last");
+        _items.RemoveRange(index, _items.Count - index);
+        return F32.Max(width, 0f);
+    }
+
     public (float Width, float Height) MeasureWord(int index)
     {
         if (index < 0 || index >= _items.Count)

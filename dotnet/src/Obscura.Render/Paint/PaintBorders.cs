@@ -478,9 +478,9 @@ internal static class PaintBorders
     /// Paint an outset <c>box-shadow</c> layer behind the element's own box.
     /// </summary>
     /// <remarks>
-    /// The blur is approximated by nested rounded rects marching inward from 2.5 sigma
-    /// outside the shape, each layer adding just enough alpha to reach the gaussian
-    /// coverage at its offset, followed by a solid core inside the ramp.
+    /// The blur falloff comes from <see cref="FillShadowRamp"/>, shared with the inset
+    /// path. Inset shadows are painted by <see cref="PaintInsetBoxShadow"/> instead,
+    /// later in the box's paint order.
     /// </remarks>
     internal static void PaintBoxShadow(
         Pixmap pixmap,
@@ -550,81 +550,201 @@ internal static class PaintBorders
         }
 
         shadowMask.Invert();
-        RgbaColor color = shadow.Color;
+        FillShadowRamp(
+            owned,
+            x0 - left,
+            y0 - top,
+            w0,
+            h0,
+            rx0,
+            ry0,
+            blur,
+            shadow.Color,
+            shadowMask);
+
+        Surface.DrawPixmap(pixmap, left, top, owned, 1f, false, Affine2.Identity, ancestorClip);
+    }
+
+    /// <summary>Lay one shadow shape's gaussian ramp into <paramref name="pixmap"/>.</summary>
+    /// <remarks>
+    /// The blur is a gaussian of standard deviation blur/2 applied to the shape, so
+    /// coverage is <c>A * Phi(-d / sigma)</c> at signed distance <c>d</c> outside the edge:
+    /// full alpha well inside, half at the edge itself, ~0 well outside. Layers march
+    /// inward from 2.5 sigma outside the shape, each adding only the coverage the ones
+    /// outside it have not already laid down, followed by a solid core inside the ramp.
+    /// 2.5 sigma is where the remaining coverage (0.6%) is the last step an 8-bit alpha
+    /// can represent, and roughly one layer per pixel of ramp keeps the banding under the
+    /// anti-aliasing.
+    /// <para>Shared by the outset and inset paths so the two falloffs cannot drift.</para>
+    /// </remarks>
+    private static void FillShadowRamp(
+        Pixmap pixmap,
+        float x0,
+        float y0,
+        float w0,
+        float h0,
+        float rx0,
+        float ry0,
+        float blur,
+        RgbaColor color,
+        Mask? mask)
+    {
         if (blur < 0.5f)
         {
-            // No blur: a single crisp, offset (and spread) rounded rect.
-            FillShadowRect(owned, x0 - left, y0 - top, w0, h0, rx0, ry0, color, shadowMask);
+            // No blur: a single crisp rounded rect.
+            FillShadowRect(pixmap, x0, y0, w0, h0, rx0, ry0, color, mask);
+            return;
         }
-        else
+
+        float sigma = F32.Max(blur / 2f, 0.05f);
+        float reach = 2.5f * sigma;
+        uint steps = (uint)Math.Clamp((int)MathF.Ceiling(2f * reach), 6, 24);
+        float targetAlpha = color.A / 255f;
+        float accumulated = 0f;
+        for (uint j = 0; j < steps; j++)
         {
-            // The blur is a gaussian of standard deviation blur/2 applied to the shadow
-            // shape, so coverage is A * Phi(-d / sigma) at signed distance d outside the
-            // shape edge: full alpha well inside, half at the edge itself, ~0 well
-            // outside. Ramping only outward from a fully opaque shape makes a wide blur
-            // read as a solid blob with a hard linear skirt instead of a soft halo, most
-            // visibly on the small glowing dots pages put next to status text.
-            float sigma = F32.Max(blur / 2f, 0.05f);
-            // 2.5 sigma is where the gaussian's remaining coverage (0.6%) is the last
-            // step an 8-bit alpha can still represent, and roughly one layer per pixel
-            // of ramp keeps the banding under the anti-aliasing.
-            float reach = 2.5f * sigma;
-            uint steps = (uint)Math.Clamp((int)MathF.Ceiling(2f * reach), 6, 24);
-            float targetAlpha = color.A / 255f;
-            float accumulated = 0f;
-            for (uint j = 0; j < steps; j++)
+            float t = 1f - (2f * j / (steps - 1));
+            float e = t * reach;
+            float target = targetAlpha * GaussianCoverage(e / sigma);
+            float remaining = 1f - accumulated;
+            if (remaining <= 0.001f)
             {
-                // Outermost layer first, marching inward, so each layer only has to add
-                // the coverage the ones outside it have not already laid down.
-                float t = 1f - (2f * j / (steps - 1));
-                float e = t * reach;
-                float target = targetAlpha * GaussianCoverage(e / sigma);
-                float remaining = 1f - accumulated;
-                if (remaining <= 0.001f)
-                {
-                    break;
-                }
-
-                float layer = Math.Clamp((target - accumulated) / remaining, 0f, 1f);
-                byte layerAlpha = (byte)Math.Clamp(F32.Round(layer * 255f), 0f, 255f);
-                if (layerAlpha == 0)
-                {
-                    continue;
-                }
-
-                FillShadowRect(
-                    owned,
-                    x0 - e - left,
-                    y0 - e - top,
-                    w0 + (2f * e),
-                    h0 + (2f * e),
-                    F32.Max(rx0 + e, 0f),
-                    F32.Max(ry0 + e, 0f),
-                    new RgbaColor(color.R, color.G, color.B, layerAlpha),
-                    shadowMask);
-                accumulated = target;
+                break;
             }
 
-            // Everything further inside than the ramp is solid, and the mask still carves
-            // the element's own border box back out.
-            float coreRemaining = 1f - accumulated;
-            if (coreRemaining > 0.001f)
+            float layer = Math.Clamp((target - accumulated) / remaining, 0f, 1f);
+            byte layerAlpha = (byte)Math.Clamp(F32.Round(layer * 255f), 0f, 255f);
+            if (layerAlpha == 0)
             {
-                float layer = Math.Clamp((targetAlpha - accumulated) / coreRemaining, 0f, 1f);
-                byte layerAlpha = (byte)Math.Clamp(F32.Round(layer * 255f), 0f, 255f);
-                if (layerAlpha > 0)
-                {
-                    FillShadowRect(
-                        owned,
-                        x0 + reach - left,
-                        y0 + reach - top,
-                        w0 - (2f * reach),
-                        h0 - (2f * reach),
-                        F32.Max(rx0 - reach, 0f),
-                        F32.Max(ry0 - reach, 0f),
-                        new RgbaColor(color.R, color.G, color.B, layerAlpha),
-                        shadowMask);
-                }
+                continue;
+            }
+
+            FillShadowRect(
+                pixmap,
+                x0 - e,
+                y0 - e,
+                w0 + (2f * e),
+                h0 + (2f * e),
+                F32.Max(rx0 + e, 0f),
+                F32.Max(ry0 + e, 0f),
+                new RgbaColor(color.R, color.G, color.B, layerAlpha),
+                mask);
+            accumulated = target;
+        }
+
+        // Everything further inside than the ramp is solid.
+        float coreRemaining = 1f - accumulated;
+        if (coreRemaining > 0.001f)
+        {
+            float layer = Math.Clamp((targetAlpha - accumulated) / coreRemaining, 0f, 1f);
+            byte layerAlpha = (byte)Math.Clamp(F32.Round(layer * 255f), 0f, 255f);
+            if (layerAlpha > 0)
+            {
+                FillShadowRect(
+                    pixmap,
+                    x0 + reach,
+                    y0 + reach,
+                    w0 - (2f * reach),
+                    h0 - (2f * reach),
+                    F32.Max(rx0 - reach, 0f),
+                    F32.Max(ry0 - reach, 0f),
+                    new RgbaColor(color.R, color.G, color.B, layerAlpha),
+                    mask);
+            }
+        }
+    }
+
+    /// <summary>Paint an inset <c>box-shadow</c> inside the element's border box.</summary>
+    /// <remarks>
+    /// Inset coverage is the complement of the outset ramp: full alpha at the border-box
+    /// edge, half at the offset-and-spread inner edge, near zero deep inside. Rather than
+    /// fill rings, this lays the <em>outset</em> ramp of the inner shape into an eraser at
+    /// full alpha and subtracts it from a solid fill, which reuses
+    /// <see cref="FillShadowRamp"/> verbatim: <c>A * (1 - Phi(-d / sigma))</c>.
+    /// <para>
+    /// Painted after the background and before the border, which is where CSS
+    /// Backgrounds 3 puts it.
+    /// </para>
+    /// </remarks>
+    internal static void PaintInsetBoxShadow(
+        Pixmap pixmap,
+        BoxShadow shadow,
+        in Rect rect,
+        BorderRadii borderRadius,
+        Mask? ancestorClip)
+    {
+        if (!shadow.Inset || shadow.Color.A == 0 || rect.Width <= 0f || rect.Height <= 0f)
+        {
+            return;
+        }
+
+        // An inset shadow never leaves the border box, so that is its whole extent.
+        if (!PaintDomPainter.RectIntersectsPaintSurface(rect, pixmap, 1f))
+        {
+            return;
+        }
+
+        int left = (int)F32.Max(MathF.Floor(rect.X), 0f);
+        int top = (int)F32.Max(MathF.Floor(rect.Y), 0f);
+        int right = (int)F32.Min(MathF.Ceiling(rect.X + rect.Width), pixmap.Width);
+        int bottom = (int)F32.Min(MathF.Ceiling(rect.Y + rect.Height), pixmap.Height);
+        if (right <= left || bottom <= top)
+        {
+            return;
+        }
+
+        Pixmap? scratch = Pixmap.New((uint)(right - left), (uint)(bottom - top));
+        if (scratch is null)
+        {
+            return;
+        }
+
+        using Pixmap owned = scratch;
+        ResolvedBorderRadii borderRadii = borderRadius.Resolve(rect.Width, rect.Height);
+        Rect local = rect with { X = rect.X - left, Y = rect.Y - top };
+        SKPath? boxPath = PaintClips.RoundedRectPathRadii(
+            local.X, local.Y, local.Width, local.Height, borderRadii);
+        if (boxPath is null)
+        {
+            return;
+        }
+
+        RgbaColor color = shadow.Color;
+        using (SKPath ownedPath = boxPath)
+        {
+            Surface.FillPath(owned, ownedPath, color, true, Affine2.Identity, null);
+        }
+
+        // The inner edge: the border box moved by the offset and shrunk by the spread. A
+        // positive x offset moves it right, which thickens the shadow on the left, the
+        // same way a positive offset moves an outset shadow right.
+        float spread = shadow.Spread;
+        float innerX = local.X + shadow.OffsetX + spread;
+        float innerY = local.Y + shadow.OffsetY + spread;
+        float innerW = local.Width - (2f * spread);
+        float innerH = local.Height - (2f * spread);
+        if (innerW > 0f && innerH > 0f)
+        {
+            Pixmap? eraserSurface = Pixmap.New(owned.Width, owned.Height);
+            if (eraserSurface is not null)
+            {
+                using Pixmap eraser = eraserSurface;
+                (float X, float Y) radius = borderRadii.TopLeft;
+                // Opaque, so the subtraction leaves A * (1 - coverage) rather than
+                // A * (1 - A * coverage).
+                FillShadowRamp(
+                    eraser,
+                    innerX,
+                    innerY,
+                    innerW,
+                    innerH,
+                    F32.Max(radius.X - spread, 0f),
+                    F32.Max(radius.Y - spread, 0f),
+                    F32.Max(shadow.Blur, 0f),
+                    new RgbaColor(color.R, color.G, color.B, 255),
+                    null);
+                Surface.DrawPixmap(
+                    owned, 0, 0, eraser, 1f, false, Affine2.Identity, null, SKBlendMode.DstOut);
             }
         }
 

@@ -1523,6 +1523,33 @@ impl TextEngine {
         )
     }
 
+    /// Max-content width of a form control's label, shaped through exactly the
+    /// path that will lay the label out, so the control's box fits its own text.
+    ///
+    /// `<button>` sizes its auto width from its label in `dom.rs`, but the label
+    /// itself is real inline content shaped here. Measuring it with
+    /// `paint::measure_text` instead mixed two different notions of font size:
+    /// ab_glyph's `PxScale` is height-based (hhea ascender minus descender), the
+    /// shaper's is em-based, and Liberation Sans is 2288 units against a 2048 em.
+    /// The box therefore came out 10.5% narrower than the text it had to hold and
+    /// a two-word label wrapped inside its own button.
+    ///
+    /// The item is pushed only to be shaped and is removed again, so it cannot
+    /// reach layout or paint. Letter spacing is applied by the shaper, so callers
+    /// must not add it a second time.
+    pub(crate) fn measure_control_label(&mut self, text: &str, style: &LayoutStyle) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let Some(idx) = self.push_generated_text(text, style) else {
+            return 0.0;
+        };
+        let (width, _) = self.measure_word(idx);
+        debug_assert_eq!(idx + 1, self.items.len(), "measurement item must be last");
+        self.items.truncate(idx);
+        width.max(0.0)
+    }
+
     /// Exact max-content size for one fallback word item. Paragraph IFCs keep
     /// their historical integer-ceiled intrinsic width, but word boxes need
     /// the selected webfont's fractional advance or every token accumulates a

@@ -703,6 +703,38 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void AutoWidthButtonIsAsWideAsTheSameLabelInASpan()
+    {
+        // A button's box is sized from its label by the control pass, but the label is laid
+        // out by the inline engine. Sizing with TextWidth used ab_glyph's height-based
+        // PxScale while the shaper uses an em-based size, so the box came out 10.5%
+        // narrower than its own text: layout still reported one line while paint wrapped
+        // the label inside the button. Chromium makes button, span and inline-block
+        // identical for identical text, so that equality is the invariant to hold,
+        // independent of which face the engine embeds.
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .c{font-size:14px;padding:8px 16px;border:1px solid #ccc;box-sizing:border-box}
+                span.c,div.c{display:inline-block}
+            </style>
+            <button class="c" id="b">Pulse UI</button>
+            <span class="c" id="s">Pulse UI</span>
+            <div class="c" id="d">Pulse UI</div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (900f, 300f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        Assert.True(
+            MathF.Abs(Width("b") - Width("s")) < 0.5f,
+            $"button must match an inline-block span: button={Width("b")}, span={Width("s")}");
+        Assert.True(
+            MathF.Abs(Width("b") - Width("d")) < 0.5f,
+            $"button must match an inline-block div: button={Width("b")}, div={Width("d")}");
+    }
+
+    [Fact]
     public void TextAlignmentDoesNotShrinkWrapBlockGridAndFlexChildren()
     {
         DomTree tree = Parse(

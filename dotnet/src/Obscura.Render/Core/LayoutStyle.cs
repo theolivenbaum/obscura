@@ -886,6 +886,23 @@ public sealed class LayoutStyle
     /// </summary>
     public float? Opacity;
 
+    /// <summary>
+    /// <c>filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS pixels.
+    /// </summary>
+    /// <remarks>
+    /// <c>blur()</c>'s argument <em>is</em> sigma, unlike <c>box-shadow</c>'s blur radius,
+    /// which is 2 sigma. Only a blur-only filter list is recorded: a list carrying any
+    /// other function stays unimplemented rather than being silently reduced to its
+    /// blurs, which would paint a wrong result instead of no result.
+    /// </remarks>
+    public float? FilterBlur;
+
+    /// <summary>
+    /// <c>backdrop-filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS
+    /// pixels. Same restriction as <see cref="FilterBlur"/>.
+    /// </summary>
+    public float? BackdropBlur;
+
     /// <summary>First CSS animation name and its timing contract.</summary>
     /// <remarks>
     /// The stylesheet sampler contributes animated opacity after normal declarations and before

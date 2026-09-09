@@ -101,6 +101,18 @@ internal static class PaintInline
             Mask? elementClipMask = PaintGradients.BackgroundExtraClip(ancestorClipMask, clipPathMask);
             Mask? backgroundMask = elementClipMask?.Clone();
 
+            // backdrop-filter reads the surface as it stands before this element paints
+            // anything of its own, so it runs ahead of the shadow.
+            if (fragmentStyle.BackdropBlur is { } fragmentBackdropSigma)
+            {
+                PaintFilters.PaintBackdropFilter(
+                    pixmap,
+                    fragment,
+                    fragmentStyle.BorderModel.Radii,
+                    fragmentBackdropSigma,
+                    ancestorClipMask);
+            }
+
             if (fragmentStyle.BoxShadow is { } shadow)
             {
                 PaintBorders.PaintBoxShadow(
@@ -245,6 +257,14 @@ internal static class PaintInline
                 }
             }
 
+            // CSS Backgrounds 3 paints an inset shadow over the background and under the
+            // border, so it cannot ride along with the outset pass above.
+            if (fragmentStyle.BoxShadow is { } insetShadow)
+            {
+                PaintBorders.PaintInsetBoxShadow(
+                    pixmap, insetShadow, fragment, fragmentStyle.BorderModel.Radii, elementClipMask);
+            }
+
             PaintBorders.PaintCssBorder(pixmap, fragment, fragmentStyle, elementClipMask, rasterScale);
             backgroundPath?.Dispose();
         }
@@ -307,6 +327,14 @@ internal static class PaintGenerated
                 overflowClip,
                 scrollState.SurfaceExtent ?? viewport);
 
+        // backdrop-filter reads the surface as it stands before this element paints
+        // anything of its own, so it runs ahead of the shadow.
+        if (style.BackdropBlur is { } backdropSigma)
+        {
+            PaintFilters.PaintBackdropFilter(
+                pixmap, rect, style.BorderModel.Radii, backdropSigma, ancestorClipMask);
+        }
+
         if (style.BoxShadow is { } shadow)
         {
             PaintBorders.PaintBoxShadow(pixmap, shadow, rect, style.BorderModel.Radii, ancestorClipMask);
@@ -353,6 +381,14 @@ internal static class PaintGenerated
             backgroundMask,
             imageCache,
             style.FontSize ?? 16f);
+
+        // CSS Backgrounds 3 paints an inset shadow over the background and under the
+        // border, so it cannot ride along with the outset pass above.
+        if (style.BoxShadow is { } insetShadow)
+        {
+            PaintBorders.PaintInsetBoxShadow(
+                pixmap, insetShadow, rect, style.BorderModel.Radii, elementClipMask);
+        }
 
         PaintBorders.PaintCssBorder(pixmap, rect, style, elementClipMask, rasterScale);
         PaintBorders.PaintCssOutline(pixmap, rect, style, elementClipMask, rasterScale);

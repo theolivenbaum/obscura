@@ -3914,7 +3914,16 @@ fn paint_laid_dom_scrolled(
             .and_then(|style| style.opacity)
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
-        if suppress_opacity_for != Some(nid) && own_opacity < 1.0 {
+        // `filter` groups exactly like `opacity` does: the whole finished
+        // stacking context is post-processed once, never each primitive. Sharing
+        // the opacity group's bookkeeping keeps one suppression flag and one
+        // recursion rather than a second, near-identical layer path.
+        let group_blur = laid
+            .styles
+            .get(&nid)
+            .and_then(|style| style.filter_blur)
+            .filter(|sigma| sigma.is_finite() && *sigma > 0.0);
+        if suppress_opacity_for != Some(nid) && (own_opacity < 1.0 || group_blur.is_some()) {
             opacity_subtree_skip.insert(nid);
             opacity_subtree_skip.extend(crate::dom::rendered_descendants(tree, nid));
             if own_opacity <= 0.0 {
@@ -3952,6 +3961,11 @@ fn paint_laid_dom_scrolled(
                 print_economy,
                 canvas_background,
             )?;
+            let mut layer = layer;
+            if let Some(sigma) = group_blur {
+                blur_pixmap(&mut layer, sigma, BlurEdge::Transparent);
+            }
+            let layer = layer;
             let group_paint = tiny_skia::PixmapPaint {
                 opacity: own_opacity,
                 ..tiny_skia::PixmapPaint::default()
@@ -4097,7 +4111,18 @@ fn paint_laid_dom_scrolled(
         // Geometry comes from the full (translate-adjusted) border box; the
         // ancestor overflow clip is reapplied inside so the shadow is clipped by
         // an ancestor exactly as the box itself is.
+        // `backdrop-filter` reads the surface as it stands before this element
+        // paints anything of its own, so it runs ahead of the shadow.
         if !paints_inline_fragments {
+            if let Some(sigma) = style.backdrop_blur {
+                paint_backdrop_filter(
+                    &mut pixmap,
+                    &rect,
+                    style.border_model.radii,
+                    sigma,
+                    ancestor_clip_mask.as_deref(),
+                );
+            }
             if let Some(shadow) = style.box_shadow {
                 paint_box_shadow(
                     &mut pixmap,
@@ -4366,6 +4391,20 @@ fn paint_laid_dom_scrolled(
                     style.object_position,
                     &mut pixmap,
                     radius.inset(content_insets),
+                    element_clip_mask,
+                );
+            }
+        }
+
+        // CSS Backgrounds 3 paints an inset shadow over the background and under
+        // the border, so it cannot ride along with the outset pass above.
+        if !paints_inline_fragments {
+            if let Some(shadow) = style.box_shadow {
+                paint_inset_box_shadow(
+                    &mut pixmap,
+                    &shadow,
+                    &rect,
+                    style.border_model.radii,
                     element_clip_mask,
                 );
             }
@@ -4977,6 +5016,15 @@ fn paint_inline_fragment_decorations(
         let element_clip_mask = background_extra_clip(ancestor_clip_mask, clip_path_mask.as_ref());
         let background_mask = element_clip_mask.clone();
 
+        if let Some(sigma) = fragment_style.backdrop_blur {
+            paint_backdrop_filter(
+                pixmap,
+                &fragment,
+                fragment_style.border_model.radii,
+                sigma,
+                ancestor_clip_mask,
+            );
+        }
         if let Some(shadow) = fragment_style.box_shadow {
             paint_box_shadow(
                 pixmap,
@@ -5120,6 +5168,17 @@ fn paint_inline_fragment_decorations(
                     background_mask.as_ref(),
                 );
             }
+        }
+        // CSS Backgrounds 3 paints an inset shadow over the background and
+        // under the border, so it cannot ride along with the outset pass above.
+        if let Some(shadow) = fragment_style.box_shadow {
+            paint_inset_box_shadow(
+                pixmap,
+                &shadow,
+                &fragment,
+                fragment_style.border_model.radii,
+                element_clip_mask.as_ref(),
+            );
         }
         paint_css_border(
             pixmap,
@@ -5489,6 +5548,11 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Option
     )
 }
 
+/// Control-point distance, as a fraction of the radius, that makes a cubic Bezier
+/// approximate a quarter circle: `4/3 * (sqrt(2) - 1)`. The classic constant; the
+/// error against a true arc peaks near 0.02% of the radius.
+const ARC_HANDLE: f32 = 0.552_284_75;
+
 fn rounded_rect_path_radii(
     x: f32,
     y: f32,
@@ -5508,16 +5572,47 @@ fn rounded_rect_path_radii(
     let tr = radii.top_right;
     let br = radii.bottom_right;
     let bl = radii.bottom_left;
+    // Each corner is a cubic approximation of a quarter ellipse, with its control
+    // points ARC_HANDLE of the radius along the tangents.
+    //
+    // These were quadratics whose single control point sat on the corner itself,
+    // which is a parabola, not an arc: its midpoint is 6.1% further from the corner
+    // centre than the true curve, so every rounded box was a squircle and
+    // `border-radius: 50%` drew something 1.2px fat on a 40px circle. The bulge
+    // scales with the radius, so it was most visible exactly where a circle was
+    // intended.
+    let cx = |r: f32| r * (1.0 - ARC_HANDLE);
     let mut pb = PathBuilder::new();
     pb.move_to(x + tl.0, y);
     pb.line_to(x + w - tr.0, y);
-    pb.quad_to(x + w, y, x + w, y + tr.1);
+    pb.cubic_to(
+        x + w - cx(tr.0),
+        y,
+        x + w,
+        y + cx(tr.1),
+        x + w,
+        y + tr.1,
+    );
     pb.line_to(x + w, y + h - br.1);
-    pb.quad_to(x + w, y + h, x + w - br.0, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - cx(br.1),
+        x + w - cx(br.0),
+        y + h,
+        x + w - br.0,
+        y + h,
+    );
     pb.line_to(x + bl.0, y + h);
-    pb.quad_to(x, y + h, x, y + h - bl.1);
+    pb.cubic_to(
+        x + cx(bl.0),
+        y + h,
+        x,
+        y + h - cx(bl.1),
+        x,
+        y + h - bl.1,
+    );
     pb.line_to(x, y + tl.1);
-    pb.quad_to(x, y, x + tl.0, y);
+    pb.cubic_to(x, y + cx(tl.1), x + cx(tl.0), y, x + tl.0, y);
     pb.close();
     pb.finish()
 }
@@ -6138,86 +6233,422 @@ fn paint_box_shadow(
         return;
     };
     shadow_mask.invert();
-    let color = shadow.color;
-    if blur < 0.5 {
-        // No blur: a single crisp, offset (and spread) rounded rect.
-        fill_shadow_rect(
-            &mut shadow_pixmap,
-            x0 - left as f32,
-            y0 - top as f32,
-            w0,
-            h0,
-            rx0,
-            ry0,
-            color,
-            Some(&shadow_mask),
-        );
+    fill_shadow_ramp(
+        &mut shadow_pixmap,
+        x0 - left as f32,
+        y0 - top as f32,
+        w0,
+        h0,
+        rx0,
+        ry0,
+        blur,
+        shadow.color,
+        Some(&shadow_mask),
+    );
+    // Ancestor overflow clip is already the complete rect/rounded chain.
+    pixmap.draw_pixmap(
+        left,
+        top,
+        shadow_pixmap.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        ancestor_clip,
+    );
+}
+
+/// The three box-blur window extents that approximate a gaussian of `sigma`,
+/// per the algorithm SVG's `feGaussianBlur` defines normatively and that CSS
+/// `blur()` is specified in terms of.
+///
+/// Each pass is `(left, right)`, so its window covers `left + right + 1` pixels.
+/// With `d = floor(sigma * 3 * sqrt(2*PI) / 4 + 0.5)`: an odd `d` uses three
+/// windows of `d` centred on the output pixel; an even `d` uses two windows of
+/// `d` centred on the pixel boundaries either side, then one of `d + 1` centred.
+fn box_blur_extents(sigma: f32) -> Option<[(u32, u32); 3]> {
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return None;
+    }
+    let d = (sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0 + 0.5).floor();
+    if !(d >= 1.0) {
+        return None;
+    }
+    let d = (d as u32).min(1 << 14);
+    Some(if d % 2 == 1 {
+        let half = (d - 1) / 2;
+        [(half, half), (half, half), (half, half)]
     } else {
-        // The blur is a gaussian of standard deviation blur/2 applied to the shadow
-        // shape, so coverage is A * Phi(-d / sigma) at signed distance d outside the
-        // shape edge: full alpha well inside, half at the edge itself, ~0 well
-        // outside. Ramping only outward from a fully opaque shape - which is what
-        // this did before - makes a wide blur read as a solid blob with a hard
-        // linear skirt instead of a soft halo, most visibly on the small glowing
-        // dots pages put next to status text.
-        let sigma = (blur / 2.0).max(0.05);
-        // 2.5 sigma is where the gaussian's remaining coverage (0.6%) is the last
-        // step an 8-bit alpha can still represent, and roughly one layer per pixel
-        // of ramp keeps the banding under the anti-aliasing.
-        let reach = 2.5 * sigma;
-        let steps: u32 = ((2.0 * reach).ceil() as u32).clamp(6, 24);
-        let target_alpha = color[3] as f32 / 255.0;
-        let mut accumulated = 0.0f32;
-        for j in 0..steps {
-            // Outermost layer first, marching inward, so each layer only has to add
-            // the coverage the ones outside it have not already laid down.
-            let t = 1.0 - 2.0 * (j as f32) / ((steps - 1) as f32);
-            let e = t * reach;
-            let target = target_alpha * gaussian_coverage(e / sigma);
-            let remaining = 1.0 - accumulated;
-            if remaining <= 0.001 {
-                break;
+        let half = d / 2;
+        [(half, half - 1), (half - 1, half), (half, half)]
+    })
+}
+
+/// What a box-blur window sees when it reaches past the edge of the surface.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlurEdge {
+    /// Out-of-range samples are transparent. Correct for `filter`, whose layer
+    /// really is empty outside the painted area.
+    Transparent,
+    /// Out-of-range samples repeat the nearest edge pixel. Correct for
+    /// `backdrop-filter`, where the surface edge is a crop of a larger backdrop
+    /// and treating it as transparent would darken the element's edges.
+    Clamp,
+}
+
+/// One separable box-blur pass over a premultiplied RGBA window, as a running
+/// sum so the cost is independent of the window size.
+fn box_blur_axis(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    horizontal: bool,
+    left: u32,
+    right: u32,
+    edge: BlurEdge,
+) {
+    let (outer, inner, step) = if horizontal {
+        (height, width, 4usize)
+    } else {
+        (width, height, stride)
+    };
+    if inner == 0 {
+        return;
+    }
+    let window = left + right + 1;
+    let left = left as isize;
+    let right = right as isize;
+    let last = inner as isize - 1;
+    for o in 0..outer {
+        let base = if horizontal { o * stride } else { o * 4 };
+        // One sample, with the edge rule applied. `None` contributes nothing.
+        let sample = |i: isize, c: usize| -> u32 {
+            if i >= 0 && i <= last {
+                src[base + i as usize * step + c] as u32
+            } else if edge == BlurEdge::Clamp {
+                let clamped = i.clamp(0, last) as usize;
+                src[base + clamped * step + c] as u32
+            } else {
+                0
             }
-            let layer = ((target - accumulated) / remaining).clamp(0.0, 1.0);
-            let layer_alpha = (layer * 255.0).round().clamp(0.0, 255.0) as u8;
-            if layer_alpha == 0 {
-                continue;
+        };
+        let mut sum = [0u32; 4];
+        for k in -left..=right {
+            for c in 0..4 {
+                sum[c] += sample(k, c);
             }
-            fill_shadow_rect(
-                &mut shadow_pixmap,
-                x0 - e - left as f32,
-                y0 - e - top as f32,
-                w0 + 2.0 * e,
-                h0 + 2.0 * e,
-                (rx0 + e).max(0.0),
-                (ry0 + e).max(0.0),
-                [color[0], color[1], color[2], layer_alpha],
-                Some(&shadow_mask),
-            );
-            accumulated = target;
         }
-        // Everything further inside than the ramp is solid, and the mask still
-        // carves the element's own border box back out.
-        let remaining = 1.0 - accumulated;
-        if remaining > 0.001 {
-            let layer = ((target_alpha - accumulated) / remaining).clamp(0.0, 1.0);
-            let layer_alpha = (layer * 255.0).round().clamp(0.0, 255.0) as u8;
-            if layer_alpha > 0 {
-                fill_shadow_rect(
-                    &mut shadow_pixmap,
-                    x0 + reach - left as f32,
-                    y0 + reach - top as f32,
-                    w0 - 2.0 * reach,
-                    h0 - 2.0 * reach,
-                    (rx0 - reach).max(0.0),
-                    (ry0 - reach).max(0.0),
-                    [color[0], color[1], color[2], layer_alpha],
-                    Some(&shadow_mask),
-                );
+        for i in 0..inner as isize {
+            let at = base + i as usize * step;
+            for c in 0..4 {
+                dst[at + c] = ((sum[c] + window / 2) / window) as u8;
+            }
+            // Slide: drop the sample leaving the window, add the one entering.
+            for c in 0..4 {
+                sum[c] = sum[c] - sample(i - left, c) + sample(i + right + 1, c);
             }
         }
     }
-    // Ancestor overflow clip is already the complete rect/rounded chain.
+}
+
+/// Blur `pixmap` in place with the three-pass box approximation of a gaussian.
+///
+/// Operates on the premultiplied bytes, which is what keeps a transparent edge
+/// from bleeding the colour under it into the result.
+fn blur_pixmap(pixmap: &mut Pixmap, sigma: f32, edge: BlurEdge) {
+    let Some(extents) = box_blur_extents(sigma) else {
+        return;
+    };
+    let width = pixmap.width() as usize;
+    let height = pixmap.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let stride = width * 4;
+    let mut scratch = vec![0u8; stride * height];
+    for (left, right) in extents {
+        // Horizontal, then vertical: a box blur is separable, so six linear
+        // passes total rather than one quadratic convolution.
+        box_blur_axis(
+            pixmap.data(),
+            &mut scratch,
+            width,
+            height,
+            stride,
+            true,
+            left,
+            right,
+            edge,
+        );
+        box_blur_axis(
+            &scratch,
+            pixmap.data_mut(),
+            width,
+            height,
+            stride,
+            false,
+            left,
+            right,
+            edge,
+        );
+    }
+}
+
+/// Blur the already-painted backdrop under `rect` and put it back, clipped to
+/// the element's own rounded border box.
+///
+/// `backdrop-filter` reads what is behind the element, so it runs against the
+/// surface as it stands before the element paints anything of its own.
+///
+/// Two details decide how the edges look, and both were measured against
+/// Chromium on a blurred panel over a 45-degree stripe backdrop rather than
+/// reasoned about:
+///
+/// * The filter region is the element's own border box, so the blur averages
+///   only backdrop from inside it. Reaching 3 sigma further out to find "real"
+///   backdrop reads 13.07 mean abs against Chromium; cropping to the box reads
+///   12.07; both are wrong at the edges.
+/// * Out-of-region samples are transparent, not edge-duplicated, and the
+///   filtered backdrop is composited *over* the sharp original rather than
+///   replacing it. The blurred copy is therefore partly transparent in a band
+///   about 3 sigma wide, and the unblurred backdrop shows through it - which is
+///   what produces Chromium's gradient from the local colour at the very edge to
+///   the blurred average further in. That reads 3.97, against 97.46 for not
+///   implementing the property at all.
+///
+/// The residual is the shape of that edge band: a three-pass box blur with
+/// transparent edges is not bit-exact with Skia's own, and 3.97 over the panel
+/// is the whole of the remaining difference.
+fn paint_backdrop_filter(
+    pixmap: &mut Pixmap,
+    rect: &crate::Rect,
+    border_radius: crate::BorderRadii,
+    sigma: f32,
+    ancestor_clip: Option<&tiny_skia::Mask>,
+) {
+    if !sigma.is_finite() || sigma <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    if !rect_intersects_paint_surface(rect, pixmap, 1.0) {
+        return;
+    }
+    let x0 = rect.x.floor().max(0.0) as u32;
+    let y0 = rect.y.floor().max(0.0) as u32;
+    let x1 = (rect.x + rect.width)
+        .ceil()
+        .clamp(0.0, pixmap.width() as f32) as u32;
+    let y1 = (rect.y + rect.height)
+        .ceil()
+        .clamp(0.0, pixmap.height() as f32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let Some(source) = tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, x1 - x0, y1 - y0) else {
+        return;
+    };
+    let Some(mut backdrop) = pixmap.clone_rect(source) else {
+        return;
+    };
+    blur_pixmap(&mut backdrop, sigma, BlurEdge::Transparent);
+
+    let radii = border_radius.resolve(rect.width, rect.height);
+    let Some(box_mask) =
+        rounded_box_clip_mask_radii(pixmap.width(), pixmap.height(), rect, radii)
+    else {
+        return;
+    };
+    let clip = intersect_clip_masks(ancestor_clip.cloned(), Some(&box_mask));
+    pixmap.draw_pixmap(
+        x0 as i32,
+        y0 as i32,
+        backdrop.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        clip.as_ref(),
+    );
+}
+
+/// Lay one shadow shape's gaussian ramp into `pixmap`.
+///
+/// The blur is a gaussian of standard deviation blur/2 applied to the shape, so
+/// coverage is `A * Phi(-d / sigma)` at signed distance `d` outside the edge:
+/// full alpha well inside, half at the edge itself, ~0 well outside. Layers
+/// march inward from 2.5 sigma outside the shape, each adding only the coverage
+/// the ones outside it have not already laid down, followed by a solid core
+/// inside the ramp. 2.5 sigma is where the remaining coverage (0.6%) is the last
+/// step an 8-bit alpha can represent, and roughly one layer per pixel of ramp
+/// keeps the banding under the anti-aliasing.
+///
+/// Shared by the outset and inset paths so the two falloffs cannot drift.
+fn fill_shadow_ramp(
+    pixmap: &mut Pixmap,
+    x0: f32,
+    y0: f32,
+    w0: f32,
+    h0: f32,
+    rx0: f32,
+    ry0: f32,
+    blur: f32,
+    color: [u8; 4],
+    mask: Option<&tiny_skia::Mask>,
+) {
+    if blur < 0.5 {
+        // No blur: a single crisp rounded rect.
+        fill_shadow_rect(pixmap, x0, y0, w0, h0, rx0, ry0, color, mask);
+        return;
+    }
+    let sigma = (blur / 2.0).max(0.05);
+    let reach = 2.5 * sigma;
+    let steps: u32 = ((2.0 * reach).ceil() as u32).clamp(6, 24);
+    let target_alpha = color[3] as f32 / 255.0;
+    let mut accumulated = 0.0f32;
+    for j in 0..steps {
+        let t = 1.0 - 2.0 * (j as f32) / ((steps - 1) as f32);
+        let e = t * reach;
+        let target = target_alpha * gaussian_coverage(e / sigma);
+        let remaining = 1.0 - accumulated;
+        if remaining <= 0.001 {
+            break;
+        }
+        let layer = ((target - accumulated) / remaining).clamp(0.0, 1.0);
+        let layer_alpha = (layer * 255.0).round().clamp(0.0, 255.0) as u8;
+        if layer_alpha == 0 {
+            continue;
+        }
+        fill_shadow_rect(
+            pixmap,
+            x0 - e,
+            y0 - e,
+            w0 + 2.0 * e,
+            h0 + 2.0 * e,
+            (rx0 + e).max(0.0),
+            (ry0 + e).max(0.0),
+            [color[0], color[1], color[2], layer_alpha],
+            mask,
+        );
+        accumulated = target;
+    }
+    // Everything further inside than the ramp is solid.
+    let remaining = 1.0 - accumulated;
+    if remaining > 0.001 {
+        let layer = ((target_alpha - accumulated) / remaining).clamp(0.0, 1.0);
+        let layer_alpha = (layer * 255.0).round().clamp(0.0, 255.0) as u8;
+        if layer_alpha > 0 {
+            fill_shadow_rect(
+                pixmap,
+                x0 + reach,
+                y0 + reach,
+                w0 - 2.0 * reach,
+                h0 - 2.0 * reach,
+                (rx0 - reach).max(0.0),
+                (ry0 - reach).max(0.0),
+                [color[0], color[1], color[2], layer_alpha],
+                mask,
+            );
+        }
+    }
+}
+
+/// Paint an inset `box-shadow` inside the element's border box.
+///
+/// Inset coverage is the complement of the outset ramp: full alpha at the
+/// border-box edge, half at the offset-and-spread inner edge, near zero deep
+/// inside. Rather than fill rings, this lays the *outset* ramp of the inner
+/// shape into an eraser at full alpha and subtracts it from a solid fill, which
+/// reuses `fill_shadow_ramp` verbatim: `A * (1 - Phi(-d / sigma))`.
+///
+/// Painted after the background and before the border, which is where CSS
+/// Backgrounds 3 puts it.
+fn paint_inset_box_shadow(
+    pixmap: &mut Pixmap,
+    shadow: &crate::BoxShadow,
+    rect: &crate::Rect,
+    border_radius: crate::BorderRadii,
+    ancestor_clip: Option<&tiny_skia::Mask>,
+) {
+    if !shadow.inset || shadow.color[3] == 0 || rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    // An inset shadow never leaves the border box, so that is its whole extent.
+    if !rect_intersects_paint_surface(rect, pixmap, 1.0) {
+        return;
+    }
+    let left = rect.x.floor().max(0.0) as i32;
+    let top = rect.y.floor().max(0.0) as i32;
+    let right = (rect.x + rect.width).ceil().min(pixmap.width() as f32) as i32;
+    let bottom = (rect.y + rect.height).ceil().min(pixmap.height() as f32) as i32;
+    if right <= left || bottom <= top {
+        return;
+    }
+    let Some(mut shadow_pixmap) = Pixmap::new((right - left) as u32, (bottom - top) as u32) else {
+        return;
+    };
+    let border_radii = border_radius.resolve(rect.width, rect.height);
+    let local = crate::Rect {
+        x: rect.x - left as f32,
+        y: rect.y - top as f32,
+        ..*rect
+    };
+    let Some(box_path) = rounded_rect_path_radii(
+        local.x,
+        local.y,
+        local.width,
+        local.height,
+        border_radii,
+    ) else {
+        return;
+    };
+    let color = shadow.color;
+    let mut paint = Paint::default();
+    paint.set_color(Color::from_rgba8(color[0], color[1], color[2], color[3]));
+    paint.anti_alias = true;
+    shadow_pixmap.fill_path(
+        &box_path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+
+    // The inner edge: the border box moved by the offset and shrunk by the
+    // spread. A positive x offset moves it right, which thickens the shadow on
+    // the left, the same way a positive offset moves an outset shadow right.
+    let spread = shadow.spread;
+    let inner_x = local.x + shadow.offset_x + spread;
+    let inner_y = local.y + shadow.offset_y + spread;
+    let inner_w = local.width - 2.0 * spread;
+    let inner_h = local.height - 2.0 * spread;
+    if inner_w > 0.0 && inner_h > 0.0 {
+        let radius = border_radii.top_left;
+        if let Some(mut eraser) = Pixmap::new(shadow_pixmap.width(), shadow_pixmap.height()) {
+            // Opaque, so the subtraction leaves `A * (1 - coverage)` rather than
+            // `A * (1 - A * coverage)`.
+            fill_shadow_ramp(
+                &mut eraser,
+                inner_x,
+                inner_y,
+                inner_w,
+                inner_h,
+                (radius.0 - spread).max(0.0),
+                (radius.1 - spread).max(0.0),
+                shadow.blur.max(0.0),
+                [color[0], color[1], color[2], 255],
+                None,
+            );
+            shadow_pixmap.draw_pixmap(
+                0,
+                0,
+                eraser.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    blend_mode: tiny_skia::BlendMode::DestinationOut,
+                    ..tiny_skia::PixmapPaint::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
     pixmap.draw_pixmap(
         left,
         top,
@@ -8720,6 +9151,15 @@ fn paint_in_flow_generated_box(
         )
     });
 
+    if let Some(sigma) = style.backdrop_blur {
+        paint_backdrop_filter(
+            pixmap,
+            &rect,
+            style.border_model.radii,
+            sigma,
+            ancestor_clip_mask.as_ref(),
+        );
+    }
     if let Some(shadow) = style.box_shadow {
         paint_box_shadow(
             pixmap,
@@ -8877,6 +9317,17 @@ fn paint_in_flow_generated_box(
         }
     }
 
+    // CSS Backgrounds 3 paints an inset shadow over the background and under
+    // the border, so it cannot ride along with the outset pass above.
+    if let Some(shadow) = style.box_shadow {
+        paint_inset_box_shadow(
+            pixmap,
+            &shadow,
+            &rect,
+            style.border_model.radii,
+            element_clip_mask.as_ref(),
+        );
+    }
     paint_css_border(
         pixmap,
         &rect,
@@ -11640,6 +12091,173 @@ mod tests {
                 "the shorthand's color layer must paint under the gradient at x={x}"
             );
         }
+    }
+
+    #[test]
+    fn backdrop_filter_blurs_what_is_behind_the_element_only() {
+        // `backdrop-filter` was parsed only for containing-block bookkeeping, so a
+        // frosted panel showed the backdrop through it perfectly sharp.
+        let html = |filter: &str| {
+            format!(
+                r#"<html style="margin:0"><body style="margin:0;width:200px;height:120px;
+                       background:linear-gradient(90deg,rgb(255,0,0) 0 50%,rgb(0,0,255) 50% 100%)">
+                   <div style="position:absolute;left:60px;top:30px;width:80px;height:60px;
+                               {filter}"></div>
+                   </body></html>"#
+            )
+        };
+        let sharp = paint_dom(&parse_html(&html("")), (200.0, 120.0), None).expect("sharp");
+        let frosted = paint_dom(
+            &parse_html(&html("backdrop-filter:blur(8px)")),
+            (200.0, 120.0),
+            None,
+        )
+        .expect("frosted");
+        let rgb = |p: &Pixmap, x: u32, y: u32| {
+            let px = p.pixel(x, y).expect("sample");
+            (px.red(), px.green(), px.blue())
+        };
+
+        // The backdrop's hard colour boundary sits at x = 100, inside the panel.
+        assert_eq!(rgb(&sharp, 96, 60), (255, 0, 0));
+        assert_eq!(rgb(&sharp, 104, 60), (0, 0, 255));
+
+        // Blurred: the boundary becomes a ramp, so both sides carry the other colour.
+        let (lr, _, lb) = rgb(&frosted, 96, 60);
+        let (rr, _, rb) = rgb(&frosted, 104, 60);
+        assert!(lb > 20, "red side must pick up blue: {:?}", rgb(&frosted, 96, 60));
+        assert!(rr > 20, "blue side must pick up red: {:?}", rgb(&frosted, 104, 60));
+        assert!(lr > rr, "the ramp must still run red to blue: {lr} vs {rr}");
+        assert!(rb > lb, "and blue to red the other way: {rb} vs {lb}");
+
+        // Outside the panel the backdrop is untouched: this is not a `filter`.
+        assert_eq!(rgb(&frosted, 96, 10), (255, 0, 0));
+        assert_eq!(rgb(&frosted, 104, 10), (0, 0, 255));
+        assert_eq!(rgb(&frosted, 20, 60), (255, 0, 0));
+        assert_eq!(rgb(&frosted, 180, 60), (0, 0, 255));
+    }
+
+    #[test]
+    fn filter_blur_softens_the_element_and_bleeds_past_its_box() {
+        // `filter` was parsed only for containing-block bookkeeping, so a blurred
+        // element rendered perfectly sharp. blur()'s argument is sigma itself,
+        // unlike box-shadow's blur radius, which is 2 sigma.
+        let sharp = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:black">
+               <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                           background:rgb(0,255,0)"></div>
+               </body></html>"#,
+        );
+        let blurred = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:black">
+               <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                           background:rgb(0,255,0);filter:blur(6px)"></div>
+               </body></html>"#,
+        );
+        let a = paint_dom(&sharp, (100.0, 100.0), None).expect("sharp paint");
+        let b = paint_dom(&blurred, (100.0, 100.0), None).expect("blurred paint");
+        let green = |p: &Pixmap, x: u32, y: u32| p.pixel(x, y).expect("sample").green();
+
+        // Sharp: hard edge at x = 30, nothing outside the box.
+        assert_eq!(green(&a, 24, 50), 0);
+        assert_eq!(green(&a, 31, 50), 255);
+
+        // Blurred: ink bleeds outside the box, the edge is a ramp, and the middle
+        // stays saturated because 40px is wide against sigma 6.
+        assert!(
+            green(&b, 24, 50) > 8,
+            "the blur must bleed past the border box: {}",
+            green(&b, 24, 50)
+        );
+        let edge = green(&b, 30, 50);
+        assert!(
+            (60..=200).contains(&edge),
+            "the edge must be a ramp, not a step: {edge}"
+        );
+        assert!(
+            green(&b, 50, 50) > 245,
+            "the middle must stay saturated: {}",
+            green(&b, 50, 50)
+        );
+        // Monotonic across the left edge.
+        let ramp: Vec<u8> = (22..40).map(|x| green(&b, x, 50)).collect();
+        assert!(
+            ramp.windows(2).all(|w| w[0] <= w[1]),
+            "coverage must rise monotonically into the box: {ramp:?}"
+        );
+    }
+
+    #[test]
+    fn border_radius_half_the_side_draws_a_circle_not_a_squircle() {
+        // Corners were quadratic Beziers controlled by the corner point, which is a
+        // parabola: its midpoint sits 6.1% further out than the arc, so every
+        // rounded box bulged and `border-radius: 50%` was visibly not a circle.
+        let tree = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:black">
+               <div style="position:absolute;left:20px;top:20px;width:80px;height:80px;
+                           background:rgb(0,255,0);border-radius:999px"></div>
+               </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (120.0, 120.0), None).expect("circle paint");
+        // Centre (60, 60), radius 40. Sample the silhouette well away from the axes,
+        // where a parabola departs from the arc most.
+        let mut worst = 0.0f32;
+        for y in 26..=94u32 {
+            let mut left = None;
+            for x in 20..=100u32 {
+                if pixmap.pixel(x, y).expect("sample").green() > 127 {
+                    left = Some(x);
+                    break;
+                }
+            }
+            let Some(left) = left else { continue };
+            let dy = (y as f32 + 0.5) - 60.0;
+            let expected = 60.0 - (40.0f32 * 40.0 - dy * dy).max(0.0).sqrt();
+            worst = worst.max((left as f32 - expected).abs());
+        }
+        assert!(
+            worst < 1.0,
+            "silhouette departs from a true circle by {worst:.2}px"
+        );
+    }
+
+    #[test]
+    fn inset_box_shadow_paints_inward_from_the_border_box_edge() {
+        // `paint_box_shadow` used to return early on `inset`, so an inner shadow
+        // painted nothing at all. Inset coverage is the complement of the outset
+        // ramp: strongest at the border-box edge, half at the offset-and-spread
+        // inner edge, near zero deep inside. It also paints over the background
+        // and under the border, so an opaque background must not hide it.
+        let tree = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:white">
+               <div style="position:absolute;left:20px;top:20px;width:40px;height:40px;
+                           background:rgb(0,0,255);
+                           box-shadow:inset 0 0 12px rgb(255,255,0)"></div>
+               </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (100.0, 100.0), None).expect("inset shadow paint");
+        let red = |x: u32, y: u32| pixmap.pixel(x, y).expect("sample").red();
+
+        // Yellow over blue, so the red channel is the shadow's own coverage.
+        let edge = red(22, 40);
+        let mid = red(30, 40);
+        let center = red(40, 40);
+        assert!(
+            edge > 60,
+            "the shadow must be strong at the border-box edge: {edge}"
+        );
+        assert!(
+            edge > mid && mid > center,
+            "coverage must decay inward: edge {edge}, mid {mid}, center {center}"
+        );
+        assert_eq!(center, 0, "the middle of a 40px box is past 2.5 sigma");
+
+        // Nothing outside the border box: the page stays white, not yellow.
+        assert_eq!(
+            (red(18, 40), pixmap.pixel(18, 40).unwrap().blue()),
+            (255, 255),
+            "an inset shadow must not paint outside its own border box"
+        );
     }
 
     #[test]

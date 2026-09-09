@@ -182,6 +182,159 @@ public class PaintTests
     }
 
     [Fact]
+    public void BackdropFilterBlursWhatIsBehindTheElementOnly()
+    {
+        // `backdrop-filter` was parsed only for containing-block bookkeeping, so a frosted
+        // panel showed the backdrop through it perfectly sharp.
+        static DomTree Page(string filter) => Parse(
+            $$"""
+            <html style="margin:0"><body style="margin:0;width:200px;height:120px;
+                background:linear-gradient(90deg,rgb(255,0,0) 0 50%,rgb(0,0,255) 50% 100%)">
+            <div style="position:absolute;left:60px;top:30px;width:80px;height:60px;
+                        {{filter}}"></div>
+            </body></html>
+            """);
+
+        Pixmap sharp = RenderPaint.PaintDom(Page(""), (200f, 120f), null)!;
+        Pixmap frosted = RenderPaint.PaintDom(
+            Page("backdrop-filter:blur(8px)"), (200f, 120f), null)!;
+
+        // The backdrop's hard colour boundary sits at x = 100, inside the panel.
+        Assert.Equal((255, 0, 0), Rgb(sharp, 96, 60));
+        Assert.Equal((0, 0, 255), Rgb(sharp, 104, 60));
+
+        // Blurred: the boundary becomes a ramp, so both sides carry the other colour.
+        (byte lr, _, byte lb) = Rgb(frosted, 96, 60);
+        (byte rr, _, byte rb) = Rgb(frosted, 104, 60);
+        Assert.True(lb > 20, $"red side must pick up blue: {Rgb(frosted, 96, 60)}");
+        Assert.True(rr > 20, $"blue side must pick up red: {Rgb(frosted, 104, 60)}");
+        Assert.True(lr > rr, $"the ramp must still run red to blue: {lr} vs {rr}");
+        Assert.True(rb > lb, $"and blue to red the other way: {rb} vs {lb}");
+
+        // Outside the panel the backdrop is untouched: this is not a `filter`.
+        Assert.Equal((255, 0, 0), Rgb(frosted, 96, 10));
+        Assert.Equal((0, 0, 255), Rgb(frosted, 104, 10));
+        Assert.Equal((255, 0, 0), Rgb(frosted, 20, 60));
+        Assert.Equal((0, 0, 255), Rgb(frosted, 180, 60));
+    }
+
+    [Fact]
+    public void FilterBlurSoftensTheElementAndBleedsPastItsBox()
+    {
+        // `filter` was parsed only for containing-block bookkeeping, so a blurred element
+        // rendered perfectly sharp. blur()'s argument is sigma itself, unlike box-shadow's
+        // blur radius, which is 2 sigma.
+        DomTree sharp = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:black">
+            <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                        background:rgb(0,255,0)"></div>
+            </body></html>
+            """);
+        DomTree blurred = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:black">
+            <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                        background:rgb(0,255,0);filter:blur(6px)"></div>
+            </body></html>
+            """);
+        Pixmap a = RenderPaint.PaintDom(sharp, (100f, 100f), null)!;
+        Pixmap b = RenderPaint.PaintDom(blurred, (100f, 100f), null)!;
+
+        // Sharp: hard edge at x = 30, nothing outside the box.
+        Assert.Equal(0, Pixel(a, 24, 50).G);
+        Assert.Equal(255, Pixel(a, 31, 50).G);
+
+        // Blurred: ink bleeds outside the box, the edge is a ramp, and the middle stays
+        // saturated because 40px is wide against sigma 6.
+        Assert.True(Pixel(b, 24, 50).G > 8, $"must bleed past the box: {Pixel(b, 24, 50).G}");
+        byte edge = Pixel(b, 30, 50).G;
+        Assert.True(edge is >= 60 and <= 200, $"the edge must be a ramp: {edge}");
+        Assert.True(Pixel(b, 50, 50).G > 245, $"middle must stay saturated: {Pixel(b, 50, 50).G}");
+
+        byte previous = 0;
+        for (uint x = 22; x < 40; x++)
+        {
+            byte value = Pixel(b, x, 50).G;
+            Assert.True(value >= previous, $"coverage must rise into the box at x={x}");
+            previous = value;
+        }
+    }
+
+    [Fact]
+    public void BorderRadiusHalfTheSideDrawsACircleNotASquircle()
+    {
+        // Corners were quadratic Beziers controlled by the corner point, which is a
+        // parabola: its midpoint sits 6.1% further out than the arc, so every rounded box
+        // bulged and border-radius:50% was visibly not a circle.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:black">
+            <div style="position:absolute;left:20px;top:20px;width:80px;height:80px;
+                        background:rgb(0,255,0);border-radius:999px"></div>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (120f, 120f), null)!;
+
+        // Centre (60, 60), radius 40. Sample the silhouette well away from the axes,
+        // where a parabola departs from the arc most.
+        float worst = 0f;
+        for (uint y = 26; y <= 94; y++)
+        {
+            uint? left = null;
+            for (uint x = 20; x <= 100; x++)
+            {
+                if (Pixel(pixmap, x, y).G > 127)
+                {
+                    left = x;
+                    break;
+                }
+            }
+
+            if (left is not { } edge)
+            {
+                continue;
+            }
+
+            float dy = y + 0.5f - 60f;
+            float expected = 60f - MathF.Sqrt(F32.Max((40f * 40f) - (dy * dy), 0f));
+            worst = F32.Max(worst, MathF.Abs(edge - expected));
+        }
+
+        Assert.True(worst < 1f, $"silhouette departs from a true circle by {worst:F2}px");
+    }
+
+    [Fact]
+    public void InsetBoxShadowPaintsInwardFromTheBorderBoxEdge()
+    {
+        // PaintBoxShadow used to return early on Inset, so an inner shadow painted
+        // nothing at all. Inset coverage is the complement of the outset ramp: strongest
+        // at the border-box edge, half at the offset-and-spread inner edge, near zero
+        // deep inside. It also paints over the background and under the border, so an
+        // opaque background must not hide it.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+            <div style="position:absolute;left:20px;top:20px;width:40px;height:40px;
+                        background:rgb(0,0,255);
+                        box-shadow:inset 0 0 12px rgb(255,255,0)"></div>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (100f, 100f), null)!;
+
+        // Yellow over blue, so the red channel is the shadow's own coverage.
+        byte edge = Pixel(pixmap, 22, 40).R;
+        byte mid = Pixel(pixmap, 30, 40).R;
+        byte center = Pixel(pixmap, 40, 40).R;
+        Assert.True(edge > 60, $"the shadow must be strong at the border-box edge: {edge}");
+        Assert.True(edge > mid && mid > center, $"must decay inward: {edge}, {mid}, {center}");
+        Assert.Equal(0, center);
+        Assert.Equal(
+            (255, 255, 255),
+            Rgb(pixmap, 18, 40));
+    }
+
+    [Fact]
     public void BlurredBoxShadowFallsOffAsAGaussianRatherThanASolidBlob()
     {
         // A 40x40 black box with a 15px blur on white. sigma is blur/2 = 7.5, so

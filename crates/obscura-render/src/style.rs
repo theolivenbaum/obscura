@@ -1832,13 +1832,17 @@ fn apply_value(style: &mut LayoutStyle, name: &str, value: &str) {
         "rotate" => parse_individual_rotate(style, value),
         "scale" => parse_individual_scale(style, value),
         "filter" => {
-            set_containing_block_trigger(style, crate::CB_TRIGGER_FILTER, non_none_value(value))
+            set_containing_block_trigger(style, crate::CB_TRIGGER_FILTER, non_none_value(value));
+            style.filter_blur = parse_filter_blur(value);
         }
-        "backdrop-filter" | "-webkit-backdrop-filter" => set_containing_block_trigger(
-            style,
-            crate::CB_TRIGGER_BACKDROP_FILTER,
-            non_none_value(value),
-        ),
+        "backdrop-filter" | "-webkit-backdrop-filter" => {
+            set_containing_block_trigger(
+                style,
+                crate::CB_TRIGGER_BACKDROP_FILTER,
+                non_none_value(value),
+            );
+            style.backdrop_blur = parse_filter_blur(value);
+        }
         "perspective" => set_containing_block_trigger(
             style,
             crate::CB_TRIGGER_PERSPECTIVE,
@@ -2282,9 +2286,15 @@ pub fn supports_declaration(name: &str, value: &str) -> bool {
         // bookkeeping. Advertising an effect that is not painted is worse
         // than a conservative false result because feature queries commonly
         // use them to select the only visible implementation of an effect.
-        "filter" | "backdrop-filter" | "-webkit-backdrop-filter" | "perspective" => {
-            value.eq_ignore_ascii_case("none")
+        "filter" | "backdrop-filter" | "-webkit-backdrop-filter" => {
+            // `blur()` is painted, so it may be advertised. Every other filter
+            // function still participates only in containing-block bookkeeping,
+            // and advertising an effect that is not painted is worse than a
+            // conservative false: feature queries commonly use these to pick the
+            // only visible implementation of an effect.
+            value.eq_ignore_ascii_case("none") || parse_filter_blur(value).is_some()
         }
+        "perspective" => value.eq_ignore_ascii_case("none"),
         "contain" => value.eq_ignore_ascii_case("none"),
         "content-visibility" => value.eq_ignore_ascii_case("visible"),
         "content" => supports_content_value(value),
@@ -3869,6 +3879,44 @@ fn set_containing_block_trigger(style: &mut LayoutStyle, trigger: u16, enabled: 
     } else {
         style.containing_block_triggers &= !trigger;
     }
+}
+
+/// The combined standard deviation of a blur-only `filter` / `backdrop-filter`
+/// list, in CSS pixels.
+///
+/// `blur(<length>)`'s argument is sigma itself (CSS Filter Effects defines it as
+/// feGaussianBlur's `stdDeviation`), unlike `box-shadow`'s blur radius, which is
+/// 2 sigma. Successive gaussians of sigma a and b compose to
+/// `sqrt(a^2 + b^2)`, so a list of blurs collapses to one.
+///
+/// Returns `None` for `none`, for an unparseable list, and - deliberately - for
+/// any list carrying a function other than `blur()`. Recording just the blurs of
+/// `grayscale(1) blur(2px)` would paint a wrong result where painting nothing at
+/// least matches what the engine advertises through `@supports`.
+fn parse_filter_blur(value: &str) -> Option<f32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let functions = transform_functions(trimmed);
+    if functions.is_empty() {
+        return None;
+    }
+    let mut variance = 0.0f32;
+    for (name, args) in &functions {
+        if !name.eq_ignore_ascii_case("blur") {
+            return None;
+        }
+        // An empty argument is `blur()`, which is a zero-radius blur.
+        let args = args.trim();
+        let sigma = if args.is_empty() {
+            0.0
+        } else {
+            px(args).filter(|value| value.is_finite() && *value >= 0.0)?
+        };
+        variance += sigma * sigma;
+    }
+    (variance > 0.0).then(|| variance.sqrt())
 }
 
 /// Strictly split a `transform` value into `name(args)` functions in source
@@ -8761,7 +8809,17 @@ mod tests {
         }
         for property in ["filter", "backdrop-filter", "-webkit-backdrop-filter"] {
             assert!(supports_declaration(property, "none"), "{property}");
-            assert!(!supports_declaration(property, "blur(2px)"), "{property}");
+            // blur() is painted, so it is advertised.
+            assert!(supports_declaration(property, "blur(2px)"), "{property}");
+            assert!(supports_declaration(property, "blur(2px) blur(3px)"), "{property}");
+            // Everything else still only does containing-block bookkeeping, and a
+            // mixed list must not be advertised on the strength of its blurs.
+            assert!(!supports_declaration(property, "grayscale(1)"), "{property}");
+            assert!(
+                !supports_declaration(property, "blur(2px) grayscale(1)"),
+                "{property}"
+            );
+            assert!(!supports_declaration(property, "blur(-2px)"), "{property}");
         }
         assert!(!supports_declaration("perspective", "800px"));
         assert!(!supports_declaration("contain", "paint"));
@@ -10968,6 +11026,30 @@ mod tests {
         assert_eq!(sh.blur, 8.0);
         assert_eq!(sh.spread, 0.0);
         assert_eq!(sh.color, [0, 0, 0, 38]);
+    }
+
+    #[test]
+    fn filter_blur_parses_only_blur_only_lists() {
+        let sigma = |css: &str| compute_style("div", Some(css)).filter_blur;
+        assert_eq!(sigma("filter:blur(6px)"), Some(6.0));
+        assert_eq!(sigma("filter:none"), None);
+        assert_eq!(sigma("filter:grayscale(1)"), None);
+        // A mixed list is not reduced to its blurs: painting a wrong result is
+        // worse than painting none, and `@supports` reports it unsupported.
+        assert_eq!(sigma("filter:blur(4px) grayscale(1)"), None);
+        assert_eq!(sigma("filter:blur(-2px)"), None);
+        // Successive gaussians compose in quadrature: sqrt(3^2 + 4^2) = 5.
+        let combined = sigma("filter:blur(3px) blur(4px)").expect("blur-only list");
+        assert!((combined - 5.0).abs() < 1e-4, "{combined}");
+        // backdrop-filter shares the parse, including the -webkit- alias.
+        assert_eq!(
+            compute_style("div", Some("backdrop-filter:blur(18px)")).backdrop_blur,
+            Some(18.0)
+        );
+        assert_eq!(
+            compute_style("div", Some("-webkit-backdrop-filter:blur(8px)")).backdrop_blur,
+            Some(8.0)
+        );
     }
 
     #[test]

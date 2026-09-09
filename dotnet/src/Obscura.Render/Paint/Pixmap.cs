@@ -91,6 +91,31 @@ public sealed class Pixmap : IDisposable
         return bytes;
     }
 
+    /// <summary>tiny-skia's <c>Pixmap::clone_rect()</c>: a copy of one sub-rectangle.</summary>
+    /// <remarks>Returns null when the rectangle is empty or reaches outside the surface.</remarks>
+    public Pixmap? CloneRect(int x, int y, uint width, uint height)
+    {
+        if (width == 0 || height == 0 || x < 0 || y < 0
+            || (ulong)x + width > Width || (ulong)y + height > Height)
+        {
+            return null;
+        }
+
+        Pixmap? copy = New(width, height);
+        if (copy is null)
+        {
+            return null;
+        }
+
+        for (uint row = 0; row < height; row++)
+        {
+            int source = (int)(((y + row) * Width) + (uint)x);
+            Pixels.AsSpan(source, (int)width).CopyTo(copy.Pixels.AsSpan((int)(row * width), (int)width));
+        }
+
+        return copy;
+    }
+
     /// <summary>tiny-skia's <c>Pixmap::pixel()</c>.</summary>
     public PremultipliedColor? Pixel(uint x, uint y) =>
         x < Width && y < Height ? Pixels[(int)((y * Width) + x)] : null;

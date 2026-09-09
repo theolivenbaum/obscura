@@ -21,7 +21,10 @@ public static partial class RenderDom
     /// Resolve native form-control intrinsic border-box geometry after inheritance and author
     /// cascading.
     /// </summary>
-    private static void ApplyNativeControlSizes(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
+    private static void ApplyNativeControlSizes(
+        DomTree tree,
+        Dictionary<NodeId, LayoutStyle> styles,
+        TextEngine engine)
     {
         Dictionary<NodeId, NativeButtonIntrinsicContent> nativeButtonContents = [];
         foreach ((NodeId id, LayoutStyle style) in styles)
@@ -78,8 +81,12 @@ public static partial class RenderDom
                     content.Text.ToString().Split(
                         (char[]?)null,
                         StringSplitOptions.RemoveEmptyEntries));
-                float contentWidth = DomTextMeasure.TextWidth(
-                    label, fontSize, bold, style.FontFamily, style.LetterSpacing ?? 0f);
+                // Shaped through the inline engine, not TextWidth: the label is laid out
+                // by that engine, so sizing the box with a different metric leaves the
+                // text too wide for the box it just produced. <select> deliberately keeps
+                // TextWidth, because paint synthesises its label with the same
+                // height-based scale.
+                float contentWidth = engine.MeasureControlLabel(label, style);
                 contentWidth += content.AtomicWidth;
 
                 float PseudoWidth(LayoutStyle? pseudo)

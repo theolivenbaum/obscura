@@ -740,7 +740,15 @@ internal static class PaintDomPainter
             }
 
             float ownOpacity = Math.Clamp(style.Opacity ?? 1f, 0f, 1f);
-            if (pass.SuppressOpacityFor != nid && ownOpacity < 1f)
+            // `filter` groups exactly like `opacity` does: the whole finished stacking
+            // context is post-processed once, never each primitive. Sharing the opacity
+            // group's bookkeeping keeps one suppression flag and one recursion rather
+            // than a second, near-identical layer path.
+            float? groupBlur = style.FilterBlur is { } blurSigma
+                && float.IsFinite(blurSigma) && blurSigma > 0f
+                    ? blurSigma
+                    : null;
+            if (pass.SuppressOpacityFor != nid && (ownOpacity < 1f || groupBlur is not null))
             {
                 opacitySubtreeSkip.Add(nid);
                 foreach (NodeId member in DomTraversal.RenderedDescendants(tree, nid))
@@ -772,6 +780,11 @@ internal static class PaintDomPainter
                 if (painted is null)
                 {
                     return null;
+                }
+
+                if (groupBlur is { } sigma)
+                {
+                    PaintFilters.BlurPixmap(painted, sigma, PaintFilters.BlurEdge.Transparent);
                 }
 
                 Surface.DrawPixmap(pixmap, 0, 0, painted, ownOpacity, false, Affine2.Identity, null);
@@ -869,6 +882,14 @@ internal static class PaintDomPainter
                     pass.BaseUrl,
                     pass.ImageCache,
                     rasterScale);
+            }
+
+            // backdrop-filter reads the surface as it stands before this element paints
+            // anything of its own, so it runs ahead of the shadow.
+            if (!paintsInlineFragments && style.BackdropBlur is { } backdropSigma)
+            {
+                PaintFilters.PaintBackdropFilter(
+                    pixmap, rect, style.BorderModel.Radii, backdropSigma, ancestorClipMask);
             }
 
             // Outset box-shadow paints behind this element's own background/border.
@@ -1114,6 +1135,14 @@ internal static class PaintDomPainter
 
             if (!paintsInlineFragments)
             {
+                // CSS Backgrounds 3 paints an inset shadow over the background and
+                // under the border, so it cannot ride along with the outset pass above.
+                if (style.BoxShadow is { } insetShadow)
+                {
+                    PaintBorders.PaintInsetBoxShadow(
+                        pixmap, insetShadow, rect, style.BorderModel.Radii, elementClipMask);
+                }
+
                 PaintBorders.PaintCssBorder(pixmap, rect, style, elementClipMask, rasterScale);
             }
 

@@ -114,7 +114,14 @@ public class ComputedStyleTests
         foreach (string property in new[] { "filter", "backdrop-filter", "-webkit-backdrop-filter" })
         {
             Assert.True(Supports(property, "none"), property);
-            Assert.False(Supports(property, "blur(2px)"), property);
+            // blur() is painted, so it is advertised.
+            Assert.True(Supports(property, "blur(2px)"), property);
+            Assert.True(Supports(property, "blur(2px) blur(3px)"), property);
+            // Everything else still only does containing-block bookkeeping, and a mixed
+            // list must not be advertised on the strength of its blurs.
+            Assert.False(Supports(property, "grayscale(1)"), property);
+            Assert.False(Supports(property, "blur(2px) grayscale(1)"), property);
+            Assert.False(Supports(property, "blur(-2px)"), property);
         }
 
         Assert.False(Supports("perspective", "800px"));
@@ -1823,4 +1830,24 @@ public class ComputedStyleTests
         LayoutStyle style = Compute("div", "box-shadow: none");
         Assert.Null(style.BoxShadow);
     }
+    [Fact]
+    public void FilterBlurParsesOnlyBlurOnlyLists()
+    {
+        static float? Sigma(string css) => Compute("div", css).FilterBlur;
+
+        Assert.Equal(6f, Sigma("filter:blur(6px)"));
+        Assert.Null(Sigma("filter:none"));
+        Assert.Null(Sigma("filter:grayscale(1)"));
+        // A mixed list is not reduced to its blurs: painting a wrong result is worse than
+        // painting none, and @supports reports it unsupported.
+        Assert.Null(Sigma("filter:blur(4px) grayscale(1)"));
+        Assert.Null(Sigma("filter:blur(-2px)"));
+        // Successive gaussians compose in quadrature: sqrt(3^2 + 4^2) = 5.
+        float combined = Sigma("filter:blur(3px) blur(4px)")!.Value;
+        Assert.True(MathF.Abs(combined - 5f) < 1e-4f, $"{combined}");
+        // backdrop-filter shares the parse, including the -webkit- alias.
+        Assert.Equal(18f, Compute("div", "backdrop-filter:blur(18px)").BackdropBlur);
+        Assert.Equal(8f, Compute("div", "-webkit-backdrop-filter:blur(8px)").BackdropBlur);
+    }
+
 }
