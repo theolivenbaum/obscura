@@ -203,8 +203,10 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## 9. Validation
 
-- [ ] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
-- [ ] Port `render-repros/run.sh` to drive the C# binary
+- [x] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
+- [x] `scripts/parity-sweep.sh` drives both engines over every fixture:
+      **320 of 320 outputs byte-identical** (64 fixtures x text/links/html/
+      markdown/assets), plus 17 of 17 `--eval` expressions
 - [ ] Obstacle course (companion repo `obscura-benchmark`) at 33/33
 - [ ] Performance comparison vs the Rust build on the standard pages
 - [ ] Re-enable CI as .NET workflows (rename off `.disabled`, rewrite for dotnet)

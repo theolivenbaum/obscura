@@ -41,6 +41,7 @@ public sealed class DynamicStylesheetOnloadFires
                 ? ("body { color: red; }", "text/css", 200)
                 : (Document, "text/html", 200));
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned = CoreCdp.Owned(ctx);
 
         // Race the link's onload promise against a 5s timeout. Before the fix the link
         // never settled, so this resolved with "timeout" and the assertion failed.

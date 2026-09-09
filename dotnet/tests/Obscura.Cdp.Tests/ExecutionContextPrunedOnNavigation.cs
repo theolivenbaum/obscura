@@ -18,6 +18,7 @@ public sealed class ExecutionContextPrunedOnNavigation
     public async Task NavigationPrunesOnlyTheNavigatedPagesStaleContextIds()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         string firstPage = ctx.CreatePage();
         string secondPage = ctx.CreatePage();
         ctx.Sessions["first"] = firstPage;

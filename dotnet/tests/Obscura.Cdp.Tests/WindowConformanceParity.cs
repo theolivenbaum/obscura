@@ -27,6 +27,7 @@ public sealed class WindowConformanceParity
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned = CoreCdp.Owned(ctx);
         JsonNode evaluated = await CoreCdp.EvalAsync(
             ctx,
             2,
@@ -60,6 +61,7 @@ public sealed class WindowConformanceParity
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         JsonNode evaluated = await CoreCdp.EvalAsync(
             ctx,
             2,

@@ -49,6 +49,7 @@ public sealed class ExecutionContextOwnership
     public async Task NonblankCreateTargetExposesOnlyTheCommittedDocumentContext()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         (_, string session) = await CreateAndAttachAsync(
             ctx, "data:text/html,<title>committed</title>", 1);
         ctx.PendingEvents.Clear();
@@ -67,6 +68,7 @@ public sealed class ExecutionContextOwnership
     public async Task DefaultContextIdentityIsPageOwnedForIdAndUniqueId()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         (_, string first) = await CreateAndAttachAsync(ctx, "about:blank", 1);
         (_, string second) = await CreateAndAttachAsync(ctx, "about:blank", 10);
         await CoreCdp.DispatchAsync(ctx, 20, "Runtime.enable", new JsonObject(), first);
@@ -135,6 +137,7 @@ public sealed class ExecutionContextOwnership
     public async Task NavigatingOnePagePreservesTheOtherPagesIsolatedContext()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned3 = CoreCdp.Owned(ctx);
         (_, string first) = await CreateAndAttachAsync(ctx, "about:blank", 1);
         (_, string second) = await CreateAndAttachAsync(ctx, "about:blank", 10);
         foreach ((ulong id, string session) in new[] { (20UL, first), (21UL, second) })
@@ -188,6 +191,7 @@ public sealed class ExecutionContextOwnership
     public async Task AttachedIsolatedContextIdsShareTheCurrentPageGlobalForNow()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned4 = CoreCdp.Owned(ctx);
         (_, string session) = await CreateAndAttachAsync(ctx, "about:blank", 1);
         await CoreCdp.DispatchAsync(
             ctx,
@@ -233,6 +237,7 @@ public sealed class ExecutionContextOwnership
     public async Task NavigationContextEventsPreserveOrderForEveryRuntimeAttachment()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned5 = CoreCdp.Owned(ctx);
         (string target, string first) = await CreateAndAttachAsync(ctx, "about:blank", 1);
         CdpResponse attached = await CoreCdp.DispatchAsync(
             ctx,
@@ -302,6 +307,7 @@ public sealed class ExecutionContextOwnership
     public async Task RuntimeAndBindingEventsUseTheOwningPagesDefaultContext()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned6 = CoreCdp.Owned(ctx);
         (_, string first) = await CreateAndAttachAsync(ctx, "about:blank", 1);
         (_, string second) = await CreateAndAttachAsync(ctx, "about:blank", 10);
         foreach ((ulong id, string session) in new[] { (20UL, first), (21UL, second) })

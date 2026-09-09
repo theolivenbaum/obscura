@@ -24,6 +24,7 @@ public sealed class StructuredCloneCryptoParity
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned = CoreCdp.Owned(ctx);
         JsonNode evaluated = await CoreCdp.EvalAsync(ctx, 2, expression, session, awaitPromise: true);
         return CoreCdp.ParseStringified(evaluated);
     }

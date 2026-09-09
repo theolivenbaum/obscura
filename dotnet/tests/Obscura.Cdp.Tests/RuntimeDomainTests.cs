@@ -24,6 +24,7 @@ public sealed class RuntimeDomainTests
     public async Task EvaluateRejectsUnknownContextId()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         string error = CdpDomainFixtures.ErrorOf(await RuntimeDomain.HandleAsync(
             "evaluate",
             CdpDomainFixtures.Json("""{"expression":"1 + 1","contextId":9999}"""),
@@ -38,6 +39,7 @@ public sealed class RuntimeDomainTests
     public async Task CallFunctionOnRejectsUnknownExecutionContextId()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         string error = CdpDomainFixtures.ErrorOf(await RuntimeDomain.HandleAsync(
             "callFunctionOn",
             CdpDomainFixtures.Json(
@@ -54,6 +56,7 @@ public sealed class RuntimeDomainTests
         foreach (int contextId in new[] { 1, 2 })
         {
             var ctx = CdpContext.New();
+            using IDisposable owned3 = CoreCdp.Owned(ctx);
             string error = CdpDomainFixtures.ErrorOf(await RuntimeDomain.HandleAsync(
                 "evaluate",
                 new JsonObject { ["expression"] = "1 + 1", ["contextId"] = contextId },
@@ -67,6 +70,7 @@ public sealed class RuntimeDomainTests
     public async Task EvaluateReportsARejectionThroughExceptionDetails()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned4 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         const string sessionId = "evaluate-rejection";
         ctx.Sessions[sessionId] = pageId;
@@ -104,6 +108,7 @@ public sealed class RuntimeDomainTests
     public async Task CallFunctionOnReportsARejectionThroughExceptionDetails()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned5 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         const string sessionId = "call-rejection";
         ctx.Sessions[sessionId] = pageId;
@@ -129,6 +134,7 @@ public sealed class RuntimeDomainTests
     public async Task AResolvedEvaluationCarriesNoExceptionDetails()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned6 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         const string sessionId = "evaluate-resolved";
         ctx.Sessions[sessionId] = pageId;
@@ -149,6 +155,7 @@ public sealed class RuntimeDomainTests
     public async Task EvaluateAwaitPromiseReportsTheRequestedTimeout()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned7 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         const string sessionId = "await-timeout-session";
         ctx.Sessions[sessionId] = pageId;
@@ -175,6 +182,7 @@ public sealed class RuntimeDomainTests
     public async Task CreateIsolatedWorldRegistersIdForEvaluate()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned8 = CoreCdp.Owned(ctx);
         // Bypass the page-attached path of createIsolatedWorld by direct insert - mirrors
         // the same effect as calling the page handler with a real session.
         ctx.ValidContextIds.Add(100);
@@ -201,6 +209,7 @@ public sealed class RuntimeDomainTests
     public async Task EnableSucceedsWhenNoSessionAttached()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned9 = CoreCdp.Owned(ctx);
         JsonNode result = CdpDomainFixtures.Unwrap(
             await RuntimeDomain.HandleAsync("enable", new JsonObject(), ctx, null));
         CdpDomainFixtures.AssertJson("{}", result);
@@ -217,6 +226,7 @@ public sealed class RuntimeDomainTests
     public async Task RemoveBindingRejectsInjectionInName()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned10 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;

@@ -115,6 +115,7 @@ public sealed class PageDomainTests
     public async Task PageEnableEmitsTheInitialLoadEventsOnce()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned3 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -148,6 +149,7 @@ public sealed class PageDomainTests
     public void RuntimeNetworkEventsReuseTheDocumentLoaderWithoutLifecycleReplay()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned4 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string sessionId = $"{pageId}-session";
         ctx.Sessions[sessionId] = pageId;
@@ -185,6 +187,7 @@ public sealed class PageDomainTests
     public async Task GetLayoutMetricsReturnsChromeDefaultViewport()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned5 = CoreCdp.Owned(ctx);
         JsonNode result = CdpDomainFixtures.Unwrap(
             await PageDomain.HandleAsync("getLayoutMetrics", new JsonObject(), ctx, null));
 
@@ -218,6 +221,7 @@ public sealed class PageDomainTests
     public async Task CdpMetricsAndCaptureFollowTheScrolledViewport()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned6 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -465,6 +469,7 @@ public sealed class PageDomainTests
     public async Task CssAnimationDrivesAutonomousScreencastFramesUntilCompletion()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned7 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -761,6 +766,7 @@ public sealed class PageDomainTests
     public async Task LongFullPagePngIsContiguousAndPreservesLiveScrollAndFixedGeometry()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned8 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -815,6 +821,7 @@ public sealed class PageDomainTests
     public async Task LongFullPagePngUsesGlobalDevicePixelBoundariesAtDprTwo()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned9 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -852,6 +859,7 @@ public sealed class PageDomainTests
     public async Task LongFullPagePngRejectsMoreThanThirtyTwoMegapixelsBeforeStriping()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned10 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -1032,6 +1040,7 @@ public sealed class PageDomainTests
     public async Task UnknownPageMethodStillErrors()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned11 = CoreCdp.Owned(ctx);
         string error = CdpDomainFixtures.ErrorOf(
             await PageDomain.HandleAsync("notARealMethod", new JsonObject(), ctx, null));
         Assert.Contains("Unknown Page method", error, StringComparison.Ordinal);
@@ -1045,6 +1054,7 @@ public sealed class PageDomainTests
     public async Task PrintToPdfIsExplicitWithoutARenderableSession()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned12 = CoreCdp.Owned(ctx);
         string error = CdpDomainFixtures.ErrorOf(
             await PageDomain.HandleAsync("printToPDF", new JsonObject(), ctx, null));
         Assert.DoesNotContain("Unknown Page method", error, StringComparison.Ordinal);
@@ -1061,6 +1071,7 @@ public sealed class PageDomainTests
     public async Task CaptureScreenshotReturnsDescriptiveUnsupportedError()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned13 = CoreCdp.Owned(ctx);
         string error = CdpDomainFixtures.ErrorOf(
             await PageDomain.HandleAsync("captureScreenshot", new JsonObject(), ctx, null));
         Assert.DoesNotContain("Unknown Page method", error, StringComparison.Ordinal);
@@ -1081,6 +1092,7 @@ public sealed class PageDomainTests
     public async Task NavigationEmitsTargetInfoChangedWithUrlAndTitle()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned14 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string sessionId = $"{pageId}-session";
         ctx.Sessions[sessionId] = pageId;

@@ -58,6 +58,7 @@ public sealed class ScrollEventOnAssignment
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned = CoreCdp.Owned(ctx);
         JsonNode result = await ProbeAsync(ctx, session, "el.scrollTop = 100;");
         Assert.Equal(1, result["fired"].AsI64());
         Assert.Equal(100, result["top"].AsI64());
@@ -68,6 +69,7 @@ public sealed class ScrollEventOnAssignment
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         JsonNode result = await ProbeAsync(ctx, session, "el.scrollLeft = 40;");
         Assert.Equal(1, result["fired"].AsI64());
         Assert.Equal(40, result["left"].AsI64());
@@ -82,6 +84,7 @@ public sealed class ScrollEventOnAssignment
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned3 = CoreCdp.Owned(ctx);
         JsonNode result = await ProbeAsync(
             ctx, session, "el.scrollTop = 100; el.scrollTop = 100;");
         Assert.Equal(1, result["fired"].AsI64());
@@ -97,6 +100,7 @@ public sealed class ScrollEventOnAssignment
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned4 = CoreCdp.Owned(ctx);
         JsonNode result = await ProbeAsync(ctx, session, "el.scrollTo(30, 60);");
         Assert.Equal(1, result["fired"].AsI64());
         Assert.Equal(60, result["top"].AsI64());
@@ -112,6 +116,7 @@ public sealed class ScrollEventOnAssignment
     {
         using var server = CoreCdpServer.Html(Body);
         (CdpContext ctx, string session) = await CoreCdp.NavigateAsync(server.Url);
+        using IDisposable owned5 = CoreCdp.Owned(ctx);
         JsonNode evaluated = await CoreCdp.EvalAsync(
             ctx,
             2,

@@ -63,6 +63,7 @@ public sealed class PageFrameContract
                 ? (ChildBody, "text/html", 200)
                 : (RootBody, "text/html", 200));
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
 
         JsonNode created = await CoreCdp.CdpAsync(
             ctx, 1, "Target.createTarget", new JsonObject { ["url"] = "about:blank" }, null);

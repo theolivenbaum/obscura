@@ -57,8 +57,12 @@ public sealed partial class ObscuraJsRuntime
     internal void BindRealmOps(ScriptObject ops, ObscuraState state)
     {
         ArgumentNullException.ThrowIfNull(ops);
-        _ = state;
         _ops.BindTo(ops);
+        // The realm-sensitive ops must resolve against THIS frame's state, not the
+        // page's. Sharing the page's bindings made every op that asks "which realm is
+        // calling" answer "the page" once the call came from a promise continuation
+        // rather than from inside FrameRealm.Run.
+        _ops.BindRealmOverrides(ops, state);
         // A frame realm cannot use the host timer queue (see TimerQueue), so
         // bootstrap.js schedules every frame timer as `op_sleep(...).then(...)`.
         // That has to count as work in flight or the page's loop reports idle

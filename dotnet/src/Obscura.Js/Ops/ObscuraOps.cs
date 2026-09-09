@@ -265,6 +265,44 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
             (id, action, value) => RenderOps.OpWaapiControl(Page, D(id), S(action), D(value))));
     }
 
+    /// <summary>
+    /// Rebind the ops whose target realm is "whoever is calling" onto one frame realm's
+    /// own state.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Most ops carry an explicit <c>__obscura_frameId</c> from the shim and resolve
+    /// through <see cref="FrameState(uint)"/>. Four do not: <c>op_navigate</c>,
+    /// <c>op_get_cookies</c>, <c>op_set_cookie</c> and <c>op_frame_document_ready</c> ask
+    /// <see cref="RealmState"/> which realm is running. The reference resolves that from
+    /// the V8 scope of the call, which is always right. Here it was an ambient
+    /// <see cref="RealmStates.Current"/> that only a synchronous
+    /// <c>FrameRealm.Run</c> sets, so an op reached from a frame's promise continuation -
+    /// which is how every frame timer runs, because a frame realm schedules through
+    /// <c>op_sleep(...).then(...)</c> - resolved against the page instead.
+    /// </para>
+    /// <para>
+    /// The visible symptom was an iframe inside an iframe: the grandchild's
+    /// <c>op_frame_document_ready</c> recorded parent frame 0, so
+    /// <c>Page.getFrameTree</c> reported two siblings of the main frame instead of a
+    /// nested tree, and it flipped between correct and wrong depending on whether the
+    /// registration happened inside the synchronous run or after it.
+    /// </para>
+    /// </remarks>
+    public void BindRealmOverrides(ScriptObject ops, ObscuraState state)
+    {
+        ArgumentNullException.ThrowIfNull(ops);
+        ArgumentNullException.ThrowIfNull(state);
+        Bind(ops, "op_navigate", (Action<object?, object?, object?>)(
+            (url, method, body) => CoreOps.OpNavigate(state, S(url), S(method), S(body))));
+        Bind(ops, "op_get_cookies", (Func<string>)(() => CoreOps.OpGetCookies(state)));
+        Bind(ops, "op_set_cookie", (Action<object?>)(
+            cookie => CoreOps.OpSetCookie(state, S(cookie))));
+        Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
+            (url, html, width, height) => CoreOps.OpFrameDocumentReady(
+                Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
+    }
+
     private static void Bind(ScriptObject ops, string name, object function) =>
         ops.SetProperty(name, function);
 

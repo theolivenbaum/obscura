@@ -44,7 +44,7 @@ public sealed class ChildFrameTree
         int depth)
     {
         JsonNode tree = new JsonObject();
-        for (int attempt = 0; attempt < 60; attempt++)
+        for (int attempt = 0; attempt < 10; attempt++)
         {
             tree = await CoreCdp.CdpAsync(ctx, 3, "Page.getFrameTree", new JsonObject(), session);
             JsonNode? node = tree["frameTree"];
@@ -120,9 +120,6 @@ public sealed class ChildFrameTree
             root.Get("frame").Get("id").AsString(),
             child.Get("frame").Get("parentId").AsString());
 
-        Assert.True(
-            child.Get("childFrames").Get(0) is not null,
-            "DIAG tree=" + CdpJson.Serialize(tree) + " req=" + string.Join("|", server.Requests));
         JsonNode? grandchild = child.Get("childFrames").Get(0);
         Assert.EndsWith(
             "/grandchild.html",

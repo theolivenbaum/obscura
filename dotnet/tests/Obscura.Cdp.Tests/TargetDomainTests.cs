@@ -24,6 +24,7 @@ public sealed class TargetDomainTests
     public async Task BrowserContextsAreRealAndDoNotClearDefaultCookies()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         ctx.DefaultContext.CookieJar.SetCookie("sid=default", new Uri("https://example.com"));
 
         JsonNode created = CdpDomainFixtures.Unwrap(
@@ -42,6 +43,7 @@ public sealed class TargetDomainTests
     public async Task DisposingContextRemovesOnlyItsPages()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         string contextId = ctx.CreateBrowserContext();
         Assert.True(ctx.CreatePageInContext(contextId, out string? isolatedPage, out _));
         string defaultPage = ctx.CreatePage();
@@ -60,6 +62,7 @@ public sealed class TargetDomainTests
     public async Task AttachToBrowserTargetReturnsSessionId()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned3 = CoreCdp.Owned(ctx);
         JsonNode result = CdpDomainFixtures.Unwrap(
             await HandleAsync("attachToBrowserTarget", new JsonObject(), ctx));
 
@@ -78,6 +81,7 @@ public sealed class TargetDomainTests
     public async Task ExplicitPageAttachmentIsUniqueAndScopedToItsParentSession()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned4 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string managedSession = $"{pageId}-session";
         ctx.Sessions[managedSession] = pageId;
@@ -109,6 +113,7 @@ public sealed class TargetDomainTests
     public async Task DetachingExplicitSessionRemovesItsPageRoute()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned5 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         const string parentSession = "browser-session";
         JsonNode attached = CdpDomainFixtures.Unwrap(await HandleAsync(
@@ -124,6 +129,7 @@ public sealed class TargetDomainTests
     public async Task ClosingTargetDetachesEveryActualPageSession()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned6 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         const string parentSession = "browser-session";
         string first = CdpDomainFixtures.Unwrap(await HandleAsync(
@@ -152,6 +158,7 @@ public sealed class TargetDomainTests
     public async Task UnknownTargetMethodStillErrors()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned7 = CoreCdp.Owned(ctx);
         string error = CdpDomainFixtures.ErrorOf(
             await HandleAsync("notARealMethod", new JsonObject(), ctx));
         Assert.Contains("Unknown Target method", error, StringComparison.Ordinal);
@@ -167,6 +174,7 @@ public sealed class TargetDomainTests
     public async Task GetTargetInfoBrowserTargetIncludesCanAccessOpener()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned8 = CoreCdp.Owned(ctx);
         // No targetId -> falls through to the browser-target branch.
         JsonNode result = CdpDomainFixtures.Unwrap(
             await HandleAsync("getTargetInfo", new JsonObject(), ctx));

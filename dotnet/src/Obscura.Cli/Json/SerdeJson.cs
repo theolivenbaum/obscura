@@ -316,8 +316,7 @@ public static class SerdeJson
         {
             var sb = Start(negative, 8);
             sb.Append(digits);
-            sb.Append('e');
-            sb.Append((pointPosition - 1).ToString(CultureInfo.InvariantCulture));
+            AppendExponent(sb, pointPosition - 1);
             return sb.ToString();
         }
 
@@ -325,9 +324,25 @@ public static class SerdeJson
         scientific.Append(digits[0]);
         scientific.Append('.');
         scientific.Append(digits, 1, length - 1);
-        scientific.Append('e');
-        scientific.Append((pointPosition - 1).ToString(CultureInfo.InvariantCulture));
+        AppendExponent(scientific, pointPosition - 1);
         return scientific.ToString();
+    }
+
+    /// <summary>
+    /// Appends a ryu-style exponent, which carries an explicit <c>+</c> when
+    /// positive: <c>1e+30</c>, not <c>1e30</c>. Verified against the reference
+    /// binary, which prints <c>1e+30</c> for <c>--eval "1e30"</c> and
+    /// <c>1e-30</c> for the negative side. Dropping the sign still parses, but
+    /// it is a different byte string on stdout.
+    /// </summary>
+    private static void AppendExponent(StringBuilder output, int exponent)
+    {
+        output.Append('e');
+        if (exponent >= 0)
+        {
+            output.Append('+');
+        }
+        output.Append(exponent.ToString(CultureInfo.InvariantCulture));
     }
 
     private static StringBuilder Start(bool negative, int capacity)

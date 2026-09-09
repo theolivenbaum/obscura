@@ -135,13 +135,23 @@ internal static class CoreCdp
 /// </summary>
 internal sealed class CoreCdpServer : IDisposable
 {
+    /// <summary>One canned HTTP response.</summary>
+    internal readonly record struct Reply(
+        string Body,
+        string ContentType,
+        int Status,
+        string? Location = null,
+        int DelayMs = 0);
+
     private readonly TcpListener _listener;
-    private readonly Func<string, (string Body, string ContentType, int Status)> _route;
+    private readonly Func<string, Reply> _route;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentQueue<string> _requests = new();
+    private int _active;
+    private int _peak;
     private bool _disposed;
 
-    private CoreCdpServer(Func<string, (string Body, string ContentType, int Status)> route)
+    private CoreCdpServer(Func<string, Reply> route)
     {
         _route = route;
         _listener = new TcpListener(IPAddress.Loopback, 0);
@@ -157,11 +167,25 @@ internal sealed class CoreCdpServer : IDisposable
     /// <summary>Every request line path this fixture served, in arrival order.</summary>
     internal IReadOnlyList<string> Requests => [.. _requests];
 
+    /// <summary>The largest number of requests this fixture served at the same time.</summary>
+    internal int PeakConcurrency => Volatile.Read(ref _peak);
+
     internal static CoreCdpServer Html(string body) =>
-        new(_ => (body, "text/html", 200));
+        new(_ => new Reply(body, "text/html", 200));
 
     internal static CoreCdpServer Routed(
-        Func<string, (string Body, string ContentType, int Status)> route) => new(route);
+        Func<string, (string Body, string ContentType, int Status)> route)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        return new(path =>
+        {
+            (string body, string contentType, int status) = route(path);
+            return new Reply(body, contentType, status);
+        });
+    }
+
+    /// <summary>A route table that can also answer a redirect.</summary>
+    internal static CoreCdpServer Advanced(Func<string, Reply> route) => new(route);
 
     private async Task AcceptLoopAsync()
     {
@@ -196,11 +220,30 @@ internal sealed class CoreCdpServer : IDisposable
                 string path = parts.Length > 1 ? parts[1] : "/";
                 _requests.Enqueue(firstLine);
 
-                (string body, string contentType, int status) = _route(path);
-                byte[] payload = Encoding.UTF8.GetBytes(body);
+                int active = Interlocked.Increment(ref _active);
+                int observed = Volatile.Read(ref _peak);
+                while (active > observed
+                    && Interlocked.CompareExchange(ref _peak, active, observed) != observed)
+                {
+                    observed = Volatile.Read(ref _peak);
+                }
+
+                Reply reply = _route(path);
+                if (reply.DelayMs > 0)
+                {
+                    await Task.Delay(reply.DelayMs, _stopping.Token).ConfigureAwait(false);
+                }
+
+                byte[] payload = Encoding.UTF8.GetBytes(reply.Body);
                 var head = new StringBuilder();
-                head.Append(CultureInfo.InvariantCulture, $"HTTP/1.1 {status} OK\r\n");
-                head.Append(CultureInfo.InvariantCulture, $"Content-Type: {contentType}\r\n");
+                string reason = reply.Status == 302 ? "Found" : "OK";
+                head.Append(CultureInfo.InvariantCulture, $"HTTP/1.1 {reply.Status} {reason}\r\n");
+                if (reply.Location is { } location)
+                {
+                    head.Append(CultureInfo.InvariantCulture, $"Location: {location}\r\n");
+                }
+
+                head.Append(CultureInfo.InvariantCulture, $"Content-Type: {reply.ContentType}\r\n");
                 head.Append(
                     CultureInfo.InvariantCulture,
                     $"Content-Length: {payload.Length.ToString(CultureInfo.InvariantCulture)}\r\n");
@@ -213,6 +256,10 @@ internal sealed class CoreCdpServer : IDisposable
             catch (Exception)
             {
                 // A test that stops mid-request is normal; the fixture must not throw.
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
             }
         }
     }

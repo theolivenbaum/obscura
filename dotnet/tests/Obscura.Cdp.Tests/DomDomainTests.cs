@@ -31,6 +31,7 @@ public sealed class DomDomainTests
     public async Task DomFocusSetsActiveElement()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -63,6 +64,7 @@ public sealed class DomDomainTests
     public async Task ScrollIntoViewIfNeededResolvesAllNodeIdentifiers()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -105,6 +107,7 @@ public sealed class DomDomainTests
     public async Task ScrollIntoViewIfNeededRequiresANodeIdentifier()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned3 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
@@ -185,6 +188,7 @@ public sealed class DomDomainTests
     public async Task SetFileInputFilesRefusesWithoutAllowFileAccess()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned4 = CoreCdp.Owned(ctx);
         string pageId = ctx.CreatePage();
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;

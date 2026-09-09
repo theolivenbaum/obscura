@@ -23,8 +23,12 @@ public sealed class SerdeJsonTests
         Assert.Equal("2.0", SerdeJson.ToJson(JsonValue.Create(2.0)));
         Assert.Equal("-0.0", SerdeJson.ToJson(JsonValue.Create(-0.0)));
         Assert.Equal("0.5", SerdeJson.ToJson(JsonValue.Create(0.5)));
-        Assert.Equal("1e30", SerdeJson.ToJson(JsonValue.Create(1e30)));
-        Assert.Equal("1.234e33", SerdeJson.ToJson(JsonValue.Create(1.234e33)));
+        // A positive exponent carries an explicit '+', which is what the
+        // reference prints for `--eval "1e30"`.
+        Assert.Equal("1e+30", SerdeJson.ToJson(JsonValue.Create(1e30)));
+        Assert.Equal("1.234e+33", SerdeJson.ToJson(JsonValue.Create(1.234e33)));
+        Assert.Equal("1e-30", SerdeJson.ToJson(JsonValue.Create(1e-30)));
+        Assert.Equal("5e-324", SerdeJson.ToJson(JsonValue.Create(double.Epsilon)));
         Assert.Equal("0.001234", SerdeJson.ToJson(JsonValue.Create(0.001234)));
     }
 

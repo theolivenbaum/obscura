@@ -39,6 +39,7 @@ public sealed class RuntimeConsoleEvents
     public async Task NavigationEmitsConsoleArgumentsAndUncaughtExceptionDetails()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         (_, string session) = await CreateAndAttachAsync(ctx);
         await CoreCdp.CdpAsync(ctx, 1, "Runtime.enable", new JsonObject(), session);
         ctx.PendingEvents.Clear();
@@ -118,6 +119,7 @@ public sealed class RuntimeConsoleEvents
     public async Task RuntimeEventsOnlyReachSessionsWhileRuntimeIsEnabled()
     {
         var ctx = CdpContext.New();
+        using IDisposable owned2 = CoreCdp.Owned(ctx);
         (string targetId, string first) = await CreateAndAttachAsync(ctx);
         string second = await AttachAsync(ctx, targetId, 902);
 
