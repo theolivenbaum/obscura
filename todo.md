@@ -228,6 +228,15 @@ The largest component. Split into stages; each stage is independently testable.
   port omits the key, so a client reading `result.value` gets `undefined` where
   Chrome and Rust give `null`.
 
+- **`ConcurrentConnectionsHeavyPageDoNotAbortV8` is load-flaky.** It drives six
+  concurrent CDP connections against a subresource-heavy page under a 30s
+  deadline, and it fails intermittently when the rest of the suite is running.
+  Measured by interleaving three full-suite rounds against the shim before and
+  after the canvas work: the old shim failed 2 of 3 rounds and the new one 2 of
+  3, so it is the test's sensitivity and not a regression. Worth noting because
+  it looked exactly like a regression on a single run each way, and startup cost
+  was ruled out separately (18 interleaved runs: 626ms median before, 622ms
+  after).
 - **Two Obscura.Js tests are timing-flaky, and not only under solution load.**
   830 of 849 is the clean result, but three consecutive runs of that project
   alone gave 2 failures, then 1, then 0, so the earlier note that they pass in
@@ -256,6 +265,61 @@ The largest component. Split into stages; each stage is independently testable.
 - [ ] Obstacle course (companion repo `obscura-benchmark`) at 33/33
 - [ ] Performance comparison vs the Rust build on the standard pages
 - [ ] Re-enable CI as .NET workflows (rename off `.disabled`, rewrite for dotnet)
+
+## Changes to the shared shim
+
+`crates/obscura-js/js/bootstrap.js` is JavaScript, shared verbatim, and linked
+rather than copied by both builds - Rust through `include_str!` in its
+`build.rs`, C# through an `EmbeddedResource` link. A fix there lands in both
+engines, so it closes a gap without creating a deviation. That is worth stating
+because the alternative, implementing a missing feature host-side in C#, would
+have created one.
+
+- **Canvas 2D was a stub and is now a rasterizer.** The context rasterized
+  exactly one thing: a solid `fillRect`. `stroke()`, `clip()`, `closePath()`,
+  every transform method, all four gradient constructors, `ellipse`,
+  `roundRect`, `arcTo`, the Bezier methods, `setLineDash`, `isPointInPath` and
+  `isPointInStroke` were no-ops or returned inert objects, `fill()` handled only
+  arc segments, and `rect()` painted immediately instead of adding to the path.
+  A page that drew a chart therefore got a blank canvas, which is most real
+  dashboards, since a chart is strokes and gradient fills over a transformed
+  context. Now implemented: an affine transform stack, a path model that
+  flattens curves and arcs in device space, scanline fill with 4x vertical
+  supersampling and fractional horizontal coverage for both winding rules,
+  stroking built as geometry (segment quads plus join and cap discs, dash
+  splitting, so width, caps, joins and gradient strokes all come from the fill
+  path), a per-pixel clip mask that `save`/`restore` carry, linear/radial/conic
+  gradients and patterns sampled through the inverse transform, `drawImage`
+  through the transform, and `source-over`/`multiply`/`lighter`/
+  `destination-out`/`copy`. Colour parsing gained `#rgba`/`#rrggbbaa`, space and
+  percentage `rgb()`, `hsl()`, and the full CSS named set.
+
+  Validated by a 43-probe conformance script run through all three engines:
+  **43 of 43 agree with headless Chromium, and the reference and the port are
+  byte-identical on all 43.** On the `renderlab-complex.html` hero chart the
+  alpha histogram now matches Chromium within 0.3% where the canvas was
+  previously empty. Pinned by `Canvas2dConformanceTests` (11 facts).
+
+  Glyph rendering is deliberately unchanged: `fillText` still draws the
+  deterministic pseudo-glyphs the fingerprint RNG produces rather than real
+  outlines, since that is a stealth surface and not a canvas gap. Only its
+  placement now honours the transform, `textAlign` and `textBaseline`.
+  `drawImage` from a decoded `<img>` is still unsupported, because the host
+  exposes only `op_image_metadata` and never hands the shim image pixels.
+
+- **The backing store was compositing premultiplied alpha into a straight-alpha
+  buffer.** `op_canvas_register_surface` hands the buffer straight to the render
+  layer, which documents it as straight-alpha RGBA and premultiplies once itself
+  before the rasterizer sees it. The shim was premultiplying too, so every
+  translucent pixel was darkened twice and `getImageData` reported
+  `(128,0,0,128)` for 50% red where a browser reports `(255,0,0,128)`. Source-
+  over is now resolved back to straight alpha, and `clearRect` scales coverage
+  rather than colour. This was a pre-existing bug, not something the rewrite
+  introduced.
+
+- **The CSS named-colour table is built on first use.** It is ~150 entries and
+  every frame realm re-parses this file, so at top level it was an allocation
+  per realm on a path that is already startup-critical.
 
 ## Known deviations
 
