@@ -8,6 +8,20 @@ namespace Obscura.Render;
 /// </summary>
 internal static class PaintFilters
 {
+    /// <summary>What a box-blur window sees when it reaches past the edge of the surface.</summary>
+    internal enum BlurEdge
+    {
+        /// <summary>
+        /// Out-of-range samples are transparent. Correct for <c>filter</c>, whose layer really
+        /// is empty outside the painted area, and for <c>backdrop-filter</c>, whose partly
+        /// transparent edge band is what lets the sharp backdrop show through.
+        /// </summary>
+        Transparent,
+
+        /// <summary>Out-of-range samples repeat the nearest edge pixel.</summary>
+        Clamp,
+    }
+
     /// <summary>
     /// The three box-blur window extents that approximate a gaussian of
     /// <paramref name="sigma"/>, per the algorithm SVG's <c>feGaussianBlur</c> defines
@@ -54,7 +68,7 @@ internal static class PaintFilters
     /// Operates on the premultiplied bytes, which is what keeps a transparent edge from
     /// bleeding the colour under it into the result.
     /// </remarks>
-    internal static void BlurPixmap(Pixmap pixmap, float sigma)
+    internal static void BlurPixmap(Pixmap pixmap, float sigma, BlurEdge edge)
     {
         if (BoxBlurExtents(sigma) is not { } extents)
         {
@@ -75,8 +89,8 @@ internal static class PaintFilters
         {
             // Horizontal, then vertical: a box blur is separable, so six linear passes
             // total rather than one quadratic convolution.
-            BoxBlurAxis(pixels, scratch, width, height, stride, true, left, right);
-            BoxBlurAxis(scratch, pixels, width, height, stride, false, left, right);
+            BoxBlurAxis(pixels, scratch, width, height, stride, true, left, right, edge);
+            BoxBlurAxis(scratch, pixels, width, height, stride, false, left, right, edge);
         }
     }
 
@@ -92,31 +106,30 @@ internal static class PaintFilters
         int stride,
         bool horizontal,
         uint left,
-        uint right)
+        uint right,
+        BlurEdge edge)
     {
         int outer = horizontal ? height : width;
         int inner = horizontal ? width : height;
         int step = horizontal ? 4 : stride;
+        if (inner == 0)
+        {
+            return;
+        }
+
         uint window = left + right + 1;
         int leftExtent = (int)left;
         int rightExtent = (int)right;
+        int last = inner - 1;
         Span<uint> sum = stackalloc uint[4];
         for (int o = 0; o < outer; o++)
         {
             int basePixel = horizontal ? o * stride : o * 4;
-            sum.Clear();
 
-            // Seed the running sum with the window at i = 0. Out-of-range samples count as
-            // transparent, which is what the filter region needs: the layer is transparent
-            // outside the painted area.
-            int seed = Math.Min(rightExtent, inner - 1);
-            for (int k = 0; k <= seed; k++)
+            sum.Clear();
+            for (int k = -leftExtent; k <= rightExtent; k++)
             {
-                int p = basePixel + (k * step);
-                for (int c = 0; c < 4; c++)
-                {
-                    sum[c] += src[p + c];
-                }
+                AddSample(src, sum, basePixel, step, last, k, edge, add: true);
             }
 
             for (int i = 0; i < inner; i++)
@@ -128,25 +141,126 @@ internal static class PaintFilters
                 }
 
                 // Slide: drop the sample leaving the window, add the one entering.
-                if (i >= leftExtent)
-                {
-                    int p = basePixel + ((i - leftExtent) * step);
-                    for (int c = 0; c < 4; c++)
-                    {
-                        sum[c] -= src[p + c];
-                    }
-                }
-
-                int incoming = i + rightExtent + 1;
-                if (incoming < inner)
-                {
-                    int p = basePixel + (incoming * step);
-                    for (int c = 0; c < 4; c++)
-                    {
-                        sum[c] += src[p + c];
-                    }
-                }
+                AddSample(src, sum, basePixel, step, last, i - leftExtent, edge, add: false);
+                AddSample(src, sum, basePixel, step, last, i + rightExtent + 1, edge, add: true);
             }
         }
+    }
+
+    /// <summary>
+    /// Add or subtract one sample of the running box-blur sum, with the edge rule applied.
+    /// Out of range contributes nothing under <see cref="BlurEdge.Transparent"/>, and the
+    /// nearest edge pixel under <see cref="BlurEdge.Clamp"/>.
+    /// </summary>
+    /// <remarks>
+    /// A separate method rather than a local function because a <c>ReadOnlySpan</c>
+    /// parameter cannot be captured by one.
+    /// </remarks>
+    private static void AddSample(
+        ReadOnlySpan<byte> src,
+        Span<uint> sum,
+        int basePixel,
+        int step,
+        int last,
+        int index,
+        BlurEdge edge,
+        bool add)
+    {
+        int at;
+        if (index >= 0 && index <= last)
+        {
+            at = basePixel + (index * step);
+        }
+        else if (edge == BlurEdge.Clamp)
+        {
+            at = basePixel + (Math.Clamp(index, 0, last) * step);
+        }
+        else
+        {
+            return;
+        }
+
+        if (add)
+        {
+            for (int c = 0; c < 4; c++)
+            {
+                sum[c] += src[at + c];
+            }
+        }
+        else
+        {
+            for (int c = 0; c < 4; c++)
+            {
+                sum[c] -= src[at + c];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Blur the already-painted backdrop under <paramref name="rect"/> and put it back,
+    /// clipped to the element's own rounded border box.
+    /// </summary>
+    /// <remarks>
+    /// <c>backdrop-filter</c> reads what is behind the element, so it runs against the
+    /// surface as it stands before the element paints anything of its own.
+    /// <para>
+    /// Two details decide how the edges look, and both were measured against Chromium on a
+    /// blurred panel over a 45-degree stripe backdrop rather than reasoned about. The
+    /// filter region is the element's own border box, so the blur averages only backdrop
+    /// from inside it; reaching 3 sigma further out to find "real" backdrop reads 13.07
+    /// mean abs against Chromium and cropping to the box reads 12.07, both wrong at the
+    /// edges. And out-of-region samples are transparent rather than edge-duplicated, with
+    /// the filtered backdrop composited <em>over</em> the sharp original rather than
+    /// replacing it: the blurred copy is partly transparent in a band about 3 sigma wide
+    /// and the unblurred backdrop shows through, which is what produces Chromium's
+    /// gradient from the local colour at the very edge to the blurred average further in.
+    /// That reads 3.97, against 97.46 for not implementing the property at all.
+    /// </para>
+    /// </remarks>
+    internal static void PaintBackdropFilter(
+        Pixmap pixmap,
+        in Rect rect,
+        BorderRadii borderRadius,
+        float sigma,
+        Mask? ancestorClip)
+    {
+        if (!float.IsFinite(sigma) || sigma <= 0f || rect.Width <= 0f || rect.Height <= 0f)
+        {
+            return;
+        }
+
+        if (!PaintDomPainter.RectIntersectsPaintSurface(rect, pixmap, 1f))
+        {
+            return;
+        }
+
+        int x0 = (int)F32.Max(MathF.Floor(rect.X), 0f);
+        int y0 = (int)F32.Max(MathF.Floor(rect.Y), 0f);
+        int x1 = (int)Math.Clamp(MathF.Ceiling(rect.X + rect.Width), 0f, pixmap.Width);
+        int y1 = (int)Math.Clamp(MathF.Ceiling(rect.Y + rect.Height), 0f, pixmap.Height);
+        if (x1 <= x0 || y1 <= y0)
+        {
+            return;
+        }
+
+        Pixmap? sampled = pixmap.CloneRect(x0, y0, (uint)(x1 - x0), (uint)(y1 - y0));
+        if (sampled is null)
+        {
+            return;
+        }
+
+        using Pixmap backdrop = sampled;
+        BlurPixmap(backdrop, sigma, BlurEdge.Transparent);
+
+        ResolvedBorderRadii radii = borderRadius.Resolve(rect.Width, rect.Height);
+        Mask? boxMask = PaintClips.RoundedBoxClipMaskRadii(
+            pixmap.Width, pixmap.Height, rect, radii);
+        if (boxMask is null)
+        {
+            return;
+        }
+
+        Mask? clip = PaintClips.IntersectClipMasks(ancestorClip?.Clone(), boxMask);
+        Surface.DrawPixmap(pixmap, x0, y0, backdrop, 1f, false, Affine2.Identity, clip);
     }
 }

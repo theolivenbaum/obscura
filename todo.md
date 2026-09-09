@@ -340,6 +340,26 @@ have created one.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Known deviation: backdrop-filter edge band
+
+Two details decide how a `backdrop-filter` panel's edges look, and both were
+settled by measuring against Chromium on a blurred panel over a 45-degree stripe
+backdrop, not by reading the spec:
+
+- The filter region is the element's own border box. Reaching 3 sigma further out
+  to find "real" backdrop reads 13.07 mean abs against Chromium; cropping to the
+  box reads 12.07.
+- Out-of-region samples are transparent rather than edge-duplicated, and the
+  filtered backdrop composites *over* the sharp original rather than replacing
+  it. The blurred copy is therefore partly transparent in a band about 3 sigma
+  wide and the unblurred backdrop shows through, which is what produces
+  Chromium's gradient from the local colour at the very edge to the blurred
+  average further in. That reads 3.97.
+
+The residual 3.97 is the shape of that band: a three-pass box blur with
+transparent edges is not bit-exact with Skia's own. Both engines agree with each
+other to 0.01.
+
 ### Reference gaps fixed in both engines
 
 These were found by comparing against Chromium, were present identically in
@@ -363,15 +383,47 @@ Rust and C#, and were fixed on both sides rather than papered over in the port.
 Together the last two took `test-html-files/renderlab-complex.html` from 92.8%
 of pixels differing from Chromium (47.3 mean abs) to 37.7% (21.9) at 640px.
 
-### Still missing in both engines
+All four of the gaps that page listed are now implemented in both engines, with
+one attribution on it corrected below.
 
-- **`filter: blur()` is not parsed or applied** anywhere in the render layer.
-  A blurred element renders sharp. Separate from `box-shadow` blur, which is
-  implemented.
-- **`backdrop-filter` is not implemented.** The dominant remaining contributor
-  to the renderlab fixture's difference against Chromium.
-- **Inset `box-shadow` is parsed but never painted.** `paint_box_shadow` returns
-  early on `shadow.inset`.
+- **`filter: blur()`** now parses and paints. The kernel is the three-pass box
+  approximation SVG's `feGaussianBlur` defines normatively, which is what CSS
+  `blur()` is specified in terms of, so both engines land at 0.03 mean abs
+  against Chromium (was 17.15) with a byte-identical sampled row. Only a
+  blur-only filter list is recorded; any other function stays unimplemented
+  rather than being reduced to its blurs, and `@supports` reports exactly that.
+- **`backdrop-filter: blur()`** now paints: 3.97 mean abs over a blurred panel
+  against Chromium, versus 97.46 for not implementing it. Two edge details were
+  measured rather than reasoned about, and both matter (see the deviation below).
+- **Inset `box-shadow`** now paints, over the background and under the border
+  where CSS Backgrounds 3 puts it: 8.53 to 1.43 on its cell.
+- **Auto-width `<button>`** now measures its label through the inline engine
+  rather than `text_width`, so the box fits the text that will be laid out in it.
+
+**Correction.** The parity page called `backdrop-filter` "the largest remaining
+contributor to the renderlab fixture's difference against Chromium". That was
+inferred from a screenshot, not measured, and it is wrong. Implementing it moved
+the fixture's whole-page mean abs from 21.86 to 22.41 at 640px - i.e. not at all,
+within the noise of the other changes in the same commit range. The fixture has
+exactly one `backdrop-blur` element in layout, the 640x69 sticky header, which is
+0.75% of a 9,168px page and sits over a near-uniform backdrop.
+
+Measured band by band, the fixture's remaining difference is **cumulative
+vertical drift**, not any unimplemented paint feature:
+
+| band (640px wide) | mean abs vs Chromium |
+|---|---|
+| y 0-300 | 15.97 |
+| y 600-900 | 6.40 |
+| y 900-1200 | 4.92 |
+| y 1800-2100 | 18.20 |
+| y 2400-2700 | 34.76 |
+
+It is low near the top and saturates further down: the document is 9,168px against
+Chromium's 9,274px, so once the two disagree on a block's height everything below
+it is offset and the pixel difference stops being about that block's rendering.
+That gap follows from the engine embedding its own faces instead of using system
+fonts, which is a deliberate policy, so paint work cannot close it.
 
 - **Stealth TLS impersonation is not ported.** `wreq`/BoringSSL fingerprints the
   ClientHello; .NET's `SocketsHttpHandler` does not expose that surface and every

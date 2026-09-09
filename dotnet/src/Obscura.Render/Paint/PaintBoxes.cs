@@ -101,6 +101,18 @@ internal static class PaintInline
             Mask? elementClipMask = PaintGradients.BackgroundExtraClip(ancestorClipMask, clipPathMask);
             Mask? backgroundMask = elementClipMask?.Clone();
 
+            // backdrop-filter reads the surface as it stands before this element paints
+            // anything of its own, so it runs ahead of the shadow.
+            if (fragmentStyle.BackdropBlur is { } fragmentBackdropSigma)
+            {
+                PaintFilters.PaintBackdropFilter(
+                    pixmap,
+                    fragment,
+                    fragmentStyle.BorderModel.Radii,
+                    fragmentBackdropSigma,
+                    ancestorClipMask);
+            }
+
             if (fragmentStyle.BoxShadow is { } shadow)
             {
                 PaintBorders.PaintBoxShadow(
@@ -314,6 +326,14 @@ internal static class PaintGenerated
                 pixmap.Height,
                 overflowClip,
                 scrollState.SurfaceExtent ?? viewport);
+
+        // backdrop-filter reads the surface as it stands before this element paints
+        // anything of its own, so it runs ahead of the shadow.
+        if (style.BackdropBlur is { } backdropSigma)
+        {
+            PaintFilters.PaintBackdropFilter(
+                pixmap, rect, style.BorderModel.Radii, backdropSigma, ancestorClipMask);
+        }
 
         if (style.BoxShadow is { } shadow)
         {

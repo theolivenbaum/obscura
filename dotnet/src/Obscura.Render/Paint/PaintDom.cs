@@ -784,7 +784,7 @@ internal static class PaintDomPainter
 
                 if (groupBlur is { } sigma)
                 {
-                    PaintFilters.BlurPixmap(painted, sigma);
+                    PaintFilters.BlurPixmap(painted, sigma, PaintFilters.BlurEdge.Transparent);
                 }
 
                 Surface.DrawPixmap(pixmap, 0, 0, painted, ownOpacity, false, Affine2.Identity, null);
@@ -882,6 +882,14 @@ internal static class PaintDomPainter
                     pass.BaseUrl,
                     pass.ImageCache,
                     rasterScale);
+            }
+
+            // backdrop-filter reads the surface as it stands before this element paints
+            // anything of its own, so it runs ahead of the shadow.
+            if (!paintsInlineFragments && style.BackdropBlur is { } backdropSigma)
+            {
+                PaintFilters.PaintBackdropFilter(
+                    pixmap, rect, style.BorderModel.Radii, backdropSigma, ancestorClipMask);
             }
 
             // Outset box-shadow paints behind this element's own background/border.

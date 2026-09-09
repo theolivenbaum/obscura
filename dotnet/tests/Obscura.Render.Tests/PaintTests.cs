@@ -182,6 +182,43 @@ public class PaintTests
     }
 
     [Fact]
+    public void BackdropFilterBlursWhatIsBehindTheElementOnly()
+    {
+        // `backdrop-filter` was parsed only for containing-block bookkeeping, so a frosted
+        // panel showed the backdrop through it perfectly sharp.
+        static DomTree Page(string filter) => Parse(
+            $$"""
+            <html style="margin:0"><body style="margin:0;width:200px;height:120px;
+                background:linear-gradient(90deg,rgb(255,0,0) 0 50%,rgb(0,0,255) 50% 100%)">
+            <div style="position:absolute;left:60px;top:30px;width:80px;height:60px;
+                        {{filter}}"></div>
+            </body></html>
+            """);
+
+        Pixmap sharp = RenderPaint.PaintDom(Page(""), (200f, 120f), null)!;
+        Pixmap frosted = RenderPaint.PaintDom(
+            Page("backdrop-filter:blur(8px)"), (200f, 120f), null)!;
+
+        // The backdrop's hard colour boundary sits at x = 100, inside the panel.
+        Assert.Equal((255, 0, 0), Rgb(sharp, 96, 60));
+        Assert.Equal((0, 0, 255), Rgb(sharp, 104, 60));
+
+        // Blurred: the boundary becomes a ramp, so both sides carry the other colour.
+        (byte lr, _, byte lb) = Rgb(frosted, 96, 60);
+        (byte rr, _, byte rb) = Rgb(frosted, 104, 60);
+        Assert.True(lb > 20, $"red side must pick up blue: {Rgb(frosted, 96, 60)}");
+        Assert.True(rr > 20, $"blue side must pick up red: {Rgb(frosted, 104, 60)}");
+        Assert.True(lr > rr, $"the ramp must still run red to blue: {lr} vs {rr}");
+        Assert.True(rb > lb, $"and blue to red the other way: {rb} vs {lb}");
+
+        // Outside the panel the backdrop is untouched: this is not a `filter`.
+        Assert.Equal((255, 0, 0), Rgb(frosted, 96, 10));
+        Assert.Equal((0, 0, 255), Rgb(frosted, 104, 10));
+        Assert.Equal((255, 0, 0), Rgb(frosted, 20, 60));
+        Assert.Equal((0, 0, 255), Rgb(frosted, 180, 60));
+    }
+
+    [Fact]
     public void FilterBlurSoftensTheElementAndBleedsPastItsBox()
     {
         // `filter` was parsed only for containing-block bookkeeping, so a blurred element
