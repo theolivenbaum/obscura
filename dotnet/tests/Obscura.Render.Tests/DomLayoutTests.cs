@@ -3315,6 +3315,57 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void CalcPercentagesResolveAgainstAResizableFlexItemsUsedWidth()
+    {
+        // A row flex item's declared inline size is not its used inline size once
+        // `flex-grow` or the default `flex-shrink` lets the flex algorithm move it.
+        // Tesserae's page shell is `width:1px; min-width:0; flex-grow:1`, so resolving
+        // a descendant `calc(100% - 4px)` against the 1px declaration collapsed every
+        // card in the page body to zero width. Chromium gives 1022px and 596px.
+        DomTree grow = Parse(
+            """
+            <style>
+              * { box-sizing:border-box; margin:0 }
+              #row { display:flex; width:1280px }
+              #side { width:250px; flex:0 0 auto }
+              #grow { width:1px; min-width:0; flex-grow:1 }
+              #pad { padding:2px }
+              #calc { width:calc(100% - 4px); height:10px }
+            </style>
+            <div id="row">
+              <div id="side"></div>
+              <div id="grow"><div id="pad"><div id="calc"></div></div></div>
+            </div>
+            """);
+        DomLayout grown = RenderDom.LayoutDom(grow, (1280f, 600f));
+        Assert.True(
+            MathF.Abs(grown.Rects[Id(grow, "grow")].Width - 1030f) < 0.01f,
+            $"{grown.Rects[Id(grow, "grow")]}");
+        Assert.True(
+            MathF.Abs(grown.Rects[Id(grow, "calc")].Width - 1022f) < 0.01f,
+            "calc(100% - 4px) must sample the grown 1026px content box, not the 1px "
+                + $"declaration: {grown.Rects[Id(grow, "calc")]}");
+
+        DomTree shrink = Parse(
+            """
+            <style>
+              * { box-sizing:border-box; margin:0 }
+              #row { display:flex; width:600px }
+              #item { width:1200px; min-width:0 }
+              #calc { width:calc(100% - 4px); height:10px }
+            </style>
+            <div id="row"><div id="item"><div id="calc"></div></div></div>
+            """);
+        DomLayout shrunk = RenderDom.LayoutDom(shrink, (600f, 600f));
+        Assert.True(
+            MathF.Abs(shrunk.Rects[Id(shrink, "item")].Width - 600f) < 0.01f,
+            $"{shrunk.Rects[Id(shrink, "item")]}");
+        Assert.True(
+            MathF.Abs(shrunk.Rects[Id(shrink, "calc")].Width - 596f) < 0.01f,
+            $"a shrunk flex item's used width is the percentage basis: {shrunk.Rects[Id(shrink, "calc")]}");
+    }
+
+    [Fact]
     public void CyclicPercentageImageKeepsNaturalIntrinsicContribution()
     {
         // A `width:100%` image inside a content-sized flex item is a cyclic

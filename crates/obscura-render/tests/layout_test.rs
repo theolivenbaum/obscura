@@ -3487,6 +3487,61 @@ fn cyclic_descendant_percentages_do_not_inflate_a_flex_items_intrinsic_minimum()
     }
 }
 
+/// A row flex item's declared inline size is not its used inline size once
+/// `flex-grow` or the default `flex-shrink` lets the flex algorithm move it.
+/// Tesserae's page shell is `width:1px; min-width:0; flex-grow:1`, so
+/// resolving a descendant `calc(100% - 4px)` against the 1px declaration
+/// collapsed every card in the page body to zero width. Chromium gives
+/// 1022px (grow) and 596px (shrink) for these two shapes.
+#[test]
+fn calc_percentages_resolve_against_a_resizable_flex_items_used_width() {
+    let grow = parse_html(
+        r#"
+        <style>
+          * { box-sizing:border-box; margin:0 }
+          #row { display:flex; width:1280px }
+          #side { width:250px; flex:0 0 auto }
+          #grow { width:1px; min-width:0; flex-grow:1 }
+          #pad { padding:2px }
+          #calc { width:calc(100% - 4px); height:10px }
+        </style>
+        <div id="row">
+          <div id="side"></div>
+          <div id="grow"><div id="pad"><div id="calc"></div></div></div>
+        </div>
+        "#,
+    );
+    let layout = layout_dom(&grow, (1280.0, 600.0));
+    let rect = |id| layout.rects[&grow.get_element_by_id(id).unwrap()];
+    assert!((rect("grow").width - 1030.0).abs() < 0.01, "{:?}", rect("grow"));
+    assert!(
+        (rect("calc").width - 1022.0).abs() < 0.01,
+        "calc(100% - 4px) must sample the grown 1026px content box, not the 1px \
+         declaration: {:?}",
+        rect("calc")
+    );
+
+    let shrink = parse_html(
+        r#"
+        <style>
+          * { box-sizing:border-box; margin:0 }
+          #row { display:flex; width:600px }
+          #item { width:1200px; min-width:0 }
+          #calc { width:calc(100% - 4px); height:10px }
+        </style>
+        <div id="row"><div id="item"><div id="calc"></div></div></div>
+        "#,
+    );
+    let layout = layout_dom(&shrink, (600.0, 600.0));
+    let rect = |id| layout.rects[&shrink.get_element_by_id(id).unwrap()];
+    assert!((rect("item").width - 600.0).abs() < 0.01, "{:?}", rect("item"));
+    assert!(
+        (rect("calc").width - 596.0).abs() < 0.01,
+        "a shrunk flex item's used width is the percentage basis: {:?}",
+        rect("calc")
+    );
+}
+
 /// Chromium resolves both spellings to the same 163px content width: the
 /// percentage is cyclic while the link's flex-item width is being measured,
 /// then resolves against that link's final width. Carbon Ads uses the bare

@@ -505,8 +505,17 @@ internal static class DomSubgridPasses
                         && !parentStyle.InternalFlexContainer
                         && parentStyle.FlexDirection
                             is not (TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse);
+                    // A declared inline size is only the item's used inline size when the flex
+                    // algorithm cannot move it. `flex-grow` above zero, or the default
+                    // `flex-shrink: 1`, both make the used width depend on the line's free
+                    // space, so a descendant percentage resolved against the declaration
+                    // samples the wrong containing block (Tesserae's
+                    // `width: 1px; min-width: 0; flex-grow: 1` panel idiom collapsed every
+                    // `calc(100% - 4px)` card inside it to 0).
                     bool itemIsIndefinite = styles.TryGetValue(item, out LayoutStyle? itemStyle)
                         && (itemStyle.Width.Kind != DimensionKind.Px
+                            || (itemStyle.FlexGrow ?? 0f) > 0f
+                            || (itemStyle.FlexShrink ?? 1f) != 0f
                             || (itemStyle.SizeExpressions[0] is { } itemExpression
                                 && itemExpression.Contains('%', StringComparison.Ordinal)))
                         && itemStyle.Float is null
