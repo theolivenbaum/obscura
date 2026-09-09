@@ -19,6 +19,13 @@ internal sealed class OverflowClipMaskCache
 
 internal static class PaintClips
 {
+    /// <summary>
+    /// Control-point distance, as a fraction of the radius, that makes a cubic Bezier
+    /// approximate a quarter circle: <c>4/3 * (sqrt(2) - 1)</c>. The classic constant;
+    /// the error against a true arc peaks near 0.02% of the radius.
+    /// </summary>
+    private const float ArcHandle = 0.55228475f;
+
     private const int MaxOverflowClipMaskCacheEntries = 2;
 
     /// <summary>
@@ -51,15 +58,27 @@ internal static class PaintClips
         (float X, float Y) tr = radii.TopRight;
         (float X, float Y) br = radii.BottomRight;
         (float X, float Y) bl = radii.BottomLeft;
+
+        // Each corner is a cubic approximation of a quarter ellipse, with its control
+        // points ArcHandle of the radius along the tangents.
+        //
+        // These were quadratics whose single control point sat on the corner itself,
+        // which is a parabola, not an arc: its midpoint is 6.1% further from the corner
+        // centre than the true curve, so every rounded box was a squircle and
+        // border-radius:50% drew something 1.2px fat on a 40px circle. The bulge scales
+        // with the radius, so it was most visible exactly where a circle was intended.
+        static float Cx(float r) => r * (1f - ArcHandle);
+
         builder.MoveTo(x + tl.X, y);
         builder.LineTo(x + w - tr.X, y);
-        builder.QuadTo(x + w, y, x + w, y + tr.Y);
+        builder.CubicTo(x + w - Cx(tr.X), y, x + w, y + Cx(tr.Y), x + w, y + tr.Y);
         builder.LineTo(x + w, y + h - br.Y);
-        builder.QuadTo(x + w, y + h, x + w - br.X, y + h);
+        builder.CubicTo(
+            x + w, y + h - Cx(br.Y), x + w - Cx(br.X), y + h, x + w - br.X, y + h);
         builder.LineTo(x + bl.X, y + h);
-        builder.QuadTo(x, y + h, x, y + h - bl.Y);
+        builder.CubicTo(x + Cx(bl.X), y + h, x, y + h - Cx(bl.Y), x, y + h - bl.Y);
         builder.LineTo(x, y + tl.Y);
-        builder.QuadTo(x, y, x + tl.X, y);
+        builder.CubicTo(x, y + Cx(tl.Y), x + Cx(tl.X), y, x + tl.X, y);
         builder.Close();
         return builder.Detach();
     }

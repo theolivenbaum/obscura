@@ -5548,6 +5548,11 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Option
     )
 }
 
+/// Control-point distance, as a fraction of the radius, that makes a cubic Bezier
+/// approximate a quarter circle: `4/3 * (sqrt(2) - 1)`. The classic constant; the
+/// error against a true arc peaks near 0.02% of the radius.
+const ARC_HANDLE: f32 = 0.552_284_75;
+
 fn rounded_rect_path_radii(
     x: f32,
     y: f32,
@@ -5567,16 +5572,47 @@ fn rounded_rect_path_radii(
     let tr = radii.top_right;
     let br = radii.bottom_right;
     let bl = radii.bottom_left;
+    // Each corner is a cubic approximation of a quarter ellipse, with its control
+    // points ARC_HANDLE of the radius along the tangents.
+    //
+    // These were quadratics whose single control point sat on the corner itself,
+    // which is a parabola, not an arc: its midpoint is 6.1% further from the corner
+    // centre than the true curve, so every rounded box was a squircle and
+    // `border-radius: 50%` drew something 1.2px fat on a 40px circle. The bulge
+    // scales with the radius, so it was most visible exactly where a circle was
+    // intended.
+    let cx = |r: f32| r * (1.0 - ARC_HANDLE);
     let mut pb = PathBuilder::new();
     pb.move_to(x + tl.0, y);
     pb.line_to(x + w - tr.0, y);
-    pb.quad_to(x + w, y, x + w, y + tr.1);
+    pb.cubic_to(
+        x + w - cx(tr.0),
+        y,
+        x + w,
+        y + cx(tr.1),
+        x + w,
+        y + tr.1,
+    );
     pb.line_to(x + w, y + h - br.1);
-    pb.quad_to(x + w, y + h, x + w - br.0, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - cx(br.1),
+        x + w - cx(br.0),
+        y + h,
+        x + w - br.0,
+        y + h,
+    );
     pb.line_to(x + bl.0, y + h);
-    pb.quad_to(x, y + h, x, y + h - bl.1);
+    pb.cubic_to(
+        x + cx(bl.0),
+        y + h,
+        x,
+        y + h - cx(bl.1),
+        x,
+        y + h - bl.1,
+    );
     pb.line_to(x, y + tl.1);
-    pb.quad_to(x, y, x + tl.0, y);
+    pb.cubic_to(x, y + cx(tl.1), x + cx(tl.0), y, x + tl.0, y);
     pb.close();
     pb.finish()
 }
@@ -12148,6 +12184,40 @@ mod tests {
         assert!(
             ramp.windows(2).all(|w| w[0] <= w[1]),
             "coverage must rise monotonically into the box: {ramp:?}"
+        );
+    }
+
+    #[test]
+    fn border_radius_half_the_side_draws_a_circle_not_a_squircle() {
+        // Corners were quadratic Beziers controlled by the corner point, which is a
+        // parabola: its midpoint sits 6.1% further out than the arc, so every
+        // rounded box bulged and `border-radius: 50%` was visibly not a circle.
+        let tree = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:black">
+               <div style="position:absolute;left:20px;top:20px;width:80px;height:80px;
+                           background:rgb(0,255,0);border-radius:999px"></div>
+               </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (120.0, 120.0), None).expect("circle paint");
+        // Centre (60, 60), radius 40. Sample the silhouette well away from the axes,
+        // where a parabola departs from the arc most.
+        let mut worst = 0.0f32;
+        for y in 26..=94u32 {
+            let mut left = None;
+            for x in 20..=100u32 {
+                if pixmap.pixel(x, y).expect("sample").green() > 127 {
+                    left = Some(x);
+                    break;
+                }
+            }
+            let Some(left) = left else { continue };
+            let dy = (y as f32 + 0.5) - 60.0;
+            let expected = 60.0 - (40.0f32 * 40.0 - dy * dy).max(0.0).sqrt();
+            worst = worst.max((left as f32 - expected).abs());
+        }
+        assert!(
+            worst < 1.0,
+            "silhouette departs from a true circle by {worst:.2}px"
         );
     }
 

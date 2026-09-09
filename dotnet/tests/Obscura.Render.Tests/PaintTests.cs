@@ -262,6 +262,49 @@ public class PaintTests
     }
 
     [Fact]
+    public void BorderRadiusHalfTheSideDrawsACircleNotASquircle()
+    {
+        // Corners were quadratic Beziers controlled by the corner point, which is a
+        // parabola: its midpoint sits 6.1% further out than the arc, so every rounded box
+        // bulged and border-radius:50% was visibly not a circle.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:black">
+            <div style="position:absolute;left:20px;top:20px;width:80px;height:80px;
+                        background:rgb(0,255,0);border-radius:999px"></div>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (120f, 120f), null)!;
+
+        // Centre (60, 60), radius 40. Sample the silhouette well away from the axes,
+        // where a parabola departs from the arc most.
+        float worst = 0f;
+        for (uint y = 26; y <= 94; y++)
+        {
+            uint? left = null;
+            for (uint x = 20; x <= 100; x++)
+            {
+                if (Pixel(pixmap, x, y).G > 127)
+                {
+                    left = x;
+                    break;
+                }
+            }
+
+            if (left is not { } edge)
+            {
+                continue;
+            }
+
+            float dy = y + 0.5f - 60f;
+            float expected = 60f - MathF.Sqrt(F32.Max((40f * 40f) - (dy * dy), 0f));
+            worst = F32.Max(worst, MathF.Abs(edge - expected));
+        }
+
+        Assert.True(worst < 1f, $"silhouette departs from a true circle by {worst:F2}px");
+    }
+
+    [Fact]
     public void InsetBoxShadowPaintsInwardFromTheBorderBoxEdge()
     {
         // PaintBoxShadow used to return early on Inset, so an inner shadow painted
