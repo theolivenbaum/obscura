@@ -9,7 +9,7 @@ using Obscura.Js.Runtime;
 if (WorkerHost.IsWorkerProcess())
 {
     Log.SetFilter("warn");
-    return await WorkerHost.RunAsync().ConfigureAwait(false);
+    return ProcessExit.Immediately(await WorkerHost.RunAsync().ConfigureAwait(false));
 }
 
 // Pin the process timezone before V8/ICU reads it. V8 sources the zone for both
@@ -118,13 +118,13 @@ catch (NotPortedException error)
     // Loud on purpose: exiting 0 here would let a CLI parity test pass against
     // an engine that never ran.
     Console.Error.WriteLine($"obscura: {error.Message}");
-    return 70; // EX_SOFTWARE
+    return ProcessExit.Immediately(70); // EX_SOFTWARE
 }
 catch (CliException error)
 {
     // What the Rust runtime prints for an anyhow error returned from main.
     Console.Error.WriteLine($"Error: {error.Message}");
-    return 1;
+    return ProcessExit.Immediately(1);
 }
 catch (Exception error)
 {
@@ -138,11 +138,10 @@ catch (Exception error)
     // RUST_BACKTRACE=1 output is the counterpart of.
     Console.Error.WriteLine($"Error: {error.Message}");
     Log.Debug($"unhandled {error.GetType().FullName}: {error}");
-    return 1;
+    return ProcessExit.Immediately(1);
 }
 
-Console.Out.Flush();
-return 0;
+return ProcessExit.Immediately(0);
 
 static void InstallVersionAction(RootCommand root)
 {

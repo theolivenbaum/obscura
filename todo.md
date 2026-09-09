@@ -194,6 +194,18 @@ The largest component. Split into stages; each stage is independently testable.
   error kind is `InvalidUrl`); only the reason is lost. Fixing it means threading
   a reason out of `UrlParser` and `UrlHost`, which have 9 and ~25 failure
   returns respectively, so it is its own piece of work rather than a one-liner.
+- **`RemoteObjectInfo.Value` cannot tell "no value" from "the value is JSON
+  null".** Rust carries `value: Option<serde_json::Value>`; the port carries
+  `JsonNode?`, and a JSON null inside a `JsonNode` graph *is* a C# null
+  reference, so `None` and `Some(Value::Null)` arrive identical. Two consequences:
+  `Obscura.Cdp`'s `Runtime.evaluate` rebuilds the distinction by inference (no
+  objectId with type `object` and subtype `null` is uniquely the by-value null
+  arm) rather than reading it, and `Obscura.Browser`'s `Page.Evaluate` JS-less
+  fallback still omits the key where Rust writes `{"type":"undefined","value":null}`
+  - unreachable from CDP, since a CDP page always has a JS runtime, but wrong.
+  The fix is a presence flag on the record, which is 8 construction sites and 3
+  read sites across `Obscura.Js`, `Obscura.Cdp`, `Obscura.Browser` and
+  `Obscura.Cli`; it would let the Cdp inference be deleted.
 - **`Obscura.Net` still speaks `System.Uri`, so URLs are reserialized at the
   transport boundary.** `Obscura.Browser` now keeps `UrlRecord` throughout, but
   `Response.Url`, `Request.Url` and every `ObscuraHttpClient` entry point take a
@@ -407,6 +419,44 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   `Exception` raises an ordinary script error that page JS can simply catch,
   defeating the cap, so the port uses the uncatchable `Interrupt` plus a
   raise-collect-restore recovery.
+- **The CLI exited on a signal after succeeding, and now does not.** About one
+  run in ten exited 139 (SIGSEGV) having produced complete, byte-identical
+  output: the crash lands in native shutdown after `main` returns and after
+  stdout is flushed. Localized by rate: 0 of 150 for `--version`, which builds
+  no isolate, against 17 of 150 for `fetch about:blank` and 20 of 150 for a
+  `--dump`, so it tracks having created a V8 isolate rather than anything about
+  the page. It predates this branch (the base commit measured 19 and 12 crashes
+  per 320 sweep cases against 15 and 7 for the current build), and it was
+  invisible because the sweep compared stdout without checking exit status.
+  `ProcessExit.Immediately` ends the process with libc `_exit` once the streams
+  are flushed, which skips the `atexit` chain the crash lives in: 0 of 150.
+  `Environment.Exit` does not help (26 of 150) because it still runs that chain.
+  Pinned by `ProcessExitTests`, deliberately probabilistic, and
+  `scripts/parity-sweep.sh` now reports a signal death instead of scoring it as
+  a parity result. No new native dependency: libc is the platform.
+- **ClearScript names V8 script documents its own way, so `Error.stack` text
+  differs.** Line and column always match; only the script name does. Two
+  symptoms, one cause, both measured against the reference binary:
+  - A `file:` script URL loses its scheme, because ClearScript names a
+    URI-based document by `Uri.LocalPath` when the URI is a file URI:
+
+        rust:  at inner (file:///tmp/stack.html:2:26)
+        port:  at inner (/tmp/stack.html:2:26)
+
+    `http`, `https` and `about` URLs print verbatim and do not diverge.
+  - A host-internal script (`<eval>`, `<eval-remote>`, `<done?>`) is named, not
+    URI-based, and ClearScript appends a uniqueness counter and a transient
+    marker: `<eval> [5] [temp]` where deno_core reuses `<eval>` every time.
+    `DocumentFlags.None` drops the ` [temp]` but not the counter, so the name is
+    still unstable per call.
+
+  There is no supported fix. `DocumentInfo` exposes `Name` and `Uri` as
+  getter-only with two mutually exclusive constructors, so a document cannot
+  carry a URI and an overridden name; `ScriptEngine.DocumentNameManager` is
+  internal. Naming file scripts by string instead would trade the missing scheme
+  for the uniquifier and also drop the URI V8 uses as `import()`'s referrer.
+  This is visible to a page that parses `Error.stack`, and on the CDP wire in
+  `RemoteObject.description` and `exceptionDetails.exception.description`.
 - **Every frame re-parses bootstrap.js.** There is no snapshot equivalent, so a
   frame realm cannot be restored from a prebuilt context. Correctness holds;
   per-frame startup cost does not.
