@@ -210,13 +210,25 @@ public abstract record BackgroundGradientLayer
         public override int GetHashCode() => HashCode.Combine(Angle, Repeating, Stops.Count);
     }
 
-    public sealed record Radial((float X, float Y) Center, List<GradientStop> Stops)
-        : BackgroundGradientLayer
+    /// <summary>
+    /// A <c>radial-gradient()</c> layer. <c>StopPositions</c> holds the authored stop
+    /// positions, retained until paint so absolute lengths can resolve against the
+    /// gradient-ray length. Layers built programmatically leave it empty and keep the
+    /// percentage-only positions in <c>Stops</c>.
+    /// </summary>
+    public sealed record Radial(
+        (float X, float Y) Center,
+        List<GradientStop> Stops,
+        List<string?> StopPositions) : BackgroundGradientLayer
     {
-        public override BackgroundGradientLayer DeepClone() => new Radial(Center, [.. Stops]);
+        public override BackgroundGradientLayer DeepClone() =>
+            new Radial(Center, [.. Stops], [.. StopPositions]);
 
         public bool Equals(Radial? other) =>
-            other is not null && Center.Equals(other.Center) && ListEquality.SequenceEqual(Stops, other.Stops);
+            other is not null
+            && Center.Equals(other.Center)
+            && ListEquality.SequenceEqual(Stops, other.Stops)
+            && ListEquality.SequenceEqual(StopPositions, other.StopPositions);
 
         public override int GetHashCode() => HashCode.Combine(Center, Stops.Count);
     }

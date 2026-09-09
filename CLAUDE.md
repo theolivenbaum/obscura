@@ -132,6 +132,14 @@ The Rust reference build (for differential testing) is unchanged:
 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo build --release -p obscura-cli --bins --features render
 ```
 
+**Any `cargo test --release -p obscura-cli` without `--features render` rewrites
+`target/release/obscura` with a default-features binary.** That binary refuses
+`--screenshot` and drops the two render-gated MCP tools, so a parity or
+render-compare run after it reports differences that are entirely the build's.
+Rebuild the reference after running the Rust tests, or pass `--features render`
+to them as well. `scripts/parity-sweep.sh` and `scripts/render-compare.sh` now
+probe for this and refuse to run, rather than producing the misleading numbers.
+
 ## Test
 
 ```bash

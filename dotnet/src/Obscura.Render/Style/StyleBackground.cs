@@ -74,7 +74,10 @@ public static partial class ComputedStyle
             }
             else if (ParseRadialGradient(authoredLayer, darkScheme) is { } radial)
             {
-                layers.Add(new BackgroundGradientLayer.Radial(radial.Center, radial.Stops));
+                layers.Add(new BackgroundGradientLayer.Radial(
+                    radial.Center,
+                    radial.Stops,
+                    radial.StopPositions));
                 radialGeometries.Add(radial.Geometry);
             }
             else if (ParseConicGradient(authoredLayer, darkScheme) is { } conic)
@@ -296,9 +299,16 @@ public static partial class ComputedStyle
         "lvw", "lvh",
     ];
 
+    /// <summary>
+    /// <c>StopPositions</c> carries the authored position token for each stop, so paint can
+    /// resolve a length against the gradient ray. <see cref="SplitColorStop"/> only
+    /// understands percentages, which silently turned <c>transparent 32rem</c> into an
+    /// unpositioned stop and spread the ramp over the whole box.
+    /// </summary>
     private readonly record struct ParsedRadialGradient(
         (float X, float Y) Center,
         List<GradientStop> Stops,
+        List<string?> StopPositions,
         RadialGradientGeometry Geometry);
 
     /// <summary>Rust <c>parse_radial_gradient</c>.</summary>
@@ -365,16 +375,21 @@ public static partial class ComputedStyle
         }
 
         List<GradientStop> stops = [];
+        List<string?> stopPositions = [];
         for (int index = stopStart; index < parts.Count; index++)
         {
-            (string colorText, float? position) = SplitColorStop(parts[index].Trim());
+            string part = parts[index].Trim();
+            (string colorText, float? position) = SplitColorStop(part);
             if (CssColor.ParseForScheme(colorText, darkScheme) is { } color)
             {
                 stops.Add(new GradientStop(color, position));
+                stopPositions.Add(AuthoredStopPosition(part));
             }
         }
 
-        return stops.Count >= 2 ? new ParsedRadialGradient(center, stops, geometry) : null;
+        return stops.Count >= 2
+            ? new ParsedRadialGradient(center, stops, stopPositions, geometry)
+            : null;
     }
 
     /// <summary>Rust <c>parse_radial_gradient_geometry</c>.</summary>
@@ -617,6 +632,27 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>split_color_stop</c>.</summary>
+    /// <summary>
+    /// The authored position token of a color-stop, retained verbatim so paint can resolve
+    /// a length against the gradient's own ray length. Returns null when the stop carries
+    /// no position.
+    /// </summary>
+    /// <remarks>
+    /// Counts through <see cref="SplitWsParen"/> rather than splitting on whitespace so a
+    /// parenthesized color such as <c>rgb(1 2 3) 40%</c> stays one token.
+    /// </remarks>
+    private static string? AuthoredStopPosition(string value)
+    {
+        List<string> tokens = SplitWsParen(value.Trim());
+        if (tokens.Count <= 1)
+        {
+            return null;
+        }
+
+        string last = tokens[^1].Trim();
+        return GradientPositionIsValid(last) ? last : null;
+    }
+
     private static (string Color, float? Position) SplitColorStop(string value)
     {
         int index = LastIndexOfWhitespace(value);

@@ -40,6 +40,18 @@ for bin in "$RUST" "$CS"; do
 done
 command -v node >/dev/null || { echo "node is required for the Chromium lane" >&2; exit 1; }
 
+# A `cargo test --release -p obscura-cli` run (no --features render) rewrites
+# target/release/obscura with a default-features binary, whose --screenshot only
+# prints an error. Left unchecked that shows up here as a blank reference lane
+# and a 100% pixel difference that has nothing to do with rendering.
+if "$RUST" fetch "data:text/html,<b>x</b>" --screenshot /dev/null --quiet --timeout 20 2>&1 \
+    | grep -q "requires a build with the render feature"; then
+  echo "the reference was built without the render feature: $RUST" >&2
+  echo "rebuild it with: cargo build --release -p obscura-cli --bins --features render" >&2
+  echo "(a plain 'cargo test --release -p obscura-cli' overwrites it)" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT"
 FIXDIR="$(cd "$(dirname "$FIXTURE")" && pwd)"
 FIXNAME="$(basename "$FIXTURE")"

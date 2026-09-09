@@ -868,6 +868,11 @@ pub enum BackgroundGradientLayer {
     Radial {
         center: (f32, f32),
         stops: Vec<([u8; 4], Option<f32>)>,
+        /// Authored stop positions, retained until paint so absolute lengths
+        /// can resolve against the final gradient-ray length. `Radial` values
+        /// built programmatically leave this empty and keep the percentage-only
+        /// positions in `stops`.
+        stop_positions: Vec<Option<String>>,
     },
     Conic {
         angle: f32,

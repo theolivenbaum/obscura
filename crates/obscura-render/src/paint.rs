@@ -3291,6 +3291,9 @@ fn paint_canvas_background(
                 origin_rect,
                 *center,
                 stops,
+                // Legacy single-gradient values carry no authored stop strings; the
+                // percentages already in `stops` are the whole story.
+                &[],
                 style.background_radial_gradient_geometry,
                 style.font_size.unwrap_or(16.0),
                 root_font_size,
@@ -4169,6 +4172,9 @@ fn paint_laid_dom_scrolled(
                             &background.origin_rect,
                             *center,
                             stops,
+                            // Legacy single-gradient values carry no authored stop strings; the
+                            // percentages already in `stops` are the whole story.
+                            &[],
                             style.background_radial_gradient_geometry,
                             style.font_size.unwrap_or(16.0),
                             root_font_size,
@@ -5021,6 +5027,9 @@ fn paint_inline_fragment_decorations(
                         &background_origin,
                         *center,
                         stops,
+                        // Legacy single-gradient values carry no authored stop strings; the
+                        // percentages already in `stops` are the whole story.
+                        &[],
                         fragment_style.background_radial_gradient_geometry,
                         fragment_style.font_size.unwrap_or(16.0),
                         root_font_size,
@@ -7609,6 +7618,72 @@ fn paint_linear_gradient(
     }
 }
 
+/// Resolve every color-stop to a fraction of the gradient's own line (or ray,
+/// for a radial gradient), then fill in the runs of unpositioned stops by
+/// spacing them evenly between their positioned neighbours.
+///
+/// `line_length` is what makes an authored length meaningful: `transparent 32rem`
+/// is 512px along the gradient line, not 100% of it, so the two cannot be
+/// resolved at parse time. Percentages in `stops` are the fallback for the
+/// programmatically built layers that carry no authored strings.
+fn resolve_gradient_stop_positions(
+    stops: &[([u8; 4], Option<f32>)],
+    stop_positions: &[Option<String>],
+    line_length: f32,
+    em: f32,
+    rem: f32,
+    viewport: (f32, f32),
+) -> Vec<Option<f32>> {
+    let mut positions: Vec<Option<f32>> = stops
+        .iter()
+        .enumerate()
+        .map(|(index, (_, legacy))| {
+            stop_positions
+                .get(index)
+                .and_then(Option::as_deref)
+                .and_then(|value| {
+                    crate::style::resolve_contextual_length(
+                        value,
+                        em,
+                        rem,
+                        viewport.0 / 100.0,
+                        viewport.1 / 100.0,
+                        line_length,
+                    )
+                    .map(|pixels| pixels / line_length)
+                })
+                .or(*legacy)
+        })
+        .collect();
+    if positions.is_empty() {
+        return positions;
+    }
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    let last_index = positions.len() - 1;
+    if positions[last_index].is_none() {
+        positions[last_index] = Some(1.0);
+    }
+    let mut previous = 0usize;
+    for index in 1..positions.len() {
+        let Some(mut position) = positions[index] else {
+            continue;
+        };
+        let previous_position = positions[previous].unwrap_or(0.0);
+        position = position.max(previous_position);
+        positions[index] = Some(position);
+        let gap = index - previous;
+        for offset in 1..gap {
+            positions[previous + offset] = Some(
+                previous_position + (position - previous_position) * offset as f32 / gap as f32,
+            );
+        }
+        previous = index;
+    }
+    positions
+}
+
 fn paint_linear_gradient_layer(
     pixmap: &mut Pixmap,
     path: &tiny_skia::Path,
@@ -7637,50 +7712,15 @@ fn paint_linear_gradient_layer(
     }
     let base_start = Point::from_xy(cx - dx * half, cy - dy * half);
     let base_end = Point::from_xy(cx + dx * half, cy + dy * half);
-    let mut positions: Vec<Option<f32>> = stops
-        .iter()
-        .enumerate()
-        .map(|(index, (_, legacy))| {
-            stop_positions
-                .get(index)
-                .and_then(Option::as_deref)
-                .and_then(|value| {
-                    crate::style::resolve_contextual_length(
-                        value,
-                        em,
-                        rem,
-                        viewport.0 / 100.0,
-                        viewport.1 / 100.0,
-                        line_length,
-                    )
-                    .map(|pixels| pixels / line_length)
-                })
-                .or(*legacy)
-        })
-        .collect();
-    if positions.first().is_some_and(Option::is_none) {
-        positions[0] = Some(0.0);
-    }
+    let positions = resolve_gradient_stop_positions(
+        stops,
+        stop_positions,
+        line_length,
+        em,
+        rem,
+        viewport,
+    );
     let last_index = positions.len() - 1;
-    if positions[last_index].is_none() {
-        positions[last_index] = Some(1.0);
-    }
-    let mut previous = 0usize;
-    for index in 1..positions.len() {
-        let Some(mut position) = positions[index] else {
-            continue;
-        };
-        let previous_position = positions[previous].unwrap_or(0.0);
-        position = position.max(previous_position);
-        positions[index] = Some(position);
-        let gap = index - previous;
-        for offset in 1..gap {
-            positions[previous + offset] = Some(
-                previous_position + (position - previous_position) * offset as f32 / gap as f32,
-            );
-        }
-        previous = index;
-    }
     let first = positions[0].unwrap_or(0.0);
     let last = positions[last_index].unwrap_or(first);
     if repeating && last - first <= 1e-6 {
@@ -7841,6 +7881,7 @@ fn paint_radial_gradient(
     rect: &crate::Rect,
     center: (f32, f32),
     stops: &[([u8; 4], Option<f32>)],
+    stop_positions: &[Option<String>],
     geometry: Option<crate::RadialGradientGeometry>,
     em: f32,
     root_font_size: f32,
@@ -7860,16 +7901,27 @@ fn paint_radial_gradient(
     else {
         return;
     };
-    let normalized = normalized_stops(stops);
-    let gradient_stops = normalized
-        .into_iter()
-        .map(|(position, color)| {
-            GradientStop::new(
-                position,
-                Color::from_rgba8(color[0], color[1], color[2], color[3]),
-            )
-        })
-        .collect();
+    // Stop positions run along the gradient ray, which is the horizontal radius
+    // in the circle-normalized space the shader below works in.
+    let positions = resolve_gradient_stop_positions(
+        stops,
+        stop_positions,
+        radius_x,
+        em,
+        root_font_size,
+        viewport,
+    );
+    let mut gradient_stops = Vec::with_capacity(stops.len());
+    let mut monotonic = 0.0f32;
+    for index in 0..stops.len() {
+        let color = gradient_stop_color(stops, index);
+        let position = positions[index].unwrap_or(0.0).clamp(0.0, 1.0).max(monotonic);
+        monotonic = position;
+        gradient_stops.push(GradientStop::new(
+            position,
+            Color::from_rgba8(color[0], color[1], color[2], color[3]),
+        ));
+    }
     // tiny-skia's native radial shader is circular. Keep the established CSS
     // coordinate-space shader and transform that circle around its center into
     // the authored ellipse. The paint transform later handles device scale.
@@ -8173,13 +8225,18 @@ fn paint_gradient_layer_stack(
                     raster_scale,
                 );
             }
-            crate::BackgroundGradientLayer::Radial { center, stops } => {
+            crate::BackgroundGradientLayer::Radial {
+                center,
+                stops,
+                stop_positions,
+            } => {
                 paint_radial_gradient(
                     pixmap,
                     path,
                     sampling_rect,
                     *center,
                     stops,
+                    stop_positions,
                     radial_geometries.get(index).copied().flatten(),
                     em,
                     root_font_size,
@@ -8726,6 +8783,9 @@ fn paint_in_flow_generated_box(
                         &background.origin_rect,
                         *center,
                         stops,
+                        // Legacy single-gradient values carry no authored stop strings; the
+                        // percentages already in `stops` are the whole story.
+                        &[],
                         style.background_radial_gradient_geometry,
                         style.font_size.unwrap_or(16.0),
                         root_font_size,
@@ -8969,6 +9029,9 @@ fn paint_positioned_pseudo(
                         &background.origin_rect,
                         *center,
                         stops,
+                        // Legacy single-gradient values carry no authored stop strings; the
+                        // percentages already in `stops` are the whole story.
+                        &[],
                         style.background_radial_gradient_geometry,
                         em,
                         root_font_size,
@@ -11521,6 +11584,62 @@ mod tests {
                 && blurred_edge.blue() < 240,
             "the issue's 2px 2px 3px shadow must retain ink outside the box: {blurred_edge:?}"
         );
+    }
+
+    #[test]
+    fn radial_gradient_length_stops_resolve_against_the_gradient_ray() {
+        // `transparent 100px` ends the ramp 100px from the center, not at the
+        // edge of the box. Only percentages used to survive parsing, so the stop
+        // became unpositioned and the ramp spread over the whole 200px radius -
+        // which is what turned Tailwind's `transparent 32rem` page glows into a
+        // wash over the entire document.
+        let tree = parse_html(
+            r#"<html style="margin:0;background:rgb(0,0,255)">
+               <body style="margin:0;width:400px;height:400px;
+                            background:radial-gradient(circle at 50% 50%,rgb(255,0,0),transparent 100px)">
+               </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (400.0, 400.0), None).expect("radial gradient paint");
+        let at = |x: u32| {
+            let pixel = pixmap.pixel(x, 200).expect("row sample");
+            (pixel.red(), pixel.green(), pixel.blue())
+        };
+
+        assert!(
+            at(200).0 > 250,
+            "the center stays the gradient's first color: {:?}",
+            at(200)
+        );
+        let (r, _, b) = at(100);
+        assert!(
+            r <= 2 && b >= 250,
+            "halfway to the 100px stop the ramp must be nearly clear: {:?}",
+            at(100)
+        );
+        assert_eq!(at(5), (0, 0, 255), "past the stop only the page shows through");
+        assert_eq!(at(395), (0, 0, 255), "and symmetrically on the far side");
+    }
+
+    #[test]
+    fn background_shorthand_paints_its_final_color_layer_under_the_gradient() {
+        // `background: <gradient>, <color>` sets background-color from the final
+        // layer. Reading the color only when no gradient parsed dropped it, so a
+        // translucent gradient composited over whatever was behind the element.
+        let tree = parse_html(
+            r#"<html style="margin:0;background:rgb(255,255,255)">
+               <body style="margin:0;width:400px;height:400px;
+                            background:linear-gradient(90deg,transparent,transparent),rgb(0,255,255)">
+               </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (400.0, 400.0), None).expect("shorthand color paint");
+        for x in [5u32, 200, 395] {
+            let pixel = pixmap.pixel(x, 200).expect("row sample");
+            assert_eq!(
+                (pixel.red(), pixel.green(), pixel.blue()),
+                (0, 255, 255),
+                "the shorthand's color layer must paint under the gradient at x={x}"
+            );
+        }
     }
 
     #[test]
