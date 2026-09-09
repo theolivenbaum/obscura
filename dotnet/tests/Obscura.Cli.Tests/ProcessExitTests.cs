@@ -19,10 +19,17 @@ namespace Obscura.Cli.Tests;
 /// <para>
 /// This is a probabilistic test, which is unusual and deliberate: the fault is
 /// a race and there is nothing deterministic to assert against. At the measured
-/// pre-fix rate of about one in ten, 25 runs would have caught it better than
-/// nine times in ten, and the cost is a few seconds. It only ever fails in the
+/// pre-fix rate of about one in six, 25 runs would have caught it better than
+/// 99 times in 100, and the cost is a few seconds. It only ever fails in the
 /// direction that matters - a green run never means the race is impossible,
 /// but a red one always means it is back.
+/// </para>
+/// <para>
+/// Run it serially, as it is here, and never in parallel. Process contention
+/// widens the window the race needs: measured against the pre-fix build, the
+/// fault fires about 15% of the time in a serial loop and 0.13% of the time
+/// under four-way parallelism, so parallelising this test would quietly destroy
+/// its power to detect anything.
 /// </para>
 /// </remarks>
 public sealed class ProcessExitTests

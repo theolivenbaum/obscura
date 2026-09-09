@@ -446,8 +446,21 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   per 320 sweep cases against 15 and 7 for the current build), and it was
   invisible because the sweep compared stdout without checking exit status.
   `ProcessExit.Immediately` ends the process with libc `_exit` once the streams
-  are flushed, which skips the `atexit` chain the crash lives in: 0 of 150.
+  are flushed, which skips the `atexit` chain the crash lives in.
   `Environment.Exit` does not help (26 of 150) because it still runs that chain.
+
+  Stressed, with the pre-fix commit built as a matched control and both binaries
+  run back to back on the same machine state:
+
+      serial, fetch about:blank      pre-fix 29/150 and 16/150   fixed 0/150 twice
+      serial, 1500 runs              -                           fixed 0/1500
+      4-way parallel, mixed, 3000    pre-fix 4/3000              fixed 0/3000
+
+  The parallel harness is the weaker test and it is worth knowing why: process
+  contention widens the window the race needs, so the same fault that fires
+  about 15% of the time serially fires 0.13% of the time under four-way
+  parallelism. Measure this one serially.
+
   Pinned by `ProcessExitTests`, deliberately probabilistic, and
   `scripts/parity-sweep.sh` now reports a signal death instead of scoring it as
   a parity result. No new native dependency: libc is the platform.
