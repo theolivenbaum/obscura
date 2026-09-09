@@ -3366,6 +3366,45 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void FunctionalBlockSizesResolveAgainstTheContainingBlockNotTheViewport()
+    {
+        // DEVIATION from the Rust reference, which uses the viewport height as the
+        // percentage basis for every functional block-axis size. Chromium resolves a
+        // block-axis percentage against the containing block's content-box height, and
+        // treats it as auto when that height is indefinite. Tesserae's `.tss-card` is
+        // `height: calc(100% - 4px)` inside an auto-height parent, which the reference
+        // sized to a full viewport instead of to its content.
+        DomTree tree = Parse(
+            """
+            <style>
+              * { box-sizing:border-box; margin:0 }
+              body { width:800px }
+              #autoh { }
+              #a { height:calc(100% - 4px) }
+              #b { height:100% }
+              #fixed { height:300px }
+              #c { height:calc(100% - 4px) }
+              #d { height:50% }
+            </style>
+            <div id="autoh"><div id="a">a</div><div id="b">b</div></div>
+            <div id="fixed"><div id="c">c</div><div id="d">d</div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // Indefinite containing block: the calc behaves as auto, so both lines are one
+        // 18px line box, exactly as the bare percentage next to them already was.
+        Assert.True(MathF.Abs(Get("autoh").Height - 36f) < 0.01f, $"{Get("autoh")}");
+        Assert.True(MathF.Abs(Get("a").Height - 18f) < 0.01f, $"{Get("a")}");
+        Assert.True(MathF.Abs(Get("b").Height - 18f) < 0.01f, $"{Get("b")}");
+
+        // Definite 300px containing block: the calc samples it, not the 900px viewport.
+        Assert.True(MathF.Abs(Get("fixed").Height - 300f) < 0.01f, $"{Get("fixed")}");
+        Assert.True(MathF.Abs(Get("c").Height - 296f) < 0.01f, $"{Get("c")}");
+        Assert.True(MathF.Abs(Get("d").Height - 150f) < 0.01f, $"{Get("d")}");
+    }
+
+    [Fact]
     public void CyclicPercentageImageKeepsNaturalIntrinsicContribution()
     {
         // A `width:100%` image inside a content-sized flex item is a cyclic

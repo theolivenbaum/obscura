@@ -368,6 +368,23 @@ have created one.
 
 ### Layout fixes found against the Tesserae sample suite
 
+`crates/**` is read-only (ground rule 1), so from here these are fixed in the C#
+tree only and the two engines legitimately disagree on them. Each one carries a
+DEVIATION comment at the C# code that differs.
+
+- **DEVIATION - functional block-axis sizes resolved against the viewport
+  height.** `crates/obscura-render/src/dom.rs` uses `viewport.1` as the
+  percentage basis for `size_expressions[1|3|5]`. Chromium resolves a block-axis
+  percentage against the containing block's content-box height, and treats it as
+  `auto` when that height is indefinite. Tesserae's `.tss-card` is
+  `height: calc(100% - 4px)` inside an auto-height parent, so the reference sizes
+  every card to a full viewport instead of to its content
+  (`height: calc(100% - 4px)` under an auto-height parent: Chromium 18px,
+  reference 716px; under a definite 300px parent: Chromium 296px, reference
+  716px). The port adds `Inherited.CbHeight` and applies both rules in
+  `LayoutDomComputed.ResolveOneComputedStyle`. Taffy already applies them to a
+  bare percentage; only the flattened functional form needed it.
+
 - **`calc()` percentages under a resizable flex item resolved against the
   declaration, not the used width.** A row flex item with a Px width was treated
   as definite by the cyclic-inline deferral, so descendants fell back to the
