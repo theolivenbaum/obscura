@@ -182,6 +182,49 @@ public class PaintTests
     }
 
     [Fact]
+    public void FilterBlurSoftensTheElementAndBleedsPastItsBox()
+    {
+        // `filter` was parsed only for containing-block bookkeeping, so a blurred element
+        // rendered perfectly sharp. blur()'s argument is sigma itself, unlike box-shadow's
+        // blur radius, which is 2 sigma.
+        DomTree sharp = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:black">
+            <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                        background:rgb(0,255,0)"></div>
+            </body></html>
+            """);
+        DomTree blurred = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:black">
+            <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                        background:rgb(0,255,0);filter:blur(6px)"></div>
+            </body></html>
+            """);
+        Pixmap a = RenderPaint.PaintDom(sharp, (100f, 100f), null)!;
+        Pixmap b = RenderPaint.PaintDom(blurred, (100f, 100f), null)!;
+
+        // Sharp: hard edge at x = 30, nothing outside the box.
+        Assert.Equal(0, Pixel(a, 24, 50).G);
+        Assert.Equal(255, Pixel(a, 31, 50).G);
+
+        // Blurred: ink bleeds outside the box, the edge is a ramp, and the middle stays
+        // saturated because 40px is wide against sigma 6.
+        Assert.True(Pixel(b, 24, 50).G > 8, $"must bleed past the box: {Pixel(b, 24, 50).G}");
+        byte edge = Pixel(b, 30, 50).G;
+        Assert.True(edge is >= 60 and <= 200, $"the edge must be a ramp: {edge}");
+        Assert.True(Pixel(b, 50, 50).G > 245, $"middle must stay saturated: {Pixel(b, 50, 50).G}");
+
+        byte previous = 0;
+        for (uint x = 22; x < 40; x++)
+        {
+            byte value = Pixel(b, x, 50).G;
+            Assert.True(value >= previous, $"coverage must rise into the box at x={x}");
+            previous = value;
+        }
+    }
+
+    [Fact]
     public void InsetBoxShadowPaintsInwardFromTheBorderBoxEdge()
     {
         // PaintBoxShadow used to return early on Inset, so an inner shadow painted

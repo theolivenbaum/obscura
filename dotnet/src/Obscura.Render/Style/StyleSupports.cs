@@ -111,12 +111,13 @@ public static partial class ComputedStyle
             case "clip-path":
             case "-webkit-clip-path":
                 return CssText.EqualsAscii(value, "none") || ParseClipPathPolygon(value) is not null;
-            // These properties currently participate only in containing-block
-            // bookkeeping. Advertising an unpainted effect is worse than a
-            // conservative false result.
+            // blur() is painted, so it may be advertised. Every other filter function
+            // still participates only in containing-block bookkeeping, and advertising an
+            // unpainted effect is worse than a conservative false result.
             case "filter":
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
+                return CssText.EqualsAscii(value, "none") || ParseFilterBlur(value) is not null;
             case "perspective":
                 return CssText.EqualsAscii(value, "none");
             case "contain":

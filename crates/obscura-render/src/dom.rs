@@ -5922,7 +5922,6 @@ fn layout_dom_once(
                 // pill became 637px wide). Approximate the native max-content
                 // border box from its label, generated icon, gap, and edges.
                 let font_size = style.font_size.unwrap_or(13.333_333).max(1.0);
-                let bold = crate::style::used_font_weight(style) >= 600;
                 let intrinsic_content = native_button_contents.get(&id);
                 let label = intrinsic_content
                     .map(|content| content.text.as_str())

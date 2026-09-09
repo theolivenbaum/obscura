@@ -740,7 +740,15 @@ internal static class PaintDomPainter
             }
 
             float ownOpacity = Math.Clamp(style.Opacity ?? 1f, 0f, 1f);
-            if (pass.SuppressOpacityFor != nid && ownOpacity < 1f)
+            // `filter` groups exactly like `opacity` does: the whole finished stacking
+            // context is post-processed once, never each primitive. Sharing the opacity
+            // group's bookkeeping keeps one suppression flag and one recursion rather
+            // than a second, near-identical layer path.
+            float? groupBlur = style.FilterBlur is { } blurSigma
+                && float.IsFinite(blurSigma) && blurSigma > 0f
+                    ? blurSigma
+                    : null;
+            if (pass.SuppressOpacityFor != nid && (ownOpacity < 1f || groupBlur is not null))
             {
                 opacitySubtreeSkip.Add(nid);
                 foreach (NodeId member in DomTraversal.RenderedDescendants(tree, nid))
@@ -772,6 +780,11 @@ internal static class PaintDomPainter
                 if (painted is null)
                 {
                     return null;
+                }
+
+                if (groupBlur is { } sigma)
+                {
+                    PaintFilters.BlurPixmap(painted, sigma);
                 }
 
                 Surface.DrawPixmap(pixmap, 0, 0, painted, ownOpacity, false, Affine2.Identity, null);

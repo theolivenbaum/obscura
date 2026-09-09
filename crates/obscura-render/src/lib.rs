@@ -1419,6 +1419,16 @@ pub struct LayoutStyle {
     /// `opacity`, own (non-inherited) value in 0.0-1.0. `None` means the
     /// default of 1.0.
     pub opacity: Option<f32>,
+    /// `filter: blur(<length>)`, as the standard deviation in CSS pixels.
+    ///
+    /// `blur()`'s argument *is* sigma, unlike `box-shadow`'s blur radius, which
+    /// is 2 sigma. Only a blur-only filter list is recorded: a list carrying any
+    /// other function stays unimplemented rather than being silently reduced to
+    /// its blurs, which would paint a wrong result instead of no result.
+    pub filter_blur: Option<f32>,
+    /// `backdrop-filter: blur(<length>)`, as the standard deviation in CSS
+    /// pixels. Same restriction as `filter_blur`.
+    pub backdrop_blur: Option<f32>,
     /// First CSS animation name and its timing contract. The stylesheet
     /// sampler contributes animated opacity after normal declarations and
     /// before author `!important`, matching the animation cascade origin.

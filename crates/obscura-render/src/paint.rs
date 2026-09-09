@@ -3914,7 +3914,16 @@ fn paint_laid_dom_scrolled(
             .and_then(|style| style.opacity)
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
-        if suppress_opacity_for != Some(nid) && own_opacity < 1.0 {
+        // `filter` groups exactly like `opacity` does: the whole finished
+        // stacking context is post-processed once, never each primitive. Sharing
+        // the opacity group's bookkeeping keeps one suppression flag and one
+        // recursion rather than a second, near-identical layer path.
+        let group_blur = laid
+            .styles
+            .get(&nid)
+            .and_then(|style| style.filter_blur)
+            .filter(|sigma| sigma.is_finite() && *sigma > 0.0);
+        if suppress_opacity_for != Some(nid) && (own_opacity < 1.0 || group_blur.is_some()) {
             opacity_subtree_skip.insert(nid);
             opacity_subtree_skip.extend(crate::dom::rendered_descendants(tree, nid));
             if own_opacity <= 0.0 {
@@ -3952,6 +3961,11 @@ fn paint_laid_dom_scrolled(
                 print_economy,
                 canvas_background,
             )?;
+            let mut layer = layer;
+            if let Some(sigma) = group_blur {
+                blur_pixmap(&mut layer, sigma);
+            }
+            let layer = layer;
             let group_paint = tiny_skia::PixmapPaint {
                 opacity: own_opacity,
                 ..tiny_skia::PixmapPaint::default()
@@ -6184,6 +6198,129 @@ fn paint_box_shadow(
         Transform::identity(),
         ancestor_clip,
     );
+}
+
+/// The three box-blur window extents that approximate a gaussian of `sigma`,
+/// per the algorithm SVG's `feGaussianBlur` defines normatively and that CSS
+/// `blur()` is specified in terms of.
+///
+/// Each pass is `(left, right)`, so its window covers `left + right + 1` pixels.
+/// With `d = floor(sigma * 3 * sqrt(2*PI) / 4 + 0.5)`: an odd `d` uses three
+/// windows of `d` centred on the output pixel; an even `d` uses two windows of
+/// `d` centred on the pixel boundaries either side, then one of `d + 1` centred.
+fn box_blur_extents(sigma: f32) -> Option<[(u32, u32); 3]> {
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return None;
+    }
+    let d = (sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0 + 0.5).floor();
+    if !(d >= 1.0) {
+        return None;
+    }
+    let d = (d as u32).min(1 << 14);
+    Some(if d % 2 == 1 {
+        let half = (d - 1) / 2;
+        [(half, half), (half, half), (half, half)]
+    } else {
+        let half = d / 2;
+        [(half, half - 1), (half - 1, half), (half, half)]
+    })
+}
+
+/// One separable box-blur pass over a premultiplied RGBA row window, as a
+/// running sum so the cost is independent of the window size.
+fn box_blur_axis(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    horizontal: bool,
+    left: u32,
+    right: u32,
+) {
+    let (outer, inner, step) = if horizontal {
+        (height, width, 4usize)
+    } else {
+        (width, height, stride)
+    };
+    let window = (left + right + 1) as u32;
+    let left = left as usize;
+    let right = right as usize;
+    for o in 0..outer {
+        let base = if horizontal { o * stride } else { o * 4 };
+        let at = |i: usize| base + i * step;
+        // Seed the running sum with the window at i = 0, clamping to the edge by
+        // treating out-of-range samples as transparent (the layer is transparent
+        // outside the painted area, which is what the filter region needs).
+        let mut sum = [0u32; 4];
+        for k in 0..=right.min(inner.saturating_sub(1)) {
+            let p = at(k);
+            for c in 0..4 {
+                sum[c] += src[p + c] as u32;
+            }
+        }
+        for i in 0..inner {
+            for c in 0..4 {
+                dst[at(i) + c] = ((sum[c] + window / 2) / window) as u8;
+            }
+            // Slide: drop the sample leaving the window, add the one entering.
+            if i >= left {
+                let out = i - left;
+                let p = at(out);
+                for c in 0..4 {
+                    sum[c] -= src[p + c] as u32;
+                }
+            }
+            let incoming = i + right + 1;
+            if incoming < inner {
+                let p = at(incoming);
+                for c in 0..4 {
+                    sum[c] += src[p + c] as u32;
+                }
+            }
+        }
+    }
+}
+
+/// Blur `pixmap` in place with the three-pass box approximation of a gaussian.
+///
+/// Operates on the premultiplied bytes, which is what keeps a transparent edge
+/// from bleeding the colour under it into the result.
+fn blur_pixmap(pixmap: &mut Pixmap, sigma: f32) {
+    let Some(extents) = box_blur_extents(sigma) else {
+        return;
+    };
+    let width = pixmap.width() as usize;
+    let height = pixmap.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let stride = width * 4;
+    let mut scratch = vec![0u8; stride * height];
+    for (left, right) in extents {
+        // Horizontal, then vertical: a box blur is separable, so six linear
+        // passes total rather than one quadratic convolution.
+        box_blur_axis(
+            pixmap.data(),
+            &mut scratch,
+            width,
+            height,
+            stride,
+            true,
+            left,
+            right,
+        );
+        box_blur_axis(
+            &scratch,
+            pixmap.data_mut(),
+            width,
+            height,
+            stride,
+            false,
+            left,
+            right,
+        );
+    }
 }
 
 /// Lay one shadow shape's gaussian ramp into `pixmap`.
@@ -11800,6 +11937,56 @@ mod tests {
                 "the shorthand's color layer must paint under the gradient at x={x}"
             );
         }
+    }
+
+    #[test]
+    fn filter_blur_softens_the_element_and_bleeds_past_its_box() {
+        // `filter` was parsed only for containing-block bookkeeping, so a blurred
+        // element rendered perfectly sharp. blur()'s argument is sigma itself,
+        // unlike box-shadow's blur radius, which is 2 sigma.
+        let sharp = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:black">
+               <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                           background:rgb(0,255,0)"></div>
+               </body></html>"#,
+        );
+        let blurred = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:black">
+               <div style="position:absolute;left:30px;top:30px;width:40px;height:40px;
+                           background:rgb(0,255,0);filter:blur(6px)"></div>
+               </body></html>"#,
+        );
+        let a = paint_dom(&sharp, (100.0, 100.0), None).expect("sharp paint");
+        let b = paint_dom(&blurred, (100.0, 100.0), None).expect("blurred paint");
+        let green = |p: &Pixmap, x: u32, y: u32| p.pixel(x, y).expect("sample").green();
+
+        // Sharp: hard edge at x = 30, nothing outside the box.
+        assert_eq!(green(&a, 24, 50), 0);
+        assert_eq!(green(&a, 31, 50), 255);
+
+        // Blurred: ink bleeds outside the box, the edge is a ramp, and the middle
+        // stays saturated because 40px is wide against sigma 6.
+        assert!(
+            green(&b, 24, 50) > 8,
+            "the blur must bleed past the border box: {}",
+            green(&b, 24, 50)
+        );
+        let edge = green(&b, 30, 50);
+        assert!(
+            (60..=200).contains(&edge),
+            "the edge must be a ramp, not a step: {edge}"
+        );
+        assert!(
+            green(&b, 50, 50) > 245,
+            "the middle must stay saturated: {}",
+            green(&b, 50, 50)
+        );
+        // Monotonic across the left edge.
+        let ramp: Vec<u8> = (22..40).map(|x| green(&b, x, 50)).collect();
+        assert!(
+            ramp.windows(2).all(|w| w[0] <= w[1]),
+            "coverage must rise monotonically into the box: {ramp:?}"
+        );
     }
 
     #[test]

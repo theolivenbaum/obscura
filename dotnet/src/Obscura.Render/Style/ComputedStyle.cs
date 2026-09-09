@@ -2427,10 +2427,12 @@ public static partial class ComputedStyle
 
             case "filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Filter, NonNoneValue(value));
+                style.FilterBlur = ParseFilterBlur(value);
                 return true;
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.BackdropFilter, NonNoneValue(value));
+                style.BackdropBlur = ParseFilterBlur(value);
                 return true;
             case "perspective":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Perspective, NonNoneValue(value));

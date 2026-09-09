@@ -19,6 +19,66 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>transform_functions</c>.</summary>
+    /// <summary>
+    /// The combined standard deviation of a blur-only <c>filter</c> /
+    /// <c>backdrop-filter</c> list, in CSS pixels.
+    /// </summary>
+    /// <remarks>
+    /// <c>blur(&lt;length&gt;)</c>'s argument is sigma itself (CSS Filter Effects defines
+    /// it as feGaussianBlur's <c>stdDeviation</c>), unlike <c>box-shadow</c>'s blur radius,
+    /// which is 2 sigma. Successive gaussians of sigma a and b compose to
+    /// <c>sqrt(a^2 + b^2)</c>, so a list of blurs collapses to one.
+    /// <para>
+    /// Returns null for <c>none</c>, for an unparseable list, and - deliberately - for any
+    /// list carrying a function other than <c>blur()</c>. Recording just the blurs of
+    /// <c>grayscale(1) blur(2px)</c> would paint a wrong result where painting nothing at
+    /// least matches what the engine advertises through <c>@supports</c>.
+    /// </para>
+    /// </remarks>
+    internal static float? ParseFilterBlur(string value)
+    {
+        string trimmed = value.Trim();
+        if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
+        {
+            return null;
+        }
+
+        List<(string Name, string Arguments)> functions = TransformFunctions(trimmed);
+        if (functions.Count == 0)
+        {
+            return null;
+        }
+
+        float variance = 0f;
+        foreach ((string name, string arguments) in functions)
+        {
+            if (!CssText.EqualsAscii(name, "blur"))
+            {
+                return null;
+            }
+
+            // An empty argument is `blur()`, which is a zero-radius blur.
+            string args = arguments.Trim();
+            float sigma;
+            if (args.Length == 0)
+            {
+                sigma = 0f;
+            }
+            else if (Px(args) is { } parsed && float.IsFinite(parsed) && parsed >= 0f)
+            {
+                sigma = parsed;
+            }
+            else
+            {
+                return null;
+            }
+
+            variance += sigma * sigma;
+        }
+
+        return variance > 0f ? MathF.Sqrt(variance) : null;
+    }
+
     internal static List<(string Name, string Arguments)> TransformFunctions(string value)
     {
         List<(string Name, string Arguments)> output = [];
