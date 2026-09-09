@@ -328,6 +328,20 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   deny-set, same failure message, and it covers redirect hops because each hop
   opens its own connection through the same callback. There is one transport
   rather than reqwest + wreq, so the two-implementation drift risk is gone.
+
+  The two hooks do not fire on the same set, and that difference was a bug. A
+  `dns_resolver` runs only for a host that needs resolving, so the reference
+  never sees an IP-literal endpoint; a `ConnectCallback` fires for every
+  connection. With `HTTPS_PROXY=http://127.0.0.1:PORT` set - this sandbox, and
+  most corporate networks - the port refused its own proxy with
+  "SSRF blocked: '127.0.0.1' resolves to forbidden address 127.0.0.1" while the
+  reference proxied normally, and the only workaround was
+  `--allow-private-network`, which disables the guard entirely. So the callback
+  now skips an IP-literal endpoint, which is exactly the set the reference's
+  resolver never inspects. A literal *target* is still refused, by `ValidateUrl`
+  on entry and on every redirect hop, which is where Rust rejects it too, and a
+  hostname resolving to a private address is still blocked by the resolver.
+  Pinned by `ProxyEndpointNotSsrfBlockedTests`.
 - **`SSL_CERT_FILE` / `SSL_CERT_DIR` roots are additive and cached per value.**
   .NET has no `add_root_certificate`, so the roots are applied through a
   `RemoteCertificateValidationCallback` that first honours the platform trust
