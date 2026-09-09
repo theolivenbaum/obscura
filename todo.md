@@ -149,17 +149,24 @@ The largest component. Split into stages; each stage is independently testable.
       is the remaining conversion at the `Obscura.Net` boundary (see Open issues)
 - [ ] Parity: navigate a fixture corpus, compare DOM + text + links
 
-## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)
+## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)  -  279/279 tests green
 
 - [x] `server.rs` -> WebSocket server, sessions, targets (1730)
 - [x] `dispatch.rs` -> method routing (1273)
 - [x] `types.rs`, `util.rs`, `cookie_params.rs` (440)
-- [ ] domains: `page` (3179), `runtime` (835), `dom` (788), `target` (540),
+- [x] domains: `page` (3179), `runtime` (835), `dom` (788), `target` (540),
       `pdf` (535), `accessibility` (524), `emulation` (456), `input` (438),
       `network` (430), `domsnapshot` (416), `io` (283), `fetch` (224),
-      `storage` (124), `browser` (42), `lp` (21)
-- [ ] Integration tests ported (27 files)
-- [ ] Parity: drive both servers with the same CDP script, diff the messages
+      `storage` (124), `browser` (42), `lp` (21). The dispatch table matches the
+      Rust one method for method. The four core domains were re-audited arm by
+      arm and field by field; `target` and the 30 in-file unit tests needed
+      nothing, and four wire-visible divergences were fixed (see the commit).
+- [x] Integration tests ported: all 27 files, 70 Rust tests -> 279 facts
+- [P] Parity: both servers driven with the same script over raw WebSocket -
+      40/40 command responses byte-identical, 111/111 events in identical order.
+      The two exceptions are response-header ordering, which comes off a Rust
+      `HashMap` and is nondeterministic per process, and header sets the two
+      HTTP clients normalize differently.
 
 ## 7. Obscura.Mcp  (<- crates/obscura-mcp, ~3.2k lines)
 
@@ -169,13 +176,23 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] Integration tests ported (16 found, 16 ported, 16 passing)
 - [ ] Parity: identical tool listings and tool-call results
 
-## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)
+## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)  -  177/178 tests green
 
-- [ ] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (1946)
-- [ ] `worker.rs` -> the `obscura-worker` binary for parallel scrape (165)
-- [ ] `crates/obscura` -> embeddable library API (`Obscura` project) (2224)
-- [ ] Integration tests ported
-- [ ] Parity: CLI golden-output tests for every `--dump` mode
+- [x] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (1946).
+      `serve` had five real defects, `scrape` one protocol bug, and every
+      numeric option went through a parser that could kill the process where
+      clap prints a usage error; see the commit.
+- [x] `worker.rs` -> the `obscura-worker` binary for parallel scrape (165)
+- [x] `crates/obscura` -> embeddable library API (`Obscura` project) (2224) -
+      diffed item by item; every public type, method and property present
+- [x] Integration tests ported: every file under `crates/obscura-cli/tests` and
+      `crates/obscura/tests` now has a same-named counterpart. One fact skipped,
+      the stealth-transport wire assertion that is a recorded deliberate gap.
+- [P] Parity: `scripts/parity-sweep.sh` is 320/320 byte-identical across
+      text/links/html/markdown/assets, and `scripts/parity-sweep-scrape.sh`
+      drives 169 `scrape`/`serve`/worker cases at 165 identical. The 4 that
+      differ are both outside the CLI: the ClearScript script-name suffix in a
+      thrown error's stack, and the platform io error string for a missing file.
 
 ## Open issues
 
@@ -235,7 +252,15 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
 - [x] `scripts/parity-sweep.sh` drives both engines over every fixture:
       **320 of 320 outputs byte-identical** (64 fixtures x text/links/html/
-      markdown/assets), plus 17 of 17 `--eval` expressions
+      markdown/assets). It now checks exit status as well, and reports a signal
+      death separately rather than scoring it as a parity result - which is how
+      the CLI's teardown segfault stayed hidden behind a green sweep.
+- [x] `scripts/parity-sweep-scrape.sh` covers `scrape`, `serve` and the worker
+      protocol: 169 cases, **165 identical**, the 4 remaining both traced to
+      recorded deviations outside the CLI
+- [x] `Obscura.Parity.Tests`: **306 of 307**, one skipped. Includes the 17
+      `--eval` expressions and `UrlSerializationParityTests`, which pins page-URL
+      serialization over 13 opaque-path cases.
 - [ ] Obstacle course (companion repo `obscura-benchmark`) at 33/33
 - [ ] Performance comparison vs the Rust build on the standard pages
 - [ ] Re-enable CI as .NET workflows (rename off `.disabled`, rewrite for dotnet)
