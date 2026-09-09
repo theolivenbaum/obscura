@@ -1,0 +1,23 @@
+Density: A raw 648px, B srcset 2x -> ~324 CSS px, C 648w + sizes:300px -> ~300px
+
+A:
+
+
+
+B:
+
+
+
+C:
+
+
+
+Broken-image fallback: D alt text only, E alt="" nothing, F no alt -> grey box
+
+D:
+
+E:
+
+F:
+
+G: cover img half-outside an overflow:hidden viewport must not bleed past the red border:

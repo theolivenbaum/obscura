@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Obscura</RootNamespace>
+    <AssemblyName>Obscura</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Obscura.Browser/Obscura.Browser.csproj" />
+  </ItemGroup>
+</Project>

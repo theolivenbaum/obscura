@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Obscura.Cli</RootNamespace>
+    <!-- The assembly cannot be named "obscura": NuGet resolves project identity
+         case-insensitively by assembly name and would collide with the Obscura
+         library project. The launcher below still produces an `obscura` binary
+         so CLI invocations match the Rust build. -->
+    <AssemblyName>Obscura.Cli</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Obscura/Obscura.csproj" />
+    <ProjectReference Include="../Obscura.Js/Obscura.Js.csproj" />
+    <ProjectReference Include="../Obscura.Render/Obscura.Render.csproj" />
+    <ProjectReference Include="../Obscura.Cdp/Obscura.Cdp.csproj" />
+    <ProjectReference Include="../Obscura.Mcp/Obscura.Mcp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+  <!-- Emit `obscura` (and `obscura-worker`) next to the apphost so the CLI is
+       invoked exactly as the Rust binary is. -->
+  <Target Name="CopyObscuraLauncher" AfterTargets="Build"
+          Condition="'$(OS)' != 'Windows_NT'">
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)obscura"
+          Condition="Exists('$(TargetDir)$(AssemblyName)')" />
+    <Exec Command="chmod +x &quot;$(TargetDir)obscura&quot;" Condition="Exists('$(TargetDir)obscura')" />
+    <!-- The apphost embeds the managed entry assembly's name, so a renamed copy
+         still runs Obscura.Cli.dll; WorkerHost selects worker mode from the
+         launcher's own file name, exactly matching the Rust build's two-binary
+         layout that `scrape`'s sibling lookup depends on. -->
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)obscura-worker"
+          Condition="Exists('$(TargetDir)$(AssemblyName)')" />
+    <Exec Command="chmod +x &quot;$(TargetDir)obscura-worker&quot;" Condition="Exists('$(TargetDir)obscura-worker')" />
+  </Target>
+
+</Project>

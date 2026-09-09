@@ -1,0 +1,9 @@
+A: z:10 overlay declared BEFORE a later sibling must paint ON TOP (green wins):
+
+
+
+
+
+
+
+B: z:-1 backdrop declared AFTER content must paint UNDER it (blue stays visible, orange edges show):

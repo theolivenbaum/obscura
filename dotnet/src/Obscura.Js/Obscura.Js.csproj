@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Obscura.Js</RootNamespace>
+    <AssemblyName>Obscura.Js</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Obscura.Dom/Obscura.Dom.csproj" />
+    <ProjectReference Include="../Obscura.Net/Obscura.Net.csproj" />
+    <ProjectReference Include="../Obscura.Render/Obscura.Render.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ClearScript.V8" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.linux-x64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.linux-arm64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.osx-x64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.osx-arm64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.win-x64" />
+  </ItemGroup>
+
+  <!-- bootstrap.js is JavaScript and is shared verbatim with the Rust engine.
+       It is linked, not copied, so the two engines can never drift. -->
+  <ItemGroup>
+    <EmbeddedResource Include="../../../crates/obscura-js/js/bootstrap.js">
+      <Link>js/bootstrap.js</Link>
+      <LogicalName>Obscura.Js.bootstrap.js</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>
