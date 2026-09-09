@@ -194,9 +194,20 @@ public sealed class ObscuraHttpClient : IDisposable
             var resolver = new SsrfGuardResolver(AllowPrivateNetwork);
             handler.ConnectCallback = async (context, cancellationToken) =>
             {
-                var addresses = await resolver
-                    .ResolveAsync(context.DnsEndPoint.Host, cancellationToken)
-                    .ConfigureAwait(false);
+                var host = context.DnsEndPoint.Host;
+                // Only guard an endpoint the reference would guard. reqwest installs
+                // this as a `dns_resolver`, so it runs for a host that needs resolving
+                // and never sees an IP-literal endpoint, which reaches the socket with
+                // no lookup. A ConnectCallback fires for every connection, so without
+                // this the port refused endpoints the reference never inspects - most
+                // visibly an HTTPS_PROXY on 127.0.0.1, where every proxied fetch died
+                // with "SSRF blocked: '127.0.0.1' resolves to forbidden address" while
+                // the reference proxied normally. An IP-literal *target* is still
+                // refused: ValidateUrl checks the request URL's host on entry and on
+                // every redirect hop, which is where Rust rejects it too.
+                var addresses = IPAddress.TryParse(StripIpv6Brackets(host), out var literal)
+                    ? [literal]
+                    : await resolver.ResolveAsync(host, cancellationToken).ConfigureAwait(false);
                 var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
                 try
                 {
@@ -227,6 +238,14 @@ public sealed class ObscuraHttpClient : IDisposable
             return _client;
         }
     }
+
+    /// <summary>
+    /// <see cref="DnsEndPoint.Host"/> carries an IPv6 literal unbracketed on some
+    /// paths and bracketed on others; <see cref="IPAddress.TryParse(string, out IPAddress)"/>
+    /// only accepts the bare form.
+    /// </summary>
+    private static string StripIpv6Brackets(string host) =>
+        host.Length > 2 && host[0] == '[' && host[^1] == ']' ? host[1..^1] : host;
 
     /// <summary>
     /// Additive trust: the platform roots still apply, and anything they reject gets
