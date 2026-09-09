@@ -143,6 +143,80 @@ internal static class PaintGradients
         Surface.FillPath(pixmap, path, paint, false, Surface.RasterTransform(rasterScale), clip);
     }
 
+    /// <summary>
+    /// Resolve every color-stop to a fraction of the gradient's own line (or ray, for a
+    /// radial gradient), then fill in runs of unpositioned stops by spacing them evenly
+    /// between their positioned neighbours.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="lineLength"/> is what makes an authored length meaningful:
+    /// <c>transparent 32rem</c> is 512px along the gradient line, not 100% of it, so the
+    /// two cannot be resolved at parse time. The percentage already in each
+    /// <see cref="GradientStop"/> is the fallback for layers built programmatically, which
+    /// carry no authored strings.
+    /// </remarks>
+    private static float?[] ResolveGradientStopPositions(
+        IReadOnlyList<GradientStop> stops,
+        IReadOnlyList<string?> stopPositions,
+        float lineLength,
+        float em,
+        float rem,
+        (float Width, float Height) viewport)
+    {
+        float?[] positions = new float?[stops.Count];
+        for (int index = 0; index < stops.Count; index++)
+        {
+            float? resolved = null;
+            if (index < stopPositions.Count && stopPositions[index] is { } expression)
+            {
+                float? pixels = ComputedStyle.ResolveContextualLength(
+                    expression,
+                    em,
+                    rem,
+                    viewport.Width / 100f,
+                    viewport.Height / 100f,
+                    lineLength);
+                if (pixels is { } value)
+                {
+                    resolved = value / lineLength;
+                }
+            }
+
+            positions[index] = resolved ?? stops[index].Position;
+        }
+
+        if (positions.Length == 0)
+        {
+            return positions;
+        }
+
+        positions[0] ??= 0f;
+        positions[^1] ??= 1f;
+
+        int previous = 0;
+        for (int index = 1; index < positions.Length; index++)
+        {
+            if (positions[index] is not { } current)
+            {
+                continue;
+            }
+
+            float previousPosition = positions[previous] ?? 0f;
+            float position = F32.Max(current, previousPosition);
+            positions[index] = position;
+            int gap = index - previous;
+            for (int offset = 1; offset < gap; offset++)
+            {
+                positions[previous + offset] =
+                    previousPosition + ((position - previousPosition) * offset / gap);
+            }
+
+            previous = index;
+        }
+
+        return positions;
+    }
+
     internal static void PaintLinearGradientLayer(
         Pixmap pixmap,
         SKPath path,
@@ -176,56 +250,14 @@ internal static class PaintGradients
 
         SKPoint baseStart = new(cx - (dx * half), cy - (dy * half));
         SKPoint baseEnd = new(cx + (dx * half), cy + (dy * half));
-        float?[] positions = new float?[stops.Count];
-        for (int index = 0; index < stops.Count; index++)
-        {
-            float? resolved = null;
-            if (index < stopPositions.Count && stopPositions[index] is { } expression)
-            {
-                float? pixels = ComputedStyle.ResolveContextualLength(
-                    expression,
-                    em,
-                    rem,
-                    viewport.Width / 100f,
-                    viewport.Height / 100f,
-                    lineLength);
-                if (pixels is { } value)
-                {
-                    resolved = value / lineLength;
-                }
-            }
-
-            positions[index] = resolved ?? stops[index].Position;
-        }
-
-        if (positions.Length > 0 && positions[0] is null)
-        {
-            positions[0] = 0f;
-        }
-
+        float?[] positions = ResolveGradientStopPositions(
+            stops,
+            stopPositions,
+            lineLength,
+            em,
+            rem,
+            viewport);
         int lastIndex = positions.Length - 1;
-        positions[lastIndex] ??= 1f;
-
-        int previous = 0;
-        for (int index = 1; index < positions.Length; index++)
-        {
-            if (positions[index] is not { } current)
-            {
-                continue;
-            }
-
-            float previousPosition = positions[previous] ?? 0f;
-            float position = F32.Max(current, previousPosition);
-            positions[index] = position;
-            int gap = index - previous;
-            for (int offset = 1; offset < gap; offset++)
-            {
-                positions[previous + offset] =
-                    previousPosition + ((position - previousPosition) * offset / gap);
-            }
-
-            previous = index;
-        }
 
         float first = positions[0] ?? 0f;
         float last = positions[lastIndex] ?? first;
@@ -295,6 +327,7 @@ internal static class PaintGradients
         in Rect rect,
         (float X, float Y) center,
         IReadOnlyList<GradientStop> stops,
+        IReadOnlyList<string?> stopPositions,
         RadialGradientGeometry? geometry,
         float em,
         float rootFontSize,
@@ -316,13 +349,24 @@ internal static class PaintGradients
             return;
         }
 
-        List<(float Position, RgbaColor Color)> normalized = NormalizedStops(stops);
-        SKColor[] colors = new SKColor[normalized.Count];
-        float[] offsets = new float[normalized.Count];
-        for (int index = 0; index < normalized.Count; index++)
+        // Stop positions run along the gradient ray, which is the horizontal radius in the
+        // circle-normalized space the shader below works in.
+        float?[] resolved = ResolveGradientStopPositions(
+            stops,
+            stopPositions,
+            radii.X,
+            em,
+            rootFontSize,
+            viewport);
+        SKColor[] colors = new SKColor[stops.Count];
+        float[] offsets = new float[stops.Count];
+        float monotonic = 0f;
+        for (int index = 0; index < stops.Count; index++)
         {
-            colors[index] = PaintColor.ToSk(normalized[index].Color);
-            offsets[index] = normalized[index].Position;
+            float position = F32.Max(Math.Clamp(resolved[index] ?? 0f, 0f, 1f), monotonic);
+            monotonic = position;
+            colors[index] = PaintColor.ToSk(GradientStopColor(stops, index));
+            offsets[index] = position;
         }
 
         // Skia's radial shader is circular, exactly as tiny-skia's is. Keep the established CSS
@@ -645,6 +689,7 @@ internal static class PaintGradients
                         samplingRect,
                         radial.Center,
                         radial.Stops,
+                        radial.StopPositions,
                         index < radialGeometries.Count ? radialGeometries[index] : null,
                         em,
                         rootFontSize,

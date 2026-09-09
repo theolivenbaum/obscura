@@ -1,2 +1,7 @@
 target/
 .DS_Store
+
+# imgdiff is a standalone diagnostic outside the solution, so its build output
+# is not covered by the dotnet/ ignores.
+tools/imgdiff/bin/
+tools/imgdiff/obj/

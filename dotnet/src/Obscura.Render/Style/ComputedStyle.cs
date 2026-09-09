@@ -1339,12 +1339,16 @@ public static partial class ComputedStyle
                 {
                     style.BackgroundColor = null;
                     SetBackgroundGradients(style, value);
-                    if (style.BackgroundGradient is null
-                        && style.BackgroundRadialGradient is null
-                        && style.BackgroundConicGradient is null)
-                    {
-                        style.BackgroundColor = CssColor.ParseForScheme(value, style.ColorSchemeDark);
-                    }
+                    // The shorthand's <color> belongs to its final layer, and it coexists
+                    // with the image layers above it: `background: linear-gradient(...),
+                    // #00f` paints the gradient over blue. Reading the color only when no
+                    // gradient parsed dropped that bottom layer, so a translucent gradient
+                    // composited over whatever was behind the element instead.
+                    List<string> backgroundLayers = SplitTopLevel(value, ',');
+                    string finalLayer =
+                        backgroundLayers.Count > 0 ? backgroundLayers[^1].Trim() : value;
+                    style.BackgroundColor =
+                        CssColor.ParseForScheme(finalLayer, style.ColorSchemeDark);
 
                     style.BackgroundImage = ParseUrl(value);
                     style.BackgroundSize = null;

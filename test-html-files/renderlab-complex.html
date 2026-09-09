@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RenderLab — Complex Self-Contained Landing Page</title>
+  <style>
+    /* Self-contained Tailwind-style utility subset.
+       Class naming and composition intentionally follow Tailwind conventions.
+       No external CSS/JS/font/image dependencies are used. */
+    :root{
+      --slate-950:#020617;--slate-900:#0f172a;--slate-800:#1e293b;--slate-700:#334155;
+      --slate-600:#475569;--slate-500:#64748b;--slate-400:#94a3b8;--slate-300:#cbd5e1;
+      --slate-200:#e2e8f0;--slate-100:#f1f5f9;--slate-50:#f8fafc;
+      --indigo-600:#4f46e5;--indigo-500:#6366f1;--violet-500:#8b5cf6;--cyan-400:#22d3ee;
+      --emerald-500:#10b981;--amber-400:#fbbf24;--rose-500:#f43f5e;
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth;background:var(--slate-950)}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e5eefc;background:
+      radial-gradient(circle at 12% -10%,rgba(99,102,241,.24),transparent 32rem),
+      radial-gradient(circle at 88% 0%,rgba(34,211,238,.12),transparent 26rem),
+      linear-gradient(180deg,#07111f 0%,#020617 60%,#060b13 100%); min-height:100vh}
+    a{color:inherit;text-decoration:none}
+    button,input{font:inherit}
+    .mx-auto{margin-left:auto;margin-right:auto}.max-w-7xl{max-width:80rem}.max-w-3xl{max-width:48rem}
+    .px-4{padding-left:1rem;padding-right:1rem}.px-6{padding-left:1.5rem;padding-right:1.5rem}
+    .py-2{padding-top:.5rem;padding-bottom:.5rem}.py-3{padding-top:.75rem;padding-bottom:.75rem}.py-4{padding-top:1rem;padding-bottom:1rem}
+    .py-6{padding-top:1.5rem;padding-bottom:1.5rem}.py-12{padding-top:3rem;padding-bottom:3rem}.py-20{padding-top:5rem;padding-bottom:5rem}
+    .p-3{padding:.75rem}.p-4{padding:1rem}.p-5{padding:1.25rem}.p-6{padding:1.5rem}.p-8{padding:2rem}
+    .mt-2{margin-top:.5rem}.mt-4{margin-top:1rem}.mt-6{margin-top:1.5rem}.mt-8{margin-top:2rem}.mt-10{margin-top:2.5rem}
+    .mb-2{margin-bottom:.5rem}.mb-4{margin-bottom:1rem}.mb-8{margin-bottom:2rem}
+    .flex{display:flex}.inline-flex{display:inline-flex}.grid{display:grid}.hidden{display:none}.block{display:block}
+    .items-center{align-items:center}.items-start{align-items:flex-start}.justify-between{justify-content:space-between}.justify-center{justify-content:center}
+    .gap-2{gap:.5rem}.gap-3{gap:.75rem}.gap-4{gap:1rem}.gap-6{gap:1.5rem}.gap-8{gap:2rem}
+    .grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .w-full{width:100%}.h-full{height:100%}.min-h-screen{min-height:100vh}
+    .rounded-lg{border-radius:.5rem}.rounded-xl{border-radius:.75rem}.rounded-2xl{border-radius:1rem}.rounded-3xl{border-radius:1.5rem}.rounded-full{border-radius:9999px}
+    .border{border:1px solid rgba(148,163,184,.16)}.border-b{border-bottom:1px solid rgba(148,163,184,.13)}
+    .bg-white\/5{background:rgba(255,255,255,.05)}.bg-white\/10{background:rgba(255,255,255,.10)}
+    .bg-slate-900\/70{background:rgba(15,23,42,.70)}.bg-slate-950\/80{background:rgba(2,6,23,.8)}
+    .text-white{color:#fff}.text-slate-200{color:var(--slate-200)}.text-slate-300{color:var(--slate-300)}
+    .text-slate-400{color:var(--slate-400)}.text-slate-500{color:var(--slate-500)}
+    .text-sm{font-size:.875rem}.text-xs{font-size:.75rem}.text-lg{font-size:1.125rem}.text-xl{font-size:1.25rem}.text-2xl{font-size:1.5rem}
+    .text-4xl{font-size:2.25rem}.text-6xl{font-size:3.75rem}.font-medium{font-weight:500}.font-semibold{font-weight:600}.font-bold{font-weight:700}.font-black{font-weight:900}
+    .leading-tight{line-height:1.08}.leading-relaxed{line-height:1.65}.tracking-tight{letter-spacing:-.025em}.uppercase{text-transform:uppercase}.tracking-widest{letter-spacing:.15em}
+    .shadow-2xl{box-shadow:0 25px 80px rgba(0,0,0,.35)}.overflow-hidden{overflow:hidden}.relative{position:relative}.absolute{position:absolute}.sticky{position:sticky}.top-0{top:0}.z-50{z-index:50}
+    .backdrop-blur{backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+    .opacity-70{opacity:.7}.opacity-80{opacity:.8}
+    .cursor-pointer{cursor:pointer}.select-none{user-select:none}.transition{transition:all .25s ease}
+    .gradient-text{background:linear-gradient(90deg,#fff,#b8c7ff 35%,#5eead4 75%);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .glass{background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.035));border:1px solid rgba(255,255,255,.09);box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 24px 70px rgba(0,0,0,.24)}
+    .btn-primary{background:linear-gradient(135deg,var(--indigo-500),var(--violet-500));box-shadow:0 10px 35px rgba(99,102,241,.28)}
+    .btn-primary:hover{transform:translateY(-1px);filter:brightness(1.08)}
+    .btn-secondary:hover,.nav-link:hover{background:rgba(255,255,255,.07)}
+    .metric-good{color:#6ee7b7}.metric-warn{color:#fcd34d}.metric-bad{color:#fda4af}
+    .hero-grid{display:grid;grid-template-columns:1.05fr .95fr;align-items:center;gap:3rem}
+    .dashboard-grid{display:grid;grid-template-columns:1.25fr .75fr;gap:1rem}
+    .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1rem}
+    .feature-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}
+    .logo-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.75rem}
+    .pricing-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}
+    .orb{position:absolute;border-radius:9999px;filter:blur(5px);opacity:.75;pointer-events:none}
+    .noise{position:fixed;inset:0;pointer-events:none;opacity:.05;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 140 140' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");mix-blend-mode:soft-light}
+    .spark{height:38px;width:100%}
+    .table{width:100%;border-collapse:collapse}.table th,.table td{padding:.8rem .6rem;text-align:left;border-bottom:1px solid rgba(148,163,184,.1)}
+    .table th{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:#7f90a8}
+    .badge{display:inline-flex;align-items:center;gap:.35rem;padding:.22rem .5rem;border-radius:999px;font-size:.72rem;border:1px solid rgba(255,255,255,.08)}
+    .bar-track{height:.55rem;border-radius:99px;background:rgba(148,163,184,.12);overflow:hidden}.bar-fill{height:100%;border-radius:99px;transform-origin:left;transform:scaleX(0)}
+    .kpi-enter,.reveal{opacity:0;transform:translateY(14px)}
+    .animate-in{animation:fadeUp .75s cubic-bezier(.2,.7,.2,1) forwards}
+    .scale-in{animation:scaleIn .8s cubic-bezier(.18,.85,.3,1) forwards}
+    .bar-animate{animation:barGrow 1.1s cubic-bezier(.2,.8,.2,1) forwards}
+    @keyframes fadeUp{to{opacity:1;transform:translateY(0)}}
+    @keyframes scaleIn{from{opacity:0;transform:scale(.975)}to{opacity:1;transform:scale(1)}}
+    @keyframes barGrow{to{transform:scaleX(1)}}
+    .chart-tooltip{position:absolute;pointer-events:none;padding:.5rem .65rem;border-radius:.6rem;background:#0b1220;border:1px solid rgba(255,255,255,.12);font-size:.72rem;color:#e2e8f0;box-shadow:0 10px 30px rgba(0,0,0,.25);opacity:0;transform:translate(-50%,-110%);transition:opacity .12s}
+    .donut-label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column}
+    .testimonial-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}
+    .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);padding:.1rem .38rem;border-radius:.35rem}
+    details summary{cursor:pointer;list-style:none} details summary::-webkit-details-marker{display:none}
+    @media(max-width:1024px){
+      .hero-grid,.dashboard-grid{grid-template-columns:1fr}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .feature-grid,.pricing-grid,.testimonial-track{grid-template-columns:1fr 1fr}.logo-grid{grid-template-columns:repeat(3,1fr)}
+      .text-6xl{font-size:3rem}
+    }
+    @media(max-width:700px){
+      .desktop-nav{display:none}.hero-grid,.feature-grid,.pricing-grid,.testimonial-track{grid-template-columns:1fr}
+      .metric-grid,.grid-cols-2,.grid-cols-3{grid-template-columns:1fr}.logo-grid{grid-template-columns:repeat(2,1fr)}
+      .text-6xl{font-size:2.55rem}.px-6{padding-left:1rem;padding-right:1rem}.py-20{padding-top:3.5rem;padding-bottom:3.5rem}
+    }
+    @media(prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;animation-iteration-count:1!important;transition:none!important}}
+  </style>
+</head>
+<body>
+  <div class="noise"></div>
+  <div class="orb" style="width:260px;height:260px;right:8%;top:120px;background:rgba(99,102,241,.18)"></div>
+  <div class="orb" style="width:180px;height:180px;left:4%;top:540px;background:rgba(34,211,238,.10)"></div>
+
+  <header class="sticky top-0 z-50 backdrop-blur border-b" style="background:rgba(2,6,23,.68)">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-3 font-black">
+        <span class="rounded-xl inline-flex items-center justify-center" style="width:36px;height:36px;background:linear-gradient(135deg,#6366f1,#22d3ee)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M5 16.2 9.5 7l3.1 5.6L15.3 8 19 16.2H5Z" fill="white"/><path d="M7 18h10" stroke="white" stroke-width="1.7" stroke-linecap="round"/></svg>
+        </span>
+        RenderLab
+      </a>
+      <nav class="desktop-nav flex items-center gap-2 text-sm text-slate-300">
+        <a class="nav-link px-4 py-2 rounded-lg transition" href="#features">Features</a>
+        <a class="nav-link px-4 py-2 rounded-lg transition" href="#analytics">Analytics</a>
+        <a class="nav-link px-4 py-2 rounded-lg transition" href="#pricing">Pricing</a>
+        <a class="nav-link px-4 py-2 rounded-lg transition" href="#faq">FAQ</a>
+      </nav>
+      <div class="flex items-center gap-2">
+        <button id="themePulse" class="btn-secondary rounded-lg border bg-white/5 px-4 py-2 text-sm text-slate-300 cursor-pointer">Pulse UI</button>
+        <a class="btn-primary rounded-lg px-4 py-2 text-sm font-semibold text-white transition" href="#pricing">Get started</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="max-w-7xl mx-auto px-6 py-20">
+      <div class="hero-grid">
+        <div>
+          <div class="inline-flex items-center gap-2 rounded-full border bg-white/5 px-3 py-2 text-xs text-slate-300 reveal">
+            <span style="width:7px;height:7px;background:#34d399;border-radius:999px;box-shadow:0 0 15px #34d399"></span>
+            Rendering benchmark suite v4.2
+          </div>
+          <h1 class="text-6xl font-black leading-tight tracking-tight mt-6 gradient-text reveal">
+            One page. Many rendering edge cases.
+          </h1>
+          <p class="text-lg text-slate-400 leading-relaxed max-w-3xl mt-6 reveal">
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer posuere erat a ante venenatis dapibus posuere velit aliquet. This page intentionally combines dense layout, inline graphics, canvas, SVG, dynamic DOM updates and deterministic animations.
+          </p>
+          <div class="flex gap-3 mt-8 reveal" style="flex-wrap:wrap">
+            <button id="launchDemo" class="btn-primary border-0 rounded-xl px-6 py-3 text-white font-semibold cursor-pointer transition">Launch simulated demo</button>
+            <button id="openModal" class="btn-secondary rounded-xl border bg-white/5 px-6 py-3 text-slate-200 cursor-pointer transition">Inspect modal</button>
+          </div>
+          <div class="mt-10 grid grid-cols-3 gap-4 reveal">
+            <div><div class="text-2xl font-bold text-white">48ms</div><div class="text-xs text-slate-500 mt-2 uppercase tracking-widest">Paint</div></div>
+            <div><div class="text-2xl font-bold text-white">100%</div><div class="text-xs text-slate-500 mt-2 uppercase tracking-widest">Inline</div></div>
+            <div><div class="text-2xl font-bold text-white">0 deps</div><div class="text-xs text-slate-500 mt-2 uppercase tracking-widest">External</div></div>
+          </div>
+        </div>
+
+        <div class="glass rounded-3xl p-4 shadow-2xl reveal relative overflow-hidden">
+          <div class="absolute" style="width:220px;height:220px;border-radius:50%;right:-80px;top:-120px;background:radial-gradient(circle,rgba(99,102,241,.36),transparent 65%)"></div>
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <div class="text-sm font-semibold">Live observability</div>
+              <div class="text-xs text-slate-500 mt-2">Generated by JavaScript after DOMContentLoaded</div>
+            </div>
+            <span class="badge" style="color:#6ee7b7;background:rgba(16,185,129,.08)">● Healthy</span>
+          </div>
+          <div id="heroMetrics" class="grid grid-cols-2 gap-3"></div>
+          <div class="glass rounded-2xl p-4 mt-4 relative" style="height:230px">
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium">Requests / minute</span>
+              <span class="text-xs text-slate-500">Canvas 2D</span>
+            </div>
+            <canvas id="heroChart" class="mt-4" style="width:100%;height:160px;display:block"></canvas>
+            <div id="chartTooltip" class="chart-tooltip"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="max-w-7xl mx-auto px-6 py-6">
+      <div class="logo-grid">
+        <div class="glass rounded-xl p-4 flex items-center justify-center text-slate-500 font-bold">NORTHSTAR</div>
+        <div class="glass rounded-xl p-4 flex items-center justify-center text-slate-500 font-bold">VECTOR</div>
+        <div class="glass rounded-xl p-4 flex items-center justify-center text-slate-500 font-bold">QUANTA</div>
+        <div class="glass rounded-xl p-4 flex items-center justify-center text-slate-500 font-bold">AURORA</div>
+        <div class="glass rounded-xl p-4 flex items-center justify-center text-slate-500 font-bold">NIMBUS</div>
+      </div>
+    </section>
+
+    <section id="analytics" class="max-w-7xl mx-auto px-6 py-20">
+      <div class="flex items-end justify-between gap-6 mb-8" style="flex-wrap:wrap">
+        <div>
+          <div class="text-xs uppercase tracking-widest" style="color:#818cf8">Analytics sandbox</div>
+          <h2 class="text-4xl font-bold tracking-tight mt-2">Dense dashboard composition</h2>
+        </div>
+        <div class="flex gap-2">
+          <button class="range-btn rounded-lg border bg-white/5 px-4 py-2 text-sm text-slate-300 cursor-pointer" data-range="7">7D</button>
+          <button class="range-btn rounded-lg border bg-white/10 px-4 py-2 text-sm text-white cursor-pointer" data-range="30">30D</button>
+          <button class="range-btn rounded-lg border bg-white/5 px-4 py-2 text-sm text-slate-300 cursor-pointer" data-range="90">90D</button>
+        </div>
+      </div>
+
+      <div id="metricGrid" class="metric-grid"></div>
+
+      <div class="dashboard-grid mt-4">
+        <div class="glass rounded-2xl p-5">
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="font-semibold">Conversion funnel</div>
+              <div class="text-xs text-slate-500 mt-2">JS-rendered segmented SVG bars</div>
+            </div>
+            <span class="badge text-slate-300">Updated now</span>
+          </div>
+          <div id="funnel" class="mt-6"></div>
+          <div class="mt-8 overflow-hidden rounded-xl border">
+            <table class="table text-sm" id="eventTable">
+              <thead><tr><th>Event</th><th>Volume</th><th>Rate</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="glass rounded-2xl p-5">
+          <div class="flex items-center justify-between">
+            <div><div class="font-semibold">Traffic mix</div><div class="text-xs text-slate-500 mt-2">SVG donut with stroke-dasharray</div></div>
+            <span class="text-xs text-slate-500">30 days</span>
+          </div>
+          <div class="relative mx-auto mt-6" style="width:190px;height:190px">
+            <svg viewBox="0 0 42 42" width="190" height="190" style="transform:rotate(-90deg)">
+              <circle cx="21" cy="21" r="15.9155" fill="none" stroke="rgba(148,163,184,.10)" stroke-width="5"/>
+              <circle id="donutA" cx="21" cy="21" r="15.9155" fill="none" stroke="#6366f1" stroke-width="5" stroke-dasharray="0 100" stroke-dashoffset="25"/>
+              <circle id="donutB" cx="21" cy="21" r="15.9155" fill="none" stroke="#22d3ee" stroke-width="5" stroke-dasharray="0 100" stroke-dashoffset="-17"/>
+              <circle id="donutC" cx="21" cy="21" r="15.9155" fill="none" stroke="#10b981" stroke-width="5" stroke-dasharray="0 100" stroke-dashoffset="-44"/>
+            </svg>
+            <div class="donut-label"><div class="text-2xl font-bold">84.2k</div><div class="text-xs text-slate-500">sessions</div></div>
+          </div>
+          <div id="legend" class="mt-6"></div>
+
+          <div class="mt-8 rounded-xl p-4 border" style="background:linear-gradient(135deg,rgba(99,102,241,.13),rgba(34,211,238,.05))">
+            <div class="text-xs uppercase tracking-widest text-slate-500">Embedded image</div>
+            <img alt="Self-contained data URI SVG illustration" class="w-full rounded-lg mt-4" style="height:110px;object-fit:cover"
+              src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 220'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='600' height='220' rx='24' fill='%230b1220'/%3E%3Cpath d='M0 185 C90 150 110 205 190 130 S340 160 410 85 S515 85 600 35 V220 H0Z' fill='url(%23g)' opacity='.38'/%3E%3Cpath d='M0 185 C90 150 110 205 190 130 S340 160 410 85 S515 85 600 35' fill='none' stroke='%23fff' stroke-opacity='.75' stroke-width='4'/%3E%3Cg fill='%23fff'%3E%3Ccircle cx='190' cy='130' r='6'/%3E%3Ccircle cx='410' cy='85' r='6'/%3E%3C/g%3E%3C/svg%3E"/>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="max-w-7xl mx-auto px-6 py-20">
+      <div class="max-w-3xl">
+        <div class="text-xs uppercase tracking-widest" style="color:#67e8f9">Rendering matrix</div>
+        <h2 class="text-4xl font-bold tracking-tight mt-2">Multiple primitives, one deterministic document</h2>
+        <p class="text-slate-400 leading-relaxed mt-4">Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum id ligula porta felis euismod semper.</p>
+      </div>
+      <div id="featureGrid" class="feature-grid mt-8"></div>
+    </section>
+
+    <section class="max-w-7xl mx-auto px-6 py-20">
+      <div class="glass rounded-3xl p-8 overflow-hidden relative">
+        <div class="absolute" style="inset:auto -120px -160px auto;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,rgba(139,92,246,.2),transparent 62%)"></div>
+        <div class="dashboard-grid items-center">
+          <div>
+            <div class="text-xs uppercase tracking-widest" style="color:#c4b5fd">CSS geometry</div>
+            <h3 class="text-4xl font-bold mt-2">Clip paths, gradients, masks and layered borders</h3>
+            <p class="text-slate-400 leading-relaxed mt-4">A deliberately layered composition to expose subtle antialiasing and stacking-context differences between engines.</p>
+            <div class="mt-6 flex gap-3" style="flex-wrap:wrap">
+              <span class="badge text-slate-300">clip-path</span><span class="badge text-slate-300">mix-blend-mode</span><span class="badge text-slate-300">backdrop-filter</span><span class="badge text-slate-300">conic-gradient</span>
+            </div>
+          </div>
+          <div class="relative" style="height:330px">
+            <div class="absolute rounded-3xl" style="inset:30px 40px;background:conic-gradient(from 220deg,#6366f1,#22d3ee,#10b981,#8b5cf6,#6366f1);filter:blur(.2px);clip-path:polygon(10% 0,92% 8%,100% 72%,75% 100%,4% 90%,0 20%)"></div>
+            <div class="absolute glass rounded-3xl p-5" style="inset:66px 74px;transform:rotate(-5deg)">
+              <div class="text-xs text-slate-500">Composite card</div>
+              <div class="text-2xl font-bold mt-2">98.74%</div>
+              <div class="bar-track mt-6"><div class="bar-fill" data-fill style="width:92%;background:linear-gradient(90deg,#6366f1,#22d3ee)"></div></div>
+              <div class="grid grid-cols-2 gap-3 mt-6">
+                <div class="rounded-xl p-3 bg-white/5 border"><div class="text-xs text-slate-500">CLS</div><div class="font-bold mt-2">0.001</div></div>
+                <div class="rounded-xl p-3 bg-white/5 border"><div class="text-xs text-slate-500">LCP</div><div class="font-bold mt-2">1.2s</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="max-w-7xl mx-auto px-6 py-20">
+      <div class="testimonial-track">
+        <blockquote class="glass rounded-2xl p-6"><p class="leading-relaxed text-slate-300">“Lorem ipsum dolor sit amet, consectetur adipiscing elit. Donec sed odio dui. Integer posuere erat a ante venenatis.”</p><footer class="mt-6 text-sm text-slate-500">A. Renderer · Chromium lane</footer></blockquote>
+        <blockquote class="glass rounded-2xl p-6"><p class="leading-relaxed text-slate-300">“Maecenas faucibus mollis interdum. Nullam quis risus eget urna mollis ornare vel eu leo.”</p><footer class="mt-6 text-sm text-slate-500">B. Raster · WebKit lane</footer></blockquote>
+        <blockquote class="glass rounded-2xl p-6"><p class="leading-relaxed text-slate-300">“Cras mattis consectetur purus sit amet fermentum. Etiam porta sem malesuada magna mollis euismod.”</p><footer class="mt-6 text-sm text-slate-500">C. Layout · Gecko lane</footer></blockquote>
+      </div>
+    </section>
+
+    <section id="pricing" class="max-w-7xl mx-auto px-6 py-20">
+      <div class="text-center">
+        <div class="text-xs uppercase tracking-widest" style="color:#fbbf24">Pricing fixture</div>
+        <h2 class="text-4xl font-bold mt-2">Responsive pricing cards</h2>
+      </div>
+      <div class="pricing-grid mt-8">
+        <div class="glass rounded-2xl p-6">
+          <div class="text-sm text-slate-400">Starter</div><div class="text-4xl font-bold mt-4">$0</div>
+          <p class="text-slate-500 mt-4">Lorem ipsum dolor sit amet.</p><div class="mt-6" id="starterList"></div>
+          <button class="w-full mt-8 rounded-xl border bg-white/5 py-3 text-slate-200 cursor-pointer">Choose Starter</button>
+        </div>
+        <div class="glass rounded-2xl p-6 relative" style="border-color:rgba(99,102,241,.45);box-shadow:0 20px 80px rgba(99,102,241,.12)">
+          <span class="badge absolute" style="right:18px;top:18px;color:#c4b5fd;background:rgba(99,102,241,.12)">Popular</span>
+          <div class="text-sm text-slate-400">Pro</div><div class="text-4xl font-bold mt-4">$29</div>
+          <p class="text-slate-500 mt-4">Lorem ipsum dolor sit amet.</p><div class="mt-6" id="proList"></div>
+          <button class="w-full mt-8 btn-primary border-0 rounded-xl py-3 text-white font-semibold cursor-pointer">Choose Pro</button>
+        </div>
+        <div class="glass rounded-2xl p-6">
+          <div class="text-sm text-slate-400">Enterprise</div><div class="text-4xl font-bold mt-4">Custom</div>
+          <p class="text-slate-500 mt-4">Lorem ipsum dolor sit amet.</p><div class="mt-6" id="entList"></div>
+          <button class="w-full mt-8 rounded-xl border bg-white/5 py-3 text-slate-200 cursor-pointer">Contact Sales</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq" class="max-w-3xl mx-auto px-6 py-20">
+      <div class="text-center"><h2 class="text-4xl font-bold">FAQ / native details elements</h2></div>
+      <div class="mt-8 grid gap-3">
+        <details class="glass rounded-xl p-5"><summary class="font-semibold flex justify-between">Is everything embedded?<span>＋</span></summary><p class="text-slate-400 leading-relaxed mt-4">Yes. CSS, JavaScript, SVG, canvas rendering, and image assets are embedded in this file.</p></details>
+        <details class="glass rounded-xl p-5"><summary class="font-semibold flex justify-between">Do animations loop?<span>＋</span></summary><p class="text-slate-400 leading-relaxed mt-4">No. Animations run once and persist at their final visual state.</p></details>
+        <details class="glass rounded-xl p-5"><summary class="font-semibold flex justify-between">What is dynamically rendered?<span>＋</span></summary><p class="text-slate-400 leading-relaxed mt-4">Metrics, feature cards, pricing bullets, event rows, funnel bars, the canvas chart, donut segments and modal content.</p></details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="border-b" style="border-top:1px solid rgba(148,163,184,.12)">
+    <div class="max-w-7xl mx-auto px-6 py-12 flex justify-between gap-6 text-sm text-slate-500" style="flex-wrap:wrap">
+      <div>© 2026 RenderLab. Self-contained HTML benchmark.</div>
+      <div>Keyboard test: press <span class="kbd">D</span> to run demo, <span class="kbd">M</span> for modal.</div>
+    </div>
+  </footer>
+
+  <dialog id="demoModal" style="width:min(720px,calc(100vw - 2rem));border:1px solid rgba(255,255,255,.12);border-radius:1.25rem;background:#08111f;color:#e2e8f0;padding:0;box-shadow:0 35px 100px rgba(0,0,0,.6)">
+    <div class="p-6">
+      <div class="flex items-center justify-between">
+        <div><div class="text-xs uppercase tracking-widest text-slate-500">Native dialog</div><h3 class="text-2xl font-bold mt-2">Rendering inspection modal</h3></div>
+        <button id="closeModal" class="rounded-lg border bg-white/5 px-3 py-2 text-slate-300 cursor-pointer">Close</button>
+      </div>
+      <div id="modalBody" class="mt-6"></div>
+    </div>
+  </dialog>
+
+<script>
+(() => {
+  const $ = (s, el=document) => el.querySelector(s);
+  const $$ = (s, el=document) => [...el.querySelectorAll(s)];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  const heroMetrics = [
+    ['DOM nodes','1,284','+8.4%'],['Layers','37','stable'],['SVG paths','86','+12'],['JS ops','214','done']
+  ];
+  $('#heroMetrics').innerHTML = heroMetrics.map(([k,v,d],i)=>`
+    <div class="kpi-enter rounded-xl p-4 border bg-white/5">
+      <div class="text-xs text-slate-500">${k}</div>
+      <div class="flex items-end justify-between mt-2">
+        <div class="text-xl font-bold">${v}</div><div class="text-xs ${d.includes('+')?'metric-good':'text-slate-500'}">${d}</div>
+      </div>
+    </div>`).join('');
+
+  const metrics = [
+    {label:'Revenue',value:'$184.2k',delta:'+12.8%',tone:'metric-good',pts:[14,18,19,26,24,31,36,42,39,46]},
+    {label:'Sessions',value:'84,219',delta:'+7.1%',tone:'metric-good',pts:[12,16,14,21,26,28,33,31,38,44]},
+    {label:'Bounce',value:'23.4%',delta:'-2.3%',tone:'metric-good',pts:[39,36,38,33,31,30,28,29,25,23]},
+    {label:'Errors',value:'0.07%',delta:'+0.01%',tone:'metric-warn',pts:[8,10,9,11,10,12,10,13,14,13]}
+  ];
+  $('#metricGrid').innerHTML = metrics.map((m,i)=>`
+    <div class="glass rounded-2xl p-5 kpi-enter">
+      <div class="flex justify-between"><div class="text-sm text-slate-400">${m.label}</div><div class="text-xs ${m.tone}">${m.delta}</div></div>
+      <div class="text-2xl font-bold mt-2">${m.value}</div>
+      <svg class="spark mt-4" viewBox="0 0 120 38" preserveAspectRatio="none">
+        <defs><linearGradient id="sg${i}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#818cf8" stop-opacity=".38"/><stop offset="1" stop-color="#818cf8" stop-opacity="0"/></linearGradient></defs>
+        <path d="${sparkArea(m.pts)}" fill="url(#sg${i})"/><path d="${sparkLine(m.pts)}" fill="none" stroke="#818cf8" stroke-width="2" vector-effect="non-scaling-stroke"/>
+      </svg>
+    </div>`).join('');
+
+  function sparkLine(pts){
+    const min=Math.min(...pts),max=Math.max(...pts),range=max-min||1;
+    return pts.map((p,i)=>`${i?'L':'M'} ${(i/(pts.length-1))*120} ${34-((p-min)/range)*28}`).join(' ');
+  }
+  function sparkArea(pts){ return sparkLine(pts)+' L 120 38 L 0 38 Z'; }
+
+  const funnelData = [
+    ['Page view',100,128430,'100%'],['Signup click',72,92310,'71.9%'],['Account create',49,62920,'49.0%'],['Activated',31,39781,'31.0%'],['Paid',18,23117,'18.0%']
+  ];
+  $('#funnel').innerHTML = funnelData.map(([name,width,count,rate],i)=>`
+    <div class="mb-4">
+      <div class="flex justify-between text-sm mb-2"><span>${name}</span><span class="text-slate-500">${count.toLocaleString()} · ${rate}</span></div>
+      <div class="bar-track"><div class="bar-fill" data-fill style="width:${width}%;background:linear-gradient(90deg,hsl(${245-i*16} 84% 68%),hsl(${185-i*7} 82% 58%))"></div></div>
+    </div>`).join('');
+
+  const rows = [
+    ['hero_view','128,430','100%','Healthy'],['cta_click','92,310','71.9%','Healthy'],['signup_submit','62,920','49.0%','Watch'],['checkout_success','23,117','18.0%','Healthy']
+  ];
+  $('#eventTable tbody').innerHTML = rows.map(r=>`<tr><td><span class="kbd">${r[0]}</span></td><td>${r[1]}</td><td>${r[2]}</td><td><span class="badge ${r[3]=='Watch'?'metric-warn':'metric-good'}">${r[3]}</span></td></tr>`).join('');
+
+  const legend=[['Organic',42,'#6366f1'],['Paid',27,'#22d3ee'],['Referral',18,'#10b981'],['Other',13,'#64748b']];
+  $('#legend').innerHTML=legend.map(([n,v,c])=>`<div class="flex justify-between items-center py-2 text-sm"><span class="flex items-center gap-2"><span style="width:9px;height:9px;border-radius:999px;background:${c}"></span>${n}</span><span class="text-slate-400">${v}%</span></div>`).join('');
+
+  const features = [
+    ['Canvas charts','Device-pixel-ratio aware canvas drawing with hover hit-testing and animated stroke reveal.','◫'],
+    ['Inline SVG','Gradients, paths, stroke dash arrays, scalable geometry and text-adjacent vector graphics.','◇'],
+    ['CSS effects','Backdrop blur, clipping, conic/radial gradients, filters, transforms and layered shadows.','✦'],
+    ['Dynamic DOM','Cards, rows, bullets and metrics are generated by JavaScript after page load.','⌘'],
+    ['Native elements','Dialog, details/summary, buttons, images, tables and semantic landmarks are included.','▤'],
+    ['Responsive grid','Multiple breakpoint-driven layout shifts test wrapping, stacking and intrinsic sizing.','▦']
+  ];
+  $('#featureGrid').innerHTML = features.map(([t,d,ic],i)=>`
+    <article class="glass rounded-2xl p-6 reveal">
+      <div class="rounded-xl flex items-center justify-center text-xl" style="width:42px;height:42px;background:linear-gradient(135deg,rgba(99,102,241,.2),rgba(34,211,238,.12));border:1px solid rgba(255,255,255,.08)">${ic}</div>
+      <h3 class="text-xl font-semibold mt-6">${t}</h3><p class="text-slate-400 leading-relaxed mt-4">${d}</p>
+    </article>`).join('');
+
+  const lists = {
+    starterList:['Single renderer','Basic snapshots','Community fixtures'],
+    proList:['Cross-engine matrix','Visual diff metadata','DOM + paint diagnostics','Artifact export'],
+    entList:['Custom harnesses','Dedicated runners','Compliance workflows','Priority fixtures']
+  };
+  for (const [id,items] of Object.entries(lists)) {
+    $('#'+id).innerHTML = items.map(x=>`<div class="flex items-center gap-2 py-2 text-sm text-slate-300"><span class="metric-good">✓</span>${x}</div>`).join('');
+  }
+
+  function resizeCanvas(canvas){
+    const rect = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.round(rect.width*dpr); canvas.height = Math.round(rect.height*dpr);
+    const ctx=canvas.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+    return {ctx,w:rect.width,h:rect.height};
+  }
+
+  const points=[18,24,20,31,28,38,36,43,39,49,52,48,61,58,67,64,72,78,74,82,80,87,89,93];
+  let chartState={coords:[],progress:1};
+  function drawHeroChart(progress=1){
+    const canvas=$('#heroChart'), {ctx,w,h}=resizeCanvas(canvas);
+    ctx.clearRect(0,0,w,h);
+    const pad={l:8,r:8,t:8,b:18}, iw=w-pad.l-pad.r, ih=h-pad.t-pad.b;
+    ctx.strokeStyle='rgba(148,163,184,.12)'; ctx.lineWidth=1;
+    for(let i=0;i<4;i++){let y=pad.t+i*(ih/3);ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();}
+    const min=Math.min(...points),max=Math.max(...points),coords=points.map((p,i)=>[
+      pad.l+(i/(points.length-1))*iw,
+      pad.t+ih-((p-min)/(max-min))*ih
+    ]);
+    chartState.coords=coords;
+    const grad=ctx.createLinearGradient(0,pad.t,0,pad.t+ih);grad.addColorStop(0,'rgba(99,102,241,.34)');grad.addColorStop(1,'rgba(99,102,241,0)');
+    const upto=(points.length-1)*progress, whole=Math.floor(upto), frac=upto-whole;
+    let partial=coords.slice(0,whole+1);
+    if(whole<coords.length-1){ const a=coords[whole],b=coords[whole+1];partial.push([a[0]+(b[0]-a[0])*frac,a[1]+(b[1]-a[1])*frac]); }
+    if(partial.length>1){
+      ctx.beginPath();ctx.moveTo(partial[0][0],partial[0][1]);partial.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));
+      const end=partial[partial.length-1];ctx.lineTo(end[0],pad.t+ih);ctx.lineTo(partial[0][0],pad.t+ih);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+      ctx.beginPath();ctx.moveTo(partial[0][0],partial[0][1]);partial.slice(1).forEach(p=>ctx.lineTo(p[0],p[1]));ctx.strokeStyle='#818cf8';ctx.lineWidth=2;ctx.stroke();
+    }
+  }
+
+  function animateChart(){
+    const start=performance.now(),dur=900;
+    function frame(now){const p=Math.min(1,(now-start)/dur);drawHeroChart(1-Math.pow(1-p,3));if(p<1)requestAnimationFrame(frame)}
+    requestAnimationFrame(frame);
+  }
+
+  $('#heroChart').addEventListener('mousemove',e=>{
+    const r=e.currentTarget.getBoundingClientRect(),x=e.clientX-r.left;
+    const i=Math.max(0,Math.min(points.length-1,Math.round((x/r.width)*(points.length-1))));
+    const tip=$('#chartTooltip'), pt=chartState.coords[i];
+    tip.textContent=`T+${i} · ${points[i]*120} req/min`;
+    tip.style.left=pt[0]+'px';tip.style.top=(pt[1]+54)+'px';tip.style.opacity=1;
+  });
+  $('#heroChart').addEventListener('mouseleave',()=>$('#chartTooltip').style.opacity=0);
+
+  function animateDonut(){
+    const targets=[[42,58],[27,73],[18,82]];
+    ['#donutA','#donutB','#donutC'].forEach((id,i)=>{
+      const el=$(id), start=performance.now(),dur=900+i*120;
+      function frame(t){const p=Math.min(1,(t-start)/dur),v=targets[i][0]*p;el.setAttribute('stroke-dasharray',`${v} ${100-v}`);if(p<1)requestAnimationFrame(frame)}
+      requestAnimationFrame(frame);
+    });
+  }
+
+  function runReveal(){
+    $$('.reveal,.kpi-enter').forEach((el,i)=>setTimeout(()=>el.classList.add('animate-in'),40+i*45));
+    setTimeout(()=>$$('[data-fill]').forEach((el,i)=>setTimeout(()=>el.classList.add('bar-animate'),i*80)),500);
+    animateChart(); animateDonut();
+  }
+
+  async function simulateDemo(){
+    const btn=$('#launchDemo'), original=btn.textContent;
+    btn.disabled=true; btn.textContent='Running deterministic steps…';
+    const cards=$$('#heroMetrics > div');
+    for (let i=0;i<cards.length;i++){cards[i].style.outline='1px solid rgba(34,211,238,.55)';await sleep(120);cards[i].style.outline='none'}
+    drawHeroChart(.35); await sleep(160); drawHeroChart(.68); await sleep(160); drawHeroChart(1);
+    btn.textContent='Demo complete ✓'; btn.style.filter='saturate(.7)';
+    setTimeout(()=>{btn.disabled=false;btn.textContent=original;btn.style.filter=''},1200);
+  }
+
+  const modal=$('#demoModal');
+  function openModal(){
+    $('#modalBody').innerHTML = `
+      <div class="grid grid-cols-2 gap-3">
+        <div class="rounded-xl border bg-white/5 p-4"><div class="text-xs text-slate-500">Viewport</div><div class="font-bold mt-2">${innerWidth} × ${innerHeight}</div></div>
+        <div class="rounded-xl border bg-white/5 p-4"><div class="text-xs text-slate-500">Device pixel ratio</div><div class="font-bold mt-2">${devicePixelRatio}</div></div>
+        <div class="rounded-xl border bg-white/5 p-4"><div class="text-xs text-slate-500">User agent</div><div class="text-xs text-slate-300 mt-2" style="word-break:break-word">${navigator.userAgent}</div></div>
+        <div class="rounded-xl border bg-white/5 p-4"><div class="text-xs text-slate-500">Timestamp</div><div class="text-xs text-slate-300 mt-2">${new Date().toISOString()}</div></div>
+      </div>`;
+    modal.showModal();
+  }
+
+  $('#launchDemo').addEventListener('click',simulateDemo);
+  $('#openModal').addEventListener('click',openModal);
+  $('#closeModal').addEventListener('click',()=>modal.close());
+  modal.addEventListener('click',e=>{if(e.target===modal)modal.close()});
+  $('#themePulse').addEventListener('click',e=>{
+    document.body.animate(
+      [{filter:'brightness(1)'},{filter:'brightness(1.12) saturate(1.12)'},{filter:'brightness(1)'}],
+      {duration:650,easing:'ease-out',fill:'forwards'}
+    );
+    e.currentTarget.textContent='Pulse complete';
+    setTimeout(()=>e.currentTarget.textContent='Pulse UI',900);
+  });
+
+  $$('.range-btn').forEach(btn=>btn.addEventListener('click',()=>{
+    $$('.range-btn').forEach(b=>{b.style.background='rgba(255,255,255,.05)';b.style.color='#cbd5e1'});
+    btn.style.background='rgba(255,255,255,.10)';btn.style.color='white';
+    metrics.forEach((m,i)=>{ const drift=(Number(btn.dataset.range)/30)*(i+1)*.9; m.value=i===0?'$'+(184.2+drift).toFixed(1)+'k':m.value; });
+    $$('#metricGrid > div').forEach((card,i)=>card.animate([{transform:'translateY(0)'},{transform:'translateY(-4px)'},{transform:'translateY(0)'}],{duration:360,fill:'forwards'}));
+  }));
+
+  addEventListener('keydown',e=>{if(e.key.toLowerCase()==='d')simulateDemo(); if(e.key.toLowerCase()==='m')openModal()});
+  addEventListener('resize',()=>drawHeroChart(1));
+  addEventListener('DOMContentLoaded',runReveal,{once:true});
+})();
+</script>
+</body>
+</html>

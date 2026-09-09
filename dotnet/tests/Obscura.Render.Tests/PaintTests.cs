@@ -136,6 +136,81 @@ public class PaintTests
     }
 
     [Fact]
+    public void RadialGradientLengthStopsResolveAgainstTheGradientRay()
+    {
+        // `transparent 100px` ends the ramp 100px from the center, not at the edge of
+        // the box. Only percentages used to survive parsing, so the stop became
+        // unpositioned and the ramp spread over the whole 200px radius - which is what
+        // turned Tailwind's `transparent 32rem` page glows into a wash over the entire
+        // document.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0;background:rgb(0,0,255)">
+            <body style="margin:0;width:400px;height:400px;
+                         background:radial-gradient(circle at 50% 50%,rgb(255,0,0),transparent 100px)">
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (400f, 400f), null)!;
+
+        Assert.True(Pixel(pixmap, 200, 200).R > 250, $"center: {Pixel(pixmap, 200, 200)}");
+        PremultipliedColor halfway = Pixel(pixmap, 100, 200);
+        Assert.True(
+            halfway.R <= 2 && halfway.B >= 250,
+            $"halfway to the 100px stop the ramp must be nearly clear: {halfway}");
+        Assert.Equal((0, 0, 255), Rgb(pixmap, 5, 200));
+        Assert.Equal((0, 0, 255), Rgb(pixmap, 395, 200));
+    }
+
+    [Fact]
+    public void BackgroundShorthandPaintsItsFinalColorLayerUnderTheGradient()
+    {
+        // `background: <gradient>, <color>` sets background-color from the final layer.
+        // Reading the color only when no gradient parsed dropped it, so a translucent
+        // gradient composited over whatever was behind the element.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0;background:rgb(255,255,255)">
+            <body style="margin:0;width:400px;height:400px;
+                         background:linear-gradient(90deg,transparent,transparent),rgb(0,255,255)">
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (400f, 400f), null)!;
+        foreach (uint x in (uint[])[5, 200, 395])
+        {
+            Assert.Equal((0, 255, 255), Rgb(pixmap, x, 200));
+        }
+    }
+
+    [Fact]
+    public void BlurredBoxShadowFallsOffAsAGaussianRatherThanASolidBlob()
+    {
+        // A 40x40 black box with a 15px blur on white. sigma is blur/2 = 7.5, so
+        // coverage at the shape edge is ~50%, decaying to nothing by 2.5 sigma
+        // (18.75px). Painting the ramp only outward from an opaque shape - the bug
+        // this guards - made every pixel out to 15px fully black instead.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+                <div style="position:absolute;left:60px;top:60px;width:40px;height:40px;
+                            background:black;box-shadow:0 0 15px black"></div>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (160f, 160f), null)!;
+        byte Gray(uint x) => Pixel(pixmap, x, 80).R;
+
+        byte edge = Gray(59);
+        Assert.True(
+            edge is >= 60 and <= 200,
+            $"one pixel outside the edge must be roughly half covered, not solid: {edge}");
+        byte mid = Gray(52);
+        byte far = Gray(45);
+        Assert.True(edge < mid && mid < far, $"coverage must decay outward: {edge}, {mid}, {far}");
+        Assert.True(far > 220, $"2 sigma out must be nearly clear: {far}");
+        Assert.Equal(255, Gray(38));
+        Assert.Equal(0, Gray(80));
+    }
+
+    [Fact]
     public void SvgImageMetadataKeepsViewBoxAsRatioOnly()
     {
         ReplacedIntrinsic ratioOnly = PaintSvg.SvgImageIntrinsicMetadata(

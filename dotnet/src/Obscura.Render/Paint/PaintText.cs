@@ -63,7 +63,10 @@ internal static class PaintText
             return;
         }
 
-        float scale = size * rasterScale;
+        // ab_glyph's PxScale is height-based; see DomTextMeasure.HeightScaledSize.
+        // Drawing has to use the same conversion as measuring or the glyphs are
+        // ~11% larger than the reference paints and sit on a different baseline.
+        float scale = DomTextMeasure.HeightScaledSize(family, size * rasterScale);
         if (text.Length == 0 || !float.IsFinite(scale) || scale <= 0f || color.A == 0)
         {
             return;

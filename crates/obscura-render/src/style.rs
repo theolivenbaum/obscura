@@ -1083,12 +1083,18 @@ fn apply_value(style: &mut LayoutStyle, name: &str, value: &str) {
             if !value.trim().is_empty() {
                 style.background_color = None;
                 set_background_gradients(style, value);
-                if style.background_gradient.is_none()
-                    && style.background_radial_gradient.is_none()
-                    && style.background_conic_gradient.is_none()
-                {
-                    style.background_color = parse_color_for_scheme(value, style.color_scheme_dark);
-                }
+                // The shorthand's <color> belongs to its final layer, and it
+                // coexists with the image layers above it: `background:
+                // linear-gradient(...), #00f` paints the gradient over blue.
+                // Reading the color only when no gradient parsed dropped that
+                // bottom layer, so a translucent gradient composited over
+                // whatever was behind the element instead.
+                let final_layer = split_top_level(value, ',')
+                    .into_iter()
+                    .next_back()
+                    .unwrap_or(value);
+                style.background_color =
+                    parse_color_for_scheme(final_layer.trim(), style.color_scheme_dark);
                 style.background_image = parse_url(value);
                 style.background_size = None;
                 style.background_size_expression = background_size_expression(value);
@@ -7572,7 +7578,9 @@ fn set_background_gradients(style: &mut LayoutStyle, value: &str) {
         _ => None,
     });
     style.background_radial_gradient = layers.iter().find_map(|layer| match layer {
-        crate::BackgroundGradientLayer::Radial { center, stops } => Some((*center, stops.clone())),
+        crate::BackgroundGradientLayer::Radial { center, stops, .. } => {
+            Some((*center, stops.clone()))
+        }
         _ => None,
     });
     style.background_radial_gradient_geometry =
@@ -7618,6 +7626,7 @@ fn parse_background_gradient_layers(
             layers.push(crate::BackgroundGradientLayer::Radial {
                 center: radial.center,
                 stops: radial.stops,
+                stop_positions: radial.stop_positions,
             });
             radial_geometries.push(Some(radial.geometry));
         } else if let Some((angle, center, stops)) =
@@ -7797,6 +7806,11 @@ fn gradient_position_is_valid(value: &str) -> bool {
 struct ParsedRadialGradient {
     center: (f32, f32),
     stops: Vec<([u8; 4], Option<f32>)>,
+    /// The authored position token for each stop, so paint can resolve a length
+    /// against the gradient ray. `split_color_stop` only understands
+    /// percentages, which silently turned `transparent 32rem` into an
+    /// unpositioned stop and spread the ramp over the whole box.
+    stop_positions: Vec<Option<String>>,
     geometry: crate::RadialGradientGeometry,
 }
 
@@ -7826,15 +7840,19 @@ fn parse_radial_gradient(value: &str, dark_scheme: bool) -> Option<ParsedRadialG
         stop_start = 1;
     }
     let mut stops = Vec::new();
+    let mut stop_positions = Vec::new();
     for part in &parts[stop_start..] {
-        let (color, position) = split_color_stop(part.trim());
+        let part = part.trim();
+        let (color, position) = split_color_stop(part);
         if let Some(color) = parse_color_for_scheme(color, dark_scheme) {
             stops.push((color, position));
+            stop_positions.push(authored_stop_position(part, color_stop_token_count(part)));
         }
     }
     (stops.len() >= 2).then_some(ParsedRadialGradient {
         center,
         stops,
+        stop_positions,
         geometry,
     })
 }
@@ -8060,6 +8078,30 @@ fn parse_css_angle(value: &str) -> Option<f32> {
         return radians.trim().parse::<f32>().ok().map(f32::to_degrees);
     }
     None
+}
+
+/// How many leading whitespace-separated tokens of a color-stop belong to the
+/// color, so the remainder is its authored position. `rgb(1 2 3) 40%` keeps its
+/// parenthesized run together, which is why this counts through
+/// `split_ws_paren` rather than splitting on whitespace.
+fn color_stop_token_count(value: &str) -> usize {
+    let tokens = split_ws_paren(value.trim());
+    if tokens.len() <= 1 {
+        return tokens.len();
+    }
+    // A trailing position is one token; anything else is part of the color.
+    if gradient_position_is_valid(tokens[tokens.len() - 1]) {
+        tokens.len() - 1
+    } else {
+        tokens.len()
+    }
+}
+
+/// The authored position token of a color-stop, retained verbatim so paint can
+/// resolve a length against the gradient's own ray length.
+fn authored_stop_position(value: &str, color_tokens: usize) -> Option<String> {
+    let tokens = split_ws_paren(value.trim());
+    (tokens.len() > color_tokens).then(|| tokens[color_tokens].trim().to_string())
 }
 
 fn split_color_stop(value: &str) -> (&str, Option<f32>) {

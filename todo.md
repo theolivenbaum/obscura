@@ -228,16 +228,40 @@ The largest component. Split into stages; each stage is independently testable.
   port omits the key, so a client reading `result.value` gets `undefined` where
   Chrome and Rust give `null`.
 
-- **Two Obscura.Js tests are timing-flaky, and not only under solution load.**
-  830 of 849 is the clean result, but three consecutive runs of that project
-  alone gave 2 failures, then 1, then 0, so the earlier note that they pass in
-  isolation was optimistic. The pair that showed up:
-  `OpsTests.Read_body_capped_rejects_oversized_streamed_body` and
-  `RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop`. The
-  first prepared render on a fresh process costs ~300ms in embedded font
-  initialization against ~1ms once warm, so tests that schedule work tens of
-  milliseconds apart collapse two events into one when the host is busy. Fix the
-  latency rather than the tests.
+- **`ConcurrentConnectionsHeavyPageDoNotAbortV8` is load-flaky.** It drives six
+  concurrent CDP connections against a subresource-heavy page under a 30s
+  deadline, and it fails intermittently when the rest of the suite is running.
+  Measured by interleaving three full-suite rounds against the shim before and
+  after the canvas work: the old shim failed 2 of 3 rounds and the new one 2 of
+  3, so it is the test's sensitivity and not a regression. Worth noting because
+  it looked exactly like a regression on a single run each way, and startup cost
+  was ruled out separately (18 interleaved runs: 626ms median before, 622ms
+  after).
+- **`RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` is a
+  real port defect, not host-load flakiness.** Measured on this 4-core box:
+  C# 4-5 passes in 8-10 runs, the Rust counterpart 8 of 8. The earlier note here
+  blamed first-render font-initialization latency collapsing two events into one;
+  the diagnostics say otherwise. In every failing run `__imageTimerRan` is
+  already `true`, so event-loop ordering is fine. What differs is the request
+  count: passing runs issue exactly 4 requests, failing runs issue 5 or 7, with
+  `/one.png` and `/three.png` (one `<img>` each) duplicated. Each duplicate comes
+  back with `Known == false`, which `_applyImageMetadata` turns into an `error`
+  event with `naturalWidth` 0 - the assertion that actually fires. So the chain
+  is: something makes `FinishAsyncImageMetadata` answer `stale` (or
+  `ProfiledCachedImageMetadata` answer null), bootstrap.js re-queues the request
+  on that answer, and the retry observes an unseeded cache entry. Which of the
+  four `Stale` predicates in `RenderOps.FinishAsyncImageMetadata` fires is not
+  yet pinned. Ruled out along the way: the `ObscuraHttpClient.ConnectCallback`
+  change for IP literals (2 of 8 with the old client, so if anything worse), and
+  thread-pool starvation from the harness's blocking handler - `RawHttpServer`
+  now gives each connection a dedicated thread, exactly as the Rust harness's
+  `std::thread::spawn` does, which removes the confound but does not change the
+  pass rate.
+- **`OpsTests.Read_body_capped_rejects_oversized_streamed_body` is timing-flaky.**
+  The first prepared render on a fresh process costs ~300ms in embedded font
+  initialization against ~1ms once warm, so a test that schedules work tens of
+  milliseconds apart can collapse two events into one when the host is busy. Fix
+  the latency rather than the test.
 
 ## 9. Validation
 
@@ -257,9 +281,97 @@ The largest component. Split into stages; each stage is independently testable.
 - [ ] Performance comparison vs the Rust build on the standard pages
 - [ ] Re-enable CI as .NET workflows (rename off `.disabled`, rewrite for dotnet)
 
+## Changes to the shared shim
+
+`crates/obscura-js/js/bootstrap.js` is JavaScript, shared verbatim, and linked
+rather than copied by both builds - Rust through `include_str!` in its
+`build.rs`, C# through an `EmbeddedResource` link. A fix there lands in both
+engines, so it closes a gap without creating a deviation. That is worth stating
+because the alternative, implementing a missing feature host-side in C#, would
+have created one.
+
+- **Canvas 2D was a stub and is now a rasterizer.** The context rasterized
+  exactly one thing: a solid `fillRect`. `stroke()`, `clip()`, `closePath()`,
+  every transform method, all four gradient constructors, `ellipse`,
+  `roundRect`, `arcTo`, the Bezier methods, `setLineDash`, `isPointInPath` and
+  `isPointInStroke` were no-ops or returned inert objects, `fill()` handled only
+  arc segments, and `rect()` painted immediately instead of adding to the path.
+  A page that drew a chart therefore got a blank canvas, which is most real
+  dashboards, since a chart is strokes and gradient fills over a transformed
+  context. Now implemented: an affine transform stack, a path model that
+  flattens curves and arcs in device space, scanline fill with 4x vertical
+  supersampling and fractional horizontal coverage for both winding rules,
+  stroking built as geometry (segment quads plus join and cap discs, dash
+  splitting, so width, caps, joins and gradient strokes all come from the fill
+  path), a per-pixel clip mask that `save`/`restore` carry, linear/radial/conic
+  gradients and patterns sampled through the inverse transform, `drawImage`
+  through the transform, and `source-over`/`multiply`/`lighter`/
+  `destination-out`/`copy`. Colour parsing gained `#rgba`/`#rrggbbaa`, space and
+  percentage `rgb()`, `hsl()`, and the full CSS named set.
+
+  Validated by a 43-probe conformance script run through all three engines:
+  **43 of 43 agree with headless Chromium, and the reference and the port are
+  byte-identical on all 43.** On the `renderlab-complex.html` hero chart the
+  alpha histogram now matches Chromium within 0.3% where the canvas was
+  previously empty. Pinned by `Canvas2dConformanceTests` (11 facts).
+
+  Glyph rendering is deliberately unchanged: `fillText` still draws the
+  deterministic pseudo-glyphs the fingerprint RNG produces rather than real
+  outlines, since that is a stealth surface and not a canvas gap. Only its
+  placement now honours the transform, `textAlign` and `textBaseline`.
+  `drawImage` from a decoded `<img>` is still unsupported, because the host
+  exposes only `op_image_metadata` and never hands the shim image pixels.
+
+- **The backing store was compositing premultiplied alpha into a straight-alpha
+  buffer.** `op_canvas_register_surface` hands the buffer straight to the render
+  layer, which documents it as straight-alpha RGBA and premultiplies once itself
+  before the rasterizer sees it. The shim was premultiplying too, so every
+  translucent pixel was darkened twice and `getImageData` reported
+  `(128,0,0,128)` for 50% red where a browser reports `(255,0,0,128)`. Source-
+  over is now resolved back to straight alpha, and `clearRect` scales coverage
+  rather than colour. This was a pre-existing bug, not something the rewrite
+  introduced.
+
+- **The CSS named-colour table is built on first use.** It is ~150 entries and
+  every frame realm re-parses this file, so at top level it was an allocation
+  per realm on a path that is already startup-critical.
+
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Reference gaps fixed in both engines
+
+These were found by comparing against Chromium, were present identically in
+Rust and C#, and were fixed on both sides rather than papered over in the port.
+
+- **Blurred `box-shadow` painted as a solid blob.** Both engines ramped alpha
+  only outward from a fully opaque shape at a uniform per-layer alpha, so a wide
+  blur read as a solid shape with a linear skirt. The spec's blur is a gaussian
+  of sigma = blur/2, so coverage is ~50% at the shape edge. Layers now march
+  inward from 2.5 sigma. Mean absolute difference against Chromium over the
+  affected region: 62.4 -> 3.5.
+- **`radial-gradient` dropped absolute-length stop positions.** Only
+  percentages survived parsing, so `transparent 32rem` became an unpositioned
+  stop and the ramp spread over the whole ending shape. Radial layers now carry
+  the authored strings to paint like linear layers already did, and resolve them
+  against the gradient ray.
+- **The `background` shorthand dropped its color layer** whenever any gradient
+  layer parsed, so `background: linear-gradient(...), #00f` composited over
+  whatever was behind the element instead of over blue.
+
+Together the last two took `test-html-files/renderlab-complex.html` from 92.8%
+of pixels differing from Chromium (47.3 mean abs) to 37.7% (21.9) at 640px.
+
+### Still missing in both engines
+
+- **`filter: blur()` is not parsed or applied** anywhere in the render layer.
+  A blurred element renders sharp. Separate from `box-shadow` blur, which is
+  implemented.
+- **`backdrop-filter` is not implemented.** The dominant remaining contributor
+  to the renderlab fixture's difference against Chromium.
+- **Inset `box-shadow` is parsed but never painted.** `paint_box_shadow` returns
+  early on `shadow.inset`.
 
 - **Stealth TLS impersonation is not ported.** `wreq`/BoringSSL fingerprints the
   ClientHello; .NET's `SocketsHttpHandler` does not expose that surface and every
@@ -386,6 +498,21 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
   against the real list's ~10,000). The algorithm is complete, and the implicit
   wildcard rule makes every single-label TLD correct, but a missing multi-label
   suffix would let `document.domain` relax one label further than the reference.
+- **`DomTextMeasure` reproduces ab_glyph's height-based scale, not Skia's em-based
+  one.** `PxScale::from(px)` sizes a glyph so hhea's ascender-minus-descender is
+  `px` tall; `SKFont.Size` sizes the em square. Liberation Sans is 2288 units
+  against a 2048 em, so measuring em-based made every advance 10.5% wider than
+  the reference reports, per face: Sans 1.1172, Serif 1.1074, Mono 1.1328, DejaVu
+  Sans 1.1641. Since `text_width` sizes auto-width `<button>` and `<select>`
+  boxes, RenderLab's "Launch simulated demo" button was 211px against the
+  reference's 196px, the label wrapped differently, and the document came out 16px
+  shorter at a 640px viewport - a 21.8% whole-page pixel difference, because every
+  row below the divergence was offset. Now 2.2%, which is edge shading. Advances
+  are summed in font units and scaled once, because Skia quantizes at a fractional
+  size and left three of seven calibration cases a pixel out. `PaintText.DrawText`
+  takes the same conversion, or the static-font glyphs would be drawn 11% larger
+  than the reference paints them and sit on a different baseline. Pinned by
+  `DomTextMeasureScaleTests`.
 - **Grid `calc()` handles use a weak registry, not a raw pointer.** Rust hands
   taffy the `Arc` address as the opaque handle. Managed objects have no stable
   address, so the port allocates an aligned counter handle and keeps a weak

@@ -668,7 +668,10 @@ public class RenderCoreTests
             BeforePseudo = new LayoutStyle { Width = Dimension.Px(1f) },
             BackgroundGradientLayers =
             [
-                new BackgroundGradientLayer.Radial((0.5f, 0.5f), [new GradientStop(new RgbaColor(1, 2, 3, 4), null)]),
+                new BackgroundGradientLayer.Radial(
+                    (0.5f, 0.5f),
+                    [new GradientStop(new RgbaColor(1, 2, 3, 4), null)],
+                    ["50%"]),
             ],
         };
         style.SizeExpressions[0] = "calc(100% - 1rem)";

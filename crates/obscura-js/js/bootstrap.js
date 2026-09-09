@@ -12827,8 +12827,308 @@ function _encodePNG(w, h, rgba) {
 
 globalThis.__ariaQuerySelector = function(root, selector) { return null; };
 globalThis.__ariaQuerySelectorAll = async function*(root, selector) { /* yields nothing */ };
+// ---------------------------------------------------------------- canvas 2D
+// The 2D context is a software rasterizer written here rather than in the host,
+// so both engines share it verbatim. Everything below supports _Canvas2D.
 const _MAX_CANVAS_DIMENSION = 32767;
 const _MAX_CANVAS_PIXELS = 67108864;
+
+function _fin() {
+  for (let i = 0; i < arguments.length; i++) {
+    const v = arguments[i];
+    if (typeof v !== 'number' || !Number.isFinite(v)) return false;
+  }
+  return true;
+}
+
+// Flatten a curve into enough segments for its size on screen, so a small arc
+// costs a few points and a full-width sweep still looks smooth.
+function _curveSteps(p0, c1, c2, p3) {
+  const d = Math.hypot(c1[0] - p0[0], c1[1] - p0[1])
+    + Math.hypot(c2[0] - c1[0], c2[1] - c1[1])
+    + Math.hypot(p3[0] - c2[0], p3[1] - c2[1]);
+  return Math.max(3, Math.min(160, Math.ceil(d / 3)));
+}
+
+function _polyArea(p) {
+  let a = 0;
+  const n = p.length / 2;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    a += p[i * 2] * p[j * 2 + 1] - p[j * 2] * p[i * 2 + 1];
+  }
+  return a / 2;
+}
+function _ccw(p) { return _polyArea(p) >= 0; }
+function _reverse(p) {
+  const out = [];
+  for (let i = p.length - 2; i >= 0; i -= 2) out.push(p[i], p[i + 1]);
+  return out;
+}
+
+// Split a polyline into the "on" runs of a dash pattern.
+function _dashSplit(pts, dash, offset) {
+  const total = dash.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) return [pts];
+  let idx = 0, remaining = dash[0], on = true;
+  let skip = ((offset % total) + total) % total;
+  while (skip > 0) {
+    if (skip >= remaining) { skip -= remaining; idx = (idx + 1) % dash.length; remaining = dash[idx]; on = !on; }
+    else { remaining -= skip; skip = 0; }
+  }
+  const runs = [];
+  let cur = on ? [pts[0], pts[1]] : null;
+  const n = pts.length / 2;
+  for (let i = 0; i < n - 1; i++) {
+    let ax = pts[i * 2], ay = pts[i * 2 + 1];
+    const bx = pts[i * 2 + 2], by = pts[i * 2 + 3];
+    let len = Math.hypot(bx - ax, by - ay);
+    if (len < 1e-9) continue;
+    let dx = (bx - ax) / len, dy = (by - ay) / len;
+    while (len > 1e-9) {
+      const step = Math.min(len, remaining);
+      const nx = ax + dx * step, ny = ay + dy * step;
+      if (on) { if (!cur) cur = [ax, ay]; cur.push(nx, ny); }
+      ax = nx; ay = ny; len -= step; remaining -= step;
+      if (remaining <= 1e-9) {
+        if (on && cur) { runs.push(cur); cur = null; }
+        idx = (idx + 1) % dash.length;
+        remaining = dash[idx];
+        on = !on;
+        if (on) cur = [ax, ay];
+      }
+    }
+  }
+  if (on && cur && cur.length >= 4) runs.push(cur);
+  return runs;
+}
+
+function _pointInPolys(polys, x, y, evenOdd) {
+  let wind = 0, crossings = 0;
+  for (const pts of polys) {
+    const n = pts.length / 2;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const x1 = pts[i * 2], y1 = pts[i * 2 + 1], x2 = pts[j * 2], y2 = pts[j * 2 + 1];
+      if ((y >= y1 && y < y2) || (y >= y2 && y < y1)) {
+        const t = (y - y1) / (y2 - y1);
+        if (x1 + t * (x2 - x1) > x) { crossings++; wind += y2 > y1 ? 1 : -1; }
+      }
+    }
+  }
+  return evenOdd ? crossings % 2 !== 0 : wind !== 0;
+}
+
+// Pixels behind drawImage and createPattern. A canvas (or anything carrying a
+// 2D context) and an ImageData both work; a decoded <img> does not, because the
+// host exposes only op_image_metadata and never hands the shim its pixels.
+function _imageSource(img) {
+  if (!img) return null;
+  if (img._ctx && img._ctx._buf) return { buf: img._ctx._buf, w: img._ctx._w, h: img._ctx._h };
+  if (img._buf && img._w !== undefined) return { buf: img._buf, w: img._w, h: img._h };
+  if (img.data && img.width !== undefined) return { buf: img.data, w: img.width, h: img.height };
+  return null;
+}
+
+class _CanvasGradient {
+  constructor(kind, params) {
+    this._obscuraGradient = true;
+    this._kind = kind;
+    this._p = params;
+    this._stops = [];
+  }
+  addColorStop(offset, color) {
+    const o = Number(offset);
+    if (!Number.isFinite(o) || o < 0 || o > 1) throw new RangeError('Offset out of range');
+    this._stops.push({ o, c: _parseColorStandalone(color) });
+    this._stops.sort((a, b) => a.o - b.o);
+  }
+  _colorAt(t) {
+    const s = this._stops;
+    if (!s.length) return [0, 0, 0, 0];
+    if (t <= s[0].o) return s[0].c;
+    if (t >= s[s.length - 1].o) return s[s.length - 1].c;
+    for (let i = 0; i < s.length - 1; i++) {
+      if (t >= s[i].o && t <= s[i + 1].o) {
+        const span = s[i + 1].o - s[i].o;
+        const f = span <= 0 ? 0 : (t - s[i].o) / span;
+        const a = s[i].c, b = s[i + 1].c;
+        return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f,
+                a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+      }
+    }
+    return s[s.length - 1].c;
+  }
+  // Gradient coordinates are user space, so the sampler maps each device pixel
+  // back through the inverse of the transform in force when painting started.
+  _makeSampler(inv) {
+    const p = this._p, kind = this._kind;
+    const toUser = inv
+      ? (x, y) => [inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5]]
+      : (x, y) => [x, y];
+    if (!this._stops.length) return () => [0, 0, 0, 0];
+    if (kind === 'linear') {
+      const dx = p.x1 - p.x0, dy = p.y1 - p.y0;
+      const denom = dx * dx + dy * dy;
+      if (denom === 0) { const c = this._colorAt(1); return () => c; }
+      return (px, py) => {
+        const [ux, uy] = toUser(px, py);
+        return this._colorAt(((ux - p.x0) * dx + (uy - p.y0) * dy) / denom);
+      };
+    }
+    if (kind === 'radial') {
+      const dr = p.r1 - p.r0;
+      return (px, py) => {
+        const [ux, uy] = toUser(px, py);
+        const d = Math.hypot(ux - p.x1, uy - p.y1);
+        if (dr === 0) return this._colorAt(d <= p.r1 ? 1 : 1);
+        return this._colorAt((d - p.r0) / dr);
+      };
+    }
+    return (px, py) => {
+      const [ux, uy] = toUser(px, py);
+      let a = Math.atan2(uy - p.y, ux - p.x) - p.a + Math.PI / 2;
+      a = ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+      return this._colorAt(a / (Math.PI * 2));
+    };
+  }
+}
+
+class _CanvasPattern {
+  constructor(src, repetition) {
+    this._obscuraPattern = true;
+    this._src = src;
+    this._rep = repetition;
+    this._m = null;
+  }
+  setTransform(m) { if (m) this._m = [m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0]; }
+  _makeSampler(inv) {
+    const src = this._src, rep = this._rep;
+    const repeatX = rep === 'repeat' || rep === 'repeat-x';
+    const repeatY = rep === 'repeat' || rep === 'repeat-y';
+    const toUser = inv
+      ? (x, y) => [inv[0] * x + inv[2] * y + inv[4], inv[1] * x + inv[3] * y + inv[5]]
+      : (x, y) => [x, y];
+    return (px, py) => {
+      let [ux, uy] = toUser(px, py);
+      if (this._m) {
+        const m = this._m;
+        const det = m[0] * m[3] - m[1] * m[2];
+        if (det) {
+          const tx = ux - m[4], ty = uy - m[5];
+          const nx = (m[3] * tx - m[2] * ty) / det;
+          const ny = (m[0] * ty - m[1] * tx) / det;
+          ux = nx; uy = ny;
+        }
+      }
+      let sx = Math.floor(ux), sy = Math.floor(uy);
+      if (repeatX) sx = ((sx % src.w) + src.w) % src.w; else if (sx < 0 || sx >= src.w) return null;
+      if (repeatY) sy = ((sy % src.h) + src.h) % src.h; else if (sy < 0 || sy >= src.h) return null;
+      const i = (sy * src.w + sx) * 4;
+      return [src.buf[i], src.buf[i + 1], src.buf[i + 2], src.buf[i + 3]];
+    };
+  }
+}
+
+const _CSS_NAMED_COLORS = {
+  transparent: [0,0,0,0], black: [0,0,0,255], silver: [192,192,192,255], gray: [128,128,128,255],
+  grey: [128,128,128,255], white: [255,255,255,255], maroon: [128,0,0,255], red: [255,0,0,255],
+  purple: [128,0,128,255], fuchsia: [255,0,255,255], magenta: [255,0,255,255], green: [0,128,0,255],
+  lime: [0,255,0,255], olive: [128,128,0,255], yellow: [255,255,0,255], navy: [0,0,128,255],
+  blue: [0,0,255,255], teal: [0,128,128,255], aqua: [0,255,255,255], cyan: [0,255,255,255],
+  orange: [255,165,0,255], orangered: [255,69,0,255], gold: [255,215,0,255], pink: [255,192,203,255],
+  hotpink: [255,105,180,255], crimson: [220,20,60,255], salmon: [250,128,114,255],
+  tomato: [255,99,71,255], coral: [255,127,80,255], brown: [165,42,42,255],
+  chocolate: [210,105,30,255], peru: [205,133,63,255], tan: [210,180,140,255],
+  beige: [245,245,220,255], ivory: [255,255,240,255], khaki: [240,230,140,255],
+  indigo: [75,0,130,255], violet: [238,130,238,255], orchid: [218,112,214,255],
+  plum: [221,160,221,255], lavender: [230,230,250,255], thistle: [216,191,216,255],
+  turquoise: [64,224,208,255], skyblue: [135,206,235,255], steelblue: [70,130,180,255],
+  royalblue: [65,105,225,255], dodgerblue: [30,144,255,255], cornflowerblue: [100,149,237,255],
+  midnightblue: [25,25,112,255], slateblue: [106,90,205,255], slategray: [112,128,144,255],
+  slategrey: [112,128,144,255], darkblue: [0,0,139,255], darkcyan: [0,139,139,255],
+  darkgreen: [0,100,0,255], darkred: [139,0,0,255], darkorange: [255,140,0,255],
+  darkviolet: [148,0,211,255], darkgray: [169,169,169,255], darkgrey: [169,169,169,255],
+  darkslategray: [47,79,79,255], darkslategrey: [47,79,79,255], dimgray: [105,105,105,255],
+  dimgrey: [105,105,105,255], lightgray: [211,211,211,255], lightgrey: [211,211,211,255],
+  lightblue: [173,216,230,255], lightgreen: [144,238,144,255], lightpink: [255,182,193,255],
+  lightyellow: [255,255,224,255], lightcyan: [224,255,255,255], lightsalmon: [255,160,122,255],
+  lightseagreen: [32,178,170,255], lightskyblue: [135,206,250,255], lightsteelblue: [176,196,222,255],
+  seagreen: [46,139,87,255], forestgreen: [34,139,34,255], limegreen: [50,205,50,255],
+  springgreen: [0,255,127,255], mediumseagreen: [60,179,113,255], olivedrab: [107,142,35,255],
+  yellowgreen: [154,205,50,255], greenyellow: [173,255,47,255], chartreuse: [127,255,0,255],
+  wheat: [245,222,179,255], goldenrod: [218,165,32,255], firebrick: [178,34,34,255],
+  indianred: [205,92,92,255], rosybrown: [188,143,143,255], sienna: [160,82,45,255],
+  saddlebrown: [139,69,19,255], seashell: [255,245,238,255], snow: [255,250,250,255],
+  linen: [250,240,230,255], mintcream: [245,255,250,255], azure: [240,255,255,255],
+  aliceblue: [240,248,255,255], ghostwhite: [248,248,255,255], whitesmoke: [245,245,245,255],
+  gainsboro: [220,220,220,255], honeydew: [240,255,240,255], aquamarine: [127,255,212,255],
+  cadetblue: [95,158,160,255], powderblue: [176,224,230,255], paleturquoise: [175,238,238,255],
+  peachpuff: [255,218,185,255], moccasin: [255,228,181,255], navajowhite: [255,222,173,255],
+  papayawhip: [255,239,213,255], blanchedalmond: [255,235,205,255], bisque: [255,228,196,255],
+  cornsilk: [255,248,220,255], lemonchiffon: [255,250,205,255], oldlace: [253,245,230,255],
+  floralwhite: [255,250,240,255], mistyrose: [255,228,225,255], lavenderblush: [255,240,245,255],
+  rebeccapurple: [102,51,153,255], blueviolet: [138,43,226,255], darkmagenta: [139,0,139,255],
+  darkorchid: [153,50,204,255], mediumorchid: [186,85,211,255], mediumpurple: [147,112,219,255],
+  mediumslateblue: [123,104,238,255], darkslateblue: [72,61,139,255], mediumblue: [0,0,205,255],
+  darkturquoise: [0,206,209,255], mediumturquoise: [72,209,204,255], darkolivegreen: [85,107,47,255],
+  darkseagreen: [143,188,143,255], palegreen: [152,251,152,255], mediumspringgreen: [0,250,154,255],
+  mediumaquamarine: [102,205,170,255], lawngreen: [124,252,0,255], darkkhaki: [189,183,107,255],
+  palegoldenrod: [238,232,170,255], darkgoldenrod: [184,134,11,255], burlywood: [222,184,135,255],
+  sandybrown: [244,164,96,255], deeppink: [255,20,147,255], palevioletred: [219,112,147,255],
+  mediumvioletred: [199,21,133,255], deepskyblue: [0,191,255,255], lightcoral: [240,128,128,255],
+  darksalmon: [233,150,122,255], lightgoldenrodyellow: [250,250,210,255], antiquewhite: [250,235,215,255],
+};
+
+// Colour parsing is a free function because gradient stops are parsed with no
+// context to hand. Accepts #rgb/#rgba/#rrggbb/#rrggbbaa, rgb()/rgba() and
+// hsl()/hsla() in comma or space form with optional percentages, and the CSS
+// named colours above.
+function _parseCanvasColor(css) {
+  if (!css || typeof css !== 'string') return null;
+  const s = css.trim();
+  if (!s) return null;
+  const lower = s.toLowerCase();
+  if (s.startsWith('#')) {
+    const hex = s.slice(1);
+    const ok = /^[0-9a-fA-F]+$/.test(hex);
+    if (ok && hex.length === 3) return [parseInt(hex[0] + hex[0], 16), parseInt(hex[1] + hex[1], 16), parseInt(hex[2] + hex[2], 16), 255];
+    if (ok && hex.length === 4) return [parseInt(hex[0] + hex[0], 16), parseInt(hex[1] + hex[1], 16), parseInt(hex[2] + hex[2], 16), parseInt(hex[3] + hex[3], 16)];
+    if (ok && hex.length === 6) return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16), 255];
+    if (ok && hex.length === 8) return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16), parseInt(hex.slice(6, 8), 16)];
+    return null;
+  }
+  const clamp = v => Math.max(0, Math.min(255, Math.round(v)));
+  const alphaOf = raw => raw === undefined ? 255
+    : clamp(String(raw).endsWith('%') ? parseFloat(raw) * 2.55 : parseFloat(raw) * 255);
+  let m = lower.match(/^rgba?\(([^)]*)\)$/);
+  if (m) {
+    const parts = m[1].split(/[,\/\s]+/).filter(p => p.length);
+    if (parts.length < 3) return null;
+    const chan = p => clamp(p.endsWith('%') ? parseFloat(p) * 2.55 : parseFloat(p));
+    return [chan(parts[0]), chan(parts[1]), chan(parts[2]), alphaOf(parts[3])];
+  }
+  m = lower.match(/^hsla?\(([^)]*)\)$/);
+  if (m) {
+    const parts = m[1].split(/[,\/\s]+/).filter(p => p.length);
+    if (parts.length < 3) return null;
+    const h = ((parseFloat(parts[0]) % 360) + 360) % 360;
+    const sat = Math.max(0, Math.min(1, parseFloat(parts[1]) / 100));
+    const li = Math.max(0, Math.min(1, parseFloat(parts[2]) / 100));
+    const c = (1 - Math.abs(2 * li - 1)) * sat, hp = h / 60;
+    const x = c * (1 - Math.abs(hp % 2 - 1));
+    let rgb;
+    if (hp < 1) rgb = [c, x, 0]; else if (hp < 2) rgb = [x, c, 0];
+    else if (hp < 3) rgb = [0, c, x]; else if (hp < 4) rgb = [0, x, c];
+    else if (hp < 5) rgb = [x, 0, c]; else rgb = [c, 0, x];
+    const off = li - c / 2;
+    return [clamp((rgb[0] + off) * 255), clamp((rgb[1] + off) * 255), clamp((rgb[2] + off) * 255), alphaOf(parts[3])];
+  }
+  if (lower === 'none') return [0, 0, 0, 0];
+  return _CSS_NAMED_COLORS[lower] || null;
+}
+function _parseColorStandalone(css) { return _parseCanvasColor(css) || [0, 0, 0, 255]; }
+
 class _Canvas2D {
   constructor(canvas) {
     this.canvas = canvas;
@@ -12845,12 +13145,23 @@ class _Canvas2D {
     this.fillStyle = '#000000';
     this.strokeStyle = '#000000';
     this.lineWidth = 1;
+    this.lineCap = 'butt';
+    this.lineJoin = 'miter';
+    this.miterLimit = 10;
+    this.lineDashOffset = 0;
     this.font = '10px sans-serif';
     this.textAlign = 'start';
     this.textBaseline = 'alphabetic';
     this.globalAlpha = 1;
     this.globalCompositeOperation = 'source-over';
+    this.imageSmoothingEnabled = true;
+    this._m = [1, 0, 0, 1, 0, 0];
+    this._clip = null;
+    this._dash = [];
     this._stateStack = [];
+    this._subpaths = [];
+    this._cur = null;
+    this._curClosed = false;
   }
   _resizeFromCanvas() {
     const requestedWidth = this._canvasDimension('width', 300);
@@ -12885,84 +13196,533 @@ class _Canvas2D {
       if (typeof damage === 'function') damage(this.canvas._nid);
     });
   }
-  _parseColor(css) {
-    if (!css || typeof css !== 'string' || css === 'none') return [0,0,0,0];
-    if (css.startsWith('#')) {
-      const hex = css.slice(1);
-      if (hex.length === 3) return [parseInt(hex[0]+hex[0],16),parseInt(hex[1]+hex[1],16),parseInt(hex[2]+hex[2],16),255];
-      if (hex.length === 6) return [parseInt(hex.slice(0,2),16),parseInt(hex.slice(2,4),16),parseInt(hex.slice(4,6),16),255];
-      if (hex.length === 8) return [parseInt(hex.slice(0,2),16),parseInt(hex.slice(2,4),16),parseInt(hex.slice(4,6),16),parseInt(hex.slice(6,8),16)];
+
+  // ------------------------------------------------------------ transform
+  // [a,b,c,d,e,f] with x' = a*x + c*y + e and y' = b*x + d*y + f, matching
+  // the DOMMatrix field order the 2D context exposes.
+  _premultiply(t) {
+    const m = this._m;
+    this._m = [
+      m[0] * t[0] + m[2] * t[1],
+      m[1] * t[0] + m[3] * t[1],
+      m[0] * t[2] + m[2] * t[3],
+      m[1] * t[2] + m[3] * t[3],
+      m[0] * t[4] + m[2] * t[5] + m[4],
+      m[1] * t[4] + m[3] * t[5] + m[5],
+    ];
+  }
+  _pt(x, y) {
+    const m = this._m;
+    return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+  }
+  _inverse() {
+    const [a, b, c, d, e, f] = this._m;
+    const det = a * d - b * c;
+    if (!det || !Number.isFinite(det)) return null;
+    return [d / det, -b / det, -c / det, a / det,
+            (c * f - d * e) / det, (b * e - a * f) / det];
+  }
+  // Uniform scale the transform applies, used for line width and dash lengths.
+  _scaleFactor() {
+    const [a, b, c, d] = this._m;
+    return Math.sqrt(Math.abs(a * d - b * c)) || 1;
+  }
+  translate(x, y) { if (_fin(x, y)) this._premultiply([1, 0, 0, 1, x, y]); }
+  scale(x, y) { if (_fin(x, y)) this._premultiply([x, 0, 0, y, 0, 0]); }
+  rotate(rad) {
+    if (!_fin(rad)) return;
+    const s = Math.sin(rad), c = Math.cos(rad);
+    this._premultiply([c, s, -s, c, 0, 0]);
+  }
+  transform(a, b, c, d, e, f) { if (_fin(a, b, c, d, e, f)) this._premultiply([a, b, c, d, e, f]); }
+  setTransform(a, b, c, d, e, f) {
+    if (a && typeof a === 'object') {
+      const m = a;
+      this._m = [m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0];
+      return;
     }
-    const m = css.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
-    if (m) return [+m[1],+m[2],+m[3],m[4]!==undefined?Math.round(+m[4]*255):255];
-    const named = {red:[255,0,0,255],green:[0,128,0,255],blue:[0,0,255,255],white:[255,255,255,255],black:[0,0,0,255],yellow:[255,255,0,255],orange:[255,165,0,255],gray:[128,128,128,255],transparent:[0,0,0,0]};
-    return named[css] || [0,0,0,255];
+    if (a === undefined) { this._m = [1, 0, 0, 1, 0, 0]; return; }
+    if (_fin(a, b, c, d, e, f)) this._m = [a, b, c, d, e, f];
+  }
+  resetTransform() { this._m = [1, 0, 0, 1, 0, 0]; }
+  getTransform() {
+    const [a, b, c, d, e, f] = this._m;
+    return { a, b, c, d, e, f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 };
+  }
+  save() {
+    this._stateStack.push({
+      fillStyle: this.fillStyle, strokeStyle: this.strokeStyle,
+      globalAlpha: this.globalAlpha, globalCompositeOperation: this.globalCompositeOperation,
+      font: this.font, lineWidth: this.lineWidth, lineCap: this.lineCap,
+      lineJoin: this.lineJoin, miterLimit: this.miterLimit,
+      lineDashOffset: this.lineDashOffset, textAlign: this.textAlign,
+      textBaseline: this.textBaseline, imageSmoothingEnabled: this.imageSmoothingEnabled,
+      _m: this._m.slice(), _clip: this._clip, _dash: this._dash.slice(),
+    });
+  }
+  restore() {
+    const s = this._stateStack.pop();
+    if (s) Object.assign(this, s);
+  }
+
+  // --------------------------------------------------------------- colors
+  // null means "not a colour": a gradient or pattern object, which _sampler
+  // then resolves to a per-pixel function.
+  _parseColor(css) {
+    if (css && typeof css === 'object') return null;
+    return _parseCanvasColor(css) || [0, 0, 0, 0];
+  }
+  // A sampler is either a constant colour or a per-pixel function, so fill,
+  // stroke and fillRect all take gradients and patterns by the same route.
+  _sampler(style) {
+    const solid = this._parseColor(style);
+    if (solid) return { solid };
+    if (style && style._obscuraGradient) return { fn: style._makeSampler(this._inverse()) };
+    if (style && style._obscuraPattern) return { fn: style._makeSampler(this._inverse()) };
+    return { solid: [0, 0, 0, 0] };
+  }
+
+  // ----------------------------------------------------------------- path
+  _begin(x, y) {
+    this._cur = [x, y];
+    this._curClosed = false;
+    this._subpaths.push({ pts: this._cur, closed: false });
+  }
+  _push(x, y) {
+    if (!this._cur) { this._begin(x, y); return; }
+    const n = this._cur.length;
+    if (this._cur[n - 2] === x && this._cur[n - 1] === y) return;
+    this._cur.push(x, y);
+  }
+  beginPath() { this._subpaths = []; this._cur = null; }
+  moveTo(x, y) { if (_fin(x, y)) { const p = this._pt(x, y); this._begin(p[0], p[1]); } }
+  lineTo(x, y) {
+    if (!_fin(x, y)) return;
+    const p = this._pt(x, y);
+    if (!this._cur) this._begin(p[0], p[1]); else this._push(p[0], p[1]);
+  }
+  closePath() {
+    if (!this._cur || this._cur.length < 4) return;
+    const sp = this._subpaths[this._subpaths.length - 1];
+    if (sp) sp.closed = true;
+    // A new segment after closePath starts again at the subpath origin.
+    const x = this._cur[0], y = this._cur[1];
+    this._cur = [x, y];
+    this._subpaths.push({ pts: this._cur, closed: false });
+  }
+  quadraticCurveTo(cx, cy, x, y) {
+    if (!_fin(cx, cy, x, y)) return;
+    if (!this._cur) this.moveTo(cx, cy);
+    const p0 = [this._cur[this._cur.length - 2], this._cur[this._cur.length - 1]];
+    const c = this._pt(cx, cy), p = this._pt(x, y);
+    const n = _curveSteps(p0, c, c, p);
+    for (let i = 1; i <= n; i++) {
+      const t = i / n, u = 1 - t;
+      this._push(u * u * p0[0] + 2 * u * t * c[0] + t * t * p[0],
+                 u * u * p0[1] + 2 * u * t * c[1] + t * t * p[1]);
+    }
+  }
+  bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+    if (!_fin(c1x, c1y, c2x, c2y, x, y)) return;
+    if (!this._cur) this.moveTo(c1x, c1y);
+    const p0 = [this._cur[this._cur.length - 2], this._cur[this._cur.length - 1]];
+    const a = this._pt(c1x, c1y), b = this._pt(c2x, c2y), p = this._pt(x, y);
+    const n = _curveSteps(p0, a, b, p);
+    for (let i = 1; i <= n; i++) {
+      const t = i / n, u = 1 - t;
+      this._push(u * u * u * p0[0] + 3 * u * u * t * a[0] + 3 * u * t * t * b[0] + t * t * t * p[0],
+                 u * u * u * p0[1] + 3 * u * u * t * a[1] + 3 * u * t * t * b[1] + t * t * t * p[1]);
+    }
+  }
+  arc(x, y, r, start, end, ccw) { this.ellipse(x, y, r, r, 0, start, end, ccw); }
+  ellipse(x, y, rx, ry, rot, start, end, ccw) {
+    if (!_fin(x, y, rx, ry)) return;
+    rot = _fin(rot) ? rot : 0;
+    start = _fin(start) ? start : 0;
+    end = _fin(end) ? end : Math.PI * 2;
+    let sweep = end - start;
+    if (ccw) { if (sweep > 0) sweep -= Math.PI * 2 * Math.ceil(sweep / (Math.PI * 2)); if (sweep <= -Math.PI * 2) sweep = -Math.PI * 2; }
+    else { if (sweep < 0) sweep += Math.PI * 2 * Math.ceil(-sweep / (Math.PI * 2)); if (sweep >= Math.PI * 2) sweep = Math.PI * 2; }
+    const radius = Math.max(Math.abs(rx), Math.abs(ry)) * this._scaleFactor();
+    const steps = Math.max(6, Math.min(720, Math.ceil(Math.abs(sweep) / (Math.PI * 2) * Math.max(12, radius * 2))));
+    const cosR = Math.cos(rot), sinR = Math.sin(rot);
+    for (let i = 0; i <= steps; i++) {
+      const a = start + sweep * (i / steps);
+      const ux = Math.cos(a) * rx, uy = Math.sin(a) * ry;
+      const p = this._pt(x + ux * cosR - uy * sinR, y + ux * sinR + uy * cosR);
+      if (i === 0 && !this._cur) this._begin(p[0], p[1]); else this._push(p[0], p[1]);
+    }
+  }
+  arcTo(x1, y1, x2, y2, r) {
+    if (!_fin(x1, y1, x2, y2, r) || r < 0) return;
+    if (!this._cur) { this.moveTo(x1, y1); return; }
+    const inv = this._inverse();
+    if (!inv) return;
+    const dx = this._cur[this._cur.length - 2] - (this._m[0] * x1 + this._m[2] * y1 + this._m[4]);
+    const dy = this._cur[this._cur.length - 1] - (this._m[1] * x1 + this._m[3] * y1 + this._m[5]);
+    if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) { this.lineTo(x1, y1); return; }
+    // Work in user space: recover p0 by inverse-transforming the current point.
+    const cx = this._cur[this._cur.length - 2], cy = this._cur[this._cur.length - 1];
+    const p0x = inv[0] * cx + inv[2] * cy + inv[4], p0y = inv[1] * cx + inv[3] * cy + inv[5];
+    const a1x = p0x - x1, a1y = p0y - y1, a2x = x2 - x1, a2y = y2 - y1;
+    const l1 = Math.hypot(a1x, a1y), l2 = Math.hypot(a2x, a2y);
+    if (l1 < 1e-9 || l2 < 1e-9) { this.lineTo(x1, y1); return; }
+    const u1x = a1x / l1, u1y = a1y / l1, u2x = a2x / l2, u2y = a2y / l2;
+    const cosT = Math.max(-1, Math.min(1, u1x * u2x + u1y * u2y));
+    const theta = Math.acos(cosT);
+    if (theta < 1e-6 || Math.abs(theta - Math.PI) < 1e-6) { this.lineTo(x1, y1); return; }
+    const tanDist = r / Math.tan(theta / 2);
+    const t1x = x1 + u1x * tanDist, t1y = y1 + u1y * tanDist;
+    const t2x = x1 + u2x * tanDist, t2y = y1 + u2y * tanDist;
+    let bx = u1x + u2x, by = u1y + u2y;
+    const bl = Math.hypot(bx, by) || 1;
+    bx /= bl; by /= bl;
+    const centreDist = r / Math.sin(theta / 2);
+    const ccx = x1 + bx * centreDist, ccy = y1 + by * centreDist;
+    const sa = Math.atan2(t1y - ccy, t1x - ccx), ea = Math.atan2(t2y - ccy, t2x - ccx);
+    const cross = u1x * u2y - u1y * u2x;
+    this.lineTo(t1x, t1y);
+    this.ellipse(ccx, ccy, r, r, 0, sa, ea, cross > 0);
+  }
+  rect(x, y, w, h) {
+    if (!_fin(x, y, w, h)) return;
+    const a = this._pt(x, y), b = this._pt(x + w, y), c = this._pt(x + w, y + h), d = this._pt(x, y + h);
+    this._subpaths.push({ pts: [a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]], closed: true });
+    this._cur = [a[0], a[1]];
+    this._subpaths.push({ pts: this._cur, closed: false });
+  }
+  roundRect(x, y, w, h, radii) {
+    if (!_fin(x, y, w, h)) return;
+    let rr = radii;
+    if (rr === undefined || rr === null) rr = 0;
+    if (!Array.isArray(rr)) rr = [rr];
+    const num = v => (v && typeof v === 'object') ? (v.x ?? 0) : (Number(v) || 0);
+    let tl, tr, br, bl;
+    if (rr.length === 1) { tl = tr = br = bl = num(rr[0]); }
+    else if (rr.length === 2) { tl = br = num(rr[0]); tr = bl = num(rr[1]); }
+    else if (rr.length === 3) { tl = num(rr[0]); tr = bl = num(rr[1]); br = num(rr[2]); }
+    else { tl = num(rr[0]); tr = num(rr[1]); br = num(rr[2]); bl = num(rr[3]); }
+    const cap = Math.min(Math.abs(w), Math.abs(h)) / 2;
+    tl = Math.min(tl, cap); tr = Math.min(tr, cap); br = Math.min(br, cap); bl = Math.min(bl, cap);
+    this.moveTo(x + tl, y);
+    this.lineTo(x + w - tr, y);
+    if (tr > 0) this.ellipse(x + w - tr, y + tr, tr, tr, 0, -Math.PI / 2, 0, false);
+    this.lineTo(x + w, y + h - br);
+    if (br > 0) this.ellipse(x + w - br, y + h - br, br, br, 0, 0, Math.PI / 2, false);
+    this.lineTo(x + bl, y + h);
+    if (bl > 0) this.ellipse(x + bl, y + h - bl, bl, bl, 0, Math.PI / 2, Math.PI, false);
+    this.lineTo(x, y + tl);
+    if (tl > 0) this.ellipse(x + tl, y + tl, tl, tl, 0, Math.PI, Math.PI * 1.5, false);
+    this.closePath();
+  }
+  setLineDash(pattern) {
+    if (!Array.isArray(pattern)) return;
+    const clean = pattern.map(Number).filter(v => Number.isFinite(v) && v >= 0);
+    if (clean.length !== pattern.length) return;
+    this._dash = clean.length % 2 ? clean.concat(clean) : clean;
+  }
+  getLineDash() { return this._dash.slice(); }
+
+  // ----------------------------------------------------------- rasterizer
+  // The backing store holds STRAIGHT (unpremultiplied) alpha. That is not a
+  // free choice: op_canvas_register_surface hands this exact buffer to the
+  // render layer, which documents it as straight-alpha and premultiplies once
+  // itself before handing it to the rasterizer. Compositing premultiplied here
+  // therefore darkened every translucent pixel twice, and getImageData reported
+  // (128,0,0,128) where a browser reports (255,0,0,128) for 50% red.
+  _blend(idx, r, g, b, a, cov) {
+    const buf = this._buf;
+    const sa = (a / 255) * this.globalAlpha * cov;
+    if (sa <= 0) return;
+    const op = this.globalCompositeOperation;
+    if (op === 'destination-out') {
+      buf[idx + 3] = Math.max(0, Math.round(buf[idx + 3] * (1 - sa)));
+      return;
+    }
+    if (op === 'copy') {
+      buf[idx] = r; buf[idx + 1] = g; buf[idx + 2] = b;
+      buf[idx + 3] = Math.round(255 * sa);
+      return;
+    }
+    const da = buf[idx + 3] / 255;
+    let sr = r, sg = g, sb = b;
+    if (op === 'multiply') { sr = (r * buf[idx]) / 255; sg = (g * buf[idx + 1]) / 255; sb = (b * buf[idx + 2]) / 255; }
+    else if (op === 'lighter') {
+      buf[idx] = Math.min(255, Math.round(buf[idx] + sr * sa));
+      buf[idx + 1] = Math.min(255, Math.round(buf[idx + 1] + sg * sa));
+      buf[idx + 2] = Math.min(255, Math.round(buf[idx + 2] + sb * sa));
+      buf[idx + 3] = Math.min(255, Math.round(buf[idx + 3] + 255 * sa));
+      return;
+    }
+    // Porter-Duff source-over resolved back to straight alpha.
+    const oa = sa + da * (1 - sa);
+    if (oa <= 0) { buf[idx] = buf[idx + 1] = buf[idx + 2] = buf[idx + 3] = 0; return; }
+    const w = sa / oa, wd = 1 - w;
+    buf[idx] = Math.round(sr * w + buf[idx] * wd);
+    buf[idx + 1] = Math.round(sg * w + buf[idx + 1] * wd);
+    buf[idx + 2] = Math.round(sb * w + buf[idx + 2] * wd);
+    buf[idx + 3] = Math.round(oa * 255);
   }
   _setPixel(x, y, r, g, b, a) {
     x = Math.round(x); y = Math.round(y);
     if (x < 0 || x >= this._w || y < 0 || y >= this._h) return;
-    const idx = (y * this._w + x) * 4;
-    const alpha = (a / 255) * this.globalAlpha;
-    if (this.globalCompositeOperation === 'multiply') {
-      this._buf[idx+0] = Math.round((r/255) * (this._buf[idx+0]/255) * 255);
-      this._buf[idx+1] = Math.round((g/255) * (this._buf[idx+1]/255) * 255);
-      this._buf[idx+2] = Math.round((b/255) * (this._buf[idx+2]/255) * 255);
-      this._buf[idx+3] = Math.min(255, this._buf[idx+3] + Math.round(a * alpha));
-    } else {
-      this._buf[idx+0] = Math.round(r * alpha + this._buf[idx+0] * (1 - alpha));
-      this._buf[idx+1] = Math.round(g * alpha + this._buf[idx+1] * (1 - alpha));
-      this._buf[idx+2] = Math.round(b * alpha + this._buf[idx+2] * (1 - alpha));
-      this._buf[idx+3] = Math.min(255, Math.round(a * alpha + this._buf[idx+3] * (1 - alpha)));
-    }
+    let cov = 1;
+    if (this._clip) { cov = this._clip[y * this._w + x] / 255; if (cov <= 0) return; }
+    this._blend((y * this._w + x) * 4, r, g, b, a, cov);
   }
-  fillRect(x, y, w, h) {
-    const [r,g,b,a] = this._parseColor(this.fillStyle);
-    x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
-    for (let py = Math.max(0,y); py < Math.min(this._h, y+h); py++) {
-      for (let px = Math.max(0,x); px < Math.min(this._w, x+w); px++) {
-        this._setPixel(px, py, r, g, b, a);
+  // Scanline coverage with four sub-rows and fractional horizontal ends. Called
+  // by fill, stroke and clip so all three antialias the same way.
+  _scan(polys, evenOdd, onRow) {
+    const SUB = 4;
+    let minY = Infinity, maxY = -Infinity, minX = Infinity, maxX = -Infinity;
+    const edges = [];
+    for (const pts of polys) {
+      const n = pts.length / 2;
+      if (n < 2) continue;
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const x1 = pts[i * 2], y1 = pts[i * 2 + 1], x2 = pts[j * 2], y2 = pts[j * 2 + 1];
+        if (y1 === y2) continue;
+        edges.push(x1, y1, x2, y2);
+        if (y1 < minY) minY = y1; if (y1 > maxY) maxY = y1;
+        if (y2 < minY) minY = y2; if (y2 > maxY) maxY = y2;
+        if (x1 < minX) minX = x1; if (x1 > maxX) maxX = x1;
+        if (x2 < minX) minX = x2; if (x2 > maxX) maxX = x2;
       }
     }
+    if (!edges.length) return;
+    const y0 = Math.max(0, Math.floor(minY)), y1b = Math.min(this._h - 1, Math.ceil(maxY));
+    const x0 = Math.max(0, Math.floor(minX)), x1b = Math.min(this._w - 1, Math.ceil(maxX));
+    if (y0 > y1b || x0 > x1b) return;
+    const cov = new Float32Array(this._w);
+    const xs = [], dirs = [];
+    for (let py = y0; py <= y1b; py++) {
+      cov.fill(0, x0, x1b + 1);
+      let touched = false;
+      for (let s = 0; s < SUB; s++) {
+        const sy = py + (s + 0.5) / SUB;
+        xs.length = 0; dirs.length = 0;
+        for (let e = 0; e < edges.length; e += 4) {
+          const ax = edges[e], ay = edges[e + 1], bx = edges[e + 2], by = edges[e + 3];
+          if ((sy >= ay && sy < by) || (sy >= by && sy < ay)) {
+            xs.push(ax + (sy - ay) / (by - ay) * (bx - ax));
+            dirs.push(by > ay ? 1 : -1);
+          }
+        }
+        if (xs.length < 2) continue;
+        const order = xs.map((v, i) => i).sort((p, q) => xs[p] - xs[q]);
+        let wind = 0;
+        for (let k = 0; k < order.length - 1; k++) {
+          wind += evenOdd ? 1 : dirs[order[k]];
+          const inside = evenOdd ? (wind % 2 !== 0) : wind !== 0;
+          if (!inside) continue;
+          let sa = xs[order[k]], sb = xs[order[k + 1]];
+          if (sb <= sa) continue;
+          if (sb < x0 || sa > x1b + 1) continue;
+          sa = Math.max(sa, x0); sb = Math.min(sb, x1b + 1);
+          const ia = Math.floor(sa), ib = Math.floor(sb);
+          const unit = 1 / SUB;
+          if (ia === ib) { cov[ia] += (sb - sa) * unit; touched = true; continue; }
+          cov[ia] += (ia + 1 - sa) * unit;
+          for (let px = ia + 1; px < ib; px++) cov[px] += unit;
+          if (ib <= x1b) cov[ib] += (sb - ib) * unit;
+          touched = true;
+        }
+      }
+      if (touched) onRow(py, cov, x0, x1b);
+    }
+  }
+  _fillPolys(polys, sampler, evenOdd) {
+    const clip = this._clip, w = this._w;
+    const solid = sampler.solid, fn = sampler.fn;
+    this._scan(polys, evenOdd, (py, cov, x0, x1b) => {
+      const rowBase = py * w;
+      for (let px = x0; px <= x1b; px++) {
+        let c = cov[px];
+        if (c <= 0.0015) continue;
+        if (c > 1) c = 1;
+        if (clip) { const m = clip[rowBase + px] / 255; if (m <= 0) continue; c *= m; }
+        if (solid) this._blend((rowBase + px) * 4, solid[0], solid[1], solid[2], solid[3], c);
+        else {
+          const col = fn(px + 0.5, py + 0.5);
+          if (col) this._blend((rowBase + px) * 4, col[0], col[1], col[2], col[3], c);
+        }
+      }
+    });
+  }
+  _devicePath() {
+    const polys = [];
+    for (const sp of this._subpaths) if (sp.pts.length >= 6) polys.push(sp.pts);
+    return polys;
+  }
+  fill(ruleOrPath) {
+    const rule = typeof ruleOrPath === 'string' ? ruleOrPath : 'nonzero';
+    const polys = this._devicePath();
+    if (polys.length) this._fillPolys(polys, this._sampler(this.fillStyle), rule === 'evenodd');
+    this._markPaintDamage();
+  }
+  // Stroking builds geometry rather than plotting pixels: each segment becomes a
+  // quad, each join and round cap a disc, and the union is filled nonzero. That
+  // gives width, caps, joins, dashes and gradient strokes from one code path.
+  _strokePolys() {
+    const wDev = Math.max(this.lineWidth, 0) * this._scaleFactor();
+    if (!(wDev > 0)) return [];
+    const hw = Math.max(wDev / 2, 0.35);
+    const scale = this._scaleFactor();
+    const dash = this._dash.length ? this._dash.map(v => v * scale) : null;
+    const polys = [];
+    const disc = (cx, cy) => {
+      const n = Math.max(8, Math.min(32, Math.ceil(hw * 2)));
+      const p = [];
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        p.push(cx + Math.cos(a) * hw, cy + Math.sin(a) * hw);
+      }
+      polys.push(p);
+    };
+    const quad = (ax, ay, bx, by) => {
+      let dx = bx - ax, dy = by - ay;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-9) return;
+      dx /= len; dy /= len;
+      let sx = ax, sy = ay, ex = bx, ey = by;
+      if (this.lineCap === 'square') { sx -= dx * hw; sy -= dy * hw; ex += dx * hw; ey += dy * hw; }
+      const nx = -dy * hw, ny = dx * hw;
+      const p = [sx + nx, sy + ny, ex + nx, ey + ny, ex - nx, ey - ny, sx - nx, sy - ny];
+      polys.push(_ccw(p) ? p : _reverse(p));
+    };
+    for (const sp of this._subpaths) {
+      let pts = sp.pts;
+      if (pts.length < 4) {
+        // A lone moveTo paints only under a round cap, as in the spec.
+        if (pts.length === 2 && this.lineCap === 'round' && sp.closed) disc(pts[0], pts[1]);
+        continue;
+      }
+      if (sp.closed) pts = pts.concat([pts[0], pts[1]]);
+      const runs = dash ? _dashSplit(pts, dash, this.lineDashOffset * scale) : [pts];
+      for (const run of runs) {
+        const n = run.length / 2;
+        for (let i = 0; i < n - 1; i++) quad(run[i * 2], run[i * 2 + 1], run[i * 2 + 2], run[i * 2 + 3]);
+        // Round joins on every interior vertex; a disc is also a fair stand-in
+        // for a miter at the widths charts actually use.
+        for (let i = 1; i < n - 1; i++) disc(run[i * 2], run[i * 2 + 1]);
+        if (this.lineCap === 'round' && n >= 2) {
+          disc(run[0], run[1]);
+          disc(run[(n - 1) * 2], run[(n - 1) * 2 + 1]);
+        }
+        if (sp.closed && !dash && n >= 3) disc(run[0], run[1]);
+      }
+    }
+    return polys;
+  }
+  stroke() {
+    const polys = this._strokePolys();
+    if (polys.length) this._fillPolys(polys, this._sampler(this.strokeStyle), false);
+    this._markPaintDamage();
+  }
+  clip(rule) {
+    const polys = this._devicePath();
+    const mask = new Uint8Array(this._w * this._h);
+    if (polys.length) {
+      this._scan(polys, rule === 'evenodd', (py, cov, x0, x1b) => {
+        const base = py * this._w;
+        for (let px = x0; px <= x1b; px++) {
+          const c = cov[px];
+          if (c > 0) mask[base + px] = Math.min(255, Math.round(c * 255));
+        }
+      });
+    }
+    if (this._clip) {
+      const prev = this._clip;
+      for (let i = 0; i < mask.length; i++) mask[i] = (mask[i] * prev[i]) / 255;
+    }
+    this._clip = mask;
+  }
+  isPointInPath(x, y, rule) {
+    if (!_fin(x, y)) return false;
+    return _pointInPolys(this._devicePath(), x, y, rule === 'evenodd');
+  }
+  isPointInStroke(x, y) {
+    if (!_fin(x, y)) return false;
+    return _pointInPolys(this._strokePolys(), x, y, false);
+  }
+
+  // --------------------------------------------------------------- shapes
+  fillRect(x, y, w, h) {
+    if (!_fin(x, y, w, h) || w === 0 || h === 0) return;
+    const a = this._pt(x, y), b = this._pt(x + w, y), c = this._pt(x + w, y + h), d = this._pt(x, y + h);
+    this._fillPolys([[a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]]], this._sampler(this.fillStyle), false);
     this._markPaintDamage();
   }
   clearRect(x, y, w, h) {
-    x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
-    for (let py = Math.max(0,y); py < Math.min(this._h, y+h); py++) {
-      for (let px = Math.max(0,x); px < Math.min(this._w, x+w); px++) {
-        const idx = (py * this._w + px) * 4;
-        this._buf[idx] = this._buf[idx+1] = this._buf[idx+2] = this._buf[idx+3] = 0;
+    if (!_fin(x, y, w, h) || w === 0 || h === 0) return;
+    const a = this._pt(x, y), b = this._pt(x + w, y), c = this._pt(x + w, y + h), d = this._pt(x, y + h);
+    const clip = this._clip, W = this._w;
+    this._scan([[a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]]], false, (py, cov, x0, x1b) => {
+      const base = py * W;
+      for (let px = x0; px <= x1b; px++) {
+        let cvg = cov[px];
+        if (cvg <= 0.0015) continue;
+        if (clip) { const m = clip[base + px] / 255; if (m <= 0) continue; cvg *= m; }
+        const idx = (base + px) * 4;
+        if (cvg >= 0.998) { this._buf[idx] = this._buf[idx + 1] = this._buf[idx + 2] = this._buf[idx + 3] = 0; }
+        else {
+          // Straight alpha: erasing scales coverage, never the colour.
+          this._buf[idx + 3] = Math.round(this._buf[idx + 3] * (1 - cvg));
+        }
       }
-    }
+    });
     this._markPaintDamage();
   }
   strokeRect(x, y, w, h) {
-    const [r,g,b,a] = this._parseColor(this.strokeStyle);
-    const lw = this.lineWidth;
-    for (let px = Math.round(x); px < Math.round(x+w); px++) {
-      for (let l = 0; l < lw; l++) { this._setPixel(px, Math.round(y)+l, r,g,b,a); this._setPixel(px, Math.round(y+h)-1-l, r,g,b,a); }
-    }
-    for (let py = Math.round(y); py < Math.round(y+h); py++) {
-      for (let l = 0; l < lw; l++) { this._setPixel(Math.round(x)+l, py, r,g,b,a); this._setPixel(Math.round(x+w)-1-l, py, r,g,b,a); }
-    }
+    if (!_fin(x, y, w, h)) return;
+    const saved = this._subpaths, savedCur = this._cur;
+    this._subpaths = []; this._cur = null;
+    this.rect(x, y, w, h);
+    const polys = this._strokePolys();
+    this._subpaths = saved; this._cur = savedCur;
+    if (polys.length) this._fillPolys(polys, this._sampler(this.strokeStyle), false);
     this._markPaintDamage();
   }
+
+  // ----------------------------------------------------------------- text
+  // The glyph shapes stay as they were: deterministic pseudo-glyphs from the
+  // fingerprint RNG rather than real outlines. Only placement now honours the
+  // transform, alignment and baseline.
+  _textOrigin(text, x, y) {
+    const metrics = this.measureText(text);
+    let ox = x;
+    const align = this.textAlign;
+    if (align === 'center') ox -= metrics.width / 2;
+    else if (align === 'right' || align === 'end') ox -= metrics.width;
+    let oy = y;
+    const base = this.textBaseline;
+    if (base === 'top' || base === 'hanging') oy += metrics.actualBoundingBoxAscent;
+    else if (base === 'middle') oy += metrics.actualBoundingBoxAscent / 2;
+    else if (base === 'bottom' || base === 'ideographic') oy -= metrics.actualBoundingBoxDescent;
+    return this._pt(ox, oy);
+  }
   fillText(text, x, y) {
-    const [r,g,b,a] = this._parseColor(this.fillStyle);
+    if (!_fin(x, y)) return;
+    const col = this._parseColor(this.fillStyle) || [0, 0, 0, 255];
+    const [r, g, b, a] = col;
     const fontSize = parseInt(this.font) || 10;
-    const scale = Math.max(1, Math.round(fontSize / 10));
+    const scale = Math.max(1, Math.round(fontSize / 10 * this._scaleFactor()));
     const str = String(text);
-    let cx = Math.round(x);
+    const origin = this._textOrigin(str, x, y);
+    let cx = Math.round(origin[0]);
+    const baseY = Math.round(origin[1]);
     for (let i = 0; i < str.length; i++) {
       const code = str.charCodeAt(i);
       for (let row = 0; row < 7; row++) {
-        for (let col = 0; col < 5; col++) {
-          const on = ((_fpRand(code * 100 + row * 10 + col) > 0.45) &&
-                      (row > 0 && row < 6 && col > 0 && col < 4)) ||
-                     (_fpRand(code * 200 + row * 7 + col) > 0.7);
+        for (let col2 = 0; col2 < 5; col2++) {
+          const on = ((_fpRand(code * 100 + row * 10 + col2) > 0.45) &&
+                      (row > 0 && row < 6 && col2 > 0 && col2 < 4)) ||
+                     (_fpRand(code * 200 + row * 7 + col2) > 0.7);
           if (on) {
             for (let sy = 0; sy < scale; sy++) {
               for (let sx = 0; sx < scale; sx++) {
-                this._setPixel(cx + col*scale + sx, Math.round(y) - 7*scale + row*scale + sy, r, g, b, a);
+                this._setPixel(cx + col2 * scale + sx, baseY - 7 * scale + row * scale + sy, r, g, b, a);
               }
             }
           }
@@ -12972,15 +13732,30 @@ class _Canvas2D {
     }
     this._markPaintDamage();
   }
-  strokeText(text, x, y) { this.fillText(text, x, y); }
+  strokeText(text, x, y) {
+    const saved = this.fillStyle;
+    this.fillStyle = this.strokeStyle;
+    this.fillText(text, x, y);
+    this.fillStyle = saved;
+  }
   measureText(t) {
     const fontSize = parseInt(this.font) || 10;
     const scale = Math.max(1, Math.round(fontSize / 10));
-    return { width: String(t).length * 6 * scale, actualBoundingBoxAscent: 7*scale, actualBoundingBoxDescent: 2*scale };
+    const width = String(t).length * 6 * scale;
+    return {
+      width,
+      actualBoundingBoxLeft: 0, actualBoundingBoxRight: width,
+      actualBoundingBoxAscent: 7 * scale, actualBoundingBoxDescent: 2 * scale,
+      fontBoundingBoxAscent: 7 * scale, fontBoundingBoxDescent: 2 * scale,
+      emHeightAscent: 7 * scale, emHeightDescent: 2 * scale,
+      alphabeticBaseline: 0, hangingBaseline: 7 * scale, ideographicBaseline: -2 * scale,
+    };
   }
+
+  // -------------------------------------------------------------- pixels
   getImageData(x, y, w, h) {
-    x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
-    const data = new Uint8ClampedArray(w * h * 4);
+    x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    const data = new Uint8ClampedArray(Math.max(0, w * h * 4));
     for (let py = 0; py < h; py++) {
       for (let px = 0; px < w; px++) {
         const srcX = x + px, srcY = y + py;
@@ -12988,17 +13763,17 @@ class _Canvas2D {
         if (srcX >= 0 && srcX < this._w && srcY >= 0 && srcY < this._h) {
           const srcIdx = (srcY * this._w + srcX) * 4;
           data[dstIdx] = this._buf[srcIdx];
-          data[dstIdx+1] = this._buf[srcIdx+1];
-          data[dstIdx+2] = this._buf[srcIdx+2];
-          data[dstIdx+3] = this._buf[srcIdx+3];
+          data[dstIdx + 1] = this._buf[srcIdx + 1];
+          data[dstIdx + 2] = this._buf[srcIdx + 2];
+          data[dstIdx + 3] = this._buf[srcIdx + 3];
         }
       }
     }
-    return { data, width: w, height: h };
+    return { data, width: w, height: h, colorSpace: 'srgb' };
   }
   putImageData(imageData, dx, dy) {
-    dx=Math.round(dx); dy=Math.round(dy);
-    const {data, width: w, height: h} = imageData;
+    dx = Math.round(dx); dy = Math.round(dy);
+    const { data, width: w, height: h } = imageData;
     for (let py = 0; py < h; py++) {
       for (let px = 0; px < w; px++) {
         const srcIdx = (py * w + px) * 4;
@@ -13006,78 +13781,66 @@ class _Canvas2D {
         if (x >= 0 && x < this._w && y >= 0 && y < this._h) {
           const dstIdx = (y * this._w + x) * 4;
           this._buf[dstIdx] = data[srcIdx];
-          this._buf[dstIdx+1] = data[srcIdx+1];
-          this._buf[dstIdx+2] = data[srcIdx+2];
-          this._buf[dstIdx+3] = data[srcIdx+3];
+          this._buf[dstIdx + 1] = data[srcIdx + 1];
+          this._buf[dstIdx + 2] = data[srcIdx + 2];
+          this._buf[dstIdx + 3] = data[srcIdx + 3];
         }
       }
     }
     this._markPaintDamage();
   }
-  createImageData(w, h) { return { data: new Uint8ClampedArray(w*h*4), width: w, height: h }; }
+  createImageData(w, h) {
+    if (w && typeof w === 'object') return { data: new Uint8ClampedArray(w.width * w.height * 4), width: w.width, height: w.height, colorSpace: 'srgb' };
+    return { data: new Uint8ClampedArray(Math.max(0, w * h * 4)), width: w, height: h, colorSpace: 'srgb' };
+  }
   drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) {
-    if (img && img._ctx && img._ctx._buf) {
-      const src = img._ctx;
-      dx = dx ?? sx; dy = dy ?? sy; dw = dw ?? (sw ?? src._w); dh = dh ?? (sh ?? src._h);
-      for (let py = 0; py < dh; py++) {
-        for (let px = 0; px < dw; px++) {
-          const srcX = Math.floor((sx||0) + px * (sw||src._w) / dw);
-          const srcY = Math.floor((sy||0) + py * (sh||src._h) / dh);
-          if (srcX >= 0 && srcX < src._w && srcY >= 0 && srcY < src._h) {
-            const srcIdx = (srcY * src._w + srcX) * 4;
-            this._setPixel(dx+px, dy+py, src._buf[srcIdx], src._buf[srcIdx+1], src._buf[srcIdx+2], src._buf[srcIdx+3]);
-          }
-        }
+    const src = _imageSource(img);
+    if (!src) return;
+    if (dx === undefined) { dx = sx ?? 0; dy = sy ?? 0; dw = src.w; dh = src.h; sx = 0; sy = 0; sw = src.w; sh = src.h; }
+    else if (dw === undefined) { dw = sw; dh = sh; sw = src.w; sh = src.h; sx = 0; sy = 0; }
+    if (!_fin(dx, dy, dw, dh) || dw === 0 || dh === 0) return;
+    sx = sx || 0; sy = sy || 0; sw = sw || src.w; sh = sh || src.h;
+    // Sample through the inverse transform so a scaled or rotated context maps
+    // the source correctly instead of ignoring the matrix.
+    const inv = this._inverse();
+    if (!inv) return;
+    const a = this._pt(dx, dy), b = this._pt(dx + dw, dy), c = this._pt(dx + dw, dy + dh), d = this._pt(dx, dy + dh);
+    const clip = this._clip, W = this._w;
+    this._scan([[a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1]]], false, (py, cov, x0, x1b) => {
+      const base = py * W;
+      for (let px = x0; px <= x1b; px++) {
+        let cvg = cov[px];
+        if (cvg <= 0.0015) continue;
+        if (cvg > 1) cvg = 1;
+        if (clip) { const m = clip[base + px] / 255; if (m <= 0) continue; cvg *= m; }
+        const ux = px + 0.5, uy = py + 0.5;
+        const lx = inv[0] * ux + inv[2] * uy + inv[4], ly = inv[1] * ux + inv[3] * uy + inv[5];
+        const u = (lx - dx) / dw, v = (ly - dy) / dh;
+        if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+        const srcX = Math.floor(sx + u * sw), srcY = Math.floor(sy + v * sh);
+        if (srcX < 0 || srcX >= src.w || srcY < 0 || srcY >= src.h) continue;
+        const si = (srcY * src.w + srcX) * 4;
+        this._blend((base + px) * 4, src.buf[si], src.buf[si + 1], src.buf[si + 2], src.buf[si + 3], cvg);
       }
-    }
+    });
     this._markPaintDamage();
   }
-  beginPath() { this._path = []; }
-  closePath() {}
-  moveTo(x, y) { if (this._path) this._path.push({t:'M',x,y}); }
-  lineTo(x, y) { if (this._path) this._path.push({t:'L',x,y}); }
-  bezierCurveTo() {} quadraticCurveTo() {}
-  arc(x, y, r, s, e) { if (this._path) this._path.push({t:'A',x,y,r}); }
-  arcTo() {}
-  rect(x, y, w, h) { this.fillRect(x, y, w, h); }
-  fill() {
-    if (!this._path) return;
-    const [r,g,b,a] = this._parseColor(this.fillStyle);
-    for (const seg of this._path) {
-      if (seg.t === 'A') {
-        const cx = Math.round(seg.x), cy = Math.round(seg.y), rad = seg.r;
-        const r2 = rad * rad;
-        for (let py = Math.max(0, cy - rad); py <= Math.min(this._h - 1, cy + rad); py++) {
-          for (let px = Math.max(0, cx - rad); px <= Math.min(this._w - 1, cx + rad); px++) {
-            if ((px-cx)*(px-cx) + (py-cy)*(py-cy) <= r2) this._setPixel(px, py, r, g, b, a);
-          }
-        }
-      }
-    }
-    this._path = [];
-    this._markPaintDamage();
+
+  // ------------------------------------------------------------ paint servers
+  createLinearGradient(x0, y0, x1, y1) { return new _CanvasGradient('linear', { x0, y0, x1, y1 }); }
+  createRadialGradient(x0, y0, r0, x1, y1, r1) { return new _CanvasGradient('radial', { x0, y0, r0, x1, y1, r1 }); }
+  createConicGradient(startAngle, x, y) { return new _CanvasGradient('conic', { a: startAngle || 0, x: x || 0, y: y || 0 }); }
+  createPattern(image, repetition) {
+    const src = _imageSource(image);
+    if (!src) return null;
+    return new _CanvasPattern(src, repetition || 'repeat');
   }
-  stroke() {}
-  clip() {}
-  save() { this._stateStack.push({fillStyle: this.fillStyle, strokeStyle: this.strokeStyle, globalAlpha: this.globalAlpha, font: this.font, lineWidth: this.lineWidth}); }
-  restore() { const s = this._stateStack.pop(); if (s) Object.assign(this, s); }
-  translate() {} rotate() {} scale() {}
-  setTransform() {} resetTransform() {} transform() {}
-  createLinearGradient(x0,y0,x1,y1) { return { addColorStop(){}, _x0:x0,_y0:y0,_x1:x1,_y1:y1 }; }
-  createRadialGradient() { return { addColorStop(){} }; }
-  createPattern() { return {}; }
-  isPointInPath() { return false; }
-  isPointInStroke() { return false; }
-  // Line-dash plus a few path/style methods that charting libraries (Highcharts,
-  // ECharts) call on every animation frame. A missing setLineDash threw
-  // "is not a function" from a timer each tick, spamming errors (#258).
-  setLineDash() {}
-  getLineDash() { return []; }
-  ellipse() {}
-  roundRect() {}
-  createConicGradient() { return { addColorStop(){} }; }
   getContextAttributes() { return { alpha: true, desynchronized: false, colorSpace: "srgb", willReadFrequently: false }; }
 }
+
+// Pages feature-detect these and some libraries check instanceof.
+globalThis.CanvasGradient = _CanvasGradient;
+globalThis.CanvasPattern = _CanvasPattern;
 
 class HTMLCanvasElement extends Element {
   get width() {

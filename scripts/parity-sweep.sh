@@ -24,6 +24,23 @@ for bin in "$RUST" "$CS"; do
   fi
 done
 
+# A `cargo test --release -p obscura-cli` run (no --features render) rewrites
+# target/release/obscura with a default-features binary, which then reports
+# nothing for every screenshot and silently turns this sweep's render lanes into
+# noise. Catch that here rather than in the results.
+require_render() {
+  local bin="$1" label="$2"
+  if "$bin" fetch "data:text/html,<b>x</b>" --screenshot /dev/null --quiet --timeout 20 2>&1 \
+      | grep -q "requires a build with the render feature"; then
+    echo "$label was built without the render feature: $bin" >&2
+    echo "rebuild it with: cargo build --release -p obscura-cli --bins --features render" >&2
+    echo "(a plain 'cargo test --release -p obscura-cli' overwrites it)" >&2
+    exit 1
+  fi
+}
+
+require_render "$RUST" "the reference"
+
 pass=0
 fail=0
 crash=0

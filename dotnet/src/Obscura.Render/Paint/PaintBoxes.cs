@@ -151,6 +151,9 @@ internal static class PaintInline
                             backgroundOrigin,
                             radial.Center,
                             radial.Stops,
+                            // The legacy single-gradient tuple carries no authored stop strings; the
+                            // percentages already in Stops are the whole story.
+                            [],
                             fragmentStyle.BackgroundRadialGradientGeometry,
                             fragmentStyle.FontSize ?? 16f,
                             rootFontSize,
@@ -591,6 +594,9 @@ internal static class PaintGenerated
                 originRect,
                 radial.Center,
                 radial.Stops,
+                // The legacy single-gradient tuple carries no authored stop strings; the
+                // percentages already in Stops are the whole story.
+                [],
                 style.BackgroundRadialGradientGeometry,
                 style.FontSize ?? 16f,
                 rootFontSize,

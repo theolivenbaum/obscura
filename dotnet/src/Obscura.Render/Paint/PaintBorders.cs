@@ -478,9 +478,9 @@ internal static class PaintBorders
     /// Paint an outset <c>box-shadow</c> layer behind the element's own box.
     /// </summary>
     /// <remarks>
-    /// The blur is approximated by nested rounded rects from a solid core out to the blur
-    /// radius, each at a fraction of the shadow alpha so source-over accumulation ramps the
-    /// coverage from full at the core to near-zero at the outer edge.
+    /// The blur is approximated by nested rounded rects marching inward from 2.5 sigma
+    /// outside the shape, each layer adding just enough alpha to reach the gaussian
+    /// coverage at its offset, followed by a solid core inside the ramp.
     /// </remarks>
     internal static void PaintBoxShadow(
         Pixmap pixmap,
@@ -558,31 +558,102 @@ internal static class PaintBorders
         }
         else
         {
-            uint steps = (uint)Math.Clamp((int)MathF.Ceiling(blur), 2, 24);
-
-            // Per-layer alpha chosen so `steps` source-over composites reach the target alpha
-            // at the core: 1 - (1 - a)^steps == A  =>  a = 1 - (1 - A)^(1/steps).
-            float aFrac = color.A / 255f;
-            float per = 1f - MathF.Pow(1f - aFrac, 1f / steps);
-            byte layerAlpha = (byte)Math.Clamp(F32.Round(per * 255f), 1f, 255f);
-            RgbaColor layerColor = new(color.R, color.G, color.B, layerAlpha);
+            // The blur is a gaussian of standard deviation blur/2 applied to the shadow
+            // shape, so coverage is A * Phi(-d / sigma) at signed distance d outside the
+            // shape edge: full alpha well inside, half at the edge itself, ~0 well
+            // outside. Ramping only outward from a fully opaque shape makes a wide blur
+            // read as a solid blob with a hard linear skirt instead of a soft halo, most
+            // visibly on the small glowing dots pages put next to status text.
+            float sigma = F32.Max(blur / 2f, 0.05f);
+            // 2.5 sigma is where the gaussian's remaining coverage (0.6%) is the last
+            // step an 8-bit alpha can still represent, and roughly one layer per pixel
+            // of ramp keeps the banding under the anti-aliasing.
+            float reach = 2.5f * sigma;
+            uint steps = (uint)Math.Clamp((int)MathF.Ceiling(2f * reach), 6, 24);
+            float targetAlpha = color.A / 255f;
+            float accumulated = 0f;
             for (uint j = 0; j < steps; j++)
             {
-                float e = blur * j / (steps - 1);
+                // Outermost layer first, marching inward, so each layer only has to add
+                // the coverage the ones outside it have not already laid down.
+                float t = 1f - (2f * j / (steps - 1));
+                float e = t * reach;
+                float target = targetAlpha * GaussianCoverage(e / sigma);
+                float remaining = 1f - accumulated;
+                if (remaining <= 0.001f)
+                {
+                    break;
+                }
+
+                float layer = Math.Clamp((target - accumulated) / remaining, 0f, 1f);
+                byte layerAlpha = (byte)Math.Clamp(F32.Round(layer * 255f), 0f, 255f);
+                if (layerAlpha == 0)
+                {
+                    continue;
+                }
+
                 FillShadowRect(
                     owned,
                     x0 - e - left,
                     y0 - e - top,
                     w0 + (2f * e),
                     h0 + (2f * e),
-                    rx0 + e,
-                    ry0 + e,
-                    layerColor,
+                    F32.Max(rx0 + e, 0f),
+                    F32.Max(ry0 + e, 0f),
+                    new RgbaColor(color.R, color.G, color.B, layerAlpha),
                     shadowMask);
+                accumulated = target;
+            }
+
+            // Everything further inside than the ramp is solid, and the mask still carves
+            // the element's own border box back out.
+            float coreRemaining = 1f - accumulated;
+            if (coreRemaining > 0.001f)
+            {
+                float layer = Math.Clamp((targetAlpha - accumulated) / coreRemaining, 0f, 1f);
+                byte layerAlpha = (byte)Math.Clamp(F32.Round(layer * 255f), 0f, 255f);
+                if (layerAlpha > 0)
+                {
+                    FillShadowRect(
+                        owned,
+                        x0 + reach - left,
+                        y0 + reach - top,
+                        w0 - (2f * reach),
+                        h0 - (2f * reach),
+                        F32.Max(rx0 - reach, 0f),
+                        F32.Max(ry0 - reach, 0f),
+                        new RgbaColor(color.R, color.G, color.B, layerAlpha),
+                        shadowMask);
+                }
             }
         }
 
         Surface.DrawPixmap(pixmap, left, top, owned, 1f, false, Affine2.Identity, ancestorClip);
+    }
+
+    /// <summary>
+    /// Fraction of a gaussian-blurred edge's coverage at <paramref name="z"/> standard
+    /// deviations outside the shape: 1 well inside, 0.5 at the edge, ~0 well outside.
+    /// </summary>
+    /// <remarks>
+    /// This is <c>Phi(-z)</c>. .NET has no <c>float</c> erf, so it uses the same
+    /// Abramowitz and Stegun 7.1.26 series the reference does (max error 1.5e-7, far
+    /// below one 8-bit alpha step) rather than a different approximation that would
+    /// drift from Rust in the last alpha count.
+    /// </remarks>
+    private static float GaussianCoverage(float z) => 0.5f * (1f + Erf(-z / MathF.Sqrt(2f)));
+
+    private static float Erf(float x)
+    {
+        float sign = x < 0f ? -1f : 1f;
+        x = MathF.Abs(x);
+        float t = 1f / (1f + (0.3275911f * x));
+        float y = 1f
+            - (((((((1.061405429f * t) - 1.453152027f) * t) + 1.421413741f) * t) - 0.284496736f) * t
+                + 0.254829592f)
+                * t
+                * MathF.Exp(-x * x);
+        return sign * y;
     }
 
     /// <summary>Fill one (possibly rounded) shadow rectangle with a flat color.</summary>

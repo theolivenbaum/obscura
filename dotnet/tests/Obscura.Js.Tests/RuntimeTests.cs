@@ -20123,7 +20123,17 @@ public sealed class RuntimeTests
                 {
                     return;
                 }
-                _ = Task.Run(() => ServeAsync(client, respond));
+                // A dedicated thread per connection, exactly as the Rust harness's
+                // std::thread::spawn does. Handlers here block (Thread.Sleep stands in
+                // for a slow origin), and on a 4-core box four of those on the thread
+                // pool starve the V8 loop's continuations and the HTTP client alongside
+                // them: the symptom was image loads landing before a 10ms timer, or
+                // failing outright, in roughly a third of runs.
+                new Thread(() => ServeAsync(client, respond).GetAwaiter().GetResult())
+                {
+                    IsBackground = true,
+                    Name = "raw-http-connection",
+                }.Start();
             }
         }
 
