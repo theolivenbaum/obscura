@@ -12,11 +12,12 @@ public static class McpCommand
         var proxy = CliOptions.MergeProxy(args.Proxy, mcp.Proxy);
         if (mcp.Http)
         {
-            if (mcp.Port is < 0 or > ushort.MaxValue)
-            {
-                throw new CliException($"--port must be between 0 and 65535, got {mcp.Port}");
-            }
-            await Http.RunAsync(mcp.Host, (ushort)mcp.Port, proxy, mcp.UserAgent, args.Stealth)
+            // The option is a u16 in Rust and its parser enforces that here too,
+            // reporting clap's message, so an out-of-range port never reaches
+            // this cast. Rust has no second runtime check and neither should
+            // this: a duplicate guard would only ever print a message the
+            // reference does not.
+            await Http.RunAsync(mcp.Host, checked((ushort)mcp.Port), proxy, mcp.UserAgent, args.Stealth)
                 .ConfigureAwait(false);
             return;
         }

@@ -153,13 +153,28 @@ public static class WorkerHost
                         var info = await page
                             .EvaluateForCdpWithTimeoutAsync(expression, true, true, 30_000)
                             .ConfigureAwait(false);
-                        result = info.Value is not null
-                            ? info.Value.DeepClone()
-                            : JsonValue.Create(info.Description);
+                        // Rust reads `info.value`, an Option that is Some even
+                        // when the value itself is JSON null, and only falls back
+                        // to the description when it is None. A JsonNode has no
+                        // representation for a bare JSON null other than a null
+                        // reference, so those two cases collapse here and
+                        // `Thrown` is what separates them: a thrown value (or a
+                        // rejected promise) is exactly where Rust has None and
+                        // uses the description. Without this, `--eval null` and
+                        // `--eval undefined` reported the string "null".
+                        result = info.Value is null && info.Thrown
+                            ? JsonValue.Create(info.Description)
+                            : info.Value?.DeepClone();
                     }
-                    catch (Exception error) when (error is Obscura.Js.Runtime.JsRuntimeException
-                        or InvalidOperationException or TimeoutException)
+                    // Rust matches `Err(_) => Value::Null`, so every failure mode
+                    // becomes a successful reply carrying null rather than
+                    // ending the command loop. Narrowing this to a few exception
+                    // types would let an unexpected one kill the worker, and the
+                    // parent would report "Read failed" for what the reference
+                    // answers.
+                    catch (Exception error) when (error is not OutOfMemoryException)
                     {
+                        Log.Debug($"evaluate failed: {error.Message}");
                         result = null;
                     }
                     response = Success(result);

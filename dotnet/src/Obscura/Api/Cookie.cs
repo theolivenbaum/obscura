@@ -1,27 +1,40 @@
+using System.Text.Json.Serialization;
 using Obscura.Js.Url;
 using Obscura.Net;
 
 namespace Obscura.Api;
 
 /// <summary>A cookie as exposed to the embeddable API.</summary>
+/// <remarks>
+/// The Rust type derives <c>Serialize</c>/<c>Deserialize</c> with no rename, so
+/// its JSON keys are the Rust field names. The property names here are the
+/// idiomatic C# ones and the JSON names are pinned to Rust's, so a cookie list
+/// written by one engine is readable by the other.
+/// </remarks>
 public sealed class Cookie
 {
     /// <summary>Cookie name.</summary>
+    [JsonPropertyName("name")]
     public required string Name { get; init; }
 
     /// <summary>Cookie value.</summary>
+    [JsonPropertyName("value")]
     public required string Value { get; init; }
 
     /// <summary>Scope domain.</summary>
+    [JsonPropertyName("domain")]
     public required string Domain { get; init; }
 
     /// <summary>Scope path.</summary>
+    [JsonPropertyName("path")]
     public required string Path { get; init; }
 
     /// <summary>Only sent over https when true.</summary>
+    [JsonPropertyName("secure")]
     public bool Secure { get; init; }
 
     /// <summary>Hidden from <c>document.cookie</c> when true.</summary>
+    [JsonPropertyName("http_only")]
     public bool HttpOnly { get; init; }
 
     /// <summary>Create a cookie from a name/value pair with Rust's defaults.</summary>

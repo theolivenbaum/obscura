@@ -249,9 +249,12 @@ public static class ScrapeCommand
                     ["worker"] = JsonValue.Create(index),
                 };
             }
-            catch (WorkerReadTimeoutException)
+            catch (WorkerReadFailedException)
             {
-                return await KillAndFailAsync(child, url, "timeout", taskStart, shutdownTimeout)
+                // Rust separates the two read outcomes: `Ok(Ok(0))` / `Ok(Err(_))`
+                // is "Read failed" (the worker closed stdout or the pipe broke),
+                // while only the elapsed `timeout(...)` is "timeout".
+                return await KillAndFailAsync(child, url, "Read failed", taskStart, shutdownTimeout)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -273,6 +276,16 @@ public static class ScrapeCommand
         await stdin.FlushAsync().ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// One response line, bounded by <paramref name="readTimeout"/> inside the
+    /// caller's overall worker budget.
+    /// </summary>
+    /// <remarks>
+    /// Null is end of stream, which Rust reports as "Read failed"; a cancelled
+    /// read propagates and the caller reports "timeout". An empty line is a real
+    /// line (Rust's <c>read_line</c> counts its newline), so it goes on to fail
+    /// JSON parsing rather than being mistaken for either.
+    /// </remarks>
     private static async Task<string> ReadLineAsync(
         StreamReader reader,
         TimeSpan readTimeout,
@@ -280,8 +293,17 @@ public static class ScrapeCommand
     {
         using var readBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         readBudget.CancelAfter(readTimeout);
-        var line = await reader.ReadLineAsync(readBudget.Token).ConfigureAwait(false);
-        return line is null or "" ? throw new WorkerReadTimeoutException() : line;
+        string? line;
+        try
+        {
+            line = await reader.ReadLineAsync(readBudget.Token).ConfigureAwait(false);
+        }
+        catch (IOException)
+        {
+            // `Ok(Err(_))` on the Rust side: an io error on the pipe.
+            throw new WorkerReadFailedException();
+        }
+        return line ?? throw new WorkerReadFailedException();
     }
 
     private static JsonObject ParseOrNotOk(string line)
@@ -333,5 +355,6 @@ public static class ScrapeCommand
         ["time_ms"] = JsonValue.Create((long)taskStart.Elapsed.TotalMilliseconds),
     };
 
-    private sealed class WorkerReadTimeoutException : Exception;
+    /// <summary>End of stream or an io error while reading a worker reply.</summary>
+    private sealed class WorkerReadFailedException : Exception;
 }
