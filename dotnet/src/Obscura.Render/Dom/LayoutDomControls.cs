@@ -39,7 +39,7 @@ public static partial class RenderDom
 
             float fontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
             nativeButtonContents[id] =
-                DomStyleFixups.NativeButtonIntrinsicContent(tree, id, styles, fontSize);
+                DomStyleFixups.NativeButtonIntrinsicContent(tree, id, styles, fontSize, engine);
         }
 
         Dictionary<NodeId, (bool Inline, bool Block)> nativeControlGridStretch = [];

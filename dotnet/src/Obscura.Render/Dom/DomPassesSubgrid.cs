@@ -554,7 +554,9 @@ internal static class DomSubgridPasses
 
             if (styles.TryGetValue(id, out LayoutStyle? style))
             {
-                Dimension value = Dimension.Px(F32.Max(intrinsicValue, 0f));
+                Dimension value = kind == DeferredCyclicInlineSourceKind.Expression
+                    ? Dimension.Auto
+                    : Dimension.Px(F32.Max(intrinsicValue, 0f));
                 switch (slot)
                 {
                     case 0:
@@ -602,13 +604,101 @@ internal static class DomSubgridPasses
 
         // This is the final-reflow boundary: preserve the main size selected by the outer flex
         // algorithm while descendants are resolved against it.
+        //
+        // DEVIATION from crates/obscura-render/src/dom.rs
+        // `resolve_deferred_flex_inline_sizes`, which pins every affected flex item in one
+        // pass off the intrinsic-neutral layout and only then restores percentages. That is
+        // right for an outermost item, whose used size the flex algorithm has already chosen,
+        // but wrong for a nested one: its measurement is taken inside ancestors whose own
+        // percentage widths are still neutralized to zero, so it gets pinned to its
+        // min-content. On Tesserae's Stack sample an `.tss-stack{width:100%}` panel sat at 0
+        // while the option row below it was pinned to 448px instead of 544px, wrapping every
+        // two-word radio label. Pin outermost-first instead, restoring each level's
+        // percentages and reflowing before measuring the next level down, so a nested item is
+        // always measured under ancestors that already have their real width. See
+        // "Known deviations" in todo.md.
         HashSet<NodeId> flexItems = [];
         foreach (DeferredCyclicInlineSize entry in deferred)
         {
             flexItems.Add(entry.FlexItem);
         }
 
-        foreach (NodeId flexItem in flexItems)
+        Dictionary<NodeId, int> renderedDepth = [];
+        int DepthOf(NodeId node)
+        {
+            List<NodeId> chain = [];
+            NodeId current = node;
+            while (!renderedDepth.ContainsKey(current))
+            {
+                chain.Add(current);
+                if (DomTraversal.RenderedParent(tree, current) is not { } parent)
+                {
+                    renderedDepth[current] = 0;
+                    chain.RemoveAt(chain.Count - 1);
+                    break;
+                }
+
+                current = parent;
+            }
+
+            for (int index = chain.Count - 1; index >= 0; index--)
+            {
+                NodeId step = chain[index];
+                renderedDepth[step] = DomTraversal.RenderedParent(tree, step) is { } parent
+                    ? renderedDepth[parent] + 1
+                    : 0;
+            }
+
+            return renderedDepth.TryGetValue(node, out int depth) ? depth : 0;
+        }
+
+        List<NodeId> orderedFlexItems = [.. flexItems];
+        orderedFlexItems.Sort((left, right) => DepthOf(left).CompareTo(DepthOf(right)));
+
+        int levelStart = 0;
+        while (levelStart < orderedFlexItems.Count)
+        {
+            int levelDepth = DepthOf(orderedFlexItems[levelStart]);
+            int levelEnd = levelStart + 1;
+            while (levelEnd < orderedFlexItems.Count
+                && DepthOf(orderedFlexItems[levelEnd]) == levelDepth)
+            {
+                levelEnd++;
+            }
+
+            HashSet<NodeId> level = [];
+            for (int index = levelStart; index < levelEnd; index++)
+            {
+                level.Add(orderedFlexItems[index]);
+            }
+
+            PinFlexItems(tree, taffyTree, taffyByDom, styles, deferred, level);
+            RestoreTypedPercentages(taffyTree, taffyByDom, styles, deferred, level);
+            relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
+            levelStart = levelEnd;
+        }
+
+        // Shrink-to-fit ancestors must be finalized while functional descendant widths still
+        // have their intrinsic-neutral declarations.
+        relayout(taffyTree, styles, DeferredFlexReflowPhase.FitContent);
+
+        return ResolveFunctionalInlineSizes(
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+    }
+
+    /// <summary>
+    /// Pin each flex item in <paramref name="level"/> to the inline size the flex algorithm
+    /// selected for it, so descendant percentages resolve against a definite basis.
+    /// </summary>
+    private static void PinFlexItems(
+        DomTree tree,
+        TaffyTree taffyTree,
+        Dictionary<NodeId, TaffyNodeId> taffyByDom,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        HashSet<NodeId> level)
+    {
+        foreach (NodeId flexItem in level)
         {
             if (!taffyByDom.TryGetValue(flexItem, out TaffyNodeId taffyId))
             {
@@ -661,12 +751,24 @@ internal static class DomSubgridPasses
             pinned.Size = pinnedSize;
             taffyTree.SetStyle(taffyId, pinned);
         }
+    }
 
-        // Once the flex item's used inline size is definite, plain percentages are no longer
-        // cyclic. Keep them typed in Taffy instead of flattening them to pixels.
+    /// <summary>
+    /// Once a flex item's used inline size is definite, the plain percentages under it are no
+    /// longer cyclic. Give them back to Taffy typed instead of flattened to pixels, so later
+    /// ancestor changes propagate through nested 100%/400% descendants.
+    /// </summary>
+    private static void RestoreTypedPercentages(
+        TaffyTree taffyTree,
+        Dictionary<NodeId, TaffyNodeId> taffyByDom,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        HashSet<NodeId> level)
+    {
         foreach (DeferredCyclicInlineSize entry in deferred)
         {
-            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent)
+            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent
+                || !level.Contains(entry.FlexItem))
             {
                 continue;
             }
@@ -743,15 +845,23 @@ internal static class DomSubgridPasses
 
             taffyTree.SetStyle(nodeId, restored);
         }
+    }
 
-        relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
-
-        // Shrink-to-fit ancestors must be finalized while functional descendant widths still
-        // have their intrinsic-neutral declarations.
-        relayout(taffyTree, styles, DeferredFlexReflowPhase.FitContent);
-
-        // Taffy cannot retain an arbitrary calc()/min()/max()/clamp() expression in a box-size
-        // field. Resolve those expressions only after their parent has final geometry.
+    /// <summary>
+    /// Taffy cannot retain an arbitrary calc()/min()/max()/clamp() expression in a box-size
+    /// field. Resolve those expressions only after their parent has final geometry.
+    /// </summary>
+    private static bool ResolveFunctionalInlineSizes(
+        DomTree tree,
+        TaffyTree taffyTree,
+        Dictionary<NodeId, TaffyNodeId> taffyByDom,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        float rootFs,
+        float vw,
+        float vh,
+        Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
+    {
         HashSet<NodeId> functionalNodes = [];
         foreach (DeferredCyclicInlineSize entry in deferred)
         {

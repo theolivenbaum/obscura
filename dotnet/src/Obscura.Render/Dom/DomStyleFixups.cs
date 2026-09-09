@@ -65,12 +65,13 @@ internal static class DomStyleFixups
         DomTree tree,
         NodeId root,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        float fontSize)
+        float fontSize,
+        TextEngine engine)
     {
         NativeButtonIntrinsicContent content = new();
         foreach (NodeId child in DomTraversal.RenderedChildren(tree, root))
         {
-            NativeButtonWalk(tree, child, styles, fontSize, content);
+            NativeButtonWalk(tree, child, styles, fontSize, engine, content);
         }
 
         return content;
@@ -93,6 +94,7 @@ internal static class DomStyleFixups
         NodeId id,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         float fontSize,
+        TextEngine engine,
         NativeButtonIntrinsicContent content)
     {
         if (tree.GetNode(id) is not { } node)
@@ -139,9 +141,62 @@ internal static class DomStyleFixups
             return;
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs `native_button_intrinsic_content`,
+        // which recurses straight past every non-replaced element and counts only its text.
+        // A button laid out as a flex row is ordinarily sized by CSS intrinsic sizing, which
+        // sums each item's outer size, so dropping element boxes and their margins makes the
+        // shortcut narrower than the content it will hold. Tesserae's toolbar buttons are
+        // `<i class="fi-rr-*" style="width:12px"></i><span style="margin-left:10px">Label</span>`
+        // and came out 22px short of Chromium on every one, which then shrank the label span
+        // and wrapped it. Count a definite-width child as its own outer box (as the replaced
+        // branch above already does) and carry every child's horizontal edges. See
+        // "Known deviations" in todo.md.
+        float childEdges = 0f;
+        if (style is not null)
+        {
+            float horizontal = style.Padding.Left
+                + style.Padding.Right
+                + style.Border.Left
+                + style.Border.Right;
+            float margins = F32.Max(style.Margin.Left, 0f) + F32.Max(style.Margin.Right, 0f);
+            if (DefiniteInlineSize(style.Width, fontSize) is { } childWidth)
+            {
+                float childBorderBox = style.BoxSizing == BoxSizing.ContentBox
+                    ? childWidth + horizontal
+                    : F32.Max(childWidth, horizontal);
+                content.AtomicWidth += childBorderBox + margins;
+
+                // A definite inline size is the whole contribution; its own text is laid out
+                // inside it and cannot widen the button further.
+                return;
+            }
+
+            childEdges = horizontal + margins;
+        }
+
+        content.AtomicWidth += childEdges;
+
+        // An icon font renders through ::before, so a descendant with no element or text
+        // children can still be 12px wide. Shape the generated content with the pseudo's own
+        // style, not the button's: the glyph comes from the icon face.
+        if (style is not null)
+        {
+            if (style.BeforeContent is { Length: > 0 } beforeContent)
+            {
+                content.AtomicWidth += engine.MeasureControlLabel(
+                    beforeContent, style.BeforePseudo ?? style);
+            }
+
+            if (style.AfterContent is { Length: > 0 } afterContent)
+            {
+                content.AtomicWidth += engine.MeasureControlLabel(
+                    afterContent, style.AfterPseudo ?? style);
+            }
+        }
+
         foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
         {
-            NativeButtonWalk(tree, child, styles, fontSize, content);
+            NativeButtonWalk(tree, child, styles, fontSize, engine, content);
         }
     }
 

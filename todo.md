@@ -372,6 +372,34 @@ have created one.
 tree only and the two engines legitimately disagree on them. Each one carries a
 DEVIATION comment at the C# code that differs.
 
+- **DEVIATION - a nested flex item was pinned from a layout where its own
+  ancestors were still collapsed.** `resolve_deferred_flex_inline_sizes` pins
+  every affected flex item in one pass off the intrinsic-neutral layout and only
+  then restores percentages. That is right for an outermost item, whose used size
+  the flex algorithm has already chosen, but a nested item gets measured inside
+  ancestors whose percentage widths are still neutralized to zero, so it is
+  pinned to its min-content and stays there. On Tesserae's Stack sample an
+  `.tss-stack { width: 100% }` panel sat at 0 while the radio row below it was
+  pinned to 448px instead of 544px, wrapping every two-word label. The port pins
+  outermost-first, restoring each level's percentages and reflowing before
+  measuring the next level down (`PinFlexItems` / `RestoreTypedPercentages` /
+  `ResolveFunctionalInlineSizes` in `DomPassesSubgrid`).
+- **DEVIATION - a cyclic functional inline size neutralized to `0px` instead of
+  `auto`.** CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
+  contribution; the reference writes a definite `Px(max(value, 0))`, which is
+  `0px` for the common `calc(100% - Npx)` and collapses the box for the whole
+  intrinsic pass. The port neutralizes an Expression source to `Auto` (bare
+  percentages keep the reference's zero, where the surrounding machinery depends
+  on it).
+- **DEVIATION - an auto-sized `<button>`'s intrinsic width ignored element
+  children.** `native_button_intrinsic_content` recurses past every non-replaced
+  element and counts only text plus replaced boxes, so a flex button's child
+  boxes, their margins and any icon-font `::before` contributed nothing. Tesserae's
+  toolbar buttons (`<i class="fi-rr-*"></i><span>Label</span>`) came out 22px short
+  on every one, which shrank the label span and wrapped it, and then failed to wrap
+  the button row Chromium wraps. The port counts a definite-width child as its own
+  outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
+  content with the pseudo's own style.
 - **DEVIATION - functional block-axis sizes resolved against the viewport
   height.** `crates/obscura-render/src/dom.rs` uses `viewport.1` as the
   percentage basis for `size_expressions[1|3|5]`. Chromium resolves a block-axis
