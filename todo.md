@@ -237,16 +237,31 @@ The largest component. Split into stages; each stage is independently testable.
   it looked exactly like a regression on a single run each way, and startup cost
   was ruled out separately (18 interleaved runs: 626ms median before, 622ms
   after).
-- **Two Obscura.Js tests are timing-flaky, and not only under solution load.**
-  830 of 849 is the clean result, but three consecutive runs of that project
-  alone gave 2 failures, then 1, then 0, so the earlier note that they pass in
-  isolation was optimistic. The pair that showed up:
-  `OpsTests.Read_body_capped_rejects_oversized_streamed_body` and
-  `RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop`. The
-  first prepared render on a fresh process costs ~300ms in embedded font
-  initialization against ~1ms once warm, so tests that schedule work tens of
-  milliseconds apart collapse two events into one when the host is busy. Fix the
-  latency rather than the tests.
+- **`RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` is a
+  real port defect, not host-load flakiness.** Measured on this 4-core box:
+  C# 4-5 passes in 8-10 runs, the Rust counterpart 8 of 8. The earlier note here
+  blamed first-render font-initialization latency collapsing two events into one;
+  the diagnostics say otherwise. In every failing run `__imageTimerRan` is
+  already `true`, so event-loop ordering is fine. What differs is the request
+  count: passing runs issue exactly 4 requests, failing runs issue 5 or 7, with
+  `/one.png` and `/three.png` (one `<img>` each) duplicated. Each duplicate comes
+  back with `Known == false`, which `_applyImageMetadata` turns into an `error`
+  event with `naturalWidth` 0 - the assertion that actually fires. So the chain
+  is: something makes `FinishAsyncImageMetadata` answer `stale` (or
+  `ProfiledCachedImageMetadata` answer null), bootstrap.js re-queues the request
+  on that answer, and the retry observes an unseeded cache entry. Which of the
+  four `Stale` predicates in `RenderOps.FinishAsyncImageMetadata` fires is not
+  yet pinned. Ruled out along the way: the `ObscuraHttpClient.ConnectCallback`
+  change for IP literals (2 of 8 with the old client, so if anything worse), and
+  thread-pool starvation from the harness's blocking handler - `RawHttpServer`
+  now gives each connection a dedicated thread, exactly as the Rust harness's
+  `std::thread::spawn` does, which removes the confound but does not change the
+  pass rate.
+- **`OpsTests.Read_body_capped_rejects_oversized_streamed_body` is timing-flaky.**
+  The first prepared render on a fresh process costs ~300ms in embedded font
+  initialization against ~1ms once warm, so a test that schedules work tens of
+  milliseconds apart can collapse two events into one when the host is busy. Fix
+  the latency rather than the test.
 
 ## 9. Validation
 
@@ -324,6 +339,39 @@ have created one.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Reference gaps fixed in both engines
+
+These were found by comparing against Chromium, were present identically in
+Rust and C#, and were fixed on both sides rather than papered over in the port.
+
+- **Blurred `box-shadow` painted as a solid blob.** Both engines ramped alpha
+  only outward from a fully opaque shape at a uniform per-layer alpha, so a wide
+  blur read as a solid shape with a linear skirt. The spec's blur is a gaussian
+  of sigma = blur/2, so coverage is ~50% at the shape edge. Layers now march
+  inward from 2.5 sigma. Mean absolute difference against Chromium over the
+  affected region: 62.4 -> 3.5.
+- **`radial-gradient` dropped absolute-length stop positions.** Only
+  percentages survived parsing, so `transparent 32rem` became an unpositioned
+  stop and the ramp spread over the whole ending shape. Radial layers now carry
+  the authored strings to paint like linear layers already did, and resolve them
+  against the gradient ray.
+- **The `background` shorthand dropped its color layer** whenever any gradient
+  layer parsed, so `background: linear-gradient(...), #00f` composited over
+  whatever was behind the element instead of over blue.
+
+Together the last two took `test-html-files/renderlab-complex.html` from 92.8%
+of pixels differing from Chromium (47.3 mean abs) to 37.7% (21.9) at 640px.
+
+### Still missing in both engines
+
+- **`filter: blur()` is not parsed or applied** anywhere in the render layer.
+  A blurred element renders sharp. Separate from `box-shadow` blur, which is
+  implemented.
+- **`backdrop-filter` is not implemented.** The dominant remaining contributor
+  to the renderlab fixture's difference against Chromium.
+- **Inset `box-shadow` is parsed but never painted.** `paint_box_shadow` returns
+  early on `shadow.inset`.
 
 - **Stealth TLS impersonation is not ported.** `wreq`/BoringSSL fingerprints the
   ClientHello; .NET's `SocketsHttpHandler` does not expose that surface and every
