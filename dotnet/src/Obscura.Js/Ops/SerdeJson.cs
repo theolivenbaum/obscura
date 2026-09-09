@@ -54,6 +54,13 @@ internal static class SerdeJson
     internal static string Number(double value) =>
         double.IsFinite(value) ? Ryu(value) : "null";
 
+    /// <summary>
+    /// The same rendering, exposed for callers that need the number as text rather
+    /// than as a JSON fragment (a CDP <c>RemoteObject.description</c>, for example,
+    /// which Rust builds with <c>serde_json::Number::to_string</c>).
+    /// </summary>
+    internal static string NumberText(double value) => Number(value);
+
     /// <summary>An <c>f32</c> field inside a <c>json!</c> literal: widened, then ryu.</summary>
     internal static string NumberF32(float value) => Number(value);
 
@@ -174,8 +181,7 @@ internal static class SerdeJson
             // 1e30
             var sb = Start(negative, 8);
             sb.Append(digits);
-            sb.Append('e');
-            sb.Append((pointPosition - 1).ToString(CultureInfo.InvariantCulture));
+            AppendExponent(sb, pointPosition - 1);
             return sb.ToString();
         }
 
@@ -184,9 +190,24 @@ internal static class SerdeJson
         scientific.Append(digits[0]);
         scientific.Append('.');
         scientific.Append(digits, 1, length - 1);
-        scientific.Append('e');
-        scientific.Append((pointPosition - 1).ToString(CultureInfo.InvariantCulture));
+        AppendExponent(scientific, pointPosition - 1);
         return scientific.ToString();
+    }
+
+    /// <summary>
+    /// Appends a ryu-style exponent, which carries an explicit <c>+</c> when
+    /// positive: <c>1e+30</c>, not <c>1e30</c>. Verified against the reference
+    /// engine, which prints <c>1e+30</c> and <c>1e-7</c>. Dropping the sign still
+    /// parses, but it is a different byte string on the wire.
+    /// </summary>
+    private static void AppendExponent(StringBuilder output, int exponent)
+    {
+        output.Append('e');
+        if (exponent >= 0)
+        {
+            output.Append('+');
+        }
+        output.Append(exponent.ToString(CultureInfo.InvariantCulture));
     }
 
     private static StringBuilder Start(bool negative, int capacity)

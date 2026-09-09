@@ -1,3 +1,4 @@
+using System.CommandLine.Parsing;
 using System.CommandLine;
 
 namespace Obscura.Cli.CommandLine;
@@ -177,11 +178,18 @@ public static class CliDefinition
             {
                 result.AddError("--screenshot cannot be used with --file");
             }
-            if (result.GetValue(Fetch.Timeout) < 1)
+            RejectOptionLikePositionals(result, Fetch.Url);
+            // Only a supplied value is range-checked. clap's
+            // `value_parser!(u64).range(1..)` and `NonZeroUsize` validate the
+            // token the user typed, never the default. Reading these through
+            // `CommandResult.GetValue` would not apply DefaultValueFactory
+            // either: inside a validator an absent option reads back as 0, so
+            // every `fetch` with no explicit --timeout/--concurrency would fail.
+            if (Supplied(result, Fetch.Timeout) is { } timeout && timeout < 1)
             {
                 result.AddError("--timeout must be at least 1");
             }
-            if (result.GetValue(Fetch.Concurrency) < 1)
+            if (Supplied(result, Fetch.Concurrency) is { } concurrency && concurrency < 1)
             {
                 result.AddError("--concurrency must be at least 1");
             }
@@ -197,11 +205,12 @@ public static class CliDefinition
         };
         cmd.Validators.Add(result =>
         {
-            if (result.GetValue(Scrape.Timeout) < 1)
+            RejectOptionLikePositionals(result, Scrape.Urls);
+            if (Supplied(result, Scrape.Timeout) is { } timeout && timeout < 1)
             {
                 result.AddError("--timeout must be at least 1");
             }
-            if (result.GetValue(Scrape.Concurrency) < 1)
+            if (Supplied(result, Scrape.Concurrency) is { } concurrency && concurrency < 1)
             {
                 result.AddError("--concurrency must be at least 1");
             }
@@ -213,4 +222,38 @@ public static class CliDefinition
     {
         Mcp.Http, Mcp.Host, Mcp.Port, Mcp.Proxy, Mcp.UserAgent,
     };
+
+    /// <summary>
+    /// Reject a token that looks like an option but was bound to a positional
+    /// argument.
+    /// </summary>
+    /// <remarks>
+    /// clap refuses an unknown flag; System.CommandLine happily binds
+    /// <c>--nope</c> to the next positional, so <c>obscura fetch --nope</c>
+    /// would try to navigate to "--nope" instead of reporting a usage error. No
+    /// URL starts with a dash, so any such token is a typo. The message is
+    /// clap's, because the exit code and the shape are both user visible.
+    /// </remarks>
+    private static void RejectOptionLikePositionals(CommandResult result, Argument argument)
+    {
+        if (result.GetResult(argument) is not ArgumentResult supplied)
+        {
+            return;
+        }
+        foreach (var token in supplied.Tokens)
+        {
+            if (token.Value.Length > 1 && token.Value[0] == '-')
+            {
+                result.AddError($"unexpected argument '{token.Value}' found");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The value the user actually typed for an option, or null when it was
+    /// absent. <c>SymbolResult.GetValue</c> does not consult
+    /// <c>DefaultValueFactory</c>, so it cannot be used for this.
+    /// </summary>
+    private static T? Supplied<T>(CommandResult result, Option<T> option) where T : struct =>
+        result.GetResult(option) is { } supplied ? supplied.GetValueOrDefault<T>() : null;
 }

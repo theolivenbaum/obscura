@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The screenshot tests decode the CLI's PNG the way the Rust test does
+         with the `image` crate; SkiaSharp is already on the CLI's transitive
+         graph through Obscura.Render, so this adds no new dependency. -->
+    <PackageReference Include="SkiaSharp" />
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />

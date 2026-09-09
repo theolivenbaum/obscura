@@ -5,6 +5,9 @@
     <RootNamespace>Obscura.Mcp.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- These tests drive real sockets and a real page; the xUnit cancellation
+         token adds nothing and the Rust originals have no equivalent. -->
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

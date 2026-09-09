@@ -593,7 +593,19 @@ public sealed partial class Page
                 js,
                 "<current-script>",
                 $"globalThis.__currentScriptNid={script.Nid.ToString(CultureInfo.InvariantCulture)};");
-            js.ExecuteScriptGuarded(executionUrl, value.Code);
+            // A page script that throws is a page problem, not a navigation failure:
+            // the reference logs `Script error (url): ...` and runs the next script.
+            // Letting it escape here failed the whole navigation (and therefore
+            // Page.navigate over CDP) for any page with one uncaught error.
+            try
+            {
+                js.ExecuteScriptGuarded(executionUrl, value.Code);
+            }
+            catch (JsRuntimeException)
+            {
+                // Reported to the page through the runtime's uncaught-exception queue.
+            }
+
             TryExecute(js, "<current-script>", "globalThis.__currentScriptNid=0;");
         }
         else if (script.Inline.Length != 0 && Js is { } inlineJs)
@@ -602,7 +614,16 @@ public sealed partial class Page
                 inlineJs,
                 "<current-script>",
                 $"globalThis.__currentScriptNid={script.Nid.ToString(CultureInfo.InvariantCulture)};");
-            inlineJs.ExecuteScriptGuarded(script.BaseUrl, script.Inline);
+            try
+            {
+                inlineJs.ExecuteScriptGuarded(script.BaseUrl, script.Inline);
+            }
+            catch (JsRuntimeException)
+            {
+                // Same as the external-script arm: an inline script's uncaught error
+                // must not abort the navigation.
+            }
+
             TryExecute(inlineJs, "<current-script>", "globalThis.__currentScriptNid=0;");
         }
     }

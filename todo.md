@@ -146,9 +146,9 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)
 
-- [ ] `server.rs` -> WebSocket server, sessions, targets (1730)
-- [ ] `dispatch.rs` -> method routing (1273)
-- [ ] `types.rs`, `util.rs`, `cookie_params.rs` (440)
+- [x] `server.rs` -> WebSocket server, sessions, targets (1730)
+- [x] `dispatch.rs` -> method routing (1273)
+- [x] `types.rs`, `util.rs`, `cookie_params.rs` (440)
 - [ ] domains: `page` (3179), `runtime` (835), `dom` (788), `target` (540),
       `pdf` (535), `accessibility` (524), `emulation` (456), `input` (438),
       `network` (430), `domsnapshot` (416), `io` (283), `fetch` (224),
@@ -158,9 +158,10 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## 7. Obscura.Mcp  (<- crates/obscura-mcp, ~3.2k lines)
 
-- [ ] `lib.rs` -> stdio MCP server and tools (2077)
-- [ ] `http.rs` -> HTTP/SSE transport (462)
-- [ ] Integration tests ported
+- [x] `lib.rs` -> stdio MCP server and tools (2077) - 37 tools, tool list
+      byte-identical to the Rust `json!` source (pinned by a differential test)
+- [x] `http.rs` -> HTTP/SSE transport (462)
+- [x] Integration tests ported (16 found, 16 ported, 16 passing)
 - [ ] Parity: identical tool listings and tool-call results
 
 ## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)
@@ -172,6 +173,26 @@ The largest component. Split into stages; each stage is independently testable.
 - [ ] Parity: CLI golden-output tests for every `--dump` mode
 
 ## Open issues
+
+- **`Obscura.Browser` serializes URLs through `System.Uri`, which is not
+  WHATWG-compliant.** `PageUrl.TryParse` returns a `System.Uri` and
+  `Page.UrlString()` reads `AbsoluteUri`, which percent-encodes `<`, `>` and
+  space in a cannot-be-a-base URL's opaque path. Reproduced:
+
+      Rust url crate:  data:text/html,<b>a b</b>
+      System.Uri:      data:text/html,%3Cb%3Ea%20b%3C/b%3E
+
+  Every `data:` URL on the CDP wire therefore differs from the reference:
+  `Page.frameNavigated`, `Page.getFrameTree`, DOMSnapshot `documentURL`/
+  `baseURL`, Runtime origins, `Target.getTargets`. Found independently by two
+  agents diffing against the running Rust server. `Obscura.Js.Url.UrlRecord` is
+  the already-ported WHATWG parser and is what Browser should serialize through;
+  this is a type migration across ~77 references in 7 files, deferred only
+  because agents were live in that project.
+- **`Runtime.evaluate` drops an explicit `"value": null`.** Rust returns
+  `{"type":"object","subtype":"null","description":"null","value":null}`; the
+  port omits the key, so a client reading `result.value` gets `undefined` where
+  Chrome and Rust give `null`.
 
 - **Two Obscura.Js tests fail under full-solution load but pass in isolation.**
   The project alone is 830/849 green; a solution-wide run loses two, a different

@@ -29,6 +29,13 @@
     <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)obscura"
           Condition="Exists('$(TargetDir)$(AssemblyName)')" />
     <Exec Command="chmod +x &quot;$(TargetDir)obscura&quot;" Condition="Exists('$(TargetDir)obscura')" />
+    <!-- The apphost embeds the managed entry assembly's name, so a renamed copy
+         still runs Obscura.Cli.dll; WorkerHost selects worker mode from the
+         launcher's own file name, exactly matching the Rust build's two-binary
+         layout that `scrape`'s sibling lookup depends on. -->
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)obscura-worker"
+          Condition="Exists('$(TargetDir)$(AssemblyName)')" />
+    <Exec Command="chmod +x &quot;$(TargetDir)obscura-worker&quot;" Condition="Exists('$(TargetDir)obscura-worker')" />
   </Target>
 
 </Project>

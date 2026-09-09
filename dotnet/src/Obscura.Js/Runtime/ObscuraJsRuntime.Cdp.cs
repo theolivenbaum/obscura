@@ -760,10 +760,17 @@ public sealed partial class ObscuraJsRuntime
         },
     };
 
-    private static string FormatNumber(double value) =>
-        value == Math.Floor(value) && double.IsFinite(value) && Math.Abs(value) < 1e15
-            ? ((long)value).ToString(CultureInfo.InvariantCulture)
-            : value.ToString("R", CultureInfo.InvariantCulture);
+    /// <summary>
+    /// Formats a number for a CDP <c>RemoteObject.description</c>.
+    /// </summary>
+    /// <remarks>
+    /// Rust builds this with <c>serde_json::Number::to_string</c> on an f64, which
+    /// keeps the fractional part: <c>Runtime.evaluate("1+1")</c> reports
+    /// <c>"2.0"</c>, not <c>"2"</c>. Formatting it as an integer here produced a
+    /// different string than the reference server for every whole-numbered result.
+    /// Confirmed by diffing the wire output of both servers.
+    /// </remarks>
+    private static string FormatNumber(double value) => Obscura.Js.Ops.SerdeJson.NumberText(value);
 
     internal static RemoteObjectInfo InfoFromMeta(JsonNode? meta, string? objectId)
     {
