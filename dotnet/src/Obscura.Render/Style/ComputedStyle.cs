@@ -134,6 +134,19 @@ public static partial class ComputedStyle
             style.TextAlign = Layout.AlignItems.Center;
             style.BoxSizing = BoxSizing.BorderBox;
             style.Padding = new Edges(1.0f, 6.0f, 1.0f, 6.0f);
+
+            // DEVIATION from crates/obscura-render/src/style.rs, whose `button` arm sets no
+            // font at all, so a button inherits the page's font-size, family and line-height.
+            // Chromium's UA sheet gives every form control `font: 400 13.3333px Arial`, and
+            // because that is the shorthand it also resets line-height to normal - which an
+            // author rule setting only font-size does not restore. `select`, `input` and
+            // `textarea` already carry this here; `button` was the one left out. On a page
+            // with an inherited `line-height: 1.4` (Tesserae sets one) every button came out
+            // 38px tall against Chromium's 21px, and its label box two line-heights tall
+            // instead of one. See "Known deviations" in todo.md.
+            style.FontSize = 13.333_333f;
+            style.FontFamily = "arial";
+            style.LineHeight = Obscura.Render.LineHeight.Normal;
         }
         else if (tag == "select")
         {

@@ -3405,6 +3405,40 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void ButtonsTakeTheUserAgentControlFontIncludingLineHeightNormal()
+    {
+        // DEVIATION from the Rust reference, whose `button` UA arm sets no font, so a button
+        // inherits the page's font-size, family and line-height. Chromium gives every form
+        // control `font: 400 13.3333px Arial`; being the shorthand it also resets line-height
+        // to normal, which an author rule setting only font-size does not restore. With
+        // Tesserae's inherited `line-height: 1.4` every button was two line-heights tall.
+        DomTree tree = Parse(
+            """
+            <style>
+              body { margin:0; font-family: Georgia, serif; font-size: 20px; line-height: 1.8 }
+              .sized { font-size: 13px }
+            </style>
+            <div><button id="plain">Plain</button></div>
+            <div><button id="sized" class="sized">Sized</button></div>
+            <div><span id="ref">Reference</span></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        LayoutStyle Style(string id) => laid.Styles[Id(tree, id)];
+
+        Assert.True(MathF.Abs((Style("plain").FontSize ?? 0f) - 13.333333f) < 0.01f);
+        Assert.Equal(LineHeight.Normal, Style("plain").LineHeight);
+
+        // An author font-size wins; the UA line-height and family do not come back with it.
+        Assert.True(MathF.Abs((Style("sized").FontSize ?? 0f) - 13f) < 0.01f);
+        Assert.Equal(LineHeight.Normal, Style("sized").LineHeight);
+
+        // Ordinary content still inherits the page font and its 1.8 line-height.
+        Assert.True(MathF.Abs((Style("ref").FontSize ?? 0f) - 20f) < 0.01f);
+        Assert.True(MathF.Abs(laid.Rects[Id(tree, "plain")].Height - 17f) < 1.01f);
+        Assert.True(MathF.Abs(laid.Rects[Id(tree, "ref")].Height - 22f) < 1.01f);
+    }
+
+    [Fact]
     public void CyclicPercentageImageKeepsNaturalIntrinsicContribution()
     {
         // A `width:100%` image inside a content-sized flex item is a cyclic

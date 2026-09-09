@@ -400,6 +400,24 @@ DEVIATION comment at the C# code that differs.
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
   content with the pseudo's own style.
+- **DEVIATION - `<button>` did not take the user-agent control font.** The
+  reference's `button` arm sets no font, so a button inherits the page's
+  font-size, family and line-height. Chromium gives every form control
+  `font: 400 13.3333px Arial`, and being the shorthand it also resets
+  `line-height` to `normal`, which an author rule setting only `font-size` does
+  not restore. `select`, `input` and `textarea` already carried this in both
+  trees; `button` was the one left out. Under Tesserae's inherited
+  `line-height: 1.4` every button was 38px tall against Chromium's 21px. The
+  port's `button` arm now sets all three. Still short of Chromium by the 2px
+  outset UA border, which no Tesserae button shows because `.tss-btn` declares
+  its own; not fixed here.
+- **DEVIATION - a control's intrinsic width is rounded up.** The reference
+  stores the summed width as measured. Taffy rounds used boxes to whole pixels,
+  and the parts (shaped label, icon glyph, child edges) are measured separately
+  with their own sub-pixel error, so a box sized at exactly its label's width can
+  round down and wrap the label it was sized for: "Section Stack" measured 143px
+  against a 79.5px label and broke over two lines. The port ceilings it - at most
+  a pixel wide, never a pixel short.
 - **DEVIATION - functional block-axis sizes resolved against the viewport
   height.** `crates/obscura-render/src/dom.rs` uses `viewport.1` as the
   percentage basis for `size_expressions[1|3|5]`. Chromium resolves a block-axis
