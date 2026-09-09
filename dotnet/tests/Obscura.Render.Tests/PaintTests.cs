@@ -136,6 +136,35 @@ public class PaintTests
     }
 
     [Fact]
+    public void BlurredBoxShadowFallsOffAsAGaussianRatherThanASolidBlob()
+    {
+        // A 40x40 black box with a 15px blur on white. sigma is blur/2 = 7.5, so
+        // coverage at the shape edge is ~50%, decaying to nothing by 2.5 sigma
+        // (18.75px). Painting the ramp only outward from an opaque shape - the bug
+        // this guards - made every pixel out to 15px fully black instead.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+                <div style="position:absolute;left:60px;top:60px;width:40px;height:40px;
+                            background:black;box-shadow:0 0 15px black"></div>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (160f, 160f), null)!;
+        byte Gray(uint x) => Pixel(pixmap, x, 80).R;
+
+        byte edge = Gray(59);
+        Assert.True(
+            edge is >= 60 and <= 200,
+            $"one pixel outside the edge must be roughly half covered, not solid: {edge}");
+        byte mid = Gray(52);
+        byte far = Gray(45);
+        Assert.True(edge < mid && mid < far, $"coverage must decay outward: {edge}, {mid}, {far}");
+        Assert.True(far > 220, $"2 sigma out must be nearly clear: {far}");
+        Assert.Equal(255, Gray(38));
+        Assert.Equal(0, Gray(80));
+    }
+
+    [Fact]
     public void SvgImageMetadataKeepsViewBoxAsRatioOnly()
     {
         ReplacedIntrinsic ratioOnly = PaintSvg.SvgImageIntrinsicMetadata(

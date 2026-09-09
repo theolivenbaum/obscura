@@ -6144,28 +6144,68 @@ fn paint_box_shadow(
             Some(&shadow_mask),
         );
     } else {
-        let steps: u32 = (blur.ceil() as u32).clamp(2, 24);
-        // Per-layer alpha chosen so `steps` source-over composites reach the target
-        // alpha at the core: 1 - (1 - a)^steps == A  =>  a = 1 - (1 - A)^(1/steps).
-        let a_frac = color[3] as f32 / 255.0;
-        let per = 1.0 - (1.0 - a_frac).powf(1.0 / steps as f32);
-        let layer_alpha = (per * 255.0).round().clamp(1.0, 255.0) as u8;
-        let layer_color = [color[0], color[1], color[2], layer_alpha];
+        // The blur is a gaussian of standard deviation blur/2 applied to the shadow
+        // shape, so coverage is A * Phi(-d / sigma) at signed distance d outside the
+        // shape edge: full alpha well inside, half at the edge itself, ~0 well
+        // outside. Ramping only outward from a fully opaque shape - which is what
+        // this did before - makes a wide blur read as a solid blob with a hard
+        // linear skirt instead of a soft halo, most visibly on the small glowing
+        // dots pages put next to status text.
+        let sigma = (blur / 2.0).max(0.05);
+        // 2.5 sigma is where the gaussian's remaining coverage (0.6%) is the last
+        // step an 8-bit alpha can still represent, and roughly one layer per pixel
+        // of ramp keeps the banding under the anti-aliasing.
+        let reach = 2.5 * sigma;
+        let steps: u32 = ((2.0 * reach).ceil() as u32).clamp(6, 24);
+        let target_alpha = color[3] as f32 / 255.0;
+        let mut accumulated = 0.0f32;
         for j in 0..steps {
-            // j = 0 is the solid core (expansion 0); j = steps-1 reaches the blur
-            // radius. Larger rects paint first, smaller (more-covered) ones on top.
-            let e = blur * (j as f32) / ((steps - 1) as f32);
+            // Outermost layer first, marching inward, so each layer only has to add
+            // the coverage the ones outside it have not already laid down.
+            let t = 1.0 - 2.0 * (j as f32) / ((steps - 1) as f32);
+            let e = t * reach;
+            let target = target_alpha * gaussian_coverage(e / sigma);
+            let remaining = 1.0 - accumulated;
+            if remaining <= 0.001 {
+                break;
+            }
+            let layer = ((target - accumulated) / remaining).clamp(0.0, 1.0);
+            let layer_alpha = (layer * 255.0).round().clamp(0.0, 255.0) as u8;
+            if layer_alpha == 0 {
+                continue;
+            }
             fill_shadow_rect(
                 &mut shadow_pixmap,
                 x0 - e - left as f32,
                 y0 - e - top as f32,
                 w0 + 2.0 * e,
                 h0 + 2.0 * e,
-                rx0 + e,
-                ry0 + e,
-                layer_color,
+                (rx0 + e).max(0.0),
+                (ry0 + e).max(0.0),
+                [color[0], color[1], color[2], layer_alpha],
                 Some(&shadow_mask),
             );
+            accumulated = target;
+        }
+        // Everything further inside than the ramp is solid, and the mask still
+        // carves the element's own border box back out.
+        let remaining = 1.0 - accumulated;
+        if remaining > 0.001 {
+            let layer = ((target_alpha - accumulated) / remaining).clamp(0.0, 1.0);
+            let layer_alpha = (layer * 255.0).round().clamp(0.0, 255.0) as u8;
+            if layer_alpha > 0 {
+                fill_shadow_rect(
+                    &mut shadow_pixmap,
+                    x0 + reach - left as f32,
+                    y0 + reach - top as f32,
+                    w0 - 2.0 * reach,
+                    h0 - 2.0 * reach,
+                    (rx0 - reach).max(0.0),
+                    (ry0 - reach).max(0.0),
+                    [color[0], color[1], color[2], layer_alpha],
+                    Some(&shadow_mask),
+                );
+            }
         }
     }
     // Ancestor overflow clip is already the complete rect/rounded chain.
@@ -6177,6 +6217,27 @@ fn paint_box_shadow(
         Transform::identity(),
         ancestor_clip,
     );
+}
+
+/// Fraction of a gaussian-blurred edge's coverage at `z` standard deviations
+/// outside the shape: 1 well inside, 0.5 at the edge, ~0 well outside. This is
+/// `Phi(-z)`, with erf from Abramowitz and Stegun 7.1.26 (max error 1.5e-7),
+/// which is far below one 8-bit alpha step.
+fn gaussian_coverage(z: f32) -> f32 {
+    let x = -z / std::f32::consts::SQRT_2;
+    0.5 * (1.0 + erf(x))
+}
+
+fn erf(x: f32) -> f32 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let y = 1.0
+        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t
+            * (-x * x).exp();
+    sign * y
 }
 
 /// Fill one (possibly rounded) shadow rectangle with a flat color, optionally
@@ -11459,6 +11520,44 @@ mod tests {
                 && blurred_edge.green() < 240
                 && blurred_edge.blue() < 240,
             "the issue's 2px 2px 3px shadow must retain ink outside the box: {blurred_edge:?}"
+        );
+    }
+
+    #[test]
+    fn blurred_box_shadow_falls_off_as_a_gaussian_rather_than_a_solid_blob() {
+        // A 40x40 black box with a 15px blur on white. sigma is blur/2 = 7.5, so
+        // coverage at the shape edge is ~50%, decaying to nothing by 2.5 sigma
+        // (18.75px). Painting the ramp only outward from an opaque shape - the bug
+        // this guards - made every pixel out to 15px fully black instead.
+        let tree = parse_html(
+            r#"<html style="margin:0"><body style="margin:0;background:white">
+                <div style="position:absolute;left:60px;top:60px;width:40px;height:40px;
+                            background:black;box-shadow:0 0 15px black"></div>
+            </body></html>"#,
+        );
+        let pixmap = paint_dom(&tree, (160.0, 160.0), None).expect("blurred shadow paint");
+        let gray = |x: u32| pixmap.pixel(x, 80).expect("row sample").red();
+
+        let edge = gray(59);
+        assert!(
+            (60..=200).contains(&edge),
+            "one pixel outside the edge must be roughly half covered, not solid: {edge}"
+        );
+        let mid = gray(52);
+        let far = gray(45);
+        assert!(
+            edge < mid && mid < far,
+            "coverage must decay outward: edge {edge}, mid {mid}, far {far}"
+        );
+        assert!(
+            far > 220,
+            "2 sigma out must be nearly clear: {far}"
+        );
+        assert_eq!(gray(38), 255, "past 2.5 sigma the shadow must be gone");
+        assert_eq!(
+            gray(80),
+            0,
+            "the element's own background still covers the shadow's core"
         );
     }
 
