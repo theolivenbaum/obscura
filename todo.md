@@ -196,6 +196,36 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **The ClearScript op boundary costs ~5us per call against deno_core's ~0.1us,
+  and it is the port's dominant runtime gap.** Measured in-page after warmup,
+  same host, same V8, both engines:
+
+      zero-arg op (op_runtime_events_enabled)   rust 0.10us   port 5.00us
+      op_dom("document_node_id")                rust 0.30us   port 9.95us
+      op_dom("node_type")                       rust 0.40us   port 4.70us
+      op_layout_metrics                         rust 1.50us   port 27.0us
+
+  It is not the op bodies: a zero-argument op that returns a bool pays the same
+  4.5us. It is not argument typing either - a standalone ClearScript benchmark
+  puts a warmed 4-argument host delegate at 2.4us/call, and `DisableDynamicBinding`,
+  `DisableExtensionMethods`, `DisableTypeRestriction` and `UseReflectionBindFallback`
+  all measure identical to the default once JIT tiering is controlled for (the
+  apparent wins from those flags were tier-up of the first engine in the process).
+  deno_core binds `#[op2(fast)]` through V8's fast API, which ClearScript has no
+  equivalent for.
+
+  What it costs in practice: `document.createElement` + className + style +
+  textContent + appendChild for 5000 nodes is 123ms in Rust and 1061ms in the
+  port; 20k `setAttribute` calls are 28ms against 412ms. On the Tesserae SPA the
+  page needs ~2s of adaptive settle in Rust and ~6s in the port, which overruns
+  the CLI's 5-second settle cap and intermittently captures the page before its
+  deferred content mounts. Closing it means cutting the number of crossings
+  (batching mutations, caching more in `bootstrap.js`), not micro-tuning the
+  binding - and `bootstrap.js` is shared, so any such change has to help both
+  engines.
+- **Cold start is ~870ms for the port against ~40ms for the reference.** .NET
+  startup plus ClearScript/V8 init on an empty page. ReadyToRun publishing is
+  untried and is the obvious first thing to measure.
 - **`Url::parse` failure reasons are collapsed into one message.** The `url`
   crate's `ParseError` has a distinct `Display` per variant and `page.rs` reports
   it verbatim; `UrlParser.Parse` returns `UrlRecord?` with no error channel, so
@@ -335,6 +365,23 @@ have created one.
 - **The CSS named-colour table is built on first use.** It is ~150 entries and
   every frame realm re-parses this file, so at top level it was an allocation
   per realm on a path that is already startup-critical.
+
+### Layout fixes found against the Tesserae sample suite
+
+- **`calc()` percentages under a resizable flex item resolved against the
+  declaration, not the used width.** A row flex item with a Px width was treated
+  as definite by the cyclic-inline deferral, so descendants fell back to the
+  pre-layout containing-block estimate. Tesserae's page shell is
+  `width: 1px; min-width: 0; flex-grow: 1`, which collapsed every
+  `calc(100% - 4px)` card in the page body to 0. Fixed in both engines by
+  treating a growable or shrinkable row-flex item as indefinite. Chromium
+  parity on both shapes (1022px grown, 596px shrunk).
+- **Still open: a shrink-to-fit block inside a flex row does not get the
+  intrinsic contribution of a cyclic-percentage child.** `flexrow > block >
+  width:100%` gives Chromium 8px (the child's text max-content) and both engines
+  0px, because the cyclic neutralization writes a definite `0px` rather than
+  behaving as `auto` for intrinsic contribution. Not a regression; predates the
+  fix above.
 
 ## Known deviations
 
