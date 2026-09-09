@@ -276,7 +276,7 @@ public static partial class RenderDom
             // after the computed top-down values are known.
             DomStyleFixups.PropagateBorderSpacing(tree, styles);
 
-            ApplyNativeControlSizes(tree, styles);
+            ApplyNativeControlSizes(tree, styles, engine);
 
             DomStyleFixups.ResolveGridAreas(tree, rootId, styles);
 

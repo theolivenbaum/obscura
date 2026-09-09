@@ -245,6 +245,14 @@ internal static class PaintInline
                 }
             }
 
+            // CSS Backgrounds 3 paints an inset shadow over the background and under the
+            // border, so it cannot ride along with the outset pass above.
+            if (fragmentStyle.BoxShadow is { } insetShadow)
+            {
+                PaintBorders.PaintInsetBoxShadow(
+                    pixmap, insetShadow, fragment, fragmentStyle.BorderModel.Radii, elementClipMask);
+            }
+
             PaintBorders.PaintCssBorder(pixmap, fragment, fragmentStyle, elementClipMask, rasterScale);
             backgroundPath?.Dispose();
         }
@@ -353,6 +361,14 @@ internal static class PaintGenerated
             backgroundMask,
             imageCache,
             style.FontSize ?? 16f);
+
+        // CSS Backgrounds 3 paints an inset shadow over the background and under the
+        // border, so it cannot ride along with the outset pass above.
+        if (style.BoxShadow is { } insetShadow)
+        {
+            PaintBorders.PaintInsetBoxShadow(
+                pixmap, insetShadow, rect, style.BorderModel.Radii, elementClipMask);
+        }
 
         PaintBorders.PaintCssBorder(pixmap, rect, style, elementClipMask, rasterScale);
         PaintBorders.PaintCssOutline(pixmap, rect, style, elementClipMask, rasterScale);

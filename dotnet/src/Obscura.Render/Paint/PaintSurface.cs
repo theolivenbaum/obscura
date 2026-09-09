@@ -135,7 +135,8 @@ internal static class Surface
         float opacity,
         bool bilinear,
         Affine2 transform,
-        Mask? mask)
+        Mask? mask,
+        SKBlendMode blend = SKBlendMode.SrcOver)
     {
         if (opacity <= 0f || source.Width == 0 || source.Height == 0)
         {
@@ -157,6 +158,7 @@ internal static class Surface
         {
             IsAntialias = false,
             Color = new SKColor(0, 0, 0, (byte)Math.Clamp((int)MathF.Round(opacity * 255f), 0, 255)),
+            BlendMode = blend,
         };
         SKSamplingOptions sampling = bilinear
             ? new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None)

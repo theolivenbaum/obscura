@@ -1114,6 +1114,14 @@ internal static class PaintDomPainter
 
             if (!paintsInlineFragments)
             {
+                // CSS Backgrounds 3 paints an inset shadow over the background and
+                // under the border, so it cannot ride along with the outset pass above.
+                if (style.BoxShadow is { } insetShadow)
+                {
+                    PaintBorders.PaintInsetBoxShadow(
+                        pixmap, insetShadow, rect, style.BorderModel.Radii, elementClipMask);
+                }
+
                 PaintBorders.PaintCssBorder(pixmap, rect, style, elementClipMask, rasterScale);
             }
 

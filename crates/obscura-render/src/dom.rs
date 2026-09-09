@@ -5930,13 +5930,12 @@ fn layout_dom_once(
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ");
-                let mut content_width = text_width(
-                    &label,
-                    font_size,
-                    bold,
-                    style.font_family.as_deref(),
-                    style.letter_spacing.unwrap_or(0.0),
-                );
+                // Shaped through the inline engine, not `text_width`: the label is
+                // laid out by that engine, so sizing the box with a different
+                // metric leaves the text too wide for the box it just produced.
+                // `<select>` deliberately keeps `text_width`, because paint
+                // synthesises its label with the same height-based scale.
+                let mut content_width = engine.measure_control_label(&label, style);
                 content_width += intrinsic_content
                     .map(|content| content.atomic_width)
                     .unwrap_or(0.0);
@@ -15332,6 +15331,42 @@ mod tests {
             (rect("icon").width - 32.0).abs() < 0.1,
             "the in-flow 16px SVG and horizontal padding must contribute: {:?}",
             rect("icon")
+        );
+    }
+
+    #[test]
+    fn auto_width_button_is_as_wide_as_the_same_label_in_a_span() {
+        // A button's box is sized from its label by the control pass, but the label is
+        // laid out by the inline engine. Sizing with `text_width` used ab_glyph's
+        // height-based PxScale while the shaper uses an em-based size, so the box came
+        // out 10.5% narrower than its own text: layout still reported one line while
+        // paint wrapped the label inside the button. Chromium makes button, span and
+        // inline-block identical for identical text, so that equality is the invariant
+        // to hold, independent of which face the engine embeds.
+        let tree = parse_html(
+            r#"<style>
+                html,body{margin:0}
+                .c{font-size:14px;padding:8px 16px;border:1px solid #ccc;box-sizing:border-box}
+                span.c,div.c{display:inline-block}
+              </style>
+              <button class="c" id="b">Pulse UI</button>
+              <span class="c" id="s">Pulse UI</span>
+              <div class="c" id="d">Pulse UI</div>"#,
+        );
+        let laid = layout_dom(&tree, (900.0, 300.0));
+        let width = |id: &str| laid.rects[&tree.get_element_by_id(id).unwrap()].width;
+
+        assert!(
+            (width("b") - width("s")).abs() < 0.5,
+            "button must match an inline-block span: button={}, span={}",
+            width("b"),
+            width("s")
+        );
+        assert!(
+            (width("b") - width("d")).abs() < 0.5,
+            "button must match an inline-block div: button={}, div={}",
+            width("b"),
+            width("d")
         );
     }
 

@@ -182,6 +182,36 @@ public class PaintTests
     }
 
     [Fact]
+    public void InsetBoxShadowPaintsInwardFromTheBorderBoxEdge()
+    {
+        // PaintBoxShadow used to return early on Inset, so an inner shadow painted
+        // nothing at all. Inset coverage is the complement of the outset ramp: strongest
+        // at the border-box edge, half at the offset-and-spread inner edge, near zero
+        // deep inside. It also paints over the background and under the border, so an
+        // opaque background must not hide it.
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+            <div style="position:absolute;left:20px;top:20px;width:40px;height:40px;
+                        background:rgb(0,0,255);
+                        box-shadow:inset 0 0 12px rgb(255,255,0)"></div>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (100f, 100f), null)!;
+
+        // Yellow over blue, so the red channel is the shadow's own coverage.
+        byte edge = Pixel(pixmap, 22, 40).R;
+        byte mid = Pixel(pixmap, 30, 40).R;
+        byte center = Pixel(pixmap, 40, 40).R;
+        Assert.True(edge > 60, $"the shadow must be strong at the border-box edge: {edge}");
+        Assert.True(edge > mid && mid > center, $"must decay inward: {edge}, {mid}, {center}");
+        Assert.Equal(0, center);
+        Assert.Equal(
+            (255, 255, 255),
+            Rgb(pixmap, 18, 40));
+    }
+
+    [Fact]
     public void BlurredBoxShadowFallsOffAsAGaussianRatherThanASolidBlob()
     {
         // A 40x40 black box with a 15px blur on white. sigma is blur/2 = 7.5, so
