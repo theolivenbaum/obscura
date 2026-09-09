@@ -679,7 +679,39 @@ public static class Runtime
         {
             obj["value"] = value.DeepClone();
         }
+        else if (CarriesAJsonNull(info))
+        {
+            obj["value"] = null;
+        }
 
         return obj;
     }
+
+    /// <summary>
+    /// Whether this info is a JS <c>null</c> reported by value, whose <c>value</c> field
+    /// must therefore be present and null.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rust carries the field as <c>Option&lt;Value&gt;</c> and stores
+    /// <c>Some(Value::Null)</c> for a null result, so <c>remote_object_from_info</c>
+    /// writes <c>"value": null</c> and a client reading <c>result.value</c> sees null,
+    /// the way Chrome reports it. <c>RemoteObjectInfo.Value</c> is a
+    /// <see cref="JsonNode"/>, and a JSON null has no node representation, so both
+    /// "absent" and "null" arrive here as a C# null and the distinction has to be
+    /// rebuilt from the rest of the shape.
+    /// </para>
+    /// <para>
+    /// Only the runtime's by-value path (<c>InfoFromJson</c>) reports a JS null, and its
+    /// null arm is the sole producer of type <c>object</c> + subtype <c>null</c> with no
+    /// objectId: a null reported by reference comes from <c>InfoFromMeta</c>, which
+    /// always carries an objectId and never a value. Keying on the missing objectId
+    /// therefore reproduces Rust exactly without emitting <c>value</c> where Rust omits
+    /// it - for undefined, or for an object/function that travels as a handle.
+    /// </para>
+    /// </remarks>
+    private static bool CarriesAJsonNull(RemoteObjectInfo info) =>
+        info.ObjectId is null
+        && info.JsType is "object"
+        && info.Subtype is "null";
 }
