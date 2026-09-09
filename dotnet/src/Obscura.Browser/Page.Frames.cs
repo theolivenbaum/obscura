@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Obscura.Js.Ops;
+using Obscura.Js.Url;
 using Obscura.Net;
 using Obscura.Js.Runtime;
 

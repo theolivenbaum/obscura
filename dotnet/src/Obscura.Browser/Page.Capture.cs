@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Obscura.Dom;
+using Obscura.Js.Url;
 using Obscura.Net;
 using Obscura.Render;
 using Obscura.Render.Css;
@@ -30,7 +31,7 @@ public sealed partial class Page
         {
             return 0;
         }
-        Uri baseUrl = ResolveBaseUrl() ?? documentUrl;
+        UrlRecord baseUrl = ResolveBaseUrl() ?? documentUrl;
 
         // A BTreeMap in Rust: ordered by (url, profile) so the request order is
         // deterministic and the 128-entry truncation always keeps the same set.
@@ -45,7 +46,7 @@ public sealed partial class Page
         {
             if (PageUrl.TryParse(raw) is { } url)
             {
-                candidates[(PageUrl.WithoutFragment(url).AbsoluteUri, (int)profile + 1)] =
+                candidates[(PageUrl.WithoutFragment(url).Href, (int)profile + 1)] =
                     ResourceType.Image;
             }
         }
@@ -89,7 +90,7 @@ public sealed partial class Page
                 if (PageUrl.TryParse(raw) is { } url)
                 {
                     ResourceType kind = PageHelpers.RenderResourceType(url);
-                    candidates[(PageUrl.WithoutFragment(url).AbsoluteUri, 0)] = kind;
+                    candidates[(PageUrl.WithoutFragment(url).Href, 0)] = kind;
                 }
             }
         }
@@ -126,8 +127,8 @@ public sealed partial class Page
         {
             factories.Add(async () =>
             {
-                Uri parsed = PageUrl.TryParse(key.url)!;
-                ResourceRequest request = ResourceRequest.Subresource(kind, documentUrl);
+                UrlRecord parsed = PageUrl.TryParse(key.url)!;
+                ResourceRequest request = ResourceRequest.Subresource(kind, NetUrl.From(documentUrl));
                 switch (key.profile)
                 {
                     case (int)ImageRequestProfile.CorsSameOrigin + 1:
@@ -144,7 +145,7 @@ public sealed partial class Page
                 try
                 {
                     Response response = await HttpClient
-                        .FetchResourceWithCallbacksAsync(parsed, request, _callbacks, cancellationToken)
+                        .FetchResourceWithCallbacksAsync(NetUrl.From(parsed), request, _callbacks, cancellationToken)
                         .ConfigureAwait(false);
                     return (key.url, key.profile, kind, (Response?)response);
                 }
@@ -229,7 +230,7 @@ public sealed partial class Page
     {
         // Needed to resolve the relative image URLs ("logo.svg") that make up the
         // overwhelming majority of real markup.
-        string? baseUrl = ResolveBaseUrl()?.AbsoluteUri;
+        string? baseUrl = ResolveBaseUrl()?.Href;
         if (Js is { } js)
         {
             if (!js.SetAnimationSample(animationSample))

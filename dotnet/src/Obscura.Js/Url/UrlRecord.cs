@@ -185,6 +185,9 @@ public sealed class UrlRecord
         return string.Create(CultureInfo.InvariantCulture, $"{scheme}://{host}:{port.Value}");
     }
 
+    /// <summary>The crate's derived <c>Clone</c>: an independent copy of the parsed URL.</summary>
+    public UrlRecord Clone() => CloneRecord();
+
     internal UrlRecord CloneRecord() => (UrlRecord)MemberwiseClone();
 
     /// <summary>Rebuilds the parsed host from the stored offsets and discriminant.</summary>

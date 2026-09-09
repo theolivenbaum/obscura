@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using Obscura.Dom;
 using Obscura.Js.Ops;
 using Obscura.Js.Runtime;
+using Obscura.Js.Url;
 using Obscura.Net;
 using Obscura.Render.Css;
 
@@ -173,7 +174,7 @@ public sealed partial class Page : IDisposable
 
     public string FrameId { get; }
 
-    public Uri? Url { get; set; }
+    public UrlRecord? Url { get; set; }
 
     public DomTree? Dom { get; set; }
 
@@ -403,8 +404,8 @@ public sealed partial class Page : IDisposable
         + DeviceScaleFactor.ToString("R", CultureInfo.InvariantCulture)
         + ";";
 
-    internal Task<Response> DoFetchAsync(Uri url, CancellationToken cancellationToken) =>
-        HttpClient.FetchWithCallbacksAsync(url, _callbacks, cancellationToken);
+    internal Task<Response> DoFetchAsync(UrlRecord url, CancellationToken cancellationToken) =>
+        HttpClient.FetchWithCallbacksAsync(NetUrl.From(url), _callbacks, cancellationToken);
 
     /// <summary>
     /// Rebuild the JavaScript realm for a new document.
@@ -485,7 +486,7 @@ public sealed partial class Page : IDisposable
     /// Resolve the document base URL per the HTML spec, falling back to
     /// <see cref="Url"/> when no <c>&lt;base href&gt;</c> exists.
     /// </summary>
-    internal Uri? ResolveBaseUrl()
+    internal UrlRecord? ResolveBaseUrl()
     {
         if (Url is not { } documentUrl)
         {
@@ -499,7 +500,7 @@ public sealed partial class Page : IDisposable
         return baseHref is null ? documentUrl : PageUrl.TryJoin(documentUrl, baseHref);
     }
 
-    public string UrlString() => Url?.AbsoluteUri ?? "about:blank";
+    public string UrlString() => Url?.Href ?? "about:blank";
 
     public T? WithDom<T>(Func<DomTree, T> body)
     {
@@ -583,7 +584,7 @@ public sealed partial class Page : IDisposable
         {
             return false;
         }
-        if (Url is { } current && string.Equals(current.AbsoluteUri, parsed.AbsoluteUri, StringComparison.Ordinal))
+        if (Url is { } current && string.Equals(current.Href, parsed.Href, StringComparison.Ordinal))
         {
             return false;
         }

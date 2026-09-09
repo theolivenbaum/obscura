@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using Obscura.Dom;
 using Obscura.Js.Runtime;
+using Obscura.Js.Url;
 using Obscura.Net;
 
 namespace Obscura.Browser;
@@ -115,12 +116,12 @@ public sealed partial class Page
         string referrer,
         CancellationToken cancellationToken)
     {
-        Uri? parsed = PageUrl.TryParse(urlString);
+        UrlRecord? parsed = PageUrl.TryParse(urlString);
         if (parsed is null)
         {
             throw PageException.InvalidUrl("relative URL without a base");
         }
-        Uri url = parsed;
+        UrlRecord url = parsed;
 
         Lifecycle = LifecycleState.Loading;
         Referrer = referrer;
@@ -133,12 +134,12 @@ public sealed partial class Page
             if (!Context.RobotsCache.Contains(origin))
             {
                 string robotsBody = string.Empty;
-                if (PageUrl.RobotsUrl(url) is { } robotsUrl)
                 {
+                    UrlRecord robotsUrl = PageUrl.RobotsUrl(url);
                     try
                     {
                         Response robots = await HttpClient
-                            .FetchWithCallbacksAsync(robotsUrl, _callbacks, cancellationToken)
+                            .FetchWithCallbacksAsync(NetUrl.From(robotsUrl), _callbacks, cancellationToken)
                             .ConfigureAwait(false);
                         if (robots.Status == 200)
                         {
@@ -153,10 +154,10 @@ public sealed partial class Page
                 Context.RobotsCache.ParseAndStore(origin, robotsBody, Context.UserAgent);
             }
 
-            if (!Context.RobotsCache.IsAllowed(origin, url.AbsolutePath))
+            if (!Context.RobotsCache.IsAllowed(origin, url.Path))
             {
                 Lifecycle = LifecycleState.Failed;
-                throw PageException.Network($"Blocked by robots.txt: {url.AbsoluteUri}");
+                throw PageException.Network($"Blocked by robots.txt: {url.Href}");
             }
         }
 
@@ -196,7 +197,7 @@ public sealed partial class Page
                 };
                 response = new Response
                 {
-                    Url = url,
+                    Url = NetUrl.From(url),
                     Status = 200,
                     Headers = headers,
                     Body = PageHelpers.DecodeDataUri(urlString) ?? [],
@@ -206,7 +207,7 @@ public sealed partial class Page
             else if (string.Equals(method, "POST", StringComparison.Ordinal))
             {
                 response = await HttpClient
-                    .PostFormWithCallbacksAsync(url, body, _callbacks, cancellationToken)
+                    .PostFormWithCallbacksAsync(NetUrl.From(url), body, _callbacks, cancellationToken)
                     .ConfigureAwait(false);
             }
             else
@@ -225,7 +226,7 @@ public sealed partial class Page
         // corrupts them. Text-like types stay as text.
         bool mainIsBinary = !PageHelpers.IsTextLikeContentType(response.ContentType());
         RecordNetworkEventWithBody(
-            url.AbsoluteUri,
+            url.Href,
             "GET",
             "Document",
             response.Status,
@@ -235,7 +236,7 @@ public sealed partial class Page
 
         if (response.RedirectedFrom.Count != 0)
         {
-            Url = response.Url;
+            Url = NetUrl.To(response.Url);
         }
 
         // Honor the response charset: HTTP Content-Type, then a <meta charset> sniff
@@ -459,7 +460,7 @@ public sealed partial class Page
         _pendingFrameWork.Clear();
         Frames.Clear();
         Js = null;
-        Url = new Uri("about:blank");
+        Url = PageUrl.TryParse("about:blank")!;
         Dom = HtmlParsing.ParseHtml("<!DOCTYPE html><html><head></head><body></body></html>");
         Title = string.Empty;
         Lifecycle = LifecycleState.Loaded;

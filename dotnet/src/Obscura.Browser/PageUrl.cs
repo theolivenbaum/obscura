@@ -1,61 +1,78 @@
+using Obscura.Js.Url;
+
 namespace Obscura.Browser;
 
 /// <summary>
 /// The pieces of the WHATWG URL surface <c>page.rs</c> reaches for through the
-/// <c>url</c> crate. <see cref="Uri"/> has no origin type and no fragment
-/// setter, so they live here.
+/// <c>url</c> crate.
 /// </summary>
+/// <remarks>
+/// These sit on <see cref="UrlRecord"/>, the in-tree port of the <c>url</c>
+/// crate, and not on <see cref="System.Uri"/>. <c>System.Uri</c> is not
+/// WHATWG-compliant: it percent-encodes <c>&lt;</c>, <c>&gt;</c> and space in a
+/// cannot-be-a-base URL's opaque path, so <c>data:text/html,&lt;b&gt;a b&lt;/b&gt;</c>
+/// came back as <c>data:text/html,%3Cb%3Ea%20b%3C/b%3E</c> and every
+/// <c>data:</c> URL on the CDP wire differed from the reference engine.
+/// </remarks>
 internal static class PageUrl
 {
     /// <summary>Rust's <c>Url::parse</c>: absolute only, no base.</summary>
-    internal static Uri? TryParse(string? value) =>
-        value is not null && Uri.TryCreate(value, UriKind.Absolute, out Uri? url) ? url : null;
+    internal static UrlRecord? TryParse(string? value) =>
+        value is null ? null : UrlRecord.Parse(value);
 
     /// <summary>Rust's <c>Url::join</c>.</summary>
-    internal static Uri? TryJoin(Uri baseUrl, string relative) =>
-        Uri.TryCreate(baseUrl, relative, out Uri? joined) ? joined : null;
+    internal static UrlRecord? TryJoin(UrlRecord baseUrl, string relative) =>
+        baseUrl.Join(relative);
 
     /// <summary>The lowercase scheme, matching <c>Url::scheme()</c>.</summary>
-    internal static string Scheme(Uri url) => url.Scheme;
+    internal static string Scheme(UrlRecord url) => url.Scheme;
 
-    /// <summary>The host without IPv6 brackets, matching <c>Url::host_str</c>.</summary>
-    internal static string Host(Uri url) =>
-        url.HostNameType == UriHostNameType.IPv6 ? url.Host.Trim('[', ']') : url.Host;
+    /// <summary>Matching <c>Url::host_str</c>, brackets and all.</summary>
+    internal static string? Host(UrlRecord url) => url.HostStr;
 
     /// <summary><c>Origin::ascii_serialization</c>.</summary>
-    internal static string AsciiOrigin(Uri url) =>
-        url.IsDefaultPort
-            ? $"{url.Scheme}://{url.Host}"
-            : $"{url.Scheme}://{url.Host}:{url.Port}";
+    internal static string AsciiOrigin(UrlRecord url) => url.AsciiOrigin;
 
-    internal static bool SameOrigin(Uri a, Uri b) =>
-        string.Equals(a.Scheme, b.Scheme, StringComparison.Ordinal)
-        && string.Equals(Host(a), Host(b), StringComparison.OrdinalIgnoreCase)
-        && a.Port == b.Port;
+    /// <summary>
+    /// <c>Url::origin() == Url::origin()</c>. Both callers gate on http/https
+    /// first, where the origin is always a tuple origin, so comparing the
+    /// serialization is the same test as comparing the origins.
+    /// </summary>
+    internal static bool SameOrigin(UrlRecord a, UrlRecord b) =>
+        string.Equals(a.AsciiOrigin, b.AsciiOrigin, StringComparison.Ordinal);
 
     /// <summary><c>url.set_fragment(None)</c>, returning the URL unchanged when it has none.</summary>
-    internal static Uri WithoutFragment(Uri url)
+    internal static UrlRecord WithoutFragment(UrlRecord url)
     {
-        string text = url.AbsoluteUri;
-        int hash = text.IndexOf('#', StringComparison.Ordinal);
-        if (hash < 0)
+        if (url.Fragment is null)
         {
             return url;
         }
-        return Uri.TryCreate(text[..hash], UriKind.Absolute, out Uri? stripped) ? stripped : url;
+        UrlRecord stripped = url.Clone();
+        stripped.SetFragment(null);
+        return stripped;
     }
 
     /// <summary>
     /// <c>set_fragment(None)</c> plus <c>set_username("")</c> and
     /// <c>set_password(None)</c>, the shape a same-origin referrer takes.
     /// </summary>
-    internal static string WithoutCredentialsOrFragment(Uri url)
+    internal static string WithoutCredentialsOrFragment(UrlRecord url)
     {
-        string authority = url.IsDefaultPort ? url.Host : $"{url.Host}:{url.Port}";
-        return $"{url.Scheme}://{authority}{url.AbsolutePath}{url.Query}";
+        UrlRecord sanitized = url.Clone();
+        sanitized.SetFragment(null);
+        sanitized.SetUsername(string.Empty);
+        sanitized.SetPassword(null);
+        return sanitized.Href;
     }
 
     /// <summary><c>robots_url.set_path("/robots.txt"); set_query(None); set_fragment(None)</c>.</summary>
-    internal static Uri? RobotsUrl(Uri url) =>
-        Uri.TryCreate($"{AsciiOrigin(url)}/robots.txt", UriKind.Absolute, out Uri? robots) ? robots : null;
+    internal static UrlRecord RobotsUrl(UrlRecord url)
+    {
+        UrlRecord robots = url.Clone();
+        robots.SetPath("/robots.txt");
+        robots.SetQuery(null);
+        robots.SetFragment(null);
+        return robots;
+    }
 }

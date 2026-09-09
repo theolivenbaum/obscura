@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Obscura.Dom;
 using Obscura.Js.Runtime;
 using Xunit;
+using Obscura.Js.Url;
 
 namespace Obscura.Browser.Tests;
 
@@ -24,7 +25,7 @@ internal static class PageFixtures
     internal static Page ImportMapTestPage(string name, string baseUrl, string html)
     {
         Page page = NewPage(name);
-        page.Url = new Uri($"{baseUrl}/app/index.html");
+        page.Url = UrlRecord.Parse($"{baseUrl}/app/index.html")!;
         page.Dom = HtmlParsing.ParseHtml(html);
         page.InitJs();
         return page;

@@ -38,7 +38,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
 
-## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green  -  81/81 tests green
+## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green
 
 - [x] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots
 - [x] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree
@@ -127,7 +127,7 @@ The largest component. Split into stages; each stage is independently testable.
       microbenchmark Rust itself marks `#[ignore]`.
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare
 
-## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  87/92 tests green  -  87/92 tests green, 5 skipped on Obscura.Js gaps
+## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  91/96 tests green, 5 skipped on Obscura.Js gaps
 
 - [x] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (4591),
       split across `Page.cs`, `Page.Navigation.cs`, `Page.Frames.cs`,
@@ -141,7 +141,12 @@ The largest component. Split into stages; each stage is independently testable.
       PNG/JPEG decode instead of the `image` crate
 - [x] Unit + integration tests ported: all 92 Rust tests (74 page.rs, 10 pdf.rs,
       4 context.rs, 4 across `tests/`), 87 green, 5 skipped on named Obscura.Js
-      gaps (see Known deviations)
+      gaps (see Known deviations), plus 4 written for the `UrlRecord` migration
+- [x] URLs go through `Obscura.Js.Url.UrlRecord`, not `System.Uri`. `Page.Url` is
+      a `UrlRecord`, `PageUrl` sits on the ported WHATWG parser, and
+      `Page.UrlString()` returns its serialization, so a `data:` URL on the CDP
+      wire and in `location.href` matches the reference. `Obscura.Browser.NetUrl`
+      is the remaining conversion at the `Obscura.Net` boundary (see Open issues)
 - [ ] Parity: navigate a fixture corpus, compare DOM + text + links
 
 ## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)
@@ -174,21 +179,33 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
-- **`Obscura.Browser` serializes URLs through `System.Uri`, which is not
-  WHATWG-compliant.** `PageUrl.TryParse` returns a `System.Uri` and
-  `Page.UrlString()` reads `AbsoluteUri`, which percent-encodes `<`, `>` and
-  space in a cannot-be-a-base URL's opaque path. Reproduced:
+- **`Url::parse` failure reasons are collapsed into one message.** The `url`
+  crate's `ParseError` has a distinct `Display` per variant and `page.rs` reports
+  it verbatim; `UrlParser.Parse` returns `UrlRecord?` with no error channel, so
+  `Page.Navigation` hardcodes one string and every rejected URL reports
+  "relative URL without a base". Diffed against the reference binary:
 
-      Rust url crate:  data:text/html,<b>a b</b>
-      System.Uri:      data:text/html,%3Cb%3Ea%20b%3C/b%3E
+      http://              rust: empty host                        port: relative URL without a base
+      http://a:99999/      rust: invalid port number               port: relative URL without a base
+      http://[fe80::1      rust: invalid IPv6 address              port: relative URL without a base
+      https://xn--/        rust: invalid international domain name  port: relative URL without a base
 
-  Every `data:` URL on the CDP wire therefore differs from the reference:
-  `Page.frameNavigated`, `Page.getFrameTree`, DOMSnapshot `documentURL`/
-  `baseURL`, Runtime origins, `Target.getTargets`. Found independently by two
-  agents diffing against the running Rust server. `Obscura.Js.Url.UrlRecord` is
-  the already-ported WHATWG parser and is what Browser should serialize through;
-  this is a type migration across ~77 references in 7 files, deferred only
-  because agents were live in that project.
+  The classification is right in every case (all four are rejected, and the
+  error kind is `InvalidUrl`); only the reason is lost. Fixing it means threading
+  a reason out of `UrlParser` and `UrlHost`, which have 9 and ~25 failure
+  returns respectively, so it is its own piece of work rather than a one-liner.
+- **`Obscura.Net` still speaks `System.Uri`, so URLs are reserialized at the
+  transport boundary.** `Obscura.Browser` now keeps `UrlRecord` throughout, but
+  `Response.Url`, `Request.Url` and every `ObscuraHttpClient` entry point take a
+  `System.Uri`, and `Obscura.Browser.NetUrl` converts in both directions. In Rust
+  there is no such boundary: `obscura-net` takes and returns the `url` crate's
+  `Url`. The visible effect left is the error text for a host `UrlRecord` accepts
+  and `System.Uri` rejects (`http://a..b/`: the reference reports a DNS-shaped
+  transport failure, the port reports one too but with the BCL's wording).
+  Removing it means moving `Obscura.Js/Url/**` into a project both `Obscura.Net`
+  and `Obscura.Js` can reference - `Obscura.Js` depends on `Obscura.Net`, so it
+  cannot go the other way. That mirrors the Rust tree, where `url` is a crate
+  both depend on.
 - **`Runtime.evaluate` drops an explicit `"value": null`.** Rust returns
   `{"type":"object","subtype":"null","description":"null","value":null}`; the
   port omits the key, so a client reading `result.value` gets `undefined` where

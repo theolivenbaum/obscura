@@ -1,4 +1,5 @@
 using Obscura.Dom;
+using Obscura.Js.Url;
 using Obscura.Net;
 
 namespace Obscura.Browser;
@@ -97,11 +98,11 @@ public sealed partial class Page
         {
             return [];
         }
-        Uri documentBase = ResolveBaseUrl() ?? documentUrl;
+        UrlRecord documentBase = ResolveBaseUrl() ?? documentUrl;
 
         List<(AuthorStylesheetTarget Target, string Key, string? Media)> roots = [];
         HashSet<string> scheduled = new(StringComparer.Ordinal);
-        List<(string Key, Uri Url, byte Depth)> pending = [];
+        List<(string Key, UrlRecord Url, byte Depth)> pending = [];
 
         foreach ((int linkIndex, string href) in allLinks)
         {
@@ -109,12 +110,12 @@ public sealed partial class Page
             {
                 continue;
             }
-            (string key, Uri resolved) = PageHelpers.CanonicalStylesheetUrl(joined);
-            if (!PageHelpers.SubresourceAllowed(documentUrl, resolved.AbsoluteUri))
+            (string key, UrlRecord resolved) = PageHelpers.CanonicalStylesheetUrl(joined);
+            if (!PageHelpers.SubresourceAllowed(documentUrl, resolved.Href))
             {
                 continue;
             }
-            if (ShouldBlockUrl(resolved.AbsoluteUri))
+            if (ShouldBlockUrl(resolved.Href))
             {
                 continue;
             }
@@ -131,9 +132,9 @@ public sealed partial class Page
             {
                 continue;
             }
-            (string key, Uri resolved) = PageHelpers.CanonicalStylesheetUrl(joined);
-            if (!PageHelpers.SubresourceAllowed(documentUrl, resolved.AbsoluteUri)
-                || ShouldBlockUrl(resolved.AbsoluteUri))
+            (string key, UrlRecord resolved) = PageHelpers.CanonicalStylesheetUrl(joined);
+            if (!PageHelpers.SubresourceAllowed(documentUrl, resolved.Href)
+                || ShouldBlockUrl(resolved.Href))
             {
                 continue;
             }
@@ -148,18 +149,19 @@ public sealed partial class Page
         Dictionary<string, string> aliases = new(StringComparer.Ordinal);
         while (pending.Count != 0)
         {
-            List<(string Key, Uri Url, byte Depth)> batch = pending;
+            List<(string Key, UrlRecord Url, byte Depth)> batch = pending;
             pending = [];
-            var factories = new List<Func<Task<(string Key, Uri Url, byte Depth, Response? Response)>>>(batch.Count);
-            foreach ((string key, Uri requestedUrl, byte depth) in batch)
+            var factories = new List<Func<Task<(string Key, UrlRecord Url, byte Depth, Response? Response)>>>(batch.Count);
+            foreach ((string key, UrlRecord requestedUrl, byte depth) in batch)
             {
                 factories.Add(async () =>
                 {
-                    ResourceRequest request = ResourceRequest.Subresource(ResourceType.Stylesheet, documentUrl);
+                    ResourceRequest request =
+                        ResourceRequest.Subresource(ResourceType.Stylesheet, NetUrl.From(documentUrl));
                     try
                     {
                         Response response = await HttpClient
-                            .FetchResourceWithCallbacksAsync(requestedUrl, request, _callbacks, cancellationToken)
+                            .FetchResourceWithCallbacksAsync(NetUrl.From(requestedUrl), request, _callbacks, cancellationToken)
                             .ConfigureAwait(false);
                         return (key, requestedUrl, depth, (Response?)response);
                     }
@@ -174,15 +176,15 @@ public sealed partial class Page
                 .AllAsync(factories, 16, cancellationToken)
                 .ConfigureAwait(false);
 
-            foreach ((string key, Uri _, byte depth, Response? maybeResponse) in results)
+            foreach ((string key, UrlRecord _, byte depth, Response? maybeResponse) in results)
             {
                 if (maybeResponse is not { } response)
                 {
                     continue;
                 }
-                Uri responseUrl = response.Url;
+                UrlRecord responseUrl = NetUrl.To(response.Url);
                 RecordNetworkEventWithBody(
-                    responseUrl.AbsoluteUri,
+                    responseUrl.Href,
                     "GET",
                     "Stylesheet",
                     response.Status,
@@ -190,7 +192,7 @@ public sealed partial class Page
                     response.Body,
                     base64Encoded: false);
 
-                (string responseKey, Uri canonicalResponseUrl) = PageHelpers.CanonicalStylesheetUrl(responseUrl);
+                (string responseKey, UrlRecord canonicalResponseUrl) = PageHelpers.CanonicalStylesheetUrl(responseUrl);
                 if (aliases.TryGetValue(responseKey, out string? existing))
                 {
                     aliases[key] = existing;
@@ -216,7 +218,7 @@ public sealed partial class Page
                     {
                         continue;
                     }
-                    (string importKey, Uri importUrl) = PageHelpers.CanonicalStylesheetUrl(joined);
+                    (string importKey, UrlRecord importUrl) = PageHelpers.CanonicalStylesheetUrl(joined);
                     if (aliases.ContainsKey(importKey) || scheduled.Contains(importKey))
                     {
                         continue;
@@ -225,8 +227,8 @@ public sealed partial class Page
                     {
                         continue;
                     }
-                    if (!PageHelpers.SubresourceAllowed(documentUrl, importUrl.AbsoluteUri)
-                        || ShouldBlockUrl(importUrl.AbsoluteUri))
+                    if (!PageHelpers.SubresourceAllowed(documentUrl, importUrl.Href)
+                        || ShouldBlockUrl(importUrl.Href))
                     {
                         continue;
                     }

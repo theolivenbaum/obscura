@@ -6,6 +6,7 @@ using Obscura.Dom;
 using Obscura.Js.Runtime;
 using Obscura.Net;
 using Obscura.Render;
+using Obscura.Js.Url;
 using Xunit;
 
 namespace Obscura.Browser.Tests;
@@ -49,7 +50,7 @@ public sealed class PageTests
     [Fact]
     public void CssResourceDiscoveryIgnoresStringsCommentsDataAndFragments()
     {
-        var baseUrl = new Uri("https://example.test/css/app/main.css");
+        var baseUrl = UrlRecord.Parse("https://example.test/css/app/main.css")!;
         const string Css = """
 
                         /* url(ignored.png) */
@@ -73,7 +74,7 @@ public sealed class PageTests
         // The IE8 idiom: a bare `.eot` in its own descriptor, then the real list. The
         // renderer resolves the cascade to the second descriptor and then drops
         // `.eot` and `.svg`, so three of the six are all it will ever consider.
-        var baseUrl = new Uri("https://example.test/css/app.css");
+        var baseUrl = UrlRecord.Parse("https://example.test/css/app.css")!;
         const string Css = """
             @font-face {
               font-family: 'Probe';
@@ -100,7 +101,7 @@ public sealed class PageTests
         // `local()` names an installed face and is not a fetch, and the block has to
         // be reported as consumed at exactly its closing brace, or the rule after it
         // would be skipped with it.
-        var baseUrl = new Uri("https://example.test/css/app.css");
+        var baseUrl = UrlRecord.Parse("https://example.test/css/app.css")!;
         const string Css = """
             @font-face {
               font-family: 'Probe';
@@ -116,7 +117,7 @@ public sealed class PageTests
     [Fact]
     public void FontFaceWarmupSkipsDataSourcesAndSurvivesABraceInAString()
     {
-        var baseUrl = new Uri("https://example.test/css/app.css");
+        var baseUrl = UrlRecord.Parse("https://example.test/css/app.css")!;
         const string Css = """
             @font-face {
               font-family: 'A }';
@@ -135,7 +136,7 @@ public sealed class PageTests
     {
         // Better to warm too much than to drop the rest of the stylesheet on the
         // floor, which is the same policy CssImportRuleLength follows.
-        var baseUrl = new Uri("https://example.test/css/app.css");
+        var baseUrl = UrlRecord.Parse("https://example.test/css/app.css")!;
         Assert.Equal<string>(
             ["https://example.test/css/probe.woff2"],
             PageHelpers.CssResourceUrls("@font-face { src: url('probe.woff2') format('woff2');", baseUrl));
@@ -199,10 +200,10 @@ public sealed class PageTests
     [Fact]
     public void DefaultNavigationReferrerMatchesStrictOriginWhenCrossOrigin()
     {
-        var source = new Uri("https://user:pass@source.example/path?q=1#fragment");
-        var sameOrigin = new Uri("https://source.example/next");
-        var crossOrigin = new Uri("https://target.example/next");
-        var downgrade = new Uri("http://source.example/next");
+        var source = UrlRecord.Parse("https://user:pass@source.example/path?q=1#fragment")!;
+        var sameOrigin = UrlRecord.Parse("https://source.example/next")!;
+        var crossOrigin = UrlRecord.Parse("https://target.example/next")!;
+        var downgrade = UrlRecord.Parse("http://source.example/next")!;
 
         Assert.Equal(
             "https://source.example/path?q=1",
@@ -210,7 +211,7 @@ public sealed class PageTests
         Assert.Equal("https://source.example/", PageHelpers.NavigationReferrer(source, crossOrigin));
         Assert.Equal(string.Empty, PageHelpers.NavigationReferrer(source, downgrade));
 
-        var dataSource = new Uri("data:text/html,source");
+        var dataSource = UrlRecord.Parse("data:text/html,source")!;
         Assert.Equal(string.Empty, PageHelpers.NavigationReferrer(dataSource, crossOrigin));
     }
 
@@ -933,7 +934,7 @@ public sealed class PageTests
     public async Task SuspendResumePreservesDocumentScriptStartState()
     {
         using Page page = PageFixtures.NewPage("script-state-suspend");
-        page.Url = new Uri("http://example.com/suspend.html");
+        page.Url = UrlRecord.Parse("http://example.com/suspend.html")!;
         page.Dom = HtmlParsing.ParseHtml(
             """
             <html><head></head><body data-parser-runs="0" data-dynamic-runs="0" data-inert-runs="0">
@@ -993,7 +994,7 @@ public sealed class PageTests
     public async Task SuspendResumePreservesCdpEvaluationHandles()
     {
         using Page page = PageFixtures.NewPage("cdp-handle-suspend");
-        page.Url = new Uri("http://example.com/");
+        page.Url = UrlRecord.Parse("http://example.com/")!;
         page.Dom = HtmlParsing.ParseHtml("<html><body></body></html>");
         page.InitJs();
 
@@ -1021,7 +1022,7 @@ public sealed class PageTests
     public void NewDocumentDoesNotInheritSuspendedScriptIds()
     {
         using Page page = PageFixtures.NewPage("script-state-navigation");
-        page.Url = new Uri("http://example.com/old.html");
+        page.Url = UrlRecord.Parse("http://example.com/old.html")!;
         page.Dom = HtmlParsing.ParseHtml(
             "<html><head></head><body><script id=old></script></body></html>");
         page.InitJs();
@@ -1030,7 +1031,7 @@ public sealed class PageTests
             + " globalThis.__markParserScripts([old._nid]); return old._nid;");
         page.SuspendJs();
 
-        page.Url = new Uri("http://example.com/new.html");
+        page.Url = UrlRecord.Parse("http://example.com/new.html")!;
         page.Dom = HtmlParsing.ParseHtml(
             "<html><head></head><body data-fresh-runs=0><script id=fresh>"
             + "document.body.setAttribute('data-fresh-runs', '1')</script></body></html>");
@@ -1694,7 +1695,7 @@ public sealed class PageTests
             pageUrl,
             $"""<html><body><img src="{assetUrl}" style="width:20px;height:10px"></body></html>""",
             (100.0f, 80.0f));
-        page.Url = new Uri(pageUrl);
+        page.Url = UrlRecord.Parse(pageUrl)!;
 
         Assert.Equal(1, await page.PrepareScreenshotResourcesAsync(1_000));
         PageFixtures.AssertJson(
@@ -1723,7 +1724,7 @@ public sealed class PageTests
             pageUrl,
             $"""<html><body><img src="{assetUrl}"></body></html>""",
             (100.0f, 80.0f));
-        page.Url = new Uri(pageUrl);
+        page.Url = UrlRecord.Parse(pageUrl)!;
 
         Assert.Equal(0, await page.PrepareScreenshotResourcesAsync(5));
         Assert.False(
@@ -1777,7 +1778,7 @@ public sealed class PageTests
             </body></html>
             """,
             (100.0f, 80.0f));
-        page.Url = new Uri("https://example.test/scroll");
+        page.Url = UrlRecord.Parse("https://example.test/scroll")!;
 
         byte[] before = Assert.IsType<byte[]>(page.Screenshot(page.Viewport));
         Assert.Equal(
@@ -1857,26 +1858,26 @@ public sealed class PageTests
     [Fact]
     public void MaterializedImportGraphRetainsPrintConditionAndImportBase()
     {
-        var rootUrl = new Uri("https://example.test/css/root.css");
-        var printUrl = new Uri(rootUrl, "print/print.css");
+        var rootUrl = UrlRecord.Parse("https://example.test/css/root.css")!;
+        var printUrl = rootUrl.Join("print/print.css")!;
         Dictionary<string, LoadedStylesheet> sheets = new(StringComparer.Ordinal)
         {
-            [rootUrl.AbsoluteUri] = new LoadedStylesheet(
+            [rootUrl.Href] = new LoadedStylesheet(
                 rootUrl,
                 [new StylesheetImport("print/print.css", "print")],
                 ".root{color:red}"),
-            [printUrl.AbsoluteUri] = new LoadedStylesheet(
+            [printUrl.Href] = new LoadedStylesheet(
                 printUrl,
                 [],
                 ".print{background:url(../mark.svg)}"),
         };
         Dictionary<string, string> aliases = new(StringComparer.Ordinal)
         {
-            [rootUrl.AbsoluteUri] = rootUrl.AbsoluteUri,
-            [printUrl.AbsoluteUri] = printUrl.AbsoluteUri,
+            [rootUrl.Href] = rootUrl.Href,
+            [printUrl.Href] = printUrl.Href,
         };
         string materialized = Assert.IsType<string>(
-            PageHelpers.MaterializeStylesheetGraph(rootUrl.AbsoluteUri, sheets, aliases, []));
+            PageHelpers.MaterializeStylesheetGraph(rootUrl.Href, sheets, aliases, []));
 
         Assert.StartsWith("@media print {\n", materialized, StringComparison.Ordinal);
         Assert.Contains(
@@ -1889,7 +1890,7 @@ public sealed class PageTests
     [Fact]
     public void StylesheetAssetUrlsKeepTheImportingSheetsBase()
     {
-        var baseUrl = new Uri("https://example.com/css/theme/app.css");
+        var baseUrl = UrlRecord.Parse("https://example.com/css/theme/app.css")!;
         const string Css = """
             .hero { background:url("../img/hero.png") }
             .icon { mask-image:URL('./icons/mark.svg') }
@@ -2137,7 +2138,7 @@ public sealed class PageTests
             </script></body></html>
             """;
         string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(html));
-        page.Url = new Uri($"data:text/html;base64,{encoded}");
+        page.Url = UrlRecord.Parse($"data:text/html;base64,{encoded}")!;
         return page;
     }
 
@@ -2236,4 +2237,74 @@ public sealed class PageTests
             "https://fonts.gstatic.com/s/inter/v18/font.woff"));
     }
 
+
+    /// <summary>
+    /// <c>url_string</c> is the WHATWG serialization, not <see cref="Uri"/>'s.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Uri.AbsoluteUri"/> percent-encodes <c>&lt;</c>, <c>&gt;</c> and
+    /// space in a cannot-be-a-base URL's opaque path, so while <c>Page.Url</c> was a
+    /// <see cref="Uri"/> every <c>data:</c> URL reaching the CDP wire read
+    /// <c>data:text/html,%3Cb%3Ea%20b%3C/b%3E</c> where the reference engine writes
+    /// <c>data:text/html,&lt;b&gt;a b&lt;/b&gt;</c>. That fed
+    /// <c>Page.frameNavigated</c>, <c>Page.getFrameTree</c>, DOMSnapshot's
+    /// <c>documentURL</c>/<c>baseURL</c>, Runtime origins and
+    /// <c>Target.getTargets</c>, and also <c>location.href</c>, because the JS realm
+    /// is built with <c>UrlString()</c> as its base.
+    /// </remarks>
+    [Fact]
+    public void UrlStringKeepsTheWhatwgSpellingOfADataUrl()
+    {
+        const string raw = "data:text/html,<b>a b</b>";
+        using Page page = PageFixtures.NewPage("url-string");
+        page.Url = UrlRecord.Parse(raw)!;
+
+        Assert.Equal(raw, page.UrlString());
+        Assert.Equal("data:text/html,%3Cb%3Ea%20b%3C/b%3E", new Uri(raw).AbsoluteUri);
+    }
+
+    /// <summary>
+    /// The <c>url</c> crate's component getters, which are not
+    /// <see cref="Uri"/>'s: <c>path()</c> excludes the query, and <c>query()</c>
+    /// excludes the leading <c>?</c> that <see cref="Uri.Query"/> includes.
+    /// </summary>
+    [Fact]
+    public void PageUrlComponentsFollowTheUrlCrateAndNotSystemUri()
+    {
+        UrlRecord url = UrlRecord.Parse("https://example.test/submitted?q=1#frag")!;
+
+        Assert.Equal("/submitted", url.Path);
+        Assert.Equal("q=1", url.Query);
+        Assert.Equal("frag", url.Fragment);
+        Assert.Equal("https://example.test", url.AsciiOrigin);
+    }
+
+    /// <summary>
+    /// <c>Url::clone</c> plus <c>set_fragment(None)</c>: the original keeps its
+    /// fragment. Mutating in place made two stylesheet cache keys collide.
+    /// </summary>
+    [Fact]
+    public void WithoutFragmentDoesNotMutateTheOriginal()
+    {
+        UrlRecord url = UrlRecord.Parse("https://example.test/a.css#frag")!;
+        UrlRecord stripped = PageUrl.WithoutFragment(url);
+
+        Assert.Equal("https://example.test/a.css", stripped.Href);
+        Assert.Equal("https://example.test/a.css#frag", url.Href);
+        UrlRecord noFragment = UrlRecord.Parse("https://example.test/a.css")!;
+        Assert.Same(noFragment, PageUrl.WithoutFragment(noFragment));
+    }
+
+    /// <summary>
+    /// <c>robots_url.set_path("/robots.txt"); set_query(None); set_fragment(None)</c>
+    /// on a clone, so the navigation URL survives.
+    /// </summary>
+    [Fact]
+    public void RobotsUrlIsTheOriginPlusRobotsTxt()
+    {
+        UrlRecord url = UrlRecord.Parse("https://example.test:8443/deep/page?x=1#f")!;
+
+        Assert.Equal("https://example.test:8443/robots.txt", PageUrl.RobotsUrl(url).Href);
+        Assert.Equal("https://example.test:8443/deep/page?x=1#f", url.Href);
+    }
 }
