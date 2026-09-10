@@ -3626,6 +3626,56 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void AStableScrollbarGutterIsReservedOnANestedScrollContainer()
+    {
+        // DEVIATION from the Rust reference, which reserves a scrollbar gutter only out of the
+        // initial containing block, so a nested scroll container reserves none. Chromium takes
+        // a stable gutter out of the content area on the inline axis and leaves the computed
+        // padding untouched. Tesserae's annotated text editor overlays a highlight layer on a
+        // `scrollbar-gutter: stable; scrollbar-width: thin` textarea; without the gutter the
+        // overlay came out 10px wider than the text it marks.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              div { width:300px; height:60px }
+              div > i { display:block; width:100%; height:10px }
+              #thin  { overflow-y:scroll; scrollbar-gutter:stable; scrollbar-width:thin }
+              #wide  { overflow-y:scroll; scrollbar-gutter:stable }
+              #auto  { overflow-y:auto;   scrollbar-gutter:stable; scrollbar-width:thin }
+              #none  { overflow-y:scroll; scrollbar-width:thin }
+              #plain { overflow-y:scroll }
+              #padded { overflow-y:scroll; scrollbar-gutter:stable; padding:0 10px;
+                        box-sizing:content-box }
+            </style>
+            <div id="thin"><i id="a"></i></div>
+            <div id="wide"><i id="b"></i></div>
+            <div id="auto"><i id="c"></i></div>
+            <div id="none"><i id="d"></i></div>
+            <div id="plain"><i id="e"></i></div>
+            <div id="padded"><i id="f"></i></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // scrollbar-width: thin reserves 10px, the classic gutter 15px, and `auto` overflow
+        // reserves just as `scroll` does once the gutter is asked for.
+        Assert.True(MathF.Abs(Width("a") - 290f) < 0.01f, $"{Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 285f) < 0.01f, $"{Width("b")}");
+        Assert.True(MathF.Abs(Width("c") - 290f) < 0.01f, $"{Width("c")}");
+
+        // An overlay scrollbar with no `scrollbar-gutter` declaration takes no space.
+        Assert.True(MathF.Abs(Width("d") - 300f) < 0.01f, $"{Width("d")}");
+        Assert.True(MathF.Abs(Width("e") - 300f) < 0.01f, $"{Width("e")}");
+
+        // The gutter comes out of the content area; the padding is untouched by it.
+        Assert.True(MathF.Abs(Width("f") - 285f) < 0.01f, $"{Width("f")}");
+        Assert.True(
+            MathF.Abs(laid.Styles[Id(tree, "padded")].Padding.Right - 10f) < 0.01f,
+            "the reserved gutter must not show up as computed padding");
+    }
+
+    [Fact]
     public void FinalFlexReflowFinalizesFitContentBeforeDescendantCalc()
     {
         DomTree tree = Parse(

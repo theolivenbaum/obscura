@@ -877,6 +877,49 @@ public sealed class LayoutStyle
     /// </remarks>
     public byte ScrollbarGutters;
 
+    /// <summary>
+    /// `scrollbar-width`: 0 auto, 1 thin, 2 none. Sizes the gutter that
+    /// <see cref="ScrollbarGutters"/> reserves.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: crates/obscura-render parses neither this property nor a gutter on any box
+    /// but the root, so a nested scroll container reserves nothing. See "Known deviations" in
+    /// todo.md.
+    /// </remarks>
+    public byte ScrollbarWidthKind;
+
+    /// <summary>
+    /// Set on the root element, whose stable gutter is already taken out of the initial
+    /// containing block, so the taffy mapping does not reserve it a second time.
+    /// </summary>
+    internal bool GutterReservedByViewport;
+
+    /// <summary>
+    /// Width of one stable scrollbar gutter on this box, or 0 when none is reserved. Chromium
+    /// reserves it only for a scroll container that asks for it with `scrollbar-gutter: stable`,
+    /// and only on the inline axis; an overlay scrollbar with no such declaration takes no space.
+    /// </summary>
+    internal float StableScrollbarGutter()
+    {
+        if (ScrollbarGutters == 0 || GutterReservedByViewport || !OverflowScrollContainer)
+        {
+            return 0f;
+        }
+
+        return ScrollbarWidthKind switch
+        {
+            1 => ThinScrollbarGutter,
+            2 => 0f,
+            _ => ClassicScrollbarGutter,
+        };
+    }
+
+    /// <summary>Classic scrollbar gutter width, matching Chromium on this platform.</summary>
+    internal const float ClassicScrollbarGutter = 15f;
+
+    /// <summary>`scrollbar-width: thin` gutter width, matching Chromium on this platform.</summary>
+    internal const float ThinScrollbarGutter = 10f;
+
     /// <summary><c>float: left|right</c>.</summary>
     /// <remarks>
     /// True CSS float needs per-line reflow around the float's shape, which taffy's

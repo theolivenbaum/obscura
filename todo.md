@@ -421,14 +421,21 @@ DEVIATION comment at the C# code that differs.
   cascade resolved, so it cannot be used to diagnose pseudo styling; paint is the
   only reliable signal today. Layout and paint use the real resolved pseudo style,
   so this is a DOM/CDP reporting gap rather than a rendering one.
-- **Open, not fixed: `scrollbar-gutter: stable` is honoured only on the root.**
-  Both engines reserve the gutter from the initial containing block only
-  (`dom.rs` reads `scrollbar_gutters` off the root element alone), so a nested
-  scroll container does not. Tesserae's annotated text editor overlays a
-  highlight layer on a `scrollbar-gutter: stable; scrollbar-width: thin`
-  textarea; the overlay comes out 902px wide against Chromium's 892px, so the
-  highlight boxes sit 10px off the text they mark. A real fix also needs
-  `scrollbar-width: thin` to pick the 10px gutter rather than the classic width.
+- **DEVIATION - `scrollbar-gutter: stable` was honoured only on the root.** The
+  reference reserves a gutter out of the initial containing block alone
+  (`dom.rs` reads `scrollbar_gutters` off the root element), so a nested scroll
+  container reserved none, and it parses no `scrollbar-width` at all. Tesserae's
+  annotated text editor overlays a highlight layer on a
+  `scrollbar-gutter: stable; scrollbar-width: thin` textarea, and the overlay came
+  out 902px against Chromium's 892. The port reserves the gutter through taffy's
+  own `ScrollbarWidth`, which takes it out of the content area and leaves the
+  computed padding untouched, exactly as Chromium does. Measured against Chromium
+  on this platform: 15px classic, 10px for `thin`, 0 for `none`, and nothing at
+  all without `scrollbar-gutter` (this build uses overlay scrollbars). Applies on
+  the inline axis only, for a box that is a scroll container in either axis.
+  Not closed: `both-edges` reserves the right total (270px of 300) but taffy
+  insets from the end only, so the content does not shift by the leading gutter
+  the way Chromium's does.
 - **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
   evenly.** Both panels' content is percentage-sized, so with the bare-percentage
   neutralization both flex base sizes measure 0 and the row splits 462/462

@@ -258,6 +258,12 @@ public static partial class RenderDom
             int rootGutters = styles.TryGetValue(rootId, out LayoutStyle? gutterStyle)
                 ? Math.Min(gutterStyle.ScrollbarGutters, (byte)2)
                 : 0;
+            if (gutterStyle is not null)
+            {
+                // The root's gutter comes out of the initial containing block just below, so
+                // the taffy mapping must not reserve it a second time on the root's own box.
+                gutterStyle.GutterReservedByViewport = true;
+            }
             float initialCbWidth = F32.Max(
                 viewport.Width - (ClassicScrollbarGutter * rootGutters),
                 0f);

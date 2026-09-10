@@ -1925,6 +1925,18 @@ public static partial class ComputedStyle
                 return true;
             }
 
+            case "scrollbar-width":
+                // DEVIATION: not parsed by crates/obscura-render. It sizes the gutter that
+                // `scrollbar-gutter: stable` reserves; Tesserae's scroll panes ask for `thin`,
+                // which Chromium reserves at 10px against the classic 15.
+                style.ScrollbarWidthKind = CssText.AsciiLower(value.Trim()) switch
+                {
+                    "thin" => (byte)1,
+                    "none" => (byte)2,
+                    _ => (byte)0,
+                };
+                return true;
+
             case "scrollbar-gutter":
             {
                 List<string> tokens = SplitWhitespace(CssText.AsciiLower(value));

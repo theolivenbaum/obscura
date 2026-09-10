@@ -233,6 +233,21 @@ internal static class TaffyStyleMapping
 
         s.Margin = RectAuto(style.Margin, style.MarginAuto);
         s.Padding = RectLpPercent(style.Padding, style.PaddingPercent);
+
+        // DEVIATION from crates/obscura-render, which reserves a scrollbar gutter only out of
+        // the initial containing block, so a nested scroll container reserves none. Chromium
+        // takes a stable gutter out of the content area on the inline axis and leaves the
+        // computed padding untouched, which is exactly taffy's own scrollbar-width reservation
+        // - but taffy only applies it to an axis marked Scroll, and the mapping below marks a
+        // scrollable axis Hidden. Tesserae's annotated text editor overlays a highlight layer on
+        // a `scrollbar-gutter: stable; scrollbar-width: thin` textarea, and without the gutter
+        // the overlay sat 10px wider than the text it marks. See "Known deviations" in todo.md.
+        if (style.StableScrollbarGutter() is > 0f and { } gutter)
+        {
+            s.ScrollbarWidth = style.ScrollbarGutters == 2 ? gutter * 2f : gutter;
+            s.Overflow = new Layout.Point<TaffyOverflow>(s.Overflow.X, TaffyOverflow.Scroll);
+        }
+
         s.Border = RectLp(style.Border);
         if (style.IgnoresUsedBoxSizes())
         {
