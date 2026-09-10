@@ -15,6 +15,9 @@ namespace Obscura.Cdp.Tests;
 /// same scheduler, so a synchronous JS <c>while</c> loop starved every other
 /// task, including the accept. The dedicated accept thread fixes this.
 /// </remarks>
+// Drives a live CDP server and its V8 isolates; joins the serial collection so
+// it does not compete with the rest of the suite on a loaded host.
+[Collection(CdpDomainCollection.Name)]
 public sealed class ControlPlaneUnblockedTests
 {
     private static readonly TimeSpan HttpTimeout = TimeSpan.FromSeconds(3);

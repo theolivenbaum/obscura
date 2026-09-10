@@ -24,6 +24,9 @@ namespace Obscura.Cdp.Tests;
 /// after N lifetime connections, which no other test would catch.
 /// </para>
 /// </remarks>
+// Drives a live CDP server and its V8 isolates; joins the serial collection so
+// it does not compete with the rest of the suite on a loaded host.
+[Collection(CdpDomainCollection.Name)]
 public sealed class MaxConnectionsCapTests
 {
     private const int Limit = 2;

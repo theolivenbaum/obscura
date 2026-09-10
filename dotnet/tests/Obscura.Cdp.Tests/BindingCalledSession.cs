@@ -15,6 +15,9 @@ namespace Obscura.Cdp.Tests;
 /// whose sessionId is not the one it attached with, so
 /// <c>page.exposeFunction()</c> never fired its callback.
 /// </remarks>
+// Drives a live CDP server and its V8 isolates; joins the serial collection so
+// it does not compete with the rest of the suite on a loaded host.
+[Collection(CdpDomainCollection.Name)]
 public sealed class BindingCalledSessionTests
 {
     private static async Task<JsonNode?> CdpAsync(

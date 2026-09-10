@@ -29,6 +29,14 @@ namespace Obscura.Cdp.Tests;
 /// OS thread, so the abort cannot happen and all clients complete.
 /// </para>
 /// </remarks>
+// Spawns many CDP connections, each with its own V8 isolates. Constructing a
+// runtime costs ~50ms here and is compile-dominated, because ClearScript has no
+// equivalent of the startup snapshot the Rust engine restores from, so this test
+// is far more sensitive to a loaded host than its Rust counterpart. It joins the
+// serial collection the other isolate-driving tests already use rather than
+// having its budget inflated: the C# deadline is 30s where Rust allows 20s, and
+// raising it further would hide the cost instead of bounding it.
+[Collection(CdpDomainCollection.Name)]
 public sealed class ConcurrentConnectionsHeavyPageTests
 {
     private const int Clients = 4;

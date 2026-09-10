@@ -28,6 +28,9 @@ namespace Obscura.Cdp.Tests;
 /// thread, stays reachable too.
 /// </para>
 /// </remarks>
+// Drives a live CDP server and its V8 isolates; joins the serial collection so
+// it does not compete with the rest of the suite on a loaded host.
+[Collection(CdpDomainCollection.Name)]
 public sealed class AcceptThreadSurvivesSilentConnectionsTests
 {
     private const int SilentConnections = 4;

@@ -194,20 +194,20 @@ The largest component. Split into stages; each stage is independently testable.
   port omits the key, so a client reading `result.value` gets `undefined` where
   Chrome and Rust give `null`.
 
-- **Four tests fail under full-solution load and pass in isolation.** Three in
-  `Obscura.Js.Tests` (a different set each run) and
-  `ConcurrentConnectionsHeavyPageDoNotAbortV8` in `Obscura.Cdp.Tests`. All are
-  timing-sensitive. The first prepared render on a fresh process costs ~300ms in
-  embedded font initialization against ~1ms once warm, so tests that schedule
-  work tens of milliseconds apart collapse two events into one when the host is
-  loaded. Measured rather than assumed: font and Skia initialization is only
-  ~18ms, not the ~300ms first attributed to it. The real cost is constructing an
-  `ObscuraJsRuntime`, 504ms for the first in a process and 43-65ms after, and it
-  is compile-dominated (compiling bootstrap.js alone measures ~49ms). Handing V8
-  a `V8CacheKind.Code` blob from the first compile was tried and REVERTED: it
-  made the first runtime slower (844ms) and later ones no faster, so V8 is not
-  accepting the cache. Rust avoids all of this with a startup snapshot, which
-  ClearScript does not expose.
+- **Isolate-driving tests run in a serial collection.** Five CDP tests that
+  stand up a live server and its V8 isolates were competing with the other 231
+  for the host and timing out under full-solution load while passing in
+  isolation. They now join the `cdp-domains` collection, which already existed
+  for exactly this reason. Their budgets were NOT inflated: the C# deadline is
+  already 30s where Rust allows 20s, and raising it further would have hidden
+  the cost rather than bounded it.
+- **The port is measurably slower than Rust at spawning isolates.** Constructing
+  an `ObscuraJsRuntime` costs 504ms for the first in a process and 43-65ms after,
+  and it is compile-dominated: compiling bootstrap.js alone measures ~49ms. Rust
+  pays none of this because it restores a V8 startup snapshot. ClearScript
+  exposes no snapshot API, and handing V8 a `V8CacheKind.Code` blob was tried and
+  reverted after it made the first runtime slower (844ms) and later ones no
+  faster. Font and Skia initialization, once blamed for this, is only ~18ms.
 - ~~CDP page/runtime/dom/target unaudited~~ **AUDITED AND COMPLETE.** Counted
   name by name against the Rust source: 49 in-file tests (page 25, runtime 10,
   dom 6, target 8) and 49 across the 19 assigned integration files. Every one

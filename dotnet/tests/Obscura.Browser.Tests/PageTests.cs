@@ -825,9 +825,14 @@ public sealed class PageTests
     // from inside `fetch(...).then(...)` in `_loadIframeSrc`, so a frame created by
     // a frame's script is recorded with parentFrameId 0 (the page) instead of its
     // real parent. Rust reads the parent from the V8 entered-or-microtask context,
-    // which is correct for an async continuation. Everything below this point is
-    // written and will pass once the op resolves the realm the way Rust does.
-    [Fact(Skip = "blocked on Obscura.Js: op_frame_document_ready records parentFrameId 0 for a frame created inside an async continuation, because RealmStates.Current is only set around synchronous host entries")]
+    // which is correct for an async continuation.
+    //
+    // Re-checked after BindRealmOverrides landed, which does bind
+    // op_frame_document_ready per realm against that realm's own state. The
+    // grandchild case still fails, so the original diagnosis is incomplete and the
+    // remaining cause is not yet identified. The body is written and runs; only the
+    // Skip stands between it and the assertion.
+    [Fact(Skip = "op_frame_document_ready still records the wrong parent for a frame created by a frame's own async continuation, even though BindRealmOverrides binds it per realm; cause not yet identified")]
     public async Task DetachingAParentDiscardsItsQueuedDescendantWork()
     {
         List<string> requests = [];
