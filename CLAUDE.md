@@ -12,14 +12,23 @@ Read `todo.md` for the live port status and the ordered work queue.
 
 ## Ground rules for the port
 
-1. **The Rust tree in `crates/` is the specification.** It stays in the repo
-   during the port and is the authority on behavior. When C# and Rust disagree,
-   Rust is right unless the Rust code is provably wrong. Do not delete or edit
-   `crates/**` to make a C# test pass.
-2. **Port behavior, not syntax.** Match observable behavior exactly (the same
+1. **The Rust tree in `crates/` is the specification, and it is read-only.**
+   It stays in the repo during the port and is the authority on behavior. When
+   C# and Rust disagree, Rust is right unless the Rust code is provably wrong.
+   Do not edit `crates/**` - not to make a C# test pass, and not to carry a fix
+   across. Fix C# only.
+2. **Where C# deviates from Rust deliberately, say so in a comment at the
+   deviation.** Once a bug is fixed on the C# side and not in `crates/**`, the
+   two trees no longer agree, and the next reader diffing them needs to know
+   which side is intentional. Put a short comment at the C# code that differs:
+   what Rust does, what C# does instead, and why (a bug fix against Chromium, a
+   platform difference, a deliberate simplification). Record the same thing under
+   "Known deviations" in `todo.md`. A deviation with no comment is a defect,
+   because the next port pass will "correct" it back to the Rust behavior.
+3. **Port behavior, not syntax.** Match observable behavior exactly (the same
    JSON payloads, the same op protocol strings, the same CDP wire messages, the
    same DOM semantics). Write idiomatic modern C#, not transliterated Rust.
-3. **Native dependencies are a closed set: V8, Skia, HarfBuzz.** Nothing else.
+4. **Native dependencies are a closed set: V8, Skia, HarfBuzz.** Nothing else.
    - `Microsoft.ClearScript.V8.Native.*` - the JavaScript engine.
    - `SkiaSharp.NativeAssets.*` - rasterization and image codecs. tiny-skia (the
      Rust engine's rasterizer) is itself a port of Skia, so painting onto Skia
@@ -30,13 +39,13 @@ Read `todo.md` for the live port status and the ordered work queue.
    dependency needs an explicit decision recorded in `todo.md` first. In
    particular: no native TLS stack, which is why stealth TLS impersonation is
    a tracked gap rather than a port target.
-4. **`bootstrap.js` is shared, not ported.** `crates/obscura-js/js/bootstrap.js`
+5. **`bootstrap.js` is shared, not ported.** `crates/obscura-js/js/bootstrap.js`
    is JavaScript and runs unchanged on the C# side. `Obscura.Js` embeds it by
    linking that exact file (see the `EmbeddedResource` in `Obscura.Js.csproj`),
    never by copying it, so the two engines cannot drift. Fix the shim in place
    and both engines pick the fix up. It reaches V8 through
    `BootstrapLoader.Install`, which installs the `Deno.core` shim first.
-5. **The op protocol is a contract.** `bootstrap.js` calls ~53 ops, and `op_dom`
+6. **The op protocol is a contract.** `bootstrap.js` calls ~53 ops, and `op_dom`
    multiplexes ~90 string commands over `(cmd, arg1, arg2) -> string`. The C#
    implementation must accept and return byte-identical payloads. See
    `dotnet/docs/op-protocol.md`.
@@ -126,6 +135,22 @@ dotnet build -c Release
 dotnet run -c Release --project src/Obscura.Cli -- fetch https://example.com --dump text
 ```
 
+`dotnet build` output starts in ~790ms on a trivial page, and about 300ms of
+that is jitting the DOM/style/layout/paint stack on the way to the first frame.
+Publish precompiles it away, so measure anything cold-start-sensitive against a
+publish, not against `bin/`:
+
+```bash
+dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained false   # ~480ms
+dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained true    # ~360ms
+```
+
+`PublishReadyToRun` is set in `Obscura.Cli.csproj` whenever a RuntimeIdentifier
+is given, and `PublishReadyToRunComposite` turns itself on when the publish is
+also self-contained. Delete `obj/` and `bin/` for the RID when switching
+between self-contained and framework-dependent: stale intermediates from the
+other mode produce a binary that aborts at startup with no output.
+
 The Rust reference build (for differential testing) is unchanged:
 
 ```bash
@@ -157,6 +182,12 @@ dotnet test -c Release tests/Obscura.Dom.Tests          # one area
 - **Parity tests** (`Obscura.Parity.Tests`) shell out to the Rust binary and
   compare output. They are skipped automatically unless `OBSCURA_RUST_BIN`
   points at a release build. CI-equivalent runs must set it.
+- **A deliberate deviation makes parity the wrong assertion for that input.**
+  Since `crates/**` is read-only, a bug fixed on the C# side leaves the two
+  engines legitimately disagreeing. Do not weaken the fix to keep parity green:
+  assert the correct (Chromium) value in an `Obscura.<Area>.Tests` fact instead,
+  and if a parity test covers the same input, narrow it and name the deviation
+  in the skip/why comment.
 
 ## Conventions
 

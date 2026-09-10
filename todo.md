@@ -196,6 +196,138 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
+  Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
+  which routes every call from `bootstrap.js` through ClearScript's
+  reflection-based host-object dispatcher. `Obscura.Js.Ops.FastOpBinding` now
+  wraps each op in a `V8FastHostFunction` (ClearScript 7.5), which hands the
+  invoker V8's raw argument list instead. Measured in-page after warmup, same
+  host, same V8, us/call:
+
+                                            rust    port before   port after
+      op_runtime_events_enabled (0 args)    0.07       1.42          0.58
+      op_shadow_root_info (1 arg)           0.30       1.40          0.50
+      op_dom("document_node_id")            0.37       3.18          1.20
+      op_dom("node_type")                   0.47       3.20          1.40
+
+  And on DOM work driven from page script:
+
+                                     rust    port before   port after
+      20k setAttribute               28ms      412ms         134ms
+      20k createElement              94ms      395ms         174ms
+      5k create + style + append    114ms     1329ms         910ms
+
+  Async ops keep the general marshaller: they return `Task` and depend on
+  `EnableTaskPromiseConversion`, which the fast path does not perform.
+
+  Beware when measuring this: timing several ops in one process in a fixed
+  order makes whichever runs first look slowest, because JIT tier-up dominates
+  the first few thousand iterations. The same op measured 8.8us on the first
+  lap and 3.2us on the second. An earlier version of this entry reported
+  5-27us/call from exactly that mistake. Always run a discarded warm-up lap
+  over every op before the measured one, and sanity-check by reversing the
+  order.
+- **The remaining page-load gap is ~2.3x, and CSS parsing is the largest single
+  piece of it.** A Tesserae SPA route at a fixed `--wait 1` takes ~6.9s to
+  `--dump html` against the reference's ~2.9s. The whole shape of that is now
+  measured, and it is one synchronous JavaScript task, not a spread:
+
+      phase preNavigate        5 ms
+      phase navigate        3109 ms     (first prepare, 1990 ms, happens in here)
+      phase settle          3552 ms     (ONE event-loop tick; budget was 1000 ms)
+      phase dump              18 ms
+
+  The settle loop checks its wall-clock budget between ticks, so a single
+  multi-second page task overruns it several times over. That task is the app's
+  render, and its cost is one `op_layout_geometry` call: `OBSCURA_OP_PROFILE=1`
+  (see `FastOpBinding.OpProfile`) puts 4.3s on one such call against 233ms for
+  the ~19,000 `op_dom` calls around it.
+
+  Inside that call, `EnsurePreparedGeometry` is essentially all of it, and
+  inside the prepare:
+
+      css parse (Stylesheet.ParseForViewportAndMedia)   ~45%
+      cascade   (DomCascade.CascadeWalk)                ~25%
+      web fonts (WOFF2 decode, first prepare only)      ~15%
+      dom build (DomBuild.Build)                        ~10%
+      taffy compute                                      ~5%
+
+  So the next round is CSS, not taffy. Isolated on a page that is 3 MB of
+  stylesheet over a one-element body, parse plus cascade is ~600ms against the
+  reference's ~125ms, and that ~5x is the widest single ratio anywhere in the
+  port. It is allocation-bound: the sheet has 44,912 rules, and parsing it
+  allocated 187 MB, with GC pauses accounting for 45% of the wall time (one run
+  with a 256 MB gen0 budget and zero collections finished in 187 ms). Tuning
+  the GC is not the answer - server GC, background GC and larger gen0 budgets
+  all measured within noise of each other on the real page - cutting the
+  allocation is.
+
+  A first pass took it to 133 MB and the warm parse from 476ms to 379ms best,
+  521ms to 438ms median: the top-level scanner now records offsets into the
+  sheet and takes one substring per rule instead of appending every character
+  to a `StringBuilder`; `StripPseudoElement` compares spans instead of building
+  a suffix string on each of its three calls per rule; `SplitSelectorList`
+  returns the input directly when there is no comma; `Denest` trims declaration
+  spans and no longer materializes its builder twice; `SelectorParser` reads an
+  escape-free identifier as one substring and short-circuits a selector that is
+  nothing but one class (95% of this sheet's 45,000 selectors, once the cascade
+  has taken the pseudo-element off).
+
+  What is left, measured per rule over the 41,994 pseudo rules on that sheet:
+  `CompileRuleSelector` 40 MB, `NoteSelectorForInvalidation` 25 MB, building
+  the `PseudoRule` 23 MB, `CssDeclarations.Partition` 21 MB. Each is a few
+  hundred bytes of small objects per rule rather than one bad allocation, so
+  the next step is a pass over those four with pooling and spans, not a single
+  fix. Note also that none of this is visible in a cold single-parse CLI run,
+  where JIT dominates the one parse; it shows in the warm bench, in `serve`,
+  and in memory.
+
+  Two prepare-path defects were fixed on the way to that conclusion, both of
+  which had been hiding behind the op-boundary cost:
+
+  - `EnsurePreparedRender` and `EnsurePreparedGeometry` read the document base
+    URL through `StateHelpers.DocumentBaseUrl`, which runs the selector engine
+    over the whole tree looking for `base[href]`. A memoized variant already
+    existed for `document.baseURI` and these two call sites simply were not
+    using it, so the geometry fast path was O(nodes). 200 repeated
+    `getBoundingClientRect()` calls on a 5000-node document went from 457ms to
+    4ms (the reference is 66ms), and `getComputedStyle` x200 from 507ms to
+    312ms (reference 374ms).
+  - Web faces were WOFF2-decoded on every prepare, ~600ms of every prepare on
+    a page with three faces. `RenderResourceCache` now memoizes the decoded
+    sfnt against the fetched byte array. Deliberate deviation, recorded below.
+- **Cold start is ~790ms from `dotnet build` output, ~40ms for the reference.**
+  Roughly 300ms of it is jitting the DOM, style, layout and paint stack on the
+  way to the first frame, and `dotnet publish` now precompiles that away:
+  `PublishReadyToRun` is on whenever a RuntimeIdentifier is set, and composite
+  turns itself on when the publish is also self-contained. Best of five on a
+  trivial file page:
+
+      dotnet build output (JIT)              790ms
+      publish, ReadyToRun                    480ms
+      publish, composite + self-contained    360ms
+
+  What is left is structural. `crates/obscura-js` bakes `bootstrap.js` into a
+  V8 startup snapshot at build time (see the comment at `frame.rs:11`), so the
+  reference restores a heap that already has the whole browser surface in it.
+  ClearScript exposes no snapshot API, so the port compiles and runs the 731 KB
+  script on every start: ~120ms of the remainder, plus V8 platform init that a
+  snapshot would also shorten. A V8 code cache does not help - it was measured
+  at 38ms to deserialize 349 KB against 40ms to compile from source, and the
+  execution time behind it does not move, so it is a small net loss.
+
+  Three tests are load-flaky, all of them asserting on a deadline: the
+  `Obscura.Browser.Tests` cases `ModuleGraphAndEvaluationShareOneActiveBudget`
+  and `PruningAnOldBatchDoesNotStrandANewRuntimeBatch`, and the
+  `Obscura.Js.Tests` case `Read_body_capped_rejects_oversized_streamed_body`.
+  Each fails under the CPU contention of a full parallel `dotnet test` and then
+  passes on its own and on a repeat of the same full run. Worth making them
+  deterministic rather than re-running.
+
+  When benchmarking publish variants, delete `obj/` and `bin/` for the RID
+  between runs. Publishing the same project self-contained and then
+  framework-dependent into different folders leaves stale intermediates that
+  produce a binary which aborts on startup with no output.
 - **`Url::parse` failure reasons are collapsed into one message.** The `url`
   crate's `ParseError` has a distinct `Display` per variant and `page.rs` reports
   it verbatim; `UrlParser.Parse` returns `UrlRecord?` with no error channel, so
@@ -336,9 +468,252 @@ have created one.
   every frame realm re-parses this file, so at top level it was an allocation
   per realm on a path that is already startup-critical.
 
+### Layout fixes found against the Tesserae sample suite
+
+`crates/**` is read-only (ground rule 1), so from here these are fixed in the C#
+tree only and the two engines legitimately disagree on them. Each one carries a
+DEVIATION comment at the C# code that differs.
+
+- **DEVIATION - a nested flex item was pinned from a layout where its own
+  ancestors were still collapsed.** `resolve_deferred_flex_inline_sizes` pins
+  every affected flex item in one pass off the intrinsic-neutral layout and only
+  then restores percentages. That is right for an outermost item, whose used size
+  the flex algorithm has already chosen, but a nested item gets measured inside
+  ancestors whose percentage widths are still neutralized to zero, so it is
+  pinned to its min-content and stays there. On Tesserae's Stack sample an
+  `.tss-stack { width: 100% }` panel sat at 0 while the radio row below it was
+  pinned to 448px instead of 544px, wrapping every two-word label. The port pins
+  outermost-first, restoring each level's percentages and reflowing before
+  measuring the next level down (`PinFlexItems` / `RestoreTypedPercentages` /
+  `ResolveFunctionalInlineSizes` in `DomPassesSubgrid`).
+- **DEVIATION - a cyclic *functional* inline size neutralized to `0px` instead of
+  `auto`.** CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
+  contribution; the reference writes a definite `Px(max(value, 0))`, which is
+  `0px` for the common `calc(100% - Npx)` and collapses the box for the whole
+  intrinsic pass. The port neutralizes the Expression source to `Auto`.
+  **Bare percentages deliberately keep the reference's zero.** Switching them to
+  `Auto` as well was tried and measured over all 136 samples: it bought 0.11 mean
+  abs on Code Diff and cost 0.59 on Sidebar, 0.48 on Search Box, 0.46 on
+  Searchable List and 0.30 on Node View, where `width: 100%` sidebar buttons
+  shrink-wrapped to their 80px min-width instead of filling their 384px row. The
+  restore path puts the typed percentage back either way, so the difference is
+  what the *intrinsic* pass measures; the reference's zero is closer for the bare
+  form. Reverted, and the Code Diff case below stays open.
+- **DEVIATION - `display: none` was ignored on an absolutely positioned
+  pseudo-element.** `paint_positioned_pseudo` guards on `position: absolute`
+  alone. An out-of-flow pseudo never reaches the taffy tree, so the
+  `display: none` that suppresses an in-flow one is not applied anywhere else
+  either and the box paints regardless. Tesserae hides an unselected radio's dot
+  with `.tss-option-mark:after { display: none }` on an absolutely positioned
+  pseudo, so every radio and checkbox in the samples painted as selected. The
+  port also checks `Display == None` and `EffectivelyInvisible` there. Verified
+  against the Rust binary, which shows the same over-paint, so this is a shared
+  engine limitation.
+
+  The earlier note here blamed the sibling combinator, from a `getComputedStyle`
+  probe. That was wrong twice over: a paint-level matrix shows `~`, `+`,
+  `:checked`, `[checked]` and class-sibling forms all match correctly with a
+  trailing pseudo-element, and the probe itself was reading a separate gap -
+  **`getComputedStyle(el, '::before'|'::after')` does not report the pseudo's
+  computed style at all**, returning `display: block` and `content: ""` for
+  every pseudo regardless of what the cascade resolved. That reporting gap is
+  still open and is its own item below.
+- **Open, not fixed: `getComputedStyle(el, pseudo)` returns defaults.** It reports
+  `display: block` and `content: ""` for every `::before`/`::after`, whatever the
+  cascade resolved, so it cannot be used to diagnose pseudo styling; paint is the
+  only reliable signal today. Layout and paint use the real resolved pseudo style,
+  so this is a DOM/CDP reporting gap rather than a rendering one.
+- **DEVIATION - `scrollbar-gutter: stable` was honoured only on the root.** The
+  reference reserves a gutter out of the initial containing block alone
+  (`dom.rs` reads `scrollbar_gutters` off the root element), so a nested scroll
+  container reserved none, and it parses no `scrollbar-width` at all. Tesserae's
+  annotated text editor overlays a highlight layer on a
+  `scrollbar-gutter: stable; scrollbar-width: thin` textarea, and the overlay came
+  out 902px against Chromium's 892. The port reserves the gutter through taffy's
+  own `ScrollbarWidth`, which takes it out of the content area and leaves the
+  computed padding untouched, exactly as Chromium does. Measured against Chromium
+  on this platform: 15px classic, 10px for `thin`, 0 for `none`, and nothing at
+  all without `scrollbar-gutter` (this build uses overlay scrollbars). Applies on
+  the inline axis only, for a box that is a scroll container in either axis.
+  Not closed: `both-edges` reserves the right total (270px of 300) but taffy
+  insets from the end only, so the content does not shift by the leading gutter
+  the way Chromium's does.
+- **Open, not fixed: a baseline-aligned atomic inline does not extend the line box
+  by the strut's descent.** Reduced to a fixture: a `display: inline-block` of
+  height 12 with no in-flow content, inside a block with `line-height: 12px`, is
+  14px tall in Chromium and 12 in both engines. An empty inline-block's baseline
+  is its bottom margin edge, so its whole box sits above the baseline and the
+  strut's descent still has to fit below it. `vertical-align: top` (12/12) and an
+  inline-block that contains text (12/12) both agree already, which pins the case
+  precisely. This is the 2px icon-box gap: `<i class="fi-rr-*">` wraps an
+  icon-font `::before` that is exactly this shape.
+
+  Root cause located, not fixed. `DomBuild.RunWrapperStyle` models a line box as a
+  wrapping flex row whose strut is a `MinSize.Height`, and `DomBuildMixed` only
+  sets `hasTextStrut` when the run contains a text node. A min-height cannot push
+  an atomic down off the baseline, and switching the wrapper to
+  `AlignItems.Baseline` changes nothing on its own (tried: 649 tests stay green,
+  the fixture stays at 12). A real fix needs the strut to be a zero-width
+  participant carrying the parent font's ascent and descent, present on every
+  line box rather than only text-bearing ones. Glyphs paint in the right place
+  meanwhile; only the wrapper box height differs.
+- **PARTLY FIXED - a cyclic percentage under a content-sized flex item is now
+  neutralized to `auto`.** A content-sized item is measured from exactly the
+  content the neutralization touches, so zeroing it is self-defeating; an item
+  sized from a declared width or basis is not measured from its content, and
+  there the reference's zero is the safer neutral. Carrying `auto` into *both*
+  cases was tried and swept over all 136 samples: it made `width: 100%` sidebar
+  buttons shrink-wrap to their 80px min-width, costing 0.59, 0.48, 0.46 and 0.30
+  mean abs on four samples. Gating it on `Width.IsAuto && FlexBasis.IsAuto` keeps
+  Sidebar exact (152/127/174/376 against Chromium's 151/127/174/376) and moves
+  Code Diff's two `flex: 1 1 auto` panels from an even 462/462 split to 363/802
+  against Chromium's 133/791.
+  Still open: the first panel measures 363 where Chromium measures 133, and the
+  pair sums to 1165 in a 924px row - they overflow rather than shrinking, so the
+  pinned base sizes are not being shrunk by the flex algorithm afterwards.
+- **Open, not fixed: a baseline-aligned atomic inline does not extend the line box
+  by the strut's descent.** Reduced to a fixture: a `display: inline-block` of
+  height 12 with no in-flow content, inside a block with `line-height: 12px`, is
+  14px tall in Chromium and 12 in both engines. An empty inline-block's baseline
+  is its bottom margin edge, so its whole box sits above the baseline and the
+  strut's descent still has to fit below it. `vertical-align: top` (12/12) and an
+  inline-block that contains text (12/12) both agree already, which pins the case
+  precisely. This is the 2px icon-box gap: `<i class="fi-rr-*">` wraps an
+  icon-font `::before` that is exactly this shape.
+
+  Root cause located, not fixed. `DomBuild.RunWrapperStyle` models a line box as a
+  wrapping flex row whose strut is a `MinSize.Height`, and `DomBuildMixed` only
+  sets `hasTextStrut` when the run contains a text node. A min-height cannot push
+  an atomic down off the baseline, and switching the wrapper to
+  `AlignItems.Baseline` changes nothing on its own (tried: 649 tests stay green,
+  the fixture stays at 12). A real fix needs the strut to be a zero-width
+  participant carrying the parent font's ascent and descent, present on every
+  line box rather than only text-bearing ones. Glyphs paint in the right place
+  meanwhile; only the wrapper box height differs.
+- **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
+  evenly.** Both panels' content is percentage-sized, so with the bare-percentage
+  neutralization both flex base sizes measure 0 and the row splits 462/462
+  instead of Chromium's 133/791; the diff table then wraps to three times its
+  height (mean abs 7.17 against a 3.08 median). Fixing it properly needs the
+  intrinsic pass to measure a bare cyclic percentage as `auto` *without* losing
+  the restore that a `width: 100%` button depends on - the two uses want
+  different answers from the same neutralization.
+- **DEVIATION - an auto-sized `<button>`'s intrinsic width ignored element
+  children.** `native_button_intrinsic_content` recurses past every non-replaced
+  element and counts only text plus replaced boxes, so a flex button's child
+  boxes, their margins and any icon-font `::before` contributed nothing. Tesserae's
+  toolbar buttons (`<i class="fi-rr-*"></i><span>Label</span>`) came out 22px short
+  on every one, which shrank the label span and wrapped it, and then failed to wrap
+  the button row Chromium wraps. The port counts a definite-width child as its own
+  outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
+  content with the pseudo's own style.
+- **DEVIATION - `repeat(auto-fit, minmax(<math function>, 1fr))` collapsed to one
+  column.** Vendored taffy (so the reference too) counts only a bare length or
+  percentage as a track's fixed component, so `min()`/`calc()` reads as
+  intrinsic. An auto-repetition beside a non-fixed track invalidates the whole
+  template and the grid falls back to zero explicit tracks - one implicit column
+  with every item stacked. Tesserae's grids are
+  `repeat(auto-fit, minmax(min(160px, 100%), 1fr))`: Chromium lays out five 177px
+  columns in a 924px container, both engines laid out one 924px column. The port
+  counts a resolvable calc as fixed. Verified against the Rust binary, which
+  shows the same collapse, so this is a shared engine limitation rather than a
+  port defect.
+- **DEVIATION - a definite flex basis did not make a column item's block size
+  definite.** The reference calls a box's block size definite only when `height`
+  itself is a length or percentage. CSS Flexbox 9.8 also makes a flex item's main
+  size definite when it has a definite flex basis in a container with a definite
+  main size, and Chromium resolves descendant percentage heights against it.
+  Tesserae's time-histogram bars are `height: 100%` inside a `flex: 1 1 120px`
+  column item, so the reference computed them to `auto`, every bar laid out 0px
+  tall, and the chart rendered as an empty box (Chromium: 107px bars in a 120px
+  row).
+- **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
+  properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
+  `inherit` has to copy the parent's computed value explicitly; the reference
+  parses it as an unrecognized length and falls back to the initial value.
+  Tesserae's annotated text editor sizes its textarea with `min-height: inherit`
+  off a per-instance container, so every editor collapsed to a single row (58px
+  against Chromium's 160/120/80). The port records a `LayoutStyle.SizeInherit`
+  bitmask and resolves it against the already-computed parent in the top-down
+  pass. Still open: `inherit` on `padding-*` and `margin-*` is dropped the same
+  way (`padding-left: inherit` gives 0 where Chromium gives the parent's 40px);
+  no Tesserae sample uses it.
+- **DEVIATION - a boxed percentage image floated its flex item to the image's
+  natural width.** The reference floors a content-sized flex item at every
+  deferred image's natural width (its #698 fix). That is only sound when the
+  image can reach that size. Tesserae's inline labels wrap a `width: 100%` SVG in
+  a `width: 14px` span, and the reference lifted the whole 60px label to the SVG's
+  natural width - 150px for a viewBox-only SVG (the 300x150 default object size at
+  its ratio) and 512px for one with explicit dimensions. The port skips the floor
+  when a box between the image and the flex item already has a definite inline
+  size, since that box caps the contribution.
+- **DEVIATION - `<button>` did not take the user-agent control font.** The
+  reference's `button` arm sets no font, so a button inherits the page's
+  font-size, family and line-height. Chromium gives every form control
+  `font: 400 13.3333px Arial`, and being the shorthand it also resets
+  `line-height` to `normal`, which an author rule setting only `font-size` does
+  not restore. `select`, `input` and `textarea` already carried this in both
+  trees; `button` was the one left out. Under Tesserae's inherited
+  `line-height: 1.4` every button was 38px tall against Chromium's 21px. The
+  port's `button` arm now sets all three. Still short of Chromium by the 2px
+  outset UA border, which no Tesserae button shows because `.tss-btn` declares
+  its own; not fixed here.
+- **DEVIATION - a control's intrinsic width is rounded up.** The reference
+  stores the summed width as measured. Taffy rounds used boxes to whole pixels,
+  and the parts (shaped label, icon glyph, child edges) are measured separately
+  with their own sub-pixel error, so a box sized at exactly its label's width can
+  round down and wrap the label it was sized for: "Section Stack" measured 143px
+  against a 79.5px label and broke over two lines. The port ceilings it - at most
+  a pixel wide, never a pixel short.
+- **DEVIATION - functional block-axis sizes resolved against the viewport
+  height.** `crates/obscura-render/src/dom.rs` uses `viewport.1` as the
+  percentage basis for `size_expressions[1|3|5]`. Chromium resolves a block-axis
+  percentage against the containing block's content-box height, and treats it as
+  `auto` when that height is indefinite. Tesserae's `.tss-card` is
+  `height: calc(100% - 4px)` inside an auto-height parent, so the reference sizes
+  every card to a full viewport instead of to its content
+  (`height: calc(100% - 4px)` under an auto-height parent: Chromium 18px,
+  reference 716px; under a definite 300px parent: Chromium 296px, reference
+  716px). The port adds `Inherited.CbHeight` and applies both rules in
+  `LayoutDomComputed.ResolveOneComputedStyle`. Taffy already applies them to a
+  bare percentage; only the flattened functional form needed it.
+
+- **`calc()` percentages under a resizable flex item resolved against the
+  declaration, not the used width.** A row flex item with a Px width was treated
+  as definite by the cyclic-inline deferral, so descendants fell back to the
+  pre-layout containing-block estimate. Tesserae's page shell is
+  `width: 1px; min-width: 0; flex-grow: 1`, which collapsed every
+  `calc(100% - 4px)` card in the page body to 0. Fixed in both engines by
+  treating a growable or shrinkable row-flex item as indefinite. Chromium
+  parity on both shapes (1022px grown, 596px shrunk).
+- **Still open: a shrink-to-fit block inside a flex row does not get the
+  intrinsic contribution of a cyclic-percentage child.** `flexrow > block >
+  width:100%` gives Chromium 8px (the child's text max-content) and both engines
+  0px, because the cyclic neutralization writes a definite `0px` rather than
+  behaving as `auto` for intrinsic contribution. Not a regression; predates the
+  fix above.
+
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Decoded web faces are cached; the reference re-decodes them
+
+`fetch_and_decode_font` in `crates/obscura-render/src/paint.rs` caches only the
+compressed bytes and runs the WOFF decoder on every prepare.
+`PaintFonts.FetchAndDecodeFont` memoizes the decoded sfnt in
+`RenderResourceCache` instead. The port's WOFF2 path is much slower than
+Rust's `wuff`: on a page with three faces, re-decoding was ~600ms of every
+prepare, and a prepare runs on the first layout read after any style mutation,
+so a settling SPA paid it several times.
+
+The decode is a pure function of the fetched bytes, so this cannot change what
+is rendered. Validity is checked by reference equality against the array
+`FetchBytes` returns, so a re-fetch or a cache eviction produces a different
+array and misses. Bounded at 32 entries.
+
+Not a parity risk: the two engines produce the same fonts, and no test asserts
+on decode count.
 
 ### Rounded corners were parabolas
 

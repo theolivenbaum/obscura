@@ -22,7 +22,13 @@ public static class RenderState
     public static PreparedRender? EnsurePreparedRender(ObscuraState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        var baseUrl = StateHelpers.DocumentBaseUrl(state);
+        // Memoized, not the direct read: the uncached one runs the selector engine
+        // over the whole tree looking for `base[href]`, which makes this an
+        // O(nodes) call. It sits on the reuse check every getBoundingClientRect()
+        // takes, so on a 5000-node document that alone was 2.5ms per repeated
+        // rect read. The memo is keyed on the document and activity generations,
+        // so inserting a <base> still invalidates it.
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(state);
         var viewport = state.Viewport;
         var renderMedia = state.RenderMedia;
         var animationSample = state.AnimationSample;
@@ -136,7 +142,10 @@ public static class RenderState
     public static PreparedRender? EnsurePreparedGeometry(ObscuraState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        var baseUrl = StateHelpers.DocumentBaseUrl(state);
+        // Memoized for the same reason as EnsurePreparedRender above: this is the
+        // geometry fast path, so an O(nodes) selector query here defeats the point
+        // of having a fast path at all.
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(state);
         var reusable = state.PendingStyleMutations.Count == 0
             && !state.AnimationTimeline.HasPendingStartCandidates()
             && state.PreparedRender is { } prepared

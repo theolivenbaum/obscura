@@ -240,6 +240,14 @@ pub mod inline {
         pub(crate) fn measure_word(&mut self, _idx: usize) -> (f32, f32) {
             (0.0, 0.0)
         }
+
+        pub(crate) fn measure_control_label(
+            &mut self,
+            _text: &str,
+            _style: &crate::LayoutStyle,
+        ) -> f32 {
+            0.0
+        }
     }
 
     pub(crate) fn used_line_height(style: &crate::LayoutStyle) -> f32 {

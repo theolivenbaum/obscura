@@ -144,8 +144,21 @@ internal static class GridStyleExtensions
     public static MaxTrackSizingFunction MaxSizingFunction(this TrackSizingFunction self) => self.Max;
 
     /// <summary>Determine whether at least one of the min/max components is a fixed sizing function.</summary>
+    /// <remarks>
+    /// DEVIATION from vendored taffy (and so from crates/obscura-render, which shares it): taffy
+    /// counts only a bare length or percentage as fixed, so a math function is treated as
+    /// intrinsic. An auto-repetition beside a non-fixed track makes the whole template invalid
+    /// and the grid falls back to zero explicit tracks - one implicit column with every item
+    /// stacked. A resolvable calc()/min()/max()/clamp() is definite, and Chromium sizes the
+    /// repetition from it. Tesserae's grids are
+    /// `repeat(auto-fit, minmax(min(160px, 100%), 1fr))`, which laid out as a single 924px
+    /// column instead of five 177px ones. See "Known deviations" in todo.md.
+    /// </remarks>
     public static bool HasFixedComponent(this TrackSizingFunction self) =>
-        self.Min.IntoRaw().IsLengthOrPercentage || self.Max.IntoRaw().IsLengthOrPercentage;
+        HasFixedComponentRaw(self.Min.IntoRaw()) || HasFixedComponentRaw(self.Max.IntoRaw());
+
+    private static bool HasFixedComponentRaw(CompactLength raw) =>
+        raw.IsLengthOrPercentage || raw.IsCalc;
 
     // ------------------------------------------------------- GridAutoFlow
 

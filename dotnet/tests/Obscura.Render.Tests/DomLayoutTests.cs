@@ -3315,6 +3315,130 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void CalcPercentagesResolveAgainstAResizableFlexItemsUsedWidth()
+    {
+        // A row flex item's declared inline size is not its used inline size once
+        // `flex-grow` or the default `flex-shrink` lets the flex algorithm move it.
+        // Tesserae's page shell is `width:1px; min-width:0; flex-grow:1`, so resolving
+        // a descendant `calc(100% - 4px)` against the 1px declaration collapsed every
+        // card in the page body to zero width. Chromium gives 1022px and 596px.
+        DomTree grow = Parse(
+            """
+            <style>
+              * { box-sizing:border-box; margin:0 }
+              #row { display:flex; width:1280px }
+              #side { width:250px; flex:0 0 auto }
+              #grow { width:1px; min-width:0; flex-grow:1 }
+              #pad { padding:2px }
+              #calc { width:calc(100% - 4px); height:10px }
+            </style>
+            <div id="row">
+              <div id="side"></div>
+              <div id="grow"><div id="pad"><div id="calc"></div></div></div>
+            </div>
+            """);
+        DomLayout grown = RenderDom.LayoutDom(grow, (1280f, 600f));
+        Assert.True(
+            MathF.Abs(grown.Rects[Id(grow, "grow")].Width - 1030f) < 0.01f,
+            $"{grown.Rects[Id(grow, "grow")]}");
+        Assert.True(
+            MathF.Abs(grown.Rects[Id(grow, "calc")].Width - 1022f) < 0.01f,
+            "calc(100% - 4px) must sample the grown 1026px content box, not the 1px "
+                + $"declaration: {grown.Rects[Id(grow, "calc")]}");
+
+        DomTree shrink = Parse(
+            """
+            <style>
+              * { box-sizing:border-box; margin:0 }
+              #row { display:flex; width:600px }
+              #item { width:1200px; min-width:0 }
+              #calc { width:calc(100% - 4px); height:10px }
+            </style>
+            <div id="row"><div id="item"><div id="calc"></div></div></div>
+            """);
+        DomLayout shrunk = RenderDom.LayoutDom(shrink, (600f, 600f));
+        Assert.True(
+            MathF.Abs(shrunk.Rects[Id(shrink, "item")].Width - 600f) < 0.01f,
+            $"{shrunk.Rects[Id(shrink, "item")]}");
+        Assert.True(
+            MathF.Abs(shrunk.Rects[Id(shrink, "calc")].Width - 596f) < 0.01f,
+            $"a shrunk flex item's used width is the percentage basis: {shrunk.Rects[Id(shrink, "calc")]}");
+    }
+
+    [Fact]
+    public void FunctionalBlockSizesResolveAgainstTheContainingBlockNotTheViewport()
+    {
+        // DEVIATION from the Rust reference, which uses the viewport height as the
+        // percentage basis for every functional block-axis size. Chromium resolves a
+        // block-axis percentage against the containing block's content-box height, and
+        // treats it as auto when that height is indefinite. Tesserae's `.tss-card` is
+        // `height: calc(100% - 4px)` inside an auto-height parent, which the reference
+        // sized to a full viewport instead of to its content.
+        DomTree tree = Parse(
+            """
+            <style>
+              * { box-sizing:border-box; margin:0 }
+              body { width:800px }
+              #autoh { }
+              #a { height:calc(100% - 4px) }
+              #b { height:100% }
+              #fixed { height:300px }
+              #c { height:calc(100% - 4px) }
+              #d { height:50% }
+            </style>
+            <div id="autoh"><div id="a">a</div><div id="b">b</div></div>
+            <div id="fixed"><div id="c">c</div><div id="d">d</div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // Indefinite containing block: the calc behaves as auto, so both lines are one
+        // 18px line box, exactly as the bare percentage next to them already was.
+        Assert.True(MathF.Abs(Get("autoh").Height - 36f) < 0.01f, $"{Get("autoh")}");
+        Assert.True(MathF.Abs(Get("a").Height - 18f) < 0.01f, $"{Get("a")}");
+        Assert.True(MathF.Abs(Get("b").Height - 18f) < 0.01f, $"{Get("b")}");
+
+        // Definite 300px containing block: the calc samples it, not the 900px viewport.
+        Assert.True(MathF.Abs(Get("fixed").Height - 300f) < 0.01f, $"{Get("fixed")}");
+        Assert.True(MathF.Abs(Get("c").Height - 296f) < 0.01f, $"{Get("c")}");
+        Assert.True(MathF.Abs(Get("d").Height - 150f) < 0.01f, $"{Get("d")}");
+    }
+
+    [Fact]
+    public void ButtonsTakeTheUserAgentControlFontIncludingLineHeightNormal()
+    {
+        // DEVIATION from the Rust reference, whose `button` UA arm sets no font, so a button
+        // inherits the page's font-size, family and line-height. Chromium gives every form
+        // control `font: 400 13.3333px Arial`; being the shorthand it also resets line-height
+        // to normal, which an author rule setting only font-size does not restore. With
+        // Tesserae's inherited `line-height: 1.4` every button was two line-heights tall.
+        DomTree tree = Parse(
+            """
+            <style>
+              body { margin:0; font-family: Georgia, serif; font-size: 20px; line-height: 1.8 }
+              .sized { font-size: 13px }
+            </style>
+            <div><button id="plain">Plain</button></div>
+            <div><button id="sized" class="sized">Sized</button></div>
+            <div><span id="ref">Reference</span></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        LayoutStyle Style(string id) => laid.Styles[Id(tree, id)];
+
+        Assert.True(MathF.Abs((Style("plain").FontSize ?? 0f) - 13.333333f) < 0.01f);
+        Assert.Equal(LineHeight.Normal, Style("plain").LineHeight);
+
+        // An author font-size wins; the UA line-height and family do not come back with it.
+        Assert.True(MathF.Abs((Style("sized").FontSize ?? 0f) - 13f) < 0.01f);
+        Assert.Equal(LineHeight.Normal, Style("sized").LineHeight);
+
+        // Ordinary content still inherits the page font and its 1.8 line-height.
+        Assert.True(MathF.Abs((Style("ref").FontSize ?? 0f) - 20f) < 0.01f);
+        Assert.True(MathF.Abs(laid.Rects[Id(tree, "plain")].Height - 17f) < 1.01f);
+        Assert.True(MathF.Abs(laid.Rects[Id(tree, "ref")].Height - 22f) < 1.01f);
+    }
+
+    [Fact]
     public void CyclicPercentageImageKeepsNaturalIntrinsicContribution()
     {
         // A `width:100%` image inside a content-sized flex item is a cyclic
@@ -3350,6 +3474,205 @@ public class DomLayoutTests
             MathF.Abs(Get("art").Width - 100f) < 0.01f
                 && MathF.Abs(Get("art").Height - 50f) < 0.01f,
             $"the percentage image must resolve against the measured item width: {Get("art")}");
+    }
+
+    [Fact]
+    public void ABoxedPercentageImageDoesNotFloatItsFlexItemToTheNaturalWidth()
+    {
+        // DEVIATION from the Rust reference, which floors a content-sized flex item at every
+        // deferred image's natural width unconditionally (the #698 fix above). That is only
+        // sound when the image can actually reach that size. Tesserae's inline labels wrap a
+        // `width: 100%` SVG in a `width: 14px` span, and the reference lifted the whole 60px
+        // label to the SVG's natural width. The definite ancestor caps the contribution, so
+        // the natural floor must not apply through it.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font: 13px Arial, sans-serif }
+              * { box-sizing:border-box }
+              #row { display:flex; flex-direction:row; width:358px }
+              #label { display:inline-flex; align-items:center; gap:6px; width:fit-content;
+                       height:24px; padding:0 8px; border:1px solid }
+              #mark { width:14px; height:14px; flex:0 0 auto; display:flex }
+              #mark img { display:block; width:100%; height:100% }
+            </style>
+            <div id="row">
+              <a id="label"><span id="mark"><img id="icon" src="icon.svg"></span><span>Box</span></a>
+            </div>
+            """);
+        Dictionary<NodeId, (float Width, float Height)> intrinsic = new()
+        {
+            [Id(tree, "icon")] = (150f, 150f),
+        };
+        DomLayout laid = RenderDom.LayoutDomWithImages(tree, (800f, 300f), intrinsic);
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(
+            Get("label").Width < 80f,
+            "a 14px-boxed icon must not float the label to the image's 150px natural width: "
+                + $"{Get("label")}");
+        Assert.True(
+            MathF.Abs(Get("mark").Width - 14f) < 0.01f, $"{Get("mark")}");
+        Assert.True(
+            MathF.Abs(Get("icon").Width - 14f) < 0.01f, $"{Get("icon")}");
+    }
+
+    [Fact]
+    public void TheInheritKeywordCopiesTheParentsBoxSizeEvenThoughItIsNotInherited()
+    {
+        // DEVIATION from the Rust reference, which drops the CSS-wide keyword `inherit` on the
+        // box-size properties. They are not inherited properties, so the keyword has to copy
+        // the parent's computed value explicitly. Tesserae's annotated text editor sizes its
+        // textarea with `min-height: inherit` off a per-instance container, and every editor
+        // collapsed to one row (58px against Chromium's 160px).
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font: 14px Arial, sans-serif }
+              #box  { min-height:160px; width:400px }
+              #tall { box-sizing:border-box; width:100%; min-height:inherit }
+              #wide { min-width:220px; display:inline-block }
+              #wide-in { min-width:inherit; display:block }
+              #cap  { max-width:300px }
+              #cap-in { max-width:inherit; display:block }
+            </style>
+            <div id="box"><div id="tall">tall</div></div>
+            <div id="wide"><div id="wide-in">in</div></div>
+            <div id="cap"><div id="cap-in">in</div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("tall").Height - 160f) < 0.01f, $"{Get("tall")}");
+        Assert.True(MathF.Abs(Get("wide-in").Width - 220f) < 0.01f, $"{Get("wide-in")}");
+        Assert.True(MathF.Abs(Get("cap-in").Width - 300f) < 0.01f, $"{Get("cap-in")}");
+    }
+
+    [Fact]
+    public void ADefiniteFlexBasisMakesAColumnItemsBlockSizeDefiniteForPercentages()
+    {
+        // DEVIATION from the Rust reference, which calls a box's block size definite only when
+        // `height` itself is a length or percentage. CSS Flexbox 9.8 also makes a flex item's
+        // main size definite when it has a definite flex basis in a container with a definite
+        // main size, and Chromium resolves descendant percentage heights against it. Tesserae's
+        // time-histogram bars are `height: 100%` inside a `flex: 1 1 120px` column item, so the
+        // reference computed them to auto and every bar laid out 0px tall.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #chart { display:flex; flex-direction:column; height:190px; width:400px }
+              #bars { flex:1 1 120px; min-height:0; display:flex; align-items:flex-end;
+                      padding:8px 0 4px; border-bottom:1px solid }
+              #bar { flex:1 1 0; height:100% }
+              #rest { flex:0 0 auto; height:70px }
+            </style>
+            <div id="chart">
+              <div id="bars"><div id="bar"></div></div>
+              <div id="rest"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("bars").Height - 120f) < 0.01f, $"{Get("bars")}");
+        Assert.True(
+            MathF.Abs(Get("bar").Height - 107f) < 0.01f,
+            $"height:100% must resolve against the 120px flex basis minus its edges: {Get("bar")}");
+    }
+
+    [Fact]
+    public void AutoFitRepetitionCountsAMathFunctionTrackMinimumAsFixed()
+    {
+        // DEVIATION from vendored taffy, and so from the Rust reference which shares it: taffy
+        // counts only a bare length or percentage as a track's fixed component, so a math
+        // function reads as intrinsic. An auto-repetition beside a non-fixed track invalidates
+        // the whole template and the grid falls back to zero explicit tracks - one implicit
+        // column with every item stacked. Tesserae's grids are
+        // `repeat(auto-fit, minmax(min(160px, 100%), 1fr))`; Chromium lays out five 177px
+        // columns in a 924px container and the reference laid out one 924px column.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font: 13px Arial, sans-serif }
+              .g { width:924px; gap:8px; display:grid }
+              .g > div { height:20px }
+              #nested { grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)) }
+              #calc   { grid-template-columns: repeat(auto-fit, minmax(calc(160px), 1fr)) }
+              #plain  { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) }
+            </style>
+            <div class="g" id="nested"><div id="n0"></div><div></div><div></div>
+              <div></div><div></div><div id="n5"></div></div>
+            <div class="g" id="calc"><div id="c0"></div><div></div><div></div>
+              <div></div><div></div><div></div></div>
+            <div class="g" id="plain"><div id="p0"></div><div></div><div></div>
+              <div></div><div></div><div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // 924px with an 8px gap fits five 176.8px tracks; all three spellings agree.
+        foreach (string first in new[] { "n0", "c0", "p0" })
+        {
+            Assert.True(
+                MathF.Abs(Get(first).Width - 177f) < 1.01f,
+                $"{first} should be one of five auto-fit tracks: {Get(first)}");
+        }
+
+        // The sixth item wraps to a second row rather than stacking one per row.
+        Assert.True(Get("n5").Y > Get("n0").Y, $"{Get("n5")} {Get("n0")}");
+        Assert.True(MathF.Abs(Get("n5").X - Get("n0").X) < 0.01f, $"{Get("n5")}");
+    }
+
+    [Fact]
+    public void AStableScrollbarGutterIsReservedOnANestedScrollContainer()
+    {
+        // DEVIATION from the Rust reference, which reserves a scrollbar gutter only out of the
+        // initial containing block, so a nested scroll container reserves none. Chromium takes
+        // a stable gutter out of the content area on the inline axis and leaves the computed
+        // padding untouched. Tesserae's annotated text editor overlays a highlight layer on a
+        // `scrollbar-gutter: stable; scrollbar-width: thin` textarea; without the gutter the
+        // overlay came out 10px wider than the text it marks.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              div { width:300px; height:60px }
+              div > i { display:block; width:100%; height:10px }
+              #thin  { overflow-y:scroll; scrollbar-gutter:stable; scrollbar-width:thin }
+              #wide  { overflow-y:scroll; scrollbar-gutter:stable }
+              #auto  { overflow-y:auto;   scrollbar-gutter:stable; scrollbar-width:thin }
+              #none  { overflow-y:scroll; scrollbar-width:thin }
+              #plain { overflow-y:scroll }
+              #padded { overflow-y:scroll; scrollbar-gutter:stable; padding:0 10px;
+                        box-sizing:content-box }
+            </style>
+            <div id="thin"><i id="a"></i></div>
+            <div id="wide"><i id="b"></i></div>
+            <div id="auto"><i id="c"></i></div>
+            <div id="none"><i id="d"></i></div>
+            <div id="plain"><i id="e"></i></div>
+            <div id="padded"><i id="f"></i></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // scrollbar-width: thin reserves 10px, the classic gutter 15px, and `auto` overflow
+        // reserves just as `scroll` does once the gutter is asked for.
+        Assert.True(MathF.Abs(Width("a") - 290f) < 0.01f, $"{Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 285f) < 0.01f, $"{Width("b")}");
+        Assert.True(MathF.Abs(Width("c") - 290f) < 0.01f, $"{Width("c")}");
+
+        // An overlay scrollbar with no `scrollbar-gutter` declaration takes no space.
+        Assert.True(MathF.Abs(Width("d") - 300f) < 0.01f, $"{Width("d")}");
+        Assert.True(MathF.Abs(Width("e") - 300f) < 0.01f, $"{Width("e")}");
+
+        // The gutter comes out of the content area; the padding is untouched by it.
+        Assert.True(MathF.Abs(Width("f") - 285f) < 0.01f, $"{Width("f")}");
+        Assert.True(
+            MathF.Abs(laid.Styles[Id(tree, "padded")].Padding.Right - 10f) < 0.01f,
+            "the reserved gutter must not show up as computed padding");
     }
 
     [Fact]

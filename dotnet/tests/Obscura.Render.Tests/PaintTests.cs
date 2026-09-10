@@ -1830,6 +1830,40 @@ public class PaintTests
     }
 
     [Fact]
+    public void DisplayNoneSuppressesAnAbsolutelyPositionedPseudo()
+    {
+        // DEVIATION from the Rust reference, whose paint_positioned_pseudo guards on
+        // `position: absolute` alone. An out-of-flow pseudo never reaches the taffy tree, so
+        // the `display: none` that suppresses an in-flow one is not applied anywhere else
+        // either and the box paints regardless. Tesserae hides an unselected radio's dot with
+        // `display: none` on an absolutely positioned pseudo, so every radio and checkbox in
+        // the samples painted as selected.
+        DomTree tree = Parse(
+            """
+            <html><head><style>
+               html, body { margin:0 }
+               div { position:absolute; top:0; width:40px; height:40px }
+               div::after { content:""; position:absolute; inset:0; background:#248efa }
+               #hidden { left:0 }
+               #hidden::after { display:none }
+               #shown { left:60px }
+               #invisible { left:120px; visibility:hidden }
+               </style></head><body>
+                 <div id="hidden"></div><div id="shown"></div><div id="invisible"></div>
+               </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (200f, 60f), null)!;
+
+        Assert.Equal((255, 255, 255), Rgb(pixmap, 20, 20));
+        Assert.Equal((255, 255, 255), Rgb(pixmap, 140, 20));
+
+        PremultipliedColor shown = Pixel(pixmap, 80, 20);
+        Assert.True(
+            shown.B > 180 && shown.R < 120,
+            $"a positioned pseudo with no display:none must still paint: {shown}");
+    }
+
+    [Fact]
     public void PolygonClipPathPaintsResponsiveGeometryOnElementsAndPseudos()
     {
         DomTree tree = Parse(

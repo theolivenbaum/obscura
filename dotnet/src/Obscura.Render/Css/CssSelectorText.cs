@@ -1017,6 +1017,17 @@ internal static class CssSelectorText
     /// </summary>
     public static List<string> SplitSelectorList(string selector)
     {
+        ArgumentNullException.ThrowIfNull(selector);
+
+        // A selector with no comma anywhere is its own single-item list, and the
+        // scanner below would copy it through a StringBuilder character by
+        // character to reach the same answer. Most rules in a real sheet take this
+        // path, so it is worth spotting.
+        if (!selector.Contains(','))
+        {
+            return [selector];
+        }
+
         var output = new List<string>();
         var parenDepth = 0;
         var bracketDepth = 0;
@@ -1126,19 +1137,41 @@ internal static class CssSelectorText
     /// </summary>
     public static string? StripPseudoElement(string selector, string which)
     {
-        foreach (var prefix in (string[])["::", ":"])
+        ArgumentNullException.ThrowIfNull(selector);
+        ArgumentNullException.ThrowIfNull(which);
+
+        // Both spellings of the same pseudo-element, longer first. Written against
+        // spans because the cascade asks this of every rule three times over, once
+        // per pseudo-element it indexes: the earlier version built the "::" + which
+        // suffix string on each of those calls, which on a sheet with 45,000 rules
+        // was 135,000 throwaway strings and an array literal per call.
+        return StripPseudoColons(selector, which, colons: 2)
+            ?? StripPseudoColons(selector, which, colons: 1);
+    }
+
+    private static string? StripPseudoColons(string selector, string which, int colons)
+    {
+        int suffixLength = colons + which.Length;
+        if (selector.Length < suffixLength)
         {
-            var suffix = prefix + which;
-            if (selector.EndsWith(suffix, StringComparison.Ordinal))
+            return null;
+        }
+
+        ReadOnlySpan<char> tail = selector.AsSpan(selector.Length - suffixLength);
+        for (int i = 0; i < colons; i++)
+        {
+            if (tail[i] != ':')
             {
-                var baseSelector = selector[..^suffix.Length];
-                if (baseSelector.Length != 0)
-                {
-                    return baseSelector.Trim();
-                }
+                return null;
             }
         }
 
-        return null;
+        if (!tail[colons..].SequenceEqual(which))
+        {
+            return null;
+        }
+
+        ReadOnlySpan<char> remaining = selector.AsSpan(0, selector.Length - suffixLength);
+        return remaining.Length != 0 ? remaining.Trim().ToString() : null;
     }
 }

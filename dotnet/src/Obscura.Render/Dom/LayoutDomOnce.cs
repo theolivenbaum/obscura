@@ -75,6 +75,22 @@ public static partial class RenderDom
         /// <summary>Whether the containing block has a definite height.</summary>
         internal bool CbHeightDefinite;
 
+        /// <summary>
+        /// Containing-block content-box height in px, meaningful only when
+        /// <see cref="CbHeightDefinite"/>.
+        /// </summary>
+        /// <remarks>
+        /// DEVIATION from <c>crates/obscura-render/src/dom.rs</c>, which tracks no such
+        /// value and resolves every functional block-axis size against the viewport
+        /// height. Taffy resolves a bare percentage height itself against the real
+        /// containing block, but a functional one (<c>calc(100% - 4px)</c>) has to be
+        /// flattened to px before layout, and the viewport is the wrong basis for it:
+        /// Tesserae's <c>.tss-card</c> is <c>height: calc(100% - 4px)</c> in an
+        /// auto-height parent, which Chromium computes to <c>auto</c> and the reference
+        /// computes to a full viewport height. See "Known deviations" in todo.md.
+        /// </remarks>
+        internal float CbHeight;
+
         internal Inherited Clone() => new()
         {
             Display = Display,
@@ -114,6 +130,7 @@ public static partial class RenderDom
             OverflowY = OverflowY,
             CbWidth = CbWidth,
             CbHeightDefinite = CbHeightDefinite,
+            CbHeight = CbHeight,
         };
     }
 
@@ -241,6 +258,12 @@ public static partial class RenderDom
             int rootGutters = styles.TryGetValue(rootId, out LayoutStyle? gutterStyle)
                 ? Math.Min(gutterStyle.ScrollbarGutters, (byte)2)
                 : 0;
+            if (gutterStyle is not null)
+            {
+                // The root's gutter comes out of the initial containing block just below, so
+                // the taffy mapping must not reserve it a second time on the root's own box.
+                gutterStyle.GutterReservedByViewport = true;
+            }
             float initialCbWidth = F32.Max(
                 viewport.Width - (ClassicScrollbarGutter * rootGutters),
                 0f);
@@ -251,7 +274,12 @@ public static partial class RenderDom
             float rootFs = ResolveRootFontSize(styles, rootId, vw, vh);
 
             // The root element's containing block is the initial containing block.
-            Inherited rootInherited = new() { CbWidth = initialCbWidth, CbHeightDefinite = true };
+            Inherited rootInherited = new()
+            {
+                CbWidth = initialCbWidth,
+                CbHeightDefinite = true,
+                CbHeight = viewport.Height,
+            };
 
             // Computed definiteness after walking the real containing-block chain.
             HashSet<NodeId> definiteHeightNodes = [];

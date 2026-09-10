@@ -39,7 +39,7 @@ public static partial class RenderDom
 
             float fontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
             nativeButtonContents[id] =
-                DomStyleFixups.NativeButtonIntrinsicContent(tree, id, styles, fontSize);
+                DomStyleFixups.NativeButtonIntrinsicContent(tree, id, styles, fontSize, engine);
         }
 
         Dictionary<NodeId, (bool Inline, bool Block)> nativeControlGridStretch = [];
@@ -131,6 +131,16 @@ public static partial class RenderDom
                     + style.Padding.Right
                     + style.Border.Left
                     + style.Border.Right;
+
+                // DEVIATION from crates/obscura-render/src/dom.rs, which stores the summed
+                // width as-is. Taffy rounds used boxes to whole pixels (Sys.Round), so a box
+                // measured at exactly its label's width can round down and wrap the label it
+                // was sized for. The parts are also measured separately (label, icon glyph,
+                // child edges) and each carries its own sub-pixel error. Round the intrinsic
+                // content width up: at most one pixel wide, never a pixel short. Tesserae's
+                // "Section Stack" button measured 143px against a 79.5px label and broke it
+                // over two lines. See "Known deviations" in todo.md.
+                contentWidth = MathF.Ceiling(contentWidth);
                 style.Width = Dimension.Px(style.BoxSizing == BoxSizing.ContentBox
                     ? contentWidth
                     : contentWidth + horizontalEdges);

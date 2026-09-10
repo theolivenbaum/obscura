@@ -836,7 +836,10 @@ public static class RenderOps
             return null;
         }
 
-        var baseUrl = StateHelpers.DocumentBaseUrl(gs);
+        // Memoized: this is the per-element image metadata read behind
+        // naturalWidth/currentSrc, and the uncached variant runs the selector
+        // engine over the whole tree on every call.
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(gs);
         return gs.RenderResources.CachedImageElementMetadata(dom, nodeId, gs.Viewport, baseUrl);
     }
 
@@ -852,7 +855,7 @@ public static class RenderOps
     /// </summary>
     private static string LoadImageMetadataWithoutPageTransport(ObscuraState gs, NodeId nodeId)
     {
-        var baseUrl = StateHelpers.DocumentBaseUrl(gs);
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(gs);
         var viewport = gs.Viewport;
         (float Width, float Height)? previousDimensions = null;
         if (gs.Dom is { } cachedDom

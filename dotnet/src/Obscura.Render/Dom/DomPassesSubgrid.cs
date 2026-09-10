@@ -505,8 +505,17 @@ internal static class DomSubgridPasses
                         && !parentStyle.InternalFlexContainer
                         && parentStyle.FlexDirection
                             is not (TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse);
+                    // A declared inline size is only the item's used inline size when the flex
+                    // algorithm cannot move it. `flex-grow` above zero, or the default
+                    // `flex-shrink: 1`, both make the used width depend on the line's free
+                    // space, so a descendant percentage resolved against the declaration
+                    // samples the wrong containing block (Tesserae's
+                    // `width: 1px; min-width: 0; flex-grow: 1` panel idiom collapsed every
+                    // `calc(100% - 4px)` card inside it to 0).
                     bool itemIsIndefinite = styles.TryGetValue(item, out LayoutStyle? itemStyle)
                         && (itemStyle.Width.Kind != DimensionKind.Px
+                            || (itemStyle.FlexGrow ?? 0f) > 0f
+                            || (itemStyle.FlexShrink ?? 1f) != 0f
                             || (itemStyle.SizeExpressions[0] is { } itemExpression
                                 && itemExpression.Contains('%', StringComparison.Ordinal)))
                         && itemStyle.Float is null
@@ -545,7 +554,31 @@ internal static class DomSubgridPasses
 
             if (styles.TryGetValue(id, out LayoutStyle? style))
             {
-                Dimension value = Dimension.Px(F32.Max(intrinsicValue, 0f));
+                // DEVIATION from crates/obscura-render/src/dom.rs, which neutralizes a cyclic
+                // inline size to a definite `Px(max(value, 0))` - `0px` for the common
+                // `width: 100%` and `calc(100% - Npx)`. CSS Sizing 3 says a cyclic percentage
+                // behaves as `auto` for intrinsic contribution, and a definite zero instead
+                // collapses the box for the whole intrinsic pass, which then pins its flex
+                // item to the collapsed measurement. Tesserae's code-diff panel is two
+                // `flex: 1 1 auto` items whose content is percentage-sized: with zero bases
+                // they split the row evenly at 462px each instead of measuring 133px and
+                // 791px, and the diff table then wrapped to three times its height. See
+                // "Known deviations" in todo.md.
+                // A content-sized item is measured from exactly the content this neutralization
+                // touches, so zeroing it is self-defeating: `auto` is both what CSS Sizing 3
+                // prescribes and what leaves a real measurement. An item whose size comes from
+                // a declared width or basis is not measured from its content, and there the
+                // reference's zero is the safer neutral - carrying `auto` into those made
+                // `width: 100%` sidebar buttons shrink-wrap to their min-width (swept: 0.59,
+                // 0.48, 0.46 and 0.30 mean abs worse on four samples).
+                bool contentSizedItem =
+                    styles.TryGetValue(resolvedFlexItem, out LayoutStyle? itemSizing)
+                    && itemSizing.Width.IsAuto
+                    && itemSizing.FlexBasis.IsAuto;
+                Dimension value =
+                    kind == DeferredCyclicInlineSourceKind.Expression || contentSizedItem
+                        ? Dimension.Auto
+                        : Dimension.Px(F32.Max(intrinsicValue, 0f));
                 switch (slot)
                 {
                     case 0:
@@ -593,13 +626,101 @@ internal static class DomSubgridPasses
 
         // This is the final-reflow boundary: preserve the main size selected by the outer flex
         // algorithm while descendants are resolved against it.
+        //
+        // DEVIATION from crates/obscura-render/src/dom.rs
+        // `resolve_deferred_flex_inline_sizes`, which pins every affected flex item in one
+        // pass off the intrinsic-neutral layout and only then restores percentages. That is
+        // right for an outermost item, whose used size the flex algorithm has already chosen,
+        // but wrong for a nested one: its measurement is taken inside ancestors whose own
+        // percentage widths are still neutralized to zero, so it gets pinned to its
+        // min-content. On Tesserae's Stack sample an `.tss-stack{width:100%}` panel sat at 0
+        // while the option row below it was pinned to 448px instead of 544px, wrapping every
+        // two-word radio label. Pin outermost-first instead, restoring each level's
+        // percentages and reflowing before measuring the next level down, so a nested item is
+        // always measured under ancestors that already have their real width. See
+        // "Known deviations" in todo.md.
         HashSet<NodeId> flexItems = [];
         foreach (DeferredCyclicInlineSize entry in deferred)
         {
             flexItems.Add(entry.FlexItem);
         }
 
-        foreach (NodeId flexItem in flexItems)
+        Dictionary<NodeId, int> renderedDepth = [];
+        int DepthOf(NodeId node)
+        {
+            List<NodeId> chain = [];
+            NodeId current = node;
+            while (!renderedDepth.ContainsKey(current))
+            {
+                chain.Add(current);
+                if (DomTraversal.RenderedParent(tree, current) is not { } parent)
+                {
+                    renderedDepth[current] = 0;
+                    chain.RemoveAt(chain.Count - 1);
+                    break;
+                }
+
+                current = parent;
+            }
+
+            for (int index = chain.Count - 1; index >= 0; index--)
+            {
+                NodeId step = chain[index];
+                renderedDepth[step] = DomTraversal.RenderedParent(tree, step) is { } parent
+                    ? renderedDepth[parent] + 1
+                    : 0;
+            }
+
+            return renderedDepth.TryGetValue(node, out int depth) ? depth : 0;
+        }
+
+        List<NodeId> orderedFlexItems = [.. flexItems];
+        orderedFlexItems.Sort((left, right) => DepthOf(left).CompareTo(DepthOf(right)));
+
+        int levelStart = 0;
+        while (levelStart < orderedFlexItems.Count)
+        {
+            int levelDepth = DepthOf(orderedFlexItems[levelStart]);
+            int levelEnd = levelStart + 1;
+            while (levelEnd < orderedFlexItems.Count
+                && DepthOf(orderedFlexItems[levelEnd]) == levelDepth)
+            {
+                levelEnd++;
+            }
+
+            HashSet<NodeId> level = [];
+            for (int index = levelStart; index < levelEnd; index++)
+            {
+                level.Add(orderedFlexItems[index]);
+            }
+
+            PinFlexItems(tree, taffyTree, taffyByDom, styles, deferred, level);
+            RestoreTypedPercentages(taffyTree, taffyByDom, styles, deferred, level);
+            relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
+            levelStart = levelEnd;
+        }
+
+        // Shrink-to-fit ancestors must be finalized while functional descendant widths still
+        // have their intrinsic-neutral declarations.
+        relayout(taffyTree, styles, DeferredFlexReflowPhase.FitContent);
+
+        return ResolveFunctionalInlineSizes(
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+    }
+
+    /// <summary>
+    /// Pin each flex item in <paramref name="level"/> to the inline size the flex algorithm
+    /// selected for it, so descendant percentages resolve against a definite basis.
+    /// </summary>
+    private static void PinFlexItems(
+        DomTree tree,
+        TaffyTree taffyTree,
+        Dictionary<NodeId, TaffyNodeId> taffyByDom,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        HashSet<NodeId> level)
+    {
+        foreach (NodeId flexItem in level)
         {
             if (!taffyByDom.TryGetValue(flexItem, out TaffyNodeId taffyId))
             {
@@ -633,11 +754,21 @@ internal static class DomSubgridPasses
                         continue;
                     }
 
+                    // DEVIATION from crates/obscura-render/src/dom.rs, which floors the item
+                    // at every deferred image's natural width unconditionally. That is only
+                    // sound when the image can actually reach that size: an icon boxed by an
+                    // ancestor with a definite inline size cannot. Tesserae's inline labels
+                    // wrap a `width: 100%` SVG in a `width: 14px` span, and the reference
+                    // lifted the whole 60px label to the SVG's natural width - 150px for a
+                    // viewBox-only SVG (the 300x150 default object size at its ratio) and
+                    // 512px for one with explicit dimensions. See "Known deviations" in
+                    // todo.md.
                     if (styles.TryGetValue(entry.Node, out LayoutStyle? entryStyle)
                         && entryStyle.ReplacedIntrinsic is { } metadata
                         && metadata.NaturalSize() is { } natural
                         && float.IsFinite(natural.Width)
-                        && natural.Width > 0f)
+                        && natural.Width > 0f
+                        && !HasDefiniteInlineAncestorBelow(tree, styles, entry.Node, flexItem))
                     {
                         naturalFloor = F32.Max(naturalFloor, natural.Width);
                     }
@@ -652,12 +783,51 @@ internal static class DomSubgridPasses
             pinned.Size = pinnedSize;
             taffyTree.SetStyle(taffyId, pinned);
         }
+    }
 
-        // Once the flex item's used inline size is definite, plain percentages are no longer
-        // cyclic. Keep them typed in Taffy instead of flattening them to pixels.
+    /// <summary>
+    /// Whether any box strictly between <paramref name="node"/> and <paramref name="flexItem"/>
+    /// already has a definite inline size. Such a box caps what the descendant can contribute,
+    /// so the descendant's natural size must not float the flex item.
+    /// </summary>
+    private static bool HasDefiniteInlineAncestorBelow(
+        DomTree tree,
+        Dictionary<NodeId, LayoutStyle> styles,
+        NodeId node,
+        NodeId flexItem)
+    {
+        NodeId? current = DomTraversal.RenderedParent(tree, node);
+        for (int depth = 0; current is { } id && !id.Equals(flexItem) && depth < 64; depth++)
+        {
+            if (styles.TryGetValue(id, out LayoutStyle? style)
+                && (style.Width.Kind is DimensionKind.Px or DimensionKind.Percent
+                    || style.MaxWidth.Kind is DimensionKind.Px or DimensionKind.Percent))
+            {
+                return true;
+            }
+
+            current = DomTraversal.RenderedParent(tree, id);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Once a flex item's used inline size is definite, the plain percentages under it are no
+    /// longer cyclic. Give them back to Taffy typed instead of flattened to pixels, so later
+    /// ancestor changes propagate through nested 100%/400% descendants.
+    /// </summary>
+    private static void RestoreTypedPercentages(
+        TaffyTree taffyTree,
+        Dictionary<NodeId, TaffyNodeId> taffyByDom,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        HashSet<NodeId> level)
+    {
         foreach (DeferredCyclicInlineSize entry in deferred)
         {
-            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent)
+            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent
+                || !level.Contains(entry.FlexItem))
             {
                 continue;
             }
@@ -734,15 +904,23 @@ internal static class DomSubgridPasses
 
             taffyTree.SetStyle(nodeId, restored);
         }
+    }
 
-        relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
-
-        // Shrink-to-fit ancestors must be finalized while functional descendant widths still
-        // have their intrinsic-neutral declarations.
-        relayout(taffyTree, styles, DeferredFlexReflowPhase.FitContent);
-
-        // Taffy cannot retain an arbitrary calc()/min()/max()/clamp() expression in a box-size
-        // field. Resolve those expressions only after their parent has final geometry.
+    /// <summary>
+    /// Taffy cannot retain an arbitrary calc()/min()/max()/clamp() expression in a box-size
+    /// field. Resolve those expressions only after their parent has final geometry.
+    /// </summary>
+    private static bool ResolveFunctionalInlineSizes(
+        DomTree tree,
+        TaffyTree taffyTree,
+        Dictionary<NodeId, TaffyNodeId> taffyByDom,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        float rootFs,
+        float vw,
+        float vh,
+        Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
+    {
         HashSet<NodeId> functionalNodes = [];
         foreach (DeferredCyclicInlineSize entry in deferred)
         {

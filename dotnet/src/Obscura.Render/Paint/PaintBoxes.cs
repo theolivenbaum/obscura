@@ -414,6 +414,19 @@ internal static class PaintGenerated
             return;
         }
 
+        // DEVIATION from crates/obscura-render/src/paint.rs `paint_positioned_pseudo`, which
+        // guards on `position: absolute` alone. An out-of-flow pseudo never reaches the taffy
+        // tree, so the `display: none` that suppresses an in-flow one is not applied anywhere
+        // else either, and the box paints regardless. Tesserae hides an unselected radio's dot
+        // with `.tss-option-mark:after { display: none }` on an absolutely positioned pseudo,
+        // so every radio and checkbox in the samples painted as selected. `visibility: hidden`
+        // and a zero-opacity ancestor come through `EffectivelyInvisible` on the same style.
+        // See "Known deviations" in todo.md.
+        if (style.Display == Display.None || style.EffectivelyInvisible)
+        {
+            return;
+        }
+
         float em = style.FontSize ?? 16f;
         float? Resolve(Dimension dimension, float basis)
         {

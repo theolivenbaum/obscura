@@ -11865,7 +11865,18 @@ fn defer_cyclic_flex_inline_sizes(
                         Some(taffy::FlexDirection::Column | taffy::FlexDirection::ColumnReverse)
                     );
                 let item_is_indefinite = styles.get(&item).map_or(false, |style| {
+                    // A declared inline size is only the item's used inline
+                    // size when the flex algorithm cannot move it. `flex-grow`
+                    // above zero, or the default `flex-shrink: 1`, both make
+                    // the used width depend on the line's free space, so a
+                    // descendant percentage resolved against the declaration
+                    // samples the wrong containing block (Tesserae's
+                    // `width: 1px; min-width: 0; flex-grow: 1` panel idiom
+                    // collapsed every `calc(100% - 4px)` card inside it to 0).
+                    let resizes = style.flex_grow.unwrap_or(0.0) > 0.0
+                        || style.flex_shrink.unwrap_or(1.0) != 0.0;
                     (!matches!(style.width, crate::Dimension::Px(_))
+                        || resizes
                         || style.size_expressions[0]
                             .as_deref()
                             .is_some_and(|expression| expression.contains('%')))

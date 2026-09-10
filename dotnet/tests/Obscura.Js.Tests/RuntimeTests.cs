@@ -4741,6 +4741,61 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public void ABaseInsertedAfterTheFirstLayoutStillRetargetsResourceUrls()
+    {
+        // Guards the memoized base-URL read on the prepare path. EnsurePreparedRender
+        // and EnsurePreparedGeometry used to call StateHelpers.DocumentBaseUrl, which
+        // runs the selector engine over the whole tree on every layout read; they now
+        // call the memoized variant. The memo is keyed on the activity generation, so
+        // inserting a <base> has to invalidate it - if it did not, an image would keep
+        // resolving against the document URL after the insertion.
+        using var owner = new CaptureRuntime(new ObscuraJsRuntime());
+        var rt = owner.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml(
+            """
+            <html style="margin:0"><head></head><body style="margin:0">
+                <div id="frame" style="width:160px">
+                    <img id="hero" src="hero.svg" style="display:block;width:100%;height:auto">
+                </div>
+            </body></html>
+            """));
+        rt.SetUrl("http://example.test/docs/page");
+        rt.SetViewport(200.0, 100.0);
+
+        List<string> requested = [];
+        rt.State.RenderResources = Obscura.Render.RenderResourceCache.WithLoader(url =>
+        {
+            requested.Add(url);
+            // 4:1 from /docs/, 2:1 from /assets/, so the used height distinguishes them.
+            string ratio = url.Contains("/assets/", StringComparison.Ordinal) ? "80" : "40";
+            return System.Text.Encoding.UTF8.GetBytes(
+                $"""
+                <svg xmlns="http://www.w3.org/2000/svg" width="160" height="{ratio}">
+                    <rect width="160" height="{ratio}" fill="#ffff00"/>
+                </svg>
+                """);
+        });
+        rt.RunPageInit();
+
+        var before = rt.Evaluate(
+            "document.getElementById('hero').getBoundingClientRect().height");
+        Assert.Equal(40.0, before!.GetValue<double>());
+        Assert.Equal(["http://example.test/docs/hero.svg"], requested);
+
+        rt.Evaluate(
+            """
+            const base = document.createElement("base");
+            base.setAttribute("href", "/assets/");
+            document.head.appendChild(base);
+            """);
+
+        var after = rt.Evaluate(
+            "document.getElementById('hero').getBoundingClientRect().height");
+        Assert.Equal(80.0, after!.GetValue<double>());
+        Assert.Contains("http://example.test/assets/hero.svg", requested);
+    }
+
+    [Fact]
     public void PreparedRenderSharesResourceGeometryWithCssomAndScreenshots()
     {
         using var owner = new CaptureRuntime(new ObscuraJsRuntime());

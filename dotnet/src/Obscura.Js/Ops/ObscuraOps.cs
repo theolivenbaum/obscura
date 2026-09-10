@@ -304,7 +304,7 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
     }
 
     private static void Bind(ScriptObject ops, string name, object function) =>
-        ops.SetProperty(name, function);
+        FastOpBinding.Bind(ops, name, function);
 
     // -----------------------------------------------------------------------
     // Argument normalization. The shim passes JS values; deno_core coerced them

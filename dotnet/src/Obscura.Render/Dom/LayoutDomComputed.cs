@@ -38,6 +38,7 @@ public static partial class RenderDom
             // Default the child containing-block width to this element's own.
             float childCbWidth = inh.CbWidth;
             bool childCbHeightDefinite = false;
+            float childCbHeight = 0f;
             bool reusedComputedStyle = freshStyles is { } fresh && !fresh.Contains(id);
             if (reusedComputedStyle)
             {
@@ -161,6 +162,7 @@ public static partial class RenderDom
                         : retainedStyle.OverflowClipY ? (byte)1 : (byte)0;
                     childCbHeightDefinite = retainedStyle.Height.Kind
                         is DimensionKind.Px or DimensionKind.Percent;
+                    childCbHeight = ContentBoxBlockSize(retainedStyle, inh.CbHeight);
                     if (childCbHeightDefinite)
                     {
                         definiteHeightNodes.Add(id);
@@ -191,6 +193,7 @@ public static partial class RenderDom
 
                 inh.CbWidth = childCbWidth;
                 inh.CbHeightDefinite = childCbHeightDefinite;
+                inh.CbHeight = childCbHeight;
                 List<NodeId> retainedChildren = DomTraversal.StyleChildren(tree, id);
                 for (int index = retainedChildren.Count - 1; index >= 0; index--)
                 {
@@ -228,6 +231,7 @@ public static partial class RenderDom
                     tree,
                     id,
                     style,
+                    styles,
                     inh,
                     inheritedGridAutoTracks,
                     definiteHeightNodes,
@@ -237,11 +241,13 @@ public static partial class RenderDom
                     viewport,
                     initialCbWidth,
                     out childCbWidth,
-                    out childCbHeightDefinite);
+                    out childCbHeightDefinite,
+                    out childCbHeight);
             }
 
             inh.CbWidth = childCbWidth;
             inh.CbHeightDefinite = childCbHeightDefinite;
+            inh.CbHeight = childCbHeight;
             List<NodeId> children = DomTraversal.StyleChildren(tree, id);
             for (int index = children.Count - 1; index >= 0; index--)
             {
@@ -254,6 +260,7 @@ public static partial class RenderDom
         DomTree tree,
         NodeId id,
         LayoutStyle style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         Inherited inh,
         (List<Layout.TrackSizingFunction> Columns,
             List<Layout.TrackSizingFunction> Rows,
@@ -266,7 +273,8 @@ public static partial class RenderDom
         (float Width, float Height) viewport,
         float initialCbWidth,
         out float childCbWidth,
-        out bool childCbHeightDefinite)
+        out bool childCbHeightDefinite,
+        out float childCbHeight)
     {
         if (style.GridAutoColumnsInherit)
         {
@@ -455,6 +463,38 @@ public static partial class RenderDom
         }
 
         float cbW = inh.CbWidth;
+
+        // DEVIATION from crates/obscura-render/src/style.rs, which drops the CSS-wide keyword
+        // `inherit` on the box-size properties. They are not inherited properties, so the
+        // keyword has to copy the parent's computed value explicitly - the parent is already
+        // resolved at this point because this pass runs top-down. Tesserae's annotated text
+        // editor sizes its textarea with `min-height: inherit` off a per-instance container
+        // and got the initial value, so every editor collapsed to one row (58px against
+        // Chromium's 160/120/80). See "Known deviations" in todo.md.
+        if (style.SizeInherit != 0
+            && DomTraversal.RenderedParent(tree, id) is { } sizeInheritParent
+            && styles.TryGetValue(sizeInheritParent, out LayoutStyle? sizeInheritFrom))
+        {
+            for (int index = 0; index < 6; index++)
+            {
+                if ((style.SizeInherit & (1 << index)) == 0)
+                {
+                    continue;
+                }
+
+                style.SizeExpressions[index] = sizeInheritFrom.SizeExpressions[index];
+                switch (index)
+                {
+                    case 0: style.Width = sizeInheritFrom.Width; break;
+                    case 1: style.Height = sizeInheritFrom.Height; break;
+                    case 2: style.MinWidth = sizeInheritFrom.MinWidth; break;
+                    case 3: style.MinHeight = sizeInheritFrom.MinHeight; break;
+                    case 4: style.MaxWidth = sizeInheritFrom.MaxWidth; break;
+                    default: style.MaxHeight = sizeInheritFrom.MaxHeight; break;
+                }
+            }
+        }
+
         for (int index = 0; index < 6; index++)
         {
             if (style.SizeExpressions[index] is not { } expression)
@@ -471,7 +511,32 @@ public static partial class RenderDom
                 continue;
             }
 
-            float percentBase = index is 1 or 3 or 5 ? viewport.Height : cbW;
+            // DEVIATION from crates/obscura-render/src/dom.rs, which uses `viewport.1` as
+            // the percentage basis for every block-axis slot. A block-axis percentage
+            // resolves against the containing block's content-box HEIGHT, and is
+            // indefinite when that height is: Chromium computes `height: calc(100% - 4px)`
+            // under an auto-height parent to `auto`. Taffy applies both rules itself for a
+            // bare percentage, but a functional one has to be flattened to px here, so the
+            // rules have to be applied here too. The viewport basis made Tesserae's
+            // `.tss-card` (`height: calc(100% - 4px)`) a full viewport tall in every
+            // sample. See "Known deviations" in todo.md.
+            bool blockAxis = index is 1 or 3 or 5;
+            if (blockAxis
+                && expression.Contains('%', StringComparison.Ordinal)
+                && !inh.CbHeightDefinite
+                && style.Position != TaffyPosition.Absolute)
+            {
+                switch (index)
+                {
+                    case 1: style.Height = Dimension.Auto; break;
+                    case 3: style.MinHeight = Dimension.Auto; break;
+                    default: style.MaxHeight = Dimension.Auto; break;
+                }
+
+                continue;
+            }
+
+            float percentBase = blockAxis ? inh.CbHeight : cbW;
             if (ComputedStyle.ResolveContextualLength(
                     expression, emPx, rootFs, vw, vh, percentBase) is not { } px)
             {
@@ -505,6 +570,37 @@ public static partial class RenderDom
         }
 
         childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
+        childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
+
+        // DEVIATION from crates/obscura-render/src/dom.rs, which calls a box's block size
+        // definite only when `height` itself is a length or percentage. CSS Flexbox 9.8 also
+        // makes a flex item's main size definite when it has a definite flex basis in a
+        // container with a definite main size, and Chromium resolves descendant percentage
+        // heights against it. Tesserae's time-histogram bars are `height: 100%` inside a
+        // `flex: 1 1 120px` column item, so the reference computed them to `auto` and every
+        // bar laid out 0px tall - the chart rendered as an empty box. See "Known deviations"
+        // in todo.md.
+        if (!childCbHeightDefinite
+            && style.FlexBasis.Kind == DimensionKind.Px
+            && style.FlexBasis.Value > 0f
+            && DomTraversal.RenderedParent(tree, id) is { } flexBasisParent
+            && styles.TryGetValue(flexBasisParent, out LayoutStyle? flexBasisContainer)
+            && flexBasisContainer.Display == Display.Flex
+            && flexBasisContainer.FlexDirection
+                is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse)
+        {
+            childCbHeightDefinite = true;
+            childCbHeight = style.BoxSizing == BoxSizing.ContentBox
+                ? style.FlexBasis.Value
+                : F32.Max(
+                    style.FlexBasis.Value
+                    - style.Padding.Top
+                    - style.Padding.Bottom
+                    - style.Border.Top
+                    - style.Border.Bottom,
+                    0f);
+        }
+
         if (childCbHeightDefinite)
         {
             definiteHeightNodes.Add(id);
@@ -549,6 +645,7 @@ public static partial class RenderDom
             }
 
             childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
+            childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
         }
 
         ushort computedWeight = ComputedStyle.ComputedFontWeight(style.FontWeight, inh.FontWeight);
@@ -775,6 +872,41 @@ public static partial class RenderDom
                 - style.Padding.Right
                 - style.Border.Left
                 - style.Border.Right,
+                0f);
+    }
+
+    /// <summary>
+    /// The content-box block size a definite-height box hands its children as a
+    /// percentage basis. Mirrors the inline-axis rule: a definite content-box height is
+    /// already the value, and a border-box or auto height includes padding and border,
+    /// which must come off. An indefinite height yields 0, which callers only read behind
+    /// <c>CbHeightDefinite</c>.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in crates/obscura-render/src/dom.rs. See the remarks on
+    /// <c>Inherited.CbHeight</c>.
+    /// </remarks>
+    private static float ContentBoxBlockSize(LayoutStyle style, float parentCbHeight)
+    {
+        float used = style.Height.Kind switch
+        {
+            DimensionKind.Px => style.Height.Value,
+            DimensionKind.Percent => style.Height.Value * parentCbHeight,
+            _ => float.NaN,
+        };
+        if (float.IsNaN(used))
+        {
+            return 0f;
+        }
+
+        return style.BoxSizing == BoxSizing.ContentBox
+            ? F32.Max(used, 0f)
+            : F32.Max(
+                used
+                - style.Padding.Top
+                - style.Padding.Bottom
+                - style.Border.Top
+                - style.Border.Bottom,
                 0f);
     }
 

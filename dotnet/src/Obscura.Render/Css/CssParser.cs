@@ -87,14 +87,15 @@ public static class CssParser
         LayerOrder? currentLayer)
     {
         var rules = new List<ParsedRule>();
-        var currentSelector = new StringBuilder();
-        var currentDeclarations = new StringBuilder();
+        var currentSelector = default(Chunk);
+        var currentDeclarations = default(Chunk);
         var blockDepth = 0;
         var inComment = false;
         var index = 0;
 
         while (index < css.Length)
         {
+            var position = index;
             var character = css[index];
             index++;
 
@@ -120,7 +121,7 @@ public static class CssParser
             {
                 if (blockDepth != 0)
                 {
-                    currentDeclarations.Append(character);
+                    currentDeclarations.Append(css, position);
                 }
 
                 blockDepth++;
@@ -138,8 +139,8 @@ public static class CssParser
                 blockDepth--;
                 if (blockDepth == 0)
                 {
-                    var selector = currentSelector.ToString().Trim();
-                    var declarations = currentDeclarations.ToString().Trim();
+                    var selector = currentSelector.Materialize(css);
+                    var declarations = currentDeclarations.Materialize(css);
                     if (selector.StartsWith('@'))
                     {
                         FlushAtRule(
@@ -176,7 +177,7 @@ public static class CssParser
                 }
                 else
                 {
-                    currentDeclarations.Append(character);
+                    currentDeclarations.Append(css, position);
                 }
             }
             else if (character == ';' && blockDepth == 0)
@@ -184,7 +185,7 @@ public static class CssParser
                 // Layer ordering statements establish slots even though they emit
                 // no selector rules. All other statement at-rules are discarded so
                 // their prelude cannot bleed into the next selector.
-                var statement = currentSelector.ToString().Trim();
+                var statement = currentSelector.Materialize(css);
                 if (statement.StartsWith('@')
                     && CssAtRules.Prelude(statement[1..], "layer") is { } prelude)
                 {
@@ -195,15 +196,96 @@ public static class CssParser
             }
             else if (blockDepth > 0)
             {
-                currentDeclarations.Append(character);
+                currentDeclarations.Append(css, position);
             }
             else
             {
-                currentSelector.Append(character);
+                currentSelector.Append(css, position);
             }
         }
 
         return rules;
+    }
+
+    private static bool IsAllWhitespace(StringBuilder builder)
+    {
+        for (int i = 0; i < builder.Length; i++)
+        {
+            if (!char.IsWhiteSpace(builder[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// A run of accepted source characters, kept as offsets into the sheet rather
+    /// than copied out character by character.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render</c> only in representation: the Rust
+    /// scanner slices <c>&amp;str</c>, which is free, so it appends nothing. The port's
+    /// first cut appended every accepted character to a <see cref="StringBuilder"/>,
+    /// which on a 3 MB sheet meant three million appends plus the builder's growth
+    /// copies, and it dominated an allocation profile that reached 187 MB for that
+    /// one sheet. Accepted characters are almost always contiguous, so this records
+    /// the run and materializes one substring at the end. A comment in the middle
+    /// of a run is the only thing that breaks contiguity, and only then does a
+    /// builder appear, holding the pieces on either side.
+    /// </remarks>
+    private struct Chunk
+    {
+        private int _start;
+        private int _end;
+        private bool _open;
+        private StringBuilder? _spill;
+
+        /// <summary>Accept the character at <paramref name="position"/>.</summary>
+        public void Append(string css, int position)
+        {
+            if (!_open)
+            {
+                _start = position;
+                _end = position + 1;
+                _open = true;
+                return;
+            }
+
+            if (_end == position)
+            {
+                _end = position + 1;
+                return;
+            }
+
+            // A comment was skipped inside the run, so the source is no longer one
+            // slice. Park what is accepted so far and start a new run after the gap.
+            _spill ??= new StringBuilder();
+            _spill.Append(css, _start, _end - _start);
+            _start = position;
+            _end = position + 1;
+        }
+
+        public void Clear()
+        {
+            _start = 0;
+            _end = 0;
+            _open = false;
+            _spill = null;
+        }
+
+        /// <summary>The accepted text, trimmed, exactly as <c>ToString().Trim()</c> gave.</summary>
+        public string Materialize(string css)
+        {
+            if (_spill is null)
+            {
+                return _open ? css.AsSpan(_start, _end - _start).Trim().ToString() : string.Empty;
+            }
+
+            _spill.Append(css, _start, _end - _start);
+            return _spill.ToString().Trim();
+        }
     }
 
     /// <summary>
@@ -510,10 +592,10 @@ public static class CssParser
 
                 case ';' when paren == 0:
                 {
-                    var declaration = body[segment..index].Trim();
-                    if (declaration.StartsWith('@'))
+                    ReadOnlySpan<char> declaration = body.AsSpan(segment, index - segment).Trim();
+                    if (declaration.Length != 0 && declaration[0] == '@')
                     {
-                        if (CssAtRules.Prelude(declaration[1..], "layer") is { } prelude)
+                        if (CssAtRules.Prelude(declaration[1..].ToString(), "layer") is { } prelude)
                         {
                             layers.RegisterStatement(currentLayer, prelude);
                         }
@@ -533,14 +615,16 @@ public static class CssParser
             index++;
         }
 
-        var tail = body[segment..].Trim();
-        if (tail.Length != 0 && !tail.Contains('{', StringComparison.Ordinal))
+        ReadOnlySpan<char> tail = body.AsSpan(segment).Trim();
+        if (tail.Length != 0 && !tail.Contains('{'))
         {
             own.Append(tail);
             own.Append(';');
         }
 
-        if (own.ToString().Trim().Length == 0)
+        // Emptiness used to be tested by materializing the builder and trimming it,
+        // which threw away a string per rule for the answer alone.
+        if (IsAllWhitespace(own))
         {
             return;
         }
