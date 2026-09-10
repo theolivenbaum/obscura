@@ -174,6 +174,20 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **PORT BUG: capture initiates network requests where the reference initiates
+  none.** `Page.captureScreenshot`, `Page.startScreencast` and `Page.printToPDF`
+  each fetch a background-image sub-resource that Rust does not, reproducibly
+  (2 requests against an expected 0, 5 of 5 isolated runs). Diagnosed but not
+  fixed. Ruled out: the CDP handler is a faithful port, the env-var gate on
+  `prepare_capture_resources_if_requested` matches, `RenderResourceCache` holds
+  the render layer's only fetch initiator and it honors
+  `SetSyncLoadingEnabled(false)`, and all five capture entry points set that
+  flag exactly where Rust sets it. The remaining suspect is the JS/op layer
+  queueing image loads that the capture path then drains. `Obscura.Cdp.Tests`
+  `CaptureMethodsDoNotStartDefaultResourceWarmups` is skipped carrying that
+  diagnosis. This was previously misfiled as a load-sensitive flake; it is not,
+  it fails deterministically in isolation.
+
 - ~~`Obscura.Browser` serializes URLs through `System.Uri`~~ **FIXED.**
   `Page.UrlString()` now serializes through `Obscura.Js.Url.UrlRecord`, the
   WHATWG parser, instead of `Uri.AbsoluteUri`. `System.Uri` percent-encoded
