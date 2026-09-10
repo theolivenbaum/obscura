@@ -455,6 +455,39 @@ DEVIATION comment at the C# code that differs.
   participant carrying the parent font's ascent and descent, present on every
   line box rather than only text-bearing ones. Glyphs paint in the right place
   meanwhile; only the wrapper box height differs.
+- **PARTLY FIXED - a cyclic percentage under a content-sized flex item is now
+  neutralized to `auto`.** A content-sized item is measured from exactly the
+  content the neutralization touches, so zeroing it is self-defeating; an item
+  sized from a declared width or basis is not measured from its content, and
+  there the reference's zero is the safer neutral. Carrying `auto` into *both*
+  cases was tried and swept over all 136 samples: it made `width: 100%` sidebar
+  buttons shrink-wrap to their 80px min-width, costing 0.59, 0.48, 0.46 and 0.30
+  mean abs on four samples. Gating it on `Width.IsAuto && FlexBasis.IsAuto` keeps
+  Sidebar exact (152/127/174/376 against Chromium's 151/127/174/376) and moves
+  Code Diff's two `flex: 1 1 auto` panels from an even 462/462 split to 363/802
+  against Chromium's 133/791.
+  Still open: the first panel measures 363 where Chromium measures 133, and the
+  pair sums to 1165 in a 924px row - they overflow rather than shrinking, so the
+  pinned base sizes are not being shrunk by the flex algorithm afterwards.
+- **Open, not fixed: a baseline-aligned atomic inline does not extend the line box
+  by the strut's descent.** Reduced to a fixture: a `display: inline-block` of
+  height 12 with no in-flow content, inside a block with `line-height: 12px`, is
+  14px tall in Chromium and 12 in both engines. An empty inline-block's baseline
+  is its bottom margin edge, so its whole box sits above the baseline and the
+  strut's descent still has to fit below it. `vertical-align: top` (12/12) and an
+  inline-block that contains text (12/12) both agree already, which pins the case
+  precisely. This is the 2px icon-box gap: `<i class="fi-rr-*">` wraps an
+  icon-font `::before` that is exactly this shape.
+
+  Root cause located, not fixed. `DomBuild.RunWrapperStyle` models a line box as a
+  wrapping flex row whose strut is a `MinSize.Height`, and `DomBuildMixed` only
+  sets `hasTextStrut` when the run contains a text node. A min-height cannot push
+  an atomic down off the baseline, and switching the wrapper to
+  `AlignItems.Baseline` changes nothing on its own (tried: 649 tests stay green,
+  the fixture stays at 12). A real fix needs the strut to be a zero-width
+  participant carrying the parent font's ascent and descent, present on every
+  line box rather than only text-bearing ones. Glyphs paint in the right place
+  meanwhile; only the wrapper box height differs.
 - **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
   evenly.** Both panels' content is percentage-sized, so with the bare-percentage
   neutralization both flex base sizes measure 0 and the row splits 462/462

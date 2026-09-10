@@ -564,9 +564,21 @@ internal static class DomSubgridPasses
                 // they split the row evenly at 462px each instead of measuring 133px and
                 // 791px, and the diff table then wrapped to three times its height. See
                 // "Known deviations" in todo.md.
-                Dimension value = kind == DeferredCyclicInlineSourceKind.Expression
-                    ? Dimension.Auto
-                    : Dimension.Px(F32.Max(intrinsicValue, 0f));
+                // A content-sized item is measured from exactly the content this neutralization
+                // touches, so zeroing it is self-defeating: `auto` is both what CSS Sizing 3
+                // prescribes and what leaves a real measurement. An item whose size comes from
+                // a declared width or basis is not measured from its content, and there the
+                // reference's zero is the safer neutral - carrying `auto` into those made
+                // `width: 100%` sidebar buttons shrink-wrap to their min-width (swept: 0.59,
+                // 0.48, 0.46 and 0.30 mean abs worse on four samples).
+                bool contentSizedItem =
+                    styles.TryGetValue(resolvedFlexItem, out LayoutStyle? itemSizing)
+                    && itemSizing.Width.IsAuto
+                    && itemSizing.FlexBasis.IsAuto;
+                Dimension value =
+                    kind == DeferredCyclicInlineSourceKind.Expression || contentSizedItem
+                        ? Dimension.Auto
+                        : Dimension.Px(F32.Max(intrinsicValue, 0f));
                 switch (slot)
                 {
                     case 0:
