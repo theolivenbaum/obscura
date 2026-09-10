@@ -732,11 +732,21 @@ internal static class DomSubgridPasses
                         continue;
                     }
 
+                    // DEVIATION from crates/obscura-render/src/dom.rs, which floors the item
+                    // at every deferred image's natural width unconditionally. That is only
+                    // sound when the image can actually reach that size: an icon boxed by an
+                    // ancestor with a definite inline size cannot. Tesserae's inline labels
+                    // wrap a `width: 100%` SVG in a `width: 14px` span, and the reference
+                    // lifted the whole 60px label to the SVG's natural width - 150px for a
+                    // viewBox-only SVG (the 300x150 default object size at its ratio) and
+                    // 512px for one with explicit dimensions. See "Known deviations" in
+                    // todo.md.
                     if (styles.TryGetValue(entry.Node, out LayoutStyle? entryStyle)
                         && entryStyle.ReplacedIntrinsic is { } metadata
                         && metadata.NaturalSize() is { } natural
                         && float.IsFinite(natural.Width)
-                        && natural.Width > 0f)
+                        && natural.Width > 0f
+                        && !HasDefiniteInlineAncestorBelow(tree, styles, entry.Node, flexItem))
                     {
                         naturalFloor = F32.Max(naturalFloor, natural.Width);
                     }
@@ -751,6 +761,33 @@ internal static class DomSubgridPasses
             pinned.Size = pinnedSize;
             taffyTree.SetStyle(taffyId, pinned);
         }
+    }
+
+    /// <summary>
+    /// Whether any box strictly between <paramref name="node"/> and <paramref name="flexItem"/>
+    /// already has a definite inline size. Such a box caps what the descendant can contribute,
+    /// so the descendant's natural size must not float the flex item.
+    /// </summary>
+    private static bool HasDefiniteInlineAncestorBelow(
+        DomTree tree,
+        Dictionary<NodeId, LayoutStyle> styles,
+        NodeId node,
+        NodeId flexItem)
+    {
+        NodeId? current = DomTraversal.RenderedParent(tree, node);
+        for (int depth = 0; current is { } id && !id.Equals(flexItem) && depth < 64; depth++)
+        {
+            if (styles.TryGetValue(id, out LayoutStyle? style)
+                && (style.Width.Kind is DimensionKind.Px or DimensionKind.Percent
+                    || style.MaxWidth.Kind is DimensionKind.Px or DimensionKind.Percent))
+            {
+                return true;
+            }
+
+            current = DomTraversal.RenderedParent(tree, id);
+        }
+
+        return false;
     }
 
     /// <summary>

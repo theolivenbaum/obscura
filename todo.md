@@ -400,6 +400,15 @@ DEVIATION comment at the C# code that differs.
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
   content with the pseudo's own style.
+- **DEVIATION - a boxed percentage image floated its flex item to the image's
+  natural width.** The reference floors a content-sized flex item at every
+  deferred image's natural width (its #698 fix). That is only sound when the
+  image can reach that size. Tesserae's inline labels wrap a `width: 100%` SVG in
+  a `width: 14px` span, and the reference lifted the whole 60px label to the SVG's
+  natural width - 150px for a viewBox-only SVG (the 300x150 default object size at
+  its ratio) and 512px for one with explicit dimensions. The port skips the floor
+  when a box between the image and the flex item already has a definite inline
+  size, since that box caps the contribution.
 - **DEVIATION - `<button>` did not take the user-agent control font.** The
   reference's `button` arm sets no font, so a button inherits the page's
   font-size, family and line-height. Chromium gives every form control

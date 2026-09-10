@@ -3477,6 +3477,47 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void ABoxedPercentageImageDoesNotFloatItsFlexItemToTheNaturalWidth()
+    {
+        // DEVIATION from the Rust reference, which floors a content-sized flex item at every
+        // deferred image's natural width unconditionally (the #698 fix above). That is only
+        // sound when the image can actually reach that size. Tesserae's inline labels wrap a
+        // `width: 100%` SVG in a `width: 14px` span, and the reference lifted the whole 60px
+        // label to the SVG's natural width. The definite ancestor caps the contribution, so
+        // the natural floor must not apply through it.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font: 13px Arial, sans-serif }
+              * { box-sizing:border-box }
+              #row { display:flex; flex-direction:row; width:358px }
+              #label { display:inline-flex; align-items:center; gap:6px; width:fit-content;
+                       height:24px; padding:0 8px; border:1px solid }
+              #mark { width:14px; height:14px; flex:0 0 auto; display:flex }
+              #mark img { display:block; width:100%; height:100% }
+            </style>
+            <div id="row">
+              <a id="label"><span id="mark"><img id="icon" src="icon.svg"></span><span>Box</span></a>
+            </div>
+            """);
+        Dictionary<NodeId, (float Width, float Height)> intrinsic = new()
+        {
+            [Id(tree, "icon")] = (150f, 150f),
+        };
+        DomLayout laid = RenderDom.LayoutDomWithImages(tree, (800f, 300f), intrinsic);
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(
+            Get("label").Width < 80f,
+            "a 14px-boxed icon must not float the label to the image's 150px natural width: "
+                + $"{Get("label")}");
+        Assert.True(
+            MathF.Abs(Get("mark").Width - 14f) < 0.01f, $"{Get("mark")}");
+        Assert.True(
+            MathF.Abs(Get("icon").Width - 14f) < 0.01f, $"{Get("icon")}");
+    }
+
+    [Fact]
     public void FinalFlexReflowFinalizesFitContentBeforeDescendantCalc()
     {
         DomTree tree = Parse(
