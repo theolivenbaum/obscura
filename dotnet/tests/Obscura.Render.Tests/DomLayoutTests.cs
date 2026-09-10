@@ -3583,6 +3583,49 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void AutoFitRepetitionCountsAMathFunctionTrackMinimumAsFixed()
+    {
+        // DEVIATION from vendored taffy, and so from the Rust reference which shares it: taffy
+        // counts only a bare length or percentage as a track's fixed component, so a math
+        // function reads as intrinsic. An auto-repetition beside a non-fixed track invalidates
+        // the whole template and the grid falls back to zero explicit tracks - one implicit
+        // column with every item stacked. Tesserae's grids are
+        // `repeat(auto-fit, minmax(min(160px, 100%), 1fr))`; Chromium lays out five 177px
+        // columns in a 924px container and the reference laid out one 924px column.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font: 13px Arial, sans-serif }
+              .g { width:924px; gap:8px; display:grid }
+              .g > div { height:20px }
+              #nested { grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)) }
+              #calc   { grid-template-columns: repeat(auto-fit, minmax(calc(160px), 1fr)) }
+              #plain  { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) }
+            </style>
+            <div class="g" id="nested"><div id="n0"></div><div></div><div></div>
+              <div></div><div></div><div id="n5"></div></div>
+            <div class="g" id="calc"><div id="c0"></div><div></div><div></div>
+              <div></div><div></div><div></div></div>
+            <div class="g" id="plain"><div id="p0"></div><div></div><div></div>
+              <div></div><div></div><div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // 924px with an 8px gap fits five 176.8px tracks; all three spellings agree.
+        foreach (string first in new[] { "n0", "c0", "p0" })
+        {
+            Assert.True(
+                MathF.Abs(Get(first).Width - 177f) < 1.01f,
+                $"{first} should be one of five auto-fit tracks: {Get(first)}");
+        }
+
+        // The sixth item wraps to a second row rather than stacking one per row.
+        Assert.True(Get("n5").Y > Get("n0").Y, $"{Get("n5")} {Get("n0")}");
+        Assert.True(MathF.Abs(Get("n5").X - Get("n0").X) < 0.01f, $"{Get("n5")}");
+    }
+
+    [Fact]
     public void FinalFlexReflowFinalizesFitContentBeforeDescendantCalc()
     {
         DomTree tree = Parse(

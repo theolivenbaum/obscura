@@ -414,6 +414,17 @@ DEVIATION comment at the C# code that differs.
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
   content with the pseudo's own style.
+- **DEVIATION - `repeat(auto-fit, minmax(<math function>, 1fr))` collapsed to one
+  column.** Vendored taffy (so the reference too) counts only a bare length or
+  percentage as a track's fixed component, so `min()`/`calc()` reads as
+  intrinsic. An auto-repetition beside a non-fixed track invalidates the whole
+  template and the grid falls back to zero explicit tracks - one implicit column
+  with every item stacked. Tesserae's grids are
+  `repeat(auto-fit, minmax(min(160px, 100%), 1fr))`: Chromium lays out five 177px
+  columns in a 924px container, both engines laid out one 924px column. The port
+  counts a resolvable calc as fixed. Verified against the Rust binary, which
+  shows the same collapse, so this is a shared engine limitation rather than a
+  port defect.
 - **DEVIATION - a definite flex basis did not make a column item's block size
   definite.** The reference calls a box's block size definite only when `height`
   itself is a length or percentage. CSS Flexbox 9.8 also makes a flex item's main
