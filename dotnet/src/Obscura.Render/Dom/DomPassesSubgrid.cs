@@ -564,8 +564,9 @@ internal static class DomSubgridPasses
                 // they split the row evenly at 462px each instead of measuring 133px and
                 // 791px, and the diff table then wrapped to three times its height. See
                 // "Known deviations" in todo.md.
-                Dimension value = Dimension.Auto;
-                _ = intrinsicValue;
+                Dimension value = kind == DeferredCyclicInlineSourceKind.Expression
+                    ? Dimension.Auto
+                    : Dimension.Px(F32.Max(intrinsicValue, 0f));
                 switch (slot)
                 {
                     case 0:

@@ -384,17 +384,27 @@ DEVIATION comment at the C# code that differs.
   outermost-first, restoring each level's percentages and reflowing before
   measuring the next level down (`PinFlexItems` / `RestoreTypedPercentages` /
   `ResolveFunctionalInlineSizes` in `DomPassesSubgrid`).
-- **DEVIATION - a cyclic inline size neutralized to `0px` instead of `auto`.**
-  CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
+- **DEVIATION - a cyclic *functional* inline size neutralized to `0px` instead of
+  `auto`.** CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
   contribution; the reference writes a definite `Px(max(value, 0))`, which is
-  `0px` for the common `width: 100%` and `calc(100% - Npx)` and collapses the box
-  for the whole intrinsic pass - which then pins its flex item to the collapsed
-  measurement. Tesserae's code-diff panel is two `flex: 1 1 auto` items whose
-  content is percentage-sized: with zero bases they split the row evenly at 462px
-  each instead of 133px and 791px, and the diff table wrapped to three times its
-  height. The port neutralizes both the functional and the bare-percentage source
-  to `Auto`. Not fully closed: the port now measures 363/802 where Chromium
-  measures 133/791, and the pair overflows its 924px row instead of shrinking.
+  `0px` for the common `calc(100% - Npx)` and collapses the box for the whole
+  intrinsic pass. The port neutralizes the Expression source to `Auto`.
+  **Bare percentages deliberately keep the reference's zero.** Switching them to
+  `Auto` as well was tried and measured over all 136 samples: it bought 0.11 mean
+  abs on Code Diff and cost 0.59 on Sidebar, 0.48 on Search Box, 0.46 on
+  Searchable List and 0.30 on Node View, where `width: 100%` sidebar buttons
+  shrink-wrapped to their 80px min-width instead of filling their 384px row. The
+  restore path puts the typed percentage back either way, so the difference is
+  what the *intrinsic* pass measures; the reference's zero is closer for the bare
+  form. Reverted, and the Code Diff case below stays open.
+- **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
+  evenly.** Both panels' content is percentage-sized, so with the bare-percentage
+  neutralization both flex base sizes measure 0 and the row splits 462/462
+  instead of Chromium's 133/791; the diff table then wraps to three times its
+  height (mean abs 7.17 against a 3.08 median). Fixing it properly needs the
+  intrinsic pass to measure a bare cyclic percentage as `auto` *without* losing
+  the restore that a `width: 100%` button depends on - the two uses want
+  different answers from the same neutralization.
 - **DEVIATION - an auto-sized `<button>`'s intrinsic width ignored element
   children.** `native_button_intrinsic_content` recurses past every non-replaced
   element and counts only text plus replaced boxes, so a flex button's child
