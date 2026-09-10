@@ -174,6 +174,15 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **PORT NONDETERMINISM: concurrent image-load completion order varies.**
+  `ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` asserts an exact
+  completion order and fails roughly 3 of 5 runs in isolation. The reference
+  drives this on a single-threaded tokio `current_thread` runtime, so its order
+  is deterministic; the port completes these on the thread pool. Consistent with
+  the evidence, not yet confirmed by instrumenting the load path. Skipped
+  carrying that reasoning. Distinct from the load-sensitive class: this one is
+  unstable even with the host idle.
+
 - **PORT BUG (CDP-specific): capture fetches sub-resources the reference does
   not.** `Page.captureScreenshot`, `Page.startScreencast` and `Page.printToPDF`
   each fetch a CSS background-image the Rust CDP server never requests: 2
