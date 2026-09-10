@@ -571,6 +571,36 @@ public static partial class RenderDom
 
         childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
         childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
+
+        // DEVIATION from crates/obscura-render/src/dom.rs, which calls a box's block size
+        // definite only when `height` itself is a length or percentage. CSS Flexbox 9.8 also
+        // makes a flex item's main size definite when it has a definite flex basis in a
+        // container with a definite main size, and Chromium resolves descendant percentage
+        // heights against it. Tesserae's time-histogram bars are `height: 100%` inside a
+        // `flex: 1 1 120px` column item, so the reference computed them to `auto` and every
+        // bar laid out 0px tall - the chart rendered as an empty box. See "Known deviations"
+        // in todo.md.
+        if (!childCbHeightDefinite
+            && style.FlexBasis.Kind == DimensionKind.Px
+            && style.FlexBasis.Value > 0f
+            && DomTraversal.RenderedParent(tree, id) is { } flexBasisParent
+            && styles.TryGetValue(flexBasisParent, out LayoutStyle? flexBasisContainer)
+            && flexBasisContainer.Display == Display.Flex
+            && flexBasisContainer.FlexDirection
+                is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse)
+        {
+            childCbHeightDefinite = true;
+            childCbHeight = style.BoxSizing == BoxSizing.ContentBox
+                ? style.FlexBasis.Value
+                : F32.Max(
+                    style.FlexBasis.Value
+                    - style.Padding.Top
+                    - style.Padding.Bottom
+                    - style.Border.Top
+                    - style.Border.Bottom,
+                    0f);
+        }
+
         if (childCbHeightDefinite)
         {
             definiteHeightNodes.Add(id);

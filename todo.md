@@ -400,6 +400,15 @@ DEVIATION comment at the C# code that differs.
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
   content with the pseudo's own style.
+- **DEVIATION - a definite flex basis did not make a column item's block size
+  definite.** The reference calls a box's block size definite only when `height`
+  itself is a length or percentage. CSS Flexbox 9.8 also makes a flex item's main
+  size definite when it has a definite flex basis in a container with a definite
+  main size, and Chromium resolves descendant percentage heights against it.
+  Tesserae's time-histogram bars are `height: 100%` inside a `flex: 1 1 120px`
+  column item, so the reference computed them to `auto`, every bar laid out 0px
+  tall, and the chart rendered as an empty box (Chromium: 107px bars in a 120px
+  row).
 - **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
   properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
   `inherit` has to copy the parent's computed value explicitly; the reference

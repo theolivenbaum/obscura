@@ -3549,6 +3549,40 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void ADefiniteFlexBasisMakesAColumnItemsBlockSizeDefiniteForPercentages()
+    {
+        // DEVIATION from the Rust reference, which calls a box's block size definite only when
+        // `height` itself is a length or percentage. CSS Flexbox 9.8 also makes a flex item's
+        // main size definite when it has a definite flex basis in a container with a definite
+        // main size, and Chromium resolves descendant percentage heights against it. Tesserae's
+        // time-histogram bars are `height: 100%` inside a `flex: 1 1 120px` column item, so the
+        // reference computed them to auto and every bar laid out 0px tall.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #chart { display:flex; flex-direction:column; height:190px; width:400px }
+              #bars { flex:1 1 120px; min-height:0; display:flex; align-items:flex-end;
+                      padding:8px 0 4px; border-bottom:1px solid }
+              #bar { flex:1 1 0; height:100% }
+              #rest { flex:0 0 auto; height:70px }
+            </style>
+            <div id="chart">
+              <div id="bars"><div id="bar"></div></div>
+              <div id="rest"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("bars").Height - 120f) < 0.01f, $"{Get("bars")}");
+        Assert.True(
+            MathF.Abs(Get("bar").Height - 107f) < 0.01f,
+            $"height:100% must resolve against the 120px flex basis minus its edges: {Get("bar")}");
+    }
+
+    [Fact]
     public void FinalFlexReflowFinalizesFitContentBeforeDescendantCalc()
     {
         DomTree tree = Parse(
