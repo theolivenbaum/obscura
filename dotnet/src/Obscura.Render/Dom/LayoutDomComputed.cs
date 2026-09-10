@@ -231,6 +231,7 @@ public static partial class RenderDom
                     tree,
                     id,
                     style,
+                    styles,
                     inh,
                     inheritedGridAutoTracks,
                     definiteHeightNodes,
@@ -259,6 +260,7 @@ public static partial class RenderDom
         DomTree tree,
         NodeId id,
         LayoutStyle style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         Inherited inh,
         (List<Layout.TrackSizingFunction> Columns,
             List<Layout.TrackSizingFunction> Rows,
@@ -461,6 +463,38 @@ public static partial class RenderDom
         }
 
         float cbW = inh.CbWidth;
+
+        // DEVIATION from crates/obscura-render/src/style.rs, which drops the CSS-wide keyword
+        // `inherit` on the box-size properties. They are not inherited properties, so the
+        // keyword has to copy the parent's computed value explicitly - the parent is already
+        // resolved at this point because this pass runs top-down. Tesserae's annotated text
+        // editor sizes its textarea with `min-height: inherit` off a per-instance container
+        // and got the initial value, so every editor collapsed to one row (58px against
+        // Chromium's 160/120/80). See "Known deviations" in todo.md.
+        if (style.SizeInherit != 0
+            && DomTraversal.RenderedParent(tree, id) is { } sizeInheritParent
+            && styles.TryGetValue(sizeInheritParent, out LayoutStyle? sizeInheritFrom))
+        {
+            for (int index = 0; index < 6; index++)
+            {
+                if ((style.SizeInherit & (1 << index)) == 0)
+                {
+                    continue;
+                }
+
+                style.SizeExpressions[index] = sizeInheritFrom.SizeExpressions[index];
+                switch (index)
+                {
+                    case 0: style.Width = sizeInheritFrom.Width; break;
+                    case 1: style.Height = sizeInheritFrom.Height; break;
+                    case 2: style.MinWidth = sizeInheritFrom.MinWidth; break;
+                    case 3: style.MinHeight = sizeInheritFrom.MinHeight; break;
+                    case 4: style.MaxWidth = sizeInheritFrom.MaxWidth; break;
+                    default: style.MaxHeight = sizeInheritFrom.MaxHeight; break;
+                }
+            }
+        }
+
         for (int index = 0; index < 6; index++)
         {
             if (style.SizeExpressions[index] is not { } expression)

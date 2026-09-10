@@ -1057,6 +1057,7 @@ public static partial class ComputedStyle
                 style.Width = DimensionValue(value);
                 style.WidthFitContent = CssText.EqualsAscii(value.Trim(), "fit-content");
                 style.SizeExpressions[0] = DeferredLengthExpression(value);
+                SetSizeInherit(style, 0, value);
                 style.WidthSet = true;
                 return true;
 
@@ -1064,6 +1065,7 @@ public static partial class ComputedStyle
             case "block-size":
                 style.Height = DimensionValue(value);
                 style.SizeExpressions[1] = DeferredLengthExpression(value);
+                SetSizeInherit(style, 1, value);
                 style.HeightSet = true;
                 return true;
 
@@ -1094,24 +1096,28 @@ public static partial class ComputedStyle
             case "min-inline-size":
                 style.MinWidth = DimensionValue(value);
                 style.SizeExpressions[2] = DeferredLengthExpression(value);
+                SetSizeInherit(style, 2, value);
                 return true;
 
             case "min-height":
             case "min-block-size":
                 style.MinHeight = DimensionValue(value);
                 style.SizeExpressions[3] = DeferredLengthExpression(value);
+                SetSizeInherit(style, 3, value);
                 return true;
 
             case "max-width":
             case "max-inline-size":
                 style.MaxWidth = DimensionValue(value);
                 style.SizeExpressions[4] = DeferredLengthExpression(value);
+                SetSizeInherit(style, 4, value);
                 return true;
 
             case "max-height":
             case "max-block-size":
                 style.MaxHeight = DimensionValue(value);
                 style.SizeExpressions[5] = DeferredLengthExpression(value);
+                SetSizeInherit(style, 5, value);
                 return true;
 
             case "aspect-ratio":

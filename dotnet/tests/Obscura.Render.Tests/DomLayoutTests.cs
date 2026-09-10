@@ -3518,6 +3518,37 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void TheInheritKeywordCopiesTheParentsBoxSizeEvenThoughItIsNotInherited()
+    {
+        // DEVIATION from the Rust reference, which drops the CSS-wide keyword `inherit` on the
+        // box-size properties. They are not inherited properties, so the keyword has to copy
+        // the parent's computed value explicitly. Tesserae's annotated text editor sizes its
+        // textarea with `min-height: inherit` off a per-instance container, and every editor
+        // collapsed to one row (58px against Chromium's 160px).
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font: 14px Arial, sans-serif }
+              #box  { min-height:160px; width:400px }
+              #tall { box-sizing:border-box; width:100%; min-height:inherit }
+              #wide { min-width:220px; display:inline-block }
+              #wide-in { min-width:inherit; display:block }
+              #cap  { max-width:300px }
+              #cap-in { max-width:inherit; display:block }
+            </style>
+            <div id="box"><div id="tall">tall</div></div>
+            <div id="wide"><div id="wide-in">in</div></div>
+            <div id="cap"><div id="cap-in">in</div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("tall").Height - 160f) < 0.01f, $"{Get("tall")}");
+        Assert.True(MathF.Abs(Get("wide-in").Width - 220f) < 0.01f, $"{Get("wide-in")}");
+        Assert.True(MathF.Abs(Get("cap-in").Width - 300f) < 0.01f, $"{Get("cap-in")}");
+    }
+
+    [Fact]
     public void FinalFlexReflowFinalizesFitContentBeforeDescendantCalc()
     {
         DomTree tree = Parse(

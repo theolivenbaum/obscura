@@ -300,6 +300,29 @@ public static partial class ComputedStyle
         return trimmed.Contains('(') ? trimmed : null;
     }
 
+    /// <summary>
+    /// Record whether one of the six box-size slots was declared as the CSS-wide keyword
+    /// <c>inherit</c>, so the top-down pass can copy the parent's computed value.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: crates/obscura-render has no counterpart and drops <c>inherit</c> on these
+    /// properties. They are not inherited, so the keyword has to copy the parent's computed
+    /// value explicitly; Tesserae's annotated text editor sizes its textarea with
+    /// <c>min-height: inherit</c> and got the initial value instead.
+    /// </remarks>
+    internal static void SetSizeInherit(LayoutStyle style, int slot, string value)
+    {
+        byte bit = (byte)(1 << slot);
+        if (CssText.EqualsAscii(value.Trim(), "inherit"))
+        {
+            style.SizeInherit |= bit;
+        }
+        else
+        {
+            style.SizeInherit &= (byte)~bit;
+        }
+    }
+
     /// <summary>Rust <c>resolve_contextual_length</c>. Delegates to the shared CSS port.</summary>
     public static float? ResolveContextualLength(
         string value,

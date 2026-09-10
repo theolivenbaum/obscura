@@ -400,6 +400,17 @@ DEVIATION comment at the C# code that differs.
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
   content with the pseudo's own style.
+- **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
+  properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
+  `inherit` has to copy the parent's computed value explicitly; the reference
+  parses it as an unrecognized length and falls back to the initial value.
+  Tesserae's annotated text editor sizes its textarea with `min-height: inherit`
+  off a per-instance container, so every editor collapsed to a single row (58px
+  against Chromium's 160/120/80). The port records a `LayoutStyle.SizeInherit`
+  bitmask and resolves it against the already-computed parent in the top-down
+  pass. Still open: `inherit` on `padding-*` and `margin-*` is dropped the same
+  way (`padding-left: inherit` gives 0 where Chromium gives the parent's 40px);
+  no Tesserae sample uses it.
 - **DEVIATION - a boxed percentage image floated its flex item to the image's
   natural width.** The reference floors a content-sized flex item at every
   deferred image's natural width (its #698 fix). That is only sound when the

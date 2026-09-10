@@ -241,6 +241,19 @@ public sealed class LayoutStyle
     public string?[] SizeExpressions = new string?[6];
 
     /// <summary>
+    /// Bitmask over the six <see cref="SizeExpressions"/> slots marking the ones declared as
+    /// the CSS-wide keyword <c>inherit</c>, to be copied from the parent's computed value in
+    /// the top-down pass.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in crates/obscura-render, which drops <c>inherit</c> on the
+    /// box-size properties entirely. They are not inherited properties, so the keyword has to
+    /// copy the parent's computed value explicitly. Tesserae's annotated text editor sizes its
+    /// textarea with <c>min-height: inherit</c>. See "Known deviations" in todo.md.
+    /// </remarks>
+    public byte SizeInherit;
+
+    /// <summary>
     /// <c>aspect-ratio</c> as width/height, or an image's intrinsic ratio resolved at layout.
     /// </summary>
     /// <remarks>
