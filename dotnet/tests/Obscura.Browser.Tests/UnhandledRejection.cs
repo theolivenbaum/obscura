@@ -29,7 +29,7 @@ public sealed class UnhandledRejectionTests
     // Verified locally that the second half of this test - the timer still runs, so
     // a rejected background promise does not stop the page event loop - already
     // holds; only the event dispatch is missing.
-    [Fact(Skip = "blocked on Obscura.Js: the handler registered through Deno.core.setUnhandledPromiseRejectionHandler is stored by DenoCoreShim and never invoked, so no unhandledrejection event is dispatched")]
+    [Fact]
     public async Task RejectedBackgroundPromiseDoesNotStopThePageEventLoop()
     {
         Environment.SetEnvironmentVariable("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");

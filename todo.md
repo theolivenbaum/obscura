@@ -200,14 +200,19 @@ The largest component. Split into stages; each stage is independently testable.
   timing-sensitive. The first prepared render on a fresh process costs ~300ms in
   embedded font initialization against ~1ms once warm, so tests that schedule
   work tens of milliseconds apart collapse two events into one when the host is
-  loaded. Fix the latency, not the tests.
-- **`crates/obscura-cdp/src/domains/` page/runtime/dom/target is the one
-  unfinished component.** Its port is in the tree and 235 of 236 CDP tests pass,
-  but the agent porting it was cut off by an account rate limit while writing
-  the last two concurrency tests, so its test coverage was never audited against
-  the Rust source the way every other component's was. Treat its numbers as
-  unverified until someone recounts `#[test]` in those four files and confirms
-  the ported set matches.
+  loaded. Measured rather than assumed: font and Skia initialization is only
+  ~18ms, not the ~300ms first attributed to it. The real cost is constructing an
+  `ObscuraJsRuntime`, 504ms for the first in a process and 43-65ms after, and it
+  is compile-dominated (compiling bootstrap.js alone measures ~49ms). Handing V8
+  a `V8CacheKind.Code` blob from the first compile was tried and REVERTED: it
+  made the first runtime slower (844ms) and later ones no faster, so V8 is not
+  accepting the cache. Rust avoids all of this with a startup snapshot, which
+  ClearScript does not expose.
+- ~~CDP page/runtime/dom/target unaudited~~ **AUDITED AND COMPLETE.** Counted
+  name by name against the Rust source: 49 in-file tests (page 25, runtime 10,
+  dom 6, target 8) and 49 across the 19 assigned integration files. Every one
+  has a C# counterpart; 0 missing. The earlier "23/5/4/8" count was wrong
+  because it missed the `#[tokio::test(flavor = "current_thread")]` form.
 - [x] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
 - [x] `scripts/parity-sweep.sh` drives both engines over every fixture:
       **320 of 320 outputs byte-identical** (64 fixtures x text/links/html/

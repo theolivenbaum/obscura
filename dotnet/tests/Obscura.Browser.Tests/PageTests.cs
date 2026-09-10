@@ -1231,7 +1231,7 @@ public sealed class PageTests
     // from page JavaScript is silently dropped. Rust shares one
     // `Rc<RefCell<ImportMap>>` between the op state and the loader
     // (runtime.rs: `let import_map = state.borrow().import_map.clone();`).
-    [Fact(Skip = "blocked on Obscura.Js: ObscuraJsRuntime builds the module loader with its own new ImportMap() while op_add_import_map writes into ObscuraState.ImportMap, so a map registered from JavaScript never reaches module resolution. Rust shares one Rc<RefCell<ImportMap>> between the two.")]
+    [Fact]
     public async Task DynamicallyInsertedImportMapControlsLaterDynamicImport()
     {
         using TestHttpServer server = SpawnParserImportMapServer();
@@ -1628,7 +1628,7 @@ public sealed class PageTests
     // from page JavaScript is silently dropped. Rust shares one
     // `Rc<RefCell<ImportMap>>` between the op state and the loader
     // (runtime.rs: `let import_map = state.borrow().import_map.clone();`).
-    [Fact(Skip = "blocked on Obscura.Js: ObscuraJsRuntime builds the module loader with its own new ImportMap() while op_add_import_map writes into ObscuraState.ImportMap, so a map registered from JavaScript never reaches module resolution. Rust shares one Rc<RefCell<ImportMap>> between the two.")]
+    [Fact]
     public async Task DynamicImportMapUsesLiveDocumentBaseAtInsertion()
     {
         using TestHttpServer server = SpawnParserImportMapServer();

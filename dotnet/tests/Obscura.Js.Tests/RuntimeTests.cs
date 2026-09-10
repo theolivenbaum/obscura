@@ -1808,7 +1808,7 @@ public sealed class RuntimeTests
             result);
     }
 
-    [Fact(Skip = "AngleSharp's fragment parser ignores the context element's namespace: parsing '<linearGradient>' with an SVG context element yields an xhtml <lineargradient>, so svg.innerHTML and Range.createContextualFragment lose the SVG namespace. Full-document parsing is correct, so the fix belongs in Obscura.Dom.HtmlParsing.ParseFragmentWithContext (wrap a foreign-namespace fragment in its root element and unwrap), which is outside Obscura.Js")]
+    [Fact]
     public void ForeignInnerHtmlAndContextualFragmentsKeepSvgNamespace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
