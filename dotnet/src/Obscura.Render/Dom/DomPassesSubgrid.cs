@@ -554,9 +554,18 @@ internal static class DomSubgridPasses
 
             if (styles.TryGetValue(id, out LayoutStyle? style))
             {
-                Dimension value = kind == DeferredCyclicInlineSourceKind.Expression
-                    ? Dimension.Auto
-                    : Dimension.Px(F32.Max(intrinsicValue, 0f));
+                // DEVIATION from crates/obscura-render/src/dom.rs, which neutralizes a cyclic
+                // inline size to a definite `Px(max(value, 0))` - `0px` for the common
+                // `width: 100%` and `calc(100% - Npx)`. CSS Sizing 3 says a cyclic percentage
+                // behaves as `auto` for intrinsic contribution, and a definite zero instead
+                // collapses the box for the whole intrinsic pass, which then pins its flex
+                // item to the collapsed measurement. Tesserae's code-diff panel is two
+                // `flex: 1 1 auto` items whose content is percentage-sized: with zero bases
+                // they split the row evenly at 462px each instead of measuring 133px and
+                // 791px, and the diff table then wrapped to three times its height. See
+                // "Known deviations" in todo.md.
+                Dimension value = Dimension.Auto;
+                _ = intrinsicValue;
                 switch (slot)
                 {
                     case 0:

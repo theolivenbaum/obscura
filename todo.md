@@ -384,13 +384,17 @@ DEVIATION comment at the C# code that differs.
   outermost-first, restoring each level's percentages and reflowing before
   measuring the next level down (`PinFlexItems` / `RestoreTypedPercentages` /
   `ResolveFunctionalInlineSizes` in `DomPassesSubgrid`).
-- **DEVIATION - a cyclic functional inline size neutralized to `0px` instead of
-  `auto`.** CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
+- **DEVIATION - a cyclic inline size neutralized to `0px` instead of `auto`.**
+  CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
   contribution; the reference writes a definite `Px(max(value, 0))`, which is
-  `0px` for the common `calc(100% - Npx)` and collapses the box for the whole
-  intrinsic pass. The port neutralizes an Expression source to `Auto` (bare
-  percentages keep the reference's zero, where the surrounding machinery depends
-  on it).
+  `0px` for the common `width: 100%` and `calc(100% - Npx)` and collapses the box
+  for the whole intrinsic pass - which then pins its flex item to the collapsed
+  measurement. Tesserae's code-diff panel is two `flex: 1 1 auto` items whose
+  content is percentage-sized: with zero bases they split the row evenly at 462px
+  each instead of 133px and 791px, and the diff table wrapped to three times its
+  height. The port neutralizes both the functional and the bare-percentage source
+  to `Auto`. Not fully closed: the port now measures 363/802 where Chromium
+  measures 133/791, and the pair overflows its 924px row instead of shrinking.
 - **DEVIATION - an auto-sized `<button>`'s intrinsic width ignored element
   children.** `native_button_intrinsic_content` recurses past every non-replaced
   element and counts only text plus replaced boxes, so a flex button's child
