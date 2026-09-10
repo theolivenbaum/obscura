@@ -227,18 +227,63 @@ The largest component. Split into stages; each stage is independently testable.
   5-27us/call from exactly that mistake. Always run a discarded warm-up lap
   over every op before the measured one, and sanity-check by reversing the
   order.
-- **The remaining page-load gap is ~2.3x and it is the layout pass, not the
-  op boundary.** A Tesserae SPA route at a fixed `--wait 1` takes 6.8s to
-  `--dump html` against the reference's 3.0s; forcing the old op binding back
-  on moves that by about 4%. `OBSCURA_OP_PROFILE=1` (see
-  `FastOpBinding.OpProfile`) says where it goes: three `op_layout_geometry`
-  calls account for 5.8s of a full adaptive-settle run, while the ~24,000
-  `op_dom` calls around them total 260ms. Inside one prepare,
-  `RenderDom.LayoutDom...` is ~2.0s of a 2.7s first prepare, so the next round
-  belongs in the `Obscura.Render` layout pass, not at the JS boundary.
+- **The remaining page-load gap is ~2.3x, and CSS parsing is the largest single
+  piece of it.** A Tesserae SPA route at a fixed `--wait 1` takes ~6.9s to
+  `--dump html` against the reference's ~2.9s. The whole shape of that is now
+  measured, and it is one synchronous JavaScript task, not a spread:
+
+      phase preNavigate        5 ms
+      phase navigate        3109 ms     (first prepare, 1990 ms, happens in here)
+      phase settle          3552 ms     (ONE event-loop tick; budget was 1000 ms)
+      phase dump              18 ms
+
+  The settle loop checks its wall-clock budget between ticks, so a single
+  multi-second page task overruns it several times over. That task is the app's
+  render, and its cost is one `op_layout_geometry` call: `OBSCURA_OP_PROFILE=1`
+  (see `FastOpBinding.OpProfile`) puts 4.3s on one such call against 233ms for
+  the ~19,000 `op_dom` calls around it.
+
+  Inside that call, `EnsurePreparedGeometry` is essentially all of it, and
+  inside the prepare:
+
+      css parse (Stylesheet.ParseForViewportAndMedia)   ~45%
+      cascade   (DomCascade.CascadeWalk)                ~25%
+      web fonts (WOFF2 decode, first prepare only)      ~15%
+      dom build (DomBuild.Build)                        ~10%
+      taffy compute                                      ~5%
+
+  So the next round is CSS, not taffy. Isolated on a page that is 3 MB of
+  stylesheet over a one-element body, parse plus cascade is ~600ms against the
+  reference's ~125ms, and that ~5x is the widest single ratio anywhere in the
+  port. It is allocation-bound: the sheet has 44,912 rules, and parsing it
+  allocated 187 MB, with GC pauses accounting for 45% of the wall time (one run
+  with a 256 MB gen0 budget and zero collections finished in 187 ms). Tuning
+  the GC is not the answer - server GC, background GC and larger gen0 budgets
+  all measured within noise of each other on the real page - cutting the
+  allocation is.
+
+  A first pass took it to 133 MB and the warm parse from 476ms to 379ms best,
+  521ms to 438ms median: the top-level scanner now records offsets into the
+  sheet and takes one substring per rule instead of appending every character
+  to a `StringBuilder`; `StripPseudoElement` compares spans instead of building
+  a suffix string on each of its three calls per rule; `SplitSelectorList`
+  returns the input directly when there is no comma; `Denest` trims declaration
+  spans and no longer materializes its builder twice; `SelectorParser` reads an
+  escape-free identifier as one substring and short-circuits a selector that is
+  nothing but one class (95% of this sheet's 45,000 selectors, once the cascade
+  has taken the pseudo-element off).
+
+  What is left, measured per rule over the 41,994 pseudo rules on that sheet:
+  `CompileRuleSelector` 40 MB, `NoteSelectorForInvalidation` 25 MB, building
+  the `PseudoRule` 23 MB, `CssDeclarations.Partition` 21 MB. Each is a few
+  hundred bytes of small objects per rule rather than one bad allocation, so
+  the next step is a pass over those four with pooling and spans, not a single
+  fix. Note also that none of this is visible in a cold single-parse CLI run,
+  where JIT dominates the one parse; it shows in the warm bench, in `serve`,
+  and in memory.
 
   Two prepare-path defects were fixed on the way to that conclusion, both of
-  which had been hiding behind the boundary cost:
+  which had been hiding behind the op-boundary cost:
 
   - `EnsurePreparedRender` and `EnsurePreparedGeometry` read the document base
     URL through `StateHelpers.DocumentBaseUrl`, which runs the selector engine
@@ -271,11 +316,13 @@ The largest component. Split into stages; each stage is independently testable.
   at 38ms to deserialize 349 KB against 40ms to compile from source, and the
   execution time behind it does not move, so it is a small net loss.
 
-  Two `Obscura.Browser.Tests` cases, `ModuleGraphAndEvaluationShareOneActiveBudget`
-  and `PruningAnOldBatchDoesNotStrandANewRuntimeBatch`, are load-flaky: they
-  assert on work-budget deadlines and fail under the CPU contention of a full
-  parallel `dotnet test`, then pass on their own and on a repeat of the same
-  full run. Worth making them deterministic rather than re-running.
+  Three tests are load-flaky, all of them asserting on a deadline: the
+  `Obscura.Browser.Tests` cases `ModuleGraphAndEvaluationShareOneActiveBudget`
+  and `PruningAnOldBatchDoesNotStrandANewRuntimeBatch`, and the
+  `Obscura.Js.Tests` case `Read_body_capped_rejects_oversized_streamed_body`.
+  Each fails under the CPU contention of a full parallel `dotnet test` and then
+  passes on its own and on a repeat of the same full run. Worth making them
+  deterministic rather than re-running.
 
   When benchmarking publish variants, delete `obj/` and `bin/` for the RID
   between runs. Publishing the same project self-contained and then

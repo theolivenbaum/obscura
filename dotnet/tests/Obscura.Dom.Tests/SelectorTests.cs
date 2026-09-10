@@ -528,4 +528,65 @@ public class SelectorTests
         // Document matching parses the selector but has no shadow scope.
         Assert.False(tree.MatchesSelector(item, "::slotted(.item)"));
     }
+    [Fact]
+    public void SimpleClassSelectorMatchesTheGeneralParser()
+    {
+        // SelectorParser short-circuits a selector that is nothing but one class,
+        // because a real sheet is overwhelmingly made of them. The short circuit is
+        // only sound while it produces exactly what the recursive-descent parser
+        // does, so hold the two against each other, including the shapes that must
+        // fall through to the parser rather than be answered by the fast path.
+        string[] fastPath = [".a", ".x", ".ec-grinning", ".tss-card", ".A_b-9", "._leading"];
+        string[] fallThrough =
+        [
+            ".a.b", ".a b", ".a>b", "a.b", "#a", ".a:hover", ".\\31 23", ".a[data-x]",
+            ".", ".-", ".1a", " .a", ".a ", ".a,.b",
+        ];
+
+        foreach (var selector in fastPath)
+        {
+            AssertSameShape(selector);
+        }
+
+        foreach (var selector in fallThrough)
+        {
+            // Whether it parses at all is the parser's business; what matters is
+            // that the answer is the parser's answer.
+            if (SelectorParser.TryParse(selector, out _, out _))
+            {
+                AssertSameShape(selector);
+            }
+        }
+
+        static void AssertSameShape(string selector)
+        {
+            var list = SelectorParser.Parse(selector);
+            var reference = ReferenceParse(selector);
+            Assert.Equal(reference.Count, list.Count);
+            for (var i = 0; i < list.Count; i++)
+            {
+                var actual = list.Selectors[i];
+                var expected = reference.Selectors[i];
+                Assert.Equal(expected.Specificity, actual.Specificity);
+                Assert.Equal(expected.Combinators, actual.Combinators);
+                Assert.Equal(expected.Compounds.Length, actual.Compounds.Length);
+                for (var c = 0; c < expected.Compounds.Length; c++)
+                {
+                    var expectedParts = expected.Compounds[c].Components;
+                    var actualParts = actual.Compounds[c].Components;
+                    Assert.Equal(expectedParts.Length, actualParts.Length);
+                    for (var k = 0; k < expectedParts.Length; k++)
+                    {
+                        Assert.Equal(expectedParts[k].GetType(), actualParts[k].GetType());
+                        Assert.Equal(expectedParts[k].ToString(), actualParts[k].ToString());
+                    }
+                }
+            }
+        }
+
+        // The general parser, reached by a spelling the fast path declines: a
+        // trailing space is insignificant to the grammar but disqualifies the
+        // short circuit, so this is the same selector down the long road.
+        static SelectorList ReferenceParse(string selector) => SelectorParser.Parse(selector + " ");
+    }
 }

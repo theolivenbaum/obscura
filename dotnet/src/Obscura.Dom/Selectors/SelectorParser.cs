@@ -64,6 +64,11 @@ public static class SelectorParser
 
     internal static SelectorList ParseUncached(string selector)
     {
+        if (TrySimpleClassSelector(selector) is { } simple)
+        {
+            return simple;
+        }
+
         var parser = new Parser(selector);
         try
         {
@@ -81,6 +86,59 @@ public static class SelectorParser
             throw new SelectorParseException(selector, failure.Message);
         }
     }
+
+    /// <summary>
+    /// A selector that is nothing but one class, built without the recursive-descent
+    /// parser.
+    /// </summary>
+    /// <remarks>
+    /// Not a shortcut around the grammar: the result is exactly what
+    /// <see cref="Parser.ParseComplexSelector"/> and <see cref="BuildSelector"/>
+    /// produce for the same input, and <c>SimpleClassSelectorMatchesTheGeneralParser</c>
+    /// in the Dom tests holds the two against each other. It exists because real
+    /// sheets are overwhelmingly made of them: on the icon-font sheet that motivated
+    /// this, 95% of the 45,000 selectors are a bare class once the cascade has taken
+    /// the pseudo-element off, and each one was costing a parser, four lists, their
+    /// backing arrays and two <see cref="List{T}.ToArray"/> copies.
+    /// </remarks>
+    private static SelectorList? TrySimpleClassSelector(string selector)
+    {
+        if (selector.Length < 2 || selector[0] != '.')
+        {
+            return null;
+        }
+
+        // Escapes and non-ASCII identifiers go the long way round; the point of this
+        // path is that it is obviously the same answer, not that it covers everything.
+        if (!IsAsciiIdentStart(selector[1]))
+        {
+            return null;
+        }
+
+        for (var i = 2; i < selector.Length; i++)
+        {
+            if (!IsAsciiIdentChar(selector[i]))
+            {
+                return null;
+            }
+        }
+
+        var className = selector[1..];
+        Component[] components = [new ClassComponent(className)];
+        CompoundSelector[] compounds = [new CompoundSelector(components)];
+        var built = new Selector(
+            compounds,
+            [],
+            PackSpecificity(0, 1, 0),
+            SelectorFlags.HasNonFeaturelessComponent);
+        return new SelectorList([built]);
+    }
+
+    private static bool IsAsciiIdentStart(char c) =>
+        c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or '_';
+
+    private static bool IsAsciiIdentChar(char c) =>
+        c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '_' or '-';
 
     private sealed class ParseFailure(string message) : Exception(message);
 
@@ -853,7 +911,22 @@ public static class SelectorParser
                 throw new ParseFailure($"expected an identifier at {_pos}");
             }
 
+            // Almost every identifier in a real sheet is escape-free, and for those
+            // the source already holds the answer: scan the run and take one
+            // substring instead of copying it a character at a time.
+            var start = _pos;
+            while (!AtEnd && IsIdentChar(Peek))
+            {
+                _pos++;
+            }
+
+            if (_pos > start && (AtEnd || Peek != '\\'))
+            {
+                return _input[start.._pos];
+            }
+
             var sb = new StringBuilder();
+            sb.Append(_input, start, _pos - start);
             while (!AtEnd)
             {
                 var c = Peek;
