@@ -135,6 +135,22 @@ dotnet build -c Release
 dotnet run -c Release --project src/Obscura.Cli -- fetch https://example.com --dump text
 ```
 
+`dotnet build` output starts in ~790ms on a trivial page, and about 300ms of
+that is jitting the DOM/style/layout/paint stack on the way to the first frame.
+Publish precompiles it away, so measure anything cold-start-sensitive against a
+publish, not against `bin/`:
+
+```bash
+dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained false   # ~480ms
+dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained true    # ~360ms
+```
+
+`PublishReadyToRun` is set in `Obscura.Cli.csproj` whenever a RuntimeIdentifier
+is given, and `PublishReadyToRunComposite` turns itself on when the publish is
+also self-contained. Delete `obj/` and `bin/` for the RID when switching
+between self-contained and framework-dependent: stale intermediates from the
+other mode produce a binary that aborts at startup with no output.
+
 The Rust reference build (for differential testing) is unchanged:
 
 ```bash

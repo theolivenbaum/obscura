@@ -196,36 +196,71 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
-- **The ClearScript op boundary costs ~5us per call against deno_core's ~0.1us,
-  and it is the port's dominant runtime gap.** Measured in-page after warmup,
-  same host, same V8, both engines:
+- **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
+  Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
+  which routes every call from `bootstrap.js` through ClearScript's
+  reflection-based host-object dispatcher. `Obscura.Js.Ops.FastOpBinding` now
+  wraps each op in a `V8FastHostFunction` (ClearScript 7.5), which hands the
+  invoker V8's raw argument list instead. Measured in-page after warmup, same
+  host, same V8, us/call:
 
-      zero-arg op (op_runtime_events_enabled)   rust 0.10us   port 5.00us
-      op_dom("document_node_id")                rust 0.30us   port 9.95us
-      op_dom("node_type")                       rust 0.40us   port 4.70us
-      op_layout_metrics                         rust 1.50us   port 27.0us
+                                            rust    port before   port after
+      op_runtime_events_enabled (0 args)    0.07       1.42          0.58
+      op_shadow_root_info (1 arg)           0.30       1.40          0.50
+      op_dom("document_node_id")            0.37       3.18          1.20
+      op_dom("node_type")                   0.47       3.20          1.40
 
-  It is not the op bodies: a zero-argument op that returns a bool pays the same
-  4.5us. It is not argument typing either - a standalone ClearScript benchmark
-  puts a warmed 4-argument host delegate at 2.4us/call, and `DisableDynamicBinding`,
-  `DisableExtensionMethods`, `DisableTypeRestriction` and `UseReflectionBindFallback`
-  all measure identical to the default once JIT tiering is controlled for (the
-  apparent wins from those flags were tier-up of the first engine in the process).
-  deno_core binds `#[op2(fast)]` through V8's fast API, which ClearScript has no
-  equivalent for.
+  And on DOM work driven from page script:
 
-  What it costs in practice: `document.createElement` + className + style +
-  textContent + appendChild for 5000 nodes is 123ms in Rust and 1061ms in the
-  port; 20k `setAttribute` calls are 28ms against 412ms. On the Tesserae SPA the
-  page needs ~2s of adaptive settle in Rust and ~6s in the port, which overruns
-  the CLI's 5-second settle cap and intermittently captures the page before its
-  deferred content mounts. Closing it means cutting the number of crossings
-  (batching mutations, caching more in `bootstrap.js`), not micro-tuning the
-  binding - and `bootstrap.js` is shared, so any such change has to help both
-  engines.
-- **Cold start is ~870ms for the port against ~40ms for the reference.** .NET
-  startup plus ClearScript/V8 init on an empty page. ReadyToRun publishing is
-  untried and is the obvious first thing to measure.
+                                     rust    port before   port after
+      20k setAttribute               28ms      412ms         134ms
+      20k createElement              94ms      395ms         174ms
+      5k create + style + append    114ms     1329ms         910ms
+
+  Async ops keep the general marshaller: they return `Task` and depend on
+  `EnableTaskPromiseConversion`, which the fast path does not perform.
+
+  Beware when measuring this: timing several ops in one process in a fixed
+  order makes whichever runs first look slowest, because JIT tier-up dominates
+  the first few thousand iterations. The same op measured 8.8us on the first
+  lap and 3.2us on the second. An earlier version of this entry reported
+  5-27us/call from exactly that mistake. Always run a discarded warm-up lap
+  over every op before the measured one, and sanity-check by reversing the
+  order.
+- **The remaining page-load gap is ~2.5x and is no longer the op boundary.**
+  With the fast binding in place, a Tesserae SPA route at a fixed `--wait 1`
+  takes 7.4s to `--dump html` against the reference's 3.2s; forcing the old
+  binding back on moved that by about 4%. Net of cold start and the fixed
+  wait that is ~5.6s of work against ~2.2s. It is spread across script
+  execution and the style/layout pipeline rather than concentrated at the
+  boundary: `getBoundingClientRect` x200 is 2030ms against 666ms and barely
+  moved (2114ms before), `querySelectorAll` x200 is 493ms against 222ms, and
+  `getComputedStyle` x200 is 507ms against 361ms. Those are op-body costs in `Obscura.Render`, so that is
+  where the next round belongs.
+- **Cold start is ~790ms from `dotnet build` output, ~40ms for the reference.**
+  Roughly 300ms of it is jitting the DOM, style, layout and paint stack on the
+  way to the first frame, and `dotnet publish` now precompiles that away:
+  `PublishReadyToRun` is on whenever a RuntimeIdentifier is set, and composite
+  turns itself on when the publish is also self-contained. Best of five on a
+  trivial file page:
+
+      dotnet build output (JIT)              790ms
+      publish, ReadyToRun                    480ms
+      publish, composite + self-contained    360ms
+
+  What is left is structural. `crates/obscura-js` bakes `bootstrap.js` into a
+  V8 startup snapshot at build time (see the comment at `frame.rs:11`), so the
+  reference restores a heap that already has the whole browser surface in it.
+  ClearScript exposes no snapshot API, so the port compiles and runs the 731 KB
+  script on every start: ~120ms of the remainder, plus V8 platform init that a
+  snapshot would also shorten. A V8 code cache does not help - it was measured
+  at 38ms to deserialize 349 KB against 40ms to compile from source, and the
+  execution time behind it does not move, so it is a small net loss.
+
+  When benchmarking publish variants, delete `obj/` and `bin/` for the RID
+  between runs. Publishing the same project self-contained and then
+  framework-dependent into different folders leaves stale intermediates that
+  produce a binary which aborts on startup with no output.
 - **`Url::parse` failure reasons are collapsed into one message.** The `url`
   crate's `ParseError` has a distinct `Display` per variant and `page.rs` reports
   it verbatim; `UrlParser.Parse` returns `UrlRecord?` with no error channel, so
