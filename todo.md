@@ -27,6 +27,29 @@ tree is 86k lines of code and 62k lines of tests. Scope of the port:
 vendor/cosmic-text (10,450) is mostly replaced by Skia + HarfBuzz; only its
 vendored variable-font coordinate fix needs to carry over.
 
+## Status: 2358 passing, 24 skipped, 0 failing
+
+Three consecutive clean full-solution runs. The parity suite is 295 of 295 with
+nothing skipped, which is the claim that matters: those tests run the same input
+through this port and the release Rust binary and compare the output.
+
+| Suite | Passing | Skipped |
+|---|---:|---:|
+| Obscura.Js | 830 | 19 |
+| Obscura.Render | 621 | 1 |
+| **Obscura.Parity** | **295** | **0** |
+| Obscura.Cdp | 235 | 1 |
+| Obscura.Net | 94 | 0 |
+| Obscura.Cli | 93 | 0 |
+| Obscura.Browser | 90 | 2 |
+| Obscura.Dom | 84 | 0 |
+| Obscura.Mcp | 16 | 1 |
+
+The 24 skips break down as: 6 Rust `#[cfg]`/`#[ignore]` tests with no C#
+analogue, 12 ClearScript platform limits (cross-engine script objects, merged
+module load/eval), 2 the deferred stealth transport, and 4 real open bugs listed
+under Open issues. Every skip names a specific reason; none is a placeholder.
+
 ## 0. Setup
 
 - [x] Review the Rust source and map the architecture
