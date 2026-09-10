@@ -436,6 +436,25 @@ DEVIATION comment at the C# code that differs.
   Not closed: `both-edges` reserves the right total (270px of 300) but taffy
   insets from the end only, so the content does not shift by the leading gutter
   the way Chromium's does.
+- **Open, not fixed: a baseline-aligned atomic inline does not extend the line box
+  by the strut's descent.** Reduced to a fixture: a `display: inline-block` of
+  height 12 with no in-flow content, inside a block with `line-height: 12px`, is
+  14px tall in Chromium and 12 in both engines. An empty inline-block's baseline
+  is its bottom margin edge, so its whole box sits above the baseline and the
+  strut's descent still has to fit below it. `vertical-align: top` (12/12) and an
+  inline-block that contains text (12/12) both agree already, which pins the case
+  precisely. This is the 2px icon-box gap: `<i class="fi-rr-*">` wraps an
+  icon-font `::before` that is exactly this shape.
+
+  Root cause located, not fixed. `DomBuild.RunWrapperStyle` models a line box as a
+  wrapping flex row whose strut is a `MinSize.Height`, and `DomBuildMixed` only
+  sets `hasTextStrut` when the run contains a text node. A min-height cannot push
+  an atomic down off the baseline, and switching the wrapper to
+  `AlignItems.Baseline` changes nothing on its own (tried: 649 tests stay green,
+  the fixture stays at 12). A real fix needs the strut to be a zero-width
+  participant carrying the parent font's ascent and descent, present on every
+  line box rather than only text-bearing ones. Glyphs paint in the right place
+  meanwhile; only the wrapper box height differs.
 - **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
   evenly.** Both panels' content is percentage-sized, so with the bare-percentage
   neutralization both flex base sizes measure 0 and the row splits 462/462
