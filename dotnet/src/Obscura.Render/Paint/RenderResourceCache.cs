@@ -88,6 +88,13 @@ public sealed class RenderResourceCache
     /// </summary>
     internal const int DefaultContentImageIntrinsicEntries = 256;
 
+    /// <summary>
+    /// How many decoded web faces to keep. A page rarely uses more than a handful;
+    /// the bound only exists so a document that cycles through faces cannot grow
+    /// this without limit.
+    /// </summary>
+    internal const int DefaultDecodedFontEntries = 32;
+
     internal static readonly TimeSpan MissingResourceRetryAfter = TimeSpan.FromSeconds(2);
 
     /// <summary>
@@ -101,6 +108,10 @@ public sealed class RenderResourceCache
     private readonly Dictionary<string, CachedResource> _entries = new(StringComparer.Ordinal);
     private readonly List<string> _order = [];
     private readonly Dictionary<NodeId, RememberedContentImageIntrinsic> _contentImageIntrinsics = [];
+    private readonly Dictionary<string, (byte[] Compressed, byte[] Decoded)> _decodedFonts =
+        new(StringComparer.Ordinal);
+
+    private readonly List<string> _decodedFontOrder = [];
     private readonly List<NodeId> _contentImageIntrinsicOrder = [];
     private readonly int _maxEntries;
     private readonly int _maxBytes;
@@ -139,6 +150,50 @@ public sealed class RenderResourceCache
         Func<string, byte[]?> loader,
         int maxEntries,
         int maxBytes) => new(new DelegateResourceLoader(loader), maxEntries, maxBytes);
+
+    /// <summary>
+    /// The sfnt bytes previously decoded from <paramref name="compressed"/> for
+    /// <paramref name="key"/>, if the same fetched array is still the one in hand.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render</c>: <c>fetch_and_decode_font</c> there
+    /// decodes on every prepare and caches only the compressed bytes. The port caches
+    /// the decoded result too, because its WOFF2 path is far slower than Rust's
+    /// <c>wuff</c>: on a page with three faces, re-decoding cost about 600ms of every
+    /// prepare, and a prepare runs on the first layout read after any style mutation.
+    /// The decode is a pure function of the fetched bytes, so memoizing it cannot
+    /// change what is rendered. Reference equality against the fetched array is the
+    /// validity check: <c>FetchBytes</c> hands back the cached instance, so a re-fetch
+    /// or an eviction produces a different array and misses.
+    /// </remarks>
+    internal bool TryGetDecodedFont(string key, byte[] compressed, out byte[]? decoded)
+    {
+        if (_decodedFonts.TryGetValue(key, out (byte[] Compressed, byte[] Decoded) entry)
+            && ReferenceEquals(entry.Compressed, compressed))
+        {
+            decoded = entry.Decoded;
+            return true;
+        }
+
+        decoded = null;
+        return false;
+    }
+
+    /// <summary>Remember <paramref name="decoded"/> for <paramref name="key"/>.</summary>
+    internal void StoreDecodedFont(string key, byte[] compressed, byte[] decoded)
+    {
+        if (!_decodedFonts.ContainsKey(key))
+        {
+            _decodedFontOrder.Add(key);
+        }
+
+        _decodedFonts[key] = (compressed, decoded);
+        while (_decodedFontOrder.Count > DefaultDecodedFontEntries)
+        {
+            _decodedFonts.Remove(_decodedFontOrder[0]);
+            _decodedFontOrder.RemoveAt(0);
+        }
+    }
 
     /// <summary>Test-only counter for the CSS content-image correction relayout.</summary>
     internal int ContentImageLayoutRetries { get; set; }

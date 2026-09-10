@@ -214,6 +214,14 @@ internal static class PaintFonts
             return null;
         }
 
+        // See RenderResourceCache.TryGetDecodedFont for why the port memoizes a decode
+        // that the Rust reference repeats.
+        string cacheKey = FontResourceKey(src, baseUrl);
+        if (cache.TryGetDecodedFont(cacheKey, compressed, out byte[]? memoized))
+        {
+            return memoized;
+        }
+
         byte[]? decoded;
         if (compressed[0] == 'w' && compressed[1] == 'O' && compressed[2] == 'F'
             && (compressed[3] == '2' || compressed[3] == 'F'))
@@ -234,7 +242,13 @@ internal static class PaintFonts
             decoded = null;
         }
 
-        return decoded is not null && decoded.Length <= 32 * 1024 * 1024 ? decoded : null;
+        if (decoded is null || decoded.Length > 32 * 1024 * 1024)
+        {
+            return null;
+        }
+
+        cache.StoreDecodedFont(cacheKey, compressed, decoded);
+        return decoded;
     }
 
     internal static List<string> FontFaceBlocks(string css)

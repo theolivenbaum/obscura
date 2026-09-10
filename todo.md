@@ -227,16 +227,30 @@ The largest component. Split into stages; each stage is independently testable.
   5-27us/call from exactly that mistake. Always run a discarded warm-up lap
   over every op before the measured one, and sanity-check by reversing the
   order.
-- **The remaining page-load gap is ~2.5x and is no longer the op boundary.**
-  With the fast binding in place, a Tesserae SPA route at a fixed `--wait 1`
-  takes 7.4s to `--dump html` against the reference's 3.2s; forcing the old
-  binding back on moved that by about 4%. Net of cold start and the fixed
-  wait that is ~5.6s of work against ~2.2s. It is spread across script
-  execution and the style/layout pipeline rather than concentrated at the
-  boundary: `getBoundingClientRect` x200 is 2030ms against 666ms and barely
-  moved (2114ms before), `querySelectorAll` x200 is 493ms against 222ms, and
-  `getComputedStyle` x200 is 507ms against 361ms. Those are op-body costs in `Obscura.Render`, so that is
-  where the next round belongs.
+- **The remaining page-load gap is ~2.3x and it is the layout pass, not the
+  op boundary.** A Tesserae SPA route at a fixed `--wait 1` takes 6.8s to
+  `--dump html` against the reference's 3.0s; forcing the old op binding back
+  on moves that by about 4%. `OBSCURA_OP_PROFILE=1` (see
+  `FastOpBinding.OpProfile`) says where it goes: three `op_layout_geometry`
+  calls account for 5.8s of a full adaptive-settle run, while the ~24,000
+  `op_dom` calls around them total 260ms. Inside one prepare,
+  `RenderDom.LayoutDom...` is ~2.0s of a 2.7s first prepare, so the next round
+  belongs in the `Obscura.Render` layout pass, not at the JS boundary.
+
+  Two prepare-path defects were fixed on the way to that conclusion, both of
+  which had been hiding behind the boundary cost:
+
+  - `EnsurePreparedRender` and `EnsurePreparedGeometry` read the document base
+    URL through `StateHelpers.DocumentBaseUrl`, which runs the selector engine
+    over the whole tree looking for `base[href]`. A memoized variant already
+    existed for `document.baseURI` and these two call sites simply were not
+    using it, so the geometry fast path was O(nodes). 200 repeated
+    `getBoundingClientRect()` calls on a 5000-node document went from 457ms to
+    4ms (the reference is 66ms), and `getComputedStyle` x200 from 507ms to
+    312ms (reference 374ms).
+  - Web faces were WOFF2-decoded on every prepare, ~600ms of every prepare on
+    a page with three faces. `RenderResourceCache` now memoizes the decoded
+    sfnt against the fetched byte array. Deliberate deviation, recorded below.
 - **Cold start is ~790ms from `dotnet build` output, ~40ms for the reference.**
   Roughly 300ms of it is jitting the DOM, style, layout and paint stack on the
   way to the first frame, and `dotnet publish` now precompiles that away:
@@ -256,6 +270,12 @@ The largest component. Split into stages; each stage is independently testable.
   snapshot would also shorten. A V8 code cache does not help - it was measured
   at 38ms to deserialize 349 KB against 40ms to compile from source, and the
   execution time behind it does not move, so it is a small net loss.
+
+  Two `Obscura.Browser.Tests` cases, `ModuleGraphAndEvaluationShareOneActiveBudget`
+  and `PruningAnOldBatchDoesNotStrandANewRuntimeBatch`, are load-flaky: they
+  assert on work-budget deadlines and fail under the CPU contention of a full
+  parallel `dotnet test`, then pass on their own and on a repeat of the same
+  full run. Worth making them deterministic rather than re-running.
 
   When benchmarking publish variants, delete `obj/` and `bin/` for the RID
   between runs. Publishing the same project self-contained and then
@@ -629,6 +649,24 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Decoded web faces are cached; the reference re-decodes them
+
+`fetch_and_decode_font` in `crates/obscura-render/src/paint.rs` caches only the
+compressed bytes and runs the WOFF decoder on every prepare.
+`PaintFonts.FetchAndDecodeFont` memoizes the decoded sfnt in
+`RenderResourceCache` instead. The port's WOFF2 path is much slower than
+Rust's `wuff`: on a page with three faces, re-decoding was ~600ms of every
+prepare, and a prepare runs on the first layout read after any style mutation,
+so a settling SPA paid it several times.
+
+The decode is a pure function of the fetched bytes, so this cannot change what
+is rendered. Validity is checked by reference equality against the array
+`FetchBytes` returns, so a re-fetch or a cache eviction produces a different
+array and misses. Bounded at 32 entries.
+
+Not a parity risk: the two engines produce the same fonts, and no test asserts
+on decode count.
 
 ### Rounded corners were parabolas
 
