@@ -589,7 +589,7 @@ public sealed class PageDomainTests
     /// resource-loading phase, which used to add up to three seconds to every
     /// screenshot/PDF/screencast start.
     /// </summary>
-    [Fact(Skip = "PORT BUG: capture initiates 2 network requests where the reference initiates 0. The render layer is not the source: RenderResourceCache has the only fetch initiator and it honors SetSyncLoadingEnabled(false), which the five capture entry points do set, matching Rust site for site. The leak is in the JS/op layer, which queues image loads that the capture path then drains. Diagnosed, not fixed.")]
+    [Fact(Skip = "PORT BUG (CDP-specific): the CDP capture handlers reach a resource-seeding path the reference does not, fetching background-image sub-resources during captureScreenshot/startScreencast/printToPDF (2 requests against an expected 0, deterministic). Verified NOT a general capture divergence: driven through the CLI screenshot path both engines fetch exactly 1, and neither fetches on eval alone. Also ruled out: the CDP handler prologue and the env-var gate match Rust, and RenderResourceCache is the render layer's only fetch initiator and honors SetSyncLoadingEnabled(false) at all five capture entry points. Diagnosed, not fixed.")]
     public async Task CaptureMethodsDoNotStartDefaultResourceWarmups()
     {
         using var listener = new System.Net.Sockets.TcpListener(
