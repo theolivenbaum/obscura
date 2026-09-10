@@ -397,25 +397,30 @@ DEVIATION comment at the C# code that differs.
   restore path puts the typed percentage back either way, so the difference is
   what the *intrinsic* pass measures; the reference's zero is closer for the bare
   form. Reverted, and the Code Diff case below stays open.
-- **Open, not fixed: a pseudo-element rule behind a sibling combinator matches
-  the wrong set.** Every radio and checkbox in the Tesserae samples paints as
-  selected, because `input:checked ~ .mark:after { display: block }` applies to
-  unchecked marks too. Reproduced in both engines (so shared, not a port defect)
-  with this fixture:
+- **DEVIATION - `display: none` was ignored on an absolutely positioned
+  pseudo-element.** `paint_positioned_pseudo` guards on `position: absolute`
+  alone. An out-of-flow pseudo never reaches the taffy tree, so the
+  `display: none` that suppresses an in-flow one is not applied anywhere else
+  either and the box paints regardless. Tesserae hides an unselected radio's dot
+  with `.tss-option-mark:after { display: none }` on an absolutely positioned
+  pseudo, so every radio and checkbox in the samples painted as selected. The
+  port also checks `Display == None` and `EffectivelyInvisible` there. Verified
+  against the Rust binary, which shows the same over-paint, so this is a shared
+  engine limitation.
 
-      .mark:after                        { display: none }        /* base */
-      .opt input:checked ~ .mark:after   { display: block }       /* applies to ALL marks */
-      .opt input:checked + .mark:after   { margin-left: 3px }     /* applies to NONE */
-      .opt input[checked] ~ .mark:after  { padding-left: 5px }    /* applies to NONE */
-      .zzz-nomatch .mark:after           { outline: 2px solid }   /* correctly applies to none */
-      .opt input:checked ~ .mark         { border-color: blue }   /* correct, no pseudo */
-
-  The same selector without the trailing pseudo-element matches correctly, and a
-  plainly non-matching descendant prefix is correctly rejected, so the prefix is
-  not simply ignored. The inconsistency (one sibling rule over-matching, two
-  under-matching) points at the pseudo-rule candidate index in
-  `CssCascade.TryPushPseudo`/`PseudoRuleMap.Push` keying off the wrong compound
-  rather than the selector's subject. Not yet fixed.
+  The earlier note here blamed the sibling combinator, from a `getComputedStyle`
+  probe. That was wrong twice over: a paint-level matrix shows `~`, `+`,
+  `:checked`, `[checked]` and class-sibling forms all match correctly with a
+  trailing pseudo-element, and the probe itself was reading a separate gap -
+  **`getComputedStyle(el, '::before'|'::after')` does not report the pseudo's
+  computed style at all**, returning `display: block` and `content: ""` for
+  every pseudo regardless of what the cascade resolved. That reporting gap is
+  still open and is its own item below.
+- **Open, not fixed: `getComputedStyle(el, pseudo)` returns defaults.** It reports
+  `display: block` and `content: ""` for every `::before`/`::after`, whatever the
+  cascade resolved, so it cannot be used to diagnose pseudo styling; paint is the
+  only reliable signal today. Layout and paint use the real resolved pseudo style,
+  so this is a DOM/CDP reporting gap rather than a rendering one.
 - **Open, not fixed: `scrollbar-gutter: stable` is honoured only on the root.**
   Both engines reserve the gutter from the initial containing block only
   (`dom.rs` reads `scrollbar_gutters` off the root element alone), so a nested
