@@ -499,7 +499,29 @@ public sealed partial class Page : IDisposable
         return baseHref is null ? documentUrl : PageUrl.TryJoin(documentUrl, baseHref);
     }
 
-    public string UrlString() => Url?.AbsoluteUri ?? "about:blank";
+    /// <summary>The page URL as the engine reports it on the wire.</summary>
+    /// <remarks>
+    /// Serialized through the WHATWG parser rather than <see cref="Uri.AbsoluteUri"/>.
+    /// <c>System.Uri</c> percent-encodes <c>&lt;</c>, <c>&gt;</c> and space in a
+    /// cannot-be-a-base URL's opaque path, so <c>data:text/html,&lt;b&gt;a b&lt;/b&gt;</c>
+    /// came back as <c>data:text/html,%3Cb%3Ea%20b%3C/b%3E</c> while the reference
+    /// engine leaves it raw. That reaches CDP clients through
+    /// <c>Page.frameNavigated</c>, <c>Page.getFrameTree</c>, DOMSnapshot's
+    /// <c>documentURL</c>, Runtime origins and <c>Target.getTargets</c>.
+    /// The fallback keeps a URL the WHATWG parser rejects reportable rather than
+    /// turning it into an exception on a hot path.
+    /// </remarks>
+    public string UrlString()
+    {
+        if (Url is null)
+        {
+            return "about:blank";
+        }
+        var raw = Url.OriginalString;
+        return Obscura.Js.Url.UrlRecord.Parse(raw)?.Href
+            ?? Obscura.Js.Url.UrlRecord.Parse(Url.AbsoluteUri)?.Href
+            ?? Url.AbsoluteUri;
+    }
 
     public T? WithDom<T>(Func<DomTree, T> body)
     {

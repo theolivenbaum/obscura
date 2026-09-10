@@ -210,7 +210,7 @@ public sealed class CliBehaviorParityTests
     /// whole dump corpus cover. Remove the Skip once Browser serializes through
     /// the WHATWG parser.
     /// </remarks>
-    [Fact(Skip = "Obscura.Browser serializes URLs through System.Uri; see 'Open issues' in todo.md")]
+    [ParityFact]
     public void Page_loaded_line_prints_the_same_url()
     {
         const string dataUrl =

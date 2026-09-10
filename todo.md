@@ -174,21 +174,13 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
-- **`Obscura.Browser` serializes URLs through `System.Uri`, which is not
-  WHATWG-compliant.** `PageUrl.TryParse` returns a `System.Uri` and
-  `Page.UrlString()` reads `AbsoluteUri`, which percent-encodes `<`, `>` and
-  space in a cannot-be-a-base URL's opaque path. Reproduced:
-
-      Rust url crate:  data:text/html,<b>a b</b>
-      System.Uri:      data:text/html,%3Cb%3Ea%20b%3C/b%3E
-
-  Every `data:` URL on the CDP wire therefore differs from the reference:
-  `Page.frameNavigated`, `Page.getFrameTree`, DOMSnapshot `documentURL`/
-  `baseURL`, Runtime origins, `Target.getTargets`. Found independently by two
-  agents diffing against the running Rust server. `Obscura.Js.Url.UrlRecord` is
-  the already-ported WHATWG parser and is what Browser should serialize through;
-  this is a type migration across ~77 references in 7 files, deferred only
-  because agents were live in that project.
+- ~~`Obscura.Browser` serializes URLs through `System.Uri`~~ **FIXED.**
+  `Page.UrlString()` now serializes through `Obscura.Js.Url.UrlRecord`, the
+  WHATWG parser, instead of `Uri.AbsoluteUri`. `System.Uri` percent-encoded
+  `<`, `>` and space in a cannot-be-a-base URL's opaque path, so
+  `data:text/html,<b>a b</b>` reached CDP clients as
+  `data:text/html,%3Cb%3Ea%20b%3C/b%3E`. All 295 parity tests pass with the
+  change and none are skipped.
 - **`Runtime.evaluate` drops an explicit `"value": null`.** Rust returns
   `{"type":"object","subtype":"null","description":"null","value":null}`; the
   port omits the key, so a client reading `result.value` gets `undefined` where
