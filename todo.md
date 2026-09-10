@@ -397,6 +397,33 @@ DEVIATION comment at the C# code that differs.
   restore path puts the typed percentage back either way, so the difference is
   what the *intrinsic* pass measures; the reference's zero is closer for the bare
   form. Reverted, and the Code Diff case below stays open.
+- **Open, not fixed: a pseudo-element rule behind a sibling combinator matches
+  the wrong set.** Every radio and checkbox in the Tesserae samples paints as
+  selected, because `input:checked ~ .mark:after { display: block }` applies to
+  unchecked marks too. Reproduced in both engines (so shared, not a port defect)
+  with this fixture:
+
+      .mark:after                        { display: none }        /* base */
+      .opt input:checked ~ .mark:after   { display: block }       /* applies to ALL marks */
+      .opt input:checked + .mark:after   { margin-left: 3px }     /* applies to NONE */
+      .opt input[checked] ~ .mark:after  { padding-left: 5px }    /* applies to NONE */
+      .zzz-nomatch .mark:after           { outline: 2px solid }   /* correctly applies to none */
+      .opt input:checked ~ .mark         { border-color: blue }   /* correct, no pseudo */
+
+  The same selector without the trailing pseudo-element matches correctly, and a
+  plainly non-matching descendant prefix is correctly rejected, so the prefix is
+  not simply ignored. The inconsistency (one sibling rule over-matching, two
+  under-matching) points at the pseudo-rule candidate index in
+  `CssCascade.TryPushPseudo`/`PseudoRuleMap.Push` keying off the wrong compound
+  rather than the selector's subject. Not yet fixed.
+- **Open, not fixed: `scrollbar-gutter: stable` is honoured only on the root.**
+  Both engines reserve the gutter from the initial containing block only
+  (`dom.rs` reads `scrollbar_gutters` off the root element alone), so a nested
+  scroll container does not. Tesserae's annotated text editor overlays a
+  highlight layer on a `scrollbar-gutter: stable; scrollbar-width: thin`
+  textarea; the overlay comes out 902px wide against Chromium's 892px, so the
+  highlight boxes sit 10px off the text they mark. A real fix also needs
+  `scrollbar-width: thin` to pick the 10px gutter rather than the classic width.
 - **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
   evenly.** Both panels' content is percentage-sized, so with the bare-percentage
   neutralization both flex base sizes measure 0 and the row splits 462/462
