@@ -263,6 +263,7 @@ public sealed class PageDomainTests
     public async Task DefaultBackgroundOverrideMatchesChromiumAcrossCaptureState()
     {
         (CdpContext ctx, string session) = await TransparentSurfaceFixtureAsync(160);
+        using IDisposable fixtureOwned1 = CoreCdp.Owned(ctx);
 
         Capture defaultRaster = DecodeCapture(CdpDomainFixtures.Unwrap(
             await PageDomain.HandleAsync("captureScreenshot", new JsonObject(), ctx, session)));
@@ -325,6 +326,7 @@ public sealed class PageDomainTests
     public async Task DefaultBackgroundOverrideIsTargetIsolated()
     {
         (CdpContext ctx, string firstSession) = await TransparentSurfaceFixtureAsync(80);
+        using IDisposable fixtureOwned2 = CoreCdp.Owned(ctx);
         string secondPageId = ctx.CreatePage();
         string secondSession = $"{secondPageId}-session";
         ctx.Sessions[secondSession] = secondPageId;
@@ -354,6 +356,7 @@ public sealed class PageDomainTests
     public async Task DefaultBackgroundOverrideCoversClipsFullPageAndScreencastDamage()
     {
         (CdpContext ctx, string session) = await TransparentSurfaceFixtureAsync(160);
+        using IDisposable fixtureOwned3 = CoreCdp.Owned(ctx);
         CdpDomainFixtures.Unwrap(await EmulationDomain.HandleAsync(
             "setDefaultBackgroundColorOverride",
             CdpDomainFixtures.Json("""{"color":{"r":7,"g":19,"b":31,"a":1}}"""),
@@ -418,6 +421,7 @@ public sealed class PageDomainTests
     public async Task ScreencastInitialFrameMetadataAndEncodingMatchOptions()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned4 = CoreCdp.Owned(ctx);
         ctx.PendingEvents.Clear();
         JsonNode result = CdpDomainFixtures.Unwrap(await PageDomain.HandleAsync(
             "startScreencast",
@@ -536,6 +540,7 @@ public sealed class PageDomainTests
     public async Task ScreencastSamplingBackpressureAndStaleAcksAreBounded()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned5 = CoreCdp.Owned(ctx);
         ctx.PendingEvents.Clear();
         CdpDomainFixtures.Unwrap(await PageDomain.HandleAsync(
             "startScreencast",
@@ -686,6 +691,7 @@ public sealed class PageDomainTests
     public async Task CaptureScreenshotPreservesDefaultPngAndHonorsClipScale()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned6 = CoreCdp.Owned(ctx);
         byte[] native;
         {
             Obscura.Browser.Page page = ctx.GetSessionPage(session)!;
@@ -755,6 +761,7 @@ public sealed class PageDomainTests
     public async Task DefaultCaptureRejectsOversizedViewportBeforeRasterAllocation()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned7 = CoreCdp.Owned(ctx);
         ctx.GetSessionPageMut(session)!.SetViewport((32_768.0f, 32_768.0f));
 
         string error = CdpDomainFixtures.ErrorOf(
@@ -884,6 +891,7 @@ public sealed class PageDomainTests
     public async Task CaptureScreenshotEncodesJpegAndLosslessWebp()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned8 = CoreCdp.Owned(ctx);
         JsonNode jpeg = CdpDomainFixtures.Unwrap(await PageDomain.HandleAsync(
             "captureScreenshot",
             CdpDomainFixtures.Json("""{"format":"jpeg","quality":35}"""),
@@ -973,6 +981,7 @@ public sealed class PageDomainTests
     public async Task CaptureScreenshotSupportsFullPageAndOffViewportClips()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned9 = CoreCdp.Owned(ctx);
         ctx.GetSessionPageMut(session)!.Evaluate(
             "Object.defineProperty(globalThis,'innerWidth',{value:4096,configurable:true});"
             + "Object.defineProperty(globalThis,'innerHeight',{value:4096,configurable:true})");
@@ -1010,6 +1019,7 @@ public sealed class PageDomainTests
     public async Task CaptureScreenshotCombinesDeviceAndClipScaleWithoutRelayout()
     {
         (CdpContext ctx, string session) = await ScreenshotFixtureAsync();
+        using IDisposable fixtureOwned10 = CoreCdp.Owned(ctx);
         CdpDomainFixtures.Unwrap(await EmulationDomain.HandleAsync(
             "setDeviceMetricsOverride",
             CdpDomainFixtures.Json("""{"width":100,"height":80,"deviceScaleFactor":2,"mobile":false}"""),

@@ -386,8 +386,13 @@ public static partial class Page
 
         var outputWidth = (uint)outputWidthValue;
         var outputHeight = (uint)outputHeightValue;
-        ulong nativePixels = checked(nativeWidth * nativeHeight);
-        ulong outputPixels = checked((ulong)outputWidth * outputHeight);
+        if (nativeHeight != 0 && nativeWidth > ulong.MaxValue / nativeHeight)
+        {
+            throw new DomainError("Page.captureScreenshot long PNG size overflow");
+        }
+
+        ulong nativePixels = nativeWidth * nativeHeight;
+        ulong outputPixels = (ulong)outputWidth * outputHeight;
         if (nativePixels > MaxLongPngPixels || outputPixels > MaxLongPngPixels)
         {
             throw new DomainError(

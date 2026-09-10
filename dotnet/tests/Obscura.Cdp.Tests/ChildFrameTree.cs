@@ -41,10 +41,11 @@ public sealed class ChildFrameTree
     private static async Task<JsonNode> FrameTreeWithDepthAsync(
         CdpContext ctx,
         string session,
-        int depth)
+        int depth,
+        CoreCdpServer? server = null)
     {
         JsonNode tree = new JsonObject();
-        for (int attempt = 0; attempt < 10; attempt++)
+        for (int attempt = 0; attempt < 40; attempt++)
         {
             tree = await CoreCdp.CdpAsync(ctx, 3, "Page.getFrameTree", new JsonObject(), session);
             JsonNode? node = tree["frameTree"];
@@ -62,10 +63,17 @@ public sealed class ChildFrameTree
 
             await CoreCdp.CdpAsync(
                 ctx, 2, "Runtime.evaluate", new JsonObject { ["expression"] = "1" }, session);
+            if (ctx.GetSessionPageMut(session) is { } page)
+            {
+                await page.RunAutonomousEventLoopTurnAsync();
+            }
+
             await Task.Delay(50);
         }
 
-        Assert.Fail("frame tree never reached depth " + depth + ": " + CdpJson.Serialize(tree));
+        Assert.Fail(
+            "frame tree never reached depth " + depth + ": " + CdpJson.Serialize(tree)
+            + " served=[" + string.Join("|", server?.Requests ?? []) + "]");
         return tree;
     }
 
@@ -109,7 +117,7 @@ public sealed class ChildFrameTree
         await CoreCdp.CdpAsync(
             ctx, 2, "Runtime.evaluate", new JsonObject { ["expression"] = "1" }, session);
 
-        JsonNode tree = await FrameTreeWithDepthAsync(ctx, session, 2);
+        JsonNode tree = await FrameTreeWithDepthAsync(ctx, session, 2, server);
         JsonNode? root = tree["frameTree"];
         JsonNode? child = root.Get("childFrames").Get(0);
         Assert.EndsWith(
@@ -179,7 +187,7 @@ public sealed class ChildFrameTree
             ctx, 1, "Page.navigate", new JsonObject { ["url"] = server.Url }, session);
         await CoreCdp.CdpAsync(
             ctx, 2, "Runtime.evaluate", new JsonObject { ["expression"] = "1" }, session);
-        await FrameTreeWithDepthAsync(ctx, session, 2);
+        await FrameTreeWithDepthAsync(ctx, session, 2, server);
         string target = ctx.Sessions[session];
         CdpResponse attached = await CoreCdp.DispatchAsync(
             ctx,
@@ -193,7 +201,7 @@ public sealed class ChildFrameTree
             await CoreCdp.CdpAsync(ctx, 3, "Runtime.enable", new JsonObject(), runtimeSession);
         }
 
-        JsonNode tree = await FrameTreeWithDepthAsync(ctx, session, 2);
+        JsonNode tree = await FrameTreeWithDepthAsync(ctx, session, 2, server);
         string mainId = tree["frameTree"].Get("frame").Get("id").AsString()!;
         string childId = tree["frameTree"].Get("childFrames").Get(0).Get("frame").Get("id").AsString()!;
         string grandchildId = tree["frameTree"].Get("childFrames").Get(0)

@@ -194,15 +194,20 @@ The largest component. Split into stages; each stage is independently testable.
   port omits the key, so a client reading `result.value` gets `undefined` where
   Chrome and Rust give `null`.
 
-- **Two Obscura.Js tests fail under full-solution load but pass in isolation.**
-  The project alone is 830/849 green; a solution-wide run loses two, a different
-  pair each time, all timing-sensitive. The first prepared render on a fresh
-  process costs ~300ms in embedded font initialization against ~1ms once warm,
-  so tests that schedule work tens of milliseconds apart collapse two events into
-  one when the host is loaded. Fix the latency rather than the tests.
-
-## 9. Validation
-
+- **Four tests fail under full-solution load and pass in isolation.** Three in
+  `Obscura.Js.Tests` (a different set each run) and
+  `ConcurrentConnectionsHeavyPageDoNotAbortV8` in `Obscura.Cdp.Tests`. All are
+  timing-sensitive. The first prepared render on a fresh process costs ~300ms in
+  embedded font initialization against ~1ms once warm, so tests that schedule
+  work tens of milliseconds apart collapse two events into one when the host is
+  loaded. Fix the latency, not the tests.
+- **`crates/obscura-cdp/src/domains/` page/runtime/dom/target is the one
+  unfinished component.** Its port is in the tree and 235 of 236 CDP tests pass,
+  but the agent porting it was cut off by an account rate limit while writing
+  the last two concurrency tests, so its test coverage was never audited against
+  the Rust source the way every other component's was. Treat its numbers as
+  unverified until someone recounts `#[test]` in those four files and confirms
+  the ported set matches.
 - [x] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
 - [x] `scripts/parity-sweep.sh` drives both engines over every fixture:
       **320 of 320 outputs byte-identical** (64 fixtures x text/links/html/

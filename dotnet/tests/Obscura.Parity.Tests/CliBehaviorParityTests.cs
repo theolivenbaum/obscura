@@ -118,6 +118,56 @@ public sealed class CliBehaviorParityTests
     }
 
     /// <summary>
+    /// The CLI pins the process timezone before V8 reads it, so <c>Date</c> and
+    /// <c>Intl</c> report the zone the page layer advertises rather than UTC.
+    /// </summary>
+    /// <remarks>
+    /// V8 reads <c>TZ</c> with <c>getenv</c> from native code.
+    /// <c>Environment.SetEnvironmentVariable</c> on Unix updates only the
+    /// managed copy, so the port has to write through <c>setenv</c> as well; if
+    /// that regresses, this test reports UTC where the reference reports
+    /// Europe/Berlin, which is exactly the cross-surface mismatch the pinning
+    /// exists to avoid.
+    /// </remarks>
+    [ParityFact]
+    public void Timezone_is_pinned_before_v8_reads_it()
+    {
+        const string page = "data:text/html,<p>x</p>";
+        ParityAssert.SameStdOut("fetch", page, "--eval", "new Date(0).toString()", "--quiet");
+
+        // And OBSCURA_TIMEZONE overrides the default in both engines.
+        var rust = RunWithTimezone(ReferenceEngine.RustBinary!, "Asia/Tokyo");
+        var port = RunWithTimezone(ReferenceEngine.PortBinary!, "Asia/Tokyo");
+        Assert.Equal(rust, port);
+        Assert.Contains("GMT+0900", rust, StringComparison.Ordinal);
+    }
+
+    private static string RunWithTimezone(string exe, string timezone)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(exe)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        foreach (var arg in new[]
+                 {
+                     "fetch", "data:text/html,<p>x</p>", "--eval", "new Date(0).toString()", "--quiet",
+                 })
+        {
+            psi.ArgumentList.Add(arg);
+        }
+        psi.Environment["OBSCURA_TIMEZONE"] = timezone;
+        psi.Environment.Remove("TZ");
+        using var process = System.Diagnostics.Process.Start(psi)
+            ?? throw new InvalidOperationException($"failed to start {exe}");
+        var stdout = process.StandardOutput.ReadToEnd();
+        _ = process.StandardError.ReadToEnd();
+        process.WaitForExit(60_000);
+        return stdout.ReplaceLineEndings("\n").TrimEnd('\n');
+    }
+
+    /// <summary>
     /// <c>--wait</c> is a maximum when absent and a fixed delay when supplied,
     /// which is the only reason it is modelled as an option rather than a
     /// defaulted value.

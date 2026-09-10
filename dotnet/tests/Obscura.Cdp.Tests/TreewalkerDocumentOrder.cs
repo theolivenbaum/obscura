@@ -22,6 +22,7 @@ public sealed class TreewalkerDocumentOrder
     public async Task NextNodeWalksTheWholeSubtreeInDocumentOrder()
     {
         (CdpContext ctx, string session, CoreCdpServer server) = await SetupAsync();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         using (server)
         {
             JsonNode evaluated = await CoreCdp.EvalAsync(
@@ -51,6 +52,7 @@ public sealed class TreewalkerDocumentOrder
     public async Task NextNodeKeepsSearchingAfterFilteredLeafNodes()
     {
         (CdpContext ctx, string session, CoreCdpServer server) = await SetupAsync();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         using (server)
         {
             JsonNode evaluated = await CoreCdp.EvalAsync(
@@ -84,6 +86,7 @@ public sealed class TreewalkerDocumentOrder
     public async Task NextNodeHandlesADeepAcceptedChildFastPath()
     {
         (CdpContext ctx, string session, CoreCdpServer server) = await SetupAsync();
+        using IDisposable owned = CoreCdp.Owned(ctx);
         using (server)
         {
             JsonNode evaluated = await CoreCdp.EvalAsync(

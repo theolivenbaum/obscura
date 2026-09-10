@@ -386,11 +386,17 @@ public static class Runtime
 
         // The inner call already bounds its own await; this outer bound exists so a
         // synchronous-but-slow path cannot pin the connection past the budget either.
-        // The budget is doubled here because the inner timeout is the one whose message
-        // the protocol reports.
-        long outerMs = timeoutMs > long.MaxValue / 4 ? long.MaxValue / 4 : (long)(timeoutMs * 2) + 1000;
-        Task completed = await Task.WhenAny(work, Task.Delay(TimeSpan.FromMilliseconds(outerMs)))
-            .ConfigureAwait(false);
+        // Deviation from the reference, which races the outer timeout against the same
+        // budget the inner one uses: the budget is doubled here so the inner timeout is
+        // reliably the one whose message reaches the client, rather than whichever of two
+        // equal timers fires first.
+        long outerMs = timeoutMs > (ulong)(long.MaxValue / 4)
+            ? long.MaxValue / 4
+            : (long)(timeoutMs * 2) + 1000;
+        using var outerTimeout = new CancellationTokenSource();
+        Task delay = Task.Delay(TimeSpan.FromMilliseconds(outerMs), outerTimeout.Token);
+        Task completed = await Task.WhenAny(work, delay).ConfigureAwait(false);
+        await outerTimeout.CancelAsync().ConfigureAwait(false);
         if (!ReferenceEquals(completed, work))
         {
             throw new DomainError(timeoutMessage);
