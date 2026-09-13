@@ -3343,7 +3343,15 @@ class Element extends Node {
     }
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
-  get innerText() { return this.textContent; }
+  // innerText used to be an alias for textContent, so document.body.innerText
+  // opened with the source of every <style> and <script> in the page and ran
+  // all block-level content together on one line. It is a rendered-text
+  // projection: subtrees that generate no boxes are dropped, whitespace is
+  // collapsed unless white-space preserves it, and block boundaries become
+  // line breaks. It costs one getComputedStyle per element -- unavoidable,
+  // since display is what decides both questions -- but those are cached per
+  // element per mutation epoch.
+  get innerText() { return _innerTextOf(this); }
   set innerText(v) { this.textContent = v; }
   get children() {
     const ids = _domParse("element_children", this._nid) || [];
@@ -5836,7 +5844,18 @@ class Document extends Node {
     return;
   }
   hasFocus() { return true; }
+  // The editing command family is a stub: nothing here implements rich-text
+  // editing, so every query answers "unsupported" consistently with
+  // execCommand() returning false. They exist because callers feature-detect
+  // them without checking they are functions first -- Monaco's loader calls
+  // document.queryCommandSupported('copy') unguarded and threw a TypeError
+  // that took out the whole editor.
   execCommand() { return false; }
+  queryCommandSupported() { return false; }
+  queryCommandEnabled() { return false; }
+  queryCommandIndeterm() { return false; }
+  queryCommandState() { return false; }
+  queryCommandValue() { return ""; }
 }
 
 class DocumentFragment extends Node {
@@ -6440,6 +6459,115 @@ globalThis.TextTrackCue = TextTrackCue;
 globalThis.TextTrackCueList = TextTrackCueList;
 globalThis.VTTCue = VTTCue;
 
+// ---- innerText ----------------------------------------------------------
+// Tags whose content never generates boxes whatever the CSS says. Checking the
+// tag first keeps the common case off the computed-style path entirely.
+var _innerTextSkipTags = {
+  SCRIPT: 1, STYLE: 1, HEAD: 1, TITLE: 1, META: 1, LINK: 1,
+  NOSCRIPT: 1, TEMPLATE: 1, BASE: 1,
+};
+function _innerTextStyle(el) {
+  try { return getComputedStyle(el); } catch (e) { return null; }
+}
+// Block-level boxes force a line break around their content. inline-block,
+// inline-flex and inline-grid deliberately do not.
+function _innerTextIsBlock(display) {
+  return display === 'block' || display === 'flow-root' || display === 'list-item'
+      || display === 'flex' || display === 'grid'
+      || (display.length > 5 && display.slice(0, 5) === 'table');
+}
+function _innerTextIsPre(whiteSpace, inherited) {
+  if (!whiteSpace) return inherited;
+  return whiteSpace === 'pre' || whiteSpace === 'pre-wrap'
+      || whiteSpace === 'pre-line' || whiteSpace === 'break-spaces';
+}
+function _innerTextCollect(node, segments, pre, visible) {
+  for (const child of node.childNodes) {
+    const type = child.nodeType;
+    if (type === 3) {
+      if (!visible) continue;
+      let data = child.data != null ? child.data : (child.textContent || '');
+      if (!data) continue;
+      if (!pre) {
+        data = data.replace(/[\t\n\f\r ]+/g, ' ');
+        if (!data) continue;
+      }
+      segments.push({ text: data, pre: pre });
+      continue;
+    }
+    if (type !== 1) continue;
+    const tag = child.tagName;
+    if (_innerTextSkipTags[tag]) continue;
+    const style = _innerTextStyle(child);
+    const display = style ? String(style.display || 'inline') : 'inline';
+    if (display === 'none') continue;
+    if (tag === 'BR') { segments.push({ breaks: 1, forced: true }); continue; }
+    const childPre = _innerTextIsPre(style ? String(style.whiteSpace || '') : '', pre);
+    const childVisible = style && style.visibility
+      ? String(style.visibility) === 'visible'
+      : visible;
+    const block = _innerTextIsBlock(display);
+    // A <p> is the one element that contributes two required line breaks.
+    const breaks = tag === 'P' ? 2 : 1;
+    if (block) segments.push({ breaks: breaks });
+    _innerTextCollect(child, segments, childPre, childVisible);
+    if (block) segments.push({ breaks: breaks });
+  }
+}
+function _innerTextJoin(segments) {
+  let result = '';
+  let breaks = 0;
+  let forced = 0;
+  let seen = false;
+  let lastPre = false;
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (segment.breaks !== undefined) {
+      // Line breaks before any text at all are dropped, which is what keeps
+      // innerText from starting with a blank line. Consecutive <br> stack;
+      // block boundaries that meet each other collapse to the widest one.
+      if (!seen) continue;
+      if (segment.forced) { forced++; if (forced > breaks) breaks = forced; }
+      else if (segment.breaks > breaks) breaks = segment.breaks;
+      continue;
+    }
+    let text = segment.text;
+    if (!segment.pre) {
+      if (!seen || breaks > 0 || result.charAt(result.length - 1) === ' ') {
+        text = text.replace(/^ +/, '');
+      }
+      if (!text) continue;
+    }
+    if (breaks > 0) {
+      if (!lastPre) result = result.replace(/ +$/, '');
+      for (let n = 0; n < breaks; n++) result += '\n';
+    }
+    breaks = 0;
+    forced = 0;
+    result += text;
+    lastPre = !!segment.pre;
+    seen = true;
+  }
+  if (!lastPre) result = result.replace(/ +$/, '');
+  return result;
+}
+function _innerTextOf(el) {
+  // A node that is not being rendered -- detached, display:none, or one of the
+  // never-rendered tags -- falls back to textContent, matching what Chrome
+  // hands back for e.g. a <style> element's own innerText.
+  if (el.isConnected === false) return el.textContent;
+  const tag = el.tagName;
+  if (tag && _innerTextSkipTags[tag]) return el.textContent;
+  const style = _innerTextStyle(el);
+  const display = style ? String(style.display || 'block') : 'block';
+  if (display === 'none') return el.textContent;
+  const pre = _innerTextIsPre(style ? String(style.whiteSpace || '') : '', false);
+  const visible = style && style.visibility ? String(style.visibility) === 'visible' : true;
+  const segments = [];
+  _innerTextCollect(el, segments, pre, visible);
+  return _innerTextJoin(segments);
+}
+var _htmlTagClasses = null;
 function _elementClassFor(nid) {
   const tag = _domParse("tag_name", nid);
   // HTML tagName values are ASCII-uppercase. Foreign SVG names retain their
@@ -6458,6 +6586,8 @@ function _elementClassFor(nid) {
   if (tag === "AUDIO") return HTMLAudioElement;
   if (tag === "VIDEO") return HTMLVideoElement;
   if (tag === "TRACK") return HTMLTrackElement;
+  const mapped = tag && _htmlTagClasses ? _htmlTagClasses[tag] : undefined;
+  if (typeof mapped === "function") return mapped;
   return Element;
 }
 function _elementClassForKnownName(namespace, qualifiedName) {
@@ -6478,6 +6608,8 @@ function _elementClassForKnownName(namespace, qualifiedName) {
     if (tag === "AUDIO") return HTMLAudioElement;
     if (tag === "VIDEO") return HTMLVideoElement;
     if (tag === "TRACK") return HTMLTrackElement;
+    const mapped = _htmlTagClasses ? _htmlTagClasses[tag] : undefined;
+    if (typeof mapped === "function") return mapped;
   }
   return Element;
 }
@@ -6523,26 +6655,88 @@ globalThis.__virtualUrl = null;
 function __currentUrl() {
   return globalThis.__virtualUrl || _domParse("document_url") || "about:blank";
 }
+// Two URLs that differ only in their fragment name the same document. Moving
+// between them is a *same-document* navigation: nothing is re-fetched and the
+// JavaScript context survives. Everything else is a real navigation.
+function _isFragmentOnlyChange(current, target) {
+  try {
+    var a = new URL(current);
+    var b = new URL(target);
+    return a.protocol === b.protocol && a.host === b.host
+        && a.username === b.username && a.password === b.password
+        && a.pathname === b.pathname && a.search === b.search
+        && a.hash !== b.hash;
+  } catch (e) { return false; }
+}
+// Every location-driven navigation funnels through here. Routing a fragment
+// change through op_navigate tore down and rebooted the whole execution
+// context, so a hash router lost all its state on every route change (and, in
+// a survey of one SPA, re-booted the app 20 times over 157 routes). Delegating
+// to history.pushState/replaceState keeps one implementation of the
+// same-document path: it moves __virtualUrl, keeps the session-history stack
+// honest, and fires `hashchange` with oldURL/newURL.
+function _locationNavigate(url, replace) {
+  var current = __currentUrl();
+  var target = _resolveUrl(url);
+  if (_isFragmentOnlyChange(current, target)) {
+    var h = globalThis.history;
+    if (h && typeof h.pushState === 'function') {
+      // A fragment navigation gets a fresh entry with null state, per spec.
+      if (replace) h.replaceState(null, '', target);
+      else h.pushState(null, '', target);
+      return;
+    }
+    globalThis.__virtualUrl = target;
+    try {
+      var ev = new HashChangeEvent('hashchange', { oldURL: current, newURL: target });
+      globalThis.dispatchEvent(ev);
+    } catch (e) {}
+    return;
+  }
+  globalThis.__virtualUrl = target;
+  Deno.core.ops.op_navigate(target, 'GET', '');
+}
+// Assigning to a URL component rebuilds the document URL and navigates, the
+// same way the href setter does. These were getter-only, so `location.hash =
+// '/route'` was a silent no-op in sloppy mode and a hash router could never
+// leave the URL it booted on.
+function _locationSetPart(part, value) {
+  var current = __currentUrl();
+  var u;
+  try { u = new URL(current); } catch (e) { return; }
+  try { u[part] = value == null ? '' : String(value); } catch (e) { return; }
+  // Assigning the value a component already has is not a navigation.
+  if (u.href === current) return;
+  _locationNavigate(u.href, false);
+}
 globalThis.location = {
   get href() { return __currentUrl(); },
-  set href(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; Deno.core.ops.op_navigate(r, 'GET', ''); },
+  set href(url) { _locationNavigate(url, false); },
   get origin() { try { return new URL(this.href).origin; } catch { return ""; } },
   get protocol() { try { return new URL(this.href).protocol; } catch { return ""; } },
+  set protocol(v) { _locationSetPart('protocol', v); },
   get host() { try { return new URL(this.href).host; } catch { return ""; } },
+  set host(v) { _locationSetPart('host', v); },
   get hostname() { try { return new URL(this.href).hostname; } catch { return ""; } },
+  set hostname(v) { _locationSetPart('hostname', v); },
   get pathname() { try { return new URL(this.href).pathname; } catch { return "/"; } },
+  set pathname(v) { _locationSetPart('pathname', v); },
   get search() { try { return new URL(this.href).search; } catch { return ""; } },
+  set search(v) { _locationSetPart('search', v); },
   get hash() { try { return new URL(this.href).hash; } catch { return ""; } },
+  set hash(v) { _locationSetPart('hash', v); },
   get port() { try { return new URL(this.href).port; } catch { return ""; } },
+  set port(v) { _locationSetPart('port', v); },
   toString() { return this.href; },
-  assign(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; Deno.core.ops.op_navigate(r, 'GET', ''); },
+  assign(url) { _locationNavigate(url, false); },
+  // A reload really re-fetches, fragment or not.
   reload() { var r = _resolveUrl(this.href); globalThis.__virtualUrl = r; Deno.core.ops.op_navigate(r, 'GET', ''); },
-  replace(url) { var r = _resolveUrl(url); globalThis.__virtualUrl = r; Deno.core.ops.op_navigate(r, 'GET', ''); },
+  replace(url) { _locationNavigate(url, true); },
 };
 const _locationObj = globalThis.location;
 Object.defineProperty(globalThis, 'location', {
   get() { return _locationObj; },
-  set(url) { var r = _resolveUrl(String(url)); globalThis.__virtualUrl = r; Deno.core.ops.op_navigate(r, 'GET', ''); },
+  set(url) { _locationNavigate(String(url), false); },
   configurable: false,
   enumerable: true,
 });
@@ -9936,7 +10130,15 @@ globalThis.PopStateEvent = class extends Event {
     this.state = init && 'state' in init ? init.state : null;
   }
 };
-globalThis.HashChangeEvent = class extends Event {};
+globalThis.HashChangeEvent = class HashChangeEvent extends Event {
+  constructor(type, init) {
+    super(type, init || {});
+    // The stub dropped its init dictionary, so a constructed hashchange event
+    // carried no oldURL/newURL and routers that read them saw undefined.
+    this.oldURL = init && init.oldURL != null ? String(init.oldURL) : "";
+    this.newURL = init && init.newURL != null ? String(init.newURL) : "";
+  }
+};
 globalThis.MessageEvent = class extends Event {
   constructor(t,o={}) {
     super(t,o);
@@ -10577,6 +10779,269 @@ globalThis.XMLSerializer = class XMLSerializer {
     return "";
   }
 };
+// ---- Performance Timeline ----------------------------------------------
+// getEntries/getEntriesByType/getEntriesByName used to be hard-coded to [] and
+// PerformanceNavigationTiming did not exist, so the very common boot probe
+// `performance.getEntriesByType('navigation')[0].nextHopProtocol` threw
+// "Cannot read properties of undefined" and took the page's first request with
+// it. Obscura does not surface per-request transport metrics to JS, so the
+// network phases below are synthesized inside the real navigationStart -> now
+// interval rather than measured; the document lifecycle marks (domInteractive,
+// DOMContentLoaded, load) are real, recorded by the hooks installed in
+// __obscura_init.
+class PerformanceEntry {
+  constructor(name, entryType, startTime, duration) {
+    this.name = String(name);
+    this.entryType = String(entryType);
+    this.startTime = +startTime || 0;
+    this.duration = +duration || 0;
+  }
+  toJSON() {
+    const out = {};
+    for (const key in this) out[key] = this[key];
+    return out;
+  }
+}
+class PerformanceMark extends PerformanceEntry {
+  constructor(name, options) {
+    super(name, "mark", (options && options.startTime != null) ? options.startTime : performance.now(), 0);
+    this.detail = (options && "detail" in options) ? options.detail : null;
+  }
+}
+class PerformanceMeasure extends PerformanceEntry {
+  constructor(name, startTime, duration, detail) {
+    super(name, "measure", startTime, duration);
+    this.detail = detail === undefined ? null : detail;
+  }
+}
+class PerformanceResourceTiming extends PerformanceEntry {
+  constructor(name, entryType, timing) {
+    super(name, entryType, timing.startTime || 0, timing.duration || 0);
+    this.initiatorType = timing.initiatorType || "";
+    this.deliveryType = "";
+    this.nextHopProtocol = timing.nextHopProtocol || "";
+    this.workerStart = 0;
+    this.redirectStart = 0;
+    this.redirectEnd = 0;
+    this.fetchStart = timing.fetchStart || 0;
+    this.domainLookupStart = timing.domainLookupStart || 0;
+    this.domainLookupEnd = timing.domainLookupEnd || 0;
+    this.connectStart = timing.connectStart || 0;
+    this.connectEnd = timing.connectEnd || 0;
+    this.secureConnectionStart = timing.secureConnectionStart || 0;
+    this.requestStart = timing.requestStart || 0;
+    this.firstInterimResponseStart = 0;
+    this.responseStart = timing.responseStart || 0;
+    this.responseEnd = timing.responseEnd || 0;
+    this.transferSize = timing.transferSize || 0;
+    this.encodedBodySize = timing.encodedBodySize || 0;
+    this.decodedBodySize = timing.decodedBodySize || 0;
+    this.responseStatus = timing.responseStatus || 0;
+    this.renderBlockingStatus = "non-blocking";
+    this.contentType = timing.contentType || "";
+    this.serverTiming = [];
+  }
+}
+class PerformanceNavigationTiming extends PerformanceResourceTiming {
+  constructor(name, timing) {
+    super(name, "navigation", timing);
+    this.initiatorType = "navigation";
+    this.unloadEventStart = 0;
+    this.unloadEventEnd = 0;
+    this.domInteractive = timing.domInteractive || 0;
+    this.domContentLoadedEventStart = timing.domContentLoadedEventStart || 0;
+    this.domContentLoadedEventEnd = timing.domContentLoadedEventEnd || 0;
+    this.domComplete = timing.domComplete || 0;
+    this.loadEventStart = timing.loadEventStart || 0;
+    this.loadEventEnd = timing.loadEventEnd || 0;
+    this.type = timing.type || "navigate";
+    this.redirectCount = timing.redirectCount || 0;
+    this.activationStart = 0;
+    this.criticalCHRestart = 0;
+  }
+}
+globalThis.PerformanceEntry = PerformanceEntry;
+globalThis.PerformanceMark = PerformanceMark;
+globalThis.PerformanceMeasure = PerformanceMeasure;
+globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;
+_markNative(PerformanceEntry);
+_markNative(PerformanceMark);
+_markNative(PerformanceMeasure);
+_markNative(PerformanceResourceTiming);
+_markNative(PerformanceNavigationTiming);
+
+// Document-lifecycle marks, all relative to performance.timeOrigin. Reset on
+// every page init; a field left at 0 is a phase the page has not reached yet,
+// which is what Chromium reports while a page is still loading.
+var _navTiming = null;
+var _perfUserEntries = [];
+function _perfRound(v) { return Math.round(v * 10) / 10; }
+function _navTimingReset(elapsed) {
+  // No transport metrics reach JS, so the pre-response phases are laid out
+  // proportionally inside [navigationStart, now]. They are ordered and
+  // monotonic, which is all a consumer can rely on.
+  var e = elapsed > 0 ? elapsed : 1;
+  var https = false;
+  try { https = new URL(__currentUrl()).protocol === "https:"; } catch (err) {}
+  _navTiming = {
+    fetchStart: _perfRound(Math.max(0.1, e * 0.02)),
+    domainLookupStart: _perfRound(e * 0.05),
+    domainLookupEnd: _perfRound(e * 0.12),
+    connectStart: _perfRound(e * 0.12),
+    secureConnectionStart: https ? _perfRound(e * 0.18) : 0,
+    connectEnd: _perfRound(e * 0.30),
+    requestStart: _perfRound(e * 0.32),
+    responseStart: _perfRound(e * 0.75),
+    responseEnd: _perfRound(e * 0.95),
+    domLoading: _perfRound(e * 0.95),
+    domInteractive: 0,
+    domContentLoadedEventStart: 0,
+    domContentLoadedEventEnd: 0,
+    domComplete: 0,
+    loadEventStart: 0,
+    loadEventEnd: 0,
+    redirectCount: 0,
+    type: "navigate",
+    // The negotiated ALPN protocol is not exposed to JS by the host, so it is
+    // derived from the scheme: h2 is what Chromium reports for nearly every
+    // https origin.
+    nextHopProtocol: https ? "h2" : "http/1.1",
+    bodySize: -1,
+  };
+}
+function _navBodySize() {
+  if (!_navTiming) return 0;
+  if (_navTiming.bodySize >= 0) return _navTiming.bodySize;
+  var size = 0;
+  try {
+    // No response-size accounting reaches JS. The serialized document is the
+    // closest thing the shim can measure, and consumers use these fields as a
+    // magnitude, not an exact byte count. Computed once per page.
+    var html = globalThis.document && globalThis.document.documentElement
+      ? globalThis.document.documentElement.outerHTML : "";
+    size = html ? html.length : 0;
+  } catch (e) { size = 0; }
+  _navTiming.bodySize = size;
+  return size;
+}
+function _navigationEntry() {
+  if (!_navTiming) _navTimingReset(0);
+  var t = _navTiming;
+  var body = _navBodySize();
+  return new PerformanceNavigationTiming(__currentUrl(), {
+    startTime: 0,
+    duration: t.loadEventEnd,
+    fetchStart: t.fetchStart,
+    domainLookupStart: t.domainLookupStart,
+    domainLookupEnd: t.domainLookupEnd,
+    connectStart: t.connectStart,
+    connectEnd: t.connectEnd,
+    secureConnectionStart: t.secureConnectionStart,
+    requestStart: t.requestStart,
+    responseStart: t.responseStart,
+    responseEnd: t.responseEnd,
+    domInteractive: t.domInteractive,
+    domContentLoadedEventStart: t.domContentLoadedEventStart,
+    domContentLoadedEventEnd: t.domContentLoadedEventEnd,
+    domComplete: t.domComplete,
+    loadEventStart: t.loadEventStart,
+    loadEventEnd: t.loadEventEnd,
+    type: t.type,
+    redirectCount: t.redirectCount,
+    nextHopProtocol: t.nextHopProtocol,
+    responseStatus: 200,
+    contentType: "text/html",
+    encodedBodySize: body,
+    decodedBodySize: body,
+    // Chromium reports transferSize as the encoded body plus response header
+    // overhead; 300 bytes is its own placeholder for that overhead.
+    transferSize: body ? body + 300 : 0,
+  });
+}
+function _perfAllEntries() {
+  var entries = [_navigationEntry()];
+  for (var i = 0; i < _perfUserEntries.length; i++) entries.push(_perfUserEntries[i]);
+  entries.sort(function (a, b) { return a.startTime - b.startTime; });
+  return entries;
+}
+// The legacy PerformanceTiming surface, derived from the same marks so the two
+// APIs cannot disagree. Absolute epoch milliseconds; 0 means "not reached".
+function _perfLegacyTiming() {
+  var t0 = globalThis.performance.timeOrigin || 0;
+  var t = _navTiming || {};
+  var abs = function (v) { return v ? Math.round(t0 + v) : 0; };
+  return {
+    navigationStart: Math.round(t0),
+    unloadEventStart: 0,
+    unloadEventEnd: 0,
+    redirectStart: 0,
+    redirectEnd: 0,
+    fetchStart: abs(t.fetchStart),
+    domainLookupStart: abs(t.domainLookupStart),
+    domainLookupEnd: abs(t.domainLookupEnd),
+    connectStart: abs(t.connectStart),
+    connectEnd: abs(t.connectEnd),
+    secureConnectionStart: abs(t.secureConnectionStart),
+    requestStart: abs(t.requestStart),
+    responseStart: abs(t.responseStart),
+    responseEnd: abs(t.responseEnd),
+    domLoading: abs(t.domLoading),
+    domInteractive: abs(t.domInteractive),
+    domContentLoadedEventStart: abs(t.domContentLoadedEventStart),
+    domContentLoadedEventEnd: abs(t.domContentLoadedEventEnd),
+    domComplete: abs(t.domComplete),
+    loadEventStart: abs(t.loadEventStart),
+    loadEventEnd: abs(t.loadEventEnd),
+  };
+}
+// Records the document-lifecycle marks. The host drives readyState and
+// dispatches DOMContentLoaded/load, and those transitions are the only signal
+// bootstrap gets, so the marks hang off them. The listeners are registered
+// from __obscura_init, ahead of any page script, so the *Start marks land
+// before the page's own handlers; the matching *End marks are taken from a
+// microtask, which runs once the whole dispatch has finished.
+function _installNavigationTimingHooks() {
+  try {
+    globalThis.document.addEventListener('DOMContentLoaded', function () {
+      if (!_navTiming) return;
+      if (!_navTiming.domContentLoadedEventStart) _navTiming.domContentLoadedEventStart = performance.now();
+      queueMicrotask(function () {
+        if (_navTiming) _navTiming.domContentLoadedEventEnd = performance.now();
+      });
+    });
+  } catch (e) {}
+  try {
+    globalThis.addEventListener('load', function () {
+      if (!_navTiming) return;
+      if (!_navTiming.loadEventStart) _navTiming.loadEventStart = performance.now();
+      queueMicrotask(function () {
+        if (_navTiming) _navTiming.loadEventEnd = performance.now();
+      });
+    });
+  } catch (e) {}
+}
+// readyState is a plain global the host assigns to. Intercepting the
+// assignment is what lets domInteractive/domComplete be real measurements
+// instead of copies of navigationStart.
+var _documentReadyStateValue;
+try {
+  Object.defineProperty(globalThis, '__documentReadyState__', {
+    get() { return _documentReadyStateValue; },
+    set(value) {
+      _documentReadyStateValue = value;
+      if (!_navTiming) return;
+      if (value === 'interactive' && !_navTiming.domInteractive) {
+        _navTiming.domInteractive = performance.now();
+      } else if (value === 'complete') {
+        if (!_navTiming.domInteractive) _navTiming.domInteractive = performance.now();
+        if (!_navTiming.domComplete) _navTiming.domComplete = performance.now();
+      }
+    },
+    configurable: true,
+    enumerable: false,
+  });
+} catch (e) {}
 globalThis.performance = globalThis.performance || {
   now: (function() {
     // Monotonically non-decreasing: return the wall-clock offset, but never a
@@ -10591,17 +11056,88 @@ globalThis.performance = globalThis.performance || {
       return _last;
     };
   })(),
-  mark(){}, measure(){},
-  clearMarks(){}, clearMeasures(){}, clearResourceTimings(){},
-  getEntries(){return [];}, getEntriesByName(){return [];}, getEntriesByType(){return [];},
+  // mark()/measure() used to be no-ops returning undefined; the real ones
+  // return the entry, and instrumentation code reads .startTime off it.
+  mark(name, options) {
+    const entry = new PerformanceMark(String(name), options);
+    _perfUserEntries.push(entry);
+    return entry;
+  },
+  measure(name, startOrOptions, endMark) {
+    let start = 0;
+    let end = this.now();
+    let detail;
+    const resolve = (ref) => {
+      if (ref === null || ref === undefined) return null;
+      if (typeof ref === "number") return ref;
+      const wanted = String(ref);
+      for (let i = _perfUserEntries.length - 1; i >= 0; i--) {
+        const candidate = _perfUserEntries[i];
+        if (candidate.entryType === "mark" && candidate.name === wanted) return candidate.startTime;
+      }
+      return null;
+    };
+    if (startOrOptions && typeof startOrOptions === "object") {
+      detail = startOrOptions.detail;
+      const s = resolve(startOrOptions.start);
+      const e = resolve(startOrOptions.end);
+      if (s !== null) start = s;
+      if (e !== null) end = e;
+      else if (startOrOptions.duration !== null && startOrOptions.duration !== undefined) {
+        end = start + Number(startOrOptions.duration);
+      }
+    } else {
+      const s = resolve(startOrOptions);
+      const e = resolve(endMark);
+      if (s !== null) start = s;
+      if (e !== null) end = e;
+    }
+    const entry = new PerformanceMeasure(String(name), start, Math.max(0, end - start), detail);
+    _perfUserEntries.push(entry);
+    return entry;
+  },
+  clearMarks(name) {
+    _perfUserEntries = _perfUserEntries.filter(e =>
+      e.entryType !== "mark" || (name !== undefined && e.name !== String(name)));
+  },
+  clearMeasures(name) {
+    _perfUserEntries = _perfUserEntries.filter(e =>
+      e.entryType !== "measure" || (name !== undefined && e.name !== String(name)));
+  },
+  clearResourceTimings(){},
+  getEntries() { try { return _perfAllEntries(); } catch (e) { return []; } },
+  getEntriesByName(name, type) {
+    try {
+      const wanted = String(name);
+      return _perfAllEntries().filter(e =>
+        e.name === wanted && (type === undefined || e.entryType === String(type)));
+    } catch (e) { return []; }
+  },
+  getEntriesByType(type) {
+    try {
+      const wanted = String(type);
+      // Subresource timing is not tracked: the host fetches scripts, styles and
+      // images without telling JS, so 'resource' comes back empty rather than
+      // fabricated. Nothing here may throw -- callers index [0] blindly.
+      if (wanted === "navigation") return [_navigationEntry()];
+      return _perfAllEntries().filter(e => e.entryType === wanted);
+    } catch (e) { return []; }
+  },
   setResourceTimingBufferSize(){},
   timeOrigin: 0,
-  timing: { navigationStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0 },
+  get timing() { return _perfLegacyTiming(); },
   navigation: { type: 0, redirectCount: 0 },
   memory: {
     jsHeapSizeLimit: 4294705152,
     totalJSHeapSize: 19321856,
     usedJSHeapSize: 16781520,
+  },
+  toJSON() {
+    return {
+      timeOrigin: this.timeOrigin,
+      timing: this.timing,
+      navigation: { type: this.navigation.type, redirectCount: this.navigation.redirectCount },
+    };
   },
 };
 
@@ -10874,6 +11410,12 @@ globalThis.atob = globalThis.atob || ((s) => {
         const ev = new Event('hashchange');
         ev.oldURL = prevUrl; ev.newURL = next;
         try { globalThis.dispatchEvent(ev); } catch {}
+        // window.dispatchEvent only runs addEventListener registrations, so the
+        // `window.onhashchange = fn` form (still common in hash routers) would
+        // never be called.
+        try {
+          if (typeof globalThis.onhashchange === 'function') globalThis.onhashchange.call(globalThis, ev);
+        } catch (e) { console.error(e); }
       }
     } catch {}
   };
@@ -11663,6 +12205,186 @@ globalThis.HTMLLegendElement = Element;
 globalThis.HTMLProgressElement = Element;
 globalThis.HTMLDetailsElement = Element;
 globalThis.HTMLDialogElement = Element;
+
+// Interface objects that were missing entirely. Referencing one is enough to
+// throw ReferenceError, and `HTMLTableRowElement` in particular is a common
+// `instanceof` target in table-rendering code, which took out whole views.
+// These are real subclasses of Element rather than `= Element` aliases (the
+// pattern most of the block above uses) so `instanceof` actually
+// discriminates: with an alias, every element is an instance of every one of
+// them. `_htmlTagClasses` below is what makes the parser/createElement path
+// hand out the matching prototype.
+class HTMLTableRowElement extends Element {
+  get cells() {
+    const out = [];
+    for (const child of this.children) {
+      if (child.tagName === "TD" || child.tagName === "TH") out.push(child);
+    }
+    return HTMLCollection._from(out);
+  }
+  get sectionRowIndex() {
+    const parent = this.parentNode;
+    if (!parent || parent.nodeType !== 1) return -1;
+    let index = -1;
+    for (const child of parent.children) {
+      if (child.tagName === "TR") index++;
+      if (child === this) return child.tagName === "TR" ? index : -1;
+    }
+    return -1;
+  }
+  get rowIndex() {
+    let table = this.parentNode;
+    while (table && table.nodeType === 1 && table.tagName !== "TABLE") table = table.parentNode;
+    if (!table || table.nodeType !== 1) return -1;
+    const rows = table.querySelectorAll("tr");
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i] === this) return i;
+    }
+    return -1;
+  }
+  insertCell(index) {
+    const cells = this.cells;
+    const at = (index === undefined || index === -1) ? cells.length : (index | 0);
+    if (at < 0 || at > cells.length) throw new DOMException("The index is not in the allowed range.", "IndexSizeError");
+    const cell = document.createElement("td");
+    if (at === cells.length) this.appendChild(cell);
+    else this.insertBefore(cell, cells[at]);
+    return cell;
+  }
+  deleteCell(index) {
+    const cells = this.cells;
+    const at = (index === -1) ? cells.length - 1 : (index | 0);
+    if (at < 0 || at >= cells.length) throw new DOMException("The index is not in the allowed range.", "IndexSizeError");
+    cells[at].remove();
+  }
+}
+class HTMLTableCellElement extends Element {
+  get cellIndex() {
+    const row = this.parentNode;
+    if (!row || row.nodeType !== 1 || row.tagName !== "TR") return -1;
+    let index = -1;
+    for (const child of row.children) {
+      if (child.tagName === "TD" || child.tagName === "TH") index++;
+      if (child === this) return index;
+    }
+    return -1;
+  }
+  get colSpan() { const v = parseInt(this.getAttribute("colspan"), 10); return Number.isFinite(v) && v > 0 ? v : 1; }
+  set colSpan(v) { this.setAttribute("colspan", String(v)); }
+  get rowSpan() { const v = parseInt(this.getAttribute("rowspan"), 10); return Number.isFinite(v) && v >= 0 ? v : 1; }
+  set rowSpan(v) { this.setAttribute("rowspan", String(v)); }
+}
+class HTMLTableSectionElement extends Element {
+  get rows() {
+    const out = [];
+    for (const child of this.children) {
+      if (child.tagName === "TR") out.push(child);
+    }
+    return HTMLCollection._from(out);
+  }
+  insertRow(index) {
+    const rows = this.rows;
+    const at = (index === undefined || index === -1) ? rows.length : (index | 0);
+    if (at < 0 || at > rows.length) throw new DOMException("The index is not in the allowed range.", "IndexSizeError");
+    const row = document.createElement("tr");
+    if (at === rows.length) this.appendChild(row);
+    else this.insertBefore(row, rows[at]);
+    return row;
+  }
+  deleteRow(index) {
+    const rows = this.rows;
+    const at = (index === -1) ? rows.length - 1 : (index | 0);
+    if (at < 0 || at >= rows.length) throw new DOMException("The index is not in the allowed range.", "IndexSizeError");
+    rows[at].remove();
+  }
+}
+class HTMLTableCaptionElement extends Element {}
+class HTMLTableColElement extends Element {
+  get span() { const v = parseInt(this.getAttribute("span"), 10); return Number.isFinite(v) && v > 0 ? v : 1; }
+  set span(v) { this.setAttribute("span", String(v)); }
+}
+class HTMLPictureElement extends Element {}
+class HTMLSourceElement extends Element {}
+class HTMLOptGroupElement extends Element {}
+class HTMLOutputElement extends Element {}
+class HTMLMeterElement extends Element {}
+class HTMLTimeElement extends Element {
+  get dateTime() { return this.getAttribute("datetime") || ""; }
+  set dateTime(v) { this.setAttribute("datetime", v == null ? "" : String(v)); }
+}
+class HTMLQuoteElement extends Element {}
+class HTMLDListElement extends Element {}
+class HTMLBaseElement extends Element {}
+class HTMLTitleElement extends Element {
+  get text() { return this.textContent; }
+  set text(v) { this.textContent = v == null ? "" : String(v); }
+}
+class HTMLMapElement extends Element {
+  get areas() { return HTMLCollection._from(this.querySelectorAll("area")); }
+}
+class HTMLAreaElement extends Element {}
+class HTMLObjectElement extends Element {}
+class HTMLEmbedElement extends Element {}
+
+globalThis.HTMLTableRowElement = HTMLTableRowElement;
+globalThis.HTMLTableCellElement = HTMLTableCellElement;
+globalThis.HTMLTableSectionElement = HTMLTableSectionElement;
+globalThis.HTMLTableCaptionElement = HTMLTableCaptionElement;
+globalThis.HTMLTableColElement = HTMLTableColElement;
+globalThis.HTMLPictureElement = HTMLPictureElement;
+globalThis.HTMLSourceElement = HTMLSourceElement;
+globalThis.HTMLOptGroupElement = HTMLOptGroupElement;
+globalThis.HTMLOutputElement = HTMLOutputElement;
+globalThis.HTMLMeterElement = HTMLMeterElement;
+globalThis.HTMLTimeElement = HTMLTimeElement;
+globalThis.HTMLQuoteElement = HTMLQuoteElement;
+globalThis.HTMLDListElement = HTMLDListElement;
+globalThis.HTMLBaseElement = HTMLBaseElement;
+globalThis.HTMLTitleElement = HTMLTitleElement;
+globalThis.HTMLMapElement = HTMLMapElement;
+globalThis.HTMLAreaElement = HTMLAreaElement;
+globalThis.HTMLObjectElement = HTMLObjectElement;
+globalThis.HTMLEmbedElement = HTMLEmbedElement;
+for (const _ctor of [
+  HTMLTableRowElement, HTMLTableCellElement, HTMLTableSectionElement,
+  HTMLTableCaptionElement, HTMLTableColElement, HTMLPictureElement,
+  HTMLSourceElement, HTMLOptGroupElement, HTMLOutputElement, HTMLMeterElement,
+  HTMLTimeElement, HTMLQuoteElement, HTMLDListElement, HTMLBaseElement,
+  HTMLTitleElement, HTMLMapElement, HTMLAreaElement, HTMLObjectElement,
+  HTMLEmbedElement,
+]) _markNative(_ctor);
+
+// Tag -> wrapper class for the interfaces above. `_elementClassFor` and
+// `_elementClassForKnownName` consult this after their own special cases, so
+// a <tr> parsed from markup and one from createElement('tr') get the same
+// prototype. Declared with `var` so the hoisted binding is visible to those
+// functions, which are defined earlier in the file but only ever run later.
+_htmlTagClasses = {
+  TR: HTMLTableRowElement,
+  TD: HTMLTableCellElement,
+  TH: HTMLTableCellElement,
+  THEAD: HTMLTableSectionElement,
+  TBODY: HTMLTableSectionElement,
+  TFOOT: HTMLTableSectionElement,
+  CAPTION: HTMLTableCaptionElement,
+  COL: HTMLTableColElement,
+  COLGROUP: HTMLTableColElement,
+  PICTURE: HTMLPictureElement,
+  SOURCE: HTMLSourceElement,
+  OPTGROUP: HTMLOptGroupElement,
+  OUTPUT: HTMLOutputElement,
+  METER: HTMLMeterElement,
+  TIME: HTMLTimeElement,
+  BLOCKQUOTE: HTMLQuoteElement,
+  Q: HTMLQuoteElement,
+  DL: HTMLDListElement,
+  BASE: HTMLBaseElement,
+  TITLE: HTMLTitleElement,
+  MAP: HTMLMapElement,
+  AREA: HTMLAreaElement,
+  OBJECT: HTMLObjectElement,
+  EMBED: HTMLEmbedElement,
+};
 // SVGAnimatedString backs the className and href reflections on SVG elements.
 // baseVal and animVal both read the live attribute (no SMIL animation), and
 // baseVal is writable. Used by the SVG-aware get className()/get href() above.
@@ -15972,7 +16694,11 @@ globalThis.__obscura_init = function() {
   // origin ahead of it makes performance.now() and the rAF timestamp negative.
   const t0 = Date.now() - 1 - Math.floor(_fpRand(641) * 100);
   globalThis.performance.timeOrigin = t0;
-  globalThis.performance.timing = { navigationStart: t0, domContentLoadedEventEnd: t0, loadEventEnd: t0 };
+  // performance.timing is a live projection of _navTiming now, so the marks
+  // are seeded here rather than pinned to navigationStart.
+  _perfUserEntries = [];
+  _navTimingReset(Date.now() - t0);
+  _installNavigationTimingHooks();
   var _totalHeap = 15000000 + Math.floor(_fpRand(620) * 85000000);
   globalThis.performance.memory = {
     jsHeapSizeLimit: 4294705152,
