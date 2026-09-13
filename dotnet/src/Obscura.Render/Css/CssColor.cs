@@ -28,7 +28,10 @@ public static class CssColor
     /// <summary>Parse a CSS color, resolving <c>light-dark()</c> to its light branch.</summary>
     public static RgbaColor? Parse(string value) => ParseForScheme(value, darkScheme: false);
 
-    public static RgbaColor? ParseForScheme(string value, bool darkScheme)
+    public static RgbaColor? ParseForScheme(string value, bool darkScheme) =>
+        ParseSingleValue(value, darkScheme) ?? ParseBackgroundLayerColor(value, darkScheme);
+
+    private static RgbaColor? ParseSingleValue(string value, bool darkScheme)
     {
         var raw = value.Trim();
         var lower = CssText.AsciiLower(raw);
@@ -99,6 +102,14 @@ public static class CssColor
             return ParseOkFunction(lower);
         }
 
+        // color(<space> c1 c2 c3 [/ alpha]) - CSS Color 4. Only the sRGB space maps onto
+        // the 8-bit sRGB model without a gamut conversion; a wider space still parses as
+        // nothing, the same as before, rather than being silently clipped.
+        if (lower.StartsWith("color(", StringComparison.Ordinal))
+        {
+            return ParseColorFunction(lower);
+        }
+
         // color-mix(in <space>, c1 p1%, c2 p2%) - Tailwind v4 uses this
         // pervasively, usually to apply opacity.
         if (lower.StartsWith("color-mix(", StringComparison.Ordinal))
@@ -151,11 +162,21 @@ public static class CssColor
 
     private static RgbaColor? ParseRgbFunction(string rest)
     {
-        var inner = rest.EndsWith(')') ? rest[..^1] : rest;
-        var parts = inner.Split([',', '/', ' '], StringSplitOptions.None)
+        // Stop at the closing paren and reject anything after it. Reading to the end of
+        // the string instead let `rgba(4, 67, 211, 0.12) none repeat scroll 0% 0%` - a
+        // whole `background` shorthand layer - parse as the *opaque* rgb(4, 67, 211):
+        // the alpha component came through as the unparseable "0.12)" and was silently
+        // dropped. ParseBackgroundLayerColor handles that shape now.
+        if (FindMatchingParen(rest) is not { } close
+            || rest[(close + 1)..].Trim().Length != 0)
+        {
+            return null;
+        }
+
+        var parts = rest[..close].Split([',', '/', ' '], StringSplitOptions.None)
             .Where(part => part.Trim().Length != 0)
             .ToList();
-        if (parts.Count < 3)
+        if (parts.Count is < 3 or > 4)
         {
             return null;
         }
@@ -169,9 +190,14 @@ public static class CssColor
         }
 
         byte alpha = 255;
-        if (parts.Count > 3 && CssNumber.ParseFloat(parts[3].Trim()) is { } parsedAlpha)
+        if (parts.Count > 3)
         {
-            alpha = ToByte(parsedAlpha * 255f);
+            if (ParseAlpha(parts[3]) is not { } parsedAlpha)
+            {
+                return null;
+            }
+
+            alpha = parsedAlpha;
         }
 
         return new RgbaColor(r.Value, g.Value, b.Value, alpha);
@@ -190,11 +216,16 @@ public static class CssColor
 
     private static RgbaColor? ParseHslFunction(string rest)
     {
-        var inner = rest.EndsWith(')') ? rest[..^1] : rest;
-        var parts = inner.Split([',', '/', ' '], StringSplitOptions.None)
+        if (FindMatchingParen(rest) is not { } close
+            || rest[(close + 1)..].Trim().Length != 0)
+        {
+            return null;
+        }
+
+        var parts = rest[..close].Split([',', '/', ' '], StringSplitOptions.None)
             .Where(part => part.Trim().Length != 0)
             .ToList();
-        if (parts.Count < 3)
+        if (parts.Count is < 3 or > 4)
         {
             return null;
         }
@@ -210,11 +241,12 @@ public static class CssColor
         byte alpha = 255;
         if (parts.Count > 3)
         {
-            var raw = parts[3].Trim();
-            if (CssNumber.ParseFloat(TrimEndAscii(raw, "%")) is { } value)
+            if (ParseAlpha(parts[3]) is not { } parsedAlpha)
             {
-                alpha = ToByte(raw.Contains('%', StringComparison.Ordinal) ? value * 2.55f : value * 255f);
+                return null;
             }
+
+            alpha = parsedAlpha;
         }
 
         return HslToRgba(hue.Value, Math.Clamp(saturation.Value / 100f, 0f, 1f), Math.Clamp(lightness.Value / 100f, 0f, 1f), alpha);
@@ -290,6 +322,73 @@ public static class CssColor
         static float? Number(string text)
         {
             var trimmed = text.Trim();
+            return trimmed.EndsWith('%')
+                ? CssNumber.ParseFloat(trimmed.AsSpan()[..^1]) is { } percent ? percent / 100f : null
+                : CssNumber.ParseFloat(trimmed);
+        }
+    }
+
+    /// <summary>
+    /// <c>color(srgb r g b [/ alpha])</c>, whose channels are 0..1 numbers or percentages.
+    /// </summary>
+    /// <remarks>
+    /// Chromium keeps the wide-gamut spelling in <c>getComputedStyle</c>; this model is
+    /// Rust's <c>[u8; 4]</c>, so the value comes back as the equivalent legacy
+    /// <c>rgb()/rgba()</c>. Parsing it at all is the point: an unparsed
+    /// <c>background-color: color(srgb ...)</c> painted nothing.
+    /// </remarks>
+    private static RgbaColor? ParseColorFunction(string lower)
+    {
+        var rest = lower["color(".Length..];
+        if (FindMatchingParen(rest) is not { } close
+            || rest[(close + 1)..].Trim().Length != 0)
+        {
+            return null;
+        }
+
+        var inner = rest[..close];
+        var slash = inner.IndexOf('/');
+        var main = slash >= 0 ? inner[..slash] : inner;
+        var alphaText = slash >= 0 ? inner[(slash + 1)..] : null;
+
+        var parts = main.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 4 || parts[0] != "srgb")
+        {
+            return null;
+        }
+
+        Span<byte> channels = stackalloc byte[3];
+        for (var index = 0; index < 3; index++)
+        {
+            if (Component(parts[index + 1]) is not { } value)
+            {
+                return null;
+            }
+
+            channels[index] = ToByte(value * 255f);
+        }
+
+        byte alpha = 255;
+        if (alphaText is not null)
+        {
+            if (ParseAlpha(alphaText) is not { } parsedAlpha)
+            {
+                return null;
+            }
+
+            alpha = parsedAlpha;
+        }
+
+        return new RgbaColor(channels[0], channels[1], channels[2], alpha);
+
+        static float? Component(string text)
+        {
+            var trimmed = text.Trim();
+            if (trimmed == "none")
+            {
+                return 0f;
+            }
+
             return trimmed.EndsWith('%')
                 ? CssNumber.ParseFloat(trimmed.AsSpan()[..^1]) is { } percent ? percent / 100f : null
                 : CssNumber.ParseFloat(trimmed);
@@ -496,6 +595,129 @@ public static class CssColor
         return !value.Any(CssText.IsWhitespace);
     }
 
+    /// <summary>
+    /// Pull the <c>&lt;color&gt;</c> out of a whole <c>background</c> shorthand layer.
+    /// </summary>
+    /// <remarks>
+    /// The shorthand hands this parser an entire layer, e.g.
+    /// <c>rgb(255, 255, 255) none repeat scroll 0% 0%</c> - which is what a
+    /// <c>background: var(--x) none repeat scroll 0% 0%</c> declaration becomes once the
+    /// custom property resolves to <c>rgb(...)</c>. The hex/keyword path above already
+    /// tolerated that shape, because it only ever reads the first whitespace-delimited
+    /// token, but the functional notations did not: <c>ParseRgbFunction</c> saw the
+    /// trailing keywords, failed, and the element lost its background color entirely.
+    ///
+    /// Leniency is confined to layers whose other components are all things a
+    /// <c>background</c> layer may actually contain, so a genuinely malformed longhand
+    /// (<c>background-color: rgb(1, 2, 3) garbage</c>) still invalidates the declaration,
+    /// and so does <c>light-dark(red, blue) trailing</c>, which the strict branch above
+    /// rejects on purpose.
+    /// </remarks>
+    private static RgbaColor? ParseBackgroundLayerColor(string value, bool darkScheme)
+    {
+        var components = SplitTopWhitespace(value);
+        if (components.Count < 2)
+        {
+            return null;
+        }
+
+        for (var index = 0; index < components.Count; index++)
+        {
+            if (ParseSingleValue(components[index], darkScheme) is not { } color)
+            {
+                continue;
+            }
+
+            for (var other = 0; other < components.Count; other++)
+            {
+                if (other != index && !IsBackgroundLayerToken(components[other]))
+                {
+                    return null;
+                }
+            }
+
+            return color;
+        }
+
+        return null;
+    }
+
+    /// <summary>Components a <c>background</c> layer may carry besides its color.</summary>
+    private static bool IsBackgroundLayerToken(string token)
+    {
+        var lower = CssText.AsciiLower(token.Trim());
+        if (lower.Length == 0 || lower == "/")
+        {
+            return true;
+        }
+
+        if (lower.StartsWith("url(", StringComparison.Ordinal)
+            || lower.StartsWith("image-set(", StringComparison.Ordinal)
+            || lower.StartsWith("cross-fade(", StringComparison.Ordinal)
+            || lower.Contains("-gradient(", StringComparison.Ordinal)
+            || lower.StartsWith("var(", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // A <length-percentage> or <number> for the position/size components.
+        var first = lower[0];
+        if (char.IsAsciiDigit(first) || first is '.' or '+' or '-')
+        {
+            return true;
+        }
+
+        return lower is "none" or "auto" or "cover" or "contain"
+            or "repeat" or "repeat-x" or "repeat-y" or "no-repeat" or "space" or "round"
+            or "scroll" or "fixed" or "local"
+            or "border-box" or "padding-box" or "content-box" or "text"
+            or "left" or "right" or "top" or "bottom" or "center";
+    }
+
+    /// <summary>Split on top-level whitespace, respecting nested <c>()</c>.</summary>
+    private static List<string> SplitTopWhitespace(string value)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var start = -1;
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            switch (character)
+            {
+                case '(':
+                    depth++;
+                    break;
+                case ')':
+                    depth = Math.Max(depth - 1, 0);
+                    break;
+            }
+
+            if (depth == 0 && CssText.IsWhitespace(character))
+            {
+                if (start >= 0)
+                {
+                    parts.Add(value[start..index]);
+                    start = -1;
+                }
+
+                continue;
+            }
+
+            if (start < 0)
+            {
+                start = index;
+            }
+        }
+
+        if (start >= 0)
+        {
+            parts.Add(value[start..]);
+        }
+
+        return parts;
+    }
+
     /// <summary>Split on top-level commas, respecting nested <c>()</c>.</summary>
     internal static List<string> SplitTopCommas(string value)
     {
@@ -545,6 +767,16 @@ public static class CssColor
         }
 
         return null;
+    }
+
+    /// <summary>The <c>&lt;alpha-value&gt;</c> of a legacy color function: a number or a percentage.</summary>
+    private static byte? ParseAlpha(string text)
+    {
+        var trimmed = text.Trim();
+        var percent = trimmed.EndsWith('%');
+        var number = CssNumber.ParseFloat(percent ? trimmed.AsSpan()[..^1] : trimmed.AsSpan());
+
+        return number is { } value ? ToByte(percent ? value * 2.55f : value * 255f) : null;
     }
 
     private static string TrimEndAscii(string value, string suffix) =>
