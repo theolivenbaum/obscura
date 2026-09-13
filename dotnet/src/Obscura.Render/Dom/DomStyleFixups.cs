@@ -69,13 +69,17 @@ internal static class DomStyleFixups
         TextEngine engine)
     {
         NativeButtonIntrinsicContent content = new();
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, root))
-        {
-            NativeButtonWalk(tree, child, styles, fontSize, engine, content);
-        }
-
+        styles.TryGetValue(root, out LayoutStyle? rootStyle);
+        NativeButtonWalkChildren(tree, root, rootStyle, styles, fontSize, rootStyle, engine, content);
         return content;
     }
+
+    /// <summary>
+    /// Normalize a control's collected text the way the sizing pass measures it: one line,
+    /// runs of white space collapsed to a single space.
+    /// </summary>
+    internal static string NormalizeControlLabel(string text) =>
+        string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static float? DefiniteInlineSize(Dimension dimension, float fontSize)
     {
@@ -89,11 +93,155 @@ internal static class DomStyleFixups
         return value is { } resolved ? F32.Max(resolved, 0f) : null;
     }
 
+    /// <summary>
+    /// Does <paramref name="container"/> give every in-flow child its own line, so the
+    /// container's inline contribution is the widest child rather than their sum?
+    /// </summary>
+    private static bool StacksChildrenInBlockAxis(
+        DomTree tree,
+        NodeId container,
+        LayoutStyle? style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        if (style is null)
+        {
+            return false;
+        }
+
+        switch (style.Display)
+        {
+            case Display.Flex when !style.InternalFlexContainer:
+                return (style.FlexDirection ?? TaffyFlexDirection.Row)
+                    is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse;
+
+            case Display.Grid:
+                // Track sizes are not known here, so approximate: a grid whose items flow
+                // down a single column stacks, anything wider accumulates across columns.
+                return style.GridTemplateColumns.Count <= 1
+                    && style.GridAutoFlow is not (Layout.GridAutoFlow.Column
+                        or Layout.GridAutoFlow.ColumnDense);
+
+            case Display.None:
+                return false;
+
+            default:
+                // A block container stacks only once something in it is block-level; a run of
+                // inline children shares one line and keeps accumulating.
+                foreach (NodeId child in DomTraversal.RenderedChildren(tree, container))
+                {
+                    if (IsBlockLevelChild(tree, child, styles))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+        }
+    }
+
+    private static bool IsBlockLevelChild(
+        DomTree tree,
+        NodeId id,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        if (tree.GetNode(id) is not { } node
+            || node.TextContentOfTextNode is not null
+            || node.AsElement() is null
+            || !styles.TryGetValue(id, out LayoutStyle? style))
+        {
+            return false;
+        }
+
+        // Out-of-flow boxes contribute nothing and must not split an inline run in two.
+        if (style.Display == Display.None
+            || style.Position == TaffyPosition.Absolute
+            || style.Float is not null
+            || style.DisplayContents)
+        {
+            return false;
+        }
+
+        return style.Display is Display.Block or Display.Flex or Display.Grid
+            && !style.IsInlineBlock;
+    }
+
+    /// <summary>
+    /// Accumulate the children of one container, summing along a line and taking the widest
+    /// line when the container stacks its children.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs `native_button_intrinsic_content`,
+    /// which sums every descendant's contribution regardless of how the boxes between them
+    /// are laid out. That is a row accumulation, and it is only right when the content really
+    /// does share one line. A `&lt;button&gt;` wrapping a column flex container (the shape
+    /// every Tesserae stacked button has) came out as the sum of the column's items instead
+    /// of the widest of them - 227px against Chromium's 180px for a [51px, 164px] column,
+    /// which is what made a grid of such buttons wrap one tile per row early. The identical
+    /// subtree under a `&lt;div&gt;` was already correct, because a div is sized by real CSS
+    /// intrinsic sizing rather than by this shortcut. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static void NativeButtonWalkChildren(
+        DomTree tree,
+        NodeId container,
+        LayoutStyle? containerStyle,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        float fontSize,
+        LayoutStyle? buttonStyle,
+        TextEngine engine,
+        NativeButtonIntrinsicContent content)
+    {
+        List<NodeId> children = DomTraversal.RenderedChildren(tree, container);
+        if (!StacksChildrenInBlockAxis(tree, container, containerStyle, styles))
+        {
+            foreach (NodeId child in children)
+            {
+                NativeButtonWalk(tree, child, styles, fontSize, buttonStyle, engine, content);
+            }
+
+            return;
+        }
+
+        // A flex or grid container blockifies every item, so each one is its own line; a block
+        // container only breaks the line at its block-level children.
+        bool everyChildIsOwnLine = containerStyle is { Display: Display.Flex or Display.Grid };
+        float widest = 0f;
+        NativeButtonIntrinsicContent line = new();
+        foreach (NodeId child in children)
+        {
+            if (!everyChildIsOwnLine && !IsBlockLevelChild(tree, child, styles))
+            {
+                NativeButtonWalk(tree, child, styles, fontSize, buttonStyle, engine, line);
+                continue;
+            }
+
+            widest = F32.Max(widest, LineWidth(line, buttonStyle, engine));
+            line = new();
+            NativeButtonWalk(tree, child, styles, fontSize, buttonStyle, engine, line);
+            widest = F32.Max(widest, LineWidth(line, buttonStyle, engine));
+            line = new();
+        }
+
+        content.AtomicWidth += F32.Max(widest, LineWidth(line, buttonStyle, engine));
+    }
+
+    private static float LineWidth(
+        NativeButtonIntrinsicContent line,
+        LayoutStyle? buttonStyle,
+        TextEngine engine)
+    {
+        string label = NormalizeControlLabel(line.Text.ToString());
+        float text = label.Length != 0 && buttonStyle is not null
+            ? engine.MeasureControlLabel(label, buttonStyle)
+            : 0f;
+        return line.AtomicWidth + text;
+    }
+
     private static void NativeButtonWalk(
         DomTree tree,
         NodeId id,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         float fontSize,
+        LayoutStyle? buttonStyle,
         TextEngine engine,
         NativeButtonIntrinsicContent content)
     {
@@ -194,10 +342,7 @@ internal static class DomStyleFixups
             }
         }
 
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
-        {
-            NativeButtonWalk(tree, child, styles, fontSize, engine, content);
-        }
+        NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, content);
     }
 
     /// <summary>

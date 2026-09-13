@@ -192,27 +192,41 @@ public sealed class LayoutStyle
 
     public Dimension Width;
 
-    /// <summary>The preferred inline size is the intrinsic <c>fit-content</c> keyword.</summary>
+    /// <summary>
+    /// Which intrinsic sizing keyword the preferred inline size carries, if any.
+    /// </summary>
     /// <remarks>
     /// Taffy's box-size dimension cannot represent intrinsic sizing keywords, so <c>Width</c>
-    /// remains <c>Auto</c> while the DOM layout convergence pass applies the CSS shrink-to-fit
-    /// formula from min/max-content measurements.
+    /// remains <c>Auto</c> while the DOM layout convergence pass resolves the keyword from
+    /// min/max-content measurements: <c>fit-content</c> applies the shrink-to-fit formula,
+    /// <c>max-content</c> and <c>min-content</c> take the measurement directly.
+    /// DEVIATION: crates/obscura-render implements none of the three (its <c>width</c> parse
+    /// drops every keyword to <c>auto</c>), so all of them fill the containing block there.
+    /// See "Known deviations" in todo.md.
     /// </remarks>
-    public bool WidthFitContent;
+    public IntrinsicSizeKeyword WidthIntrinsicKeyword;
+
+    /// <summary>The preferred inline size is one of the intrinsic sizing keywords.</summary>
+    public bool WidthFitContent => WidthIntrinsicKeyword != IntrinsicSizeKeyword.None;
 
     public Dimension Height;
 
-    /// <summary>The preferred block size is the intrinsic <c>fit-content</c> keyword.</summary>
+    /// <summary>
+    /// Which intrinsic sizing keyword the preferred block size carries, if any.
+    /// </summary>
     /// <remarks>
-    /// In the block axis <c>fit-content</c> sizes to content exactly like <c>auto</c>, so
-    /// <c>Height</c> stays <c>Auto</c>. The one observable difference is that it is not an
-    /// automatic size, so a flex or grid item carrying it is never stretched to fill its line
-    /// or row.
-    /// DEVIATION: crates/obscura-render does not implement <c>height: fit-content</c> at all
-    /// (it has no counterpart of this flag), so the keyword there leaves the box free to
-    /// stretch. See "Known deviations" in todo.md.
+    /// In the block axis all three keywords size to content exactly like <c>auto</c>, so
+    /// <c>Height</c> stays <c>Auto</c>. The one observable difference is that none of them is
+    /// an automatic size, so a flex or grid item carrying one is never stretched to fill its
+    /// line or row.
+    /// DEVIATION: crates/obscura-render implements none of them (it has no counterpart of
+    /// this field), so the keywords there leave the box free to stretch. See "Known
+    /// deviations" in todo.md.
     /// </remarks>
-    public bool HeightFitContent;
+    public IntrinsicSizeKeyword HeightIntrinsicKeyword;
+
+    /// <summary>The preferred block size is one of the intrinsic sizing keywords.</summary>
+    public bool HeightFitContent => HeightIntrinsicKeyword != IntrinsicSizeKeyword.None;
 
     /// <summary>
     /// Which box edge <c>width</c>/<c>height</c> and min/max sizes describe. CSS starts at

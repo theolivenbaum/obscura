@@ -1194,7 +1194,7 @@ public static partial class ComputedStyle
             case "width":
             case "inline-size":
                 style.Width = DimensionValue(value);
-                style.WidthFitContent = CssText.EqualsAscii(value.Trim(), "fit-content");
+                style.WidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[0] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 0, value);
                 style.WidthSet = true;
@@ -1203,7 +1203,7 @@ public static partial class ComputedStyle
             case "height":
             case "block-size":
                 style.Height = DimensionValue(value);
-                style.HeightFitContent = CssText.EqualsAscii(value.Trim(), "fit-content");
+                style.HeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[1] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 1, value);
                 style.HeightSet = true;

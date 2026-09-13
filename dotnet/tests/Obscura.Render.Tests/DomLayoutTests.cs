@@ -3581,6 +3581,116 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void ButtonTakesTheWidestItemOfAColumnFlexChildNotTheirSum()
+    {
+        // The native-control sizing pass walks a button's subtree and accumulates every
+        // descendant's contribution, which is a row accumulation: only right when the content
+        // shares one line. A column flex container gives each item its own line, so the
+        // button's contribution is the widest item. Summing them made a [51px, 164px] column
+        // measure 215px of content instead of 164px, and the identical subtree under an
+        // inline-block div (which goes through real intrinsic sizing, not the shortcut) was
+        // already correct - that mismatch is the invariant this pins.
+        DomTree tree = Parse(
+            """
+            <style>
+             html,body{margin:0}
+             .col{display:flex;flex-direction:column}
+             .a{width:164px;height:20px}
+             .b{width:51px;height:20px}
+             .plainbox{display:inline-block;border:0;padding:0}
+            </style>
+            <button id=b1><div class=col><div class=b></div><div class=a></div></div></button>
+            <button id=b2><div class=col><div class=a></div></div></button>
+            <div class=plainbox id=d1><div class=col><div class=b></div><div class=a></div></div></div>
+            <button id=b4 style="display:flex"><div class=col><div class=b></div><div class=a></div></div></button>
+            <button id=b5><div class=a></div><div class=b></div></button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 950f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The plain inline-block is the oracle: max, not sum.
+        Assert.True(MathF.Abs(Width("d1") - 164f) < 0.01f, $"inline-block: {Width("d1")}");
+
+        // The button adds only its UA `padding: 1px 6px`. Chromium reports 180 for all three
+        // because its UA sheet also gives a button a 2px border, which this port's UA arm
+        // does not carry; that 4px is a separate, pre-existing gap and not what this pins.
+        Assert.True(MathF.Abs(Width("b1") - 176f) < 0.01f, $"column child: {Width("b1")}");
+        Assert.True(MathF.Abs(Width("b2") - 176f) < 0.01f, $"single-item column: {Width("b2")}");
+        Assert.True(
+            MathF.Abs(Width("b4") - 176f) < 0.01f,
+            $"display:flex button around the same column: {Width("b4")}");
+
+        // Block-level children of the button itself stack the same way.
+        Assert.True(MathF.Abs(Width("b5") - 176f) < 0.01f, $"block children: {Width("b5")}");
+    }
+
+    [Fact]
+    public void ButtonStillSumsInlineLevelContentOnOneLine()
+    {
+        // The guard for the fix above: a row of inline-level children does share a line, so
+        // their contributions still add up. This is the shape of every icon-plus-label button
+        // (`<i style="width:12px"></i><span style="margin-left:10px">...</span>`).
+        DomTree tree = Parse(
+            """
+            <style>
+             html,body{margin:0}
+             button{padding:0;border:0}
+             .icon{display:inline-block;width:12px;height:12px}
+             .gap{display:inline-block;width:30px;height:12px;margin-left:10px}
+            </style>
+            <button id=b><span class=icon></span><span class=gap></span></button>
+            <button id=row style="display:flex"><div class=icon></div><div class=gap></div></button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 950f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        Assert.True(MathF.Abs(Width("b") - 52f) < 0.01f, $"inline run: {Width("b")}");
+        Assert.True(MathF.Abs(Width("row") - 52f) < 0.01f, $"flex row: {Width("row")}");
+    }
+
+    [Fact]
+    public void WidthMaxContentAndMinContentSizeToTheirMeasurement()
+    {
+        // `fit-content` was the only intrinsic sizing keyword the width parse recognized; the
+        // other two fell through to `auto` and filled the 1200px containing block.
+        DomTree tree = Parse(
+            """
+            <style>
+              html,body{margin:0}
+              .box{padding:0 20px;border:1px solid #999;box-sizing:border-box}
+              .wide{width:160px;height:20px}
+              .narrow{width:50px;height:20px}
+            </style>
+            <div style="width:1200px">
+              <div class=box id=mx style="display:flex;flex-direction:column;width:max-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+              <div class=box id=mn style="display:flex;flex-direction:column;width:min-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+              <div class=box id=rw style="display:flex;width:max-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+              <div class=box id=fc style="display:flex;flex-direction:column;width:fit-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 950f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // max(160, 50) + 40 padding + 2 border.
+        Assert.True(MathF.Abs(Width("mx") - 202f) < 0.01f, $"column max-content: {Width("mx")}");
+        Assert.True(MathF.Abs(Width("mn") - 202f) < 0.01f, $"column min-content: {Width("mn")}");
+
+        // A row sums its items: 160 + 50 + 42.
+        Assert.True(MathF.Abs(Width("rw") - 252f) < 0.01f, $"row max-content: {Width("rw")}");
+
+        // fit-content is unchanged, and here clamps to the same max-content.
+        Assert.True(MathF.Abs(Width("fc") - 202f) < 0.01f, $"column fit-content: {Width("fc")}");
+    }
+
+    [Fact]
     public void CyclicPercentageImageKeepsNaturalIntrinsicContribution()
     {
         // A `width:100%` image inside a content-sized flex item is a cyclic

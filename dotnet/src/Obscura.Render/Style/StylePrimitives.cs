@@ -650,6 +650,21 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>dimension_value</c>.</summary>
+    /// <summary>
+    /// Classify a <c>width</c>/<c>height</c> declaration as one of the CSS intrinsic sizing
+    /// keywords. None of them is representable as a <see cref="Dimension"/>, so the caller
+    /// keeps the dimension <c>auto</c> and resolves the keyword during layout convergence.
+    /// </summary>
+    internal static IntrinsicSizeKeyword IntrinsicSizeKeywordValue(string token)
+    {
+        string value = token.Trim();
+        if (CssText.EqualsAscii(value, "fit-content")) return IntrinsicSizeKeyword.FitContent;
+        if (CssText.EqualsAscii(value, "max-content")) return IntrinsicSizeKeyword.MaxContent;
+        if (CssText.EqualsAscii(value, "min-content")) return IntrinsicSizeKeyword.MinContent;
+
+        return IntrinsicSizeKeyword.None;
+    }
+
     internal static Dimension DimensionValue(string token)
     {
         string value = token.Trim();

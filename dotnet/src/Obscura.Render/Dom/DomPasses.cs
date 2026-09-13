@@ -1269,7 +1269,10 @@ internal static class DomPasses
         }
     }
 
-    /// <summary>Resolve the <c>width: fit-content</c> keyword after the containing inline space is known.</summary>
+    /// <summary>
+    /// Resolve the <c>width</c> intrinsic sizing keywords (<c>fit-content</c>,
+    /// <c>max-content</c>, <c>min-content</c>) after the containing inline space is known.
+    /// </summary>
     internal static bool ApplyFitContentWidths(
         TaffyTree taffyTree,
         IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
@@ -1277,8 +1280,12 @@ internal static class DomPasses
         float initialCbWidth,
         Func<TaffyTree, TaffyNodeId, TaffyAvailableSpace, float?> intrinsicWidth)
     {
-        List<(TaffyNodeId Node, float Available, float Margin, float InlineEdges, bool ContentBox)>
-            candidates = [];
+        List<(TaffyNodeId Node,
+            IntrinsicSizeKeyword Keyword,
+            float Available,
+            float Margin,
+            float InlineEdges,
+            bool ContentBox)> candidates = [];
 
         // Snapshot every containing-space input before intrinsic subtree measurements overwrite
         // cached node layouts.
@@ -1355,6 +1362,7 @@ internal static class DomPasses
 
             candidates.Add((
                 node,
+                style.WidthIntrinsicKeyword,
                 available,
                 margin,
                 inlineEdges,
@@ -1362,8 +1370,12 @@ internal static class DomPasses
         }
 
         bool changed = false;
-        foreach ((TaffyNodeId node, float available, float margin, float inlineEdges, bool contentBox)
-            in candidates)
+        foreach ((TaffyNodeId node,
+            IntrinsicSizeKeyword keyword,
+            float available,
+            float margin,
+            float inlineEdges,
+            bool contentBox) in candidates)
         {
             if (intrinsicWidth(taffyTree, node, TaffyAvailableSpace.MinContent) is not { } minContent)
             {
@@ -1376,7 +1388,12 @@ internal static class DomPasses
             }
 
             float fill = F32.Max(available - margin, 0f);
-            float usedOuter = F32.Max(minContent, F32.Min(maxContent, fill));
+            float usedOuter = keyword switch
+            {
+                IntrinsicSizeKeyword.MinContent => minContent,
+                IntrinsicSizeKeyword.MaxContent => maxContent,
+                _ => F32.Max(minContent, F32.Min(maxContent, fill)),
+            };
             float declaration = contentBox
                 ? F32.Max(usedOuter - inlineEdges, 0f)
                 : F32.Max(usedOuter, 0f);

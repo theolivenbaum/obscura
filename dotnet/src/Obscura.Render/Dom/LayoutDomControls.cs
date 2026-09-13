@@ -76,11 +76,7 @@ public static partial class RenderDom
                 // changes their inner display to flex/grid.
                 float fontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
                 bool bold = ComputedStyle.UsedFontWeight(style) >= 600;
-                string label = string.Join(
-                    ' ',
-                    content.Text.ToString().Split(
-                        (char[]?)null,
-                        StringSplitOptions.RemoveEmptyEntries));
+                string label = DomStyleFixups.NormalizeControlLabel(content.Text.ToString());
                 // Shaped through the inline engine, not TextWidth: the label is laid out
                 // by that engine, so sizing the box with a different metric leaves the
                 // text too wide for the box it just produced. <select> deliberately keeps

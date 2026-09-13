@@ -545,12 +545,12 @@ public static class CssAnimationSampler
             case AnimatedProperty.Width:
                 style.Width = dimension;
                 style.WidthSet = true;
-                style.WidthFitContent = false;
+                style.WidthIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.Height:
                 style.Height = dimension;
                 style.HeightSet = true;
-                style.HeightFitContent = false;
+                style.HeightIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.MinWidth:
                 style.MinWidth = dimension;

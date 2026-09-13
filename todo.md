@@ -606,7 +606,9 @@ DEVIATION comment at the C# code that differs.
   on every one, which shrank the label span and wrapped it, and then failed to wrap
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
-  content with the pseudo's own style.
+  content with the pseudo's own style. Follow-up: that accumulation was a *sum* over
+  the whole subtree, which is only right on one line - see "An auto-sized `<button>`
+  accumulates by line" under Known deviations.
 - **DEVIATION - `repeat(auto-fit, minmax(<math function>, 1fr))` collapsed to one
   column.** Vendored taffy (so the reference too) counts only a bare length or
   percentage as a track's fixed component, so `min()`/`calc()` reads as
@@ -719,6 +721,55 @@ buttons, context cards, cron editors and date-range pickers with
 
 Covered by `HeightFitContentHugsContentInsteadOfStretching` and
 `HeightFitContentRespectsExplicitCrossAxisAlignment`.
+
+### `width: max-content` / `min-content` are implemented; the reference ignores them
+
+`style.rs` recognizes `fit-content` on `width`/`inline-size` and nothing else, so
+`max-content` and `min-content` parse as an unknown dimension and fall back to `auto`.
+An `auto` inline size on a block-level box fills its containing block, which is the
+opposite of what both keywords ask for: a `width: max-content` column flex box inside a
+1200px parent came out 1200px wide against Chromium's 202px.
+
+`LayoutStyle.WidthFitContent` / `HeightFitContent` are now the "is an intrinsic
+keyword" predicates over `WidthIntrinsicKeyword` / `HeightIntrinsicKeyword`
+(`IntrinsicSizeKeyword`), which say *which* keyword it is. Taffy's box-size dimension
+still cannot carry any of them, so the dimension stays `Auto` and
+`DomPasses.ApplyFitContentWidths` resolves it once the containing space is known:
+`min-content` takes the min-content measurement, `max-content` the max-content one, and
+`fit-content` keeps the existing `clamp(min-content, stretch-fit, max-content)`. In the
+block axis all three size to content like `auto`, so they share
+`ApplyFitContentBlockSize` and only stop the box from being stretched.
+
+Covered by `WidthMaxContentAndMinContentSizeToTheirMeasurement`.
+
+### An auto-sized `<button>` accumulates by line, not over the whole subtree
+
+`native_button_intrinsic_content` in `dom.rs` walks a button's subtree and adds up every
+descendant's contribution. That is a row accumulation, and it is only correct when the
+content really does share one line. A `<button>` wrapping a column flex container - the
+shape of every stacked Tesserae button - therefore measured the *sum* of the column's
+items instead of the widest of them: 227px against Chromium's 180px for a
+[51px, 164px] column. The same subtree under an inline-block `<div>` was already right,
+because a div is sized by real CSS intrinsic sizing rather than by this shortcut.
+
+The port's walk asks each container how its children stack before combining them
+(`DomStyleFixups.StacksChildrenInBlockAxis`): a column flex container, a single-column
+grid, and a block container holding block-level children each give their in-flow
+children their own line, so the container contributes the widest line; anything else
+keeps summing along the line. Consecutive inline-level children of a block container are
+still measured as one run.
+
+Measured against Chromium on Curiosity Workspace `#/preferences?id=themes`, where each
+theme tile is a `<button class="tss-btn">` around a `.tss-stack` column contributing 51
+and 164: the tile went from 257px to Chromium's 206px, and the wrapping row of tiles
+from 4 per row to Chromium's 5.
+
+Covered by `ButtonTakesTheWidestItemOfAColumnFlexChildNotTheirSum` and
+`ButtonStillSumsInlineLevelContentOnOneLine`.
+
+Still short of Chromium by 4px on a button with no author border, because this port's
+`button` UA arm carries `padding: 1px 6px` but not Chromium's `border: 2px outset`. That
+is a separate pre-existing gap and is not what the fix above changes.
 
 ### `align-content: baseline` uses its fallback alignment
 
