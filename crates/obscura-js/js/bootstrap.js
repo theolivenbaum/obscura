@@ -6506,22 +6506,36 @@ function _innerTextCollect(node, segments, pre, visible) {
     const childVisible = style && style.visibility
       ? String(style.visibility) === 'visible'
       : visible;
-    const block = _innerTextIsBlock(display);
+    // A table cell is separated from its siblings by a tab, not a line break;
+    // the row around it supplies the break. Obscura's computed style reports a
+    // default-styled <td>/<th> as display:block rather than table-cell, so the
+    // tag is what identifies a cell in that case; an author who really did set
+    // display:block on a cell gets the block treatment, same as Chromium.
+    const cell = display === 'table-cell'
+      || ((tag === 'TD' || tag === 'TH') && display === 'block');
+    const block = !cell && _innerTextIsBlock(display);
     // A <p> is the one element that contributes two required line breaks.
     const breaks = tag === 'P' ? 2 : 1;
-    if (block) segments.push({ breaks: breaks });
+    if (cell) segments.push({ tab: 1 });
+    else if (block) segments.push({ breaks: breaks });
     _innerTextCollect(child, segments, childPre, childVisible);
-    if (block) segments.push({ breaks: breaks });
+    if (cell) segments.push({ tab: 1 });
+    else if (block) segments.push({ breaks: breaks });
   }
 }
 function _innerTextJoin(segments) {
   let result = '';
   let breaks = 0;
   let forced = 0;
+  let tabs = 0;
   let seen = false;
   let lastPre = false;
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
+    if (segment.tab !== undefined) {
+      if (seen) tabs = 1;
+      continue;
+    }
     if (segment.breaks !== undefined) {
       // Line breaks before any text at all are dropped, which is what keeps
       // innerText from starting with a blank line. Consecutive <br> stack;
@@ -6533,7 +6547,7 @@ function _innerTextJoin(segments) {
     }
     let text = segment.text;
     if (!segment.pre) {
-      if (!seen || breaks > 0 || result.charAt(result.length - 1) === ' ') {
+      if (!seen || breaks > 0 || tabs > 0 || result.charAt(result.length - 1) === ' ') {
         text = text.replace(/^ +/, '');
       }
       if (!text) continue;
@@ -6541,9 +6555,13 @@ function _innerTextJoin(segments) {
     if (breaks > 0) {
       if (!lastPre) result = result.replace(/ +$/, '');
       for (let n = 0; n < breaks; n++) result += '\n';
+    } else if (tabs > 0) {
+      if (!lastPre) result = result.replace(/ +$/, '');
+      result += '\t';
     }
     breaks = 0;
     forced = 0;
+    tabs = 0;
     result += text;
     lastPre = !!segment.pre;
     seen = true;
