@@ -78,7 +78,50 @@ internal static class PaintCssValues
                 $"rgb({color.R}, {color.G}, {color.B})")
             : string.Create(
                 CultureInfo.InvariantCulture,
-                $"rgba({color.R}, {color.G}, {color.B}, {CssNumber(color.A / 255f)})");
+                $"rgba({color.R}, {color.G}, {color.B}, {CssAlpha(color.A)})");
+
+    /// <summary>
+    /// Serialize an 8-bit alpha the way Blink's <c>Color::SerializeAsCSSColor</c> does:
+    /// the shortest decimal with at most three fraction digits that quantizes back to the
+    /// same byte.
+    /// </summary>
+    /// <remarks>
+    /// Storing alpha in 8 bits is correct and matches Blink - Chromium reports
+    /// <c>rgba(1, 2, 3, 0.9999)</c> as the opaque <c>rgb(1, 2, 3)</c>, so it quantizes
+    /// too. What was wrong was emitting the raw <c>A / 255</c> ratio afterwards, which
+    /// turned an authored <c>rgba(4, 67, 211, 0.1)</c> into
+    /// <c>rgba(4, 67, 211, 0.10196079)</c>. Searching short decimals first recovers the
+    /// authored spelling without having to carry a float alpha through the paint stack.
+    ///
+    /// Three fraction digits always terminate the search: the 0.001 grid is finer than
+    /// the 1/255 step between adjacent byte alphas, so some decimal on it always
+    /// round-trips. Verified against Chromium for all 256 values.
+    /// </remarks>
+    internal static string CssAlpha(byte alpha)
+    {
+        for (int places = 0, scale = 1; places <= 3; places++, scale *= 10)
+        {
+            int digits = (int)F32.Round(alpha * scale / 255f);
+            if ((int)F32.Round(digits * 255f / scale) != alpha)
+            {
+                continue;
+            }
+
+            if (places == 0)
+            {
+                return digits.ToString(CultureInfo.InvariantCulture);
+            }
+
+            string fraction = digits
+                .ToString(CultureInfo.InvariantCulture)
+                .PadLeft(places, '0')
+                .TrimEnd('0');
+
+            return fraction.Length == 0 ? "0" : "0." + fraction;
+        }
+
+        return CssNumber(alpha / 255f);
+    }
 
     internal static string AlignItemsCss(AlignItems value)
     {

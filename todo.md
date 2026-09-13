@@ -196,6 +196,29 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **`filter` is parsed only for `blur()`, so `drop-shadow()` neither reports nor
+  paints.** `getComputedStyle(el).filter` returns `""` where Chromium returns the
+  authored list, and the product's four-way
+  `drop-shadow(rgba(0, 0, 0, 0.5) 1px 0px 0px) ...` outline around
+  `.tss-pixelavatar-canvas` renders with no outline at all. Confirmed visually
+  against Chromium.
+
+  Both halves live outside the paint/color surface: the `case "filter":` arm is
+  in `Obscura.Render/Style/ComputedStyle.cs` and its only storage is
+  `LayoutStyle.FilterBlur` in `Obscura.Render/Core/LayoutStyle.cs`, so reporting
+  the value needs a new `LayoutStyle` member and painting it needs a
+  `SKImageFilter.CreateDropShadow` pass in `PaintDom`. Nothing is stubbed: the
+  property is silently absent today, not wrongly reported.
+
+- **`PerformanceNavigationTiming.nextHopProtocol` is missing, and it stops the
+  Curiosity Workspace front end from booting.** The app's `SupportsDuplexStream`
+  probe reads it off the navigation entry, throws
+  `TypeError: Cannot read properties of undefined (reading 'nextHopProtocol')`,
+  and the shell retries forever ("Failed to load page, reloading now"), so the
+  page never renders past its loading skeleton. That makes any whole-app
+  differential run against this product impossible: Obscura reports 4
+  `button.tss-btn` on every route where Chromium reports 39-58.
+
 - **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
   Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
   which routes every call from `bootstrap.js` through ClearScript's
@@ -904,6 +927,50 @@ matched: `text-decoration-line` other than `underline`; computed insets on a
 positioned box, which Chromium reports as used values and the port reports as the
 specified value; and `background-image` gradients, which are re-serialized from the
 parsed layer rather than from their source text.
+### Alpha is serialized the way Blink spells it, not as `A / 255`
+
+`css_color` in `crates/obscura-render/src/paint.rs` writes a translucent color's
+alpha as the raw `a as f32 / 255.0` ratio, so an authored `rgba(4, 67, 211, 0.1)`
+read back as `rgba(4, 67, 211, 0.10196079)`. `PaintCssValues.CssAlpha` instead
+searches decimals with 0..3 fraction digits and emits the first that quantizes
+back to the same byte, which is what Blink's `Color::SerializeAsCSSColor` does.
+
+Storing alpha in 8 bits was never the bug and is not changed: Chromium quantizes
+too, and reports `rgba(1, 2, 3, 0.9999)` as the opaque `rgb(1, 2, 3)`. Verified
+against headless Chromium for all 256 alpha values; that table is pinned in
+`PaintColorTests.AlphaSerializationMatchesChromiumForEveryByte`.
+
+### A whole `background` shorthand layer can be handed to the color parser
+
+`parse_color_for_scheme` reads a color out of the front of whatever string it is
+given - the hex and keyword paths take only the first whitespace-delimited token -
+but the functional notations did not, so
+`background: rgb(255, 255, 255) none repeat scroll 0% 0%` lost its color
+entirely and `background: rgba(4, 67, 211, 0.12) none ...` came back *opaque*,
+because the alpha component arrived as the unparseable `"0.12)"` and was
+silently dropped. That declaration shape is what
+`background: var(--x) none repeat scroll 0% 0%` becomes whenever the custom
+property resolves to a functional color, which is pervasive in Tesserae.
+
+C# makes the functional parsers strict about their closing paren and adds
+`CssColor.ParseBackgroundLayerColor`, which retries a multi-component value by
+picking the component that is a color. The retry only applies when every other
+component is something a `background` layer may actually contain, so
+`background-color: rgb(1, 2, 3) garbage` and `light-dark(red, blue) trailing`
+still invalidate the declaration.
+
+### `color(srgb ...)` parses, and reads back as legacy `rgb()`
+
+Neither engine parsed the CSS Color 4 `color()` function, so
+`background-color: color(srgb 0.0156863 0.262745 0.827451 / 0.14)` painted
+nothing at all. C# parses the `srgb` space (`ParseColorFunction`); wider spaces
+still parse as nothing rather than being silently clipped into sRGB.
+
+`RgbaColor` is Rust's `[u8; 4]`, so `getComputedStyle` returns the equivalent
+`rgba(4, 67, 211, 0.14)` where Chromium preserves the wide-gamut
+`color(srgb ...)` spelling. The numbers agree; only the spelling differs.
+Matching Chromium here needs a color-space tag on the color model and is not
+done.
 
 ### Decoded web faces are cached; the reference re-decodes them
 
