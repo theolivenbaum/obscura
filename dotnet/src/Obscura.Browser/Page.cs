@@ -557,14 +557,25 @@ public sealed partial class Page : IDisposable
     /// rendering the next view in place. <c>bootstrap.js</c> tracks that in
     /// <c>__virtualUrl</c> so <c>location.href</c> reads correctly, but nothing on
     /// the host side looked at it, so the page had moved on while
-    /// <c>page.url()</c> still reported the old document. Returns whether the URL
-    /// changed.
+    /// <c>page.url()</c> still reported the old document. Adopting the URL is
+    /// unchanged; what the outcome adds is that the change is classified, because
+    /// nothing fetched a document here and CDP has to say so.
+    /// <para>
+    /// Deviation from <c>crates/obscura-browser/src/fork_virtual_url.rs</c>: Rust's
+    /// <c>sync_virtual_url</c> answers a bare <c>bool</c> and its CDP layer turns
+    /// that into <c>Page.frameNavigated</c>, which in CDP means a new document, so
+    /// every client retires the frame's execution contexts and the next
+    /// <c>Runtime.evaluate</c> fails with "Execution context was destroyed". The
+    /// C# port answers the kind instead so the CDP layer can emit
+    /// <c>Page.navigatedWithinDocument</c>. The Rust tree has the same gap; this is
+    /// a fix, not a port correction.
+    /// </para>
     /// </remarks>
-    public bool SyncVirtualUrl()
+    public PageNavigationOutcome SyncVirtualUrl()
     {
         if (Js is not { } js)
         {
-            return false;
+            return PageNavigationOutcome.None;
         }
         JsonNode? value;
         try
@@ -573,25 +584,42 @@ public sealed partial class Page : IDisposable
         }
         catch (JsRuntimeException)
         {
-            return false;
+            return PageNavigationOutcome.None;
         }
         if (value?.GetValueKind() != System.Text.Json.JsonValueKind.String)
         {
-            return false;
+            return PageNavigationOutcome.None;
         }
         string virtualUrl = value.GetValue<string>();
         if (virtualUrl.Length == 0 || PageUrl.TryParse(virtualUrl) is not { } parsed)
         {
-            return false;
+            return PageNavigationOutcome.None;
         }
         if (Url is { } current && string.Equals(current.Href, parsed.Href, StringComparison.Ordinal))
         {
-            return false;
+            return PageNavigationOutcome.None;
         }
+        UrlRecord? previous = Url;
         Url = parsed;
         PushHistory(UrlString());
-        return true;
+
+        // No document was fetched, so the DOM, the JS realm and every execution context
+        // built on it survive: whichever API moved the URL, this is a same-document
+        // navigation. Chrome tells the two apart only in the reported navigationType.
+        bool fragmentOnly = previous is { } before && IsFragmentOnlyChange(before, parsed);
+
+        return PageNavigationOutcome.SameDocument(fragmentOnly
+            ? PageNavigationOutcome.FragmentType
+            : PageNavigationOutcome.HistoryApiType);
     }
+
+    /// <summary>Whether two URLs differ in their fragment and in nothing else.</summary>
+    private static bool IsFragmentOnlyChange(UrlRecord before, UrlRecord after) =>
+        !string.Equals(before.Fragment, after.Fragment, StringComparison.Ordinal)
+        && string.Equals(
+            PageUrl.WithoutFragment(before).Href,
+            PageUrl.WithoutFragment(after).Href,
+            StringComparison.Ordinal);
 
     /// <summary>Runs a host script, swallowing a page-level failure as Rust's <c>let _ =</c> does.</summary>
     internal static void TryExecute(ObscuraJsRuntime js, string name, string source)

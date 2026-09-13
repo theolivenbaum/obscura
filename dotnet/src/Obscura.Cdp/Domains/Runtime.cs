@@ -74,27 +74,29 @@ public static class Runtime
 
     /// <summary>
     /// Drain pending JS-initiated navigation (form.submit, location.assign, etc), then
-    /// emit the same CDP nav-event sequence Page.navigate emits so Puppeteer's
+    /// emit the CDP nav events for what actually happened so Puppeteer's
     /// waitForNavigation / Playwright's wait_for_url resolves.
     /// </summary>
     /// <remarks>
     /// Without this, in-page navigations look like Runtime.evaluate finishing to clients
-    /// and they hang waiting for a frameNavigated that never fires.
+    /// and they hang waiting for a frameNavigated that never fires. A URL change the
+    /// document survived is the other half of that: it gets navigatedWithinDocument, not
+    /// the document sequence.
     /// </remarks>
     private static async Task EmitPostEvalNavAsync(CdpContext ctx, string? sessionId)
     {
         BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
-        bool didNavigate;
+        PageNavigationOutcome navigation;
         try
         {
-            didNavigate = await page.ProcessPendingNavigationAsync().ConfigureAwait(false);
+            navigation = await page.ProcessPendingNavigationOutcomeAsync().ConfigureAwait(false);
         }
         catch (Obscura.Browser.PageException exception)
         {
             throw new DomainError(exception.Message);
         }
 
-        if (!didNavigate)
+        if (!navigation.Navigated)
         {
             return;
         }
@@ -106,6 +108,20 @@ public static class Runtime
         List<NetworkEvent> networkEvents = [.. current.NetworkEvents];
         current.NetworkEvents.Clear();
         bool reachedIdle = current.Lifecycle.IsNetworkIdle();
+
+        // A route change the page made through the History API fetched no document, so the
+        // loader, the realm and the client's execution context all survive it. Replaying a
+        // document lifecycle here is what made the next evaluate fail with "Execution
+        // context was destroyed"; the requests the script started belong to the loader the
+        // page already has.
+        if (navigation.IsSameDocument)
+        {
+            Page.EmitSameDocumentNavigation(
+                ctx, sessionId, frameId, pageUrl, pageId, navigation.NavigationType);
+            Page.EmitRuntimeNetworkEvents(
+                ctx, sessionId, frameId, pageUrl, pageId, networkEvents);
+            return;
+        }
 
         string loaderId = $"loader-{Guid.NewGuid()}";
         Page.EmitNavigationEvents(

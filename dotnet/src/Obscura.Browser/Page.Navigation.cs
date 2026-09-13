@@ -7,6 +7,59 @@ using Obscura.Net;
 
 namespace Obscura.Browser;
 
+/// <summary>What a URL change was, so a CDP client is told the truth about the document.</summary>
+/// <remarks>
+/// CDP draws a hard line here: <c>Page.frameNavigated</c> announces a new document and every
+/// client (Puppeteer, Playwright, chromiumoxide) retires the frame's execution contexts when
+/// it arrives. A History API or fragment-only URL change keeps the document, and is
+/// <c>Page.navigatedWithinDocument</c> instead.
+/// </remarks>
+public enum PageNavigationKind
+{
+    /// <summary>The URL did not move.</summary>
+    None,
+
+    /// <summary>The URL moved without fetching a document; the realm and its contexts survive.</summary>
+    SameDocument,
+
+    /// <summary>A document was fetched and replaced; the old contexts are gone.</summary>
+    CrossDocument,
+}
+
+/// <summary>The outcome of draining a page's pending navigation.</summary>
+/// <param name="Kind">Whether anything moved, and whether the document survived.</param>
+/// <param name="NavigationType">
+/// The CDP <c>navigationType</c> a same-document change is reported with.
+/// </param>
+public readonly record struct PageNavigationOutcome(PageNavigationKind Kind, string NavigationType)
+{
+    /// <summary>A <c>history.pushState</c> / <c>replaceState</c> URL change.</summary>
+    public const string HistoryApiType = "historyApi";
+
+    /// <summary>A change to nothing but the fragment.</summary>
+    public const string FragmentType = "fragment";
+
+    /// <summary>Anything else, including a real document navigation.</summary>
+    public const string OtherType = "other";
+
+    /// <summary>Nothing moved.</summary>
+    public static PageNavigationOutcome None => new(PageNavigationKind.None, OtherType);
+
+    /// <summary>A document was fetched and replaced.</summary>
+    public static PageNavigationOutcome CrossDocument =>
+        new(PageNavigationKind.CrossDocument, OtherType);
+
+    /// <summary>A URL change the document survived, reported as <paramref name="navigationType"/>.</summary>
+    public static PageNavigationOutcome SameDocument(string navigationType) =>
+        new(PageNavigationKind.SameDocument, navigationType);
+
+    /// <summary>Whether the URL moved at all.</summary>
+    public bool Navigated => Kind != PageNavigationKind.None;
+
+    /// <summary>Whether the URL moved without replacing the document.</summary>
+    public bool IsSameDocument => Kind == PageNavigationKind.SameDocument;
+}
+
 public sealed partial class Page
 {
     public Task NavigateAsync(string url, CancellationToken cancellationToken = default) =>
@@ -607,7 +660,20 @@ public sealed partial class Page
         }
     }
 
-    public async Task<bool> ProcessPendingNavigationAsync(CancellationToken cancellationToken = default)
+    /// <summary>Whether anything moved; <see cref="ProcessPendingNavigationOutcomeAsync"/> says what.</summary>
+    public async Task<bool> ProcessPendingNavigationAsync(CancellationToken cancellationToken = default) =>
+        (await ProcessPendingNavigationOutcomeAsync(cancellationToken).ConfigureAwait(false)).Navigated;
+
+    /// <summary>
+    /// Drain a pending navigation, answering whether the document was replaced.
+    /// </summary>
+    /// <remarks>
+    /// The caller needs the distinction to pick the CDP event: only a fetched document is a
+    /// <c>Page.frameNavigated</c>. A page that routed itself through the History API kept
+    /// its document, and saying otherwise destroys the client's execution context.
+    /// </remarks>
+    public async Task<PageNavigationOutcome> ProcessPendingNavigationOutcomeAsync(
+        CancellationToken cancellationToken = default)
     {
         if (TakePendingNavigation() is not { } pending)
         {
@@ -635,7 +701,7 @@ public sealed partial class Page
                 $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
         }
         PushHistory(UrlString());
-        return true;
+        return PageNavigationOutcome.CrossDocument;
     }
 
     private static ulong ElapsedMilliseconds(long startTimestamp) =>

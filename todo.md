@@ -1095,6 +1095,22 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   `navigate*` branches on `Err`, so `PageException` carries a `PageErrorKind`
   and, for `TooManyClientNavigations`, the limit; the messages are the ones
   `thiserror` renders. Same for `RasterPdfError` -> `RasterPdfException`.
+- **A same-document URL change is reported as `Page.navigatedWithinDocument`.**
+  Rust's `sync_virtual_url` answers a bare `bool` and `obscura-cdp` turns any
+  URL change into `Page.frameNavigated`, which in CDP means a new document: the
+  client retires the frame's execution contexts, so the next `Runtime.evaluate`
+  fails with "Execution context was destroyed". Driving a single page app whose
+  views persist their tab through `history.replaceState` lost 20 of 157 routes
+  that way, where Chromium captured all 157. `SyncVirtualUrl` /
+  `ProcessPendingNavigationOutcomeAsync` now answer a `PageNavigationOutcome`,
+  and `Runtime.evaluate` / `Input.dispatchMouseEvent` emit
+  `Page.navigatedWithinDocument` (`navigationType` `fragment` or `historyApi`)
+  plus `Target.targetInfoChanged` for a URL change that fetched no document. A
+  real document navigation still emits the full `frameNavigated` sequence.
+  `Page.navigatedWithinDocument` appears nowhere in `crates/obscura-cdp`, so
+  this is a fix rather than a port correction, and the C# half of
+  `page_frame_contract` asserts the new event where the Rust test asserts the
+  frame. Covered by `SameDocumentNavigationEvents`.
 - **The navigation deadline is a `CancellationTokenSource`, not a dropped
   future.** `tokio::time::timeout` cancels the inner future at its next await
   point; the port threads the token into every HTTP call and awaits on the
