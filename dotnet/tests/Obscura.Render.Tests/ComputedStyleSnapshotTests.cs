@@ -264,7 +264,7 @@ public class ComputedStyleSnapshotTests
     public void BoxShadowSerializesColorFirstAndMarksInset()
     {
         Assert.Equal(
-            "rgba(0, 0, 0, 0.301961) 0px 1px 2px 0px",
+            "rgba(0, 0, 0, 0.3) 0px 1px 2px 0px",
             Computed(
                 """<div id="box" style="box-shadow:0 1px 2px rgba(0,0,0,.3)">x</div>""",
                 "box")["box-shadow"]);
