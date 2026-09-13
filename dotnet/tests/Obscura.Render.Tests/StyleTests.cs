@@ -568,6 +568,69 @@ public class ComputedStyleTests
     }
 
     [Fact]
+    public void FontFamilyInheritClearsTheUserAgentFormControlFont()
+    {
+        // The UA sheet pins every form control to Arial; `input, textarea, select, button {
+        // font-family: inherit }` is how a page's own face reaches them. A null family is what
+        // the top-down pass reads as "inherit", so the keyword has to write one.
+        Assert.Equal("arial", Compute("button", null).FontFamily);
+        Assert.Null(Compute("button", "font-family:inherit").FontFamily);
+        Assert.Null(Compute("select", "font-family:unset").FontFamily);
+        Assert.Null(Compute("input", "font-family:inherit").FontFamily);
+        Assert.Null(Compute("textarea", "font-family:inherit").FontFamily);
+
+        // `revert` rolls an author declaration back to the UA value.
+        Assert.Equal("arial", Compute("button", "font-family:revert").FontFamily);
+
+        // An ordinary family still wins, and a non-control is unaffected.
+        Assert.Equal(
+            "pjs, inter",
+            Compute("button", "font-family:PJS, Inter").FontFamily);
+        Assert.Null(Compute("div", "font-family:inherit").FontFamily);
+    }
+
+    [Fact]
+    public void OverflowKeywordsKeepTheirComputedIdentity()
+    {
+        Assert.Equal("visible", Compute("div", "overflow:visible").ComputedOverflowCss(true));
+        Assert.Equal("clip", Compute("div", "overflow:clip").ComputedOverflowCss(true));
+        Assert.Equal("hidden", Compute("div", "overflow:hidden").ComputedOverflowCss(true));
+        Assert.Equal("scroll", Compute("div", "overflow:scroll").ComputedOverflowCss(true));
+        Assert.Equal("auto", Compute("div", "overflow:auto").ComputedOverflowCss(true));
+
+        // `overlay` is the legacy alias of `auto` and computes to it.
+        Assert.Equal("auto", Compute("div", "overflow:overlay").ComputedOverflowCss(true));
+
+        LayoutStyle two = Compute("div", "overflow:hidden auto");
+        Assert.Equal("hidden", two.ComputedOverflowCss(true));
+        Assert.Equal("auto", two.ComputedOverflowCss(false));
+
+        // Computed-value coupling: one scrollable axis turns `visible` into `auto` and `clip`
+        // into `hidden` on the other.
+        LayoutStyle coupled = Compute("div", "overflow-x:visible;overflow-y:hidden");
+        Assert.Equal("auto", coupled.ComputedOverflowCss(true));
+        Assert.Equal("hidden", coupled.ComputedOverflowCss(false));
+
+        LayoutStyle clipped = Compute("div", "overflow-x:clip;overflow-y:scroll");
+        Assert.Equal("hidden", clipped.ComputedOverflowCss(true));
+        Assert.Equal("scroll", clipped.ComputedOverflowCss(false));
+
+        // `clip` still clips without establishing a scroll container.
+        LayoutStyle clip = Compute("div", "overflow:clip");
+        Assert.True(clip.OverflowHidden);
+        Assert.False(clip.OverflowScrollContainer);
+
+        LayoutStyle hidden = Compute("div", "overflow:hidden");
+        Assert.True(hidden.OverflowHidden);
+        Assert.True(hidden.OverflowScrollContainer);
+
+        // Chromium's UA sheet clips an image to its box.
+        Assert.Equal("clip", Compute("img", null).ComputedOverflowCss(true));
+        Assert.Equal("clip", Compute("img", null).ComputedOverflowCss(false));
+        Assert.Equal("visible", Compute("img", "overflow:visible").ComputedOverflowCss(true));
+    }
+
+    [Fact]
     public void FontWeightPreservesNumericValuesAndResolvesRelativeKeywords()
     {
         Assert.Equal("500", Compute("div", "font-weight:500").FontWeight);

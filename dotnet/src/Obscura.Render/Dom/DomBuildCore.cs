@@ -44,6 +44,7 @@ internal static partial class DomBuild
 
         TaffyStyle taffyStyle = TaffyStyleMapping.ToTaffyStyle(style);
         DomStyleFixups.ApplyContainerSizeContainment(tree, id, style, context.Styles, taffyStyle);
+        DomStyleFixups.ApplyFitContentBlockSize(tree, id, style, context.Styles, taffyStyle);
 
         // A non-stretched flex item in a column flex container uses fit-content for its auto
         // inline size. Taffy has no fit-content box-size value; a synthetic percentage max has

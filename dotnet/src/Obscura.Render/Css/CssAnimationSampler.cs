@@ -207,7 +207,8 @@ public static class CssAnimationSampler
             case AnimatedProperty.MaxWidth:
             case AnimatedProperty.MaxHeight:
             {
-                if (property == AnimatedProperty.Width && style.WidthFitContent)
+                if ((property == AnimatedProperty.Width && style.WidthFitContent)
+                    || (property == AnimatedProperty.Height && style.HeightFitContent))
                 {
                     return null;
                 }
@@ -549,6 +550,7 @@ public static class CssAnimationSampler
             case AnimatedProperty.Height:
                 style.Height = dimension;
                 style.HeightSet = true;
+                style.HeightFitContent = false;
                 break;
             case AnimatedProperty.MinWidth:
                 style.MinWidth = dimension;

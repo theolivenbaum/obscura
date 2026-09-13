@@ -202,6 +202,18 @@ public sealed class LayoutStyle
 
     public Dimension Height;
 
+    /// <summary>The preferred block size is the intrinsic <c>fit-content</c> keyword.</summary>
+    /// <remarks>
+    /// In the block axis <c>fit-content</c> sizes to content exactly like <c>auto</c>, so
+    /// <c>Height</c> stays <c>Auto</c>. The one observable difference is that it is not an
+    /// automatic size, so a flex or grid item carrying it is never stretched to fill its line
+    /// or row.
+    /// DEVIATION: crates/obscura-render does not implement <c>height: fit-content</c> at all
+    /// (it has no counterpart of this flag), so the keyword there leaves the box free to
+    /// stretch. See "Known deviations" in todo.md.
+    /// </remarks>
+    public bool HeightFitContent;
+
     /// <summary>
     /// Which box edge <c>width</c>/<c>height</c> and min/max sizes describe. CSS starts at
     /// <c>content-box</c>; many modern reset sheets opt into <c>border-box</c>.
@@ -611,6 +623,44 @@ public sealed class LayoutStyle
     public string? FontFamily;
 
     /// <summary>
+    /// The <c>font-family</c> list as the author spelled it, re-serialized the way a
+    /// computed-style query reports it: original casing, one <c>", "</c> between families, and
+    /// quotes only where a family does not round-trip as an identifier.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="FontFamily"/> stays lower-cased because every face lookup matches against it
+    /// case-insensitively; this is the reporting spelling only, and follows
+    /// <see cref="FontFamily"/> everywhere, inheritance included.
+    /// DEVIATION: crates/obscura-render keeps only the lower-cased list, so it reports
+    /// <c>"plus jakarta sans", "inter"</c> where Chromium reports
+    /// <c>"Plus Jakarta Sans", Inter</c>. See "Known deviations" in todo.md.
+    /// </remarks>
+    public string? FontFamilySpecified;
+
+    /// <summary>
+    /// The computed <c>cursor</c> keyword, or null while it still inherits. Inherited, initial
+    /// <c>auto</c>.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: crates/obscura-render does not model <c>cursor</c> at all, so a
+    /// computed-style query falls back to the inline declaration and answers <c>auto</c> for
+    /// every element styled by a rule. See "Known deviations" in todo.md.
+    /// </remarks>
+    public string? Cursor;
+
+    /// <summary>
+    /// The computed <c>pointer-events</c> keyword, or null while it still inherits. Inherited,
+    /// initial <c>auto</c>.
+    /// </summary>
+    /// <remarks>
+    /// Reporting only: hit testing runs in JavaScript through <c>document.elementFromPoint</c>,
+    /// which does not consult this.
+    /// DEVIATION: crates/obscura-render does not model <c>pointer-events</c>. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    public string? PointerEvents;
+
+    /// <summary>
     /// Computed inherited <c>font-optical-sizing</c>. <c>null</c> during cascade means inherit;
     /// the top-down pass resolves every element to a value.
     /// </summary>
@@ -841,9 +891,29 @@ public sealed class LayoutStyle
 
     internal bool OverflowAxesSet;
 
+    /// <summary>
+    /// The specified <c>overflow-x</c> keyword: 0 <c>visible</c>, 1 <c>clip</c>, 2
+    /// <c>hidden</c>, 3 <c>scroll</c>, 4 <c>auto</c>. <c>overlay</c> is the legacy alias of
+    /// <c>auto</c> and shares its code, and every code from 2 up establishes a scroll
+    /// container - the order is what <see cref="ComputedStyle.RecomputeOverflow"/> tests.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: crates/obscura-render collapses <c>hidden</c>, <c>scroll</c>, <c>auto</c> and
+    /// <c>overlay</c> onto one code, so it cannot report which of them an element specified and
+    /// answers `auto` for all four. See "Known deviations" in todo.md.
+    /// </remarks>
     internal byte OverflowSpecifiedX;
 
     internal byte OverflowSpecifiedY;
+
+    /// <summary>
+    /// The computed <c>overflow-x</c> keyword, in the same encoding as
+    /// <see cref="OverflowSpecifiedX"/>, after the CSS Overflow computed-value coupling has
+    /// run. This is the value a computed-style query has to report.
+    /// </summary>
+    internal byte OverflowComputedX;
+
+    internal byte OverflowComputedY;
 
     internal bool OverflowInheritX;
 
@@ -1262,6 +1332,17 @@ public sealed class LayoutStyle
         Display == Obscura.Render.Display.Inline && !IsInlineBlock && !IsReplacedBox;
 
     internal bool EstablishesPositioningContainingBlock() => ContainingBlockTriggers != 0;
+
+    /// <summary>The CSS keyword a computed-style query reports for one overflow axis.</summary>
+    public string ComputedOverflowCss(bool horizontal) =>
+        (horizontal ? OverflowComputedX : OverflowComputedY) switch
+        {
+            1 => "clip",
+            2 => "hidden",
+            3 => "scroll",
+            4 => "auto",
+            _ => "visible",
+        };
 
     internal bool ClipsOverflowX() => OverflowAxesSet ? OverflowClipX : OverflowHidden;
 

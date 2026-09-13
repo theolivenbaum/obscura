@@ -65,6 +65,7 @@ public static partial class RenderDom
                     if (retainedStyle.FontFamily is { } family)
                     {
                         inh.FontFamily = family;
+                        inh.FontFamilySpecified = retainedStyle.FontFamilySpecified;
                     }
 
                     if (retainedStyle.FontOpticalSizing is { } optical)
@@ -154,12 +155,8 @@ public static partial class RenderDom
                         inh.TableVerticalAlign = verticalAlign;
                     }
 
-                    inh.OverflowX = retainedStyle.OverflowScrollX
-                        ? (byte)2
-                        : retainedStyle.OverflowClipX ? (byte)1 : (byte)0;
-                    inh.OverflowY = retainedStyle.OverflowScrollY
-                        ? (byte)2
-                        : retainedStyle.OverflowClipY ? (byte)1 : (byte)0;
+                    inh.OverflowX = retainedStyle.OverflowComputedX;
+                    inh.OverflowY = retainedStyle.OverflowComputedY;
                     childCbHeightDefinite = retainedStyle.Height.Kind
                         is DimensionKind.Px or DimensionKind.Percent;
                     childCbHeight = ContentBoxBlockSize(retainedStyle, inh.CbHeight);
@@ -427,8 +424,8 @@ public static partial class RenderDom
         }
 
         ComputedStyle.RecomputeOverflow(style);
-        inh.OverflowX = style.OverflowScrollX ? (byte)2 : style.OverflowClipX ? (byte)1 : (byte)0;
-        inh.OverflowY = style.OverflowScrollY ? (byte)2 : style.OverflowClipY ? (byte)1 : (byte)0;
+        inh.OverflowX = style.OverflowComputedX;
+        inh.OverflowY = style.OverflowComputedY;
         if (style.RowGapExpression is { } rowGapExpression)
         {
             style.RowGap = ComputedStyle.ResolveContextualLength(
@@ -654,10 +651,30 @@ public static partial class RenderDom
         if (style.FontFamily is { } fontFamily)
         {
             inh.FontFamily = fontFamily;
+            inh.FontFamilySpecified = style.FontFamilySpecified;
         }
         else
         {
             style.FontFamily = inh.FontFamily;
+            style.FontFamilySpecified = inh.FontFamilySpecified;
+        }
+
+        if (style.Cursor is { } cursor)
+        {
+            inh.Cursor = cursor;
+        }
+        else
+        {
+            style.Cursor = inh.Cursor;
+        }
+
+        if (style.PointerEvents is { } pointerEvents)
+        {
+            inh.PointerEvents = pointerEvents;
+        }
+        else
+        {
+            style.PointerEvents = inh.PointerEvents;
         }
 
         if (style.FontOpticalSizing is { } opticalSizing)
@@ -941,6 +958,9 @@ public static partial class RenderDom
         bool hostLetterSpacingNonNormal = style.LetterSpacingNonNormal ?? false;
         ushort hostWeight = ComputedStyle.UsedFontWeight(style);
         string? hostFamily = style.FontFamily;
+        string? hostFamilySpecified = style.FontFamilySpecified;
+        string? hostCursor = style.Cursor;
+        string? hostPointerEvents = style.PointerEvents;
         FontOpticalSizing? hostOpticalSizing = style.FontOpticalSizing;
         List<FontVariationSetting>? hostVariationSettings = style.FontVariationSettings;
         LineHeight? hostLineHeight = style.LineHeight;
@@ -964,8 +984,8 @@ public static partial class RenderDom
         List<Layout.TrackSizingFunction> hostGridAutoRows = [.. style.GridAutoRows];
         List<object> hostGridAutoColumnCalcs = [.. GridCalcBucket(style, 2)];
         List<object> hostGridAutoRowCalcs = [.. GridCalcBucket(style, 3)];
-        byte hostOverflowX = style.OverflowScrollX ? (byte)2 : style.OverflowClipX ? (byte)1 : (byte)0;
-        byte hostOverflowY = style.OverflowScrollY ? (byte)2 : style.OverflowClipY ? (byte)1 : (byte)0;
+        byte hostOverflowX = style.OverflowComputedX;
+        byte hostOverflowY = style.OverflowComputedY;
 
         void Settle(LayoutStyle pseudo)
         {
@@ -1124,7 +1144,14 @@ public static partial class RenderDom
 
             ushort weight = ComputedStyle.ComputedFontWeight(pseudo.FontWeight, hostWeight);
             pseudo.FontWeight = weight.ToString(CultureInfo.InvariantCulture);
-            pseudo.FontFamily ??= hostFamily;
+            if (pseudo.FontFamily is null)
+            {
+                pseudo.FontFamily = hostFamily;
+                pseudo.FontFamilySpecified = hostFamilySpecified;
+            }
+
+            pseudo.Cursor ??= hostCursor;
+            pseudo.PointerEvents ??= hostPointerEvents;
             pseudo.FontOpticalSizing ??= hostOpticalSizing;
             pseudo.FontVariationSettings ??= hostVariationSettings is null
                 ? null

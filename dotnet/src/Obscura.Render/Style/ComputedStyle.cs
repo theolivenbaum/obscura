@@ -129,6 +129,7 @@ public static partial class ComputedStyle
         }
         else if (tag == "button")
         {
+            style.Cursor = "default";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.TextAlign = Layout.AlignItems.Center;
@@ -146,14 +147,17 @@ public static partial class ComputedStyle
             // instead of one. See "Known deviations" in todo.md.
             style.FontSize = 13.333_333f;
             style.FontFamily = "arial";
+            style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
         }
         else if (tag == "select")
         {
+            style.Cursor = "default";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
             style.FontFamily = "arial";
+            style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.Padding = new Edges(1.0f, 20.0f, 1.0f, 2.0f);
             style.Border = new Edges(1.0f, 1.0f, 1.0f, 1.0f);
@@ -168,10 +172,12 @@ public static partial class ComputedStyle
         }
         else if (tag == "input")
         {
+            style.Cursor = "text";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
             style.FontFamily = "arial";
+            style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.Padding = new Edges(1.0f, 2.0f, 1.0f, 2.0f);
             style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
@@ -247,6 +253,15 @@ public static partial class ComputedStyle
         else if (tag == "img")
         {
             style.Display = Display.Inline;
+
+            // DEVIATION from crates/obscura-render/src/style.rs, whose `img` arm sets display
+            // only. Chromium's UA sheet gives an image `overflow: clip; overflow-clip-margin:
+            // content-box`, so every image computes `overflow-x: clip` rather than `visible`
+            // and its content cannot paint outside its box. See "Known deviations" in todo.md.
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 1;
+            style.OverflowSpecifiedY = 1;
+            RecomputeOverflow(style);
         }
 
         return style;
@@ -382,7 +397,10 @@ public static partial class ComputedStyle
         {
             "visible" => new ParsedOverflowAxis(0, false),
             "clip" => new ParsedOverflowAxis(1, false),
-            "hidden" or "scroll" or "auto" or "overlay" => new ParsedOverflowAxis(2, false),
+            "hidden" => new ParsedOverflowAxis(2, false),
+            "scroll" => new ParsedOverflowAxis(3, false),
+            // `overlay` is the legacy alias of `auto` and computes to it.
+            "auto" or "overlay" => new ParsedOverflowAxis(4, false),
             "inherit" => new ParsedOverflowAxis(0, true),
             "initial" or "unset" or "revert" or "revert-layer" => new ParsedOverflowAxis(0, false),
             _ => null,
@@ -454,22 +472,24 @@ public static partial class ComputedStyle
         // `visible` on the other computes to `auto` and `clip` computes to `hidden`.
         byte computedX = style.OverflowSpecifiedX;
         byte computedY = style.OverflowSpecifiedY;
-        if ((computedX == 2) != (computedY == 2))
+        if ((computedX >= 2) != (computedY >= 2))
         {
-            if (computedX == 2)
+            if (computedX >= 2)
             {
-                computedY = 2;
+                computedY = computedY == 1 ? (byte)2 : (byte)4;
             }
             else
             {
-                computedX = 2;
+                computedX = computedX == 1 ? (byte)2 : (byte)4;
             }
         }
 
+        style.OverflowComputedX = computedX;
+        style.OverflowComputedY = computedY;
         style.OverflowClipX = computedX != 0;
         style.OverflowClipY = computedY != 0;
-        style.OverflowScrollX = computedX == 2;
-        style.OverflowScrollY = computedY == 2;
+        style.OverflowScrollX = computedX >= 2;
+        style.OverflowScrollY = computedY >= 2;
         style.OverflowHidden = style.OverflowClipX || style.OverflowClipY;
         style.OverflowScrollContainer = style.OverflowScrollX || style.OverflowScrollY;
     }
@@ -956,9 +976,126 @@ public static partial class ComputedStyle
             ApplyValue(style, "line-height", resolvedLineHeight);
         }
 
-        style.FontFamily = CssText.AsciiLower(
-            string.Join(" ", tokens.GetRange(familyIndex, tokens.Count - familyIndex)));
+        string families = string.Join(" ", tokens.GetRange(familyIndex, tokens.Count - familyIndex));
+        style.FontFamily = CssText.AsciiLower(families);
+        style.FontFamilySpecified = SerializeFontFamilyList(families);
     }
+
+    /// <summary>
+    /// Re-serialize a <c>font-family</c> list the way a computed-style query reports it: the
+    /// author's casing, one <c>", "</c> between families, and quotes only where a family does
+    /// not round-trip as a CSS identifier sequence.
+    /// </summary>
+    internal static string SerializeFontFamilyList(string value)
+    {
+        List<string> families = [];
+        foreach (string token in SplitTopLevelCommas(value))
+        {
+            string family = token.Trim();
+            if (family.Length == 0)
+            {
+                continue;
+            }
+
+            if (family.Length >= 2
+                && (family[0] == '"' || family[0] == '\'')
+                && family[^1] == family[0])
+            {
+                // A quoted family keeps its quotes unless the name is an identifier that a
+                // reader would not mistake for a generic keyword.
+                string inner = family[1..^1];
+                families.Add(IsCssIdentifier(inner) && !IsGenericFontFamily(inner)
+                    ? inner
+                    : '"' + inner + '"');
+                continue;
+            }
+
+            // An unquoted family is a sequence of identifiers; more than one means the name
+            // carries spaces and is serialized as a string.
+            string[] words = family.Split(
+                (char[]?)null,
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            families.Add(words.Length == 1 ? words[0] : '"' + string.Join(' ', words) + '"');
+        }
+
+        return string.Join(", ", families);
+    }
+
+    private static List<string> SplitTopLevelCommas(string value)
+    {
+        List<string> parts = [];
+        int start = 0;
+        char quote = '\0';
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (quote != '\0')
+            {
+                if (c == quote)
+                {
+                    quote = '\0';
+                }
+            }
+            else if (c is '"' or '\'')
+            {
+                quote = c;
+            }
+            else if (c == ',')
+            {
+                parts.Add(value[start..i]);
+                start = i + 1;
+            }
+        }
+
+        parts.Add(value[start..]);
+        return parts;
+    }
+
+    private static bool IsCssIdentifier(string value)
+    {
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            bool head = c == '_' || c > '\u007f' || char.IsAsciiLetter(c);
+            if (head || (i > 0 && (c == '-' || char.IsAsciiDigit(c))))
+            {
+                continue;
+            }
+
+            if (i == 0 && c == '-' && value.Length > 1)
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return !char.IsAsciiDigit(value[0]);
+    }
+
+    /// <summary>The CSS Basic UI <c>cursor</c> keywords, without the <c>url()</c> forms.</summary>
+    internal static bool IsCursorKeyword(string value) =>
+        value is "auto" or "default" or "none" or "context-menu" or "help" or "pointer"
+            or "progress" or "wait" or "cell" or "crosshair" or "text" or "vertical-text"
+            or "alias" or "copy" or "move" or "no-drop" or "not-allowed" or "grab"
+            or "grabbing" or "e-resize" or "n-resize" or "ne-resize" or "nw-resize"
+            or "s-resize" or "se-resize" or "sw-resize" or "w-resize" or "ew-resize"
+            or "ns-resize" or "nesw-resize" or "nwse-resize" or "col-resize"
+            or "row-resize" or "all-scroll" or "zoom-in" or "zoom-out";
+
+    internal static bool IsPointerEventsKeyword(string value) =>
+        value is "auto" or "none" or "visiblepainted" or "visiblefill" or "visiblestroke"
+            or "visible" or "painted" or "fill" or "stroke" or "all";
+
+    private static bool IsGenericFontFamily(string value) =>
+        CssText.AsciiLower(value) is "serif" or "sans-serif" or "cursive" or "fantasy"
+            or "monospace" or "system-ui" or "ui-serif" or "ui-sans-serif" or "ui-monospace"
+            or "ui-rounded" or "math" or "emoji" or "fangsong";
 
     // -------------------------------------------------- declaration dispatch
 
@@ -1064,6 +1201,7 @@ public static partial class ComputedStyle
             case "height":
             case "block-size":
                 style.Height = DimensionValue(value);
+                style.HeightFitContent = CssText.EqualsAscii(value.Trim(), "fit-content");
                 style.SizeExpressions[1] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 1, value);
                 style.HeightSet = true;
@@ -1489,9 +1627,91 @@ public static partial class ComputedStyle
             case "font-family":
             {
                 string family = CssText.AsciiLower(value.Trim());
-                if (family.Length != 0 && family != "inherit")
+                switch (family)
                 {
-                    style.FontFamily = family;
+                    // `font-family` is inherited, so `unset` is `inherit`. A null family is
+                    // what the top-down pass reads as "take the parent's computed value", so
+                    // the keyword has to clear whatever the UA sheet put here - every form
+                    // control carries an explicit `arial`, and the author sheets that reach
+                    // them do it through `input, textarea, select, button { font-family:
+                    // inherit }`. Dropping the declaration left those controls on Arial.
+                    case "inherit":
+                    case "unset":
+                        style.FontFamily = null;
+                        style.FontFamilySpecified = null;
+                        break;
+
+                    // Roll back to the UA value, which is the value already in `style`.
+                    case "revert":
+                    case "revert-layer":
+                        break;
+
+                    default:
+                        if (family.Length != 0)
+                        {
+                            style.FontFamily = family;
+                            style.FontFamilySpecified = SerializeFontFamilyList(value);
+                        }
+
+                        break;
+                }
+
+                return true;
+            }
+
+            case "cursor":
+            {
+                // DEVIATION: not modeled by crates/obscura-render, which reports whatever the
+                // inline declaration said. It is inherited, so a null value means "inherit".
+                string cursor = CssText.AsciiLower(value.Trim());
+                switch (cursor)
+                {
+                    case "inherit":
+                    case "unset":
+                        style.Cursor = null;
+                        break;
+                    case "initial":
+                        style.Cursor = "auto";
+                        break;
+                    case "revert":
+                    case "revert-layer":
+                        break;
+                    default:
+                        if (IsCursorKeyword(cursor))
+                        {
+                            style.Cursor = cursor;
+                        }
+
+                        break;
+                }
+
+                return true;
+            }
+
+            case "pointer-events":
+            {
+                // DEVIATION: not modeled by crates/obscura-render. Reporting only - hit testing
+                // runs in JavaScript through `document.elementFromPoint`.
+                string pointerEvents = CssText.AsciiLower(value.Trim());
+                switch (pointerEvents)
+                {
+                    case "inherit":
+                    case "unset":
+                        style.PointerEvents = null;
+                        break;
+                    case "initial":
+                        style.PointerEvents = "auto";
+                        break;
+                    case "revert":
+                    case "revert-layer":
+                        break;
+                    default:
+                        if (IsPointerEventsKeyword(pointerEvents))
+                        {
+                            style.PointerEvents = pointerEvents;
+                        }
+
+                        break;
                 }
 
                 return true;

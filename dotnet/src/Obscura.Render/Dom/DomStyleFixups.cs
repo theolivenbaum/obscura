@@ -912,6 +912,78 @@ internal static class DomStyleFixups
         }
     }
 
+    /// <summary>
+    /// Suppress block-axis stretching for a flex or grid item whose block size is the
+    /// intrinsic <c>fit-content</c> keyword.
+    /// </summary>
+    /// <remarks>
+    /// In the block axis <c>fit-content</c> resolves to the content size exactly like
+    /// <c>auto</c>, so the only thing that has to change is that the box is no longer
+    /// automatically sized: CSS stretch alignment applies to an auto cross size only, and an
+    /// item declaring <c>height: fit-content</c> hugs its content instead of filling its flex
+    /// line or grid row. Taffy's box-size dimension cannot carry the keyword, so the used
+    /// alignment is written into the item's own <c>align-self</c>.
+    /// DEVIATION: crates/obscura-render does not implement <c>height: fit-content</c>, so the
+    /// keyword stretches there. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static void ApplyFitContentBlockSize(
+        DomTree tree,
+        NodeId id,
+        LayoutStyle style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        Layout.Style taffyStyle)
+    {
+        if (!style.HeightFitContent
+            || style.Position == TaffyPosition.Absolute
+            || style.Float is not null
+            || !style.Height.IsAuto)
+        {
+            return;
+        }
+
+        NodeId? parent = DomTraversal.RenderedParent(tree, id);
+        LayoutStyle parentStyle;
+        while (true)
+        {
+            if (parent is not { } parentId || !styles.TryGetValue(parentId, out LayoutStyle? found))
+            {
+                return;
+            }
+
+            if (found.DisplayContents)
+            {
+                parent = DomTraversal.RenderedParent(tree, parentId);
+                continue;
+            }
+
+            parentStyle = found;
+            break;
+        }
+
+        if (parentStyle.Display == Display.Flex && !parentStyle.InternalFlexContainer)
+        {
+            // Only a row container puts the block axis on the cross axis, where stretch lives.
+            TaffyFlexDirection direction = parentStyle.FlexDirection ?? TaffyFlexDirection.Row;
+            if (direction is not (TaffyFlexDirection.Row or TaffyFlexDirection.RowReverse))
+            {
+                return;
+            }
+
+            if (UsedFlexAlignment(style.AlignSelf, parentStyle.AlignItems) == TaffyAlignItems.Stretch)
+            {
+                taffyStyle.AlignSelf = TaffyAlignItems.FlexStart;
+            }
+
+            return;
+        }
+
+        if (parentStyle.Display == Display.Grid
+            && UsedGridAlignments(style, parentStyle).Vertical == TaffyAlignItems.Stretch)
+        {
+            taffyStyle.AlignSelf = TaffyAlignItems.Start;
+        }
+    }
+
     internal static bool IsInFlowGridItem(
         DomTree tree,
         NodeId id,

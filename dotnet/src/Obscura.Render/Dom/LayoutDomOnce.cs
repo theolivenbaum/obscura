@@ -41,6 +41,9 @@ public static partial class RenderDom
         internal float? FontSize;
         internal ushort FontWeight = 400;
         internal string? FontFamily;
+        internal string? FontFamilySpecified;
+        internal string? Cursor = "auto";
+        internal string? PointerEvents = "auto";
         internal FontOpticalSizing FontOpticalSizing = Render.FontOpticalSizing.Auto;
         internal List<FontVariationSetting> FontVariationSettings = [];
         internal float LetterSpacing;
@@ -104,6 +107,9 @@ public static partial class RenderDom
             FontSize = FontSize,
             FontWeight = FontWeight,
             FontFamily = FontFamily,
+            FontFamilySpecified = FontFamilySpecified,
+            Cursor = Cursor,
+            PointerEvents = PointerEvents,
             FontOpticalSizing = FontOpticalSizing,
             FontVariationSettings = [.. FontVariationSettings],
             LetterSpacing = LetterSpacing,

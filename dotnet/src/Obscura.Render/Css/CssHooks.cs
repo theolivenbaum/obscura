@@ -155,6 +155,8 @@ internal static class CssSupportsOracle
             lower.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).All(token => token is "none" or "underline"),
         "font-style" => lower is "normal" or "italic" || lower.StartsWith("oblique", StringComparison.Ordinal),
         "font-family" => value.Trim().Length != 0,
+        "cursor" => Obscura.Render.ComputedStyle.IsCursorKeyword(lower),
+        "pointer-events" => Obscura.Render.ComputedStyle.IsPointerEventsKeyword(lower),
         "clear" => lower is "none" or "left" or "right" or "both" or "inline-start" or "inline-end",
         "vertical-align" => lower is "top" or "baseline" or "text-top" or "middle" or "bottom" or "text-bottom",
         "border-collapse" => lower is "collapse" or "separate",
@@ -165,8 +167,9 @@ internal static class CssSupportsOracle
         "z-index" => lower == "auto"
             || int.TryParse(value.Trim(), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out _),
         "flex-grow" or "flex-shrink" => FiniteNumber(value) && CssNumber.ParseFloat(value.Trim()) >= 0f,
-        "width" or "inline-size" => lower == "fit-content" || Dimension(value, auto: true),
-        "height" or "block-size" or "min-width" or "min-inline-size" or "min-height"
+        "width" or "inline-size" or "height" or "block-size" =>
+            lower == "fit-content" || Dimension(value, auto: true),
+        "min-width" or "min-inline-size" or "min-height"
             or "min-block-size" or "max-width" or "max-inline-size" or "max-height"
             or "max-block-size" or "flex-basis" => Dimension(value, auto: true),
         "margin" or "margin-inline" or "margin-block" => Dimensions(value, auto: true, max: 4),

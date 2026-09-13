@@ -3315,6 +3315,86 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void FormControlsInheritThePageFontFamilyThroughTheAuthorRule()
+    {
+        // The UA sheet's `arial` on a control is right; the author sheet every reset carries
+        // is what takes it back off, and the label inside the button follows the control.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px; font-family:"Page Face", sans-serif }
+               .app input, .app select, .app button { font-family:inherit; font-size:inherit }
+               </style>
+               <div class="app"><button id="btn"><span id="label">Go</span></button></div>
+               <button id="ua">Plain</button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+
+        Assert.Equal("\"page face\", sans-serif", laid.Styles[Id(tree, "btn")].FontFamily);
+        Assert.Equal("\"page face\", sans-serif", laid.Styles[Id(tree, "label")].FontFamily);
+        Assert.Equal(16f, laid.Styles[Id(tree, "btn")].FontSize);
+
+        // Out of the author rule's reach the UA font is still what a control gets.
+        Assert.Equal("arial", laid.Styles[Id(tree, "ua")].FontFamily);
+    }
+
+    [Fact]
+    public void HeightFitContentHugsContentInsteadOfStretching()
+    {
+        // `height: fit-content` sizes to content in the block axis exactly like `auto`, but it
+        // is not an automatic size, so stretch alignment does not apply to it.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px }
+               #row { display:flex; width:400px; height:200px }
+               #card, #stretchy { width:100px }
+               #card { height:fit-content }
+               #grid { display:grid; width:400px; height:200px }
+               #gcard { height:fit-content }
+               .inner { height:40px }
+               </style>
+               <div id="row">
+                 <div id="card"><div class="inner"></div></div>
+                 <div id="stretchy"><div class="inner"></div></div>
+               </div>
+               <div id="grid"><div id="gcard"><div class="inner"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(laid.Styles[Id(tree, "card")].HeightFitContent);
+        Assert.True(MathF.Abs(Get("card").Height - 40f) < 0.01f, $"{Get("card")}");
+        Assert.True(MathF.Abs(Get("stretchy").Height - 200f) < 0.01f, $"{Get("stretchy")}");
+        Assert.True(MathF.Abs(Get("gcard").Height - 40f) < 0.01f, $"{Get("gcard")}");
+
+        // The card is still placed at the start of its flex line.
+        Assert.True(MathF.Abs(Get("card").Y - Get("row").Y) < 0.01f, $"{Get("card")}");
+    }
+
+    [Fact]
+    public void HeightFitContentRespectsExplicitCrossAxisAlignment()
+    {
+        // Only the `normal`/`stretch` alignment is replaced; an authored align-items still wins.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px }
+               #row { display:flex; align-items:center; width:400px; height:200px }
+               #card { width:100px; height:fit-content }
+               .inner { height:40px }
+               </style>
+               <div id="row"><div id="card"><div class="inner"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 600f));
+        Rect row = laid.Rects[Id(tree, "row")];
+        Rect card = laid.Rects[Id(tree, "card")];
+
+        Assert.True(MathF.Abs(card.Height - 40f) < 0.01f, $"{card}");
+        Assert.True(MathF.Abs(card.Y - (row.Y + 80f)) < 0.01f, $"{card}");
+    }
+
+    [Fact]
     public void CalcPercentagesResolveAgainstAResizableFlexItemsUsedWidth()
     {
         // A row flex item's declared inline size is not its used inline size once

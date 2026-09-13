@@ -697,6 +697,77 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### `height: fit-content` is implemented; the reference ignores it
+
+`style.rs` handles `fit-content` on `width`/`inline-size` only (`width_fit_content`),
+and its `height`/`block-size` arm parses the keyword as a plain dimension, which falls
+back to `auto`. A box declaring `height: fit-content` therefore keeps an automatic
+block size and a flex or grid item carrying it stretches to fill its line or row.
+
+`LayoutStyle.HeightFitContent` is the C# counterpart. In the block axis `fit-content`
+sizes to content exactly like `auto`, so `Height` stays `Auto`; the one observable
+difference is that the box is no longer automatically sized, and CSS stretch alignment
+applies to an auto cross size only. `DomStyleFixups.ApplyFitContentBlockSize` writes
+that used alignment into the item's own `align-self` (taffy's box-size dimension
+cannot carry an intrinsic keyword), leaving an authored `align-items: center` / `end`
+alone.
+
+Measured against Chromium on Curiosity Workspace, where Tesserae sizes avatars,
+buttons, context cards, cron editors and date-range pickers with
+`:where(...) { width: fit-content; height: fit-content }`: a suggestion card came out
+163px tall against Chromium's 56px, with every child sized identically in both engines.
+
+Covered by `HeightFitContentHugsContentInsteadOfStretching` and
+`HeightFitContentRespectsExplicitCrossAxisAlignment`.
+
+### `font-family: inherit` is honoured on form controls
+
+`style.rs` skips the `inherit` keyword on `font-family` (`if family != "inherit"`), so
+the declaration is dropped rather than resolved, and whatever the UA sheet put there
+survives. Every form control carries an explicit `arial`, and the reset rule every
+page ships - `input, textarea, select, button, optgroup { font-family: inherit }` - is
+exactly how the page's own face is supposed to reach them, so all of them rendered in
+Arial. On Curiosity Workspace that was 889 of 1715 aligned elements: every `<button>`
+and everything inside one. `font-size: inherit` in the same rule already worked, so
+the two halves of the same declaration disagreed.
+
+The C# arm treats `inherit`/`unset` as "clear the family", which is what the top-down
+pass reads as inherit, and `revert`/`revert-layer` as "keep the UA value" - the same
+shape the `font-weight` arm already had.
+
+A visible consequence: an icon `<i>` inside a button takes its glyph from a `::before`
+whose rule sets `content` but deliberately not `font-family`. Inheriting Arial left the
+private-use codepoint without a glyph and the icon rendered as tofu.
+
+Covered by `FontFamilyInheritClearsTheUserAgentFormControlFont` and
+`FormControlsInheritThePageFontFamilyThroughTheAuthorRule`.
+
+### The five overflow keywords are kept apart, and an image clips
+
+`style.rs` collapses `hidden`, `scroll`, `auto` and `overlay` onto one code, so the
+computed value cannot say which of the four an element specified and a computed-style
+query answers `auto` for all of them. `OverflowSpecifiedX`/`Y` now carry the specified
+keyword (0 `visible`, 1 `clip`, 2 `hidden`, 3 `scroll`, 4 `auto`, `overlay` sharing
+`auto`'s code), `OverflowComputedX`/`Y` carry it after the CSS Overflow computed-value
+coupling, and `LayoutStyle.ComputedOverflowCss` renders it. Every code from 2 up is a
+scroll container, which is what keeps the coupling and the layout booleans unchanged:
+the coupling now turns `visible` into `auto` and `clip` into `hidden` on the other axis
+rather than making both codes equal.
+
+`ua_style`'s `img` arm sets display only. Chromium's UA sheet gives an image
+`overflow: clip; overflow-clip-margin: content-box`, so an image computes `clip` on
+both axes and its content cannot paint outside its box; that was 11 of 1715 aligned
+elements on Curiosity Workspace, all images.
+
+**Still outstanding, in `Paint/PreparedRender.cs`:** its local `OverflowAxis` helper
+reports `"auto"` for anything scrollable, so `hidden` and `scroll` are still reported
+as `auto` (322 and 298 of the 1715 aligned pairs). The model now carries the right
+value - the fix is to read `style.ComputedOverflowCss(true)` / `(false)` for
+`overflow-x` / `overflow-y`, and the same helper serves the missing `overflow`
+shorthand.
+
+Covered by `OverflowKeywordsKeepTheirComputedIdentity`.
+
 ### Decoded web faces are cached; the reference re-decodes them
 
 `fetch_and_decode_font` in `crates/obscura-render/src/paint.rs` caches only the

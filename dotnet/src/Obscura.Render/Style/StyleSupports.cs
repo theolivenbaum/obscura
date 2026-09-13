@@ -168,6 +168,10 @@ public static partial class ComputedStyle
                 return lower is "visible" or "hidden" or "collapse";
             case "scrollbar-gutter":
                 return lower is "auto" or "stable" or "stable both-edges";
+            case "cursor":
+                return ComputedStyle.IsCursorKeyword(lower);
+            case "pointer-events":
+                return ComputedStyle.IsPointerEventsKeyword(lower);
             case "overflow":
             case "overflow-x":
             case "overflow-y":
@@ -1077,9 +1081,9 @@ public static partial class ComputedStyle
         {
             case "width":
             case "inline-size":
-                return lower == "fit-content" || DimensionSupported(value, true);
             case "height":
             case "block-size":
+                return lower == "fit-content" || DimensionSupported(value, true);
             case "min-width":
             case "min-inline-size":
             case "min-height":
@@ -1459,6 +1463,6 @@ public static partial class ComputedStyle
         "grid-column-end", "grid-row-start", "grid-row-end", "transform", "transform-origin",
         "translate", "rotate", "scale", "filter", "backdrop-filter", "-webkit-backdrop-filter",
         "perspective", "contain", "will-change", "content-visibility", "box-shadow",
-        "-webkit-box-shadow",
+        "-webkit-box-shadow", "cursor", "pointer-events",
     };
 }
