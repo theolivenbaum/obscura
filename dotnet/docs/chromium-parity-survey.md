@@ -1,5 +1,10 @@
 # Obscura vs Chromium — Curiosity Workspace rendering survey
 
+> **Status: all findings below have been acted on.** Fixes landed on
+> `claude/sweet-allen-jy7y9i` across five parallel workstreams. See "Outcomes" at the end of
+> this file for what was fixed, what was deliberately not fixed, and what is left.
+
+
 Reference: Chromium 141 (headless) via CDP. Subject: Obscura C# `serve` (CDP), commit 097aa93.
 Both driven by the *same* Playwright script over `connectOverCDP`, viewport 1440x950,
 against the same live Curiosity Workspace server (auto-login, Lorem Ipsum AI provider).
@@ -417,3 +422,62 @@ differences F15 measured on 15% of elements.
 is ~1.26x Chromium's, so one fewer card fits per line and the grid reflows. This is the visible
 form of the `width` divergence F15 measured on 29% of elements, and it is the kind of defect that
 changes what a user actually sees rather than just what a script measures.
+
+
+---
+
+# Outcomes
+
+Five workstreams, partitioned by file so they could run in parallel. Every fix carries tests.
+
+| finding | outcome |
+|---|---|
+| F1 performance timeline | Fixed. Real `PerformanceNavigationTiming` entry, real lifecycle marks, `mark()`/`measure()` no longer no-ops. Resource entries deliberately still `[]` (no transport metrics reach JS); network phases in the navigation entry are synthesized and documented as such. |
+| F2 `innerText` | Fixed. Rendered-text projection: skips non-rendered subtrees, collapses whitespace per `white-space`, breaks at block boundaries and `<br>`, tab-separates table cells. |
+| F3 `font-family: inherit` | Fixed. The cascade arm skipped the keyword (`if (family != "inherit")`) so the UA `arial` survived; it now resolves it. `revert`/`revert-layer` keep the UA value. |
+| F4 font-family casing | Fixed. `LayoutStyle.FontFamilySpecified` carries the reporting spelling beside the lower-cased matching key; re-serialized Blink-style, verified per shape against Chromium 141. |
+| F5 `height: fit-content` | Fixed, and it had a **second cause**: `align-content: baseline` was dropped by `ContentAlignmentValue`, so the container stayed `normal` = stretch. Fixing only `fit-content` left a correct 56px card inside a 175px row. Both fixed. |
+| F6 overflow | Fixed, both halves. The cascade collapsed `hidden`/`scroll`/`auto`/`overlay` onto one code so the value could not be reported; now five codes with the computed-value coupling preserved. The `clip -> visible` half was a missing UA rule (`img { overflow: clip }`) — all 11 cases were images. Shorthand also emitted. |
+| F7 background-color | **Not fixed.** 93 pairs. Did not reproduce on the routes the cascade agent drove. |
+| F8 `location` setters | Fixed. All components, fragment-only changes take the same-document path. |
+| F9a CDP same-document | Fixed. `Page.navigatedWithinDocument` with `fragment`/`historyApi` navigationType; real cross-document navigations still get `frameNavigated`. |
+| F9b fragment-only reload | Fixed. `href=`/`assign()`/`replace()` delegate to the History API for a fragment-only change. Two adjacent bugs found and fixed: `HashChangeEvent` dropped its init dictionary, and `window.onhashchange` never fired. |
+| F10 snapshot omissions | Fixed. Box metrics, insets (correctly `auto`, not `0px`), flex longhands + shorthand, `gap`, `background*`, `box-shadow`, `text-decoration`, `font-style`, plus `cursor` and `pointer-events` newly modelled in the cascade. |
+| F11 HTMLTable*Element | Fixed. 19 interface objects added as real `Element` subclasses rather than the `= Element` alias the existing 43 use — an alias makes every element an instance of every one of them. Table members (`cells`, `rowIndex`, `insertCell`, …) added. |
+| F12 `queryCommandSupported` | Fixed, with the rest of the family. |
+| F13 strict-script globals | Fixed — **and my diagnosis was wrong.** See below. |
+| F14 script 404s | **Not investigated.** Needs the failing URL captured first. |
+| F15 / F19 width divergence | **Not fixed, and not caused by F5** as I had guessed. Every box size is now correct; the residue is intrinsic inline sizing. Themes cards are 160x100 in *both* engines but the wrapper pitch is 265px vs Chromium's 214px. Points at max-content contribution / text measurement. |
+| F16 transform | **Not fixed.** 15 pairs, did not reproduce on the routes driven. |
+| F17 float serialization | Fixed. `CssNumber` now matches Blink's `String::Number`; `line-height` reads `14.3px`. |
+| F18 | Retracted (see above) — a harness artefact, not a defect. |
+
+## F13: the diagnosis in this document is wrong, and the correction matters
+
+This file argues the discriminator is the `"use strict"` directive. It is not. The real
+discriminator is **parser-inserted vs dynamically inserted** scripts.
+
+`bootstrap.js` executes every *dynamically inserted* classic script with `(0, eval)(source)`
+(`__runDynScriptTask` for a fetched `script.src` body, `__prepareInsertedScript` for an element's
+own text). Indirect eval runs in global scope, but ES confines a **strict** eval's top-level
+`var`/`function` to the eval's own variable environment, while a sloppy one publishes them. That
+is why strictness correlated perfectly in my matrix: every case I tested was dynamically inserted
+(`document.createElement('script')`), so I never tested a parser-inserted strict script — which
+works fine. Raw ClearScript handles a strict top-level script correctly; the parser path was never
+at fault.
+
+The lesson is the same one F18 taught: a variable that correlates perfectly across six cases can
+still be the wrong variable if every case shares an untested confound.
+
+The fix bridges those two call sites onto a port-added `op_run_classic_script`. Its proper home is
+`bootstrap.js` itself (which would fix the Rust engine too); the bridge no-ops if that happens.
+
+## Verified end to end
+
+With F1, F8, F9a and F9b merged, the app **boots in Obscura with no shim** (it previously stopped
+at a 156-element spinner), and routes that were uncapturable now capture:
+`#/manage/ai` 325 elements, `#/manage/search/settings` 899, `#/search?query=test` 485 — 0 failures.
+
+Cascade fixes, strictly aligned against Chromium 141: `font-family`, `overflow`, `cursor` and
+`pointer-events` all differ on **0** pairs across 205 + 205 + 329 element pairs on three routes.
+The F5 card is `[433,584,400,56]` against Chromium's `[425,584,400,56]`.
