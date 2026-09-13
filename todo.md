@@ -697,6 +697,37 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### The CSSOM snapshot serializes numbers and shorthands like Chromium, not like Rust
+
+`computed_style` in `crates/obscura-render/src/paint.rs` writes each `f32` with
+Rust's `Display`, i.e. the shortest decimal that round-trips, so `font-size:11px`
+with `line-height:1.3` serializes as `14.299999px`. Blink formats a CSS number
+with WTF's `String::Number` - `%.6g` with trailing zeros truncated - and reports
+`14.3px`. `PaintCssValues.CssNumber` now does the Chromium thing, so every length
+the snapshot emits (and the one SVG `opacity` attribute that shares the helper)
+matches what page script compares against. Verified against Chromium 141 on
+14.3 / 20.8002 / 0.333333 / 1261.33 / 3.35544e+07 / 0.123457.
+
+`PreparedRender.ComputedStyle` also emits properties the Rust snapshot never had:
+the `margin` / `padding` / `border-width` / `border-style` / `border-color` /
+`border-radius` / `border` / `outline` / `overflow` / `gap` / `flex` shorthands,
+`top` / `right` / `bottom` / `left`, the `flex-*` longhands, `background*`,
+`box-shadow`, `text-decoration*` and `font-style`. A property missing from the
+snapshot falls through to bootstrap's inline-declaration fallback, which answers
+the empty string or a box-derived number, so ~1700 of 1715 measured element pairs
+read a wrong value. Covered by
+`dotnet/tests/Obscura.Render.Tests/ComputedStyleSnapshotTests.cs`, whose
+expectations are all taken from Chromium.
+
+Still not matched, because the cascade does not model them (all outside
+`PreparedRender`): `cursor` and `pointer-events` (no field in `LayoutStyle`, so
+the snapshot cannot report them); `text-decoration-line` other than `underline`;
+`font-family`, which `ComputedStyle.ApplyValue` lowercases with
+`CssText.AsciiLower`, losing the author casing Chromium preserves; computed
+insets on a positioned box, which Chromium reports as used values and the port
+reports as the specified value; and `background-image` gradients, which are
+re-serialized from the parsed layer rather than from their source text.
+
 ### Decoded web faces are cached; the reference re-decodes them
 
 `fetch_and_decode_font` in `crates/obscura-render/src/paint.rs` caches only the

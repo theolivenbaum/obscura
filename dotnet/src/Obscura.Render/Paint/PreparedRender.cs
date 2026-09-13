@@ -673,6 +673,17 @@ public sealed class PreparedRender
 
         output["overflow-x"] = OverflowAxis(style.OverflowSpecifiedX, style.OverflowClipX, style.OverflowScrollX);
         output["overflow-y"] = OverflowAxis(style.OverflowSpecifiedY, style.OverflowClipY, style.OverflowScrollY);
+        output["overflow"] = CollapseAxes(output["overflow-x"], output["overflow-y"]);
+
+        // Chromium reports `auto` for an inset nobody specified. Without these the snapshot let
+        // bootstrap's fallback answer from the element's box, which reads `0px` on most boxes.
+        string[] insetNames = ["top", "right", "bottom", "left"];
+        for (int side = 0; side < insetNames.Length; side++)
+        {
+            output[insetNames[side]] = style.Inset[side] is { } inset
+                ? PaintCssValues.DimensionCss(inset, "auto")
+                : "auto";
+        }
 
         (string Name, float Value, bool Auto)[] margins =
         [
@@ -685,6 +696,12 @@ public sealed class PreparedRender
         {
             output[name] = auto ? "auto" : PaintCssValues.CssPx(value);
         }
+
+        output["margin"] = CollapseSides(
+            output["margin-top"],
+            output["margin-right"],
+            output["margin-bottom"],
+            output["margin-left"]);
 
         (string Name, float Value)[] lengths =
         [
@@ -702,6 +719,17 @@ public sealed class PreparedRender
             output[name] = PaintCssValues.CssPx(value);
         }
 
+        output["padding"] = CollapseSides(
+            output["padding-top"],
+            output["padding-right"],
+            output["padding-bottom"],
+            output["padding-left"]);
+        output["border-width"] = CollapseSides(
+            output["border-top-width"],
+            output["border-right-width"],
+            output["border-bottom-width"],
+            output["border-left-width"]);
+
         RgbaColor currentColor = style.Color ?? new RgbaColor(0, 0, 0, 255);
         (string Name, RgbaColor? Color)[] borderColors =
         [
@@ -714,6 +742,14 @@ public sealed class PreparedRender
         {
             output[name] = PaintCssValues.CssColor(color ?? style.BorderColor ?? currentColor);
         }
+
+        // An omitted border color is `currentColor`, so the shorthand resolves to the element's
+        // own `color` rather than to black.
+        output["border-color"] = CollapseSides(
+            output["border-top-color"],
+            output["border-right-color"],
+            output["border-bottom-color"],
+            output["border-left-color"]);
 
         Sides<BorderStyle> effective = PaintBorders.EffectiveBorderStyles(style);
         (string Name, BorderStyle Style)[] borderStyles =
@@ -728,6 +764,22 @@ public sealed class PreparedRender
             output[name] = lineStyle.CssName();
         }
 
+        output["border-style"] = CollapseSides(
+            output["border-top-style"],
+            output["border-right-style"],
+            output["border-bottom-style"],
+            output["border-left-style"]);
+
+        // CSSOM serializes `border` only when all four sides agree on width, style and color;
+        // otherwise the shorthand has no representation and is the empty string.
+        bool uniformBorder =
+            AllSidesEqual(output, "border-top-width", "border-right-width", "border-bottom-width", "border-left-width")
+            && AllSidesEqual(output, "border-top-style", "border-right-style", "border-bottom-style", "border-left-style")
+            && AllSidesEqual(output, "border-top-color", "border-right-color", "border-bottom-color", "border-left-color");
+        output["border"] = uniformBorder
+            ? output["border-top-width"] + " " + output["border-top-style"] + " " + output["border-top-color"]
+            : string.Empty;
+
         (string Name, CornerRadius Radius)[] radii =
         [
             ("border-top-left-radius", style.BorderModel.Radii.TopLeft),
@@ -740,10 +792,48 @@ public sealed class PreparedRender
             output[name] = PaintCssValues.CornerRadiusCss(radius);
         }
 
+        output["border-radius"] = BorderRadiusCss(style.BorderModel.Radii);
+
         output["outline-width"] = PaintCssValues.CssPx(style.Outline.UsedWidth());
         output["outline-style"] = style.Outline.Style.CssName();
         output["outline-color"] = PaintCssValues.CssColor(style.Outline.Color ?? currentColor);
         output["outline-offset"] = PaintCssValues.CssPx(style.Outline.Offset);
+
+        // CSSOM's `outline` shorthand is color, style, width - not the border's order.
+        output["outline"] = output["outline-color"] + " " + output["outline-style"] + " " + output["outline-width"];
+
+        output["font-style"] = style.FontStyleItalic == true ? "italic" : "normal";
+
+        // The cascade models only the underline line, so `line-through` / `overline` cannot be
+        // reported; everything else is initial, and Chromium then omits style and color.
+        string decorationLine = style.Underline == true ? "underline" : "none";
+        output["text-decoration-line"] = decorationLine;
+        output["text-decoration"] = decorationLine;
+
+        output["box-shadow"] = style.BoxShadow is { } shadow
+            ? PaintCssValues.CssColor(shadow.Color)
+                + " " + PaintCssValues.CssPx(shadow.OffsetX)
+                + " " + PaintCssValues.CssPx(shadow.OffsetY)
+                + " " + PaintCssValues.CssPx(shadow.Blur)
+                + " " + PaintCssValues.CssPx(shadow.Spread)
+                + (shadow.Inset ? " inset" : string.Empty)
+            : "none";
+
+        string backgroundImage = BackgroundImageCss(style);
+        output["background-image"] = backgroundImage;
+        output["background-repeat"] = BackgroundRepeatCss(style.BackgroundRepeat);
+        output["background-size"] = BackgroundSizeCss(style);
+        output["background-position"] = BackgroundPositionCss(style.BackgroundPosition);
+
+        // `background-attachment` is not modeled; every layer paints as the initial `scroll`.
+        output["background-attachment"] = "scroll";
+        output["background"] = output["background-color"]
+            + " " + backgroundImage
+            + " " + output["background-repeat"]
+            + " scroll " + output["background-position"]
+            + " / " + output["background-size"]
+            + " " + output["background-origin"]
+            + " " + output["background-clip"];
 
         output["flex-direction"] = (style.FlexDirection ?? TaffyFlexDirection.Row) switch
         {
@@ -772,6 +862,12 @@ public sealed class PreparedRender
             : "normal";
         output["column-gap"] = style.ColumnGap is { } columnGap ? PaintCssValues.CssPx(columnGap) : "normal";
         output["row-gap"] = style.RowGap is { } rowGap ? PaintCssValues.CssPx(rowGap) : "normal";
+        output["gap"] = CollapseAxes(output["row-gap"], output["column-gap"]);
+
+        output["flex-grow"] = PaintCssValues.CssNumber(style.FlexGrow ?? 0f);
+        output["flex-shrink"] = PaintCssValues.CssNumber(style.FlexShrink ?? 1f);
+        output["flex-basis"] = PaintCssValues.DimensionCss(style.FlexBasis, "auto");
+        output["flex"] = output["flex-grow"] + " " + output["flex-shrink"] + " " + output["flex-basis"];
         output["grid-auto-flow"] = (style.GridAutoFlow ?? TaffyGridAutoFlow.Row) switch
         {
             TaffyGridAutoFlow.Row => "row",
@@ -792,6 +888,183 @@ public sealed class PreparedRender
             ? PaintCssValues.CssNumber(scale.X) + " " + PaintCssValues.CssNumber(scale.Y)
             : "none";
         return output;
+    }
+
+    /// <summary>CSS 1-to-4 collapsing of a top/right/bottom/left shorthand, CSSOM's rule.</summary>
+    private static string CollapseSides(string top, string right, string bottom, string left)
+    {
+        if (!string.Equals(left, right, StringComparison.Ordinal))
+        {
+            return top + " " + right + " " + bottom + " " + left;
+        }
+
+        if (!string.Equals(bottom, top, StringComparison.Ordinal))
+        {
+            return top + " " + right + " " + bottom;
+        }
+
+        return string.Equals(right, top, StringComparison.Ordinal) ? top : top + " " + right;
+    }
+
+    /// <summary>A two-axis shorthand (<c>overflow</c>, <c>gap</c>): one value when both agree.</summary>
+    private static string CollapseAxes(string first, string second) =>
+        string.Equals(first, second, StringComparison.Ordinal) ? first : first + " " + second;
+
+    private static bool AllSidesEqual(
+        Dictionary<string, string> output,
+        string top,
+        string right,
+        string bottom,
+        string left)
+    {
+        string value = output[top];
+
+        return string.Equals(output[right], value, StringComparison.Ordinal)
+            && string.Equals(output[bottom], value, StringComparison.Ordinal)
+            && string.Equals(output[left], value, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>border-radius</c>: the four horizontal radii, then the vertical ones after a slash
+    /// when the two lists differ.
+    /// </summary>
+    private static string BorderRadiusCss(BorderRadii radii)
+    {
+        string horizontal = CollapseSides(
+            PaintCssValues.RadiusValueCss(radii.TopLeft.X),
+            PaintCssValues.RadiusValueCss(radii.TopRight.X),
+            PaintCssValues.RadiusValueCss(radii.BottomRight.X),
+            PaintCssValues.RadiusValueCss(radii.BottomLeft.X));
+        string vertical = CollapseSides(
+            PaintCssValues.RadiusValueCss(radii.TopLeft.Y),
+            PaintCssValues.RadiusValueCss(radii.TopRight.Y),
+            PaintCssValues.RadiusValueCss(radii.BottomRight.Y),
+            PaintCssValues.RadiusValueCss(radii.BottomLeft.Y));
+
+        return string.Equals(horizontal, vertical, StringComparison.Ordinal)
+            ? horizontal
+            : horizontal + " / " + vertical;
+    }
+
+    private static string BackgroundRepeatCss((bool X, bool Y)? repeat)
+    {
+        if (repeat is not { } axes)
+        {
+            return "repeat";
+        }
+
+        return (axes.X, axes.Y) switch
+        {
+            (true, true) => "repeat",
+            (true, false) => "repeat-x",
+            (false, true) => "repeat-y",
+            _ => "no-repeat",
+        };
+    }
+
+    private static string BackgroundSizeCss(LayoutStyle style)
+    {
+        if (style.BackgroundSizeFit == ObjectFit.Contain)
+        {
+            return "contain";
+        }
+
+        if (style.BackgroundSizeFit == ObjectFit.Cover)
+        {
+            return "cover";
+        }
+
+        return style.BackgroundSize is { } size
+            ? PaintCssValues.CssPx(size.Width) + " " + PaintCssValues.CssPx(size.Height)
+            : "auto";
+    }
+
+    private static string BackgroundPositionCss(BackgroundPosition position) =>
+        BackgroundPositionAxisCss(position.X) + " " + BackgroundPositionAxisCss(position.Y);
+
+    private static string BackgroundPositionAxisCss(BackgroundPositionAxis axis)
+    {
+        // The initial value is `0% 0%`, so a zero offset with no percentage is a percentage.
+        if (axis.LengthPart == 0f)
+        {
+            return PaintCssValues.CssNumber(axis.PercentagePart * 100f) + "%";
+        }
+
+        return axis.PercentagePart == 0f
+            ? PaintCssValues.CssPx(axis.LengthPart)
+            : "calc(" + PaintCssValues.CssPx(axis.LengthPart)
+                + " + " + PaintCssValues.CssNumber(axis.PercentagePart * 100f) + "%)";
+    }
+
+    /// <summary>
+    /// <c>background-image</c>, in authored layer order. Gradients are re-serialized from the
+    /// parsed layer rather than from their source text, so a gradient's ending-shape sizing and
+    /// its authored stop positions round-trip only approximately; `none` and `url()` are exact.
+    /// </summary>
+    private static string BackgroundImageCss(LayoutStyle style)
+    {
+        List<string> layers = [];
+        if (style.BackgroundImage is { } url)
+        {
+            layers.Add("url(\"" + url + "\")");
+        }
+
+        foreach (BackgroundGradientLayer layer in style.BackgroundGradientLayers)
+        {
+            layers.Add(GradientLayerCss(layer));
+        }
+
+        if (layers.Count == 0)
+        {
+            if (style.BackgroundGradient is { } linear)
+            {
+                layers.Add(LinearGradientCss(linear.Angle, linear.Stops, repeating: false));
+            }
+            else if (style.BackgroundRadialGradient is { } radial)
+            {
+                layers.Add("radial-gradient(" + GradientStopsCss(radial.Stops) + ")");
+            }
+            else if (style.BackgroundConicGradient is { } conic)
+            {
+                layers.Add("conic-gradient(" + GradientStopsCss(conic.Stops) + ")");
+            }
+        }
+
+        return layers.Count == 0 ? "none" : string.Join(", ", layers);
+    }
+
+    private static string GradientLayerCss(BackgroundGradientLayer layer) => layer switch
+    {
+        BackgroundGradientLayer.Linear linear =>
+            LinearGradientCss(linear.Angle, linear.Stops, linear.Repeating),
+        BackgroundGradientLayer.Radial radial =>
+            "radial-gradient(" + GradientStopsCss(radial.Stops) + ")",
+        BackgroundGradientLayer.Conic conic =>
+            "conic-gradient(from " + PaintCssValues.CssNumber(conic.Angle) + "deg, "
+                + GradientStopsCss(conic.Stops) + ")",
+        _ => "none",
+    };
+
+    private static string LinearGradientCss(float angle, List<GradientStop> stops, bool repeating)
+    {
+        // 180deg is `to bottom`, the CSS initial gradient line, which CSSOM leaves implicit.
+        string prefix = repeating ? "repeating-linear-gradient(" : "linear-gradient(";
+        string direction = angle == 180f ? string.Empty : PaintCssValues.CssNumber(angle) + "deg, ";
+
+        return prefix + direction + GradientStopsCss(stops) + ")";
+    }
+
+    private static string GradientStopsCss(List<GradientStop> stops)
+    {
+        List<string> rendered = new(stops.Count);
+        foreach (GradientStop stop in stops)
+        {
+            rendered.Add(stop.Position is { } position
+                ? PaintCssValues.CssColor(stop.Color) + " " + PaintCssValues.CssNumber(position * 100f) + "%"
+                : PaintCssValues.CssColor(stop.Color));
+        }
+
+        return string.Join(", ", rendered);
     }
 
     /// <summary>Cascaded custom properties exposed by CSSOM.</summary>
