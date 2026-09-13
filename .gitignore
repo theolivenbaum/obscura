@@ -5,3 +5,6 @@ target/
 # is not covered by the dotnet/ ignores.
 tools/imgdiff/bin/
 tools/imgdiff/obj/
+
+# Transient agent worktrees created by Claude Code (isolation: worktree).
+.claude/worktrees/
