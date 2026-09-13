@@ -39,7 +39,9 @@ public static class BootstrapLoader
             })();
             """);
 
-        engine.Execute(new DocumentInfo("bootstrap.js"), BootstrapSource.Text);
+        // EngineText, not Text: the shim's dynamic-classic-script call sites are
+        // bridged onto op_run_classic_script on the way in. See BootstrapSource.
+        engine.Execute(new DocumentInfo("bootstrap.js"), BootstrapSource.EngineText);
 
         // The shim registers its rejection handlers while bootstrap.js runs, so the
         // tracker and the engine callback are installed afterwards, once there is

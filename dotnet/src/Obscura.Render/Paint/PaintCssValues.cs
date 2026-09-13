@@ -8,8 +8,37 @@ namespace Obscura.Render;
 
 internal static class PaintCssValues
 {
-    internal static string CssNumber(float value) =>
-        value == 0f ? "0" : value.ToString(CultureInfo.InvariantCulture);
+    /// <summary>
+    /// CSSOM number serialization: six significant digits with trailing zeros truncated.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render/src/paint.rs</c> writes an <c>f32</c> with
+    /// Rust's <c>Display</c>, i.e. the shortest decimal that round-trips, so a line-height of
+    /// <c>11px * 1.3</c> serializes as <c>14.299999px</c>. Blink serializes a CSS number through
+    /// WTF's <c>String::Number</c>, which is <c>%.6g</c> with trailing zeros truncated, and
+    /// reports <c>14.3px</c>. Page script string-compares computed values, so the port follows
+    /// Chromium here rather than Rust.
+    /// </remarks>
+    internal static string CssNumber(float value)
+    {
+        if (value == 0f)
+        {
+            return "0";
+        }
+
+        if (!float.IsFinite(value))
+        {
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        string text = value.ToString("G6", CultureInfo.InvariantCulture);
+        int exponent = text.IndexOf('E', StringComparison.Ordinal);
+
+        // .NET spells the exponent `E+07`; C's `%g`, and therefore Blink, spells it `e+07`.
+        return exponent < 0
+            ? text
+            : string.Concat(text.AsSpan(0, exponent), "e", text.AsSpan(exponent + 1));
+    }
 
     internal static string CssPx(float value) => CssNumber(value == 0f ? 0f : value) + "px";
 

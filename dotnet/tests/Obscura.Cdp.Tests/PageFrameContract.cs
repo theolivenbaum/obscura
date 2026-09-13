@@ -150,13 +150,27 @@ public sealed class PageFrameContract
                 ["button"] = "left",
             },
             sessionId);
-        JsonNode? routeFrame = ctx.PendingEvents
+        // Deviation from the Rust test: there the pushState click emits Page.frameNavigated
+        // and this section asserts that frame's contract. A pushState fetches no document,
+        // so C# reports Page.navigatedWithinDocument instead - which carries a frameId and
+        // a url rather than a Frame - and leaves the client's execution context alive. See
+        // SameDocumentNavigationEvents.
+        CdpEvent routed = ctx.PendingEvents
             .Skip(routeEventStart)
-            .First(e => e.Method == "Page.frameNavigated"
-                && e.Params.Get("frame").Get("id").AsString() == pageId)
-            .Params.Get("frame");
-        AssertFrameContract(routeFrame);
-        Assert.Equal(loaderId, routeFrame.Get("loaderId").AsString());
-        Assert.EndsWith("/next", routeFrame.Get("url").AsStringOr(string.Empty), StringComparison.Ordinal);
+            .Single(e => e.Method == "Page.navigatedWithinDocument");
+        Assert.Equal(pageId, routed.Params.Get("frameId").AsString());
+        Assert.EndsWith("/next", routed.Params.Get("url").AsStringOr(string.Empty), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            ctx.PendingEvents.Skip(routeEventStart),
+            e => e.Method == "Page.frameNavigated");
+
+        // The document, and so the loader the frame tree reports, is the one the navigation
+        // committed: a route change does not mint a new one.
+        JsonNode routedTree = await CoreCdp.CdpAsync(
+            ctx, 10, "Page.getFrameTree", new JsonObject(), sessionId);
+        JsonNode? routedFrame = routedTree["frameTree"]!["frame"];
+        AssertFrameContract(routedFrame);
+        Assert.Equal(loaderId, routedFrame.Get("loaderId").AsString());
+        Assert.EndsWith("/next", routedFrame.Get("url").AsStringOr(string.Empty), StringComparison.Ordinal);
     }
 }

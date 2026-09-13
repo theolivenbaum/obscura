@@ -767,6 +767,35 @@ value - the fix is to read `style.ComputedOverflowCss(true)` / `(false)` for
 shorthand.
 
 Covered by `OverflowKeywordsKeepTheirComputedIdentity`.
+### The CSSOM snapshot serializes numbers and shorthands like Chromium, not like Rust
+
+`computed_style` in `crates/obscura-render/src/paint.rs` writes each `f32` with
+Rust's `Display`, i.e. the shortest decimal that round-trips, so `font-size:11px`
+with `line-height:1.3` serializes as `14.299999px`. Blink formats a CSS number
+with WTF's `String::Number` - `%.6g` with trailing zeros truncated - and reports
+`14.3px`. `PaintCssValues.CssNumber` now does the Chromium thing, so every length
+the snapshot emits (and the one SVG `opacity` attribute that shares the helper)
+matches what page script compares against. Verified against Chromium 141 on
+14.3 / 20.8002 / 0.333333 / 1261.33 / 3.35544e+07 / 0.123457.
+
+`PreparedRender.ComputedStyle` also emits properties the Rust snapshot never had:
+the `margin` / `padding` / `border-width` / `border-style` / `border-color` /
+`border-radius` / `border` / `outline` / `overflow` / `gap` / `flex` shorthands,
+`top` / `right` / `bottom` / `left`, the `flex-*` longhands, `background*`,
+`box-shadow`, `text-decoration*` and `font-style`. A property missing from the
+snapshot falls through to bootstrap's inline-declaration fallback, which answers
+the empty string or a box-derived number, so ~1700 of 1715 measured element pairs
+read a wrong value. Covered by
+`dotnet/tests/Obscura.Render.Tests/ComputedStyleSnapshotTests.cs`, whose
+expectations are all taken from Chromium.
+
+`cursor`, `pointer-events` and the `font-family` casing were on that list and are
+now modeled in the cascade - see "The cascade models `cursor` and `pointer-events`"
+and "A `font-family` computed value keeps the author's spelling" above. Still not
+matched: `text-decoration-line` other than `underline`; computed insets on a
+positioned box, which Chromium reports as used values and the port reports as the
+specified value; and `background-image` gradients, which are re-serialized from the
+parsed layer rather than from their source text.
 
 ### Decoded web faces are cached; the reference re-decodes them
 
@@ -1166,6 +1195,22 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   `navigate*` branches on `Err`, so `PageException` carries a `PageErrorKind`
   and, for `TooManyClientNavigations`, the limit; the messages are the ones
   `thiserror` renders. Same for `RasterPdfError` -> `RasterPdfException`.
+- **A same-document URL change is reported as `Page.navigatedWithinDocument`.**
+  Rust's `sync_virtual_url` answers a bare `bool` and `obscura-cdp` turns any
+  URL change into `Page.frameNavigated`, which in CDP means a new document: the
+  client retires the frame's execution contexts, so the next `Runtime.evaluate`
+  fails with "Execution context was destroyed". Driving a single page app whose
+  views persist their tab through `history.replaceState` lost 20 of 157 routes
+  that way, where Chromium captured all 157. `SyncVirtualUrl` /
+  `ProcessPendingNavigationOutcomeAsync` now answer a `PageNavigationOutcome`,
+  and `Runtime.evaluate` / `Input.dispatchMouseEvent` emit
+  `Page.navigatedWithinDocument` (`navigationType` `fragment` or `historyApi`)
+  plus `Target.targetInfoChanged` for a URL change that fetched no document. A
+  real document navigation still emits the full `frameNavigated` sequence.
+  `Page.navigatedWithinDocument` appears nowhere in `crates/obscura-cdp`, so
+  this is a fix rather than a port correction, and the C# half of
+  `page_frame_contract` asserts the new event where the Rust test asserts the
+  frame. Covered by `SameDocumentNavigationEvents`.
 - **The navigation deadline is a `CancellationTokenSource`, not a dropped
   future.** `tokio::time::timeout` cancels the inner future at its next await
   point; the port threads the token into every HTTP call and awaits on the
@@ -1232,3 +1277,36 @@ skip reason.
   cause as the existing "ClearScript cannot tell a static import from a dynamic
   one" deviation, but it also changes *when* the work happens. Pinned by
   `PageTests.LazyModuleGraphIsPostLoadWorkUntilCallerSettles`.
+
+### A dynamically inserted classic script runs as a script, not as an eval
+
+`bootstrap.js` executes a dynamically inserted classic script with
+`(0, eval)(source)` twice: on a fetched `script.src` body in `__runDynScriptTask`
+and on an inserted element's own text in `__prepareInsertedScript`. Indirect eval
+does run in the global scope, but ES semantics confine a *strict* eval's top-level
+`var` and `function` declarations to the eval's own variable environment. So any
+inserted script whose source begins with `"use strict"` - every bundler prologue,
+and the whole `"use strict"; var lib = (() => { ... })();` library shape - loaded,
+fired `load`, and published nothing: `globalThis.lib` stayed `undefined` and even
+a later `eval('lib')` threw. Chromium evaluates the element as a top-level classic
+script, where those declarations create global bindings whatever the strictness.
+Parser-inserted scripts were never affected; they go through
+`Page.ExecuteClassic` -> `ObscuraJsRuntime.ExecuteScript`, which already compiles
+a script.
+
+The fix belongs in the shim, which is shared with Rust and read-only here (rule 1),
+so the port rewrites those two call sites on the way into V8
+(`BootstrapSource.EngineText`) onto `op_run_classic_script`, a port-added op that
+compiles the source as a top-level script in the calling realm. The directive is
+left in the source, so the body still runs in strict mode. Rust keeps the eval and
+therefore keeps the bug.
+
+Two smaller consequences. A script error now reaches the shim's `catch` as an
+`Error` whose message carries the original error's name (`TypeError: boom` rather
+than `boom`), which only changes the console text the shim prints; the error is
+still caught at the insertion point and the page keeps running. And the third
+indirect eval in the shim, the one compiling an inline event-handler attribute, is
+deliberately left alone - that source is a function body, not a script.
+
+Pinned by `ClassicScriptScopeTests` (7 facts, including that the bridge applied and
+that strict-mode semantics still hold inside the inserted script).

@@ -431,15 +431,66 @@ public static partial class Page
         });
         ctx.PendingEvents.AddRange(phase3);
 
-        // Target.targetInfoChanged: strict CDP clients (browser-use, and
-        // Puppeteer/Playwright `page.url()` tracking) cache the TargetInfo from
-        // attachedToTarget and only refresh it on this event. Without it they keep
-        // reporting the pre-navigation url/title (about:blank) and never see the loaded
-        // page. Emit it browser-level (no sessionId) with the new url/title.
+        ctx.PendingEvents.Add(TargetInfoChanged(ctx, pageId, pageUrl));
+    }
+
+    /// <summary>
+    /// Announce a URL change the document survived: a History API call, or a change to
+    /// nothing but the fragment.
+    /// </summary>
+    /// <remarks>
+    /// In CDP <c>Page.frameNavigated</c> means a new document, and every client retires the
+    /// frame's execution contexts when it arrives. Reporting a <c>pushState</c> that way
+    /// made the client's next <c>Runtime.evaluate</c> fail with "Execution context was
+    /// destroyed", which is what a single page app does on every route change: driving one
+    /// over CDP lost 20 of 157 routes. Chrome emits <c>Page.navigatedWithinDocument</c>
+    /// instead, and nothing else - no loader, no lifecycle, no context churn - because
+    /// nothing about the document changed but its URL.
+    /// <para>
+    /// The Rust tree has the same gap (<c>Page.navigatedWithinDocument</c> appears nowhere
+    /// in <c>crates/obscura-cdp</c>), so this is a fix rather than a port correction.
+    /// </para>
+    /// </remarks>
+    public static void EmitSameDocumentNavigation(
+        CdpContext ctx,
+        string? sessionId,
+        string frameId,
+        string pageUrl,
+        string pageId,
+        string navigationType)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        ctx.PendingEvents.Add(new CdpEvent
+        {
+            Method = "Page.navigatedWithinDocument",
+            Params = new JsonObject
+            {
+                ["frameId"] = frameId,
+                ["url"] = pageUrl,
+                ["navigationType"] = navigationType,
+            },
+            SessionId = sessionId,
+        });
+
+        // A client that tracks the page url from TargetInfo alone (browser-use, and
+        // Puppeteer/Playwright target bookkeeping) would otherwise keep reporting the
+        // pre-route url, exactly as it would across a document navigation.
+        ctx.PendingEvents.Add(TargetInfoChanged(ctx, pageId, pageUrl));
+    }
+
+    /// <summary>The target's new url/title, browser-level (no sessionId).</summary>
+    /// <remarks>
+    /// Strict CDP clients (browser-use, and Puppeteer/Playwright <c>page.url()</c>
+    /// tracking) cache the TargetInfo from attachedToTarget and only refresh it on this
+    /// event. Without it they keep reporting the pre-navigation url/title (about:blank) and
+    /// never see the loaded page. <c>canAccessOpener</c> is mandatory: generated clients
+    /// reject a TargetInfo payload missing it.
+    /// </remarks>
+    private static CdpEvent TargetInfoChanged(CdpContext ctx, string pageId, string pageUrl)
+    {
         BrowserPage? navigated = ctx.GetPage(pageId);
-        string ticTitle = navigated?.Title ?? string.Empty;
-        string ticContext = navigated?.Context.Id ?? string.Empty;
-        ctx.PendingEvents.Add(CdpEvent.New(
+
+        return CdpEvent.New(
             "Target.targetInfoChanged",
             new JsonObject
             {
@@ -447,13 +498,13 @@ public static partial class Page
                 {
                     ["targetId"] = pageId,
                     ["type"] = "page",
-                    ["title"] = ticTitle,
+                    ["title"] = navigated?.Title ?? string.Empty,
                     ["url"] = pageUrl,
                     ["attached"] = true,
                     ["canAccessOpener"] = false,
-                    ["browserContextId"] = ticContext,
+                    ["browserContextId"] = navigated?.Context.Id ?? string.Empty,
                 },
-            }));
+            });
     }
 
     /// <summary>
