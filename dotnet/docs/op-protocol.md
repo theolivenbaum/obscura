@@ -130,3 +130,24 @@ text_content
    the Rust output in a parity test rather than reasoning about it.
 4. **`frame_id` selects the realm state.** Ops that take `frame_id` resolve
    per-frame state; the main realm is frame 0.
+
+## Port-added ops (1)
+
+These have no counterpart in `ops.rs`. The shim as shipped does not call them;
+`BootstrapSource.EngineText` rewrites a call site onto each one on the way into
+V8, so the shared JavaScript file stays untouched.
+
+| Op | Kind | Arguments | Returns |
+|---|---|---|---|
+| `op_run_classic_script` | sync | `source: String, url: String` | `(void)` |
+
+`op_run_classic_script` compiles `source` as a top-level classic script in the
+calling realm. It replaces the two `(0, eval)(source)` calls that execute a
+dynamically inserted classic script, which dropped the top-level `var` and
+`function` declarations of any script beginning with `"use strict"` instead of
+publishing them as globals. See "A dynamically inserted classic script runs as a
+script, not as an eval" in `todo.md`.
+
+It is the one op that deliberately does not go through `OpGuard`: both call sites
+catch and report what the script threw, exactly as they did when eval threw it, so
+the failure has to travel back into JavaScript rather than be contained.
