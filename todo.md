@@ -1208,3 +1208,36 @@ skip reason.
   cause as the existing "ClearScript cannot tell a static import from a dynamic
   one" deviation, but it also changes *when* the work happens. Pinned by
   `PageTests.LazyModuleGraphIsPostLoadWorkUntilCallerSettles`.
+
+### A dynamically inserted classic script runs as a script, not as an eval
+
+`bootstrap.js` executes a dynamically inserted classic script with
+`(0, eval)(source)` twice: on a fetched `script.src` body in `__runDynScriptTask`
+and on an inserted element's own text in `__prepareInsertedScript`. Indirect eval
+does run in the global scope, but ES semantics confine a *strict* eval's top-level
+`var` and `function` declarations to the eval's own variable environment. So any
+inserted script whose source begins with `"use strict"` - every bundler prologue,
+and the whole `"use strict"; var lib = (() => { ... })();` library shape - loaded,
+fired `load`, and published nothing: `globalThis.lib` stayed `undefined` and even
+a later `eval('lib')` threw. Chromium evaluates the element as a top-level classic
+script, where those declarations create global bindings whatever the strictness.
+Parser-inserted scripts were never affected; they go through
+`Page.ExecuteClassic` -> `ObscuraJsRuntime.ExecuteScript`, which already compiles
+a script.
+
+The fix belongs in the shim, which is shared with Rust and read-only here (rule 1),
+so the port rewrites those two call sites on the way into V8
+(`BootstrapSource.EngineText`) onto `op_run_classic_script`, a port-added op that
+compiles the source as a top-level script in the calling realm. The directive is
+left in the source, so the body still runs in strict mode. Rust keeps the eval and
+therefore keeps the bug.
+
+Two smaller consequences. A script error now reaches the shim's `catch` as an
+`Error` whose message carries the original error's name (`TypeError: boom` rather
+than `boom`), which only changes the console text the shim prints; the error is
+still caught at the insertion point and the page keeps running. And the third
+indirect eval in the shim, the one compiling an inline event-handler attribute, is
+deliberately left alone - that source is a function body, not a script.
+
+Pinned by `ClassicScriptScopeTests` (7 facts, including that the bridge applied and
+that strict-mode semantics still hold inside the inserted script).
