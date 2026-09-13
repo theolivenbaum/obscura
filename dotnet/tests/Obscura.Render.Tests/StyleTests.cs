@@ -639,6 +639,7 @@ public class ComputedStyleTests
         Assert.Equal("default", Compute("button", null).Cursor);
         Assert.Equal("default", Compute("select", null).Cursor);
         Assert.Equal("text", Compute("input", null).Cursor);
+        Assert.Equal("text", Compute("textarea", null).Cursor);
 
         Assert.True(Supports("cursor", "pointer"));
         Assert.False(Supports("cursor", "nonsense"));

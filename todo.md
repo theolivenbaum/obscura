@@ -720,6 +720,24 @@ buttons, context cards, cron editors and date-range pickers with
 Covered by `HeightFitContentHugsContentInsteadOfStretching` and
 `HeightFitContentRespectsExplicitCrossAxisAlignment`.
 
+### `align-content: baseline` uses its fallback alignment
+
+`content_alignment_value` in `style.rs` does not accept the baseline keywords, so the
+declaration is dropped and the container keeps `normal`, which for content distribution
+is `stretch`. Baseline alignment does not apply to content distribution at all: CSS Box
+Alignment gives it a fallback alignment, `start` for a first baseline and `end` for a
+last one, which is what Chromium does.
+
+Found while checking the `height: fit-content` fix against the real app. Tesserae's
+`.tss-grid` asks for `align-content: baseline`, so stretching its auto rows made a
+400x56 card sit in a 175px row; Chromium sizes the row to the card. With both fixes the
+home route's four suggestion cards land on Chromium's exact rows.
+
+Chromium reports the computed value as `baseline` while behaving as `start`; the port
+reports the fallback, because taffy's `AlignContent` has no baseline variant to carry.
+
+Covered by `BaselineContentAlignmentUsesItsFallbackInsteadOfStretching`.
+
 ### `font-family: inherit` is honoured on form controls
 
 `style.rs` skips the `inherit` keyword on `font-family` (`if family != "inherit"`), so

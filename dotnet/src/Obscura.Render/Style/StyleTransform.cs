@@ -727,6 +727,14 @@ public static partial class ComputedStyle
         CssText.AsciiLower(value.Trim()) switch
         {
             "normal" or "stretch" => Layout.AlignContent.Stretch,
+            // Baseline alignment does not apply to content distribution, which uses the
+            // fallback alignment instead: `start` for a first baseline, `end` for a last one.
+            // DEVIATION: crates/obscura-render drops the keyword, so the declaration does
+            // nothing and the container keeps `normal`, i.e. stretch. Tesserae's grid asks for
+            // `align-content: baseline`, and stretching its auto rows made every card in it
+            // fill the container. See "Known deviations" in todo.md.
+            "baseline" or "first baseline" => Layout.AlignContent.Start,
+            "last baseline" => Layout.AlignContent.End,
             "start" => Layout.AlignContent.Start,
             "end" => Layout.AlignContent.End,
             "flex-start" => Layout.AlignContent.FlexStart,

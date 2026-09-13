@@ -3369,6 +3369,38 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void BaselineContentAlignmentUsesItsFallbackInsteadOfStretching()
+    {
+        // Baseline alignment does not apply to content distribution; `align-content: baseline`
+        // falls back to `start`, so the auto rows of a taller-than-content grid keep their
+        // content size rather than being stretched to fill it.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px }
+               #grid { display:grid; grid-template-columns:100px 100px; row-gap:12px;
+                       align-content:baseline; width:220px; height:400px }
+               .cell { height:40px }
+               #stretchy { display:grid; grid-template-columns:100px; row-gap:12px;
+                           width:100px; height:400px }
+               </style>
+               <div id="grid">
+                 <div id="a" class="cell"></div><div class="cell"></div>
+                 <div id="b" class="cell"></div><div class="cell"></div>
+               </div>
+               <div id="stretchy"><div class="cell"></div><div id="c" class="cell"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("a").Height - 40f) < 0.01f, $"{Get("a")}");
+        Assert.True(MathF.Abs(Get("b").Y - (Get("a").Y + 52f)) < 0.01f, $"{Get("b")}");
+
+        // `align-content: normal` still spreads the same grid's rows over the extra space.
+        Assert.True(Get("c").Y > 200f, $"{Get("c")}");
+    }
+
+    [Fact]
     public void HeightFitContentHugsContentInsteadOfStretching()
     {
         // `height: fit-content` sizes to content in the block axis exactly like `auto`, but it

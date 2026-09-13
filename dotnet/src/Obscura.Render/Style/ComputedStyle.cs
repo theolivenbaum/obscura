@@ -192,10 +192,12 @@ public static partial class ComputedStyle
         }
         else if (tag == "textarea")
         {
+            style.Cursor = "text";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
             style.FontFamily = "monospace";
+            style.FontFamilySpecified = "monospace";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.WhiteSpace = Obscura.Render.WhiteSpace.PreWrap;
             style.BoxSizing = BoxSizing.BorderBox;
