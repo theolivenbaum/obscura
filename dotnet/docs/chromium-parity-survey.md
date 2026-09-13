@@ -481,3 +481,50 @@ at a 156-element spinner), and routes that were uncapturable now capture:
 Cascade fixes, strictly aligned against Chromium 141: `font-family`, `overflow`, `cursor` and
 `pointer-events` all differ on **0** pairs across 205 + 205 + 329 element pairs on three routes.
 The F5 card is `[433,584,400,56]` against Chromium's `[425,584,400,56]`.
+
+
+---
+
+# Measured after the fixes: full 157-route re-survey
+
+Both engines re-driven over all 157 routes with the same harness, Obscura running the fixed build
+**with no shim**. 59,230 strictly-aligned element pairs (identical tag *and* class list).
+
+## Capture reliability
+
+| | before | after |
+|---|---|---|
+| routes captured in Obscura | 137 / 157 | **157 / 157** |
+| capture failures | 20 | **0** |
+| app boots without the F1 shim | no - 156-element spinner | **yes** |
+| routes rendering under 250 elements | 20 (all the same spinner) | 2, both legitimate (`#/desktop/search-box` is a search box; `#/manage` is a redirecting shell) |
+
+## Computed-style agreement with Chromium
+
+| property | before | after |
+|---|---|---|
+| `font-family` | 1706 / 1715 (99.5%) | **0 / 59230 (0.00%)** |
+| `overflow` | ~20% of pairs | **408 / 59230 (0.69%)** |
+| `position` | 63 pairs (alignment artefact) | 1 / 59230 (0.00%) |
+| `flex-direction` | - | 17 / 59230 (0.03%) |
+| `font-size` | - | 68 / 59230 (0.11%) |
+| `display` | - | 226 / 59230 (0.38%) |
+| `color` | 10 / 1715 | 528 / 59230 (0.89%) |
+| `background-color` | 93 / 1715 (5.4%) | **3790 / 59230 (6.40%)** - unchanged, still open (F7) |
+
+`cursor` and `pointer-events`, which previously could not be reported at all, now differ on
+0-1 pairs on the routes spot-checked.
+
+## What is left
+
+- **Geometry: 24,143 / 59,230 aligned pairs (40.8%) still differ by more than 2px.** This is the
+  dominant residual and it is F15, not F5: box *sizes* are now correct, the divergence is
+  intrinsic inline sizing. The cleanest repro is `#/preferences?id=themes` (the worst route at
+  21.9% pixel difference): the theme cards are 160x100 in **both** engines, but the wrapper pitch
+  is 265px in Obscura against Chromium's 214px, so four cards fit per row instead of five.
+  That points at max-content contribution / text measurement.
+- **`background-color` at 6.40%** is now the largest computed-style gap and was never addressed.
+- Pixel difference: median **2.74%**, mean 3.47%, max 21.9%; **132 of 157 routes under 5%**.
+  Note that a slice of this is genuine content drift (the Logs page differs by 11.9% almost
+  entirely because it lists different log lines), so the true rendering difference is lower than
+  the raw number.
