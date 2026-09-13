@@ -400,6 +400,14 @@ internal static class DomCascade
                 style.MarginRelative[2] = Dimension.Em(1f);
             }
 
+            // Chromium's UA sheet gives `a:any-link` a pointer cursor, which needs the
+            // attribute a tag-keyed UA style cannot see.
+            if (string.Equals(local, "a", StringComparison.Ordinal)
+                && node.GetAttribute("href") is not null)
+            {
+                style.Cursor = "pointer";
+            }
+
             if (string.Equals(local, "input", StringComparison.Ordinal))
             {
                 string inputType = (node.GetAttribute("type") ?? "text").Trim().ToLowerInvariant();

@@ -3315,6 +3315,36 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void CursorAndPointerEventsInheritDownTheTree()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0 }
+               #clickable { cursor:pointer }
+               #inert { pointer-events:none }
+               </style>
+               <div id="clickable"><span id="inner">x</span></div>
+               <div id="inert"><span id="inert-inner">y</span></div>
+               <a id="link" href="#">z</a>
+               <a id="anchor">w</a>
+               <p id="plain">p</p>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+
+        Assert.Equal("pointer", laid.Styles[Id(tree, "clickable")].Cursor);
+        Assert.Equal("pointer", laid.Styles[Id(tree, "inner")].Cursor);
+        Assert.Equal("none", laid.Styles[Id(tree, "inert")].PointerEvents);
+        Assert.Equal("none", laid.Styles[Id(tree, "inert-inner")].PointerEvents);
+
+        // Chromium's UA sheet points at a link, and only at one that is a link.
+        Assert.Equal("pointer", laid.Styles[Id(tree, "link")].Cursor);
+        Assert.Equal("auto", laid.Styles[Id(tree, "anchor")].Cursor);
+        Assert.Equal("auto", laid.Styles[Id(tree, "plain")].Cursor);
+        Assert.Equal("auto", laid.Styles[Id(tree, "plain")].PointerEvents);
+    }
+
+    [Fact]
     public void FormControlsInheritThePageFontFamilyThroughTheAuthorRule()
     {
         // The UA sheet's `arial` on a control is right; the author sheet every reset carries

@@ -590,10 +590,15 @@ public sealed class PreparedRender
         output["color"] = PaintCssValues.CssColor(style.Color ?? new RgbaColor(0, 0, 0, 255));
         output["font-size"] = PaintCssValues.CssPx(style.FontSize ?? 16f);
         output["font-weight"] = style.FontWeight ?? "400";
-        if (style.FontFamily is { } family)
+        // `FontFamily` is lower-cased for case-insensitive face matching; the computed value
+        // reports the author's own spelling.
+        if ((style.FontFamilySpecified ?? style.FontFamily) is { } family)
         {
             output["font-family"] = family;
         }
+
+        output["cursor"] = style.Cursor ?? "auto";
+        output["pointer-events"] = style.PointerEvents ?? "auto";
 
         output["line-height"] = (style.LineHeight ?? Obscura.Render.LineHeight.Normal) == Obscura.Render.LineHeight.Normal
             ? "normal"
@@ -668,11 +673,10 @@ public sealed class PreparedRender
         output["max-height"] = PaintCssValues.DimensionCss(style.MaxHeight, "none");
         output["box-sizing"] = style.BoxSizing == BoxSizing.BorderBox ? "border-box" : "content-box";
 
-        static string OverflowAxis(byte specified, bool clipped, bool scroll) =>
-            scroll ? "auto" : specified == 1 || clipped ? "clip" : "visible";
-
-        output["overflow-x"] = OverflowAxis(style.OverflowSpecifiedX, style.OverflowClipX, style.OverflowScrollX);
-        output["overflow-y"] = OverflowAxis(style.OverflowSpecifiedY, style.OverflowClipY, style.OverflowScrollY);
+        // The cascade keeps the five overflow keywords apart; anything scrollable used to be
+        // reported as `auto`, which was wrong for `hidden` and `scroll` alike.
+        output["overflow-x"] = style.ComputedOverflowCss(true);
+        output["overflow-y"] = style.ComputedOverflowCss(false);
         output["overflow"] = CollapseAxes(output["overflow-x"], output["overflow-y"]);
 
         // Chromium reports `auto` for an inset nobody specified. Without these the snapshot let
@@ -1185,6 +1189,7 @@ public sealed class PreparedRender
                 && style.MaxWidth.Kind is DimensionKind.Auto or DimensionKind.Px
                 && style.MaxHeight.Kind is DimensionKind.Auto or DimensionKind.Px
                 && !style.WidthFitContent
+                && !style.HeightFitContent
                 && style.SizeExpressions.All(expression => expression is null);
             if (!fixedBox)
             {

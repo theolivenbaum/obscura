@@ -767,6 +767,45 @@ value - the fix is to read `style.ComputedOverflowCss(true)` / `(false)` for
 shorthand.
 
 Covered by `OverflowKeywordsKeepTheirComputedIdentity`.
+### A `font-family` computed value keeps the author's spelling
+
+`style.rs` stores the family list lower-cased (`CssText.AsciiLower` on the C# side),
+because every face lookup matches against it case-insensitively. That spelling is also
+what the snapshot reported, so Chromium's
+`"Plus Jakarta Sans", Inter, "Segoe UI", sans-serif` came back as
+`"plus jakarta sans", "inter", ...` - wrong on 816 of 1715 aligned element pairs on
+Curiosity Workspace.
+
+`LayoutStyle.FontFamilySpecified` carries the reporting spelling next to the
+lower-cased `FontFamily`, and follows it everywhere including inheritance and the
+pseudo-element settle. `ComputedStyle.SerializeFontFamilyList` re-serializes the list
+the way Blink does: the author's casing, one `", "` between families, and quotes only
+where a family does not round-trip as an identifier - so an unquoted `Plus Jakarta
+Sans` gains quotes, a quoted `"Inter"` loses them, and a quoted `"sans-serif"` keeps
+them because it is a string rather than the generic keyword. Checked against
+Chromium 141 for each of those shapes.
+
+Covered by `FontFamilyKeepsTheAuthorsSpellingForReporting`.
+
+### The cascade models `cursor` and `pointer-events`
+
+Neither property exists in `style.rs`, so neither reached the snapshot and
+`getComputedStyle` fell through to bootstrap's inline-declaration fallback: `cursor`
+was wrong on ~1200 of 1715 aligned pairs and `pointer-events` on ~400. Both are
+inherited with initial `auto`, both are stored as the validated keyword (null while
+inheriting), and `PreparedRender.ComputedStyle` emits them.
+
+The UA values come with them: `button` and `select` are `default`, `input` is `text`,
+and `a` is `pointer` when it has an `href` - which is why that one is set in
+`DomCascade` rather than in the tag-keyed `UaStyle`.
+
+`pointer-events` is reporting only. Hit testing runs in JavaScript through
+`document.elementFromPoint` in `Obscura.Js`, which does not consult the cascade, so
+making the property behavioural is a separate change there.
+
+Covered by `CursorAndPointerEventsAreModelled` and
+`CursorAndPointerEventsInheritDownTheTree`.
+
 ### The CSSOM snapshot serializes numbers and shorthands like Chromium, not like Rust
 
 `computed_style` in `crates/obscura-render/src/paint.rs` writes each `f32` with

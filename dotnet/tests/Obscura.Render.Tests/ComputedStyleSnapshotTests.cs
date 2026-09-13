@@ -12,8 +12,8 @@ namespace Obscura.Render.Tests;
 /// markup), not from the Rust engine: a property the snapshot omits falls through to
 /// bootstrap's inline-declaration fallback, which answers the empty string or a box-derived
 /// number, so page script reads a wrong value. Where the port cannot match Chromium (the
-/// cascade models only the underline decoration line, and `cursor` / `pointer-events` are not
-/// modeled at all) the gap is named in the test rather than asserted.
+/// cascade models only the underline decoration line) the gap is named in the test rather
+/// than asserted.
 /// </remarks>
 public class ComputedStyleSnapshotTests
 {
@@ -150,19 +150,62 @@ public class ComputedStyleSnapshotTests
             """<div id="box" style="overflow:hidden">x</div>""",
             "box");
 
-        // The axis VALUES are a separate, tracked cascade defect; the shorthand is what this
-        // asserts, so it is checked against the axes the snapshot actually reports.
-        Assert.Equal(same["overflow-x"], same["overflow-y"]);
-        Assert.Equal(same["overflow-x"], same["overflow"]);
+        Assert.Equal("hidden", same["overflow-x"]);
+        Assert.Equal("hidden", same["overflow-y"]);
+        Assert.Equal("hidden", same["overflow"]);
 
         Dictionary<string, string> split = Computed(
             """<div id="box" style="overflow-x:clip;overflow-y:visible">x</div>""",
             "box");
 
+        Assert.Equal("clip", split["overflow-x"]);
+        Assert.Equal("visible", split["overflow-y"]);
+        Assert.Equal("clip visible", split["overflow"]);
+
+        // One scrollable axis turns `visible` into `auto` on the other.
+        Dictionary<string, string> coupled = Computed(
+            """<div id="box" style="overflow-y:scroll">x</div>""",
+            "box");
+
+        Assert.Equal("auto", coupled["overflow-x"]);
+        Assert.Equal("scroll", coupled["overflow-y"]);
+        Assert.Equal("auto scroll", coupled["overflow"]);
+
+        // Chromium's UA sheet clips an image to its box.
+        Assert.Equal("clip", Computed("""<img id="box" width="8" height="8">""", "box")["overflow"]);
+    }
+
+    [Fact]
+    public void FontFamilyCursorAndPointerEventsAreReported()
+    {
+        Dictionary<string, string> computed = Computed(
+            """
+            <div id="box" style="font-family:'Plus Jakarta Sans', Inter, sans-serif;
+                                 cursor:pointer; pointer-events:none">x</div>
+            """,
+            "box");
+
+        Assert.Equal("\"Plus Jakarta Sans\", Inter, sans-serif", computed["font-family"]);
+        Assert.Equal("pointer", computed["cursor"]);
+        Assert.Equal("none", computed["pointer-events"]);
+
+        Dictionary<string, string> plain = Computed("""<div id="box">x</div>""", "box");
+        Assert.Equal("auto", plain["cursor"]);
+        Assert.Equal("auto", plain["pointer-events"]);
+
+        // The UA form-control font reaches the snapshot with Chromium's spelling, and the
+        // author rule every reset ships takes it back off.
         Assert.Equal(
-            split["overflow-x"] + " " + split["overflow-y"],
-            split["overflow"]);
-        Assert.Contains(' ', split["overflow"]);
+            "Arial",
+            Computed("""<button id="box">x</button>""", "box")["font-family"]);
+        Assert.Equal(
+            "Verdana",
+            Computed(
+                """
+                <style>body { font-family:Verdana } button { font-family:inherit }</style>
+                <button id="box">x</button>
+                """,
+                "box")["font-family"]);
     }
 
     [Fact]

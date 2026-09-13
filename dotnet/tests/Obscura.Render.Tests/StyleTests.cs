@@ -590,6 +590,62 @@ public class ComputedStyleTests
     }
 
     [Fact]
+    public void FontFamilyKeepsTheAuthorsSpellingForReporting()
+    {
+        // Every expectation here is what Chromium 141 answers for the same declaration.
+        static string? Specified(string css) => Compute("div", css).FontFamilySpecified;
+
+        Assert.Equal(
+            "\"Plus Jakarta Sans\", Inter, \"Segoe UI\", sans-serif",
+            Specified("font-family:\"Plus Jakarta Sans\", Inter, \"Segoe UI\", sans-serif"));
+
+        // An unquoted multi-word family serializes as a string; a single identifier does not.
+        Assert.Equal("\"Plus Jakarta Sans\", Inter", Specified("font-family:Plus Jakarta Sans, Inter"));
+        Assert.Equal("ARIAL, helvetica", Specified("font-family:ARIAL , helvetica"));
+
+        // Quotes come off a family that round-trips as an identifier, and stay on one that
+        // would otherwise read as a generic keyword.
+        Assert.Equal("Inter", Specified("font-family:\"Inter\""));
+        Assert.Equal("\"sans-serif\"", Specified("font-family:\"sans-serif\""));
+        Assert.Equal("\"Foo Bar\"", Specified("font-family:'Foo Bar'"));
+
+        // The lower-cased list every face lookup matches against is untouched.
+        Assert.Equal("\"plus jakarta sans\", inter", Compute("div", "font-family:\"Plus Jakarta Sans\", Inter").FontFamily);
+
+        // The shorthand and the UA form-control font carry a spelling too.
+        Assert.Equal("\"Google Sans\", sans-serif", Compute("div", "font:20px \"Google Sans\", sans-serif").FontFamilySpecified);
+        Assert.Equal("Arial", Compute("button", null).FontFamilySpecified);
+        Assert.Null(Compute("button", "font-family:inherit").FontFamilySpecified);
+    }
+
+    [Fact]
+    public void CursorAndPointerEventsAreModelled()
+    {
+        Assert.Equal("pointer", Compute("div", "cursor:pointer").Cursor);
+        Assert.Equal("not-allowed", Compute("div", "cursor:NOT-ALLOWED").Cursor);
+        Assert.Equal("auto", Compute("div", "cursor:initial").Cursor);
+        Assert.Null(Compute("div", "cursor:inherit").Cursor);
+        Assert.Null(Compute("div", null).Cursor);
+
+        // An unknown keyword leaves the value alone rather than storing garbage.
+        Assert.Null(Compute("div", "cursor:nonsense").Cursor);
+
+        Assert.Equal("none", Compute("div", "pointer-events:none").PointerEvents);
+        Assert.Equal("auto", Compute("div", "pointer-events:initial").PointerEvents);
+        Assert.Null(Compute("div", "pointer-events:inherit").PointerEvents);
+        Assert.Null(Compute("div", "pointer-events:nonsense").PointerEvents);
+
+        // Chromium's UA sheet cursors for the form controls.
+        Assert.Equal("default", Compute("button", null).Cursor);
+        Assert.Equal("default", Compute("select", null).Cursor);
+        Assert.Equal("text", Compute("input", null).Cursor);
+
+        Assert.True(Supports("cursor", "pointer"));
+        Assert.False(Supports("cursor", "nonsense"));
+        Assert.True(Supports("pointer-events", "none"));
+    }
+
+    [Fact]
     public void OverflowKeywordsKeepTheirComputedIdentity()
     {
         Assert.Equal("visible", Compute("div", "overflow:visible").ComputedOverflowCss(true));
