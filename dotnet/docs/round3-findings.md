@@ -98,3 +98,23 @@ native control painter at all.
 GraphKit's canvas is 1202 wide in Chromium and 1217 in Obscura, and the available-apps grid
 overflows its container, both the known 15px sidebar delta from the flex-shrink `calc()` defect
 (a flex item that shrinks never re-resolves a `calc()` size). Tracked separately.
+
+## S1 - `overflow: visible` on an `<svg>` is ignored
+
+`svg-probe.html` case s9: an `<svg width=120 height=60 style="overflow:visible">` whose `<rect>`
+extends past the viewport. Chromium paints **4800** red pixels (the overflow shows); Obscura
+paints **900** (clipped to the svg box). The outermost `<svg>` gets `overflow: hidden` from the
+UA sheet, and an author `overflow: visible` has to override it.
+
+## S2 - a nested `<svg>` is not scaled or placed correctly
+
+`svg-probe.html` case s10: `<svg width=200 height=100 viewBox="0 0 200 100">` containing
+`<svg x=50 y=20 width=100 height=60 viewBox="0 0 10 6"><rect width=10 height=6/></svg>`.
+Chromium paints **6000** red pixels, Obscura **60** - two orders of magnitude out, so the inner
+viewport's scale is being dropped and the rect is drawn in the inner viewBox's user units
+without the width/height mapping.
+
+Eight other cases in the same probe are byte-identical between the engines and are NOT defects:
+viewBox scaling up, no viewBox, `preserveAspectRatio` default and `none`, clipping of content
+outside the viewBox, CSS-sized svg with a viewBox, a flat zero-value polyline, and percentage
+width/height attributes.
