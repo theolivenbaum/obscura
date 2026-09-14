@@ -120,6 +120,153 @@ public sealed class SameDocumentNavigationEvents
         Assert.Single(server.Requests);
     }
 
+    /// <summary>
+    /// A <c>Page.navigate</c> that differs from the loaded document only in its fragment is
+    /// a same-document navigation, not a load.
+    /// </summary>
+    /// <remarks>
+    /// Measured against real Chromium: no document request, the realm and every
+    /// <c>window</c> property intact, <c>hashchange</c> and <c>popstate</c> fired.
+    /// Refetching instead reboots a single page app on every route change, which is what a
+    /// client driving one with <c>goto(base + '#/route')</c> asks for on every step.
+    /// </remarks>
+    [Fact]
+    public async Task FragmentOnlyPageNavigateKeepsTheDocument()
+    {
+        CoreCdp.AllowLoopback();
+        using CoreCdpServer server = CoreCdpServer.Html("<html><body><p>spa</p></body></html>");
+        var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
+        long contextId = await LoadAsync(ctx, server.Url);
+        await CoreCdp.EvalAsync(
+            ctx,
+            3,
+            "globalThis.__marker = 'ALIVE'; globalThis.__hc = 0; globalThis.__ps = 0;"
+            + " addEventListener('hashchange', function () { __hc++; });"
+            + " addEventListener('popstate', function () { __ps++; }); 1",
+            Session);
+        ctx.PendingEvents.Clear();
+
+        JsonNode navigate = await CoreCdp.CdpAsync(
+            ctx,
+            4,
+            "Page.navigate",
+            new JsonObject { ["url"] = server.Url + "#/x", ["waitUntil"] = "load" },
+            Session);
+
+        // No loaderId: that field is the id of the document the navigation created, and
+        // nothing was created. Playwright reads it as newDocumentId and, when it is there,
+        // waits for a load lifecycle that never comes -- goto() then hangs to its timeout.
+        Assert.False(string.IsNullOrEmpty(navigate.Get("frameId").AsString()));
+        Assert.Null(navigate.Get("loaderId").AsString());
+
+        CdpEvent moved = SoleSameDocumentEvent(ctx);
+        Assert.Equal(server.Url + "#/x", moved.Params.Get("url").AsString());
+        Assert.Equal("fragment", moved.Params.Get("navigationType").AsString());
+
+        // The route never asked for a document, so the fixture never served a second one.
+        Assert.Single(server.Requests);
+
+        // The realm survived, so the client's context is still live and so is its state.
+        CdpResponse after = await CoreCdp.DispatchAsync(
+            ctx,
+            5,
+            "Runtime.evaluate",
+            new JsonObject
+            {
+                ["expression"] = "[__marker, __hc, __ps, location.href]",
+                ["returnByValue"] = true,
+                ["contextId"] = contextId,
+            },
+            Session);
+        Assert.True(after.Error is null, $"context was destroyed: {after.Error?.Message}");
+        Assert.Equal(
+            $"""["ALIVE",1,1,"{server.Url}#/x"]""",
+            after.Result!["result"]!["value"]!.ToJsonString());
+    }
+
+    /// <summary>
+    /// <c>Page.reload</c> is handed the current URL and means the document literally, so a
+    /// page sitting on a fragment must still be refetched.
+    /// </summary>
+    [Fact]
+    public async Task ReloadStillFetchesWhenTheUrlCarriesAFragment()
+    {
+        CoreCdp.AllowLoopback();
+        using CoreCdpServer server = CoreCdpServer.Html("<html><body><p>spa</p></body></html>");
+        var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
+        await LoadAsync(ctx, server.Url + "#/x");
+        ctx.PendingEvents.Clear();
+
+        await CoreCdp.CdpAsync(ctx, 4, "Page.reload", new JsonObject(), Session);
+
+        Assert.Contains("Page.frameNavigated", ctx.PendingEvents.Select(e => e.Method));
+        Assert.Equal(2, server.Requests.Count);
+    }
+
+    /// <summary>
+    /// A real input-driven click on an in-page link navigates, the same way
+    /// <c>element.click()</c> does.
+    /// </summary>
+    /// <remarks>
+    /// The CDP mouse path carried its own copy of the "skip a fragment href" rule that the
+    /// <c>bootstrap.js</c> click path had, so an actual mouse click on an SPA's own link --
+    /// how most of them route -- did nothing at all.
+    /// </remarks>
+    [Fact]
+    public async Task AnInputDrivenClickOnAFragmentLinkNavigatesWithinTheDocument()
+    {
+        CoreCdp.AllowLoopback();
+        using CoreCdpServer server = CoreCdpServer.Html(
+            """
+            <html><body style="margin:0">
+            <a id="lnk" href="#/x"
+               style="position:absolute;left:0;top:0;width:200px;height:60px;display:block">go</a>
+            </body></html>
+            """);
+        var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
+        await LoadAsync(ctx, server.Url);
+        await CoreCdp.EvalAsync(
+            ctx,
+            3,
+            "globalThis.__hc = 0; globalThis.__ps = 0;"
+            + " addEventListener('hashchange', function () { __hc++; });"
+            + " addEventListener('popstate', function () { __ps++; }); 1",
+            Session);
+        ctx.PendingEvents.Clear();
+
+        foreach ((ulong id, string type, int buttons) in
+            new (ulong, string, int)[] { (4, "mousePressed", 1), (5, "mouseReleased", 0) })
+        {
+            await CoreCdp.CdpAsync(
+                ctx,
+                id,
+                "Input.dispatchMouseEvent",
+                new JsonObject
+                {
+                    ["type"] = type,
+                    ["x"] = 20,
+                    ["y"] = 20,
+                    ["button"] = "left",
+                    ["buttons"] = buttons,
+                    ["clickCount"] = 1,
+                },
+                Session);
+        }
+
+        JsonNode state = await CoreCdp.EvalAsync(
+            ctx, 6, "JSON.stringify([location.href, __hc, __ps])", Session);
+        Assert.Equal(
+            $"""["{server.Url}#/x",1,1]""",
+            CoreCdp.ParseStringified(state).ToJsonString());
+
+        CdpEvent moved = SoleSameDocumentEvent(ctx);
+        Assert.Equal(server.Url + "#/x", moved.Params.Get("url").AsString());
+        Assert.Single(server.Requests);
+    }
+
     [Fact]
     public async Task ARealDocumentNavigationIsStillReportedAsAFrameNavigation()
     {

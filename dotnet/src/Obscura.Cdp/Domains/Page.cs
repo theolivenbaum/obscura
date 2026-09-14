@@ -691,11 +691,17 @@ public static partial class Page
         return WaitUntil.DomContentLoaded;
     }
 
+    /// <param name="allowSameDocument">
+    /// Whether a target differing from the loaded document in nothing but its fragment may
+    /// be answered without fetching. True for <c>Page.navigate</c>; false for
+    /// <c>Page.reload</c>, which is handed the current URL and means the document literally.
+    /// </param>
     private static async Task<JsonNode?> DoNavigateAsync(
         string url,
         JsonNode? parameters,
         CdpContext ctx,
-        string? sessionId)
+        string? sessionId,
+        bool allowSameDocument)
     {
         WaitUntil waitUntil = ParseWaitUntil(parameters);
 
@@ -718,6 +724,35 @@ public static partial class Page
         BrowserPage page = ctx.GetSessionPageMut(sessionId)
             ?? throw new DomainError("No page for session");
         string frameId = page.FrameId;
+
+        // Navigating to the loaded document's own URL with a different fragment is a
+        // same-document navigation, not a load: Chromium fetches nothing, keeps the realm
+        // and every window property, and fires hashchange then popstate. Fetching instead
+        // rebooted a single page app on every route change, which is exactly what a client
+        // driving one with goto(base + '#/route') asks for on every step.
+        if (allowSameDocument
+            && await page.TryNavigateSameDocumentAsync(url).ConfigureAwait(false)
+                is { IsSameDocument: true } sameDocument)
+        {
+            page.SyncJsNetworkEvents();
+            List<NetworkEvent> routerEvents = [.. page.NetworkEvents];
+            page.NetworkEvents.Clear();
+            EmitRuntimeNetworkEvents(
+                ctx, sessionId, frameId, page.UrlString(), page.Id, routerEvents);
+            EmitSameDocumentNavigation(
+                ctx,
+                sessionId,
+                frameId,
+                page.UrlString(),
+                page.Id,
+                sameDocument.NavigationType);
+
+            // No loaderId: that field is the id of the document the navigation created, and
+            // nothing was created. A client reading it as the new document id would wait
+            // for a load lifecycle that never comes.
+            return new JsonObject { ["frameId"] = frameId };
+        }
+
         string loaderId = $"loader-{Guid.NewGuid()}";
 
         // Preloads (addBinding shims, addScriptToEvaluateOnNewDocument sources) must run
@@ -890,7 +925,8 @@ public static partial class Page
                 string url = parameters.Get("url").AsString()
                     ?? throw new DomainError("url required");
                 return DomainResult.Ok(
-                    await DoNavigateAsync(url, parameters, ctx, sessionId).ConfigureAwait(false));
+                    await DoNavigateAsync(url, parameters, ctx, sessionId, allowSameDocument: true)
+                        .ConfigureAwait(false));
             }
 
             case "reload":
@@ -901,8 +937,9 @@ public static partial class Page
                     ["waitUntil"] = parameters.Get("waitUntil").Clone()
                         ?? JsonValue.Create("load"),
                 };
-                return DomainResult.Ok(await DoNavigateAsync(currentUrl, reloadParams, ctx, sessionId)
-                    .ConfigureAwait(false));
+                return DomainResult.Ok(
+                    await DoNavigateAsync(currentUrl, reloadParams, ctx, sessionId, allowSameDocument: false)
+                        .ConfigureAwait(false));
             }
 
             case "getFrameTree":

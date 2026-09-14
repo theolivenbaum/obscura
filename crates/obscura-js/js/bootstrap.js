@@ -21,6 +21,7 @@
     '__obscura_liveFrameIds', '__obscura_forgetFrame',
     '__obscura_registerLinkedStylesheet', '__obscura_activateLabel',
     '__obscura_isDisabled', '__obscura_labeledControl', '__obscura_interactiveHost',
+    '__obscura_tryFragmentNavigate', '_rawFragment',
     '__markParserScripts', '__obscura_hasPendingDynamicScripts',
     '__obscura_hasPendingLoadDelayingScripts',
     '__obscura_nextPendingTimeoutDelay',
@@ -3794,7 +3795,12 @@ class Element extends Node {
       const link = this.tagName === 'A' ? this : (this.closest ? this.closest('a[href]') : null);
       if (link) {
         const href = link.getAttribute('href');
-        if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+        // A fragment href used to be excluded here, back when every
+        // location.assign tore the document down and rebooted the realm. It is
+        // a same-document navigation now, so excluding it only meant that
+        // clicking an in-page link -- how most single page apps route -- did
+        // nothing at all: no URL change, no hashchange, no popstate.
+        if (href !== null && href !== '' && !href.startsWith('javascript:')) {
           location.assign(href);
           return;
         }
@@ -6673,9 +6679,34 @@ globalThis.__virtualUrl = null;
 function __currentUrl() {
   return globalThis.__virtualUrl || _domParse("document_url") || "about:blank";
 }
-// Two URLs that differ only in their fragment name the same document. Moving
-// between them is a *same-document* navigation: nothing is re-fetched and the
-// JavaScript context survives. Everything else is a real navigation.
+// Whether two URLs name the same document, so moving between them is a
+// *same-document* navigation: nothing is re-fetched and the JavaScript context
+// survives. HTML's "navigate to a fragment" asks for everything but the
+// fragment to match and for the target to carry a fragment at all, which is why
+// this reads the raw string rather than comparing hashes: `<a href="#">` has an
+// empty fragment and is still a fragment navigation in Chromium, while the same
+// URL with no `#` at all is a reload.
+function _isSameDocumentNavigation(current, target) {
+  try {
+    if (String(target).indexOf('#') < 0) return false;
+    var a = new URL(current);
+    var b = new URL(target);
+    return a.protocol === b.protocol && a.host === b.host
+        && a.username === b.username && a.password === b.password
+        && a.pathname === b.pathname && a.search === b.search;
+  } catch (e) { return false; }
+}
+// The raw fragment of a URL, null when it carries none. Distinguishing a missing
+// fragment from an empty one is what `new URL(u).hash` cannot do -- it answers ''
+// for both -- and it is the difference between clicking `<a href="#">` from a
+// fragmentless URL (Chromium fires hashchange) and clicking it again (it does not).
+function _rawFragment(url) {
+  var text = String(url);
+  var hash = text.indexOf('#');
+  return hash < 0 ? null : text.slice(hash + 1);
+}
+// Whether the fragment itself moved. Only that fires `hashchange`; a fragment
+// navigation to the fragment already in the URL fires `popstate` alone.
 function _isFragmentOnlyChange(current, target) {
   try {
     var a = new URL(current);
@@ -6683,37 +6714,70 @@ function _isFragmentOnlyChange(current, target) {
     return a.protocol === b.protocol && a.host === b.host
         && a.username === b.username && a.password === b.password
         && a.pathname === b.pathname && a.search === b.search
-        && a.hash !== b.hash;
+        && _rawFragment(current) !== _rawFragment(target);
   } catch (e) { return false; }
+}
+// window.dispatchEvent only runs addEventListener registrations, so the
+// `window.onhashchange = fn` / `window.onpopstate = fn` form (still common in
+// hash routers) would never be called.
+function _dispatchWindowEventWithHandler(ev, handlerName) {
+  try { globalThis.dispatchEvent(ev); } catch (e) { console.error(e); }
+  try {
+    if (typeof globalThis[handlerName] === 'function') globalThis[handlerName].call(globalThis, ev);
+  } catch (e) { console.error(e); }
+}
+// Perform a fragment navigation: move the session history, then fire the events
+// the HTML spec's "navigate to a fragment" queues. Chromium fires `hashchange`
+// (only when the fragment actually moved) followed by `popstate`; `pushState`
+// fires neither, which is why the dispatch lives here and not inside pushState.
+function _fragmentNavigate(target, replace) {
+  var current = __currentUrl();
+  var h = globalThis.history;
+  if (h && typeof h.pushState === 'function') {
+    // A fragment navigation gets a fresh entry with null state, per spec.
+    if (replace) h.replaceState(null, '', target);
+    else h.pushState(null, '', target);
+  } else {
+    globalThis.__virtualUrl = target;
+  }
+  var next = __currentUrl();
+  if (_isFragmentOnlyChange(current, next)) {
+    try {
+      _dispatchWindowEventWithHandler(
+        new HashChangeEvent('hashchange', { oldURL: current, newURL: next }), 'onhashchange');
+    } catch (e) {}
+  }
+  try {
+    var state = null;
+    try { state = h ? h.state : null; } catch (e) {}
+    _dispatchWindowEventWithHandler(new PopStateEvent('popstate', { state: state }), 'onpopstate');
+  } catch (e) {}
 }
 // Every location-driven navigation funnels through here. Routing a fragment
 // change through op_navigate tore down and rebooted the whole execution
 // context, so a hash router lost all its state on every route change (and, in
-// a survey of one SPA, re-booted the app 20 times over 157 routes). Delegating
-// to history.pushState/replaceState keeps one implementation of the
-// same-document path: it moves __virtualUrl, keeps the session-history stack
-// honest, and fires `hashchange` with oldURL/newURL.
+// a survey of one SPA, re-booted the app 20 times over 157 routes).
 function _locationNavigate(url, replace) {
   var current = __currentUrl();
   var target = _resolveUrl(url);
-  if (_isFragmentOnlyChange(current, target)) {
-    var h = globalThis.history;
-    if (h && typeof h.pushState === 'function') {
-      // A fragment navigation gets a fresh entry with null state, per spec.
-      if (replace) h.replaceState(null, '', target);
-      else h.pushState(null, '', target);
-      return;
-    }
-    globalThis.__virtualUrl = target;
-    try {
-      var ev = new HashChangeEvent('hashchange', { oldURL: current, newURL: target });
-      globalThis.dispatchEvent(ev);
-    } catch (e) {}
+  if (_isSameDocumentNavigation(current, target)) {
+    _fragmentNavigate(target, replace);
     return;
   }
   globalThis.__virtualUrl = target;
   Deno.core.ops.op_navigate(target, 'GET', '');
 }
+// The host side asks whether a navigation it was handed is same-document, and
+// performs it here if so, so CDP's Page.navigate and location share one
+// implementation of the fragment path instead of growing a second one.
+globalThis.__obscura_tryFragmentNavigate = function (url, replace) {
+  try {
+    var target = _resolveUrl(String(url));
+    if (!_isSameDocumentNavigation(__currentUrl(), target)) return false;
+    _fragmentNavigate(target, !!replace);
+    return true;
+  } catch (e) { return false; }
+};
 // Assigning to a URL component rebuilds the document URL and navigates, the
 // same way the href setter does. These were getter-only, so `location.hash =
 // '/route'` was a silent no-op in sloppy mode and a hash router could never
@@ -11521,21 +11585,21 @@ globalThis.atob = globalThis.atob || ((s) => {
     const entry = stack[idx];
     globalThis.__virtualUrl = entry.url ?? null;
   };
+  // Traversal (back/forward) across a fragment fires hashchange; pushState and
+  // replaceState fire nothing at all, even when the URL they write differs in
+  // its fragment. That is the spec and it is what Chromium does, and it matters
+  // because a router that both pushes state and listens for hashchange would
+  // otherwise route twice for one navigation. The location-driven fragment path
+  // fires its own events in _fragmentNavigate.
   const fireHashChangeIfNeeded = (prevUrl) => {
     try {
       const next = __currentUrl();
       if (!prevUrl || !next) return;
       const a = new URL(prevUrl), b = new URL(next);
-      if (a.origin === b.origin && a.pathname === b.pathname && a.search === b.search && a.hash !== b.hash) {
-        const ev = new Event('hashchange');
-        ev.oldURL = prevUrl; ev.newURL = next;
-        try { globalThis.dispatchEvent(ev); } catch {}
-        // window.dispatchEvent only runs addEventListener registrations, so the
-        // `window.onhashchange = fn` form (still common in hash routers) would
-        // never be called.
-        try {
-          if (typeof globalThis.onhashchange === 'function') globalThis.onhashchange.call(globalThis, ev);
-        } catch (e) { console.error(e); }
+      if (a.origin === b.origin && a.pathname === b.pathname && a.search === b.search
+          && _rawFragment(prevUrl) !== _rawFragment(next)) {
+        const ev = new HashChangeEvent('hashchange', {oldURL: prevUrl, newURL: next});
+        _dispatchWindowEventWithHandler(ev, 'onhashchange');
       }
     } catch {}
   };
@@ -11553,7 +11617,6 @@ globalThis.atob = globalThis.atob || ((s) => {
       }
     }
     pushState(state, _title, url) {
-      const prevUrl = __currentUrl();
       const resolved = resolveOrFallback(url);
       // Truncate forward entries (real Chrome drops the forward stack on a
       // new push) then append + advance.
@@ -11561,14 +11624,11 @@ globalThis.atob = globalThis.atob || ((s) => {
       stack.push({state: state ?? null, url: resolved});
       idx = stack.length - 1;
       applyVirtual();
-      fireHashChangeIfNeeded(prevUrl);
     }
     replaceState(state, _title, url) {
-      const prevUrl = __currentUrl();
       const resolved = resolveOrFallback(url);
       stack[idx] = {state: state ?? null, url: resolved};
       applyVirtual();
-      fireHashChangeIfNeeded(prevUrl);
     }
     go(n) {
       n = (n | 0);
@@ -11581,7 +11641,7 @@ globalThis.atob = globalThis.atob || ((s) => {
       // Real Chrome fires popstate on back/forward with the destination entry's state.
       try {
         const ev = new PopStateEvent('popstate', {state: stack[idx].state});
-        globalThis.dispatchEvent(ev);
+        _dispatchWindowEventWithHandler(ev, 'onpopstate');
       } catch {}
       fireHashChangeIfNeeded(prevUrl);
     }

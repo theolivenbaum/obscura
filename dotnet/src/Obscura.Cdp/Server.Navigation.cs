@@ -104,6 +104,79 @@ public static partial class CdpServer
         var frameId = page.FrameId;
         var loaderId = $"loader-{Guid.NewGuid()}";
 
+        // A Page.navigate whose target names the loaded document and differs from it in
+        // nothing but the fragment is what a user does by clicking an in-page link:
+        // Chromium fetches nothing, keeps the realm and every window property, and fires
+        // hashchange then popstate. Answering it with a fetch rebooted a single page app on
+        // every route change, which is what a client driving one with
+        // goto(base + '#/route') asks for on every step.
+        //
+        // Deviation from crates/obscura-cdp/src/domains/page.rs, whose navigate always
+        // fetches. The Rust tree has the same gap; this is a fix against Chromium, not a
+        // port correction.
+        if (!string.Equals(navMethod, "POST", StringComparison.Ordinal))
+        {
+            PageNavigationOutcome sameDocument = PageNavigationOutcome.None;
+            List<NetworkEvent> fragmentEvents = [];
+            await ctx.V8Lock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                sameDocument = await page.TryNavigateSameDocumentAsync(url).ConfigureAwait(false);
+                if (sameDocument.IsSameDocument)
+                {
+                    // A router answering the fragment can fetch; report those the way a
+                    // script-initiated request is reported, on the loader that is still
+                    // current, rather than replaying a document lifecycle.
+                    page.SyncJsNetworkEvents();
+                    fragmentEvents = [.. page.NetworkEvents];
+                    page.NetworkEvents.Clear();
+                }
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                CdpLog.Warn($"same-document navigate failed, falling back to a load: {error.Message}");
+                sameDocument = PageNavigationOutcome.None;
+            }
+            finally
+            {
+                ctx.V8Lock.Release();
+            }
+
+            if (sameDocument.IsSameDocument)
+            {
+                var fragmentUrl = page.UrlString();
+                var fragmentPageId = page.Id;
+                ctx.Pages.Add(page);
+
+                if (sendCommandResponse)
+                {
+                    // No loaderId: in CDP that field is the id of the document the
+                    // navigation created, and nothing was created. Playwright reads it as
+                    // `newDocumentId` and, when it is present, waits for that document's
+                    // load lifecycle -- which never comes for a navigation that loaded
+                    // nothing, so goto() hangs until its timeout. Chromium omits it here for
+                    // the same reason, and the client then waits for
+                    // Page.navigatedWithinDocument instead.
+                    replyTx.TryWrite(CdpResponse.Success(
+                        req.Id,
+                        new JsonObject { ["frameId"] = frameId },
+                        req.SessionId).ToJson());
+                }
+
+                Domains.Page.EmitRuntimeNetworkEvents(
+                    ctx, sessionForEvents, frameId, fragmentUrl, fragmentPageId, fragmentEvents);
+                Domains.Page.EmitSameDocumentNavigation(
+                    ctx,
+                    sessionForEvents,
+                    frameId,
+                    fragmentUrl,
+                    fragmentPageId,
+                    sameDocument.NavigationType);
+                ForwardPendingEvents(ctx, replyTx);
+                return;
+            }
+        }
+
         var navigation = NavigateTaskAsync(ctx, page, url, waitUntil, navMethod, navBody, preloadScripts);
 
         while (true)
