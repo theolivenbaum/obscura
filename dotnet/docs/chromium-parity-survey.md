@@ -823,3 +823,29 @@ classless `<span>` in Chromium's sidebar brand against an unrelated classless `<
 Obscura primary button. Strict alignment on tag plus class list cannot separate `<span class="">`
 from `<span class="">`, so once the two sidebars differ structurally the spans below them pair up
 arbitrarily. These are alignment artifacts, not colour defects.
+
+## F24 — NEW: the UA stylesheet's `overflow` defaults for replaced and form elements are missing
+
+The 408 `overflow` mismatches split cleanly once probed (`ovf-probe.html`). Author `overflow: clip`
+works — a `div` with `overflow: clip` and one with `overflow-x: clip; overflow-y: visible` both
+compute exactly as Chromium does. What is missing is the UA defaults:
+
+| element | Chromium | Obscura |
+|---|---|---|
+| `input` | `clip`, `overflow-clip-margin: 0px` | **`visible`** |
+| `textarea` | `auto` | **`visible`** |
+| `canvas` | `clip`, `overflow-clip-margin: content-box` | **`visible`** |
+| `video` | `clip`, `overflow-clip-margin: content-box` | **`visible`** |
+| `img` | `clip`, `overflow-clip-margin: content-box` | `clip` (correct) |
+| `select`, `button`, `span`, `div` | `visible` | `visible` (correct) |
+
+`overflow-clip-margin` is also absent from the computed-style snapshot entirely (empty string for
+every element), which belongs with F23.
+
+That accounts for all 198 `clip` mismatches in the survey: 153 are `<input>` (`.tss-searchbox`,
+`.tss-textbox`, `.tss-omnibox-search-input`, `.tss-file-input`) and 14 are `<canvas>`.
+
+The other 210 are a single shape — classless `<span>`, `hidden` in Chromium and `visible` in
+Obscura — and are the same alignment artifact as the `color` pairs described under F9b, not a
+defect: a classless span cannot be distinguished from another classless span once the two sidebars
+differ structurally.
