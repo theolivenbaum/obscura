@@ -32,7 +32,8 @@ internal static class RenderInvalidation
     {
         "set_attribute" or "remove_attribute" or "set_attribute_ns" or "remove_attribute_ns"
             or "append_child" or "remove_child" or "insert_before" or "set_inner_html"
-            or "set_inner_html_context" or "set_text_content" => true,
+            or "set_inner_html_context" or "set_text_content"
+            or "set_form_value" or "set_form_checked" => true,
         _ => false,
     };
 
@@ -43,6 +44,33 @@ internal static class RenderInvalidation
     {
         switch (cmd)
         {
+            case "set_form_value":
+            {
+                if (ParseNode(arg1) is not { } valueTarget)
+                {
+                    return RenderMutationImpact.None;
+                }
+
+                var changed = !dom.TryGetDirtyFormValue(valueTarget, out var previous)
+                    || !string.Equals(previous, arg2, StringComparison.Ordinal);
+                return new RenderMutationImpact(StateHelpers.NodeIsConnected(dom, valueTarget), changed);
+            }
+
+            case "set_form_checked":
+            {
+                if (ParseNode(arg1) is not { } checkedTarget)
+                {
+                    return RenderMutationImpact.None;
+                }
+
+                var wanted = string.Equals(arg2, "true", StringComparison.Ordinal);
+                var checkedChanged = !dom.TryGetDirtyFormChecked(checkedTarget, out var previousChecked)
+                    || previousChecked != wanted;
+                return new RenderMutationImpact(
+                    StateHelpers.NodeIsConnected(dom, checkedTarget),
+                    checkedChanged);
+            }
+
             case "set_attribute":
             {
                 if (ParseNode(arg1) is not { } target)

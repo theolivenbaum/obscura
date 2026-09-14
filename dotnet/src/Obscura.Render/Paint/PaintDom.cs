@@ -835,12 +835,22 @@ internal static class PaintDomPainter
             Rect visibleRect;
             if (boxClip is { } c)
             {
-                if (rect.Intersect(c) is not { } intersected)
+                if (rect.Intersect(c) is { } intersected)
+                {
+                    visibleRect = intersected;
+                }
+                else if (PaintNativeControls.NativeInkBounds(tree, nid, rect, style) is { } nativeInk
+                    && nativeInk.Intersect(c) is not null)
+                {
+                    // A range input's thumb is a native box that stands outside the control,
+                    // so a zero-height slider - the shape a page gets by styling the track
+                    // itself - still has ink even where its own box has no area at all.
+                    visibleRect = rect;
+                }
+                else
                 {
                     continue;
                 }
-
-                visibleRect = intersected;
             }
             else
             {
@@ -1424,67 +1434,105 @@ internal static class PaintDomPainter
                 }
             }
 
-            // An empty text `<input>`/`<textarea>` shows its `placeholder` attribute.
+            // A native `<input>` paints its own contents: the value or the placeholder of a
+            // text field, the field text of a date/time control, and the widget itself for a
+            // checkbox, radio or range. A `<textarea>`'s value is ordinary laid-out text, so
+            // only its placeholder is painted here.
             if (localName is "input" or "textarea")
             {
-                string? valueAttribute = node.GetAttribute("value");
-                bool hasValue = (valueAttribute is not null && valueAttribute.Length > 0)
-                    || (string.Equals(localName, "textarea", StringComparison.Ordinal)
-                        && tree.TextContent(nid).Length > 0);
-                if (hasValue
-                    && string.Equals(localName, "input", StringComparison.Ordinal)
-                    && valueAttribute is { Length: > 0 })
+                bool isTextarea = string.Equals(localName, "textarea", StringComparison.Ordinal);
+                string inputType = isTextarea
+                    ? "textarea"
+                    : (node.GetAttribute("type") ?? "text").Trim().ToLowerInvariant();
+
+                // Script assigns `element.value` far more often than it writes the content
+                // attribute, and HTML keeps the two apart, so the dirty value comes first.
+                string? shownValue = PaintNativeControls.ShownValue(tree, nid, node);
+                if (isTextarea && shownValue is null && tree.TextContent(nid).Length > 0)
                 {
-                    float valueSize = style.FontSize ?? 16f;
-                    float textX = rect.X + style.Padding.Left + style.Border.Left;
-                    float textY = rect.Y + style.Padding.Top + style.Border.Top;
-                    RgbaColor color = style.Color ?? new RgbaColor(0, 0, 0, 255);
-                    string shown = node.GetAttribute("type") is { } kind
-                        && kind.Equals("password", StringComparison.OrdinalIgnoreCase)
-                        ? new string('•', valueAttribute.EnumerateRunes().Count())
-                        : valueAttribute;
-                    if (color.A != 0)
-                    {
-                        PaintText.DrawText(
-                            pixmap,
-                            shown,
-                            textX,
-                            textY,
-                            color,
-                            valueSize,
-                            false,
-                            style.FontFamily,
-                            style.LetterSpacing ?? 0f,
-                            boxClip,
-                            elementClipMask,
-                            rasterScale);
-                    }
+                    shownValue = tree.TextContent(nid);
                 }
 
-                if (!hasValue && node.GetAttribute("placeholder") is { Length: > 0 } placeholder)
+                if (inputType is "checkbox" or "radio")
                 {
-                    float placeholderSize = style.FontSize ?? 16f;
+                    PaintNativeControls.PaintToggle(
+                        pixmap,
+                        string.Equals(inputType, "radio", StringComparison.Ordinal),
+                        PaintNativeControls.IsChecked(tree, nid, node),
+                        rect,
+                        elementClipMask,
+                        rasterScale);
+                }
+                else if (string.Equals(inputType, "range", StringComparison.Ordinal))
+                {
+                    PaintNativeControls.PaintRange(
+                        pixmap, tree, nid, rect, style, boxClip, elementClipMask, rasterScale);
+                }
+                else if (PaintNativeControls.IsDateFamily(inputType))
+                {
+                    PaintNativeControls.PaintDateFields(
+                        pixmap,
+                        inputType,
+                        PaintNativeControls.FieldText(inputType, shownValue),
+                        rect,
+                        style,
+                        boxClip,
+                        elementClipMask,
+                        rasterScale);
+                }
+                else
+                {
+                    bool hasValue = shownValue is { Length: > 0 };
+                    float textSize = style.FontSize ?? 16f;
                     float textX = rect.X + style.Padding.Left + style.Border.Left;
                     float textY = rect.Y + style.Padding.Top + style.Border.Top;
-                    LayoutStyle? placeholderStyle = style.PlaceholderPseudo;
-                    RgbaColor color = placeholderStyle?.Color ?? new RgbaColor(117, 117, 117, 255);
-                    float opacity = Math.Clamp(placeholderStyle?.Opacity ?? 1f, 0f, 1f);
-                    color = color with { A = (byte)F32.Round(color.A * opacity) };
-                    if (color.A != 0)
+                    if (hasValue && !isTextarea && PaintNativeControls.ShowsTextValue(inputType))
                     {
-                        PaintText.DrawText(
-                            pixmap,
-                            placeholder,
-                            textX,
-                            textY,
-                            color,
-                            placeholderSize,
-                            false,
-                            style.FontFamily,
-                            style.LetterSpacing ?? 0f,
-                            boxClip,
-                            elementClipMask,
-                            rasterScale);
+                        RgbaColor color = style.Color ?? new RgbaColor(0, 0, 0, 255);
+                        string shown = string.Equals(inputType, "password", StringComparison.Ordinal)
+                            ? new string('•', shownValue!.EnumerateRunes().Count())
+                            : shownValue!;
+                        if (color.A != 0)
+                        {
+                            PaintText.DrawText(
+                                pixmap,
+                                shown,
+                                textX,
+                                textY,
+                                color,
+                                textSize,
+                                false,
+                                style.FontFamily,
+                                style.LetterSpacing ?? 0f,
+                                boxClip,
+                                elementClipMask,
+                                rasterScale);
+                        }
+                    }
+                    else if (!hasValue
+                        && (isTextarea || PaintNativeControls.ShowsPlaceholder(inputType))
+                        && node.GetAttribute("placeholder") is { Length: > 0 } placeholder)
+                    {
+                        LayoutStyle? placeholderStyle = style.PlaceholderPseudo;
+                        RgbaColor color = placeholderStyle?.Color ?? new RgbaColor(117, 117, 117, 255);
+                        float opacity = Math.Clamp(placeholderStyle?.Opacity ?? 1f, 0f, 1f);
+                        color = color with { A = (byte)F32.Round(color.A * opacity) };
+                        if (color.A != 0)
+                        {
+                            PaintText.DrawText(
+                                pixmap,
+                                placeholder,
+                                textX,
+                                textY,
+                                color,
+                                textSize,
+                                false,
+                                style.FontFamily,
+                                style.LetterSpacing ?? 0f,
+                                boxClip,
+                                elementClipMask,
+                                rasterScale);
+                        }
                     }
                 }
             }

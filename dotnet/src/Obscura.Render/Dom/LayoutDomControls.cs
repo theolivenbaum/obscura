@@ -283,6 +283,38 @@ public static partial class RenderDom
                 case "image":
                     intrinsic = (inputHorizontalEdges, inputVerticalEdges);
                     break;
+
+                // DEVIATION from crates/obscura-render/src/dom.rs, which sizes a date/time
+                // control from the `size` attribute like a text field and so makes it both too
+                // wide and, in a shrink-to-fit container, zero. Chromium fills it with read-only
+                // sub-fields (`mm/dd/yyyy` and friends) plus a picker indicator, and that content
+                // is what it is sized from. See "Known deviations" in todo.md.
+                case "date":
+                case "datetime-local":
+                case "month":
+                case "week":
+                case "time":
+                {
+                    float fieldWidth = MathF.Ceiling(
+                        PaintNativeControls.DateFamilyIntrinsicContentWidth(inputType, style, engine));
+                    intrinsic = (fieldWidth + inputHorizontalEdges, defaultHeight);
+
+                    // A percentage width resolves against a containing block that does not exist
+                    // yet while intrinsic sizes are computed, so the control would contribute
+                    // nothing to a shrink-to-fit ancestor and collapse it. Chromium has the
+                    // shadow content to contribute instead; this engine has no box for it, so
+                    // the intrinsic width is published as a minimum. It differs from Chromium
+                    // only where such a control is squeezed below its own content width.
+                    if (style.Width.Kind == DimensionKind.Percent && style.MinWidth.IsAuto)
+                    {
+                        style.MinWidth = Dimension.Px(style.BoxSizing == BoxSizing.ContentBox
+                            ? fieldWidth
+                            : fieldWidth + inputHorizontalEdges);
+                    }
+
+                    break;
+                }
+
                 default:
                 {
                     float size = ParsePositiveInt(node.GetAttribute("size")) ?? 20;

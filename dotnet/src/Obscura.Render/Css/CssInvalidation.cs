@@ -982,7 +982,8 @@ public static class CssInvalidationMapBuilder
                 var trimmed = selector.Trim();
                 var pseudoBase = CssSelectorText.StripPseudoElement(trimmed, "before")
                     ?? CssSelectorText.StripPseudoElement(trimmed, "after")
-                    ?? CssSelectorText.StripPseudoElement(trimmed, "placeholder");
+                    ?? CssSelectorText.StripPseudoElement(trimmed, "placeholder")
+                    ?? CssSelectorText.StripPseudoElement(trimmed, "-webkit-slider-thumb");
 
                 if (pseudoBase is not null)
                 {

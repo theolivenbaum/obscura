@@ -30,11 +30,24 @@ internal class Rule
 }
 
 /// <summary>
-/// A <c>sel::before</c> / <c>sel::after</c> / <c>sel::placeholder</c> rule,
-/// indexed by its ordinary base selector.
+/// A <c>sel::before</c> / <c>sel::after</c> / <c>sel::placeholder</c> /
+/// <c>sel::-webkit-slider-thumb</c> rule, indexed by its ordinary base selector.
 /// </summary>
 internal sealed class PseudoRule : Rule
 {
+}
+
+/// <summary>Which pseudo-element a cascaded pseudo style belongs to.</summary>
+internal enum PseudoOrigin
+{
+    /// <summary><c>::before</c> / <c>::after</c>: exists only when it generates content.</summary>
+    Generated,
+
+    /// <summary><c>::placeholder</c>.</summary>
+    Placeholder,
+
+    /// <summary><c>::-webkit-slider-thumb</c>.</summary>
+    SliderThumb,
 }
 
 /// <summary>The declarations one shadow encapsulation scope contributes.</summary>
@@ -246,7 +259,8 @@ public sealed class StylesheetCache
         var compiledRules = sheet.Rules.Count
             + sheet.BeforeRules.Rules.Count
             + sheet.AfterRules.Rules.Count
-            + sheet.PlaceholderRules.Rules.Count;
+            + sheet.PlaceholderRules.Rules.Count
+            + sheet.SliderThumbRules.Rules.Count;
         if (sourceBytes <= MaxSourceBytes && compiledRules <= MaxRules)
         {
             _entry = new CachedStylesheet
@@ -337,6 +351,14 @@ public sealed class Stylesheet
     internal PseudoRuleMap AfterRules { get; } = new();
 
     internal PseudoRuleMap PlaceholderRules { get; } = new();
+
+    /// <summary>
+    /// Author rules for <c>::-webkit-slider-thumb</c>, the box a range input's knob is drawn
+    /// from. Chromium honours only that spelling, so <c>::-moz-range-thumb</c> is indexed
+    /// nowhere and the Gecko half of a stylesheet that writes both is ignored, exactly as it
+    /// is in the browser this engine presents itself as.
+    /// </summary>
+    internal PseudoRuleMap SliderThumbRules { get; } = new();
 
     /// <summary>
     /// Dependency metadata for conservative incremental-style invalidation.
@@ -483,7 +505,16 @@ public sealed class Stylesheet
                         rule,
                         order,
                         "placeholder",
-                        sheet.PlaceholderRules))
+                        sheet.PlaceholderRules)
+                    || TryPushPseudo(
+                        sheet,
+                        tree,
+                        trimmed,
+                        declarations,
+                        rule,
+                        order,
+                        "-webkit-slider-thumb",
+                        sheet.SliderThumbRules))
                 {
                     order++;
                     continue;
@@ -676,7 +707,10 @@ public sealed class Stylesheet
             }
         }
 
-        return AnyConditional(BeforeRules) || AnyConditional(AfterRules) || AnyConditional(PlaceholderRules);
+        return AnyConditional(BeforeRules)
+            || AnyConditional(AfterRules)
+            || AnyConditional(PlaceholderRules)
+            || AnyConditional(SliderThumbRules);
 
         static bool AnyConditional(PseudoRuleMap map)
         {
@@ -751,7 +785,8 @@ public sealed class Stylesheet
         return normalMatch
             || BeforeRules.NodeMatchesContainerQueryRule(tree, matcher, nid)
             || AfterRules.NodeMatchesContainerQueryRule(tree, matcher, nid)
-            || (supportsPlaceholder && PlaceholderRules.NodeMatchesContainerQueryRule(tree, matcher, nid));
+            || (supportsPlaceholder && PlaceholderRules.NodeMatchesContainerQueryRule(tree, matcher, nid))
+            || SliderThumbRules.NodeMatchesContainerQueryRule(tree, matcher, nid);
 
         bool AnyClassMatches(string classes)
         {
@@ -812,38 +847,46 @@ public sealed class Stylesheet
         IReadOnlyDictionary<string, string> props,
         LayoutStyle hostStyle)
     {
-        var (before, after, _) = PseudoStylesInternal(tree, matcher, nid, props, hostStyle, null);
+        var (before, after, _, _) = PseudoStylesInternal(tree, matcher, nid, props, hostStyle, null);
         return (before, after);
     }
 
-    public (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder) AllPseudoStyles(
-        DomTree tree,
-        Matcher matcher,
-        NodeId nid,
-        IReadOnlyDictionary<string, string> props,
-        LayoutStyle hostStyle,
-        ContainerQueryEvaluator? evaluator) =>
+    public (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder, LayoutStyle? SliderThumb)
+        AllPseudoStyles(
+            DomTree tree,
+            Matcher matcher,
+            NodeId nid,
+            IReadOnlyDictionary<string, string> props,
+            LayoutStyle hostStyle,
+            ContainerQueryEvaluator? evaluator) =>
         PseudoStylesInternal(tree, matcher, nid, props, hostStyle, evaluator);
 
-    private (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder) PseudoStylesInternal(
-        DomTree tree,
-        Matcher matcher,
-        NodeId nid,
-        IReadOnlyDictionary<string, string> props,
-        LayoutStyle hostStyle,
-        ContainerQueryEvaluator? evaluator)
+    private (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder, LayoutStyle? SliderThumb)
+        PseudoStylesInternal(
+            DomTree tree,
+            Matcher matcher,
+            NodeId nid,
+            IReadOnlyDictionary<string, string> props,
+            LayoutStyle hostStyle,
+            ContainerQueryEvaluator? evaluator)
     {
         ArgumentNullException.ThrowIfNull(tree);
         ArgumentNullException.ThrowIfNull(matcher);
         ArgumentNullException.ThrowIfNull(hostStyle);
-        var supportsPlaceholder = tree.GetNode(nid)?.AsElement() is { } element
+        var control = tree.GetNode(nid);
+        var supportsPlaceholder = control?.AsElement() is { } element
             && element.Name.Local is "input" or "textarea";
+        var supportsSliderThumb = control?.AsElement() is { } rangeElement
+            && string.Equals(rangeElement.Name.Local, "input", StringComparison.Ordinal)
+            && control.GetAttribute("type") is { } rangeType
+            && rangeType.Trim().Equals("range", StringComparison.OrdinalIgnoreCase);
         return (
-            BuildPseudo(BeforeRules, false),
-            BuildPseudo(AfterRules, false),
-            supportsPlaceholder ? BuildPseudo(PlaceholderRules, true) : null);
+            BuildPseudo(BeforeRules, PseudoOrigin.Generated),
+            BuildPseudo(AfterRules, PseudoOrigin.Generated),
+            supportsPlaceholder ? BuildPseudo(PlaceholderRules, PseudoOrigin.Placeholder) : null,
+            supportsSliderThumb ? BuildPseudo(SliderThumbRules, PseudoOrigin.SliderThumb) : null);
 
-        LayoutStyle? BuildPseudo(PseudoRuleMap rules, bool isPlaceholder)
+        LayoutStyle? BuildPseudo(PseudoRuleMap rules, PseudoOrigin origin)
         {
             var normalMatched = new List<(uint Specificity, int Order, int Index)>();
             var importantMatched = new List<(uint Specificity, int Order, int Index)>();
@@ -946,11 +989,17 @@ public sealed class Stylesheet
             // initial value explicitly before applying author declarations.
             var style = new LayoutStyle { Display = Display.Inline };
             style.ColorSchemeDark = hostStyle.ColorSchemeDark;
-            if (isPlaceholder)
+            if (origin == PseudoOrigin.Placeholder)
             {
                 // Chromium's light native-control placeholder color. Author
                 // declarations cascade over this UA-origin initial value.
                 style.Color = new RgbaColor(117, 117, 117, 255);
+            }
+            else if (origin == PseudoOrigin.SliderThumb)
+            {
+                // Chromium's UA sheet sizes the slider thumb as a border box, so the 16px
+                // width an author writes is the whole knob and not 16px inside its border.
+                style.BoxSizing = BoxSizing.BorderBox;
             }
 
             var inheritedColorSchemeDark = hostStyle.ColorSchemeDark;
@@ -1019,11 +1068,19 @@ public sealed class Stylesheet
                 ? null
                 : CssValues.GeneratedContentWithZeroCounters(generatedContent);
             style.GeneratedContent = generatedContent;
-            if (isPlaceholder)
+            if (origin == PseudoOrigin.Placeholder)
             {
                 // `color` is inherited on the pseudo. The declaration parser
                 // represents `inherit` as null, so resolve it against the
                 // originating control after the author cascade.
+                style.Color ??= hostStyle.Color;
+                return style;
+            }
+
+            if (origin == PseudoOrigin.SliderThumb)
+            {
+                // The thumb is a native box, not a generated one: it exists because the
+                // control does, so it is returned whatever the author declared on it.
                 style.Color ??= hostStyle.Color;
                 return style;
             }
