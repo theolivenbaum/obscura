@@ -1832,3 +1832,45 @@ The integers come from taffy's layout rounding: `Compute.RoundLayout`
 rect to whole pixels, which is what the reference engine does and what Chromium
 does not. Fixing it means giving the CSSOM and rect paths an unrounded layout to
 read, which is a renderer change; it is recorded here and left alone.
+
+### A fragment navigation keeps the document, and CDP is told so
+
+Four things about same-document navigation were wrong against Chromium, measured side by
+side on a trivial page with a `window` marker and `hashchange` / `popstate` counters. All
+four are fixed on the C# and shared-shim sides; `crates/` has the same gaps.
+
+- **`Page.navigate` to a URL differing only in the fragment refetched the document.**
+  `Page.TryNavigateSameDocumentAsync` (`Obscura.Browser/Page.Navigation.cs`) now asks
+  `bootstrap.js` whether the target is same-document and, if so, performs it there: no
+  request, the realm and every `window` property intact, `Page.navigatedWithinDocument`
+  instead of a `Page.frameNavigated` + load cycle. Both navigate entry points consult it -
+  `CdpServer.ProcessWithInterceptionAsync` (the path live `Page.navigate` traffic takes)
+  and `Domains.Page.DoNavigateAsync` - and `Page.reload` deliberately does not, because it
+  is handed the current URL and means the document literally. The response carries
+  **no `loaderId`**: that field is the id of the document the navigation created, and
+  Playwright reads it as `newDocumentId` and then waits for a load lifecycle that never
+  comes. Chromium omits it here for the same reason.
+- **`popstate` never fired.** HTML's "navigate to a fragment" queues `hashchange` (only
+  when the fragment moved) and then `popstate`; Obscura fired `hashchange` alone.
+  `_fragmentNavigate` in `bootstrap.js` now owns both.
+- **`history.pushState` fired a spurious `hashchange`.** `pushState` and `replaceState`
+  fire nothing at all, even when the URL they write differs in its fragment. The dispatch
+  moved out of them and into the location-driven path, which is where it belongs; a router
+  that both pushes state and listens for `hashchange` was routing twice per navigation.
+- **Clicking an `<a href="#/x">` did nothing.** Both click paths - `Element.click()` in
+  `bootstrap.js` and the CDP mouse path's `MouseReleasedJs` (`Obscura.Cdp/Domains/Input.cs`,
+  which mirrors `crates/obscura-cdp/src/domains/input.rs`) - skipped a fragment href
+  outright. That was correct back when `location.assign` tore the document down; it now
+  means an in-page link, how most single page apps route, was inert.
+
+One supporting detail: an empty fragment is not the same as no fragment, though
+`new URL(u).hash` reports `''` for both. `_rawFragment` reads the raw string so
+`<a href="#">` from a fragmentless URL fires `hashchange` and a second click does not,
+matching Chromium.
+
+Measured on the Curiosity Workspace SPA: walking seven hash routes now costs zero document
+requests and keeps one long-lived app instance, with node counts within two of Chromium on
+every route. Before, the app rebooted on each.
+
+Pinned by `FragmentNavigationTests` (12 facts, `Obscura.Js.Tests`) and
+`SameDocumentNavigationEvents` (6 facts, `Obscura.Cdp.Tests`).

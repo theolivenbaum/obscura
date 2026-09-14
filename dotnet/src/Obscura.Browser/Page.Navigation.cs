@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using Obscura.Dom;
 using Obscura.Js.Runtime;
 using Obscura.Js.Url;
@@ -658,6 +659,89 @@ public sealed partial class Page
         {
             await Task.Delay(requested - elapsed).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Navigate to <paramref name="url"/> without fetching a document, when it names the
+    /// document already loaded and differs from it in nothing but the fragment.
+    /// </summary>
+    /// <remarks>
+    /// An automation client navigating to <c>page.html#/route</c> from <c>page.html</c> is
+    /// doing what a user does by clicking an in-page link, and Chromium answers it the same
+    /// way: no request, the realm and every <c>window</c> property intact, <c>hashchange</c>
+    /// and <c>popstate</c> fired. Refetching instead reboots a single page app on every
+    /// route change, which is what a client driving one with <c>goto(base + '#/route')</c>
+    /// does on every step.
+    /// <para>
+    /// The decision and the events belong to <c>bootstrap.js</c>
+    /// (<c>__obscura_tryFragmentNavigate</c>), which already owns the fragment path for
+    /// <c>location.href</c> / <c>assign</c> / <c>replace</c> and the component setters. The
+    /// host asks rather than re-deciding, so the two cannot disagree about what counts as a
+    /// fragment navigation.
+    /// </para>
+    /// <para>
+    /// Deviation from <c>crates/obscura-cdp/src/domains/page.rs</c>, whose <c>navigate</c>
+    /// always fetches. The Rust tree has the same gap; this is a fix against Chromium, not a
+    /// port correction.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// <see cref="PageNavigationOutcome.SameDocument"/> when the navigation was handled
+    /// here; <see cref="PageNavigationOutcome.None"/> when the caller must fetch.
+    /// </returns>
+    public async Task<PageNavigationOutcome> TryNavigateSameDocumentAsync(
+        string url,
+        CancellationToken cancellationToken = default)
+    {
+        if (Js is null || Url is null || string.IsNullOrEmpty(url))
+        {
+            return PageNavigationOutcome.None;
+        }
+
+        // A fragment can only be same-document relative to a document that is actually
+        // loaded; about:blank has nothing to stay on.
+        if (string.Equals(Url.Scheme, "about", StringComparison.Ordinal))
+        {
+            return PageNavigationOutcome.None;
+        }
+
+        string literal = System.Text.Json.JsonSerializer.Serialize(url);
+        JsonNode? handled;
+        try
+        {
+            handled = Evaluate($"globalThis.__obscura_tryFragmentNavigate({literal}, false)");
+        }
+        catch (JsRuntimeException)
+        {
+            return PageNavigationOutcome.None;
+        }
+        if (handled?.GetValueKind() != System.Text.Json.JsonValueKind.True)
+        {
+            return PageNavigationOutcome.None;
+        }
+
+        // bootstrap.js moved __virtualUrl; adopt it host-side so page.url() and every CDP
+        // payload that reports it agree with what the page now thinks it is.
+        SyncVirtualUrl();
+
+        // Routers answer hashchange/popstate by queueing work. Give that a bounded turn so
+        // the navigation is observed after the route has had a chance to render, the way a
+        // document navigation already settles before returning.
+        if (Js is { } js)
+        {
+            try
+            {
+                await js.RunEventLoopBoundedAsync(
+                    PageHelpers.EnvUlong("OBSCURA_FRAGMENT_NAV_SETTLE_MS", 250)).ConfigureAwait(false);
+            }
+            catch (JsRuntimeException)
+            {
+                // A router that throws must not fail the navigation.
+            }
+        }
+        await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false);
+
+        return PageNavigationOutcome.SameDocument(PageNavigationOutcome.FragmentType);
     }
 
     /// <summary>Whether anything moved; <see cref="ProcessPendingNavigationOutcomeAsync"/> says what.</summary>

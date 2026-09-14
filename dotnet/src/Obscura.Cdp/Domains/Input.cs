@@ -487,7 +487,13 @@ public static class Input
             + "if (!link && tag === 'A' && clickTarget.getAttribute('href')) link = clickTarget;"
             + "if (link) {"
             + "var href = link.getAttribute('href');"
-            + "if (href && !href.startsWith('#') && !href.startsWith('javascript:')) location.assign(href);"
+            // Deviation from crates/obscura-cdp/src/domains/input.rs, which skips a
+            // fragment href here: it did so because location.assign used to tear the
+            // document down, so an in-page link would have rebooted the realm. Fragment
+            // navigation is same-document now, and skipping it made a real mouse click on
+            // an SPA's own link do nothing at all. Same fix as the el.click() path in
+            // bootstrap.js.
+            + "if (href && !href.startsWith('javascript:')) location.assign(href);"
             + "} else if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {"
             + "var form = clickTarget.closest ? clickTarget.closest('form') : null;"
             + "if (form) { try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(clickTarget); }"
