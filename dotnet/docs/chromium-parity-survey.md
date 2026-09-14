@@ -901,3 +901,47 @@ engine itself reports, in this context only. The leading hypothesis is that it i
 an intermediate layout pass, against a parent width that later changes, and not recomputed — which
 would also fit the pattern of several distinct fixed offsets rather than one. Not confirmed;
 recorded here with the repro so the next pass can start from it rather than from the survey.
+
+## What the 33,157 comparable pairs actually disagree about
+
+Every remaining computed-style mismatch, by element:
+
+**`display` (180) and `fontSize` (45) are entirely F20.** `line` 42, `rect` 22, `g` 19, `defs` 13,
+`stop` 10 all `inline` in Chromium and `block` in Obscura; `title` 14 `inline` vs `none`; and all
+45 `fontSize` are SVG `<text>` with a `font-size` presentation attribute.
+
+**F25 — NEW: `<input>` UA defaults for `color` and `background-color`.**
+
+| element | property | Chromium | Obscura | pairs |
+|---|---|---|---|---|
+| `input.tss-checkbox` | color | `rgb(0, 0, 0)` | `rgb(50, 49, 48)` (inherited) | 45 |
+| `input.tss-checkbox` | background-color | `rgba(0, 0, 0, 0)` | `rgb(255, 255, 255)` | 45 |
+| `input.tss-file-input` | background-color | `rgba(0, 0, 0, 0)` | `rgb(255, 255, 255)` | 3 |
+
+Chromium's UA sheet gives a form control `color: fieldtext`, which does not inherit the page's
+colour; Obscura inherits. The background is the mirror of the same thing.
+
+**F26 — NEW: a `color-mix()` result serializes in the wrong notation.** 16 pairs on
+`div.tss-contextcard-icon`, whose rule is
+`background: color-mix(in srgb, var(--tss-primary-background-color) 14%, transparent)`. Chromium
+reports `color(srgb 0.0156863 0.262745 0.827451 / 0.14)`; Obscura reports
+`rgba(4, 67, 211, 0.14)`. The values are the same colour (4/255 = 0.0157, 67/255 = 0.2627,
+211/255 = 0.8275) — only the serialization differs. Nine `color` pairs are the same thing.
+
+**F27 — NEW: table elements report `flex-direction: column`.** All 15 `flexDirection`
+mismatches are `table` / `thead` / `tbody` / `th` / `td`, `row` in Chromium and `column` in
+Obscura. A table element is not a flex container, so the computed value should stay at the initial
+`row`; the internal flex-based table implementation is leaking into the reported style.
+Reporting only, no layout effect.
+
+**F28 — the active sidenav item is not highlighted on the `#/preferences` routes.** 124 of the
+246 `color` pairs and 31 of the 133 `background-color` pairs are four sidenav elements
+(`a.tss-btn.tss-sidenav-btn`, `div.tss-sidenav-btn-content`, `i.fi-rr-home`,
+`span.tss-sidenav-btn-label`) that Chromium paints `rgb(4, 67, 211)` on
+`rgba(4, 67, 211, 0.12)` and Obscura leaves at the default colour on a transparent background.
+
+It is exactly the 31 `#/preferences?id=…` routes and no others: on the 89 other routes that have a
+highlighted item, both engines highlight the same four elements. Those are the routes whose route
+string carries a query inside the hash, and they are also the ones where Chromium reaches the route
+by same-document navigation while Obscura reboots. Most likely downstream of F9b; re-check after
+the fragment-navigation fix lands rather than treating it as a separate defect.
