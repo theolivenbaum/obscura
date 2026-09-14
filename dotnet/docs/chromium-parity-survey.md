@@ -785,3 +785,41 @@ style snapshot omitting commonly-read properties); reporting only, no layout eff
 
 198 of the 408 involve `overflow: clip`, which Obscura appears not to support at all: it falls
 back to `visible` in the common case. That is a distinct, smaller fix from the 210 `hidden` cases.
+
+## F9b — RE-MEASURED: the in-page paths are fixed, four cases are not
+
+F9b was recorded earlier as "a fragment-only `location.replace()` / `assign()` / `href=` really
+does reload". Re-run against a trivial page (`frag-a.html`) with `window.__marker` set and
+`hashchange`/`popstate` counters installed, each case from a fresh load:
+
+| case | Chromium | Obscura |
+|---|---|---|
+| CDP `Page.navigate` to `…#/x` | same-document, state ALIVE, hashchange 1, popstate 1 | **full reload, 1 doc request, state GONE, no events** |
+| `location.hash = '/x'` | same-document, hashchange 1, popstate 1 | same-document, hashchange 1, **popstate 0** |
+| `location.href = '#/x'` | same-document, hashchange 1, popstate 1 | same-document, hashchange 1, **popstate 0** |
+| `location.assign('#/x')` | same-document, hashchange 1, popstate 1 | same-document, hashchange 1, **popstate 0** |
+| `location.replace('#/x')` | same-document, hashchange 1, popstate 1 | same-document, hashchange 1, **popstate 0** |
+| `history.pushState({}, '', '#/x')` | same-document, **hashchange 0, popstate 0** | same-document, **hashchange 1**, popstate 0 |
+| click `<a href="#/x">` | same-document, hashchange 1, popstate 1 | **no navigation at all**, href unchanged, no events |
+
+The in-page reload is fixed; what remains is four things:
+
+1. **CDP `Page.navigate` to a fragment-only difference still does a full document load.** The JS
+   realm is destroyed and no `hashchange` / `popstate` fires.
+2. **`popstate` never fires** on any fragment navigation.
+3. **`history.pushState` fires a spurious `hashchange`.** Per spec it fires neither event.
+4. **An anchor click to `#/x` does not navigate**, which is how most SPAs navigate.
+
+(1) is what produces the `tss-sidebar-has-shift` gap recorded above. The harness navigates with
+`page.goto(base + route)`; in Chromium that is a same-document navigation, so one long-lived SPA
+instance persists across all 157 routes and keeps the sidebar shift scaffolding built on the first
+route that needed it. In Obscura each route reboots the app, so the scaffolding is never
+inherited: 31 of 157 routes carry the class in Chromium against 1 in Obscura, a ~170-element gap on
+routes such as `#/users`.
+
+That structural gap is also why the `color` count is overstated. Six of the `rgb(50, 49, 48)` vs
+`rgb(255, 255, 255)` pairs on `#/contacts` were checked by hand: every one is the aligner matching a
+classless `<span>` in Chromium's sidebar brand against an unrelated classless `<span>` inside an
+Obscura primary button. Strict alignment on tag plus class list cannot separate `<span class="">`
+from `<span class="">`, so once the two sidebars differ structurally the spans below them pair up
+arbitrarily. These are alignment artifacts, not colour defects.
