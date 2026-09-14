@@ -1270,10 +1270,11 @@ internal static class DomPasses
     }
 
     /// <summary>
-    /// Resolve the <c>width</c> intrinsic sizing keywords (<c>fit-content</c>,
-    /// <c>max-content</c>, <c>min-content</c>) after the containing inline space is known.
+    /// Resolve the inline-axis intrinsic sizing keywords (<c>fit-content</c>,
+    /// <c>max-content</c>, <c>min-content</c>) on <c>width</c>, <c>min-width</c> and
+    /// <c>max-width</c> after the containing inline space is known.
     /// </summary>
-    internal static bool ApplyFitContentWidths(
+    internal static bool ApplyIntrinsicInlineSizes(
         TaffyTree taffyTree,
         IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
@@ -1281,7 +1282,9 @@ internal static class DomPasses
         Func<TaffyTree, TaffyNodeId, TaffyAvailableSpace, float?> intrinsicWidth)
     {
         List<(TaffyNodeId Node,
-            IntrinsicSizeKeyword Keyword,
+            IntrinsicSizeKeyword Preferred,
+            IntrinsicSizeKeyword Minimum,
+            IntrinsicSizeKeyword Maximum,
             float Available,
             float Margin,
             float InlineEdges,
@@ -1296,7 +1299,7 @@ internal static class DomPasses
                 continue;
             }
 
-            if (!style.WidthFitContent || style.IgnoresUsedBoxSizes())
+            if (!style.HasInlineIntrinsicKeyword || style.IgnoresUsedBoxSizes())
             {
                 continue;
             }
@@ -1363,6 +1366,8 @@ internal static class DomPasses
             candidates.Add((
                 node,
                 style.WidthIntrinsicKeyword,
+                style.MinWidthIntrinsicKeyword,
+                style.MaxWidthIntrinsicKeyword,
                 available,
                 margin,
                 inlineEdges,
@@ -1371,36 +1376,190 @@ internal static class DomPasses
 
         bool changed = false;
         foreach ((TaffyNodeId node,
-            IntrinsicSizeKeyword keyword,
+            IntrinsicSizeKeyword preferred,
+            IntrinsicSizeKeyword minimum,
+            IntrinsicSizeKeyword maximum,
             float available,
             float margin,
             float inlineEdges,
             bool contentBox) in candidates)
         {
-            if (intrinsicWidth(taffyTree, node, TaffyAvailableSpace.MinContent) is not { } minContent)
-            {
-                continue;
-            }
+            // A keyword names an intrinsic size of the CONTENT, so the measurement drops every
+            // inline-axis declaration on the box - including a plain length. `min-width:
+            // max-content` with `max-width: 200px` is 510px of min-width that the 200px max
+            // then loses to, not 200px measured through its own clamp. Dropping what this pass
+            // wrote also keeps it idempotent, which the deferred-flex driver relies on.
+            TaffyStyle original = taffyTree.GetStyle(node);
+            TaffyStyle probe = original.Clone();
+            Layout.Size<TaffyDimension> probeSize = probe.Size;
+            Layout.Size<TaffyDimension> probeMin = probe.MinSize;
+            Layout.Size<TaffyDimension> probeMax = probe.MaxSize;
+            probeSize.Width = TaffyDimension.Auto;
+            probeMin.Width = TaffyDimension.Auto;
+            probeMax.Width = TaffyDimension.Auto;
+            probe.Size = probeSize;
+            probe.MinSize = probeMin;
+            probe.MaxSize = probeMax;
+            taffyTree.SetStyle(node, probe);
 
-            if (intrinsicWidth(taffyTree, node, TaffyAvailableSpace.MaxContent) is not { } maxContent)
+            float? measuredMin = intrinsicWidth(taffyTree, node, TaffyAvailableSpace.MinContent);
+            float? measuredMax = intrinsicWidth(taffyTree, node, TaffyAvailableSpace.MaxContent);
+            if (measuredMin is not { } minContent || measuredMax is not { } maxContent)
             {
+                taffyTree.SetStyle(node, original);
                 continue;
             }
 
             float fill = F32.Max(available - margin, 0f);
-            float usedOuter = keyword switch
+
+            float Declaration(IntrinsicSizeKeyword keyword)
             {
-                IntrinsicSizeKeyword.MinContent => minContent,
-                IntrinsicSizeKeyword.MaxContent => maxContent,
-                _ => F32.Max(minContent, F32.Min(maxContent, fill)),
-            };
-            float declaration = contentBox
-                ? F32.Max(usedOuter - inlineEdges, 0f)
-                : F32.Max(usedOuter, 0f);
-            TaffyStyle resolved = taffyTree.GetStyle(node).Clone();
+                float usedOuter = keyword switch
+                {
+                    IntrinsicSizeKeyword.MinContent => minContent,
+                    IntrinsicSizeKeyword.MaxContent => maxContent,
+                    _ => F32.Max(minContent, F32.Min(maxContent, fill)),
+                };
+
+                return contentBox
+                    ? F32.Max(usedOuter - inlineEdges, 0f)
+                    : F32.Max(usedOuter, 0f);
+            }
+
+            TaffyStyle resolved = original.Clone();
             Layout.Size<TaffyDimension> size = resolved.Size;
-            size.Width = TaffyDimension.FromLength(declaration);
+            Layout.Size<TaffyDimension> minSize = resolved.MinSize;
+            Layout.Size<TaffyDimension> maxSize = resolved.MaxSize;
+            if (preferred != IntrinsicSizeKeyword.None)
+            {
+                size.Width = TaffyDimension.FromLength(Declaration(preferred));
+            }
+
+            if (minimum != IntrinsicSizeKeyword.None)
+            {
+                minSize.Width = TaffyDimension.FromLength(Declaration(minimum));
+            }
+
+            if (maximum != IntrinsicSizeKeyword.None)
+            {
+                maxSize.Width = TaffyDimension.FromLength(Declaration(maximum));
+            }
+
             resolved.Size = size;
+            resolved.MinSize = minSize;
+            resolved.MaxSize = maxSize;
+            taffyTree.SetStyle(node, resolved);
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// Resolve the intrinsic sizing keywords on <c>min-height</c> and <c>max-height</c> once
+    /// the used inline size of every box is known.
+    /// </summary>
+    /// <remarks>
+    /// All three keywords name the same block size for a box whose inline size is definite -
+    /// min-content, max-content and the stretch-fit clamp between them collapse to the content
+    /// height - so one measurement serves all of them. That measurement re-lays the box out at
+    /// its used inline size with every block-axis constraint removed, because the declaration
+    /// being resolved is exactly what would otherwise clamp it.
+    /// <c>height</c> needs no counterpart here: sizing to content is what <c>auto</c> already
+    /// does in the block axis, and <see cref="LayoutStyle.HeightIntrinsicKeyword"/> carries the
+    /// one behavioural difference (such a box is not an automatic size, so it never stretches).
+    /// DEVIATION: crates/obscura-render implements no intrinsic sizing keyword on the min/max
+    /// size properties, so all of them are dropped to the initial value there. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    internal static bool ApplyIntrinsicBlockSizes(
+        TaffyTree taffyTree,
+        IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        Func<TaffyTree, TaffyNodeId, float, float?> intrinsicHeight)
+    {
+        List<(TaffyNodeId Node,
+            IntrinsicSizeKeyword Minimum,
+            IntrinsicSizeKeyword Maximum,
+            float UsedWidth,
+            float InlineEdges,
+            float BlockEdges,
+            bool ContentBox)> candidates = [];
+
+        // Snapshot every used inline size before the first measurement overwrites cached node
+        // layouts.
+        foreach ((TaffyNodeId node, NodeId dom) in idMap)
+        {
+            if (!styles.TryGetValue(dom, out LayoutStyle? style))
+            {
+                continue;
+            }
+
+            if (!style.HasBlockMinMaxIntrinsicKeyword || style.IgnoresUsedBoxSizes())
+            {
+                continue;
+            }
+
+            TaffyLayout layout = taffyTree.GetLayout(node);
+            candidates.Add((
+                node,
+                style.MinHeightIntrinsicKeyword,
+                style.MaxHeightIntrinsicKeyword,
+                F32.Max(layout.Size.Width, 0f),
+                layout.Padding.Left + layout.Padding.Right + layout.Border.Left + layout.Border.Right,
+                layout.Padding.Top + layout.Padding.Bottom + layout.Border.Top + layout.Border.Bottom,
+                style.BoxSizing == BoxSizing.ContentBox));
+        }
+
+        bool changed = false;
+        foreach ((TaffyNodeId node,
+            IntrinsicSizeKeyword minimum,
+            IntrinsicSizeKeyword maximum,
+            float usedWidth,
+            float inlineEdges,
+            float blockEdges,
+            bool contentBox) in candidates)
+        {
+            TaffyStyle original = taffyTree.GetStyle(node);
+            TaffyStyle probe = original.Clone();
+            Layout.Size<TaffyDimension> probeSize = probe.Size;
+            probeSize.Width = TaffyDimension.FromLength(
+                contentBox ? F32.Max(usedWidth - inlineEdges, 0f) : usedWidth);
+            probeSize.Height = TaffyDimension.Auto;
+            probe.Size = probeSize;
+            Layout.Size<TaffyDimension> probeMin = probe.MinSize;
+            probeMin.Height = TaffyDimension.Auto;
+            probe.MinSize = probeMin;
+            Layout.Size<TaffyDimension> probeMax = probe.MaxSize;
+            probeMax.Height = TaffyDimension.Auto;
+            probe.MaxSize = probeMax;
+            taffyTree.SetStyle(node, probe);
+
+            float? measured = intrinsicHeight(taffyTree, node, usedWidth);
+            taffyTree.SetStyle(node, original);
+            if (measured is not { } contentHeight)
+            {
+                continue;
+            }
+
+            float declaration = contentBox
+                ? F32.Max(contentHeight - blockEdges, 0f)
+                : F32.Max(contentHeight, 0f);
+            TaffyStyle resolved = original.Clone();
+            if (minimum != IntrinsicSizeKeyword.None)
+            {
+                Layout.Size<TaffyDimension> minSize = resolved.MinSize;
+                minSize.Height = TaffyDimension.FromLength(declaration);
+                resolved.MinSize = minSize;
+            }
+
+            if (maximum != IntrinsicSizeKeyword.None)
+            {
+                Layout.Size<TaffyDimension> maxSize = resolved.MaxSize;
+                maxSize.Height = TaffyDimension.FromLength(declaration);
+                resolved.MaxSize = maxSize;
+            }
+
             taffyTree.SetStyle(node, resolved);
             changed = true;
         }

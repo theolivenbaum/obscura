@@ -3591,6 +3591,123 @@ public class DomLayoutTests
         Assert.True(MathF.Abs(card.Y - (row.Y + 80f)) < 0.01f, $"{card}");
     }
 
+    /// <summary>
+    /// The inline-axis content of these fixtures is three 100px inline blocks, so min-content
+    /// is 100px and max-content 300px with no text measurement involved. Every expectation
+    /// was read off Chromium 141 on the same markup.
+    /// </summary>
+    [Fact]
+    public void MinAndMaxWidthResolveTheIntrinsicSizingKeywords()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font-size:16px }
+              .chip { display:inline-block; width:100px; height:20px }
+              #cb { width:200px }
+              #narrow { width:50px }
+              #wide { width:400px }
+              #a { min-width:max-content }
+              #b { max-width:min-content }
+              #c { min-width:min-content }
+              #d { max-width:fit-content }
+            </style>
+            <div id="cb">
+              <div id="a"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+              <div id="b"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            <div id="narrow">
+              <div id="c"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            <div id="wide">
+              <div id="d"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // A min-width keyword grows the box past its containing block; a max-width one shrinks
+        // it below. Neither was applied at all before: the declaration computed to `auto`.
+        Assert.True(MathF.Abs(Get("a").Width - 300f) < 0.01f, $"{Get("a")}");
+        Assert.True(MathF.Abs(Get("b").Width - 100f) < 0.01f, $"{Get("b")}");
+        Assert.True(MathF.Abs(Get("c").Width - 100f) < 0.01f, $"{Get("c")}");
+        Assert.True(MathF.Abs(Get("d").Width - 300f) < 0.01f, $"{Get("d")}");
+    }
+
+    [Fact]
+    public void MinAndMaxHeightResolveTheIntrinsicSizingKeywords()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font-size:16px }
+              .tall { height:150px }
+              #cb { width:200px }
+              #e { width:100px; height:40px; min-height:min-content; overflow:hidden }
+              #f { width:100px; height:400px; max-height:max-content; overflow:hidden }
+              #g { width:100px; height:400px; min-height:min-content; overflow:hidden }
+              #h { width:100px; height:20px; padding:10px; box-sizing:border-box;
+                   min-height:min-content; overflow:hidden }
+              #i { width:100px; height:20px; padding:10px; box-sizing:content-box;
+                   min-height:min-content; overflow:hidden }
+            </style>
+            <div id="cb">
+              <div id="e"><div class="tall"></div></div>
+              <div id="f"><div class="tall"></div></div>
+              <div id="g"><div class="tall"></div></div>
+              <div id="h"><div class="tall"></div></div>
+              <div id="i"><div class="tall"></div></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("e").Height - 150f) < 0.01f, $"{Get("e")}");
+        Assert.True(MathF.Abs(Get("f").Height - 150f) < 0.01f, $"{Get("f")}");
+
+        // A min-height keyword still loses to a larger `height`.
+        Assert.True(MathF.Abs(Get("g").Height - 400f) < 0.01f, $"{Get("g")}");
+
+        // The resolved block size is a border-box measurement, so the padding is inside it
+        // under `border-box` and outside it under `content-box`.
+        Assert.True(MathF.Abs(Get("h").Height - 170f) < 0.01f, $"{Get("h")}");
+        Assert.True(MathF.Abs(Get("i").Height - 170f) < 0.01f, $"{Get("i")}");
+        Assert.True(MathF.Abs(Get("i").Width - 120f) < 0.01f, $"{Get("i")}");
+    }
+
+    [Fact]
+    public void IntrinsicMinAndMaxSizesApplyToFlexGridAndOutOfFlowBoxes()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font-size:16px }
+              .chip { display:inline-block; width:100px; height:20px }
+              .tall { height:150px }
+              #col { display:flex; flex-direction:column; width:200px; height:60px }
+              #grid { display:grid; grid-template-columns:200px; width:200px; height:60px }
+              #abs { position:relative; width:200px; height:60px }
+              #ci { width:100px; min-height:min-content; overflow:hidden }
+              #gi { min-width:max-content }
+              #ai { position:absolute; left:0; top:0; min-width:max-content }
+            </style>
+            <div id="col"><div id="ci"><div class="tall"></div></div></div>
+            <div id="grid">
+              <div id="gi"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            <div id="abs">
+              <div id="ai"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // Without the min-height the column item shrinks to the container's 60px.
+        Assert.True(MathF.Abs(Get("ci").Height - 150f) < 0.01f, $"{Get("ci")}");
+        Assert.True(MathF.Abs(Get("gi").Width - 300f) < 0.01f, $"{Get("gi")}");
+        Assert.True(MathF.Abs(Get("ai").Width - 300f) < 0.01f, $"{Get("ai")}");
+    }
+
     [Fact]
     public void CalcPercentagesResolveAgainstAResizableFlexItemsUsedWidth()
     {

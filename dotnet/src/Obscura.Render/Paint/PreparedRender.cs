@@ -694,10 +694,16 @@ public sealed class PreparedRender
         // or grid item, where it stays `auto` and means the automatic minimum size. Reporting
         // `auto` unconditionally is what page script sees as a min-height it never set.
         bool automaticMinimumSize = HasAutomaticMinimumSize(id, style);
-        output["min-width"] = MinSizeCss(style.MinWidth, automaticMinimumSize);
-        output["min-height"] = MinSizeCss(style.MinHeight, automaticMinimumSize);
-        output["max-width"] = PaintCssValues.DimensionCss(style.MaxWidth, "none");
-        output["max-height"] = PaintCssValues.DimensionCss(style.MaxHeight, "none");
+        // An intrinsic sizing keyword is the computed value of these four properties, so it is
+        // what getComputedStyle reports - unlike `width`/`height`, which report a used length.
+        output["min-width"] = IntrinsicSizeKeywordCss(style.MinWidthIntrinsicKeyword)
+            ?? MinSizeCss(style.MinWidth, automaticMinimumSize);
+        output["min-height"] = IntrinsicSizeKeywordCss(style.MinHeightIntrinsicKeyword)
+            ?? MinSizeCss(style.MinHeight, automaticMinimumSize);
+        output["max-width"] = IntrinsicSizeKeywordCss(style.MaxWidthIntrinsicKeyword)
+            ?? PaintCssValues.DimensionCss(style.MaxWidth, "none");
+        output["max-height"] = IntrinsicSizeKeywordCss(style.MaxHeightIntrinsicKeyword)
+            ?? PaintCssValues.DimensionCss(style.MaxHeight, "none");
         output["box-sizing"] = style.BoxSizing == BoxSizing.BorderBox ? "border-box" : "content-box";
         output["aspect-ratio"] = style.AspectRatioSpecified ?? "auto";
 
@@ -948,6 +954,14 @@ public sealed class PreparedRender
     /// The computed value of <c>min-width</c>/<c>min-height</c>: the initial <c>auto</c> is
     /// <c>0px</c> unless the automatic minimum size applies to this box.
     /// </summary>
+    private static string? IntrinsicSizeKeywordCss(IntrinsicSizeKeyword keyword) => keyword switch
+    {
+        IntrinsicSizeKeyword.MinContent => "min-content",
+        IntrinsicSizeKeyword.MaxContent => "max-content",
+        IntrinsicSizeKeyword.FitContent => "fit-content",
+        _ => null,
+    };
+
     private static string MinSizeCss(Dimension value, bool automaticMinimumSize) =>
         value.IsAuto
             ? automaticMinimumSize ? "auto" : "0px"
@@ -1384,6 +1398,8 @@ public sealed class PreparedRender
                 && style.MaxHeight.Kind is DimensionKind.Auto or DimensionKind.Px
                 && !style.WidthFitContent
                 && !style.HeightFitContent
+                && !style.HasInlineIntrinsicKeyword
+                && !style.HasBlockMinMaxIntrinsicKeyword
                 && style.SizeExpressions.All(expression => expression is null);
             if (!fixedBox)
             {

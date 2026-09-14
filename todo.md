@@ -675,11 +675,9 @@ DEVIATION comment at the C# code that differs.
   already correct on its own; only the DOM style pass destroyed the percentage.
   `RenderDom.IsFlexSizedDefiniteBlock` / `IsStretchedFlexItem`, whose three
   stretch conditions are the ones `FlexboxLayout.DetermineUsedCrossSize` applies.
-  Still open on that same chain, and separate: `min-height: min-content` computes
-  to `auto` (`.tss-grid` carries it), so the grid settles at its scroll parent's
-  666px where Chromium expands it to its 1676px min-content height. Both engines
-  show the same first screen and both scroll; only which box owns the scrollbar
-  differs.
+  The `min-height: min-content` half of that same chain (`.tss-grid` carries it)
+  is fixed below - the grid now expands to 1677px, so the scroll parent owns the
+  scrollbar as it does in Chromium.
 - **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
   properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
   `inherit` has to copy the parent's computed value explicitly; the reference
@@ -1205,13 +1203,57 @@ opposite of what both keywords ask for: a `width: max-content` column flex box i
 keyword" predicates over `WidthIntrinsicKeyword` / `HeightIntrinsicKeyword`
 (`IntrinsicSizeKeyword`), which say *which* keyword it is. Taffy's box-size dimension
 still cannot carry any of them, so the dimension stays `Auto` and
-`DomPasses.ApplyFitContentWidths` resolves it once the containing space is known:
+`DomPasses.ApplyIntrinsicInlineSizes` resolves it once the containing space is known:
 `min-content` takes the min-content measurement, `max-content` the max-content one, and
 `fit-content` keeps the existing `clamp(min-content, stretch-fit, max-content)`. In the
 block axis all three size to content like `auto`, so they share
 `ApplyFitContentBlockSize` and only stop the box from being stretched.
 
 Covered by `WidthMaxContentAndMinContentSizeToTheirMeasurement`.
+
+### `min-*` / `max-*` take the intrinsic sizing keywords too; the reference ignores them
+
+Same gap one level further: `style.rs` reads `min-width`/`min-height`/`max-width`/
+`max-height` through `dimension_value`, which has no keyword path at all, so all three
+keywords computed to the initial value and the declaration was silently dropped. On a
+300px container with content whose min-content width is 77px and max-content 511px, 13
+of 22 probe cases differed from Chromium - `min-width: max-content` stayed at 300,
+`max-height: min-content` left a `height: 400px` box at 400, a shrinking column flex
+item ignored `min-height: min-content`, and so on.
+
+The four properties now carry their own `IntrinsicSizeKeyword` on `LayoutStyle`
+(`MinWidthIntrinsicKeyword`, …), parsed by the same `IntrinsicSizeKeywordValue` the
+preferred sizes use, and follow the same mechanism: the dimension stays at its initial
+value and a convergence pass writes the measured length.
+
+- **Inline axis** - `ApplyIntrinsicInlineSizes` (the renamed `ApplyFitContentWidths`)
+  now measures for `width`, `min-width` and `max-width` in one pass. The measurement
+  drops *every* inline-axis declaration on the box first, a plain length included: a
+  keyword names an intrinsic size of the content, so `min-width: max-content` beside
+  `max-width: 200px` is 511px of min-width that the 200px maximum then loses to, not
+  200px measured through its own clamp.
+- **Block axis** - `ApplyIntrinsicBlockSizes` runs after the inline pass and its
+  relayout, and re-lays each box out at its used inline size with every block-axis
+  constraint removed. For a box whose inline size is definite, min-content, max-content
+  and the stretch-fit clamp between them are all the content height, so one measurement
+  serves all three keywords. `height` needs no counterpart: sizing to content there is
+  what `auto` already does.
+- `getComputedStyle` reports the keyword for these four (it is their computed value),
+  unlike `width`/`height`, which report a used length.
+
+All 22 probe cases now match Chromium, and 27 further cases were added to the probe -
+a keyword competing with a length or a percentage, a min-height losing to a larger
+height, a max-height beating one, out-of-flow and replaced boxes, and the containing
+block widths that make `min-width: min-content` / `max-width: max-content`
+non-vacuous. Covered by `MinAndMaxWidthResolveTheIntrinsicSizingKeywords`,
+`MinAndMaxHeightResolveTheIntrinsicSizingKeywords`,
+`IntrinsicMinAndMaxSizesApplyToFlexGridAndOutOfFlowBoxes` and
+`IntrinsicSizingKeywordsAreTheComputedMinAndMaxSizes`.
+
+Found while checking it, and separate: a fixed-width `<img>` in a *narrower* containing
+block is shrunk to the container (`width: 160px` in a 100px block gives 100px against
+Chromium's 160px). The probe carries two keyword-free controls that show it, and it is
+untouched here - it is replaced-element sizing, not keyword resolution.
 
 ### An auto-sized `<button>` accumulates by line, not over the whole subtree
 
