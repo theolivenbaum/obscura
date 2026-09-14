@@ -94,6 +94,19 @@ public static partial class RenderDom
         /// </remarks>
         internal float CbHeight;
 
+        /// <summary>
+        /// Whether <see cref="CbHeight"/> is a usable number, and not merely definite.
+        /// Implies <see cref="CbHeightDefinite"/>.
+        /// </summary>
+        /// <remarks>
+        /// A grid item's containing block is its grid area, whose size is only known once
+        /// track sizing has run. Its percentage height is therefore definite (taffy
+        /// resolves it against the area) while its pixel value is unavailable during this
+        /// style pass, so a descendant's <c>calc(100% - 4px)</c> must stay <c>auto</c>
+        /// rather than flatten against a basis we had to invent.
+        /// </remarks>
+        internal bool CbHeightKnown;
+
         internal Inherited Clone() => new()
         {
             Display = Display,
@@ -137,6 +150,7 @@ public static partial class RenderDom
             CbWidth = CbWidth,
             CbHeightDefinite = CbHeightDefinite,
             CbHeight = CbHeight,
+            CbHeightKnown = CbHeightKnown,
         };
     }
 
@@ -285,6 +299,7 @@ public static partial class RenderDom
                 CbWidth = initialCbWidth,
                 CbHeightDefinite = true,
                 CbHeight = viewport.Height,
+                CbHeightKnown = true,
             };
 
             // Computed definiteness after walking the real containing-block chain.

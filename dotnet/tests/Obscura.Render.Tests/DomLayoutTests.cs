@@ -774,6 +774,141 @@ public class DomLayoutTests
         Assert.True(MathF.Abs(flex.Width - 900f) < 0.01f, $"{flex}");
     }
 
+    /// <summary>
+    /// A grid item's containing block is its grid area, so a percentage block size resolves
+    /// against the row track even when the grid container itself has no definite height.
+    /// `align-items: center` is the case that matters: the item is not stretched, so nothing
+    /// else can supply its height. Chromium lays the item and its absolutely-positioned
+    /// child out 24px tall; the engine used to compute the percentage to `auto` and collapse
+    /// both to 0.
+    /// </summary>
+    [Fact]
+    public void GridItemPercentageHeightResolvesAgainstGridAreaWithoutStretch()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:24px;width:200px;align-items:center}
+                .item{height:100%;width:100%;padding:0;border:0;position:relative}
+                .abs{position:absolute;top:0;left:0;width:100%;height:100%}
+            </style>
+            <div class="grid">
+              <div id="item" class="item"><div id="abs" class="abs"></div></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+        Rect abs = laid.Rects[Id(tree, "abs")];
+
+        Assert.True(MathF.Abs(item.Width - 40f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(item.Height - 24f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(abs.Width - 40f) < 0.01f, $"{abs}");
+        Assert.True(MathF.Abs(abs.Height - 24f) < 0.01f, $"{abs}");
+    }
+
+    /// <summary>
+    /// The stretched variant reaches the same size down a different path (stretch alignment
+    /// rather than the item's own percentage), and is here so a change that only repairs one
+    /// of the two cannot look complete.
+    /// </summary>
+    [Fact]
+    public void GridItemPercentageHeightResolvesAgainstGridAreaWhenStretched()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:24px;width:200px;align-items:stretch}
+                .item{height:100%;width:100%;padding:0;border:0}
+            </style>
+            <div class="grid"><div id="item" class="item"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+
+        Assert.True(MathF.Abs(item.Width - 40f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(item.Height - 24f) < 0.01f, $"{item}");
+    }
+
+    /// <summary>
+    /// An `auto` row is sized from its items, so the percentage must not feed back into the
+    /// track: the item contributes its content height and then takes all of it. Chromium
+    /// gives 10px, the height of the one child.
+    /// </summary>
+    [Fact]
+    public void GridItemPercentageHeightAgainstAutoRowUsesContentHeight()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:auto;width:200px;align-items:center}
+                .item{height:100%;width:100%;padding:0;border:0}
+                .spacer{height:10px}
+            </style>
+            <div class="grid"><div id="item" class="item"><div class="spacer"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+
+        Assert.True(MathF.Abs(item.Width - 40f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(item.Height - 10f) < 0.01f, $"{item}");
+    }
+
+    /// <summary>
+    /// The grid-area rule is scoped to grid items: a percentage height under an ordinary
+    /// auto-height block parent still behaves as `auto` and takes the content height (7px in
+    /// Chromium), which is what keeps `.tss-card` from filling the viewport.
+    /// </summary>
+    [Fact]
+    public void PercentageHeightUnderAutoHeightBlockParentStillBehavesAsAuto()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .parent{width:60px}
+                .pct{height:50%}
+                .filler{height:7px}
+            </style>
+            <div class="parent"><div id="pct" class="pct"><div class="filler"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect pct = laid.Rects[Id(tree, "pct")];
+
+        Assert.True(MathF.Abs(pct.Width - 60f) < 0.01f, $"{pct}");
+        Assert.True(MathF.Abs(pct.Height - 7f) < 0.01f, $"{pct}");
+    }
+
+    /// <summary>
+    /// A functional block-axis percentage has to be flattened to px before layout, and a
+    /// grid item's area size is not available in that pass, so a `calc()` height inside one
+    /// stays `auto` rather than flattening against an invented basis. Chromium resolves it
+    /// to 20px (24 - 4); the tripwire here is only that it stays inside the grid area
+    /// instead of going negative or escaping it. See "Known deviations" in todo.md.
+    /// </summary>
+    [Fact]
+    public void CalcPercentageHeightInsideGridItemStaysWithinTheGridArea()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:24px;width:200px;align-items:center}
+                .item{height:100%;width:100%;padding:0;border:0}
+                .calcchild{height:calc(100% - 4px)}
+            </style>
+            <div class="grid"><div id="item" class="item"><div id="calcchild" class="calcchild"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+        Rect calc = laid.Rects[Id(tree, "calcchild")];
+
+        Assert.True(MathF.Abs(item.Height - 24f) < 0.01f, $"{item}");
+        Assert.True(calc.Height >= 0f && calc.Height <= 24f, $"{calc}");
+    }
+
     [Fact]
     public void StickyNormalFlowExcludesOwnPixelAndPercentageTranslates()
     {

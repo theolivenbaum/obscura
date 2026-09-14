@@ -722,6 +722,47 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### A grid item's percentage height resolves against its grid area
+
+`dom.rs` drops a block-axis percentage whenever the parent box has no definite height,
+which is right for a block container and wrong for a grid item: a grid item's containing
+block is its **grid area**, so `grid-template-rows: 24px` gives it a definite basis no
+matter what the grid container's own height is. The reference computed `height: 100%` on
+such an item to `auto`, and with a non-stretch `align-items` nothing else could supply a
+height, so the item laid out 0px tall.
+
+`LayoutDomComputed.ResolveOneComputedStyle` now keeps the percentage when the element's
+rendered parent is a grid container, and hands it to taffy, which already resolves a grid
+item's size against the area itself (`grid/alignment.rs align_and_position_item`, with
+`GridItem.KnownDimensions` passing `None` for a track that is still indefinite, so an
+`auto` row is sized from content and does not go circular).
+
+Found on Curiosity Workspace: `.tss-gridpicker` (`grid-template-rows: 24px` x8,
+`align-items: center`, buttons with inline `height: 100%; width: 100%`) rendered every
+cell 24x2 instead of 24x24 and its absolutely-positioned overlays 22x0 instead of 22x22,
+504 elements each across `#/preferences?id=file-indexing-schedule`,
+`#/preferences?id=file-indexing-monitoring` and `#/manage/data/file-indexing`. The cells
+were visibly collapsed in the screenshot. `align-items: stretch` masked the bug, so the
+non-stretch case is the one that has to be tested.
+
+`Inherited.CbHeightKnown` is the second half of the change. A percentage basis can now be
+definite (bare percentages survive and taffy resolves them) while its pixel value is
+unavailable in the style pass, which is exactly a grid item's situation. A **functional**
+block-axis percentage has to be flattened to px before layout, so it is gated on the
+numeric flag instead: `calc(100% - 4px)` inside a percentage-height grid item stays
+`auto` rather than flattening against a basis we would have had to invent.
+
+**Remaining gap:** that `calc()` case. Chromium resolves it to 20px (24 - 4) and the port
+gives it the content height. Closing it means resolving the item's row track during the
+style pass, which is grid placement and track sizing done twice; not worth it until
+something needs it.
+
+Covered by `GridItemPercentageHeightResolvesAgainstGridAreaWithoutStretch`,
+`GridItemPercentageHeightResolvesAgainstGridAreaWhenStretched`,
+`GridItemPercentageHeightAgainstAutoRowUsesContentHeight`,
+`PercentageHeightUnderAutoHeightBlockParentStillBehavesAsAuto` and
+`CalcPercentageHeightInsideGridItemStaysWithinTheGridArea`.
+
 ### `filter` carries the whole function list; the reference keeps only a blur
 
 `style.rs` parses `filter` for `blur()` alone and stores one sigma (`FilterBlur`), so a
