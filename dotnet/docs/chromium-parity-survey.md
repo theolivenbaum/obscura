@@ -1267,3 +1267,43 @@ number was not checked.
 Also unfixed by design: `getComputedStyle().top` still reports the flattened `470px` on a
 content-sized combobox. That is the used-value reporting gap tracked under F23, not the geometry —
 the box itself is now in the right place.
+
+## F30 — NEW: terminating a wedged isolate kills the process
+
+The final Obscura survey pass died at route 43 (`#/manage/operate/code`, the Monaco editor page) and
+every route after it failed against a dead server. It was not a timeout — the process crashed:
+
+```
+WARN: CDP error for Runtime.callFunctionOn: promise did not settle within 30000ms
+WARN: CDP command Runtime.callFunctionOn held V8 past 60000ms; terminated the isolate to free the dispatcher
+WARN: CDP error for Runtime.callFunctionOn: exceeded 30000ms timeout
+WARN: autonomous page task failed: autonomous microtask checkpoint exceeded its task budget    x4
+Unhandled exception. System.ObjectDisposedException: Cannot access a disposed object.
+Object name: 'Microsoft.ClearScript.V8.V8ScriptEngine'.
+   at V8SplitProxyManaged.<get_InvokePromiseRejectionCallbackFastMethodPtr>g__Thunk|178_0(
+        IntPtr pEngine, V8PromiseRejectionEventKind kind, Ptr pPromise, Ptr pValue)
+```
+
+A page held V8 past the watchdog's 60s budget; the watchdog terminated the isolate to free the
+dispatcher, which is the documented and correct behaviour; then V8's **promise-rejection callback**
+fired into the now-disposed `V8ScriptEngine` on a native callback thread and the exception escaped.
+
+The slow page is a separate matter and is probably not a defect at all: the same route on the same
+build loads in 1.8s and settles in 7.3s in isolation, and the survey was competing with four test
+suites for CPU at the time. **The crash is a defect either way.** CLAUDE.md's rule is that an
+exception crossing back into V8 must be converted to a JS error or a null return and never allowed
+to escape, and the promise-rejection callback is exactly such a boundary. As it stands, one slow
+page takes out the whole browser.
+
+Dispatched with a brief to fix the boundary, to audit the rest of the termination path for other
+unguarded ClearScript callbacks, and to say whether the dispose ordering can be fixed rather than
+only defended.
+
+### A harness bug found alongside it
+
+The first failed run reported "465 routes", which is 155 x 3. `final-survey.sh` copies
+`index-retry.json` after each of its three passes, and a pass whose `capture.js` dies early leaves
+the previous pass's file in place, so the same 155 records were copied into `index-B` and
+`index-C`. It now clears the file before each pass and dedupes on merge, preferring a record that
+succeeded. Worth noting because the bad number looked like a capture explosion rather than a stale
+file.
