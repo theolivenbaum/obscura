@@ -849,3 +849,55 @@ The other 210 are a single shape — classless `<span>`, `hidden` in Chromium an
 Obscura — and are the same alignment artifact as the `color` pairs described under F9b, not a
 defect: a classless span cannot be distinguished from another classless span once the two sidebars
 differ structurally.
+
+## What the numbers look like once the two confounds are removed
+
+Restricting to the 127 routes where both engines produce the same sidebar shape (so the F9b
+structural divergence is out) and excluding the avatar:
+
+| property | pairs 33,157 | |
+|---|---|---|
+| display | 122 | 0.37% |
+| position | 0 | 0.00% |
+| fontSize | 45 | 0.14% |
+| fontFamily | 0 | 0.00% |
+| color | 94 | 0.28% |
+| backgroundColor | 87 | 0.26% |
+| flexDirection | 15 | 0.05% |
+| overflow | 165 | 0.50% |
+| **width >2px** | **9,145** | **27.58%** |
+
+Every computed-style property is now under 0.5%. Width is the one real remaining number.
+
+## Open: sidebar item widths, `calc(100% + N)` resolved against the wrong base
+
+The width divergence is concentrated in three nested sidebar elements —
+`div.tss-sidebar-btn-open`, its `a.tss-link-no-underline` and its `button.tss-btn` — at fixed
+per-item offsets (-9px on 484 pairs, -26px on 352, -12px on 132, -32px on 131).
+
+It is not text measurement. On `#/` the brand item's whole subtree is byte-identical between the
+engines (`div.tss-btn-with-image` 109x28 at x=17, `img.tss-image` 28x28, the label span 71x24 at
+x=55) and only the two outer boxes differ. The rule that sizes them is
+
+```css
+.tss-sidebar:not(.tss-sidebar-closed) .tss-sidebar-header .msk-sidebar-brand {
+  transform: translateY(-8px) translateX(-12px);
+  width: calc(100% + 32px);
+}
+```
+
+and the containing block is identical in both engines: `.tss-sidebar-header` measures
+`offsetWidth 191`, `clientWidth 191`, no padding, no border, in Chromium and in Obscura alike.
+Chromium then computes `223.141px` (its 191.141 plus 32); Obscura computes `208px`, which is
+`176 + 32` — a base 15px narrower than the containing block it reports.
+
+It is not `calc()` itself. A standalone probe (`calc-probe.html`) of `width: calc(100% + 32px)` on
+a column-flex item, on the same item with the same transform, on a `flex-shrink: 0` item, on a
+plain block child and on a row-flex item gives byte-identical results in the two engines (223, 223,
+191, 223, 223, 191).
+
+So the percentage appears to be resolved against something other than the containing block the
+engine itself reports, in this context only. The leading hypothesis is that it is resolved during
+an intermediate layout pass, against a parent width that later changes, and not recomputed — which
+would also fit the pattern of several distinct fixed offsets rather than one. Not confirmed;
+recorded here with the repro so the next pass can start from it rather than from the survey.
