@@ -3682,6 +3682,154 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void FunctionalInsetsResolveAgainstTheAbsolutePositioningContainingBlock()
+    {
+        // DEVIATION from the Rust reference, which flattens a functional inset against the
+        // viewport height. Every expected value below was read off headless Chromium at
+        // 1280x720 (Tesserae's dropdown chevron reduced to its CSS).
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif;height:2000px}
+              :root{--tiny:10px}
+              .ctr{position:relative;width:300px;height:34px;margin-top:200px}
+              .k{position:absolute;width:10px;height:10px}
+              #a{right:8px;top:calc(50% - var(--tiny) / 2)}
+              #b{right:30px;top:50%}
+              #c{right:52px;top:calc(50% - 5px)}
+              #d{right:74px;top:calc(50% - var(--tiny))}
+              #e{right:96px;bottom:50%}
+              #f{right:118px;top:0;margin-top:calc(50% - 5px)}
+            </style>
+            <div class="ctr" id="ctr">
+              <div class="k" id="a"></div><div class="k" id="b"></div><div class="k" id="c"></div>
+              <div class="k" id="d"></div><div class="k" id="e"></div><div class="k" id="f"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        float container = laid.Rects[Id(tree, "ctr")].Y;
+        float Offset(string id) => laid.Rects[Id(tree, id)].Y - container;
+
+        // Half of the 34px containing block, not half of the 720px viewport.
+        Assert.True(MathF.Abs(Offset("a") - 12f) < 0.01f, $"a: {Offset("a")}");
+        Assert.True(MathF.Abs(Offset("c") - 12f) < 0.01f, $"c: {Offset("c")}");
+        Assert.True(MathF.Abs(Offset("d") - 7f) < 0.01f, $"d: {Offset("d")}");
+
+        // Tripwires: the bare percentages and the percentage margin were already right.
+        Assert.True(MathF.Abs(Offset("b") - 17f) < 0.01f, $"b: {Offset("b")}");
+        Assert.True(MathF.Abs(Offset("e") - 7f) < 0.01f, $"e: {Offset("e")}");
+        Assert.True(MathF.Abs(Offset("f") - 145f) < 0.01f, $"f: {Offset("f")}");
+    }
+
+    [Fact]
+    public void FunctionalInsetsSampleThePaddingBoxOfTheNearestPositionedAncestor()
+    {
+        // Chromium at 1280x720. The basis is the ancestor's padding box on both axes, the
+        // ancestor need not be the parent, and an auto-height ancestor still has a used
+        // height a percentage resolves against.
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif}
+              .k{position:absolute;width:10px;height:10px}
+              #p1{position:relative;width:300px;height:34px;padding:20px 30px}
+              #g1{top:calc(50% - 5px);left:calc(50% - 5px)}
+              #p2{position:relative;width:300px}
+              #p2 .filler{height:60px}
+              #g2{top:calc(50% - 5px)}
+              #p3{position:relative;width:300px;height:80px}
+              #p3 .mid{height:20px}
+              #g3{top:calc(50% - 5px);left:calc(25% - 5px)}
+              #p7{position:relative;width:300px;height:40px;border:5px solid #999}
+              #g7{bottom:calc(50% - 5px);right:calc(50% - 5px)}
+            </style>
+            <div id="p1"><div class="k" id="g1"></div></div>
+            <div id="p2"><div class="filler"></div><div class="k" id="g2"></div></div>
+            <div id="p3"><div class="mid"><div class="k" id="g3"></div></div></div>
+            <div id="p7"><div class="k" id="g7"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+        float Top(string child, string ancestor) => Get(child).Y - Get(ancestor).Y;
+        float Left(string child, string ancestor) => Get(child).X - Get(ancestor).X;
+
+        // 360x74 padding box: 0.5*74 - 5 and 0.5*360 - 5.
+        Assert.True(MathF.Abs(Top("g1", "p1") - 32f) < 0.01f, $"g1 top: {Get("g1")}");
+        Assert.True(MathF.Abs(Left("g1", "p1") - 175f) < 0.01f, $"g1 left: {Get("g1")}");
+
+        // The ancestor's height is content-derived (60px) and still the basis.
+        Assert.True(MathF.Abs(Top("g2", "p2") - 25f) < 0.01f, $"g2: {Get("g2")}");
+
+        // #p3, not the 20px-tall .mid the box is parented to.
+        Assert.True(MathF.Abs(Top("g3", "p3") - 35f) < 0.01f, $"g3 top: {Get("g3")}");
+        Assert.True(MathF.Abs(Left("g3", "p3") - 70f) < 0.01f, $"g3 left: {Get("g3")}");
+
+        // `bottom` off a padding box inset by the 5px border: 5 + 40 - 15 - 10.
+        Assert.True(MathF.Abs(Top("g7", "p7") - 20f) < 0.01f, $"g7 top: {Get("g7")}");
+        Assert.True(MathF.Abs(Left("g7", "p7") - 150f) < 0.01f, $"g7 left: {Get("g7")}");
+    }
+
+    [Fact]
+    public void FunctionalRelativeOffsetsResolveAgainstTheContainingBlockHeight()
+    {
+        // Chromium at 1280x720. A relative offset is not taffy's to resolve on the block
+        // axis (it passes a hard 0 there), so it stays flattened - against the containing
+        // block's content-box height, and as `auto` when that height is indefinite.
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif}
+              .k{width:10px;height:10px}
+              #p4{width:300px;height:100px}
+              #g4{position:relative;top:calc(50% - 5px);left:calc(10% - 5px)}
+              #p5{width:300px}
+              #g5{position:relative;top:calc(50% - 5px)}
+              #g5b{position:relative;top:50%}
+            </style>
+            <div id="p4"><div class="k" id="g4"></div></div>
+            <div id="p5"><div class="k" id="g5"></div><div class="k" id="g5b"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // Definite 100px containing block: half of it, not half of the 720px viewport.
+        Assert.True(MathF.Abs(Get("g4").Y - (Get("p4").Y + 45f)) < 0.01f, $"g4: {Get("g4")}");
+        Assert.True(MathF.Abs(Get("g4").X - (Get("p4").X + 25f)) < 0.01f, $"g4: {Get("g4")}");
+
+        // Indefinite containing block: the offset computes to auto, exactly as the bare
+        // percentage beside it does.
+        Assert.True(MathF.Abs(Get("g5").Y - Get("p5").Y) < 0.01f, $"g5: {Get("g5")}");
+        Assert.True(MathF.Abs(Get("g5b").Y - (Get("p5").Y + 10f)) < 0.01f, $"g5b: {Get("g5b")}");
+    }
+
+    [Fact]
+    public void FunctionalInlineSizesSampleTheUsedContainingBlockWidth()
+    {
+        // Chromium at 1280x720. `#cb` is a flex item that ends 200px wide; the top-down
+        // style pass's own block-flow estimate of its width is the 300px row, so a
+        // `calc()` percentage flattened there came out 100px too wide.
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif}
+              .row{display:flex;width:300px}
+              .fixed{flex:0 0 100px;height:20px}
+              .grow{flex:1 1 auto;min-width:0}
+              #t{width:calc(100% + 20px);height:10px}
+              #t2{width:calc(50% - 10px);height:10px}
+            </style>
+            <div class="row"><div class="fixed"></div>
+              <div class="grow" id="cb"><div id="t"></div><div id="t2"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("cb").Width - 200f) < 0.01f, $"cb: {Get("cb")}");
+        Assert.True(MathF.Abs(Get("t").Width - 220f) < 0.01f, $"t: {Get("t")}");
+        Assert.True(MathF.Abs(Get("t2").Width - 90f) < 0.01f, $"t2: {Get("t2")}");
+    }
+
+    [Fact]
     public void ButtonsTakeTheUserAgentControlFontIncludingLineHeightNormal()
     {
         // DEVIATION from the Rust reference, whose `button` UA arm sets no font, so a button

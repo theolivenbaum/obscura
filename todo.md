@@ -763,6 +763,77 @@ Covered by `GridItemPercentageHeightResolvesAgainstGridAreaWithoutStretch`,
 `PercentageHeightUnderAutoHeightBlockParentStillBehavesAsAuto` and
 `CalcPercentageHeightInsideGridItemStaysWithinTheGridArea`.
 
+### A `calc()` percentage is resolved by layout, not flattened by the style pass
+
+`dom.rs` flattens every functional length to px during the top-down computed-value pass,
+against a basis it picks there: the viewport height for a box offset's block axis, and
+`Inherited.CbWidth` - the pass's own block-flow estimate of the containing block - for the
+inline axis. Both are wrong for a percentage, and no basis picked in that pass can be
+right, because the pass runs before layout:
+
+- An **absolutely positioned** box resolves its offsets against the **padding box of the
+  nearest positioned ancestor**, which is not the parent the pass is walking and whose used
+  size layout has not produced yet. `top: calc(50% - var(--tiny) / 2)` on a chevron inside
+  a 34px-tall `position: relative` combobox came out 355px (half of the 720px viewport)
+  where Chromium computes 12px, so every Tesserae dropdown chevron sat hundreds of pixels
+  below its box and off the page. Measured on `#/manage/data/file-indexing`: container at
+  `y=583`, icon at `y=1053`, a constant +470 (`0.5 * 950 - 5`).
+- An **inline-axis** size resolves against the used containing block, which the estimate
+  only sometimes matches: a flex item that ends 200px wide inside a 300px row gave
+  `width: calc(100% + 20px)` as 320px instead of 220px.
+
+Taffy resolves a bare percentage against the real containing block already, and its
+`calc()` support (`CompactLength.Calc`, the tree's `CalcResolver`) resolves an opaque
+handle the same way. So a percentage-bearing expression is no longer flattened for layout:
+`LayoutDomComputed.ResolveOneComputedStyle` parses it into a `GridCalcExpression` - now
+shared with the grid track path, with an `allowNegative` flag because an offset may be
+negative where a track size may not - and stores it in `LayoutStyle.InsetCalc` /
+`LayoutStyle.SizeCalc`, which `TaffyStyleMapping` hands to taffy as a calc value.
+
+Two parts stay flattened, deliberately:
+
+- **The block axis of a relative offset.** Taffy resolves those against a hard 0
+  (`BlockLayout`'s `item.Inset.ZipSize(new Size(containerInnerWidth, 0.0f), ...)`), because
+  the container's height is not final where the offset is applied. So it keeps being
+  flattened, now against the containing block's content-box height, and becomes `auto` when
+  that height is indefinite - which is what Chromium computes for a percentage offset it
+  cannot resolve (a relative `top: calc(50% - 5px)` under an auto-height parent moves the
+  box 0px, not -5px).
+- **The block axis of a size.** Its definite/indefinite rules are applied in the style pass
+  (see the `.tss-card` entry above) and taffy is not told which case it is in.
+
+Everything else keeps the flattened value too, because layout is not its only reader: the
+sticky-offset pass, an inline box's relative shift, pseudo-element paint and the
+computed-style projection all read `style.Inset` / `style.Width`. Those get the better basis
+as a side effect wherever the style pass does know the containing block's height -
+`getComputedStyle().top` on the probe's chevron reports `12px` where it reported `355px` -
+and keep the viewport fallback where it does not, so a chevron in a content-sized combobox
+is laid out at 12px and still reports `470px`. That reporting gap is the separate
+`getComputedStyle` used-value work, not this.
+
+Verified against headless Chromium at 1280x720 on a six-case probe (bare `top`/`bottom`
+percentages and a percentage `margin-top` as tripwires), on padding-box, auto-height,
+non-parent-ancestor and border-inset ancestors, and on a shrinking flex item.
+
+Covered by `FunctionalInsetsResolveAgainstTheAbsolutePositioningContainingBlock`,
+`FunctionalInsetsSampleThePaddingBoxOfTheNearestPositionedAncestor`,
+`FunctionalRelativeOffsetsResolveAgainstTheContainingBlockHeight` and
+`FunctionalInlineSizesSampleTheUsedContainingBlockWidth`.
+
+**Remaining gap, and it is not this one:** a `calc()` percentage under a flex item that
+**shrinks** still resolves against the item's pre-shrink inner size.
+`FlexboxLayout.GenerateAnonymousFlexItems` resolves every child size against
+`constants.NodeInnerSize` once and the flex algorithm reuses that resolution, so after the
+item is shrunk nothing re-resolves it. Minimal repro: a 250px `flex: 0 1 auto` column with
+`padding: 0 12px` in a 600px row whose sibling forces a shrink - the column settles at
+226px (inner 202px) and a child `width: calc(100% + 32px)` comes out 219px instead of
+Chromium's 234px, while a bare `width: 100%` and `width: 150%` beside it are exact. This is
+what leaves Curiosity Workspace's sidebar subtree 15px narrow on `#/users`
+(`.msk-sidebar-brand` 208px against Chromium's 223.141px, from a basis of 176 where the
+reported containing block is 191.141). Not a style-pass basis problem: instrumenting the
+resolver shows both 191.14764 and 176 reaching it, and the surviving geometry is the 176
+one. Belongs to the flex algorithm, not to the computed-value pass.
+
 ### `filter` carries the whole function list; the reference keeps only a blur
 
 `style.rs` parses `filter` for `blur()` alone and stores one sigma (`FilterBlur`), so a
