@@ -1137,3 +1137,84 @@ where the sidebar settles at a different final width.
 
 This makes the width work one defect, the same one as F29 and in the same machinery, rather than
 the loose cluster it looked like at the start.
+
+---
+
+# Third-pass outcomes
+
+## F22 — FIXED (merged)
+
+`LayoutDomComputed.ResolveOneComputedStyle` dropped a block-axis percentage to `auto` whenever the
+parent box had no definite height. That is right for a block container and wrong for a grid item,
+whose containing block is its **grid area** — `grid-template-rows: 24px` is a definite basis under
+an auto-height container. The percentage never reached taffy, which already positioned the item
+correctly once it had one.
+
+`gi` goes 40x0 -> 40x24 and the real page's `.tss-gridpicker-button-content` 22x0 -> 22x22, both
+matching Chromium; the five already-correct rows are unchanged.
+
+Not covered, and recorded as a deviation: `calc(100% - 4px)` inside a percentage-height grid item
+still yields the content height where Chromium gives 20px, because closing it means running grid
+placement and track sizing during the style pass. Before this change the whole subtree was
+collapsed, so it is an incomplete fix rather than a regression.
+
+## F20 — FIXED (merged)
+
+Three changes: `ComputedStyle.UaStyle` takes the namespace and answers SVG elements from an SVG
+table (`inline`, except `text` and `foreignObject`); `DomCascade.ApplySvgPresentationAttributes`
+maps 18 attributes into the cascade for SVG-namespace elements only, above the UA style and below
+author rules and `style=`; and `fill` / `stroke` / `stroke-width` / `text-anchor` exist as one
+inherited `SvgPaintValues` record rather than four fields, deliberately separate from the specified
+values `PaintSvg` pushes into the serialized SVG (pushing an inherited value there would override
+the rasterizer's own inheritance and break `<use>` of a `<symbol>`). All 130 probe values now match
+Chromium.
+
+The change surfaced a real layout bug: once `<svg>` computed as `inline`,
+`DomBuild.InlineWrapsOnlyInFlowBlocks` began splicing away an `<svg>` wrapping `<text>` and
+hoisting its children into the body, so SVG text painted as black HTML text at the page origin. A
+replaced box is atomic, so the guard now refuses `IsReplacedBox`. All 64 `render-repros` fixtures
+are pixel-identical before and after.
+
+Left alone deliberately: `<img>`, `<canvas>`, `<video>` and `<iframe>` still report `display: block`
+where Chromium says `inline`, because the engine models HTML replaced elements as block-level
+atomic boxes and changing that is separate work on the inline-replaced layout path. Six of the 18
+mapped attributes (`fill-opacity`, `stroke-opacity`, `stroke-linecap`, `stroke-linejoin`,
+`stroke-dasharray`, `dominant-baseline`) are wired in but have no computed-value handler yet, so
+they are no-ops; painting is unaffected since the rasterizer reads them off the attributes.
+
+## F9b — FIXED (merged)
+
+Four causes, one per symptom:
+
+- **`Page.navigate` reloaded.** Live navigate traffic does not reach `Domains/Page.cs`'s handler at
+  all — `ServerSupport.IsNavigateMethod` routes it to a separate implementation in
+  `Server.Navigation.cs` that unconditionally fetched. The fragment check now lives in the Browser
+  layer and asks `bootstrap.js` rather than re-deciding, so `location.*` and `Page.navigate` share
+  one path. A second half that is easy to miss: the response must carry **no `loaderId`**, or
+  Playwright reads it as `newDocumentId` and waits for a document load that never comes — `goto()`
+  hung to its 30s timeout even though the navigation itself was right.
+- **`popstate` never fired** because the location setters delegated the whole fragment path to
+  `history.pushState`, which only fires `hashchange`.
+- **`pushState` fired a spurious `hashchange`** because `fireHashChangeIfNeeded` was called from
+  `pushState` and `replaceState`. It stays on `go()`, where traversal legitimately fires it.
+- **An anchor click did nothing** because both click paths carried `!href.startsWith('#')` — the
+  synthetic one in `bootstrap.js` and the real input one in `Domains/Input.cs`. Both needed fixing.
+
+A detail worth keeping: an empty fragment is not the same as no fragment, and `new URL(u).hash`
+reports `''` for both, so `<a href="#">` from a fragmentless URL must fire `hashchange` once and not
+again. Reading the raw string handles it, matching Chromium.
+
+`Page.reload` is deliberately excluded from the same-document path — it is handed the current URL,
+which on a page sitting at `#/x` would look fragment-only and silently stop reloading. Pinned by a
+test.
+
+The probe table now matches Chromium row for row, including the real `Input.dispatchMouseEvent`
+click. Walking six routes from one boot, Obscura makes **zero document requests** and keeps
+`window` state throughout, with node counts within two of Chromium per route.
+
+### The retraction is independently confirmed
+
+The agent could not make `document.querySelector('.tss-sidebar-has-shift')` non-null on `#/users`
+and checked why: **real Chromium returns null there too** from this harness shape. It declined to
+assert it rather than pinning a false expectation. That is the same conclusion the forced-reload
+re-capture reached from the other direction, arrived at independently.
