@@ -662,3 +662,126 @@ Painting is unaffected: `Paint/SvgRenderer.cs` is a separate path that reads the
 itself and skips `title`/`desc`/`defs` by tag name, not by computed `display`. The Rust
 reference has the same namespace-blind table (`crates/obscura-render/src/style.rs`), so fixing
 this is a deliberate C#-side deviation under ground rule 2.
+
+## Where the remaining divergence actually is
+
+Re-aggregating the verification run by property, and separately excluding one animated component
+(next section), narrows "what is left" considerably:
+
+| property | all elements | excluding `tss-pixelavatar*` |
+|---|---|---|
+| pairs compared | 59,203 | 45,762 |
+| display | 242 (0.41%) | 242 (0.53%) |
+| position | 1 | 1 |
+| fontSize | 75 (0.13%) | 75 (0.16%) |
+| fontFamily | **0** | **0** |
+| color | 531 (0.90%) | 531 (1.16%) |
+| backgroundColor | 3187 (5.38%) | **152 (0.33%)** |
+| flexDirection | 17 | 17 |
+| overflow | 408 (0.69%) | 408 (0.89%) |
+| geometry >2px | 23,865 (40.3%) | 22,055 (48.2%) |
+
+### The `background-color` number was almost entirely one animated component
+
+3,035 of the 3,187 `background-color` mismatches are `div.tss-pixelavatar-pixel` — the pixel-cat
+avatar, which is 80 divs whose backgrounds are the sprite. Both engines decode the same sprite:
+across the four capture sets there are six distinct 80-pixel patterns and the two engines draw
+from the same set. They differ in *which* one they are showing at capture time:
+
+| capture | pose 0 | pose 1 | pose 2 | pose 3 | pose 4 | pose 5 |
+|---|---|---|---|---|---|---|
+| Chromium, previous run | 8 | 145 | 5 | | | 2 |
+| Chromium, verification run | 10 | 143 | 2 | 5 | | |
+| Obscura, previous run | 147 | 3 | 6 | 1 | 3 | |
+| Obscura, verification run | 149 | 3 | 3 | 3 | 2 | |
+
+`tss.PixelAvatarRandom` is an unseeded `System.Random`; `PixelAvatar` picks a resting pose from
+`["Idle", "Sit", "Crouch"]` and holds it for a jittered duration, so the pose at any given moment
+is not deterministic. Chromium's own two runs disagree with each other on 2.6% of avatar pixels
+for the same reason. Timers are not the cause: measured side by side, `requestAnimationFrame`
+runs at a 17 ms cadence in Chromium and 19 ms in Obscura, and `setInterval(50)` and a
+`setTimeout` chain both deliver exactly 20 ticks in 1.1 s in each engine.
+
+This is capture non-determinism in an animated, randomized component, not a rendering defect. It
+should be excluded from the parity metric rather than "fixed". With it excluded, `background-color`
+agreement is 99.67%.
+
+### Geometry: width, not height
+
+Splitting the geometry number by axis over the 35,485 pairs that have a non-zero box:
+
+| | pairs >2px | share |
+|---|---|---|
+| x | 15,462 | 43.6% |
+| y | 5,784 | 16.3% |
+| **w** | **10,068** | **28.4%** |
+| h | 1,953 | 5.5% |
+
+`x` and `y` are largely downstream of `w`: one element sized differently shifts everything after
+it. Width is the thing to fix, and it splits 5,522 narrower / 4,546 wider, clustered at small
+deltas (-9px x1701, ±26px, ±8px, ±12px) that look like text measurement, plus 88 pairs over 200px
+that are two specific layout bugs, below.
+
+## F21 — NEW: a `calc()` flex-basis in the `flex` shorthand is dropped
+
+Reduced from the chat suggestion cards (`#/chat-ai`), where Chromium lays out four 404px cards two
+per row and Obscura lays out four 820px cards one per row. The rule that decides it is
+`.msk-chat-view-suggestions > .tss-stack-item { flex: 1 1 calc(50% - 6px); min-width: 260px }`.
+
+Standalone probe (`fb-probe.html`), a `820px` wrap container with `gap: 12px`:
+
+| item | declaration | Chromium | Obscura |
+|---|---|---|---|
+| a | `flex: 1 1 calc(50% - 6px); width: 100%` | 404px, `flexBasis: calc(50% - 6px)` | **820px**, `flexBasis: auto` |
+| b | `flex: 1 1 calc(50% - 6px)` | 404px, `flexBasis: calc(50% - 6px)` | 404px (right size, by accident), `flexBasis: auto` |
+| c | `flex: 1 1 50%; width: 100%` | 820px, `flexBasis: 50%` | 820px, `flexBasis: 50%` (correct) |
+| d | `flex-basis: calc(50% - 6px)` longhand | 404px, `flexBasis: calc(50% - 6px)` | 404px, `flexBasis: **2px**` |
+| e | `flex: 0 0 calc(50% - 6px)` | 404px | **0px** |
+| f | `width: calc(50% - 6px)` | 404px | 404px (correct) |
+
+Two defects:
+
+1. **The `flex` shorthand does not accept a `calc()` basis.** It computes to `auto`, and layout
+   then falls back to whatever `width` says (case a, the real-world one) or to zero when there is
+   no width and no grow (case e, a visible collapse). A plain percentage basis (case c) and a
+   `calc()` in `width` (case f) both work, so it is the shorthand's basis component specifically.
+2. **`flex-basis`'s computed value does not round-trip a `calc()`.** The longhand lays out
+   correctly (case d) but serializes as `2px` where Chromium keeps `calc(50% - 6px)`.
+
+## F22 — NEW: a percentage block-size on a grid item does not resolve against the grid area
+
+Standalone probe (`pct-probe.html`), `grid-template-rows: 24px 24px` with `align-items: center`
+(so the item is not stretched and its used height has to come from its own `height: 100%`):
+
+| element | Chromium | Obscura |
+|---|---|---|
+| grid item, `height: 100%`, 24px row | **40x24** | **40x0** |
+| abspos child of it, `height: 100%` | 40x24 | 40x0 (follows its parent) |
+| abspos, `height: 50%` of a 50px containing block | 40x25 | 40x25 correct |
+| flex item, `height: 100%` in a 40px row | 30x40 | 30x40 correct |
+| block child, `height: 50%` of 60px | 60x30 | 60x30 correct |
+
+It is the grid case specifically; the flex, abspos and block cases are all right. In the app this
+collapses every cell of the time-scheduler grid (`.tss-gridpicker`, `grid-template-rows: 24px x8`,
+`align-items: center`, buttons with inline `height: 100%`): 24x24 in Chromium, 24x2 in Obscura,
+and their absolutely-positioned overlays 22x22 vs 22x0. 504 elements each on
+`#/preferences?id=file-indexing-schedule`, `#/preferences?id=file-indexing-monitoring` and
+`#/manage/data/file-indexing`. It is the largest single height divergence in the survey.
+
+## F23 — `getComputedStyle` still omits `align-self` and `aspect-ratio`, and always reports `min-height: auto`
+
+Seen while probing F22. Obscura returns the empty string for `alignSelf` and `aspectRatio`, and
+`auto` for `minHeight` where Chromium reports the resolved `0px`. Same family as F10 (the computed
+style snapshot omitting commonly-read properties); reporting only, no layout effect.
+
+## `overflow` (408) is two sub-cases, and one is unimplemented
+
+| Chromium | Obscura | pairs |
+|---|---|---|
+| `hidden` | `visible` | 210 |
+| `clip` | `visible` | 173 |
+| `clip` | `auto hidden` | 19 |
+| `clip` | `hidden` | 6 |
+
+198 of the 408 involve `overflow: clip`, which Obscura appears not to support at all: it falls
+back to `visible` in the common case. That is a distinct, smaller fix from the 210 `hidden` cases.
