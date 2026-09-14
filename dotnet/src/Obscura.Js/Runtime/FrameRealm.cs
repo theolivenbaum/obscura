@@ -44,6 +44,13 @@ public sealed class FrameRealm : IDisposable
     private readonly ObscuraJsRuntime _parent;
     private bool _disposed;
 
+    /// <summary>
+    /// The realm's own <c>Deno.core</c> shim, kept only so its promise-rejection
+    /// callback can be detached before the engine goes away. See
+    /// <see cref="DenoCoreShim.Detach"/>.
+    /// </summary>
+    private DenoCoreShim? _shim;
+
     private FrameRealm(
         ObscuraJsRuntime parent,
         V8ScriptEngine engine,
@@ -117,16 +124,20 @@ public sealed class FrameRealm : IDisposable
         parent.ShareResourcesWith(state);
 
         var engine = parent.CreateRealmEngine();
+        DenoCoreShim? shim = null;
         try
         {
             // The realm's op table is filled the same way the page's is, with
             // this frame's state, which is what makes an op called from the
             // frame resolve against the frame's own document.
-            BootstrapLoader.Install(engine, ops => parent.BindRealmOps(ops, state));
+            shim = BootstrapLoader.Install(engine, ops => parent.BindRealmOps(ops, state));
             CopyIdentityToRealm(parent, engine);
         }
         catch (ScriptEngineException)
         {
+            // The shim may already have registered V8's promise-reject hook, so
+            // unhook it before the engine is destroyed under it.
+            shim?.Detach();
             engine.Dispose();
             return null;
         }
@@ -140,6 +151,7 @@ public sealed class FrameRealm : IDisposable
         parent.RealmStates.Register(engine, frameId, state);
 
         var realm = new FrameRealm(parent, engine, frameId, parentFrameId, url, origin) { State = state };
+        realm._shim = shim;
         parent.RegisterRealm(realm);
 
         // Both ids before init, not after: init is what installs `parent` and
@@ -345,6 +357,10 @@ public sealed class FrameRealm : IDisposable
         _disposed = true;
         _parent.RealmStates.Forget(_engine);
         _parent.ForgetRealm(this);
+        // Detach V8's promise-reject hook before the engine goes, for the reason
+        // ObscuraJsRuntime.Dispose gives.
+        _shim?.Detach();
+        _shim = null;
         _engine.Dispose();
     }
 
