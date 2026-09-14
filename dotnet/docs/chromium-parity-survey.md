@@ -1299,6 +1299,29 @@ Dispatched with a brief to fix the boundary, to audit the rest of the terminatio
 unguarded ClearScript callbacks, and to say whether the dispose ordering can be fixed rather than
 only defended.
 
+### Fixed
+
+ClearScript's own thunks are not uniform: the host-object and fast-function ones catch every
+managed exception and schedule it as a script exception (`ScheduleHostException` in
+`V8SplitProxyManaged`), so an op cannot kill the process even when it is not wrapped in `OpGuard`.
+The promise-rejection thunk does not, which is why this boundary and not another one was the fatal
+one.
+
+Two things were wrong there, both reproduced. First, the callback rethrew
+`ScriptInterruptedException` by design, and it re-enters script to deliver the report, so a
+terminated page raised one per rejection: a script that spins while rejecting left the test host
+wedged with `[FATAL ERROR] ScriptInterruptedException` at
+`V8SplitProxyManaged.<get_InvokePromiseRejectionCallbackFastMethodPtr>g__Thunk`, the exact frame in
+the crash above. Second, the hook stayed registered across `Dispose`, so V8 could call into a
+half-torn-down engine; ClearScript raises that `ObjectDisposedException` inside the thunk, before
+any of our code runs, which is the form the survey hit and the reason a defensive catch alone would
+not have been enough.
+
+`DenoCoreShim.Report` now contains every exception, the interrupt included, and suspends further
+delivery until `CancelTermination` clears the termination. `DenoCoreShim.Detach` unregisters the
+hook before `ObscuraJsRuntime.Dispose` and `FrameRealm.Dispose` destroy the engine. The wedging
+script now terminates in 0.6s; covered by two facts in `RejectionEventTests`.
+
 ### A harness bug found alongside it
 
 The first failed run reported "465 routes", which is 155 x 3. `final-survey.sh` copies

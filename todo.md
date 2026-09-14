@@ -722,6 +722,38 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### The promise-rejection callback contains everything, and is detached before dispose
+
+deno_core installs V8's `PromiseRejectCallback` and reports from it directly; the ops
+around it are wrapped in `catch_unwind`, so nothing unwinds into V8. ClearScript's
+equivalent hook (`V8ScriptEngine.PromiseRejectionCallback`) has no such wrapper: its
+host-object and fast-function thunks all convert a managed exception into a scheduled
+script exception, but the promise-rejection thunk does not, so an exception thrown in
+that callback unwinds into V8's own frame.
+
+That is a live process-kill path, because the callback re-enters script to deliver the
+report and the watchdog terminates isolates. A page terminated mid-checkpoint made every
+re-entry raise `ScriptInterruptedException`, which the callback deliberately rethrew; and
+once ClearScript had torn the engine down, the thunk itself raised
+`ObjectDisposedException` before any of our code ran. A 157-route survey died on the
+second form: `Unhandled exception. System.ObjectDisposedException ... at
+V8SplitProxyManaged.<get_InvokePromiseRejectionCallbackFastMethodPtr>g__Thunk`.
+
+So `DenoCoreShim.Report` contains every exception, the interrupt included, and suspends
+further delivery until `ObscuraJsRuntime.CancelTermination` clears the termination (a
+terminated page can raise thousands of rejections, each one a re-entry). And
+`DenoCoreShim.Detach` unregisters the hook before `ObscuraJsRuntime.Dispose` /
+`FrameRealm.Dispose` destroy the engine, which is the actual fix for the disposed-engine
+form: the catch cannot reach an exception thrown inside the thunk.
+
+Observable difference from Rust: a rejection raised while the isolate is terminating is
+dropped rather than reported. The page is being torn down or reset at that point, and the
+watchdog's own `ScriptInterruptedException` still reaches the host through the call it
+interrupted.
+
+Covered by `RejectionEventTests.Terminating_a_page_that_is_producing_rejections_stays_contained`
+and `Rejection_reporting_resumes_after_the_termination_is_cleared`.
+
 ### A grid item's percentage height resolves against its grid area
 
 `dom.rs` drops a block-axis percentage whenever the parent box has no definite height,
