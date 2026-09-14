@@ -370,4 +370,149 @@ public class ComputedStyleSnapshotTests
             "1.5px",
             Computed("""<div id="box" style="letter-spacing:1.5px">x</div>""", "box")["letter-spacing"]);
     }
+
+    /// <summary>
+    /// Chromium 141 on a bare <c>&lt;button&gt;Hi&lt;/button&gt;</c>: <c>2px</c> / <c>outset</c>
+    /// / <c>rgb(0, 0, 0)</c>. The rgb(118, 118, 118) a button is drawn with comes from the
+    /// native form-control painter and is not this value; carrying it here made every button
+    /// in the app report a border colour Chromium does not. See the <c>button</c> arm of
+    /// <c>ComputedStyle</c> and <c>PaintBorders.NativeControlStroke</c>.
+    /// </summary>
+    [Fact]
+    public void ButtonComputesTheBlackUserAgentBorderChromiumReports()
+    {
+        Dictionary<string, string> computed = Computed("<button id=\"b\">Hi</button>", "b");
+
+        Assert.Equal("2px", computed["border-top-width"]);
+        Assert.Equal("outset", computed["border-top-style"]);
+        Assert.Equal("rgb(0, 0, 0)", computed["border-top-color"]);
+        Assert.Equal("rgb(0, 0, 0)", computed["border-color"]);
+    }
+
+    /// <summary>
+    /// Chromium 141 on a bare <c>&lt;input value=x&gt;</c>: <c>2px</c> / <c>inset</c> /
+    /// <c>rgb(118, 118, 118)</c>. Unlike <c>button</c>, an input's <c>ButtonBorder</c> really
+    /// does compute grey; only the style was wrong here, reported as <c>solid</c>.
+    /// </summary>
+    [Fact]
+    public void InputComputesTheInsetUserAgentBorderChromiumReports()
+    {
+        Dictionary<string, string> computed = Computed("<input id=\"i\" value=\"x\">", "i");
+
+        Assert.Equal("2px", computed["border-top-width"]);
+        Assert.Equal("inset", computed["border-top-style"]);
+        Assert.Equal("inset", computed["border-bottom-style"]);
+        Assert.Equal("rgb(118, 118, 118)", computed["border-top-color"]);
+        Assert.Equal("1px", computed["padding-top"]);
+        Assert.Equal("2px", computed["padding-left"]);
+    }
+
+    /// <summary>
+    /// A font-relative length resolves against the element's own computed <c>font-size</c>, not
+    /// against CSS's initial 16px. <c>PxValue</c> scaled every one of them by a flat 16, which
+    /// is what the reference does, so on the 13px element below Chromium 141 reports 13px for
+    /// <c>blur(1em)</c> and for the shadow's blur and this port reported 16px for both.
+    /// <c>padding: 1em</c> was always right, because it defers through <c>Dimension</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("filter:blur(1em)", "filter", "blur(13px)")]
+    [InlineData("filter:blur(0.5em)", "filter", "blur(6.5px)")]
+    [InlineData("filter:blur(1rem)", "filter", "blur(16px)")]
+    [InlineData("filter:drop-shadow(1em 2em)", "filter", "drop-shadow(rgb(0, 0, 0) 13px 26px 0px)")]
+    [InlineData("box-shadow:0 0 1em red", "box-shadow", "rgb(255, 0, 0) 0px 0px 13px 0px")]
+    [InlineData("box-shadow:1em 0 0 red", "box-shadow", "rgb(255, 0, 0) 13px 0px 0px 0px")]
+    [InlineData("box-shadow:0 0 1rem red", "box-shadow", "rgb(255, 0, 0) 0px 0px 16px 0px")]
+    [InlineData("padding:1em", "padding-top", "13px")]
+    public void FontRelativeLengthsResolveAgainstTheElementsOwnFontSize(
+        string declarations,
+        string property,
+        string expected)
+    {
+        // The root keeps the initial 16px, so an `em` that read the wrong base would land on
+        // the `rem` answer and be indistinguishable from it.
+        Dictionary<string, string> computed = Computed(
+            $"""<div id="box" style="font-size:13px;{declarations}">x</div>""",
+            "box");
+
+        Assert.Equal(expected, computed[property]);
+    }
+
+    /// <summary>
+    /// <c>calc()</c> in a filter or shadow length. These read through a bare-token reader that
+    /// cannot see into a function, so the whole declaration used to invalidate; Chromium 141
+    /// reports <c>blur(15px)</c> and <c>rgb(255, 0, 0) 0px 0px 15px 0px</c> for these two.
+    /// </summary>
+    [Fact]
+    public void CalcResolvesInsideAFilterOrShadowLength()
+    {
+        Assert.Equal(
+            "blur(15px)",
+            Computed(
+                """<div id="box" style="font-size:13px;filter:blur(calc(1em + 2px))">x</div>""",
+                "box")["filter"]);
+        Assert.Equal(
+            "rgb(255, 0, 0) 0px 0px 15px 0px",
+            Computed(
+                """<div id="box" style="font-size:13px;box-shadow:0 0 calc(1em + 2px) red">x</div>""",
+                "box")["box-shadow"]);
+    }
+
+    /// <summary>
+    /// <c>ch</c> was not a unit anywhere in the port: <c>width: 1ch</c> fell through to
+    /// <c>auto</c>, and inside the bare-token reader the unit was stripped and <c>1ch</c> read
+    /// as the number 1. It now resolves as <c>Dimension.ChPerEm</c> em.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: that is one constant - Liberation Sans' advance for <c>0</c>, the face this
+    /// renderer paints unstyled text with, matching how <c>ExPerEm</c> was chosen - where
+    /// Chromium measures the glyph in the face the page actually resolved. On these elements
+    /// Chromium 141 reports 6.5px, its default serif face's 0.5 em. See "Known deviations" in
+    /// todo.md.
+    /// </remarks>
+    [Fact]
+    public void ChResolvesAgainstTheFontSizeInsteadOfBeingDroppedOrReadAsPx()
+    {
+        Dictionary<string, string> computed = Computed(
+            """<div id="box" style="font-size:13px;padding-left:1ch;filter:blur(1ch)">x</div>""",
+            "box");
+
+        Assert.Equal("7.22998px", computed["padding-left"]);
+        Assert.Equal("blur(7.22998px)", computed["filter"]);
+    }
+
+    /// <summary>
+    /// The same length under an inherited font size, so the value cannot be right by the
+    /// element happening to carry the declaration that set it.
+    /// </summary>
+    [Fact]
+    public void EmInAFilterFollowsTheInheritedFontSizeToo()
+    {
+        Dictionary<string, string> computed = Computed(
+            """
+            <html style="font-size:32px"><body>
+                <div><span id="box" style="filter:blur(1em);box-shadow:0 0 1em red">x</span></div>
+            </body></html>
+            """,
+            "box");
+
+        Assert.Equal("blur(32px)", computed["filter"]);
+        Assert.Equal("rgb(255, 0, 0) 0px 0px 32px 0px", computed["box-shadow"]);
+        Assert.Equal("32px", computed["font-size"]);
+    }
+
+    /// <summary>
+    /// <c>select</c> keeps the 1px solid grey border it already had, so the two changes above
+    /// cannot spread to the control whose border was right.
+    /// </summary>
+    [Fact]
+    public void SelectKeepsItsSolidGreyUserAgentBorder()
+    {
+        Dictionary<string, string> computed = Computed(
+            "<select id=\"s\"><option>a</option></select>",
+            "s");
+
+        Assert.Equal("1px", computed["border-top-width"]);
+        Assert.Equal("solid", computed["border-top-style"]);
+        Assert.Equal("rgb(118, 118, 118)", computed["border-top-color"]);
+    }
 }

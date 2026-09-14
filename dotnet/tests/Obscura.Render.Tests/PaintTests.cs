@@ -5151,4 +5151,41 @@ public class PaintTests
         Assert.True(atEnd.Layout.Styles[overlay].EffectivelyInvisible);
         Assert.False(atEnd.HasActiveCssAnimations());
     }
+
+    /// <summary>
+    /// A default-appearance control computes a 2px relief border and paints a flat 1px
+    /// rgb(118, 118, 118) line, which is what Chromium 141 puts on the glass: the pixel
+    /// immediately inside the outer one is the control's face, not a second border pixel and
+    /// not a lit or shaded relief tone.
+    /// </summary>
+    [Fact]
+    public void NativeControlsPaintTheFlatOnePixelStrokeChromiumDraws()
+    {
+        DomTree tree = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+                <button id=b style="position:absolute;left:0;top:0;width:60px;height:24px">x</button>
+                <input id=i style="position:absolute;left:0;top:40px;width:60px;height:24px" value="x">
+                <button id=a style="position:absolute;left:0;top:80px;width:60px;height:24px;
+                                    border:4px solid rgb(0,128,0)">x</button>
+            </body></html>
+            """);
+        Pixmap pixmap = RenderPaint.PaintDom(tree, (120f, 120f), null)!;
+
+        // Left edge of the button: one grey pixel, then the face.
+        Assert.Equal((118, 118, 118), Rgb(pixmap, 0, 12));
+        Assert.NotEqual((118, 118, 118), Rgb(pixmap, 1, 12));
+
+        // Bottom edge too - the relief would have shaded this side away from the top one.
+        Assert.Equal((118, 118, 118), Rgb(pixmap, 30, 23));
+        Assert.Equal((118, 118, 118), Rgb(pixmap, 30, 0));
+
+        // The input paints the same flat stroke, not the 2px band its `inset` border spans.
+        Assert.Equal((118, 118, 118), Rgb(pixmap, 0, 52));
+        Assert.Equal((255, 255, 255), Rgb(pixmap, 1, 52));
+
+        // An author border takes the native appearance away, here and in Chromium both.
+        Assert.Equal((0, 128, 0), Rgb(pixmap, 1, 92));
+        Assert.Equal((0, 128, 0), Rgb(pixmap, 2, 92));
+    }
 }

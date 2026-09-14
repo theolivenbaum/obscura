@@ -140,23 +140,23 @@ public static partial class ComputedStyle
             // arm set no part of - an unstyled button came out 4px narrower and 4px shorter
             // than Chromium's (176x63 against 180x67 on the btn-min repro).
             //
-            // DEVIATION from Chromium on the COLOUR only, and deliberately. Chromium computes
-            // `ButtonBorder` on a button to rgb(0, 0, 0) - unlike `select` and `input`, whose
-            // border colour computes to the rgb(118, 118, 118) used below - and then never
-            // paints that black, because a button with the default `appearance` is drawn by
-            // the native form-control painter as a flat 1px rgb(118, 118, 118) stroke. There
-            // is no native-appearance painter here, so taking the computed black literally
-            // would paint a heavy black bevel where Chromium shows thin grey. Using the colour
-            // Chromium actually paints keeps the rendering close and costs only the reported
-            // `border-color`. Recorded under "Known deviations" in todo.md.
+            // The computed colour and the painted colour are two different values, and
+            // conflating them is what this arm got wrong. `ButtonBorder` computes to
+            // rgb(0, 0, 0) on a button - unlike `select` and `input`, whose border colour
+            // computes to the rgb(118, 118, 118) used below - and Chromium then never paints
+            // that black, because a button with the default `appearance` is drawn by the
+            // native form-control painter as a flat 1px rgb(118, 118, 118) stroke. So the
+            // computed value is black, matching `getComputedStyle`, and the grey stroke is
+            // PaintBorders' native-control path, keyed off NativeControlAppearance below.
             style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
             style.BorderModel = style.BorderModel with
             {
                 SpecifiedWidths = Sides<float>.All(2.0f),
                 Styles = Sides<BorderStyle>.All(BorderStyle.Outset),
-                Colors = Sides<RgbaColor?>.All(new RgbaColor(118, 118, 118, 255)),
+                Colors = Sides<RgbaColor?>.All(new RgbaColor(0, 0, 0, 255)),
             };
-            style.BorderColor = new RgbaColor(118, 118, 118, 255);
+            style.BorderColor = new RgbaColor(0, 0, 0, 255);
+            style.NativeControlAppearance = true;
 
             // DEVIATION from crates/obscura-render/src/style.rs, whose `button` arm sets no
             // font at all, so a button inherits the page's font-size, family and line-height.
@@ -202,15 +202,23 @@ public static partial class ComputedStyle
             style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.Padding = new Edges(1.0f, 2.0f, 1.0f, 2.0f);
+
+            // Chromium's UA sheet gives `input` `border: 2px inset ButtonBorder`, and on an
+            // input `ButtonBorder` computes to rgb(118, 118, 118) - not to the rgb(0, 0, 0) a
+            // button reports. The style was `solid` here, which is the one part of the box
+            // getComputedStyle disagreed with. As with `button` the relief is never painted:
+            // Chromium's native text-field painter strokes a flat 1px rgb(118, 118, 118),
+            // which is what NativeControlAppearance gets PaintBorders to draw.
             style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
             style.BorderModel = style.BorderModel with
             {
                 SpecifiedWidths = Sides<float>.All(2.0f),
-                Styles = Sides<BorderStyle>.All(BorderStyle.Solid),
+                Styles = Sides<BorderStyle>.All(BorderStyle.Inset),
                 Colors = Sides<RgbaColor?>.All(new RgbaColor(118, 118, 118, 255)),
             };
             style.BorderColor = new RgbaColor(118, 118, 118, 255);
             style.BackgroundColor = new RgbaColor(255, 255, 255, 255);
+            style.NativeControlAppearance = true;
         }
         else if (tag == "textarea")
         {
@@ -654,6 +662,7 @@ public static partial class ComputedStyle
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
+            case DimensionKind.Ch:
             case DimensionKind.Rem:
             case DimensionKind.Vw:
             case DimensionKind.Vh:
@@ -704,6 +713,7 @@ public static partial class ComputedStyle
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
+            case DimensionKind.Ch:
             case DimensionKind.Rem:
             case DimensionKind.Vw:
             case DimensionKind.Vh:
@@ -2703,11 +2713,13 @@ public static partial class ComputedStyle
             case "filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Filter, NonNoneValue(value));
                 style.Filter = ParseFilterFunctions(value, style.Color, style.ColorSchemeDark);
+                style.FilterFontRelative = ContainsFontRelativeUnit(value) ? value : null;
                 return true;
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.BackdropFilter, NonNoneValue(value));
                 style.BackdropBlur = ParseFilterBlur(value);
+                style.BackdropFilterFontRelative = ContainsFontRelativeUnit(value) ? value : null;
                 return true;
             case "perspective":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Perspective, NonNoneValue(value));
@@ -2756,6 +2768,7 @@ public static partial class ComputedStyle
             case "box-shadow":
             case "-webkit-box-shadow":
                 style.BoxShadow = ParseBoxShadow(value, style.Color, style.ColorSchemeDark);
+                style.BoxShadowFontRelative = ContainsFontRelativeUnit(value) ? value : null;
                 return true;
 
             default:
@@ -2901,7 +2914,15 @@ public static partial class ComputedStyle
     internal static FilterFunction[]? ParseFilterFunctions(
         string value,
         RgbaColor? currentColor,
-        bool darkScheme)
+        bool darkScheme) =>
+        ParseFilterFunctions(value, currentColor, darkScheme, FontLengthContext.Initial);
+
+    /// <inheritdoc cref="ParseFilterFunctions(string, RgbaColor?, bool)"/>
+    internal static FilterFunction[]? ParseFilterFunctions(
+        string value,
+        RgbaColor? currentColor,
+        bool darkScheme,
+        in FontLengthContext context)
     {
         string trimmed = value.Trim();
         if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
@@ -2919,7 +2940,7 @@ public static partial class ComputedStyle
         for (int index = 0; index < functions.Count; index++)
         {
             (string name, string arguments) = functions[index];
-            if (BuildFilterFunction(CssText.AsciiLower(name), arguments, currentColor, darkScheme)
+            if (BuildFilterFunction(CssText.AsciiLower(name), arguments, currentColor, darkScheme, context)
                 is not { } function)
             {
                 return null;
@@ -2935,7 +2956,8 @@ public static partial class ComputedStyle
         string name,
         string arguments,
         RgbaColor? currentColor,
-        bool darkScheme)
+        bool darkScheme,
+        in FontLengthContext context)
     {
         string args = arguments.Trim();
         switch (name)
@@ -2945,7 +2967,7 @@ public static partial class ComputedStyle
             case "blur":
                 return args.Length == 0
                     ? FilterFunction.Scalar(FilterFunctionKind.Blur, 0f)
-                    : NonNegativeLength(args) is { } sigma
+                    : NonNegativeLength(args, context) is { } sigma
                         ? FilterFunction.Scalar(FilterFunctionKind.Blur, sigma)
                         : null;
 
@@ -2964,7 +2986,7 @@ public static partial class ComputedStyle
             case "opacity": return Multiplier(FilterFunctionKind.Opacity, args, 1f);
             case "sepia": return Multiplier(FilterFunctionKind.Sepia, args, 1f);
 
-            case "drop-shadow": return DropShadow(args, currentColor, darkScheme);
+            case "drop-shadow": return DropShadow(args, currentColor, darkScheme, context);
 
             // url() is kept verbatim so the computed value round-trips. It is never painted;
             // SVG filter elements are not modeled.
@@ -3000,7 +3022,11 @@ public static partial class ComputedStyle
     /// <c>drop-shadow()</c> does not accept. Both offsets are required; the blur defaults to 0
     /// and, unlike <c>blur()</c>, is a radius - twice sigma.
     /// </remarks>
-    private static FilterFunction? DropShadow(string args, RgbaColor? currentColor, bool darkScheme)
+    private static FilterFunction? DropShadow(
+        string args,
+        RgbaColor? currentColor,
+        bool darkScheme,
+        in FontLengthContext context)
     {
         RgbaColor? color = null;
         List<float> lengths = [];
@@ -3014,7 +3040,7 @@ public static partial class ComputedStyle
 
             // A bare `0` must be an offset, not a failed colour, so lengths are tried first
             // while any slot is still open.
-            if (lengths.Count < 3 && PxValue(CssText.AsciiLower(current)) is { } length)
+            if (lengths.Count < 3 && Px(CssText.AsciiLower(current), context) is { } length)
             {
                 lengths.Add(length);
                 continue;
@@ -3059,9 +3085,11 @@ public static partial class ComputedStyle
             color ?? currentColor ?? new RgbaColor(0, 0, 0, 255));
     }
 
-    private static float? NonNegativeLength(string args)
+    private static float? NonNegativeLength(string args, in FontLengthContext context)
     {
-        float? length = PxValue(CssText.AsciiLower(args.Trim()));
+        // `Px`, not `PxValue`: a bare token reader cannot see into `calc()`, so
+        // `blur(calc(1em + 2px))` invalidated the whole filter list where Chromium resolves it.
+        float? length = Px(CssText.AsciiLower(args.Trim()), context);
         return length is { } parsed && float.IsFinite(parsed) && parsed >= 0f ? parsed : null;
     }
 }

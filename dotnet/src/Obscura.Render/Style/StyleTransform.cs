@@ -35,7 +35,11 @@ public static partial class ComputedStyle
     /// least matches what the engine advertises through <c>@supports</c>.
     /// </para>
     /// </remarks>
-    internal static float? ParseFilterBlur(string value)
+    internal static float? ParseFilterBlur(string value) =>
+        ParseFilterBlur(value, FontLengthContext.Initial);
+
+    /// <inheritdoc cref="ParseFilterBlur(string)"/>
+    internal static float? ParseFilterBlur(string value, in FontLengthContext context)
     {
         string trimmed = value.Trim();
         if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
@@ -64,7 +68,7 @@ public static partial class ComputedStyle
             {
                 sigma = 0f;
             }
-            else if (Px(args) is { } parsed && float.IsFinite(parsed) && parsed >= 0f)
+            else if (Px(args, context) is { } parsed && float.IsFinite(parsed) && parsed >= 0f)
             {
                 sigma = parsed;
             }

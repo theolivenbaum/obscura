@@ -88,6 +88,7 @@ internal static class DomStyleFixups
             DimensionKind.Px => dimension.Value,
             DimensionKind.Em or DimensionKind.Rem => dimension.Value * fontSize,
             DimensionKind.Ex => dimension.Value * fontSize * Dimension.ExPerEm,
+            DimensionKind.Ch => dimension.Value * fontSize * Dimension.ChPerEm,
             _ => null,
         };
         return value is { } resolved ? F32.Max(resolved, 0f) : null;
