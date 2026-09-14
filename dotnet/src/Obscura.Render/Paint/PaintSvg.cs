@@ -663,6 +663,18 @@ internal static class PaintSvg
                     && customProperties.TryGetValue(nid, out IReadOnlyDictionary<string, string>? owned)
                         ? owned
                         : EmptyProperties;
+                // The UA sheet's `overflow: hidden` on an outermost `<svg>` is what the raster's
+                // viewport clip already stands for, so only an author declaration that turns it
+                // off has to travel. `OverflowAxesSet` is what separates the two: nothing in the
+                // cascade sets overflow on an `<svg>` otherwise.
+                if (string.Equals(tag, "svg", StringComparison.Ordinal)
+                    && computed.OverflowAxesSet
+                    && !computed.OverflowClipX
+                    && !computed.OverflowClipY)
+                {
+                    Append("overflow", "visible");
+                }
+
                 if (computed.SvgFill is { } fillValue
                     && ResolveSvgPresentationValue("fill", fillValue, properties) is { } fill)
                 {

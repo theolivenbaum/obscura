@@ -2150,3 +2150,37 @@ every route. Before, the app rebooted on each.
 
 Pinned by `FragmentNavigationTests` (12 facts, `Obscura.Js.Tests`) and
 `SameDocumentNavigationEvents` (6 facts, `Obscura.Cdp.Tests`).
+
+### The SVG viewport is a real viewport, and an `overflow: visible` raster grows right/down
+
+`crates/obscura-render` hands every SVG to resvg, so the reference has no viewport code of
+its own to port. The in-tree rasterizer that stands in for it (`SvgRenderer`, see the PORT
+NOTE at the top of the file) had three geometry gaps, all found on Curiosity Workspace and
+all measured against Chromium 141 on `svg-probe.html` / `imgsvg2-probe.html`:
+
+- **An author `overflow: visible` on an outermost `<svg>` was ignored.** The UA sheet's
+  `overflow: hidden` is spelled here as "the pixmap is exactly the CSS viewport", so there
+  was nothing for an author declaration to override. `SvgRenderer` now measures the
+  content and grows the raster. **The deviation: only the right and bottom overflow is
+  recovered.** `PaintDom` blits the raster at the element's border-box origin, so content
+  left of or above the viewport has nowhere to land; carrying it needs an origin offset
+  out of `PaintDom`, which resvg does not need because it rasterizes the whole page tree.
+  Growth is capped at 8192px per side.
+- **A nested `<svg>` established no viewport.** Its `x`/`y`/`width`/`height` were dropped
+  and its `viewBox` never applied, so its content painted in its own user units at the
+  parent's origin: the probe's inner rect covered 60 pixels at [0,0,10,6] where Chromium
+  paints 6000 at [50,20,100,60]. `SvgPaintState` now carries the current viewport, which
+  is also what a percentage length on a nested `<svg>` resolves against.
+- **A `clipPath` ignored its shapes' `transform`.** Every Figma export wraps its artboard
+  clip in `transform="translate(...)"`, and dropping it moved the clip to the origin: the
+  workspace's empty-search illustration was cut to the top 203 rows of 444.
+
+`<filter>` is the fourth: `feGaussianBlur` now applies through a Skia blur image filter,
+including the transparent `feFlood` + normal `feBlend` preamble every Figma export emits
+ahead of it. Anything else in a filter still paints unfiltered rather than approximated,
+which is the same "skip what usvg cannot represent" rule the rest of the file follows. A
+`userSpaceOnUse` filter region is applied as a `ClipRect` as well as the layer bounds,
+because Skia treats a layer's bounds as a rasterization hint that an image filter expands
+past.
+
+Pinned by `SvgViewportTests` (13 facts, `Obscura.Render.Tests`).
