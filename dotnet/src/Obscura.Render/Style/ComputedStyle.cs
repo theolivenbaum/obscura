@@ -20,9 +20,35 @@ public static partial class ComputedStyle
         return style;
     }
 
-    /// <summary>Rust <c>ua_style</c>: the built-in UA defaults.</summary>
-    public static LayoutStyle UaStyle(string tag)
+    /// <summary>Rust <c>ua_style</c>: the built-in UA defaults for an HTML-namespace tag.</summary>
+    public static LayoutStyle UaStyle(string tag) => UaStyle(tag, null);
+
+    /// <summary>
+    /// Rust <c>ua_style</c>, resolved against the element's namespace as well as its tag name.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render/src/style.rs</c>, whose <c>ua_style</c> is keyed
+    /// on the tag name alone. The HTML and SVG UA sheets share a lot of names - <c>a</c>,
+    /// <c>title</c>, <c>desc</c>, <c>style</c>, <c>script</c>, <c>text</c> - and applying the
+    /// HTML rule to an SVG element is wrong in both directions: an SVG <c>&lt;a&gt;</c> was
+    /// picking up the link colour <c>rgb(0, 0, 238)</c> and underlining, and every shape in an
+    /// SVG chart was reporting <c>display: block</c> where Chromium reports <c>inline</c>.
+    /// Chromium's SVG UA sheet gives every SVG element <c>display: inline</c> except
+    /// <c>text</c> and <c>foreignObject</c>, and notably does *not* give <c>title</c> /
+    /// <c>desc</c> / <c>defs</c> <c>display: none</c> - those are non-rendered through the SVG
+    /// rendering model instead, which is why the SVG rasterizer skips them by tag name. See
+    /// "Known deviations" in todo.md.
+    /// </remarks>
+    public static LayoutStyle UaStyle(string tag, string? ns)
     {
+        if (string.Equals(ns, Obscura.Dom.Namespaces.Svg, StringComparison.Ordinal))
+        {
+            return new LayoutStyle
+            {
+                Display = tag is "text" or "foreignObject" ? Display.Block : Display.Inline,
+            };
+        }
+
         LayoutStyle style = new();
         if (tag is "b" or "strong")
         {
@@ -1622,6 +1648,9 @@ public static partial class ComputedStyle
                 return true;
             case "stroke-width":
                 style.SvgStrokeWidth = value.Trim();
+                return true;
+            case "text-anchor":
+                style.SvgTextAnchor = CssText.AsciiLower(value.Trim());
                 return true;
 
             case "font-size":

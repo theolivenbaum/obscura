@@ -763,6 +763,46 @@ Covered by `GridItemPercentageHeightResolvesAgainstGridAreaWithoutStretch`,
 `PercentageHeightUnderAutoHeightBlockParentStillBehavesAsAuto` and
 `CalcPercentageHeightInsideGridItemStaysWithinTheGridArea`.
 
+### The UA style table is namespace-aware, and SVG presentation attributes cascade
+
+`style.rs`'s `ua_style` is keyed on the tag name alone and `dom.rs` maps HTML presentational
+attributes only. The HTML and SVG UA sheets share a lot of names, so an element in the SVG
+namespace picked up HTML defaults: an SVG `<a>` got the link colour `rgb(0, 0, 238)` and an
+underline (which its `<rect>` children then inherited), `<title>` / `<desc>` got
+`display: none`, and every shape reported `display: block`. Chromium gives every SVG element
+`display: inline` except `text` and `foreignObject`, which are `block`, and hides none of them
+through `display` - `title` / `desc` / `metadata` / `defs` are non-rendered through the SVG
+rendering model, which is why `SvgRenderer` skips them by tag name.
+
+So `ComputedStyle.UaStyle` takes the namespace and answers from an SVG table when it is the
+SVG one, and `DomCascade.ApplySvgPresentationAttributes` maps the 18 presentation attributes a
+real chart uses (`fill`, `stroke`, `stroke-width`, `opacity`, `text-anchor`, `visibility`,
+`display`, `color`, `font-size`, `font-family`, ...) into the cascade at author origin, below
+every author rule and below the `style` attribute. A bare number on a length-valued attribute
+is in user units, i.e. px.
+
+The four SVG-only properties are reported by `getComputedStyle` through `LayoutStyle.SvgPaint`
+(`SvgPaintValues`: `fill` `rgb(0, 0, 0)`, `stroke` `none`, `stroke-width` `1px`, `text-anchor`
+`start`, all inherited, all reported on every element the way Chromium reports them). That
+record is deliberately separate from the specified `SvgFill` / `SvgStroke` / `SvgStrokeWidth`
+that `PaintSvg` pushes back into the serialized SVG document as `!important` declarations:
+pushing an inherited value there would override the rasterizer's own inheritance, and a `<use>`
+of a `<symbol>` in `<defs>` inherits its fill from the use site, not from the `<svg>` root.
+
+One layout bug fell out of `<svg>` becoming inline and is fixed rather than worked around:
+`DomBuild.InlineWrapsOnlyInFlowBlocks` spliced any inline element whose children are all
+block-level, which now matched an `<svg>` wrapping `<text>`. A replaced box is atomic, so it
+now refuses `IsReplacedBox` - without that the svg laid out 0x0 and its SVG text was laid out
+and painted as HTML in the body.
+
+Found on Curiosity Workspace, where a 157-route survey showed every SVG chart on the admin
+pages mismatching Chromium. The 13-element probe page now matches Chromium 141 exactly on
+`display`, `fontSize`, `fontFamily`, `fill`, `stroke`, `strokeWidth`, `opacity`, `textAnchor`,
+`visibility` and `color`.
+
+Covered by `SvgStyleTests` (13 facts), which also pins that an SVG `<title>` computing to
+`inline` still puts no ink on the page.
+
 ### `filter` carries the whole function list; the reference keeps only a blur
 
 `style.rs` parses `filter` for `blur()` alone and stores one sigma (`FilterBlur`), so a

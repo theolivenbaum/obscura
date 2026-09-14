@@ -588,6 +588,14 @@ public sealed class PreparedRender
             _ => "text",
         };
         output["color"] = PaintCssValues.CssColor(style.Color ?? new RgbaColor(0, 0, 0, 255));
+
+        // The four inherited SVG paint properties. Chromium reports them on every element, not
+        // only inside the SVG namespace, so they are unconditional here too.
+        SvgPaintValues svgPaint = style.SvgPaint ?? SvgPaintValues.Initial;
+        output["fill"] = svgPaint.Fill;
+        output["stroke"] = svgPaint.Stroke;
+        output["stroke-width"] = svgPaint.StrokeWidth;
+        output["text-anchor"] = svgPaint.TextAnchor;
         output["font-size"] = PaintCssValues.CssPx(style.FontSize ?? 16f);
         output["font-weight"] = style.FontWeight ?? "400";
         // `FontFamily` is lower-cased for case-insensitive face matching; the computed value

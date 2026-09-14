@@ -104,6 +104,7 @@ public static partial class RenderDom
 
                     inh.VisibilityHidden = retainedStyle.VisibilityHidden ?? inh.VisibilityHidden;
                     inh.HasZeroOpacity |= retainedStyle.Opacity is { } opacity && opacity <= 0f;
+                    inh.Svg = retainedStyle.SvgPaint ?? inh.Svg;
                     if (retainedStyle.ListStyle is { } listStyle)
                     {
                         inh.ListStyle = listStyle;
@@ -259,6 +260,120 @@ public static partial class RenderDom
         }
     }
 
+    /// <summary>
+    /// Fold this element's specified SVG paint properties onto the inherited ones and serialize
+    /// the result the way <c>getComputedStyle</c> reports it.
+    /// </summary>
+    /// <remarks>
+    /// The inherited instance is returned unchanged when the element specifies none of the four,
+    /// which is the overwhelmingly common case, so an ordinary page allocates one record for the
+    /// whole document.
+    /// </remarks>
+    private static SvgPaintValues ResolveSvgPaint(
+        LayoutStyle    style,
+        SvgPaintValues inherited,
+        float          emPx,
+        float          rootFs,
+        float          vw,
+        float          vh)
+    {
+        if (style.SvgFill is null
+            && style.SvgStroke is null
+            && style.SvgStrokeWidth is null
+            && style.SvgTextAnchor is null)
+        {
+            return inherited;
+        }
+
+        string fill = style.SvgFill is { } specifiedFill
+            ? SvgPaintCss(specifiedFill, style, inherited.Fill)
+            : inherited.Fill;
+        string stroke = style.SvgStroke is { } specifiedStroke
+            ? SvgPaintCss(specifiedStroke, style, inherited.Stroke)
+            : inherited.Stroke;
+        string strokeWidth = style.SvgStrokeWidth is { } specifiedWidth
+            ? SvgStrokeWidthCss(specifiedWidth, emPx, rootFs, vw, vh, inherited.StrokeWidth)
+            : inherited.StrokeWidth;
+        string textAnchor = style.SvgTextAnchor switch
+        {
+            null => inherited.TextAnchor,
+            "initial" => SvgPaintValues.Initial.TextAnchor,
+            "start" or "middle" or "end" => style.SvgTextAnchor,
+            _ => inherited.TextAnchor,
+        };
+
+        return new SvgPaintValues(fill, stroke, strokeWidth, textAnchor);
+    }
+
+    /// <summary>Serialize one specified <c>fill</c> / <c>stroke</c> value.</summary>
+    /// <remarks>
+    /// A paint server (<c>url(#gradient)</c>) and the <c>none</c> / <c>context-*</c> keywords
+    /// have no colour to resolve and report their own text; everything else is a colour, and
+    /// <c>currentColor</c> resolves against this element's computed <c>color</c>.
+    /// </remarks>
+    private static string SvgPaintCss(string specified, LayoutStyle style, string inherited)
+    {
+        string value = specified.Trim();
+        string lower = CssText.AsciiLower(value);
+        if (lower is "" or "inherit" or "unset")
+        {
+            return inherited;
+        }
+
+        if (lower == "currentcolor")
+        {
+            return PaintCssValues.CssColor(style.Color ?? new RgbaColor(0, 0, 0, 255));
+        }
+
+        if (lower is "none" or "context-fill" or "context-stroke")
+        {
+            return lower;
+        }
+
+        if (lower.StartsWith("url(", StringComparison.Ordinal))
+        {
+            return value;
+        }
+
+        return CssColor.ParseForScheme(value, style.ColorSchemeDark) is { } color
+            ? PaintCssValues.CssColor(color)
+            : inherited;
+    }
+
+    /// <summary>Serialize one specified <c>stroke-width</c> value.</summary>
+    private static string SvgStrokeWidthCss(
+        string specified,
+        float  emPx,
+        float  rootFs,
+        float  vw,
+        float  vh,
+        string inherited)
+    {
+        string value = specified.Trim();
+        string lower = CssText.AsciiLower(value);
+        if (lower is "" or "inherit" or "unset")
+        {
+            return inherited;
+        }
+
+        if (lower == "initial")
+        {
+            return SvgPaintValues.Initial.StrokeWidth;
+        }
+
+        Dimension dimension = ComputedStyle.DimensionValue(value);
+        if (dimension.Kind == DimensionKind.Percent)
+        {
+            return PaintCssValues.CssNumber(dimension.Value * 100f) + "%";
+        }
+
+        Dimension resolved = dimension.Resolve(emPx, rootFs, vw, vh);
+
+        return resolved is { Kind: DimensionKind.Px } px && float.IsFinite(px.Value)
+            ? PaintCssValues.CssPx(px.Value)
+            : inherited;
+    }
+
     private static void ResolveOneComputedStyle(
         DomTree tree,
         NodeId id,
@@ -374,6 +489,11 @@ public static partial class RenderDom
 
         // em in non-font-size properties is relative to this element's OWN computed font-size.
         float emPx = style.FontSize ?? parentFs;
+
+        // `fill` / `stroke` / `stroke-width` / `text-anchor` all inherit, and all four need the
+        // element's own computed colour and font-size to serialize, so they resolve here.
+        inh.Svg = ResolveSvgPaint(style, inh.Svg, emPx, rootFs, vw, vh);
+        style.SvgPaint = inh.Svg;
         ComputedStyle.SetGridCalcContext(style, emPx, rootFs, vw, vh);
         ComputedStyle.ResolveFontRelativeDeclarations(style, emPx, rootFs, vw, vh);
         if (style.LetterSpacingExpression is { } letterSpacingExpression)
