@@ -39,6 +39,7 @@ public static partial class RenderDom
             float childCbWidth = inh.CbWidth;
             bool childCbHeightDefinite = false;
             float childCbHeight = 0f;
+            bool childCbHeightKnown = false;
             bool reusedComputedStyle = freshStyles is { } fresh && !fresh.Contains(id);
             if (reusedComputedStyle)
             {
@@ -160,6 +161,8 @@ public static partial class RenderDom
                     childCbHeightDefinite = retainedStyle.Height.Kind
                         is DimensionKind.Px or DimensionKind.Percent;
                     childCbHeight = ContentBoxBlockSize(retainedStyle, inh.CbHeight);
+                    childCbHeightKnown = childCbHeightDefinite
+                        && (retainedStyle.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
                     if (childCbHeightDefinite)
                     {
                         definiteHeightNodes.Add(id);
@@ -191,6 +194,7 @@ public static partial class RenderDom
                 inh.CbWidth = childCbWidth;
                 inh.CbHeightDefinite = childCbHeightDefinite;
                 inh.CbHeight = childCbHeight;
+                inh.CbHeightKnown = childCbHeightKnown;
                 List<NodeId> retainedChildren = DomTraversal.StyleChildren(tree, id);
                 for (int index = retainedChildren.Count - 1; index >= 0; index--)
                 {
@@ -239,12 +243,14 @@ public static partial class RenderDom
                     initialCbWidth,
                     out childCbWidth,
                     out childCbHeightDefinite,
-                    out childCbHeight);
+                    out childCbHeight,
+                    out childCbHeightKnown);
             }
 
             inh.CbWidth = childCbWidth;
             inh.CbHeightDefinite = childCbHeightDefinite;
             inh.CbHeight = childCbHeight;
+            inh.CbHeightKnown = childCbHeightKnown;
             List<NodeId> children = DomTraversal.StyleChildren(tree, id);
             for (int index = children.Count - 1; index >= 0; index--)
             {
@@ -271,7 +277,8 @@ public static partial class RenderDom
         float initialCbWidth,
         out float childCbWidth,
         out bool childCbHeightDefinite,
-        out float childCbHeight)
+        out float childCbHeight,
+        out bool childCbHeightKnown)
     {
         if (style.GridAutoColumnsInherit)
         {
@@ -521,7 +528,7 @@ public static partial class RenderDom
             bool blockAxis = index is 1 or 3 or 5;
             if (blockAxis
                 && expression.Contains('%', StringComparison.Ordinal)
-                && !inh.CbHeightDefinite
+                && !inh.CbHeightKnown
                 && style.Position != TaffyPosition.Absolute)
             {
                 switch (index)
@@ -560,8 +567,29 @@ public static partial class RenderDom
         style.MaxWidth = style.MaxWidth.Resolve(emPx, rootFs, vw, vh);
         style.MaxHeight = style.MaxHeight.Resolve(emPx, rootFs, vw, vh);
         style.FlexBasis = style.FlexBasis.Resolve(emPx, rootFs, vw, vh);
+        // DEVIATION from crates/obscura-render/src/dom.rs, which drops a block-axis
+        // percentage whenever the parent box has no definite height. A grid item's
+        // containing block is its GRID AREA, not the grid container's content box, so the
+        // container's own height says nothing about whether the percentage is resolvable:
+        // `grid-template-rows: 24px` gives a definite area under an auto-height container.
+        // Taffy resolves a grid item's size against the grid area itself (grid/alignment.rs
+        // `align_and_position_item`, and `GridItem.KnownDimensions` passes `None` for a
+        // track that is still indefinite), so the percentage has to survive this pass and
+        // reach it. The reference computed it to `auto` and every item laid out 0px tall -
+        // Tesserae's `.tss-gridpicker` cells (`height: 100%` in a 24px row with
+        // `align-items: center`, so no stretch to mask it) collapsed to 24x2. See "Known
+        // deviations" in todo.md.
+        // Only a percentage height asks the question, and the parent walk is not free, so it
+        // stays behind that test: every other box skips it.
+        bool isGridItem = style.Height.Kind == DimensionKind.Percent
+            && style.Position != TaffyPosition.Absolute
+            && DomTraversal.RenderedParent(tree, id) is { } gridAreaParent
+            && styles.TryGetValue(gridAreaParent, out LayoutStyle? gridAreaContainer)
+            && gridAreaContainer.Display == Display.Grid;
+
         if (style.Height.Kind == DimensionKind.Percent
             && !inh.CbHeightDefinite
+            && !isGridItem
             && style.Position != TaffyPosition.Absolute)
         {
             style.Height = Dimension.Auto;
@@ -569,6 +597,11 @@ public static partial class RenderDom
 
         childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
         childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
+
+        // A percentage height only yields a number when its own basis was one. A grid item's
+        // basis is the grid area, which this pass cannot see, so it stays definite-but-unknown.
+        childCbHeightKnown = childCbHeightDefinite
+            && (style.Height.Kind == DimensionKind.Px || (inh.CbHeightKnown && !isGridItem));
 
         // DEVIATION from crates/obscura-render/src/dom.rs, which calls a box's block size
         // definite only when `height` itself is a length or percentage. CSS Flexbox 9.8 also
@@ -588,6 +621,7 @@ public static partial class RenderDom
                 is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse)
         {
             childCbHeightDefinite = true;
+            childCbHeightKnown = true;
             childCbHeight = style.BoxSizing == BoxSizing.ContentBox
                 ? style.FlexBasis.Value
                 : F32.Max(
@@ -644,6 +678,8 @@ public static partial class RenderDom
 
             childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
             childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
+            childCbHeightKnown = childCbHeightDefinite
+                && (style.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
         }
 
         ushort computedWeight = ComputedStyle.ComputedFontWeight(style.FontWeight, inh.FontWeight);
