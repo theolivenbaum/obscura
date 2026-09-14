@@ -47,12 +47,10 @@ public static partial class RenderDom
                 // once. Seed the inherited context from the prior computed values instead.
                 if (styles.TryGetValue(id, out LayoutStyle? retainedStyle))
                 {
-                    ComputedStyle.SetGridCalcContext(
-                        retainedStyle,
-                        retainedStyle.FontSize ?? inh.FontSize ?? 16f,
-                        rootFs,
-                        vw,
-                        vh);
+                    float retainedEm = retainedStyle.FontSize ?? inh.FontSize ?? 16f;
+                    ComputedStyle.SetGridCalcContext(retainedStyle, retainedEm, rootFs, vw, vh);
+                    SetLateCalcContext(retainedStyle.InsetCalc, retainedEm, rootFs, vw, vh);
+                    SetLateCalcContext(retainedStyle.SizeCalc, retainedEm, rootFs, vw, vh);
                     inh.Display = retainedStyle.Display;
                     inh.Direction = retainedStyle.Direction ?? inh.Direction;
                     inh.DisplayContents = retainedStyle.DisplayContents;
@@ -622,6 +620,11 @@ public static partial class RenderDom
 
         for (int index = 0; index < 6; index++)
         {
+            if (style.SizeCalc is { } clearedSize)
+            {
+                clearedSize[index] = null;
+            }
+
             if (style.SizeExpressions[index] is not { } expression)
             {
                 continue;
@@ -659,6 +662,26 @@ public static partial class RenderDom
                 }
 
                 continue;
+            }
+
+            // DEVIATION from crates/obscura-render/src/dom.rs, which has no counterpart:
+            // an INLINE-axis percentage inside a functional size is handed to taffy as a
+            // late-resolved calc() value, the same way a functional inset is above. `cbW` is
+            // this pass's own block-flow estimate of the containing block, and it is only an
+            // estimate - it is computed before the box it describes has been laid out, so a
+            // container that settles at a different width leaves it stale. Tesserae's sidebar
+            // resolved `width: calc(100% + 32px)` against 176px while the containing block it
+            // reports is 191.141px, which pulled the whole sidebar subtree 15px narrow. Taffy
+            // resolves an inline percentage against the used containing block, so the
+            // percentage is left for it. The block axis keeps the flattening above: its
+            // definite/indefinite rules are applied here, not by taffy. See "Known
+            // deviations" in todo.md.
+            if (!blockAxis
+                && expression.Contains('%', StringComparison.Ordinal)
+                && GridCalcExpression.Parse(expression) is { } lateSize)
+            {
+                lateSize.SetContext(emPx, rootFs, vw, vh);
+                (style.SizeCalc ??= new GridCalcExpression?[6])[index] = lateSize;
             }
 
             float percentBase = blockAxis ? inh.CbHeight : cbW;
@@ -758,14 +781,58 @@ public static partial class RenderDom
             definiteHeightNodes.Add(id);
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which flattens a functional inset
+        // to px here against the viewport height (block axis) or this element's own
+        // containing-block width (inline axis). Neither is the basis a box offset resolves
+        // against: an absolutely positioned box takes the PADDING BOX of its nearest
+        // positioned ancestor, which this top-down style pass cannot know - the ancestor's
+        // used size is settled by layout, and for an auto-height ancestor it is not knowable
+        // beforehand at all. `top: calc(50% - 5px)` in a 34px-tall relative container came out
+        // as 355px (half the 720px viewport) instead of 12px, which put every Tesserae
+        // dropdown chevron hundreds of pixels below its combobox. Taffy already resolves a
+        // bare percentage inset against the real containing block, and its calc() support
+        // resolves an opaque handle the same way, so the expression is handed over as a
+        // late-resolved value instead. See "Known deviations" in todo.md.
+        //
+        // The one basis taffy does not have is the block axis of a RELATIVE box: it resolves
+        // those against a hard 0 (BlockLayout's `ZipSize(new Size(containerInnerWidth, 0))`)
+        // because the container's height is not final where the offset is applied. So a
+        // relative block-axis offset keeps being flattened, against the containing block's
+        // content-box height, and becomes `auto` when that height is indefinite - which is
+        // what Chromium computes for a percentage offset it cannot resolve.
+        bool lateResolvedInsets = style.Position == TaffyPosition.Absolute && !style.PositionSticky;
         for (int index = 0; index < 4; index++)
         {
             if (style.InsetExpressions[index] is not { } expression)
             {
+                if (style.InsetCalc is { } cleared)
+                {
+                    cleared[index] = null;
+                }
+
                 continue;
             }
 
-            float percentBase = index is 1 or 3 ? cbW : viewport.Height;
+            bool blockAxisInset = index is 0 or 2;
+            bool percentBearing = expression.Contains('%', StringComparison.Ordinal);
+            GridCalcExpression? late = percentBearing && (lateResolvedInsets || !blockAxisInset)
+                ? GridCalcExpression.Parse(expression, allowNegative: true)
+                : null;
+            late?.SetContext(emPx, rootFs, vw, vh);
+            (style.InsetCalc ??= new GridCalcExpression?[4])[index] = late;
+
+            if (percentBearing && blockAxisInset && !lateResolvedInsets && !inh.CbHeightKnown)
+            {
+                style.Inset[index] = null;
+                continue;
+            }
+
+            // The flattened value is what layout reads on the paths above that keep it, and
+            // what the readers layout does not feed read throughout: sticky offsets, an inline
+            // box's relative shift, pseudo-element paint and the computed-style projection.
+            float percentBase = blockAxisInset
+                ? (inh.CbHeightKnown ? inh.CbHeight : viewport.Height)
+                : cbW;
             float? resolved = ComputedStyle.ResolveContextualLength(
                 expression, emPx, rootFs, vw, vh, percentBase);
             style.Inset[index] = resolved is { } value ? Dimension.Px(value) : null;
@@ -1082,6 +1149,30 @@ public static partial class RenderDom
                 - style.Border.Top
                 - style.Border.Bottom,
                 0f);
+    }
+
+    /// <summary>
+    /// Refresh the viewport basis of the late-resolved expressions a retained style carries.
+    /// A retained style skips <c>ResolveOneComputedStyle</c>, so this is the only place a
+    /// `calc(50% - 2vh)` inset hears about a new layout viewport. Mirrors what
+    /// <c>ComputedStyle.SetGridCalcContext</c> does for the grid track buckets.
+    /// </summary>
+    private static void SetLateCalcContext(
+        GridCalcExpression?[]? expressions,
+        float emPx,
+        float remPx,
+        float vw,
+        float vh)
+    {
+        if (expressions is null)
+        {
+            return;
+        }
+
+        foreach (GridCalcExpression? expression in expressions)
+        {
+            expression?.SetContext(emPx, remPx, vw, vh);
+        }
     }
 
     private static Edges SetEdge(Edges edges, int index, float value) => index switch

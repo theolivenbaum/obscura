@@ -1000,6 +1000,30 @@ public sealed class LayoutStyle
     public string?[] InsetExpressions = new string?[4];
 
     /// <summary>
+    /// The late-resolved form of a percentage-bearing <see cref="InsetExpressions"/> entry,
+    /// allocated lazily and in the same top/right/bottom/left order. Non-null only where the
+    /// expression's percentage has to be resolved against the used containing block during
+    /// layout rather than flattened to px beforehand.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in <c>crates/obscura-render</c>, which flattens every
+    /// functional inset against the viewport at computed-value time. See the remarks on the
+    /// inset loop in <c>LayoutDomComputed.ResolveOneComputedStyle</c>.
+    /// </remarks>
+    public GridCalcExpression?[]? InsetCalc;
+
+    /// <summary>
+    /// The late-resolved form of an inline-axis <c>SizeExpressions</c> entry, allocated lazily
+    /// and in the same six-slot order. Non-null only where the expression's percentage has to
+    /// be resolved against the used containing block during layout.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in <c>crates/obscura-render</c>. See the remarks on the size
+    /// loop in <c>LayoutDomComputed.ResolveOneComputedStyle</c>.
+    /// </remarks>
+    public GridCalcExpression?[]? SizeCalc;
+
+    /// <summary>
     /// <c>overflow</c>/-x/-y other than <c>visible</c>: clips this element's descendants to its
     /// border box during paint.
     /// </summary>
@@ -1559,6 +1583,8 @@ public sealed class LayoutStyle
             : new Dictionary<string, short>(GridRowLineNames, StringComparer.Ordinal);
         copy.Inset = (Dimension?[])Inset.Clone();
         copy.InsetExpressions = (string?[])InsetExpressions.Clone();
+        copy.InsetCalc = InsetCalc is null ? null : (GridCalcExpression?[])InsetCalc.Clone();
+        copy.SizeCalc = SizeCalc is null ? null : (GridCalcExpression?[])SizeCalc.Clone();
         copy.CounterReset = [.. CounterReset];
         copy.CounterIncrement = [.. CounterIncrement];
         copy.CounterSet = [.. CounterSet];

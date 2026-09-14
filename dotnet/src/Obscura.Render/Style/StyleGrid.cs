@@ -6,15 +6,17 @@ using Obscura.Render.Css;
 namespace Obscura.Render;
 
 /// <summary>
-/// A grid track expression whose CSS math is resolved late, against the used
-/// grid-axis basis rather than at computed-value time.
+/// A CSS math expression whose percentage is resolved late, against the used basis taffy
+/// has during layout rather than against an estimate at computed-value time. Named for its
+/// first use, grid tracks; box offsets and inline-axis sizes now take the same route.
 /// </summary>
 /// <remarks>
 /// Rust hands taffy the <c>Arc</c> pointer as an opaque <c>calc()</c> handle.
 /// Managed code cannot hand out an address of a moving object, so the port
 /// allocates a stable 8-byte-aligned handle and keeps a weak registry entry for
-/// it; <see cref="LayoutStyle.GridCalcExpressions"/> owns the strong references
-/// exactly as the Rust field does.
+/// it; <see cref="LayoutStyle.GridCalcExpressions"/>, <see cref="LayoutStyle.InsetCalc"/>
+/// and <see cref="LayoutStyle.SizeCalc"/> own the strong references exactly as the Rust
+/// field does.
 /// </remarks>
 public sealed class GridCalcExpression
 {
@@ -27,6 +29,7 @@ public sealed class GridCalcExpression
     private float _vw;
     private float _vh;
     private bool _contextInitialized;
+    private bool _allowNegative;
 
     private GridCalcExpression()
     {
@@ -39,7 +42,12 @@ public sealed class GridCalcExpression
     public string Expression => _expression;
 
     /// <summary>Rust <c>GridCalcExpression::parse</c>.</summary>
-    internal static GridCalcExpression? Parse(string value)
+    /// <param name="value">The CSS math expression.</param>
+    /// <param name="allowNegative">
+    /// Whether a resolved value below zero is kept. A grid track size is clamped at zero;
+    /// a box offset or margin is not, so the inset path passes <c>true</c>.
+    /// </param>
+    internal static GridCalcExpression? Parse(string value, bool allowNegative = false)
     {
         string lower = CssText.AsciiLower(value.Trim());
         if (!(lower.StartsWith("calc(", StringComparison.Ordinal)
@@ -78,7 +86,12 @@ public sealed class GridCalcExpression
             _nextHandle += 8;
         }
 
-        GridCalcExpression expression = new() { Handle = handle, _expression = lower };
+        GridCalcExpression expression = new()
+        {
+            Handle = handle,
+            _expression = lower,
+            _allowNegative = allowNegative,
+        };
         Registry[handle] = new WeakReference<GridCalcExpression>(expression);
         if (Registry.Count > 4096)
         {
@@ -161,7 +174,7 @@ public sealed class GridCalcExpression
     {
         float? resolved = ComputedStyle.ResolveContextualLength(_expression, _emPx, _remPx, _vw, _vh, basis);
         float value = resolved is { } candidate && float.IsFinite(candidate) ? candidate : 0f;
-        return F32.Max(value, 0f);
+        return _allowNegative ? value : F32.Max(value, 0f);
     }
 
     /// <summary>Look up a live expression by its taffy handle.</summary>
