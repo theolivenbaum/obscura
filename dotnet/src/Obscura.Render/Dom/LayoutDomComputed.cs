@@ -162,6 +162,18 @@ public static partial class RenderDom
                     childCbHeight = ContentBoxBlockSize(retainedStyle, inh.CbHeight);
                     childCbHeightKnown = childCbHeightDefinite
                         && (retainedStyle.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
+
+                    // The flex-sized rule below applies to a retained style too: the box is the
+                    // same box, and which containing block its children resolve against cannot
+                    // depend on whether this pass happened to recompute its style.
+                    if (!childCbHeightDefinite
+                        && IsFlexSizedDefiniteBlock(
+                            tree, styles, id, retainedStyle, inh.CbHeightDefinite))
+                    {
+                        childCbHeightDefinite = true;
+                        childCbHeightKnown = false;
+                    }
+
                     if (childCbHeightDefinite)
                     {
                         definiteHeightNodes.Add(id);
@@ -776,6 +788,31 @@ public static partial class RenderDom
                     0f);
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which calls a box's block size
+        // definite only when `height` itself is a length or percentage. A flex item sized by
+        // the flex algorithm has no such `height`, so the reference made it an INDEFINITE
+        // containing block and every descendant `height: %` under it computed to `auto`.
+        // CSS Flexbox 9.8 says otherwise, in two halves that Chromium both implements:
+        // a flex item's post-flexing MAIN size is definite whenever the container's main size
+        // is, and a stretched item's CROSS size is definite whenever the container's cross
+        // size is. The block axis is the main axis of a column container and the cross axis of
+        // a row one, so either half can make this box a definite containing block.
+        // Tesserae nests a `height: 100%` column inside a `flex-grow: 1` item carrying no
+        // height of its own, so the reference collapsed that whole chain to 0 and the
+        // connect-apps grid clipped 1676px of cards into an 8px box.
+        // The post-flex size is not knowable in this top-down pass - it is decided by the flex
+        // algorithm later - so the box is marked definite but NOT known: a bare percentage
+        // survives as a percentage and taffy resolves it against the used size, exactly as the
+        // grid-item case above does. A functional `calc()` percentage still flattens to `auto`,
+        // which is the same residual gap the grid case accepts. See "Known deviations" in
+        // todo.md.
+        if (!childCbHeightDefinite
+            && IsFlexSizedDefiniteBlock(tree, styles, id, style, inh.CbHeightDefinite))
+        {
+            childCbHeightDefinite = true;
+            childCbHeightKnown = false;
+        }
+
         if (childCbHeightDefinite)
         {
             definiteHeightNodes.Add(id);
@@ -1114,6 +1151,63 @@ public static partial class RenderDom
                 - style.Border.Left
                 - style.Border.Right,
                 0f);
+    }
+
+    /// <summary>
+    /// Whether the flex algorithm gives this box a definite block size even though its own
+    /// <c>height</c> is not a length or a percentage, which makes it a definite containing
+    /// block for a descendant's percentage height.
+    /// </summary>
+    /// <remarks>
+    /// CSS Flexbox 9.8 in two halves, both of which Chromium implements: a flex item's
+    /// post-flexing MAIN size is definite whenever the container's main size is definite, and
+    /// a stretched item's CROSS size is definite whenever the container's cross size is. The
+    /// block axis is the main axis of a column container and the cross axis of a row one, so
+    /// each half covers one <c>flex-direction</c>. The
+    /// <paramref name="containingBlockHeightDefinite"/> flag is the container's content-box
+    /// block size definiteness, which is the container size both halves ask about.
+    /// </remarks>
+    private static bool IsFlexSizedDefiniteBlock(
+        DomTree tree,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        NodeId id,
+        LayoutStyle style,
+        bool containingBlockHeightDefinite)
+    {
+        // An absolutely positioned box is not a flex item; its containing block is the padding
+        // box of its nearest positioned ancestor.
+        if (!containingBlockHeightDefinite || style.Position == TaffyPosition.Absolute)
+        {
+            return false;
+        }
+
+        if (DomTraversal.RenderedParent(tree, id) is not { } parent
+            || !styles.TryGetValue(parent, out LayoutStyle? container)
+            || container.Display != Display.Flex)
+        {
+            return false;
+        }
+
+        return container.FlexDirection
+                is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse
+            || IsStretchedFlexItem(style, container);
+    }
+
+    /// <summary>
+    /// Whether a row flex container stretches this item across the cross (block) axis, which
+    /// is what CSS Flexbox 9.8 makes its cross size definite. The three conditions are the
+    /// ones <c>FlexboxLayout.DetermineUsedCrossSize</c> itself applies, so a box counted here
+    /// is a box taffy will actually stretch.
+    /// </summary>
+    private static bool IsStretchedFlexItem(LayoutStyle style, LayoutStyle container)
+    {
+        var alignSelf = style.AlignSelf ?? container.AlignItems ?? TaffyAlignItems.Stretch;
+
+        return alignSelf.Keyword
+                is Layout.AlignItemsKeyword.Stretch or Layout.AlignItemsKeyword.Normal
+            && style.Height.IsAuto
+            && !style.MarginAuto[0]
+            && !style.MarginAuto[2];
     }
 
     /// <summary>
