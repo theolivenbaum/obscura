@@ -99,14 +99,14 @@ GraphKit's canvas is 1202 wide in Chromium and 1217 in Obscura, and the availabl
 overflows its container, both the known 15px sidebar delta from the flex-shrink `calc()` defect
 (a flex item that shrinks never re-resolves a `calc()` size). Tracked separately.
 
-## S1 - `overflow: visible` on an `<svg>` is ignored
+## S1 - `overflow: visible` on an `<svg>` is ignored (FIXED)
 
 `svg-probe.html` case s9: an `<svg width=120 height=60 style="overflow:visible">` whose `<rect>`
 extends past the viewport. Chromium paints **4800** red pixels (the overflow shows); Obscura
 paints **900** (clipped to the svg box). The outermost `<svg>` gets `overflow: hidden` from the
 UA sheet, and an author `overflow: visible` has to override it.
 
-## S2 - a nested `<svg>` is not scaled or placed correctly
+## S2 - a nested `<svg>` is not scaled or placed correctly (FIXED)
 
 `svg-probe.html` case s10: `<svg width=200 height=100 viewBox="0 0 200 100">` containing
 `<svg x=50 y=20 width=100 height=60 viewBox="0 0 10 6"><rect width=10 height=6/></svg>`.
@@ -118,3 +118,32 @@ Eight other cases in the same probe are byte-identical between the engines and a
 viewBox scaling up, no viewBox, `preserveAspectRatio` default and `none`, clipping of content
 outside the viewBox, CSS-sized svg with a viewBox, a flat zero-value polyline, and percentage
 width/height attributes.
+
+### What S1 and S2 were
+
+`SvgRenderer.RenderElement` treated a nested `<svg>` as a plain group, so it established no
+viewport at all, and the raster pixmap was always exactly the CSS viewport, so an author
+`overflow: visible` had nothing to override. Both are fixed; all ten cases now match Chromium
+exactly, s10 in bounds as well as count. The one limit is recorded under "Known deviations" in
+`todo.md`: an `overflow: visible` raster can only grow right and down, because `PaintDom` blits
+it at the element's border-box origin.
+
+The dashboard sparklines are a **separate** matter and are not these two defects. Cases s6 and
+s7 are exactly that shape - a CSS-sized `<svg>` with `preserveAspectRatio="none"` and a
+polyline, flat-zero included - and both already matched Chromium byte for byte before this
+change. Whatever insets the sparkline on `#/` is upstream of the rasterizer.
+
+## S3 - SVG `<filter>` is not applied, and a `clipPath` drops its shapes' transforms (FIXED)
+
+`imgsvg2-probe.html` case j2 (`<g filter="url(#f1)">` + `feGaussianBlur stdDeviation="20"`,
+`filterUnits="userSpaceOnUse"`) painted the rect sharp: `RenderElement` skipped the `<filter>`
+*element* as a definition but never read the `filter` *attribute*. Pixels differing from
+Chromium by more than 8: **11,374 before, 67 after**.
+
+Case j3 - the real `no-results-light.svg` - was a different defect that happened to travel with
+it. Its artboard clip is `<clipPath id="clip0_398_1060"><rect width="392" height="203"
+transform="translate(20 121)"/></clipPath>`, and the clip builder called `ShapePath(shape)`
+without the shape's own `transform`, so the clip landed at the origin and cut the illustration
+to its top 203 rows of 444. Chromium-diff pixels: **23,264 before, 1,298 after** (the remainder
+is blur-kernel and anti-aliasing spread, which is expected - see the pixel-tolerance note in
+`PaintTests`).
