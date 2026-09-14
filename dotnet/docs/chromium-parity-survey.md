@@ -1071,3 +1071,36 @@ Width. It does not move with the harness change and on `#/spaces/connect-apps` i
 247) simply because more pairs now align. On the new reference `#/users` and `#/abbreviations` show
 72 width mismatches in ~350 pairs, and `#/manage/data/file-indexing` is unchanged at 110 in 859.
 Together with F29 (the `calc()` percentage base) that is the remaining geometry work.
+
+## The remaining width divergence traces back to one `calc()`
+
+Measured against the clean reference on `#/users`, the divergence has exactly one entry point.
+
+| element | Chromium | Obscura |
+|---|---|---|
+| `.msk-app-sidebar-default` (`padding: 16px 12px`, `width: 215` inline) | 215.141 | 215 |
+| `.tss-sidebar-middle` (`width: 100%`, `margin-left: -12px`, `padding-left: 12px`, `border-box`, column-flex item) | **211.141** | **196** |
+| every descendant | 199, 171, … | 184, 156, … (all exactly -15) |
+
+The 15px appears once, at `.tss-sidebar-middle`, and everything below simply inherits it.
+
+Neither engine's number is the naive `215 - 24 = 191`, and the reason is the same in both: the item
+is stretched to the flex line's content width, and the widest thing on that line is the sibling
+brand element with `width: calc(100% + 32px)`. Chromium's brand is **223.141** and its
+sidebar-middle is `223.141 - 12 = 211.141`; Obscura's brand is **208** and its sidebar-middle is
+`208 - 12 = 196`. The sidebar's own `scrollWidth` confirms it: 223 in Chromium, 215 in Obscura.
+
+So the open sidebar-width question above and this one are the same defect, and it is the
+`calc(100% + 32px)` whose percentage Obscura resolves against 176 rather than the 191.141 both
+engines report for the containing block. That is the same shape as F29 — a `calc()` percentage
+flattened against the wrong basis — which is why the F29 fix was asked to measure this case rather
+than assume it.
+
+One caveat against over-claiming: on `#/manage/data/file-indexing` the sidebar items are -32 rather
+than -15 and the main content area is correspondingly +40, so either the same defect resolves
+against a different stale basis there or a second one is involved. Confirm on that route too before
+closing this out.
+
+Scrollbars are not involved. `scroll-probe.html` measures `offsetWidth - clientWidth` as **0 in
+both engines** for `overflow-y: auto` with overflowing content, for `overflow: scroll`, and for
+`overflow: hidden auto`. Neither engine reserves a gutter.
