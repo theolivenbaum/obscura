@@ -118,3 +118,35 @@ Eight other cases in the same probe are byte-identical between the engines and a
 viewBox scaling up, no viewBox, `preserveAspectRatio` default and `none`, clipping of content
 outside the viewBox, CSS-sized svg with a viewBox, a flat zero-value polyline, and percentage
 width/height attributes.
+
+## S3 - SVG `<filter>` / `feGaussianBlur` renders wrong
+
+`imgsvg2-probe.html`, three `<img>` elements at 400x411 loading a 432x444 SVG. Non-white, red
+and green pixel counts inside each case rect:
+
+| case | content | Chromium | Obscura |
+|---|---|---|---|
+| j1 | `clip-path="url(#c0)"` around plain shapes | (164400, 105775, 14800) | (164400, 105774, 14800) |
+| j2 | same plus `<g filter="url(#f1)">`, `feGaussianBlur stdDeviation=20`, `filterUnits="userSpaceOnUse"` | (132924, 105777, 14800) | **(123849, 105771, 14800)** |
+| j3 | the real `no-results-light.svg` | (7825, 0, 0) | **(2088, 0, 0)** |
+
+In j2 the red circle and green bar are pixel-identical, so shapes, `clip-path`, viewBox scaling
+and SVG-in-`<img>` fitting are all correct. The ~9,000 pixel shortfall is entirely the blurred
+rect. j3 is the same defect at scale: Obscura draws about a quarter of the illustration's ink.
+
+This is what the user saw as "empty search message sizing is wrong" - on
+`#/search?query=<no hits>` the "Nothing turned up" illustration is visibly cropped. The `<img>`
+is 400x411 in both engines and every surrounding box matches, so it is purely what gets
+rasterized inside.
+
+Ruled out, do not re-derive: plain SVG-in-`<img>` scaling (`imgsvg-probe.html` fits a 432x444
+SVG into 400x411 and 200x206, both exact), and `clip-path` on its own (j1).
+
+## Not defects, checked and dismissed
+
+- **Monaco** renders correctly on `#/manage/operate/code`: syntax colouring, line numbers, gutter
+  and text all match. The only differences are the ~4px width delta from the known flex-shrink
+  `calc()` defect and a missing gutter separator line.
+- **The dashboard sparklines** on `#/` draw in both engines. Chromium's zero-value baselines are
+  missing in Obscura and the sparkline is inset rather than full-bleed, which is worth a look but
+  is not the SVG viewport defect.
