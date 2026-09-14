@@ -136,6 +136,28 @@ public static partial class ComputedStyle
             style.BoxSizing = BoxSizing.BorderBox;
             style.Padding = new Edges(1.0f, 6.0f, 1.0f, 6.0f);
 
+            // Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder`, which this
+            // arm set no part of - an unstyled button came out 4px narrower and 4px shorter
+            // than Chromium's (176x63 against 180x67 on the btn-min repro).
+            //
+            // DEVIATION from Chromium on the COLOUR only, and deliberately. Chromium computes
+            // `ButtonBorder` on a button to rgb(0, 0, 0) - unlike `select` and `input`, whose
+            // border colour computes to the rgb(118, 118, 118) used below - and then never
+            // paints that black, because a button with the default `appearance` is drawn by
+            // the native form-control painter as a flat 1px rgb(118, 118, 118) stroke. There
+            // is no native-appearance painter here, so taking the computed black literally
+            // would paint a heavy black bevel where Chromium shows thin grey. Using the colour
+            // Chromium actually paints keeps the rendering close and costs only the reported
+            // `border-color`. Recorded under "Known deviations" in todo.md.
+            style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
+            style.BorderModel = style.BorderModel with
+            {
+                SpecifiedWidths = Sides<float>.All(2.0f),
+                Styles = Sides<BorderStyle>.All(BorderStyle.Outset),
+                Colors = Sides<RgbaColor?>.All(new RgbaColor(118, 118, 118, 255)),
+            };
+            style.BorderColor = new RgbaColor(118, 118, 118, 255);
+
             // DEVIATION from crates/obscura-render/src/style.rs, whose `button` arm sets no
             // font at all, so a button inherits the page's font-size, family and line-height.
             // Chromium's UA sheet gives every form control `font: 400 13.3333px Arial`, and
@@ -2680,7 +2702,7 @@ public static partial class ComputedStyle
 
             case "filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Filter, NonNoneValue(value));
-                style.FilterBlur = ParseFilterBlur(value);
+                style.Filter = ParseFilterFunctions(value, style.Color, style.ColorSchemeDark);
                 return true;
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
@@ -2859,5 +2881,187 @@ public static partial class ComputedStyle
                 style.Display = Display.Inline;
                 break;
         }
+    }
+
+    /// <summary>
+    /// Parse a <c>filter</c> value into its computed function list, Chromium's way.
+    /// </summary>
+    /// <remarks>
+    /// Returns <c>null</c> for <c>none</c>, for an empty value, and for any list carrying one
+    /// invalid function - CSS invalidates the whole declaration rather than the offending
+    /// function, which is why a bad argument drops the list instead of being skipped.
+    /// <para>
+    /// The two ways an out-of-range argument is handled are not interchangeable, and Chromium
+    /// was measured for each: a negative argument is <em>invalid</em> everywhere, while a value
+    /// above the maximum of a bounded function is <em>clamped</em> - <c>grayscale(2)</c>
+    /// computes to <c>grayscale(1)</c>, but <c>saturate(-0.5)</c> drops the declaration.
+    /// <c>brightness</c>, <c>contrast</c> and <c>saturate</c> have no upper bound.
+    /// </para>
+    /// </remarks>
+    internal static FilterFunction[]? ParseFilterFunctions(
+        string value,
+        RgbaColor? currentColor,
+        bool darkScheme)
+    {
+        string trimmed = value.Trim();
+        if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
+        {
+            return null;
+        }
+
+        List<(string Name, string Arguments)> functions = TransformFunctions(trimmed);
+        if (functions.Count == 0)
+        {
+            return null;
+        }
+
+        FilterFunction[] parsed = new FilterFunction[functions.Count];
+        for (int index = 0; index < functions.Count; index++)
+        {
+            (string name, string arguments) = functions[index];
+            if (BuildFilterFunction(CssText.AsciiLower(name), arguments, currentColor, darkScheme)
+                is not { } function)
+            {
+                return null;
+            }
+
+            parsed[index] = function;
+        }
+
+        return parsed;
+    }
+
+    private static FilterFunction? BuildFilterFunction(
+        string name,
+        string arguments,
+        RgbaColor? currentColor,
+        bool darkScheme)
+    {
+        string args = arguments.Trim();
+        switch (name)
+        {
+            // An omitted argument is the function's initial value: 0 for blur and hue-rotate,
+            // 1 for every multiplier. `grayscale()` computes to `grayscale(1)`.
+            case "blur":
+                return args.Length == 0
+                    ? FilterFunction.Scalar(FilterFunctionKind.Blur, 0f)
+                    : NonNegativeLength(args) is { } sigma
+                        ? FilterFunction.Scalar(FilterFunctionKind.Blur, sigma)
+                        : null;
+
+            case "hue-rotate":
+                return args.Length == 0
+                    ? FilterFunction.Scalar(FilterFunctionKind.HueRotate, 0f)
+                    : AngleDegrees(CssText.AsciiLower(args)) is { } degrees && float.IsFinite(degrees)
+                        ? FilterFunction.Scalar(FilterFunctionKind.HueRotate, degrees)
+                        : null;
+
+            case "brightness": return Multiplier(FilterFunctionKind.Brightness, args, float.PositiveInfinity);
+            case "contrast": return Multiplier(FilterFunctionKind.Contrast, args, float.PositiveInfinity);
+            case "saturate": return Multiplier(FilterFunctionKind.Saturate, args, float.PositiveInfinity);
+            case "grayscale": return Multiplier(FilterFunctionKind.Grayscale, args, 1f);
+            case "invert": return Multiplier(FilterFunctionKind.Invert, args, 1f);
+            case "opacity": return Multiplier(FilterFunctionKind.Opacity, args, 1f);
+            case "sepia": return Multiplier(FilterFunctionKind.Sepia, args, 1f);
+
+            case "drop-shadow": return DropShadow(args, currentColor, darkScheme);
+
+            // url() is kept verbatim so the computed value round-trips. It is never painted;
+            // SVG filter elements are not modeled.
+            case "url": return args.Length == 0 ? null : FilterFunction.ReferenceTo(args);
+
+            default: return null;
+        }
+
+        static FilterFunction? Multiplier(FilterFunctionKind kind, string args, float maximum)
+        {
+            if (args.Length == 0)
+            {
+                return FilterFunction.Scalar(kind, 1f);
+            }
+
+            if (ScaleNumber(CssText.AsciiLower(args)) is not { } amount
+                || !float.IsFinite(amount)
+                || amount < 0f)
+            {
+                return null;
+            }
+
+            return FilterFunction.Scalar(kind, F32.Min(amount, maximum));
+        }
+    }
+
+    /// <summary>
+    /// <c>drop-shadow(&lt;color&gt;? &lt;x&gt; &lt;y&gt; &lt;blur&gt;?)</c>, where the colour may
+    /// sit on either side of the lengths.
+    /// </summary>
+    /// <remarks>
+    /// Shares <c>box-shadow</c>'s token walk, minus <c>inset</c> and spread, which
+    /// <c>drop-shadow()</c> does not accept. Both offsets are required; the blur defaults to 0
+    /// and, unlike <c>blur()</c>, is a radius - twice sigma.
+    /// </remarks>
+    private static FilterFunction? DropShadow(string args, RgbaColor? currentColor, bool darkScheme)
+    {
+        RgbaColor? color = null;
+        List<float> lengths = [];
+        foreach (string token in SplitWsParen(args))
+        {
+            string current = token.Trim();
+            if (current.Length == 0)
+            {
+                continue;
+            }
+
+            // A bare `0` must be an offset, not a failed colour, so lengths are tried first
+            // while any slot is still open.
+            if (lengths.Count < 3 && PxValue(CssText.AsciiLower(current)) is { } length)
+            {
+                lengths.Add(length);
+                continue;
+            }
+
+            // `currentcolor` is a keyword the colour parser does not take, and it has to be
+            // handled rather than skipped: an unrecognised token here invalidates the whole
+            // declaration, so `drop-shadow(currentColor 1px 2px)` would otherwise compute to
+            // `none` where Chromium reports the resolved colour.
+            RgbaColor? parsed = CssText.EqualsAscii(current, "currentcolor")
+                ? currentColor ?? new RgbaColor(0, 0, 0, 255)
+                : CssColor.ParseForScheme(current, darkScheme);
+            if (parsed is null)
+            {
+                return null;
+            }
+
+            // A second colour is a parse error, not an override.
+            if (color is not null)
+            {
+                return null;
+            }
+
+            color = parsed;
+        }
+
+        if (lengths.Count < 2)
+        {
+            return null;
+        }
+
+        float blur = lengths.Count > 2 ? lengths[2] : 0f;
+        if (!float.IsFinite(lengths[0]) || !float.IsFinite(lengths[1]) || !float.IsFinite(blur) || blur < 0f)
+        {
+            return null;
+        }
+
+        return FilterFunction.DropShadowOf(
+            lengths[0],
+            lengths[1],
+            blur,
+            color ?? currentColor ?? new RgbaColor(0, 0, 0, 255));
+    }
+
+    private static float? NonNegativeLength(string args)
+    {
+        float? length = PxValue(CssText.AsciiLower(args.Trim()));
+        return length is { } parsed && float.IsFinite(parsed) && parsed >= 0f ? parsed : null;
     }
 }

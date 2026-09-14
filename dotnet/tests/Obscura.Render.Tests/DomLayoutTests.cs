@@ -3576,8 +3576,49 @@ public class DomLayoutTests
 
         // Ordinary content still inherits the page font and its 1.8 line-height.
         Assert.True(MathF.Abs((Style("ref").FontSize ?? 0f) - 20f) < 0.01f);
-        Assert.True(MathF.Abs(laid.Rects[Id(tree, "plain")].Height - 17f) < 1.01f);
+        // 17px of line box plus the UA `border: 2px outset` top and bottom, which is
+        // Chromium's 21px exactly.
+        Assert.True(MathF.Abs(laid.Rects[Id(tree, "plain")].Height - 21f) < 1.01f);
         Assert.True(MathF.Abs(laid.Rects[Id(tree, "ref")].Height - 22f) < 1.01f);
+    }
+
+    [Fact]
+    public void ButtonCarriesTheUserAgentOutsetBorder()
+    {
+        // Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder`. This arm set
+        // padding but no border, so every unstyled button was 4px narrower and 4px shorter
+        // than Chromium's, and painted with no border at all.
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0}</style>
+            <button id=plain>x</button>
+            <button id=none style="border:0">x</button>
+            <button id=author style="border:5px dashed red">x</button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        LayoutStyle Style(string id) => laid.Styles[Id(tree, id)];
+
+        Assert.Equal(new Edges(2f, 2f, 2f, 2f), Style("plain").Border);
+        Assert.Equal(BorderStyle.Outset, Style("plain").BorderModel.Styles.Top);
+
+        // DEVIATION: Chromium computes a button's `ButtonBorder` to rgb(0, 0, 0) and then
+        // paints rgb(118, 118, 118) through its native form-control painter. Having no such
+        // painter, this port carries the colour Chromium paints. See the `button` arm of
+        // ComputedStyle and "Known deviations" in todo.md.
+        Assert.Equal(new RgbaColor(118, 118, 118, 255), Style("plain").BorderModel.Colors.Top);
+
+        // The UA border is a normal declaration, so an author rule still replaces it in
+        // either direction.
+        Assert.Equal(new Edges(0f, 0f, 0f, 0f), Style("none").Border);
+        Assert.Equal(new Edges(5f, 5f, 5f, 5f), Style("author").Border);
+        Assert.Equal(BorderStyle.Dashed, Style("author").BorderModel.Styles.Top);
+
+        // Which is exactly the 4px each way that separated this port from Chromium.
+        float plainWidth = laid.Rects[Id(tree, "plain")].Width;
+        float noneWidth = laid.Rects[Id(tree, "none")].Width;
+        Assert.True(MathF.Abs((plainWidth - noneWidth) - 4f) < 0.01f, $"{plainWidth} vs {noneWidth}");
+        Assert.True(
+            MathF.Abs(laid.Rects[Id(tree, "plain")].Height - laid.Rects[Id(tree, "none")].Height - 4f) < 0.01f);
     }
 
     [Fact]
@@ -3611,17 +3652,17 @@ public class DomLayoutTests
         // The plain inline-block is the oracle: max, not sum.
         Assert.True(MathF.Abs(Width("d1") - 164f) < 0.01f, $"inline-block: {Width("d1")}");
 
-        // The button adds only its UA `padding: 1px 6px`. Chromium reports 180 for all three
-        // because its UA sheet also gives a button a 2px border, which this port's UA arm
-        // does not carry; that 4px is a separate, pre-existing gap and not what this pins.
-        Assert.True(MathF.Abs(Width("b1") - 176f) < 0.01f, $"column child: {Width("b1")}");
-        Assert.True(MathF.Abs(Width("b2") - 176f) < 0.01f, $"single-item column: {Width("b2")}");
+        // The button adds its UA `padding: 1px 6px` and its UA `border: 2px outset`, so
+        // 164 + 12 + 4 = 180, which is what Chromium reports for all four. These read 176
+        // while the UA arm still carried no border.
+        Assert.True(MathF.Abs(Width("b1") - 180f) < 0.01f, $"column child: {Width("b1")}");
+        Assert.True(MathF.Abs(Width("b2") - 180f) < 0.01f, $"single-item column: {Width("b2")}");
         Assert.True(
-            MathF.Abs(Width("b4") - 176f) < 0.01f,
+            MathF.Abs(Width("b4") - 180f) < 0.01f,
             $"display:flex button around the same column: {Width("b4")}");
 
         // Block-level children of the button itself stack the same way.
-        Assert.True(MathF.Abs(Width("b5") - 176f) < 0.01f, $"block children: {Width("b5")}");
+        Assert.True(MathF.Abs(Width("b5") - 180f) < 0.01f, $"block children: {Width("b5")}");
     }
 
     [Fact]

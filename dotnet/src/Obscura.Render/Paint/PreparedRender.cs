@@ -823,6 +823,8 @@ public sealed class PreparedRender
                 + (shadow.Inset ? " inset" : string.Empty)
             : "none";
 
+        output["filter"] = PaintCssValues.FilterCss(style.Filter);
+
         string backgroundImage = BackgroundImageCss(style);
         output["background-image"] = backgroundImage;
         output["background-repeat"] = BackgroundRepeatCss(style.BackgroundRepeat);

@@ -276,6 +276,68 @@ public class ComputedStyleSnapshotTests
     }
 
     [Fact]
+    public void FilterIsReportedAndDefaultsToNone()
+    {
+        Assert.Equal("none", Computed("<div id=\"box\">x</div>", "box")["filter"]);
+
+        static string Filter(string declaration) => Computed(
+            $"""<div id="box" style="filter:{declaration}">x</div>""",
+            "box")["filter"];
+
+        // A multiplier reports as a number whatever it was authored as, and hue-rotate
+        // always carries deg. Measured against Chromium 141.
+        Assert.Equal("brightness(0.5)", Filter("brightness(50%)"));
+        Assert.Equal("contrast(2)", Filter("contrast(200%)"));
+        Assert.Equal("grayscale(1)", Filter("grayscale()"));
+        Assert.Equal("opacity(0.25)", Filter("opacity(25%)"));
+        Assert.Equal("hue-rotate(90deg)", Filter("hue-rotate(90deg)"));
+        Assert.Equal("hue-rotate(0deg)", Filter("hue-rotate(0)"));
+        Assert.Equal("blur(0px)", Filter("blur()"));
+        Assert.Equal("blur(5px)", Filter("blur(5px)"));
+        Assert.Equal(
+            "blur(2px) grayscale(1) drop-shadow(rgb(0, 0, 255) 1px 2px 3px)",
+            Filter("blur(2px) grayscale(1) drop-shadow(1px 2px 3px blue)"));
+
+        // An SVG filter reference round-trips quoted, even though nothing paints it.
+        Assert.Equal("url(\"#f\")", Filter("url(#f)"));
+    }
+
+    [Fact]
+    public void FilterDropShadowSerializesColorFirstAndAlwaysThreeLengths()
+    {
+        // The exact computed string Chromium reports for Curiosity's
+        // `.tss-pixelavatar-canvas`, which outlines the pixel-art avatar with four 1px
+        // shadows. Unlike every other CSS shadow the colour comes FIRST, and the blur is
+        // emitted even when it was omitted.
+        const string AVATAR_OUTLINE =
+            "drop-shadow(rgba(0, 0, 0, 0.5) 1px 0px 0px) "
+            + "drop-shadow(rgba(0, 0, 0, 0.5) -1px 0px 0px) "
+            + "drop-shadow(rgba(0, 0, 0, 0.5) 0px 1px 0px) "
+            + "drop-shadow(rgba(0, 0, 0, 0.5) 0px -1px 0px)";
+
+        Assert.Equal(
+            AVATAR_OUTLINE,
+            Computed(
+                $"""<div id="box" style="filter:{AVATAR_OUTLINE}">x</div>""",
+                "box")["filter"]);
+
+        // The authored spelling need not be the serialized one: a trailing colour moves to
+        // the front, and an omitted blur reports as 0px.
+        Assert.Equal(
+            "drop-shadow(rgb(255, 0, 0) 2px 3px 0px)",
+            Computed(
+                """<div id="box" style="filter:drop-shadow(2px 3px red)">x</div>""",
+                "box")["filter"]);
+
+        // An omitted colour resolves to currentColor before it is serialized.
+        Assert.Equal(
+            "drop-shadow(rgb(10, 20, 30) 1px 2px 0px)",
+            Computed(
+                """<div id="box" style="color:rgb(10,20,30);filter:drop-shadow(1px 2px)">x</div>""",
+                "box")["filter"]);
+    }
+
+    [Fact]
     public void FontStyleAndTextDecorationAreReported()
     {
         Dictionary<string, string> computed = Computed(

@@ -111,10 +111,12 @@ public static partial class ComputedStyle
             case "clip-path":
             case "-webkit-clip-path":
                 return CssText.EqualsAscii(value, "none") || ParseClipPathPolygon(value) is not null;
-            // blur() is painted, so it may be advertised. Every other filter function
-            // still participates only in containing-block bookkeeping, and advertising an
-            // unpainted effect is worse than a conservative false result.
+            // Every `filter` function except url() is painted, so a list may be advertised
+            // once it parses and carries no SVG filter reference. `backdrop-filter` still
+            // paints blur() only, and advertising an unpainted effect is worse than a
+            // conservative false result.
             case "filter":
+                return CssText.EqualsAscii(value, "none") || IsPaintedFilterList(value);
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
                 return CssText.EqualsAscii(value, "none") || ParseFilterBlur(value) is not null;
@@ -1465,4 +1467,28 @@ public static partial class ComputedStyle
         "perspective", "contain", "will-change", "content-visibility", "box-shadow",
         "-webkit-box-shadow", "cursor", "pointer-events",
     };
+
+    /// <summary>
+    /// Whether a <c>filter</c> value both parses and is painted in full, which is what
+    /// <c>@supports</c> may advertise.
+    /// </summary>
+    /// <remarks>
+    /// The colour that <c>drop-shadow()</c> falls back to does not change whether the list
+    /// parses, so resolving against black here rather than the element's <c>currentColor</c>
+    /// (which an <c>@supports</c> query has no element to read) is exact.
+    /// </remarks>
+    private static bool IsPaintedFilterList(string value)
+    {
+        if (ParseFilterFunctions(value, null, darkScheme: false) is not { } functions)
+        {
+            return false;
+        }
+
+        foreach (FilterFunction function in functions)
+        {
+            if (function.Kind == FilterFunctionKind.Reference) return false;
+        }
+
+        return true;
+    }
 }
