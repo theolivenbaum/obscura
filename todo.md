@@ -722,6 +722,28 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Shaped inline items flush before a level's positive z-index layers, not after them
+
+`paint.rs` paints one stacking context as bands (negative z, normal, floats, positive z) and
+then, after that whole loop, walks the level's nodes again to paint the shaped inline items
+"last, in tree order". That trailing flush also puts them above the level's *own* positive
+z-index stacking contexts, which CSS 2.1 Appendix E does not: inline-level content is step 7,
+positive z-index stacking contexts are step 9.
+
+The visible symptom is that box backgrounds obey stacking order and text does not. On
+Curiosity Workspace `#/spaces/new` the modal's white panel covers the page's backgrounds while
+the page's headline and bullet lines paint straight through it; Chromium hides them. Reduced
+to `render-repros`-style markup: a static block of text plus a later
+`position: fixed; z-index: 1010` panel over it.
+
+`PaintDomPainter.PaintLaidDomScrolled` now flushes the inline band where the positive-z band
+begins instead of after the loop, excluding the remaining entries' subtrees first (each of
+them repaints its own subtree through its recursion). Negative-z layers, in-flow block
+backgrounds and floats still paint below the text, unchanged.
+
+Covered by `PaintStackingOrderTests`; all 64 `render-repros` fixtures render byte-identically
+before and after.
+
 ### The promise-rejection callback contains everything, and is detached before dispose
 
 deno_core installs V8's `PromiseRejectCallback` and reports from it directly; the ops

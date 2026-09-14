@@ -66,6 +66,23 @@ Do not re-derive these; they are dead ends:
 
 So the trigger needs the real page. Bisect there.
 
+### Resolved - the trailing inline flush
+
+Root cause: `PaintLaidDomScrolled` painted the boxes in stacking bands and then flushed the
+shaped inline items for the whole level *after* that loop, so a level's text landed above its
+own positive z-index stacking contexts. `paint.rs` does the same thing, so this is a recorded
+deviation (see "Known deviations" in `todo.md`). The flush now happens where the positive-z
+band begins. A synthetic reduction does reproduce it - probes 1-5 above all kept the base text
+in a *positioned* box, which lands in the same band as the layer and so orders correctly;
+`PaintStackingOrderTests` uses a static one.
+
+The `#/spaces/connect-apps` list is **not** this defect and is still open. The cards are
+clipped away, not mispainted: `.tss-stack` above them is 92px high in Obscura against 758px in
+Chromium, and the collapse propagates down to `.msk-connect-apps-grid`, which ends up 8px high
+with `overflow: auto` over 1676px of content. That is an auto-height flex column not filling
+its parent, i.e. a layout defect, not a paint one. Fixing the paint order does remove the page
+text that was bleeding over that modal too.
+
 ## A1 - the slider thumb is never painted
 
 `#/preferences?id=file-indexing-schedule`. The track paints; the thumb does not.
