@@ -747,6 +747,39 @@ public class ComputedStyleSnapshotTests
                 ["min-height"]);
     }
 
+    [Fact]
+    public void IntrinsicSizingKeywordsAreTheComputedMinAndMaxSizes()
+    {
+        // Unlike `width`/`height`, which report a used length, these four report the keyword
+        // itself - it is their computed value. Chromium 141 on the same markup.
+        Dictionary<string, string> box = Computed(
+            """
+            <div id="box" style="min-width:min-content;min-height:max-content;
+                                 max-width:fit-content;max-height:min-content">x</div>
+            """,
+            "box");
+
+        Assert.Equal("min-content", box["min-width"]);
+        Assert.Equal("max-content", box["min-height"]);
+        Assert.Equal("fit-content", box["max-width"]);
+        Assert.Equal("min-content", box["max-height"]);
+
+        // A flex item's `auto` minimum is still reported as `auto` on the axis that has no
+        // keyword, not swallowed by the one that does.
+        Dictionary<string, string> item = Computed(
+            """
+            <div style="display:flex">
+              <div id="box" style="min-width:max-content;min-height:fit-content">x</div>
+            </div>
+            """,
+            "box");
+
+        Assert.Equal("max-content", item["min-width"]);
+        Assert.Equal("fit-content", item["min-height"]);
+        Assert.Equal("none", item["max-width"]);
+        Assert.Equal("none", item["max-height"]);
+    }
+
     /// <summary>
     /// A relatively positioned box reports its used offsets, which are the shift it was given
     /// and the negation of that on the opposite side.

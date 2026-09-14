@@ -530,13 +530,31 @@ public static partial class RenderDom
                     return t.GetLayout(node).Size.Width;
                 }
 
+                float? IntrinsicHeight(TaffyTree t, TaffyNodeId node, float width)
+                {
+                    t.ComputeLayoutWithMeasure(
+                        node,
+                        new Layout.Size<TaffyAvailableSpace>(
+                            TaffyAvailableSpace.Definite(width),
+                            TaffyAvailableSpace.MaxContent),
+                        Measure);
+                    return t.GetLayout(node).Size.Height;
+                }
+
                 ApplyTableUsedWidths(
                     tree, taffyTree, taffyRoot, idMap, styles, ifcItems, initialCbWidth, available, Measure);
 
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 if (deferredCyclicInlineSizes.Count == 0
-                    && DomPasses.ApplyFitContentWidths(
+                    && DomPasses.ApplyIntrinsicInlineSizes(
                         taffyTree, idMap, styles, initialCbWidth, IntrinsicWidth))
+                {
+                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                }
+
+                // Block-axis keywords measure at the used inline size, so they follow the
+                // inline pass and its relayout.
+                if (DomPasses.ApplyIntrinsicBlockSizes(taffyTree, idMap, styles, IntrinsicHeight))
                 {
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
@@ -567,12 +585,20 @@ public static partial class RenderDom
                         {
                             t.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                         }
-                        else if (DomPasses.ApplyFitContentWidths(
+                        else if (DomPasses.ApplyIntrinsicInlineSizes(
                             t, idMap, resolvedStyles, initialCbWidth, IntrinsicWidth))
                         {
                             t.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                         }
                     });
+
+                // A deferred cyclic inline size skips the pass above, so the block-axis
+                // keywords under it are only measurable once those widths have settled.
+                if (deferredCyclicInlineSizes.Count != 0
+                    && DomPasses.ApplyIntrinsicBlockSizes(taffyTree, idMap, styles, IntrinsicHeight))
+                {
+                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                }
 
                 if (DomPasses.ApplyMulticolBalance(taffyTree, ifcItems.Multicol))
                 {

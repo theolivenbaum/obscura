@@ -207,13 +207,15 @@ public static class CssAnimationSampler
             case AnimatedProperty.MaxWidth:
             case AnimatedProperty.MaxHeight:
             {
-                if ((property == AnimatedProperty.Width && style.WidthFitContent)
-                    || (property == AnimatedProperty.Height && style.HeightFitContent))
+                var index = SizeIndex(property);
+
+                // An intrinsic sizing keyword is not a length, so there is nothing to
+                // interpolate from or to; the declaration stays put for the whole animation.
+                if (style.SizeIntrinsicKeyword(index) != IntrinsicSizeKeyword.None)
                 {
                     return null;
                 }
 
-                var index = SizeIndex(property);
                 var dimension = property switch
                 {
                     AnimatedProperty.Width => style.Width,
@@ -558,15 +560,19 @@ public static class CssAnimationSampler
                 break;
             case AnimatedProperty.MinWidth:
                 style.MinWidth = dimension;
+                style.MinWidthIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.MinHeight:
                 style.MinHeight = dimension;
+                style.MinHeightIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.MaxWidth:
                 style.MaxWidth = dimension;
+                style.MaxWidthIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             default:
                 style.MaxHeight = dimension;
+                style.MaxHeightIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
         }
     }

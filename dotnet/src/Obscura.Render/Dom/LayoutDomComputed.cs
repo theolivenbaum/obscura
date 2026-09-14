@@ -618,6 +618,7 @@ public static partial class RenderDom
                 }
 
                 style.SizeExpressions[index] = sizeInheritFrom.SizeExpressions[index];
+                style.SetSizeIntrinsicKeyword(index, sizeInheritFrom.SizeIntrinsicKeyword(index));
                 switch (index)
                 {
                     case 0: style.Width = sizeInheritFrom.Width; break;

@@ -1325,6 +1325,7 @@ public static partial class ComputedStyle
             case "min-width":
             case "min-inline-size":
                 style.MinWidth = DimensionValue(value);
+                style.MinWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[2] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 2, value);
                 return true;
@@ -1332,6 +1333,7 @@ public static partial class ComputedStyle
             case "min-height":
             case "min-block-size":
                 style.MinHeight = DimensionValue(value);
+                style.MinHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[3] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 3, value);
                 return true;
@@ -1339,6 +1341,7 @@ public static partial class ComputedStyle
             case "max-width":
             case "max-inline-size":
                 style.MaxWidth = DimensionValue(value);
+                style.MaxWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[4] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 4, value);
                 return true;
@@ -1346,6 +1349,7 @@ public static partial class ComputedStyle
             case "max-height":
             case "max-block-size":
                 style.MaxHeight = DimensionValue(value);
+                style.MaxHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[5] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 5, value);
                 return true;

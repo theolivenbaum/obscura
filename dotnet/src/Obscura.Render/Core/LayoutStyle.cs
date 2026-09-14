@@ -327,6 +327,71 @@ public sealed class LayoutStyle
     public bool HeightFitContent => HeightIntrinsicKeyword != IntrinsicSizeKeyword.None;
 
     /// <summary>
+    /// Which intrinsic sizing keyword <c>min-width</c> carries, if any.
+    /// </summary>
+    /// <remarks>
+    /// Like the preferred sizes above, the dimension stays at its initial value and the
+    /// keyword is resolved from a measurement during layout convergence
+    /// (<c>DomPasses.ApplyIntrinsicInlineSizes</c>).
+    /// DEVIATION: crates/obscura-render implements none of the intrinsic sizing keywords on
+    /// the min/max properties either. See "Known deviations" in todo.md.
+    /// </remarks>
+    public IntrinsicSizeKeyword MinWidthIntrinsicKeyword;
+
+    /// <summary>Which intrinsic sizing keyword <c>min-height</c> carries, if any.</summary>
+    public IntrinsicSizeKeyword MinHeightIntrinsicKeyword;
+
+    /// <summary>Which intrinsic sizing keyword <c>max-width</c> carries, if any.</summary>
+    public IntrinsicSizeKeyword MaxWidthIntrinsicKeyword;
+
+    /// <summary>Which intrinsic sizing keyword <c>max-height</c> carries, if any.</summary>
+    public IntrinsicSizeKeyword MaxHeightIntrinsicKeyword;
+
+    /// <summary>Any inline-axis size property carries an intrinsic sizing keyword.</summary>
+    public bool HasInlineIntrinsicKeyword =>
+        WidthIntrinsicKeyword != IntrinsicSizeKeyword.None
+        || MinWidthIntrinsicKeyword != IntrinsicSizeKeyword.None
+        || MaxWidthIntrinsicKeyword != IntrinsicSizeKeyword.None;
+
+    /// <summary>A min/max block-axis size property carries an intrinsic sizing keyword.</summary>
+    /// <remarks>
+    /// <c>height</c> itself is excluded: all three keywords size a block box to its content
+    /// there, which is what <c>auto</c> already does, so it needs no measurement.
+    /// </remarks>
+    public bool HasBlockMinMaxIntrinsicKeyword =>
+        MinHeightIntrinsicKeyword != IntrinsicSizeKeyword.None
+        || MaxHeightIntrinsicKeyword != IntrinsicSizeKeyword.None;
+
+    /// <summary>
+    /// Read the intrinsic sizing keyword of one of the six box-size slots, in the order
+    /// <c>width</c>, <c>height</c>, <c>min-width</c>, <c>min-height</c>, <c>max-width</c>,
+    /// <c>max-height</c> that <see cref="SizeExpressions"/> and <see cref="SizeInherit"/> use.
+    /// </summary>
+    internal IntrinsicSizeKeyword SizeIntrinsicKeyword(int index) => index switch
+    {
+        0 => WidthIntrinsicKeyword,
+        1 => HeightIntrinsicKeyword,
+        2 => MinWidthIntrinsicKeyword,
+        3 => MinHeightIntrinsicKeyword,
+        4 => MaxWidthIntrinsicKeyword,
+        _ => MaxHeightIntrinsicKeyword,
+    };
+
+    /// <summary>Write the intrinsic sizing keyword of one of the six box-size slots.</summary>
+    internal void SetSizeIntrinsicKeyword(int index, IntrinsicSizeKeyword keyword)
+    {
+        switch (index)
+        {
+            case 0: WidthIntrinsicKeyword = keyword; break;
+            case 1: HeightIntrinsicKeyword = keyword; break;
+            case 2: MinWidthIntrinsicKeyword = keyword; break;
+            case 3: MinHeightIntrinsicKeyword = keyword; break;
+            case 4: MaxWidthIntrinsicKeyword = keyword; break;
+            default: MaxHeightIntrinsicKeyword = keyword; break;
+        }
+    }
+
+    /// <summary>
     /// Which box edge <c>width</c>/<c>height</c> and min/max sizes describe. CSS starts at
     /// <c>content-box</c>; many modern reset sheets opt into <c>border-box</c>.
     /// </summary>
