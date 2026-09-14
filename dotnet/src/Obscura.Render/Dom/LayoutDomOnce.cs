@@ -55,6 +55,7 @@ public static partial class RenderDom
         internal bool LegacyCenter;
         internal bool VisibilityHidden;
         internal bool HasZeroOpacity;
+        internal SvgPaintValues Svg = SvgPaintValues.Initial;
         internal ListStyle ListStyle = ListStyle.Disc;
         internal LineHeight LineHeight = LineHeight.Normal;
         internal WhiteSpace WhiteSpace = WhiteSpace.Normal;
@@ -121,6 +122,7 @@ public static partial class RenderDom
             LegacyCenter = LegacyCenter,
             VisibilityHidden = VisibilityHidden,
             HasZeroOpacity = HasZeroOpacity,
+            Svg = Svg,
             ListStyle = ListStyle,
             LineHeight = LineHeight,
             WhiteSpace = WhiteSpace,

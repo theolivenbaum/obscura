@@ -1441,7 +1441,7 @@ public static partial class ComputedStyle
         "background-repeat", "background-origin", "background-clip", "-webkit-background-clip",
         "mask-image", "-webkit-mask-image", "mask-size", "-webkit-mask-size", "mask-repeat",
         "-webkit-mask-repeat", "color", "content", "-webkit-text-fill-color", "fill", "stroke",
-        "stroke-width", "border-color", "outline", "outline-width", "outline-style", "outline-color",
+        "stroke-width", "text-anchor", "border-color", "outline", "outline-width", "outline-style", "outline-color",
         "outline-offset", "color-scheme", "font-size", "letter-spacing", "font", "font-weight",
         "font-family", "font-style", "font-optical-sizing", "font-variation-settings", "text-align",
         "text-indent", "text-transform", "text-decoration", "text-decoration-line", "line-height",

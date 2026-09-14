@@ -729,8 +729,13 @@ internal static partial class DomBuild
             }
         }
 
+        // A replaced box is atomic: whatever it contains, its children never become boxes in
+        // the parent's formatting context. Without this an inline `<svg>` wrapping SVG content
+        // that computes block-level (`<text>`) was spliced away entirely, leaving the svg with
+        // no box and its text laid out and painted as HTML in the body.
         if (style.Display != Display.Inline
             || style.IsInlineBlock
+            || style.IsReplacedBox
             || style.BeforePseudo is not null
             || style.AfterPseudo is not null
             || style.Float is not null

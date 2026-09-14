@@ -666,6 +666,24 @@ public sealed class LayoutStyle
 
     public string? SvgStrokeWidth;
 
+    /// <summary>Specified <c>text-anchor</c>, before inheritance.</summary>
+    public string? SvgTextAnchor;
+
+    /// <summary>
+    /// The four SVG paint properties after inheritance, serialized the way
+    /// <c>getComputedStyle</c> reports them.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately separate from <see cref="SvgFill"/> / <see cref="SvgStroke"/> /
+    /// <see cref="SvgStrokeWidth"/>, which stay *specified* values: those three are pushed back
+    /// into the serialized SVG document as <c>!important</c> inline declarations, and pushing an
+    /// inherited value there would override the SVG rasterizer's own inheritance - a
+    /// <c>&lt;use&gt;</c> of a <c>&lt;symbol&gt;</c> in <c>&lt;defs&gt;</c> inherits its fill from
+    /// the use site, not from the <c>&lt;svg&gt;</c> root the defs subtree sits under.
+    /// <c>null</c> means every property still holds its initial value.
+    /// </remarks>
+    public SvgPaintValues? SvgPaint;
+
     /// <summary>
     /// Compatibility mirror for uniform border colors. New code should use
     /// <c>BorderModel.Colors</c>; this remains for programmatic LayoutStyle users.
@@ -1585,6 +1603,21 @@ public static class LayoutStyleExtensions
 
         style.IsInlineBlock = false;
     }
+}
+
+/// <summary>
+/// The inherited SVG paint properties, already serialized as CSSOM computed values.
+/// </summary>
+/// <remarks>
+/// They are ordinary inherited CSS properties in Chromium and apply to every element, not only
+/// to the SVG namespace: <c>getComputedStyle(document.body).fill</c> is <c>rgb(0, 0, 0)</c>.
+/// One shared immutable instance is threaded down a subtree, so an element that specifies none
+/// of them costs no allocation.
+/// </remarks>
+public sealed record SvgPaintValues(string Fill, string Stroke, string StrokeWidth, string TextAnchor)
+{
+    /// <summary>The initial values, which are what an element with no SVG paint style reports.</summary>
+    public static readonly SvgPaintValues Initial = new("rgb(0, 0, 0)", "none", "1px", "start");
 }
 
 /// <summary>
