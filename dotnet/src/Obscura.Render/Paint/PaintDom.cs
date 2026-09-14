@@ -447,6 +447,16 @@ internal static class PaintDomPainter
             .. posLayers.OrderBy(entry => entry.Z).Select(entry => entry.Node),
         ];
 
+        // Deviation from `paint.rs`, which flushes the shaped inline items after the whole
+        // paint order and so paints this level's text over its own positive z-index stacking
+        // contexts - page content bleeds through a `position: fixed; z-index: 1010` overlay.
+        // CSS 2.1 Appendix E puts inline-level content (step 7) above this level's block
+        // backgrounds (step 4) and floats (step 5) but *below* its positive z-index stacking
+        // contexts (step 9), which is what Chromium paints, so the flush happens where the
+        // positive band begins instead.
+        int inlineBandEnd = negLayers.Count + normal.Count + floatLayers.Count;
+        bool inlineBandPainted = false;
+
         // Generated boxes are anonymous layout children: ::before paints directly after its
         // host's own box; ::after paints after the host's last descendant in this paint order.
         Dictionary<NodeId, List<GeneratedBox>> generatedBefore = [];
@@ -500,6 +510,24 @@ internal static class PaintDomPainter
 
         for (int paintIndex = 0; paintIndex < paintOrder.Count; paintIndex++)
         {
+            if (!inlineBandPainted && paintIndex >= inlineBandEnd)
+            {
+                // Every remaining entry is a positive z-index stacking context that repaints
+                // its whole subtree through its own recursion, so exclude those subtrees the
+                // way the loop itself would have.
+                for (int rest = paintIndex; rest < paintOrder.Count; rest++)
+                {
+                    opacitySubtreeSkip.Add(paintOrder[rest]);
+                    foreach (NodeId member in DomTraversal.RenderedDescendants(tree, paintOrder[rest]))
+                    {
+                        opacitySubtreeSkip.Add(member);
+                    }
+                }
+
+                PaintInlineBand();
+                inlineBandPainted = true;
+            }
+
             NodeId nid = paintOrder[paintIndex];
             if (svgSubtreeSkip.Contains(nid))
             {
@@ -1476,56 +1504,51 @@ internal static class PaintDomPainter
             }
         }
 
-        // Inline formatting contexts draw last, in tree order, so their glyphs sit above the
-        // box backgrounds/borders painted in the loop above.
-        foreach (NodeId nid in paintNodes)
+        if (!inlineBandPainted)
         {
-            if (svgSubtreeSkip.Contains(nid) || opacitySubtreeSkip.Contains(nid))
-            {
-                continue;
-            }
+            PaintInlineBand();
+        }
 
-            bool hasWhole = laid.IfcItems.TryGetValue(nid, out int whole);
-            bool hasRuns = laid.RunIfcItems.TryGetValue(nid, out List<int>? runItems);
-            if (!hasWhole && !hasRuns)
-            {
-                continue;
-            }
+        return pixmap;
 
-            if (laid.Styles.TryGetValue(nid, out LayoutStyle? textStyle) && textStyle.EffectivelyInvisible)
+        // Inline formatting contexts draw in tree order, so their glyphs sit above the box
+        // backgrounds/borders of this level painted in the loop above.
+        void PaintInlineBand()
+        {
+            foreach (NodeId nid in paintNodes)
             {
-                continue;
-            }
+                if (svgSubtreeSkip.Contains(nid) || opacitySubtreeSkip.Contains(nid))
+                {
+                    continue;
+                }
 
-            (float X, float Y) off = scrollState.TranslationFor(laid, nid);
-            OverflowClip? overflow = scrollState.ShapedTextOverflowClipFor(laid, nid);
-            Rect? clip = overflow?.ViewportRect(scrollState.SurfaceExtent ?? viewport);
-            Mask? clipMask = overflow is null
-                ? null
-                : PaintClips.CachedOverflowClipMask(
-                    overflowMaskCache,
-                    pixmap.Width,
-                    pixmap.Height,
-                    overflow,
-                    scrollState.SurfaceExtent ?? viewport);
-            if (hasWhole)
-            {
-                laid.TextEngine.PaintItemWithClipMaskScaledForPrint(
-                    whole,
-                    pixmap,
-                    off,
-                    clip,
-                    clipMask,
-                    rasterScale,
-                    pass.PrintEconomy);
-            }
+                bool hasWhole = laid.IfcItems.TryGetValue(nid, out int whole);
+                bool hasRuns = laid.RunIfcItems.TryGetValue(nid, out List<int>? runItems);
+                if (!hasWhole && !hasRuns)
+                {
+                    continue;
+                }
 
-            if (runItems is not null)
-            {
-                foreach (int index in runItems)
+                if (laid.Styles.TryGetValue(nid, out LayoutStyle? textStyle) && textStyle.EffectivelyInvisible)
+                {
+                    continue;
+                }
+
+                (float X, float Y) off = scrollState.TranslationFor(laid, nid);
+                OverflowClip? overflow = scrollState.ShapedTextOverflowClipFor(laid, nid);
+                Rect? clip = overflow?.ViewportRect(scrollState.SurfaceExtent ?? viewport);
+                Mask? clipMask = overflow is null
+                    ? null
+                    : PaintClips.CachedOverflowClipMask(
+                        overflowMaskCache,
+                        pixmap.Width,
+                        pixmap.Height,
+                        overflow,
+                        scrollState.SurfaceExtent ?? viewport);
+                if (hasWhole)
                 {
                     laid.TextEngine.PaintItemWithClipMaskScaledForPrint(
-                        index,
+                        whole,
                         pixmap,
                         off,
                         clip,
@@ -1533,10 +1556,23 @@ internal static class PaintDomPainter
                         rasterScale,
                         pass.PrintEconomy);
                 }
+
+                if (runItems is not null)
+                {
+                    foreach (int index in runItems)
+                    {
+                        laid.TextEngine.PaintItemWithClipMaskScaledForPrint(
+                            index,
+                            pixmap,
+                            off,
+                            clip,
+                            clipMask,
+                            rasterScale,
+                            pass.PrintEconomy);
+                    }
+                }
             }
         }
-
-        return pixmap;
     }
 
     private static void PaintCanvasBackground(
