@@ -945,3 +945,57 @@ highlighted item, both engines highlight the same four elements. Those are the r
 string carries a query inside the hash, and they are also the ones where Chromium reaches the route
 by same-document navigation while Obscura reboots. Most likely downstream of F9b; re-check after
 the fragment-navigation fix lands rather than treating it as a separate defect.
+
+## F29 — NEW: a percentage inside `calc()` resolves against the viewport, not the containing block
+
+Found by looking at why every combobox in the app is missing its `⌄`. The rule is
+
+```css
+.tss-dropdown-container { position: relative; ... }
+.tss-dropdown-container > .tss-dropdown-icon {
+  position: absolute; right: 8px; top: calc(50% - var(--tss-font-size-tiny) / 2);
+}
+```
+
+The icon element exists in both engines at the same 10x10 size, but on
+`#/manage/data/file-indexing` Obscura places it a constant **+470px** below its container:
+container at `y=583` / icon at `y=1053`, container at `y=723` / icon at `y=1193`, and so on.
+`470 = 0.5 * 950 - 5`, and 950 is the capture viewport height.
+
+Reduced (`abs-probe.html`): a `position: relative` container **300x34** at `y=200`, six
+absolutely-positioned 10x10 children, viewport 1280x720.
+
+| child | declaration | Chromium | Obscura |
+|---|---|---|---|
+| a | `top: calc(50% - var(--tiny) / 2)` | 212 (200+12) | **555** (200+355) |
+| b | `top: 50%` | 217 (200+17) | 217 correct |
+| c | `top: calc(50% - 5px)` | 212 | **555** |
+| d | `top: calc(50% - var(--tiny))` | 207 | **550** |
+| e | `bottom: 50%` | 207 | 207 correct |
+| f | `margin-top: calc(50% - 5px)` | 345 | 345 correct |
+
+`355 = 0.5 * 720 - 5` and `350 = 0.5 * 720 - 10`: the percentage is resolved against the viewport
+height, not the 34px containing block. A bare percentage (b, e) is correct, so the containing block
+is known; a `calc()` percentage in `margin-top` (f) is correct too. It is the `calc()` path for the
+box offsets specifically. `calc()` percentages have to be flattened to pixels before layout, and
+the flattening is using a basis that is right for in-flow boxes and wrong for absolutely-positioned
+ones.
+
+The sidebar `calc(100% + 32px)` question recorded above may be the same root cause; the dispatched
+fix is asked to measure it rather than assume it.
+
+Two smaller things visible in the same probe: Obscura reports `top: 50%` where Chromium reports
+the used `17px`, `bottom: auto` where Chromium reports `7px`, and `top: auto` on the relative
+container where Chromium reports `0px`. Computed-value serialization, no geometric effect; belongs
+with F23.
+
+## Reading the worst routes by pixel difference
+
+| route | diff | cause |
+|---|---|---|
+| `#/manage/data/file-indexing` | 13.62% | F22. The scheduler grid is a solid block of cells in Chromium and a set of thin lines in Obscura. Confirmed visually. |
+| `#/manage/operate/logs` | 11.99% | Content drift. The two captures show different log lines; the layout is the same. Not a defect. |
+| `#/sign-in` | 9.80% | F9b. Chromium's capture still shows the "Connected Apps" modal carried over from the previous route, because its SPA instance is long-lived; Obscura shows a fresh boot. Obscura's is the more correct rendering of the route in isolation. |
+| `#/preferences?id=file-indexing-schedule` / `-monitoring` | 9.63% | F22, same grid. |
+
+Median pixel difference across the survey is 2.76%, 134 of 157 routes under 5%.
