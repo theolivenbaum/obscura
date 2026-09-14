@@ -288,6 +288,7 @@ public static class FetchOps
         string credentials)
     {
         ArgumentNullException.ThrowIfNull(gs);
+        var startedAtUnixMs = PerformanceOps.UnixMilliseconds();
         foreach (var pattern in gs.BlockedUrls)
         {
             if (string.Equals(pattern, "*", StringComparison.Ordinal)
@@ -706,6 +707,24 @@ public static class FetchOps
                 {
                     gs.JsNetworkEvents.RemoveRange(0, gs.JsNetworkEvents.Count - MaxJsNetworkEvents);
                 }
+
+                // The one request the page can see go out, so it is also the one whose
+                // start the shim could have measured itself. Recording it here keeps
+                // fetch()/XHR on the same timeline as the host-owned subresources, and
+                // the start is the real one rather than the resolution of the promise.
+                PerformanceOps.RecordResourceTiming(
+                    gs,
+                    new ResourceTimingRecord
+                    {
+                        Url = currentUrl,
+                        InitiatorType = "fetch",
+                        Status = finalStatus,
+                        StartedAtUnixMs = startedAtUnixMs,
+                        EndedAtUnixMs = PerformanceOps.UnixMilliseconds(),
+                        DecodedBodySize = respBytes.Length,
+                        EncodedBodySize = PerformanceOps.EncodedBodySize(respHeaders, respBytes.Length),
+                        ContentType = respHeaders.GetValueOrDefault("content-type", string.Empty),
+                    });
 
                 var result = new StringBuilder(respBody.Length + respBodyBase64.Length + 256);
                 result.Append("{\"status\":").Append(finalStatus.ToString(CultureInfo.InvariantCulture));

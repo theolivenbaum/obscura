@@ -171,6 +171,9 @@ public sealed partial class ObscuraJsRuntime
         State.ActivityGeneration = 0;
         State.PageInFlight = new InFlightCounter();
         State.AlreadyStartedScripts.Clear();
+        // A document owns its own performance timeline, so the subresources the
+        // previous one pulled in must not show up in this one's entries.
+        State.ResourceTimings.Clear();
         // A new document owns a fresh retained scene and resource cache.
         State.PreparedRender = null;
         State.AnimationSample = default;
@@ -446,6 +449,43 @@ public sealed partial class ObscuraJsRuntime
         State.JsNetworkEvents.Clear();
         return events;
     }
+
+    /// <summary>
+    /// Record one subresource the browser transport fetched for this document, so
+    /// <c>performance.getEntriesByType('resource')</c> reports it.
+    /// </summary>
+    /// <remarks>
+    /// Scripted fetch()/XHR records itself from inside <c>op_fetch_url</c>; this is
+    /// the entry point for the fetches the Page owns - external scripts, stylesheets,
+    /// images and fonts - which page JS never sees go out. Timestamps are unix-epoch
+    /// milliseconds: the shim, not the host, knows the document's
+    /// <c>performance.timeOrigin</c>.
+    /// </remarks>
+    public void RecordResourceTiming(
+        string url,
+        string initiatorType,
+        int status,
+        double startedAtUnixMs,
+        double endedAtUnixMs,
+        long decodedBodySize,
+        long encodedBodySize,
+        string contentType) =>
+        PerformanceOps.RecordResourceTiming(
+            State,
+            new ResourceTimingRecord
+            {
+                Url = url,
+                InitiatorType = initiatorType,
+                Status = status,
+                StartedAtUnixMs = startedAtUnixMs,
+                EndedAtUnixMs = endedAtUnixMs,
+                DecodedBodySize = decodedBodySize,
+                EncodedBodySize = encodedBodySize,
+                ContentType = contentType,
+            });
+
+    /// <summary>The subresources recorded for the current document, in completion order.</summary>
+    public IReadOnlyList<ResourceTimingRecord> ResourceTimings => State.ResourceTimings;
 
     public DomTree? TakeDom()
     {

@@ -115,9 +115,19 @@ public sealed partial class Page
             string? source = null;
             if (!ShouldBlockUrl(url) && PageUrl.TryParse(url) is { } parsed)
             {
+                double startedAt = PerformanceOps.UnixMilliseconds();
                 try
                 {
                     Response response = await DoFetchAsync(parsed, cancellationToken).ConfigureAwait(false);
+                    // A frame document is a resource of the page that embeds it, which
+                    // is the timeline this records onto; the frame's own realm reports
+                    // it as its navigation entry.
+                    RecordResourceTiming(
+                        response.Url.AbsoluteUri,
+                        "iframe",
+                        response,
+                        startedAt,
+                        PerformanceOps.UnixMilliseconds());
                     source = System.Text.Encoding.UTF8.GetString(response.Body);
                 }
                 catch (Exception error) when (error is not OperationCanceledException)

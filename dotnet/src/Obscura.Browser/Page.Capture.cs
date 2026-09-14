@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Obscura.Dom;
+using Obscura.Js.Ops;
 using Obscura.Js.Url;
 using Obscura.Net;
 using Obscura.Render;
@@ -142,11 +143,22 @@ public sealed partial class Page
                     default:
                         break;
                 }
+                double startedAt = PerformanceOps.UnixMilliseconds();
                 try
                 {
                     Response response = await HttpClient
                         .FetchResourceWithCallbacksAsync(NetUrl.From(parsed), request, _callbacks, cancellationToken)
                         .ConfigureAwait(false);
+                    // These are the render resources, discovered from CSS and from DOM
+                    // attributes rather than requested by script: a font or image
+                    // named by a stylesheet is "css", one named by <img>/<video> is
+                    // its element.
+                    RecordResourceTiming(
+                        response.Url.AbsoluteUri,
+                        kind == ResourceType.Font ? "css" : "img",
+                        response,
+                        startedAt,
+                        PerformanceOps.UnixMilliseconds());
                     return (key.url, key.profile, kind, (Response?)response);
                 }
                 catch (Exception error) when (error is not OperationCanceledException)

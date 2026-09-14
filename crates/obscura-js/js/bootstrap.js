@@ -10803,10 +10803,18 @@ globalThis.XMLSerializer = class XMLSerializer {
 // `performance.getEntriesByType('navigation')[0].nextHopProtocol` threw
 // "Cannot read properties of undefined" and took the page's first request with
 // it. Obscura does not surface per-request transport metrics to JS, so the
-// network phases below are synthesized inside the real navigationStart -> now
-// interval rather than measured; the document lifecycle marks (domInteractive,
-// DOMContentLoaded, load) are real, recorded by the hooks installed in
-// __obscura_init.
+// navigation entry's network phases below are synthesized inside the real
+// navigationStart -> now interval rather than measured; the document lifecycle
+// marks (domInteractive, DOMContentLoaded, load) are real, recorded by the hooks
+// installed in __obscura_init.
+//
+// Resource entries are different: they are real, and none of their phases are
+// synthesized. op_resource_timings hands over the subresources the host actually
+// fetched, each with its measured request start and response end; every phase the
+// transport does not instrument (DNS, TCP, TLS, request/response split) stays 0,
+// which is what Resource Timing says to report for a phase that did not occur or
+// cannot be timed. Where the op is absent -- an older host, or any embedder that
+// does not implement it -- `resource` comes back empty exactly as before.
 class PerformanceEntry {
   constructor(name, entryType, startTime, duration) {
     this.name = String(name);
@@ -10977,8 +10985,92 @@ function _navigationEntry() {
     transferSize: body ? body + 300 : 0,
   });
 }
+// ---- Resource timing ----------------------------------------------------
+// The host appends one record per subresource it fetched -- external scripts,
+// stylesheets and their @imports, images, webfonts, frame documents -- and
+// op_fetch_url appends one per fetch()/XHR. op_resource_timings hands over the
+// records added since a cursor, so a getEntries() in a loop costs one empty
+// array. The buffer itself lives here because its size and its clearing are the
+// page's, not the host's.
+var _resourceEntries = [];
+var _resourceTimingCursor = 0;
+var _resourceTimingBufferSize = 250;
+var _resourceTimingBufferFull = false;
+function _resourceTimingReset() {
+  _resourceEntries = [];
+  _resourceTimingCursor = 0;
+  _resourceTimingBufferSize = 250;
+  _resourceTimingBufferFull = false;
+}
+// Every field the host did not measure is omitted here and left at 0 by the
+// PerformanceResourceTiming constructor. That covers redirectStart/End,
+// domainLookupStart/End, connectStart/End, secureConnectionStart, requestStart,
+// responseStart and workerStart: the transport does not instrument those phases,
+// and 0 is what Resource Timing prescribes for a phase that did not occur or
+// cannot be reported. startTime, fetchStart, responseEnd and duration are real.
+function _resourceEntryFrom(record) {
+  var t0 = globalThis.performance.timeOrigin || 0;
+  var start = Math.max(0, (+record.startedAt || 0) - t0);
+  var end = Math.max(start, (+record.endedAt || 0) - t0);
+  var encoded = +record.encodedBodySize || 0;
+  var https = false;
+  try { https = new URL(record.name).protocol === "https:"; } catch (e) {}
+  return new PerformanceResourceTiming(record.name, "resource", {
+    startTime: _perfRound(start),
+    duration: _perfRound(end - start),
+    fetchStart: _perfRound(start),
+    responseEnd: _perfRound(end),
+    initiatorType: record.initiatorType || "other",
+    responseStatus: +record.responseStatus || 0,
+    contentType: record.contentType || "",
+    decodedBodySize: +record.decodedBodySize || 0,
+    encodedBodySize: encoded,
+    // Chromium reports transferSize as the encoded body plus a flat 300 bytes of
+    // response-header overhead, which is the same convention the navigation
+    // entry above uses. A zero body stays at 0, which is how a consumer spells
+    // "served from cache".
+    transferSize: encoded ? encoded + 300 : 0,
+    // As with the navigation entry: the negotiated ALPN protocol never reaches
+    // JS, so it is derived from the scheme.
+    nextHopProtocol: https ? "h2" : "http/1.1",
+  });
+}
+function _pullResourceTimings() {
+  if (typeof Deno === "undefined" || !Deno.core || !Deno.core.ops
+    || typeof Deno.core.ops.op_resource_timings !== "function") return;
+  var records;
+  try {
+    var raw = Deno.core.ops.op_resource_timings(_resourceTimingCursor);
+    if (!raw || raw === "[]") return;
+    records = JSON.parse(raw);
+  } catch (e) { return; }
+  if (!Array.isArray(records) || records.length === 0) return;
+  _resourceTimingCursor += records.length;
+  for (var i = 0; i < records.length; i++) {
+    if (_resourceEntries.length >= _resourceTimingBufferSize) {
+      // Spec: once the buffer is full the entry is dropped and
+      // resourcetimingbufferfull fires once, until clearResourceTimings().
+      if (!_resourceTimingBufferFull) {
+        _resourceTimingBufferFull = true;
+        var handler = globalThis.performance.onresourcetimingbufferfull;
+        if (typeof handler === "function") {
+          try { handler.call(globalThis.performance, new Event("resourcetimingbufferfull")); }
+          catch (err) { console.error(err); }
+        }
+      }
+      break;
+    }
+    try { _resourceEntries.push(_resourceEntryFrom(records[i])); } catch (e) {}
+  }
+}
+function _perfResourceEntries() {
+  _pullResourceTimings();
+  return _resourceEntries;
+}
 function _perfAllEntries() {
   var entries = [_navigationEntry()];
+  var resources = _perfResourceEntries();
+  for (var r = 0; r < resources.length; r++) entries.push(resources[r]);
   for (var i = 0; i < _perfUserEntries.length; i++) entries.push(_perfUserEntries[i]);
   entries.sort(function (a, b) { return a.startTime - b.startTime; });
   return entries;
@@ -11122,7 +11214,13 @@ globalThis.performance = globalThis.performance || {
     _perfUserEntries = _perfUserEntries.filter(e =>
       e.entryType !== "measure" || (name !== undefined && e.name !== String(name)));
   },
-  clearResourceTimings(){},
+  clearResourceTimings() {
+    // Consume whatever the host has queued first, so a cleared entry cannot
+    // reappear on the next read.
+    try { _pullResourceTimings(); } catch (e) {}
+    _resourceEntries = [];
+    _resourceTimingBufferFull = false;
+  },
   getEntries() { try { return _perfAllEntries(); } catch (e) { return []; } },
   getEntriesByName(name, type) {
     try {
@@ -11134,14 +11232,18 @@ globalThis.performance = globalThis.performance || {
   getEntriesByType(type) {
     try {
       const wanted = String(type);
-      // Subresource timing is not tracked: the host fetches scripts, styles and
-      // images without telling JS, so 'resource' comes back empty rather than
-      // fabricated. Nothing here may throw -- callers index [0] blindly.
+      // Nothing here may throw -- callers index [0] blindly.
       if (wanted === "navigation") return [_navigationEntry()];
+      if (wanted === "resource") return _perfResourceEntries().slice();
       return _perfAllEntries().filter(e => e.entryType === wanted);
     } catch (e) { return []; }
   },
-  setResourceTimingBufferSize(){},
+  setResourceTimingBufferSize(size) {
+    const wanted = Math.floor(Number(size));
+    // Spec: this sets the maximum, it does not evict what is already buffered.
+    if (Number.isFinite(wanted) && wanted >= 0) _resourceTimingBufferSize = wanted;
+  },
+  onresourcetimingbufferfull: null,
   timeOrigin: 0,
   get timing() { return _perfLegacyTiming(); },
   navigation: { type: 0, redirectCount: 0 },
@@ -16245,6 +16347,36 @@ if (typeof FontFace === 'undefined') {
       binary: true
     };
   };
+  // Whether the engine is holding usable bytes for an @font-face `src`, i.e.
+  // whether text can be shaped with that face right now.
+  //
+  // A face the shim discovered from the page's own @font-face rules is
+  // downloaded by the renderer, which never told JS, so every one of them used
+  // to sit at 'unloaded' forever and document.fonts.check() answered false for a
+  // webfont the page was visibly rendering with. Libraries gate on check() to
+  // decide whether to wait before measuring text, so that false negative makes a
+  // page loop or mis-measure. The op is the renderer's own answer.
+  const _fontSourceLoaded = source => {
+    if (typeof Deno === 'undefined' || !Deno.core || !Deno.core.ops
+      || typeof Deno.core.ops.op_font_resource_loaded !== 'function') return false;
+    const pattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/g;
+    let match;
+    while ((match = pattern.exec(source))) {
+      const raw = (match[1] !== undefined ? match[1]
+        : match[2] !== undefined ? match[2]
+        : match[3] || '').trim();
+      if (!raw) continue;
+      // A data: URL carries its own bytes, so there was never a fetch to wait on.
+      if (/^data:/i.test(raw)) return true;
+      let absolute;
+      // The same resolution the host used to fetch it: url() is relative to the
+      // document base, and the host discovered these from the same stylesheets.
+      try { absolute = new URL(raw, globalThis.document ? document.baseURI : undefined).href; }
+      catch (e) { continue; }
+      try { if (Deno.core.ops.op_font_resource_loaded(absolute)) return true; } catch (e) {}
+    }
+    return false;
+  };
   const _fontFaceDescriptor = (descriptors, name, fallback) =>
     descriptors && descriptors[name] !== undefined ? String(descriptors[name]) : fallback;
   const _fontFaceDeclarations = block => {
@@ -16355,7 +16487,15 @@ if (typeof FontFace === 'undefined') {
     set descentOverride(value) { this._setDescriptor('_descentOverride', value); }
     get lineGapOverride() { return this._lineGapOverride; }
     set lineGapOverride(value) { this._setDescriptor('_lineGapOverride', value); }
-    get status() { return this._status; }
+    get status() {
+      // A CSS-connected face is loaded exactly when the renderer holds its bytes;
+      // see _fontSourceLoaded. Latching the answer keeps a repeated check() from
+      // re-asking about a face that is already in.
+      if (this._status === 'unloaded' && this._cssConnected && _fontSourceLoaded(this._source)) {
+        this._status = 'loaded';
+      }
+      return this._status;
+    }
     get loaded() {
       if (!this._loadedPromise) {
         this._loadedPromise = new Promise((resolve, reject) => {
@@ -16715,6 +16855,11 @@ globalThis.__obscura_init = function() {
   // performance.timing is a live projection of _navTiming now, so the marks
   // are seeded here rather than pinned to navigationStart.
   _perfUserEntries = [];
+  // A document owns its own timeline. The host cleared its own record list when
+  // it installed this document, so the cursor restarts at 0 and the subresources
+  // fetched for this document (stylesheets and scripts already went out by now)
+  // are read from the beginning.
+  _resourceTimingReset();
   _navTimingReset(Date.now() - t0);
   _installNavigationTimingHooks();
   var _totalHeap = 15000000 + Math.floor(_fpRand(620) * 85000000);

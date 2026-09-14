@@ -1557,3 +1557,113 @@ deliberately left alone - that source is a function body, not a script.
 
 Pinned by `ClassicScriptScopeTests` (7 facts, including that the bridge applied and
 that strict-mode semantics still hold inside the inserted script).
+
+### Resource timing is real, and the C# host is the only one that reports it
+
+`performance.getEntriesByType('resource')` was hard-coded to `[]` in the shim, on
+the reasoning that "the host fetches scripts, styles and images without telling
+JS, and there is no op exposing them". The first half is true and the second half
+was the whole problem: the host does know every subresource it fetched, it just
+had no way to say so. Chromium reports 27 resource entries for a normal load of
+the Curiosity app and Obscura reported 0, which is visible to any page that sizes
+its own payload, reports its own web vitals, or waits on a resource it did not
+request itself.
+
+Three port-added ops close it. `op_resource_timings(since_index)` hands over the
+records the host appended for the current document; `op_resource_timing_count`
+reports how many exist; the shim keeps its own cursor, so a `getEntries()` in a
+loop costs one empty array. The producers are the five places the engine fetches
+a subresource - `Page.Scripts`, `Page.Stylesheets`, `Page.Capture` (images and
+webfonts), `Page.Frames` (frame documents) and `op_fetch_url` (`fetch()`/XHR) -
+each recording at its own fetch lambda, which is the only place that brackets the
+transport. The Page's existing `RecordNetworkEvent*` could not be reused: it fires
+where a resource is *used* (a classic script is recorded as it executes, long
+after it arrived), and a resource-timing entry needs the request's own start.
+
+**What is measured and what is zero.** Real: `name`, `initiatorType`,
+`responseStatus`, `contentType`, `decodedBodySize`, `startTime`, `fetchStart`,
+`responseEnd` and therefore `duration`. `encodedBodySize` is real when
+`content-length` survives (it equals `decodedBodySize` otherwise, because
+`SocketsHttpHandler` drops `content-length` along with `content-encoding` when it
+transparently decompresses, and guessing a ratio would be worse than saying the
+body was its own size). `transferSize` is `encodedBodySize + 300`, which is
+Chromium's own flat header-overhead placeholder and the convention the navigation
+entry already used. `nextHopProtocol` is derived from the scheme, as the
+navigation entry already did, because the negotiated ALPN protocol never reaches
+JS. Everything else is **0 and deliberately so**: `redirectStart`/`End`,
+`workerStart`, `domainLookupStart`/`End`, `connectStart`/`End`,
+`secureConnectionStart`, `requestStart`, `responseStart`,
+`firstInterimResponseStart`. The transport does not instrument those phases, and
+0 is what Resource Timing prescribes for a phase that did not occur or cannot be
+reported - so a consumer computing TTFB gets 0, not an invented number.
+
+The buffer lives in the shim, because its size and its clearing are the page's:
+`clearResourceTimings()` drops what is buffered without letting it reappear,
+`setResourceTimingBufferSize()` sets the maximum without evicting, and
+`onresourcetimingbufferfull` fires once when the cap is reached. The host caps its
+own list at 1000 records and drops on arrival rather than trimming from the front,
+so a cursor never goes stale.
+
+`bootstrap.js` is shared, so all three call sites are guarded by a
+`typeof ... === 'function'` test: the Rust engine, which binds none of these ops,
+keeps exactly the empty `resource` list it had.
+
+Pinned by `PerformanceTimelineTests` (6 resource facts). Measured live against the
+Curiosity app: 80 entries where Chromium reports 50, the difference being the
+eager font warm-up described below.
+
+### `document.fonts.check()` answers from the renderer, not from a status nobody sets
+
+`document.fonts.check('13px "Plus Jakarta Sans"')` returned false on a page whose
+body text was visibly rendering in that webfont. The font set itself was right -
+`document.fonts.size` was 51 and `status` was `"loaded"`, both matching Chromium -
+and text measurement was already accurate, so this was a `check()` predicate bug
+and nothing else.
+
+The cause: the shim discovers a `FontFace` for every `@font-face` rule in the
+page's own stylesheets and constructs it `unloaded`, because a face built from a
+CSS source string has not been fetched by *this code*. But the renderer downloads
+those sources itself and never told JS, so a CSS-connected face stayed `unloaded`
+for the life of the page, and `check()`, which is `all matched faces are loaded`,
+answered false. Libraries gate on `check()` to decide whether to wait before
+measuring text, so the false negative makes a page loop or mis-measure.
+
+`op_font_resource_loaded(url)` is the renderer's own answer: whether it is holding
+usable bytes for that source, i.e. whether text can be shaped with the face right
+now. The shim resolves the face's `url()` against `document.baseURI` - the same
+resolution the warm-up path used to fetch it - and a CSS-connected face's `status`
+getter consults it, latching once loaded. A data-URL source is loaded by
+construction and never asks. A script-created `FontFace` is unaffected: it is the
+page's to load, and `check()` on one still returns false until `load()` resolves,
+which is what Chromium does and what `FontFaceLoadUpdatesStatusSetReadiness`
+already pinned.
+
+**Deviation from Chromium, in the safe direction.** Chromium fetches a webfont
+only when something uses it, so on the Curiosity app it marks 2 of the 51 faces
+loaded and `check('13px Inter')` is false. Obscura eagerly warms every font URL
+the page's CSS names (so the first screenshot does not stall on serial font HTTP),
+so it genuinely has all 23 and reports them all loaded, and `check('13px Inter')`
+is true. That is a true statement about Obscura's renderer rather than a guess,
+and it errs towards "go ahead and measure" rather than towards the loop. Narrowing
+it would need the renderer's used-font set, which is not worth a new seam.
+
+Rust keeps the old behaviour: it does not bind the op, the shim's guarded call
+returns false, and every CSS-connected face stays `unloaded` there.
+
+Pinned by `PerformanceTimelineTests` (3 font facts).
+
+### Computed-style lengths are integers because layout rounds, not because JS does
+
+Chromium reports `getComputedStyle` lengths at LayoutUnit precision (1/64 px):
+a `28.4844px` box reads back as `28.4844px`, and `getBoundingClientRect().height`
+as `28.484375`. Obscura reports `28px` and `28`. This was checked on the JS side
+first and it is **not** there: `op_computed_style` passes the renderer's snapshot
+through verbatim, and `PaintCssValues.CssNumber` is `%.6g`, which prints fractions
+happily - an inline-block whose used width is fractional still reads back as
+`221.4px` today.
+
+The integers come from taffy's layout rounding: `Compute.RoundLayout`
+(`Obscura.Render/Layout/Compute.cs`), driven from `TaffyTree.cs`, snaps every
+rect to whole pixels, which is what the reference engine does and what Chromium
+does not. Fixing it means giving the CSSOM and rect paths an unrounded layout to
+read, which is a renderer change; it is recorded here and left alone.
