@@ -999,3 +999,29 @@ with F23.
 | `#/preferences?id=file-indexing-schedule` / `-monitoring` | 9.63% | F22, same grid. |
 
 Median pixel difference across the survey is 2.76%, 134 of 157 routes under 5%.
+
+## Methodology caveat: the Chromium reference is polluted by carried-over modal state
+
+Because Chromium treats `page.goto(base + '#/route')` as a same-document navigation, one SPA
+instance serves all 157 routes, and anything the app leaves open stays open. Counting
+modal/overlay nodes per route:
+
+| routes | Chromium | Obscura |
+|---|---|---|
+| `#/spaces/connect-apps` (where the modal legitimately belongs) | **26** (two modals) | 13 (one) |
+| `#/spaces/configure-apps` | 26 | 13 |
+| the 13 consecutive routes `#/users` … `#/send-email` | **26** | **0** |
+| three others | 1 | 0 |
+
+The "Connect Apps" modal opens on `#/spaces/connect-apps` and is never dismissed, so it rides along
+through the next thirteen captures — visible in the screenshots for `#/abbreviations` and
+`#/sign-in`, where Chromium renders the modal over a dimmed page and Obscura renders the route.
+On the route that owns the modal, Chromium shows **two** stacked copies (one left over from an
+earlier visit, one fresh) against Obscura's one.
+
+On these routes Obscura's rendering is the correct one and the reference is wrong. The survey's
+numbers are therefore slightly pessimistic about Obscura, not optimistic.
+
+It also means the harness needs fixing before the next run: once F9b lands, Obscura will inherit
+the same pollution and the two engines will merely be wrong together. Either force a real document
+load between routes, or dismiss overlays before capturing.
