@@ -1104,3 +1104,36 @@ closing this out.
 Scrollbars are not involved. `scroll-probe.html` measures `offsetWidth - clientWidth` as **0 in
 both engines** for `overflow-y: auto` with overflowing content, for `overflow: scroll`, and for
 `overflow: hidden auto`. Neither engine reserves a gutter.
+
+### Correction: `.tss-sidebar-middle` is sized by its own `calc()`, not by flex stretch
+
+The stretch reasoning in the previous section is wrong. `.tss-sidebar-middle` is
+`.tss-sidebar > .tss-stack-item:nth-child(2)`, and that rule sets its width directly:
+
+```css
+.tss-sidebar > .tss-stack-item:nth-child(2) {
+  margin: 0 0 0 -12px !important;
+  width: calc(100% + 20px) !important;
+  padding-left: 12px !important;
+}
+```
+
+The conclusion is the same and the arithmetic is now exact. The sidebar is 215.141 wide with 12px
+padding each side, so the containing block is **191.141**, and both sidebar `calc()`s take it:
+
+| element | declaration | Chromium | base used | Obscura | base used |
+|---|---|---|---|---|---|
+| `.tss-sidebar-middle` | `calc(100% + 20px)` | **211.141** | 191.141 | **196** | **176** |
+| `.msk-sidebar-brand` | `calc(100% + 32px)` | **223.141** | 191.141 | **208** | **176** |
+
+Two independent declarations, same containing block, and Obscura resolves both against **176**
+where Chromium uses 191.141. That rules out anything specific to either rule.
+
+`176 = 200 - 24`, which is the same containing-block computation against a **200px** sidebar — the
+width it would have before settling at 215.141. That is the stale-intermediate-basis hypothesis
+with a concrete number: the `calc()` percentage is flattened once, early, and never recomputed when
+the sidebar resizes. It also predicts the `#/manage/data/file-indexing` route's different offset,
+where the sidebar settles at a different final width.
+
+This makes the width work one defect, the same one as F29 and in the same machinery, rather than
+the loose cluster it looked like at the start.
