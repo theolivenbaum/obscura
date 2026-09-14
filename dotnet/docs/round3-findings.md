@@ -196,3 +196,41 @@ without the shape's own `transform`, so the clip landed at the origin and cut th
 to its top 203 rows of 444. Chromium-diff pixels: **23,264 before, 1,298 after** (the remainder
 is blur-kernel and anti-aliasing spread, which is expected - see the pixel-tolerance note in
 `PaintTests`).
+
+## I1 - the intrinsic sizing keywords are ignored on `min-*` and `max-*`
+
+`min-content` / `max-content` / `fit-content` are implemented for `width` and `height`, which route
+through `StylePrimitives.IntrinsicSizeKeywordValue`. `min-width`, `min-height`, `max-width` and
+`max-height` instead go through `DimensionValue`, which has no keyword path, so the declaration
+computes to `auto` and is silently dropped (`ComputedStyle.cs:1325-1351`).
+
+Measured with `intrinsic-probe.html` (a 300px container, monospace text whose min-content width is
+one 8-character word and whose max-content width is the whole string). **13 of 22 cases differ:**
+
+| case | Chromium | Obscura |
+|---|---|---|
+| `min-width: max-content` | 510.55 x 20 | 300 x 40 |
+| `max-width: min-content` | 77.06 x 120 | 300 x 40 |
+| `min-height: min-content` (block, height 40) | 120 x **120** | 120 x **40** |
+| `min-height: max-content` | 120 x 120 | 120 x 40 |
+| `min-height: fit-content` | 120 x 120 | 120 x 40 |
+| `max-height: min-content` (block, height 400) | 120 x **120** | 120 x **400** |
+| `max-height: max-content` | 120 x 120 | 120 x 400 |
+| flex column, shrinking, `min-height: min-content` | 120 x **120** | 120 x **60** |
+| flex column, shrinking, `min-height: max-content` | 120 x 120 | 120 x 60 |
+| flex row, `min-width: max-content` | 510.55 x 120 | 300 x 120 |
+| flex row, `max-width: min-content` | 77.06 x 120 | 300 x 120 |
+| grid item, `min-height: min-content` | 120 x **120** | 120 x **60** |
+| grid item, `min-width: max-content` | 510.55 x 120 | 300 x 120 |
+
+The nine that match do so because the keyword happens to agree with the default, or because they
+are the already-working `width`/`height` forms - `min-width: min-content` and
+`max-width: max-content` are vacuous on a box that already fills its container. A first version of
+this probe reported only 6 failures for exactly that reason; the height cases now put content
+taller than the container so the keyword has to do work.
+
+`width: max-content` at 509 against Chromium's 510.55 is the known text-measurement delta, not a
+keyword failure.
+
+This is what leaves the connect-apps grid at its scroll parent's 666px where Chromium expands it
+to 1677px.
