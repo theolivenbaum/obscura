@@ -1218,3 +1218,52 @@ The agent could not make `document.querySelector('.tss-sidebar-has-shift')` non-
 and checked why: **real Chromium returns null there too** from this harness shape. It declined to
 assert it rather than pinning a false expectation. That is the same conclusion the forced-reload
 re-capture reached from the other direction, arrived at independently.
+
+## F29 — FIXED (merged), and the sidebar case is a different bug after all
+
+The computed-value pass flattened **every** `calc()` to px before layout, against a basis it could
+not know: `viewport.Height` for a box offset's block axis and its own block-flow estimate
+(`Inherited.CbWidth`) for the inline axis. An absolutely positioned box resolves its offsets
+against the **padding box of the nearest positioned ancestor**, which is neither the parent that
+pass walks nor a size that exists before layout. taffy already resolves a bare percentage against
+the real containing block and resolves an opaque `calc()` handle (`CompactLength.Calc` +
+`CalcResolver`) the same way, so percentage-bearing expressions are handed to it instead of being
+flattened.
+
+Relative block-axis offsets stay flattened deliberately: taffy resolves those against a hard `0`
+(`BlockLayout`'s `ZipSize(new Size(containerInnerWidth, 0f))`). They now flatten against the
+containing block's content-box height and become `auto` when it is indefinite, which is Chromium's
+behaviour.
+
+All six `abs-probe` rows match Chromium, and a wider 17-row probe (padding-box basis, auto-height
+ancestor, non-parent ancestor, border-inset `bottom`/`right`, relative offsets, fixed,
+transform-established containing block) matches on every row — 7 of those 17 were wrong before.
+On the real page all five `.tss-dropdown-icon` elements sit at `relTop 12` inside their container,
+identical to Chromium, instead of ~470px below it.
+
+### The sidebar `calc(100% + N)` case is NOT this bug — correcting the earlier entry
+
+The "stale intermediate basis, `176 = 200 - 24`" guess recorded above is wrong, and so is the
+inference that it shared a root cause with F29. Instrumenting the resolver on `#/users` shows
+**both** bases reaching it — `calc(100% + 20px)` at `basis=191.14764 -> 211.14764`, which is
+Chromium's value, and again at `basis=176 -> 196` — and it is the 176 geometry that survives. So
+the style pass computes the right answer and something later overwrites it.
+
+Reduced (`shrink.html` in the scratchpad): a 250px `flex: 0 1 auto` column with `padding: 0 12px`
+inside a 600px row whose sibling forces it to shrink. The column settles at 226 (inner 202); a
+child with `width: calc(100% + 32px)` comes out **219** where Chromium gives 234, while `width:
+100%` and `width: 150%` beside it are exact. Remove the shrink and the calc is exact too (258 vs
+258).
+
+`FlexboxLayout.GenerateAnonymousFlexItems` resolves each child size against
+`constants.NodeInnerSize` once and the flex algorithm reuses that resolution, so nothing
+re-resolves after the item shrinks. That is the flex algorithm, not the computed-value pass, and it
+is a much larger change. Recorded as the remaining gap rather than fixed.
+
+Still open and unmeasured: `#/manage/data/file-indexing` shows a -32 sidebar offset rather than
+-15. The same flex-shrink mechanism predicts a different stale offset per route, but that specific
+number was not checked.
+
+Also unfixed by design: `getComputedStyle().top` still reports the flattened `470px` on a
+content-sized combobox. That is the used-value reporting gap tracked under F23, not the geometry —
+the box itself is now in the right place.
