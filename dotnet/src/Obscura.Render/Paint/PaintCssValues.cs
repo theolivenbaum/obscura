@@ -83,6 +83,21 @@ internal static class PaintCssValues
                 $"rgba({color.R}, {color.G}, {color.B}, {CssAlpha(color.A)})");
 
     /// <summary>
+    /// The <c>color(srgb r g b [/ a])</c> serialization Chromium uses for a colour that is not
+    /// in the legacy sRGB space, with channels as 0-1 numbers.
+    /// </summary>
+    internal static string SrgbFunctionColor(RgbaColor color)
+    {
+        string channels = CssNumber(color.R / 255f)
+            + " " + CssNumber(color.G / 255f)
+            + " " + CssNumber(color.B / 255f);
+
+        return color.A == 255
+            ? "color(srgb " + channels + ")"
+            : "color(srgb " + channels + " / " + CssAlpha(color.A) + ")";
+    }
+
+    /// <summary>
     /// Serialize an 8-bit alpha the way Blink's <c>Color::SerializeAsCSSColor</c> does:
     /// the shortest decimal with at most three fraction digits that quantizes back to the
     /// same byte.

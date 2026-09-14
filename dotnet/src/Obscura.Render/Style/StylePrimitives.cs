@@ -1298,6 +1298,101 @@ public static partial class ComputedStyle
         return float.IsFinite(ratio) && ratio > 0f ? ratio : null;
     }
 
+    /// <summary>
+    /// The CSSOM form of an <c>aspect-ratio</c> declaration: both terms of the ratio, with the
+    /// implicit <c>1</c> written out, and <c>auto</c> kept in front of it when present.
+    /// </summary>
+    /// <remarks>
+    /// Chromium reports <c>1.5</c> as <c>1.5 / 1</c> and <c>auto 16/9</c> as
+    /// <c>auto 16 / 9</c>, so the computed value cannot be rebuilt from
+    /// <see cref="LayoutStyle.AspectRatio"/>, which is one float.
+    /// </remarks>
+    internal static string? SerializeAspectRatio(string value)
+    {
+        bool auto = false;
+        List<string> kept = [];
+        foreach (string token in SplitWhitespace(value.Trim()))
+        {
+            if (CssText.EqualsAscii(token, "auto"))
+            {
+                auto = true;
+            }
+            else
+            {
+                kept.Add(token);
+            }
+        }
+
+        if (kept.Count == 0)
+        {
+            return null;
+        }
+
+        string ratioPart = string.Join(string.Empty, kept);
+        int slash = ratioPart.IndexOf('/');
+        string? width = slash >= 0 ? ratioPart[..slash].Trim() : ratioPart.Trim();
+        string? height = slash >= 0 ? ratioPart[(slash + 1)..].Trim() : "1";
+        if (ParseF32(width) is not { } numerator
+            || ParseF32(height) is not { } denominator
+            || numerator <= 0f
+            || denominator <= 0f)
+        {
+            return null;
+        }
+
+        string ratio = PaintCssValues.CssNumber(numerator) + " / " + PaintCssValues.CssNumber(denominator);
+
+        return auto ? "auto " + ratio : ratio;
+    }
+
+    /// <summary>
+    /// Whether a specified colour computes to a non-legacy sRGB colour, which CSSOM serializes
+    /// as <c>color(srgb r g b)</c> rather than <c>rgb()</c>/<c>rgba()</c>.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/style.rs, which has no notion of a colour's
+    /// space and reports every colour as <c>rgb()</c>/<c>rgba()</c>. Chromium keeps the space a
+    /// colour was specified in: the legacy notations (a hex, a named colour, <c>rgb()</c>,
+    /// <c>hsl()</c>, <c>hwb()</c>) serialize as <c>rgb()</c>, while <c>color(srgb …)</c> and a
+    /// <c>color-mix()</c> interpolated in a space that resolves to sRGB serialize as
+    /// <c>color(srgb …)</c>. Page script string-compares computed values, and Tesserae's
+    /// <c>color-mix()</c> surfaces (cards, hovers, the icon chips) were 25 of the mismatches in
+    /// one survey.
+    /// <para>
+    /// Only the sRGB family is recognised. A colour specified as <c>lab()</c>, <c>oklch()</c> or
+    /// <c>color(display-p3 …)</c> keeps its own notation in Chromium, and reproducing that needs
+    /// a wider colour than the engine's 8-bit sRGB - those stay <c>rgb()</c>. For the same
+    /// reason the channels reported here are the stored bytes: a mix of two opaque colours can
+    /// differ from Chromium in the sixth digit. See "Known deviations" in todo.md.
+    /// </para>
+    /// </remarks>
+    internal static bool IsSrgbFunctionColor(string value)
+    {
+        string lower = CssText.AsciiLower(value.Trim());
+        if (lower.StartsWith("color(", StringComparison.Ordinal))
+        {
+            List<string> parts = SplitWsParen(lower["color(".Length..]);
+            return parts.Count != 0 && parts[0] == "srgb";
+        }
+
+        if (!lower.StartsWith("color-mix(", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // The mix result is a colour in the interpolation space; the three sRGB spellings all
+        // serialize through `color(srgb …)`.
+        List<string> arguments = SplitTopLevel(lower["color-mix(".Length..], ',');
+        if (arguments.Count == 0)
+        {
+            return false;
+        }
+
+        List<string> space = SplitWsParen(arguments[0]);
+
+        return space.Count >= 2 && space[0] == "in" && space[1] is "srgb" or "hsl" or "hwb";
+    }
+
     /// <summary>Rust <c>parse_url</c>.</summary>
     internal static string? ParseUrl(string value)
     {

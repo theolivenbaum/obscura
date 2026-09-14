@@ -490,6 +490,18 @@ internal static class DomCascade
                         style.Margin = new Edges(3f, 3f, 3f, 4f);
                         style.Padding = Edges.Zero;
                         style.Border = Edges.Zero;
+
+                        // Chromium's UA sheet clears the field background on the two controls
+                        // it paints itself; the tag-keyed `input` arm gave them the white one
+                        // a text field gets.
+                        style.BackgroundColor = null;
+                        break;
+                    case "file":
+                        // `input[type=file] { color: inherit; background-color: initial }` -
+                        // the file control is the one input whose label takes the page's
+                        // colour. Null restores inheritance in the top-down pass.
+                        style.Color = null;
+                        style.BackgroundColor = null;
                         break;
                     case "range":
                     case "color":

@@ -245,6 +245,20 @@ public static partial class ComputedStyle
             style.BorderColor = new RgbaColor(118, 118, 118, 255);
             style.BackgroundColor = new RgbaColor(255, 255, 255, 255);
             style.NativeControlAppearance = true;
+
+            // DEVIATION from crates/obscura-render/src/style.rs, whose `input` arm sets no
+            // colour and no overflow, so a text field inherited the page's `color` and let its
+            // value paint outside the box. Chromium's UA sheet gives every form control
+            // `color: fieldtext`, which is black and does not inherit, and gives `input`
+            // `overflow: clip`. `input[type=file]` takes its colour back from the page and
+            // checkbox/radio/file clear the field background - those need the `type` attribute
+            // and are in DomCascade beside the other per-type UA rules. See "Known deviations"
+            // in todo.md.
+            style.Color = new RgbaColor(0, 0, 0, 255);
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 1;
+            style.OverflowSpecifiedY = 1;
+            RecomputeOverflow(style);
         }
         else if (tag == "textarea")
         {
@@ -267,6 +281,14 @@ public static partial class ComputedStyle
             };
             style.BorderColor = new RgbaColor(118, 118, 118, 255);
             style.BackgroundColor = new RgbaColor(255, 255, 255, 255);
+
+            // Chromium's UA sheet: `textarea { color: fieldtext; overflow: auto }`. The scroller
+            // is what keeps a long value inside the box instead of painting past it.
+            style.Color = new RgbaColor(0, 0, 0, 255);
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 4;
+            style.OverflowSpecifiedY = 4;
+            RecomputeOverflow(style);
         }
         else if (tag is "table" or "tbody" or "thead" or "tfoot")
         {
@@ -319,6 +341,16 @@ public static partial class ComputedStyle
             style.OverflowAxesSet = true;
             style.OverflowSpecifiedX = 1;
             style.OverflowSpecifiedY = 1;
+            style.OverflowClipMargin = "content-box";
+            RecomputeOverflow(style);
+        }
+        else if (tag is "canvas" or "video")
+        {
+            // The same UA rule as `img`: a replaced element clips to its content box.
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 1;
+            style.OverflowSpecifiedY = 1;
+            style.OverflowClipMargin = "content-box";
             RecomputeOverflow(style);
         }
 
@@ -1320,6 +1352,7 @@ public static partial class ComputedStyle
 
             case "aspect-ratio":
                 style.AspectRatio = ParseAspectRatio(value);
+                style.AspectRatioSpecified = SerializeAspectRatio(value);
                 style.AspectRatioIsMapped = false;
                 style.AspectRatioIsIntrinsic = false;
                 return true;
@@ -1547,6 +1580,8 @@ public static partial class ComputedStyle
 
             case "background-color":
                 style.BackgroundColor = CssColor.ParseForScheme(value, style.ColorSchemeDark);
+                style.BackgroundColorIsSrgbFunction =
+                    style.BackgroundColor is not null && IsSrgbFunctionColor(value);
                 return true;
 
             case "background":
@@ -1555,6 +1590,7 @@ public static partial class ComputedStyle
                 if (value.Trim().Length != 0)
                 {
                     style.BackgroundColor = null;
+                    style.BackgroundColorIsSrgbFunction = false;
                     SetBackgroundGradients(style, value);
                     // The shorthand's <color> belongs to its final layer, and it coexists
                     // with the image layers above it: `background: linear-gradient(...),
@@ -1566,6 +1602,8 @@ public static partial class ComputedStyle
                         backgroundLayers.Count > 0 ? backgroundLayers[^1].Trim() : value;
                     style.BackgroundColor =
                         CssColor.ParseForScheme(finalLayer, style.ColorSchemeDark);
+                    style.BackgroundColorIsSrgbFunction =
+                        style.BackgroundColor is not null && IsSrgbFunctionColor(finalLayer);
 
                     style.BackgroundImage = ParseUrl(value);
                     style.BackgroundSize = null;
@@ -1638,6 +1676,7 @@ public static partial class ComputedStyle
             case "color":
             case "-webkit-text-fill-color":
                 style.Color = CssColor.ParseForScheme(value, style.ColorSchemeDark);
+                style.ColorIsSrgbFunction = style.Color is not null && IsSrgbFunctionColor(value);
                 return true;
 
             case "fill":
@@ -1952,6 +1991,7 @@ public static partial class ComputedStyle
                     // A shorthand always assigns both longhands.
                     style.FlexDirection = flow.Direction;
                     style.FlexWrap = flow.Wrap;
+                    style.FlexDirectionAuthored = true;
                 }
 
                 return true;
@@ -1961,15 +2001,19 @@ public static partial class ComputedStyle
                 {
                     case "row":
                         style.FlexDirection = Layout.FlexDirection.Row;
+                        style.FlexDirectionAuthored = true;
                         break;
                     case "row-reverse":
                         style.FlexDirection = Layout.FlexDirection.RowReverse;
+                        style.FlexDirectionAuthored = true;
                         break;
                     case "column":
                         style.FlexDirection = Layout.FlexDirection.Column;
+                        style.FlexDirectionAuthored = true;
                         break;
                     case "column-reverse":
                         style.FlexDirection = Layout.FlexDirection.ColumnReverse;
+                        style.FlexDirectionAuthored = true;
                         break;
                 }
 
@@ -2016,7 +2060,7 @@ public static partial class ComputedStyle
                 return true;
 
             case "flex-basis":
-                style.FlexBasis = DimensionValue(value.Trim());
+                SetFlexBasis(style, value);
                 return true;
 
             case "flex":
@@ -2205,6 +2249,30 @@ public static partial class ComputedStyle
 
                 style.OverflowAxesSet = true;
                 RecomputeOverflow(style);
+                return true;
+            }
+
+            case "overflow-clip-margin":
+            {
+                // Reported only - see LayoutStyle.OverflowClipMargin. A box keyword or a
+                // length; anything else leaves the UA value in place, as an invalid
+                // declaration must.
+                string clipMargin = CssText.AsciiLower(value.Trim());
+                if (clipMargin is "border-box" or "padding-box" or "content-box")
+                {
+                    style.OverflowClipMargin = clipMargin;
+                }
+                else if (clipMargin is "initial" or "unset" or "revert" or "revert-layer")
+                {
+                    style.OverflowClipMargin = null;
+                }
+                else if (DimensionValue(clipMargin) is { Kind: DimensionKind.Px } margin)
+                {
+                    style.OverflowClipMargin = margin.Value == 0f
+                        ? null
+                        : PaintCssValues.CssPx(margin.Value);
+                }
+
                 return true;
             }
 

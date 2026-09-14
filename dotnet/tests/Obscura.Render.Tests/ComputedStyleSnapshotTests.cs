@@ -65,6 +65,12 @@ public class ComputedStyleSnapshotTests
     /// and bootstrap's fallback then answered from the bounding box - <c>0px</c> for most
     /// elements, which reads as "pinned to the top-left" to any script that checks.
     /// </summary>
+    /// <remarks>
+    /// The positioned half of this test asserted <c>auto</c> for the two sides nobody
+    /// specified. Chromium reports the *used* offsets of a positioned box on all four sides:
+    /// measured on Chromium 141 at a 1280x720 viewport, this box reports
+    /// <c>top: 10px / right: 1277px / bottom: 692px / left: -5px</c>.
+    /// </remarks>
     [Fact]
     public void InsetsAreAutoUntilSpecified()
     {
@@ -81,8 +87,8 @@ public class ComputedStyleSnapshotTests
 
         Assert.Equal("10px", positioned["top"]);
         Assert.Equal("-5px", positioned["left"]);
-        Assert.Equal("auto", positioned["right"]);
-        Assert.Equal("auto", positioned["bottom"]);
+        Assert.Equal("1277px", positioned["right"]);
+        Assert.Equal("692px", positioned["bottom"]);
     }
 
     [Fact]
@@ -498,6 +504,311 @@ public class ComputedStyleSnapshotTests
         Assert.Equal("blur(32px)", computed["filter"]);
         Assert.Equal("rgb(255, 0, 0) 0px 0px 32px 0px", computed["box-shadow"]);
         Assert.Equal("32px", computed["font-size"]);
+    }
+
+    /// <summary>
+    /// A <c>flex</c> shorthand carrying a percentage-dependent <c>calc()</c> basis keeps it,
+    /// both as the computed value and as the basis the flex algorithm lays the item out with.
+    /// </summary>
+    /// <remarks>
+    /// The shorthand split on plain whitespace, so <c>calc(50% - 6px)</c> arrived as three
+    /// fragments and the declaration lost its basis entirely; the item then fell back to its
+    /// <c>width</c> and laid out 820px wide, one per row, where Chromium lays out two 404px
+    /// items per row.
+    /// </remarks>
+    [Fact]
+    public void FlexShorthandKeepsAPercentageCalcBasis()
+    {
+        Dictionary<string, string> computed = Computed(
+            """
+            <div style="display:flex;flex-wrap:wrap;gap:12px;width:820px">
+                <div id="box" style="flex:1 1 calc(50% - 6px);width:100%"></div>
+                <div style="flex:1 1 calc(50% - 6px);width:100%"></div>
+            </div>
+            """,
+            "box");
+
+        Assert.Equal("calc(50% - 6px)", computed["flex-basis"]);
+        Assert.Equal("1 1 calc(50% - 6px)", computed["flex"]);
+        Assert.Equal("404px", computed["width"]);
+    }
+
+    /// <summary>
+    /// The same basis on the longhand, with no growth to hide a wrong one: the item is sized by
+    /// the basis alone.
+    /// </summary>
+    [Fact]
+    public void FlexBasisLonghandResolvesACalcAgainstTheContainer()
+    {
+        Dictionary<string, string> computed = Computed(
+            """
+            <div style="display:flex;flex-wrap:wrap;gap:12px;width:820px">
+                <div id="box" style="flex:0 0 calc(50% - 6px)"></div>
+                <div style="flex:0 0 calc(50% - 6px)"></div>
+            </div>
+            """,
+            "box");
+
+        Assert.Equal("calc(50% - 6px)", computed["flex-basis"]);
+        Assert.Equal("404px", computed["width"]);
+    }
+
+    /// <summary>
+    /// Math that does not depend on the percentage basis still computes to a length, which is
+    /// what Chromium reports for it.
+    /// </summary>
+    [Fact]
+    public void FlexBasisWithoutAPercentageComputesToALength()
+    {
+        Dictionary<string, string> computed = Computed(
+            """<div style="display:flex"><div id="box" style="flex-basis:calc(10px + 2px)"></div></div>""",
+            "box");
+
+        Assert.Equal("12px", computed["flex-basis"]);
+    }
+
+    /// <summary>
+    /// The UA sheet's <c>overflow</c> defaults for the replaced and form elements that have
+    /// one. A missing default let an input's value and a canvas's children paint outside the
+    /// box, and reported <c>visible</c> where Chromium reports <c>clip</c> or <c>auto</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("<input id=\"box\">", "clip", "0px")]
+    [InlineData("<textarea id=\"box\"></textarea>", "auto", "0px")]
+    [InlineData("<canvas id=\"box\"></canvas>", "clip", "content-box")]
+    [InlineData("<video id=\"box\"></video>", "clip", "content-box")]
+    [InlineData("<img id=\"box\">", "clip", "content-box")]
+    [InlineData("<select id=\"box\"></select>", "visible", "0px")]
+    [InlineData("<button id=\"box\">b</button>", "visible", "0px")]
+    [InlineData("<div id=\"box\">d</div>", "visible", "0px")]
+    public void UserAgentOverflowDefaultsMatchChromium(string html, string overflow, string clipMargin)
+    {
+        Dictionary<string, string> computed = Computed(html, "box");
+
+        Assert.Equal(overflow, computed["overflow"]);
+        Assert.Equal(overflow, computed["overflow-x"]);
+        Assert.Equal(overflow, computed["overflow-y"]);
+        Assert.Equal(clipMargin, computed["overflow-clip-margin"]);
+    }
+
+    /// <summary>
+    /// An author <c>overflow-clip-margin</c> is reported; the property has no paint effect.
+    /// </summary>
+    [Fact]
+    public void OverflowClipMarginReportsTheAuthoredValue()
+    {
+        Assert.Equal(
+            "10px",
+            Computed("""<div id="box" style="overflow:clip;overflow-clip-margin:10px">x</div>""", "box")
+                ["overflow-clip-margin"]);
+        Assert.Equal(
+            "padding-box",
+            Computed("""<img id="box" style="overflow-clip-margin:padding-box">""", "box")
+                ["overflow-clip-margin"]);
+    }
+
+    /// <summary>
+    /// Chromium's UA sheet gives a form control <c>color: fieldtext</c>, which is black and
+    /// does not inherit, and clears the field background on the controls it paints itself.
+    /// </summary>
+    [Theory]
+    [InlineData("<input id=\"box\">", "rgb(0, 0, 0)", "rgb(255, 255, 255)")]
+    [InlineData("<input id=\"box\" type=\"checkbox\">", "rgb(0, 0, 0)", "rgba(0, 0, 0, 0)")]
+    [InlineData("<input id=\"box\" type=\"radio\">", "rgb(0, 0, 0)", "rgba(0, 0, 0, 0)")]
+    [InlineData("<input id=\"box\" type=\"file\">", "rgb(50, 49, 48)", "rgba(0, 0, 0, 0)")]
+    [InlineData("<textarea id=\"box\"></textarea>", "rgb(0, 0, 0)", "rgb(255, 255, 255)")]
+    public void UserAgentFormControlColoursMatchChromium(string control, string color, string background)
+    {
+        Dictionary<string, string> computed = Computed(
+            $"""<body style="color:rgb(50, 49, 48)">{control}</body>""",
+            "box");
+
+        Assert.Equal(color, computed["color"]);
+        Assert.Equal(background, computed["background-color"]);
+    }
+
+    /// <summary>An author declaration still wins over the UA control colours.</summary>
+    [Fact]
+    public void AuthorColoursWinOverTheFormControlDefaults()
+    {
+        Dictionary<string, string> computed = Computed(
+            """<input id="box" style="color:#a0f;background:#fe0">""",
+            "box");
+
+        Assert.Equal("rgb(170, 0, 255)", computed["color"]);
+        Assert.Equal("rgb(255, 238, 0)", computed["background-color"]);
+    }
+
+    /// <summary>
+    /// A colour that is not in the legacy sRGB space serializes as <c>color(srgb …)</c>. The
+    /// channels are the engine's 8-bit sRGB, so a mix of two opaque colours can differ from
+    /// Chromium in the sixth digit; a mix with <c>transparent</c>, which is what Tesserae's
+    /// surfaces use, is exact.
+    /// </summary>
+    [Fact]
+    public void ColorMixInSrgbSerializesAsAColorFunction()
+    {
+        Dictionary<string, string> computed = Computed(
+            """
+            <div id="box" style="background:color-mix(in srgb, #0443d3 14%, transparent);
+                                 color:color-mix(in srgb, #0443d3 40%, transparent)">x</div>
+            """,
+            "box");
+
+        Assert.Equal("color(srgb 0.0156863 0.262745 0.827451 / 0.14)", computed["background-color"]);
+        Assert.Equal("color(srgb 0.0156863 0.262745 0.827451 / 0.4)", computed["color"]);
+    }
+
+    /// <summary>A legacy notation keeps <c>rgb()</c>/<c>rgba()</c>, including one with alpha.</summary>
+    [Fact]
+    public void LegacyColourNotationsStillSerializeAsRgb()
+    {
+        Dictionary<string, string> computed = Computed(
+            """<div id="box" style="background:rgb(4 67 211 / 14%);color:#0443d3">x</div>""",
+            "box");
+
+        Assert.Equal("rgba(4, 67, 211, 0.14)", computed["background-color"]);
+        Assert.Equal("rgb(4, 67, 211)", computed["color"]);
+    }
+
+    /// <summary>
+    /// <c>align-self</c>, <c>aspect-ratio</c> and <c>overflow-clip-margin</c> were missing from
+    /// the snapshot entirely, so script read the empty string for all three.
+    /// </summary>
+    [Fact]
+    public void SelfAlignmentAndRatioAreReported()
+    {
+        Dictionary<string, string> initial = Computed("<div id=\"box\">x</div>", "box");
+
+        Assert.Equal("auto", initial["align-self"]);
+        Assert.Equal("auto", initial["aspect-ratio"]);
+        Assert.Equal("0px", initial["overflow-clip-margin"]);
+
+        Dictionary<string, string> set = Computed(
+            """<div style="display:flex"><div id="box" style="align-self:center;aspect-ratio:16/9">x</div></div>""",
+            "box");
+
+        Assert.Equal("center", set["align-self"]);
+        Assert.Equal("16 / 9", set["aspect-ratio"]);
+
+        // Chromium writes the implicit second term out, and keeps `auto` in front of a ratio.
+        Assert.Equal(
+            "1.5 / 1",
+            Computed("""<div id="box" style="aspect-ratio:1.5">x</div>""", "box")["aspect-ratio"]);
+        Assert.Equal(
+            "auto 16 / 9",
+            Computed("""<div id="box" style="aspect-ratio:auto 16/9">x</div>""", "box")["aspect-ratio"]);
+
+        // A ratio mapped from the width/height attributes is not the property's value.
+        Assert.Equal(
+            "auto",
+            Computed("""<img id="box" width="16" height="9">""", "box")["aspect-ratio"]);
+    }
+
+    /// <summary>
+    /// The initial <c>auto</c> minimum size computes to <c>0px</c> except on a flex or grid
+    /// item, where it stays <c>auto</c>. Reporting <c>auto</c> everywhere told script the box
+    /// had a minimum it never set.
+    /// </summary>
+    [Fact]
+    public void AutomaticMinimumSizeIsReportedOnlyForFlexAndGridItems()
+    {
+        Dictionary<string, string> block = Computed(
+            """<div style="display:block"><div id="box">x</div></div>""",
+            "box");
+
+        Assert.Equal("0px", block["min-height"]);
+        Assert.Equal("0px", block["min-width"]);
+
+        Dictionary<string, string> flexItem = Computed(
+            """<div style="display:flex"><div id="box">x</div></div>""",
+            "box");
+
+        Assert.Equal("auto", flexItem["min-height"]);
+        Assert.Equal("auto", flexItem["min-width"]);
+
+        Dictionary<string, string> gridItem = Computed(
+            """<div style="display:grid"><div id="box">x</div></div>""",
+            "box");
+
+        Assert.Equal("auto", gridItem["min-height"]);
+
+        // An out-of-flow child of a flex container is not a flex item.
+        Dictionary<string, string> positioned = Computed(
+            """<div style="display:flex"><div id="box" style="position:absolute">x</div></div>""",
+            "box");
+
+        Assert.Equal("0px", positioned["min-height"]);
+
+        // A declared minimum is reported whatever the box is.
+        Assert.Equal(
+            "4px",
+            Computed("""<div style="display:flex"><div id="box" style="min-height:4px">x</div></div>""", "box")
+                ["min-height"]);
+    }
+
+    /// <summary>
+    /// A relatively positioned box reports its used offsets, which are the shift it was given
+    /// and the negation of that on the opposite side.
+    /// </summary>
+    [Fact]
+    public void RelativeInsetsReportTheUsedOffsets()
+    {
+        Dictionary<string, string> none = Computed(
+            """<div id="box" style="position:relative">x</div>""",
+            "box");
+
+        Assert.Equal("0px", none["top"]);
+        Assert.Equal("0px", none["right"]);
+        Assert.Equal("0px", none["bottom"]);
+        Assert.Equal("0px", none["left"]);
+
+        Dictionary<string, string> shifted = Computed(
+            """<div id="box" style="position:relative;bottom:8px;right:3px">x</div>""",
+            "box");
+
+        Assert.Equal("-8px", shifted["top"]);
+        Assert.Equal("3px", shifted["right"]);
+        Assert.Equal("8px", shifted["bottom"]);
+        Assert.Equal("-3px", shifted["left"]);
+
+        // A percentage offset resolves against the containing block, not the viewport.
+        Dictionary<string, string> percent = Computed(
+            """
+            <div style="position:relative;width:300px;height:34px">
+                <div id="box" style="position:absolute;top:50%;width:10px;height:10px"></div>
+            </div>
+            """,
+            "box");
+
+        Assert.Equal("17px", percent["top"]);
+        Assert.Equal("7px", percent["bottom"]);
+    }
+
+    /// <summary>
+    /// A table box is laid out as an internal flex container, which must not reach the reported
+    /// style: CSS gives a table no flex formatting context, so <c>flex-direction</c> keeps its
+    /// initial <c>row</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("<table id=\"box\"><tr><td>d</td></tr></table>")]
+    [InlineData("<table><thead id=\"box\"><tr><th>h</th></tr></thead></table>")]
+    [InlineData("<table><tbody id=\"box\"><tr><td>d</td></tr></tbody></table>")]
+    [InlineData("<table><tr><th id=\"box\">h</th></tr></table>")]
+    [InlineData("<table><tr><td id=\"box\">d</td></tr></table>")]
+    public void TableBoxesReportTheInitialFlexDirection(string html)
+    {
+        Assert.Equal("row", Computed(html, "box")["flex-direction"]);
+    }
+
+    /// <summary>An author <c>flex-direction</c> on such a box is still reported.</summary>
+    [Fact]
+    public void AnAuthoredFlexDirectionOnATableBoxIsReported()
+    {
+        Assert.Equal(
+            "column",
+            Computed("""<table id="box" style="flex-direction:column"><tr><td>d</td></tr></table>""", "box")
+                ["flex-direction"]);
     }
 
     /// <summary>

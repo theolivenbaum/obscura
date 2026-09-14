@@ -359,6 +359,10 @@ public static class CssAnimationSampler
             case AnimatedProperty.FlexBasis
                 when value is AnimationValue.Length { Value: AnimatedLength.DimensionLength basis }:
                 style.FlexBasis = basis.Value;
+
+                // The sampled value replaces the declaration, math function included.
+                style.FlexBasisCalc = null;
+                style.FlexBasisSpecified = null;
                 break;
 
             case AnimatedProperty.Opacity when value is AnimationValue.Number number:
