@@ -387,6 +387,14 @@ public sealed class LayoutStyle
     public float? AspectRatio;
 
     /// <summary>
+    /// The authored <c>aspect-ratio</c>, already in CSSOM's <c>W / H</c> form. Only an
+    /// authored declaration sets it: a ratio derived from <c>width</c>/<c>height</c>
+    /// attributes or from decoded media is not the computed value of the property, and
+    /// Chromium reports <c>auto</c> for it.
+    /// </summary>
+    public string? AspectRatioSpecified;
+
+    /// <summary>
     /// Whether the preferred ratio came from decoded intrinsic media and therefore applies to
     /// the content box regardless of <c>box-sizing</c>.
     /// </summary>
@@ -654,6 +662,16 @@ public sealed class LayoutStyle
     /// <summary>Foreground (text) color for the paint step.</summary>
     public RgbaColor? Color;
 
+    /// <summary>
+    /// Whether <see cref="Color"/> / <see cref="BackgroundColor"/> were specified in a
+    /// non-legacy sRGB notation, which decides only how <c>getComputedStyle</c> serializes
+    /// them: <c>color(srgb r g b)</c> rather than <c>rgb()</c>/<c>rgba()</c>.
+    /// </summary>
+    public bool ColorIsSrgbFunction;
+
+    /// <inheritdoc cref="ColorIsSrgbFunction"/>
+    public bool BackgroundColorIsSrgbFunction;
+
     /// <summary>Computed SVG presentation properties supplied by author CSS.</summary>
     /// <remarks>
     /// Inline SVG is serialized into a standalone document for the SVG rasterizer; without
@@ -854,6 +872,31 @@ public sealed class LayoutStyle
     /// </summary>
     public Dimension FlexBasis;
 
+    /// <summary>
+    /// A <c>flex-basis</c> written as CSS math that depends on the percentage basis, kept
+    /// unresolved so the flex algorithm can resolve it against the container's inner main
+    /// size the way a bare percentage is resolved.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="FlexBasis"/> stays <c>auto</c> while this is set;
+    /// <c>TaffyStyleMapping</c> hands taffy the calc handle instead. The percentage basis is
+    /// not known at computed-value time, and flattening it against the initial 16px made
+    /// <c>flex: 1 1 calc(50% - 6px)</c> a 2px basis.
+    /// </remarks>
+    public GridCalcExpression? FlexBasisCalc;
+
+    /// <summary>
+    /// The specified <c>flex-basis</c> text when the computed value keeps its math function
+    /// (a percentage-dependent <c>calc()</c>), which is what <c>getComputedStyle</c> reports.
+    /// </summary>
+    public string? FlexBasisSpecified;
+
+    /// <summary>
+    /// Whether <c>flex-direction</c> (or <c>flex-flow</c>) was authored, as opposed to
+    /// <see cref="FlexDirection"/> carrying the internal table approximation's column.
+    /// </summary>
+    internal bool FlexDirectionAuthored;
+
     // CSS Grid. Tracks are stored as taffy sizing functions; GridAreas is the parsed
     // `grid-template-areas` matrix (one list per row, "." for a null cell), resolved to line
     // placements on children in a later pass.
@@ -998,6 +1041,17 @@ public sealed class LayoutStyle
 
     /// <summary>Deferred functional inset expressions in top/right/bottom/left order.</summary>
     public string?[] InsetExpressions = new string?[4];
+
+    /// <summary>
+    /// <c>overflow-clip-margin</c>, reported only. <c>null</c> is the initial <c>0px</c>; the
+    /// UA sheet gives a replaced element <c>content-box</c>.
+    /// </summary>
+    /// <remarks>
+    /// The property has no paint effect here: an element with <c>overflow: clip</c> clips at
+    /// its padding box, which is what <c>0px</c> means. A <c>content-box</c> origin (and any
+    /// non-zero margin) would move that edge and is not modeled.
+    /// </remarks>
+    public string? OverflowClipMargin;
 
     /// <summary>
     /// <c>overflow</c>/-x/-y other than <c>visible</c>: clips this element's descendants to its

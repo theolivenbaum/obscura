@@ -1203,11 +1203,162 @@ Neither engine parsed the CSS Color 4 `color()` function, so
 nothing at all. C# parses the `srgb` space (`ParseColorFunction`); wider spaces
 still parse as nothing rather than being silently clipped into sRGB.
 
-`RgbaColor` is Rust's `[u8; 4]`, so `getComputedStyle` returns the equivalent
-`rgba(4, 67, 211, 0.14)` where Chromium preserves the wide-gamut
-`color(srgb ...)` spelling. The numbers agree; only the spelling differs.
-Matching Chromium here needs a color-space tag on the color model and is not
-done.
+`RgbaColor` is Rust's `[u8; 4]`, so `getComputedStyle` returned the equivalent
+`rgba(4, 67, 211, 0.14)` where Chromium preserves the `color(srgb ...)`
+spelling. The spelling is now carried (below); the numbers are still 8-bit.
+
+### A non-legacy sRGB colour serializes as `color(srgb ...)`
+
+Chromium keeps the space a colour was specified in. The legacy notations - a
+hex, a named colour, `rgb()`, `hsl()`, `hwb()` - serialize as
+`rgb()`/`rgba()`, while `color(srgb ...)` and a `color-mix()` interpolated in a
+space that resolves to sRGB serialize as `color(srgb 0.0156863 0.262745
+0.827451 / 0.14)`. `crates/obscura-render` has no notion of a colour's space and
+reports every colour as `rgb()`/`rgba()`; that was 25 of the mismatches in one
+survey of Curiosity Workspace, all of them Tesserae's `color-mix()` surfaces.
+
+`ComputedStyle.IsSrgbFunctionColor` decides it from the specified text, two
+bools on `LayoutStyle` carry it for `color` and `background-color`, and
+`PaintCssValues.SrgbFunctionColor` renders it. Two limits, both from the 8-bit
+colour model:
+
+- Only the sRGB family is recognised. `lab()`, `oklch()`, `color(display-p3 ...)`
+  and a `color-mix(in oklab, ...)` keep their own notation in Chromium and are
+  still reported as `rgb()` here.
+- The channels are the stored bytes, so a mix of two opaque colours can differ in
+  the sixth digit (`color-mix(in srgb, red, blue)` is `0.501961` here against
+  Chromium's `0.5`). A mix with `transparent`, which is the Tesserae pattern,
+  keeps the other colour's channels exactly.
+
+The flag is per declaration, so a descendant that *inherits* a `color-mix()`
+`color` reports it as `rgb()` where Chromium keeps the space. Carrying it would
+mean copying the flag beside `Color` in the top-down inheritance pass.
+
+Covered by `ColorMixInSrgbSerializesAsAColorFunction` and
+`LegacyColourNotationsStillSerializeAsRgb`.
+
+### A `flex-basis` can be `calc()`, and it resolves against the flex container
+
+`parse_flex_shorthand` splits on plain whitespace, so `flex: 1 1 calc(50% - 6px)`
+arrived as three fragments, none of them a basis, and the declaration lost its
+basis entirely: the item fell back to its `width` (820px, one per row, where
+Chromium lays out two 404px items per row) or, with no width, collapsed to zero.
+The longhand did parse, but `dimension_value` flattens the expression against the
+initial 16px, so `flex-basis: calc(50% - 6px)` became a 2px basis and reported
+`2px`.
+
+The percentage basis of a flex basis is the container's inner main size and is
+not known at computed-value time, exactly as for a grid track. So
+`ComputedStyle.SetFlexBasis` keeps a percentage-dependent expression whole in
+`LayoutStyle.FlexBasisCalc` (a `GridCalcExpression`, taking its font/viewport
+context from the same `SetGridCalcContext` call), `TaffyStyleMapping` hands taffy
+the calc handle, and the flex algorithm resolves it through the existing
+`CalcResolver`. `FlexBasis` itself stays `auto` while that is set, so nothing that
+reads the dimension directly sees a flattened value. The computed value reports
+the math function, which is what Chromium reports.
+
+This was Tesserae's chat suggestion cards
+(`.msk-chat-view-suggestions > .tss-stack-item { flex: 1 1 calc(50% - 6px) }`):
+four full-width cards where Chromium lays out four 404px cards two per row.
+
+Covered by `FlexShorthandKeepsAPercentageCalcBasis`,
+`FlexBasisLonghandResolvesACalcAgainstTheContainer` and
+`FlexBasisWithoutAPercentageComputesToALength`.
+
+### The UA sheet's overflow and colour defaults for controls and replaced boxes
+
+`ua_style` gives neither the form controls nor `canvas`/`video` an `overflow`, and
+gives no control a colour. Chromium's UA sheet gives `input` `overflow: clip`,
+`textarea` `overflow: auto`, and `canvas`/`video` the same
+`overflow: clip; overflow-clip-margin: content-box` an image already had here, so
+an input's value and a canvas's children could paint outside their boxes. It also
+gives every form control `color: fieldtext`, which is black and does *not*
+inherit, and clears the field background on the two controls it paints itself:
+
+- `input` and `textarea` compute `color: rgb(0, 0, 0)` rather than inheriting the
+  page's.
+- `input[type=checkbox]` / `[type=radio]` compute `background-color:
+  rgba(0, 0, 0, 0)`, not the text field's white. Unlike Chromium the engine has no
+  native control painter, so an unstyled checkbox now paints as its border alone
+  rather than as a white box.
+- `input[type=file]` takes its colour back from the page (`color: inherit`) and
+  has no field background either. The two per-type rules are in `DomCascade`
+  beside the other rules that need the `type` attribute.
+
+Not carried, and still reported wrong: `select` and `button` compute
+`color: rgb(0, 0, 0)` and `background-color: rgb(239, 239, 239)` in Chromium,
+`select` reports white here and `button` reports transparent; a checkbox's and a
+file input's border colour is `currentColor` in Chromium (black, and the page
+colour) against the text field's grey here.
+
+Covered by `UserAgentOverflowDefaultsMatchChromium`,
+`UserAgentFormControlColoursMatchChromium` and
+`AuthorColoursWinOverTheFormControlDefaults`.
+
+### `overflow-clip-margin`, `align-self` and `aspect-ratio` are reported
+
+The CSSOM snapshot omitted all three, so page script read the empty string for
+each. `align-self` is `auto` initially and otherwise the alignment keyword;
+`overflow-clip-margin` is `0px` unless the UA or the author set it, and is
+reported only - an element with `overflow: clip` still clips at its padding box,
+so a `content-box` origin or a non-zero margin does not move the clip edge.
+
+`aspect-ratio` cannot be rebuilt from `LayoutStyle.AspectRatio`, which is one
+float: Chromium writes both terms out (`1.5` reports as `1.5 / 1`) and keeps
+`auto` in front of a ratio (`auto 16 / 9`). `AspectRatioSpecified` carries the
+authored text in CSSOM's form. A ratio mapped from an image's `width`/`height`
+attributes, or from decoded media, is not the property's computed value and
+reports `auto`, as it does in Chromium.
+
+Covered by `SelfAlignmentAndRatioAreReported` and
+`OverflowClipMarginReportsTheAuthoredValue`.
+
+### A positioned box reports used insets, and an `auto` minimum reports `0px`
+
+Two more CSSOM values Chromium derives from layout rather than from the
+declaration, which the reference reports as specified:
+
+- **Insets.** A positioned box reports its *used* offsets on all four sides. An
+  absolutely positioned box is measured off its laid-out margin box against its
+  containing block's padding box (`top: 50%` in a 34px containing block reports
+  `top: 17px` / `bottom: 7px`), and a relatively positioned one reports the shift
+  it was given and the negation of it on the opposite side (`position: relative`
+  with no offsets is `0px` on all four). A static box still reports `auto`, and a
+  sticky box still reports its specified offsets.
+- **Minimum size.** The initial `auto` minimum computes to `0px` except on a flex
+  or grid item, where it stays `auto` and means the automatic minimum size.
+  Reporting `auto` everywhere told script the box had a minimum it never set.
+
+Both need the element's parent and containing block, which the snapshot did not
+have: `PreparedRender.TreeValue` is the tree the layout was prepared from, set in
+`PaintPrepare` beside the layout itself. The DOM must not be mutated while a
+`PreparedRender` is reused, so the reference is exactly as current as the layout.
+
+The one case not carried is an absolutely positioned box with `margin: auto`,
+whose resolved auto margins are not kept on the style, so its used insets are off
+by the margin the centring added.
+
+Covered by `RelativeInsetsReportTheUsedOffsets`,
+`AutomaticMinimumSizeIsReportedOnlyForFlexAndGridItems` and the widened
+`InsetsAreAutoUntilSpecified`.
+
+### A table box reports the initial `flex-direction`
+
+Tables are laid out as internal flex containers
+(`LayoutStyle.InternalFlexContainer`, with `flex-direction: column` on `table`,
+`thead`, `tbody`, `th` and `td`). That is an implementation detail: CSS gives a
+table no flex formatting context, so Chromium reports the initial `row`. The
+snapshot already hides the same detail for `display`; `flex-direction` now follows
+it, unless the author set the property (`FlexDirectionAuthored`), in which case
+the authored value is reported as Chromium reports it. Nothing about how tables
+lay out changes.
+
+Still reported wrong on the same boxes, and not part of this change: `display` is
+`block` rather than `table`/`table-row-group`/`table-cell`, and `align-items` is
+`stretch`/`flex-start` rather than `normal`.
+
+Covered by `TableBoxesReportTheInitialFlexDirection` and
+`AnAuthoredFlexDirectionOnATableBoxIsReported`.
 
 ### Decoded web faces are cached; the reference re-decodes them
 

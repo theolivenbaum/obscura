@@ -114,6 +114,15 @@ public sealed class PreparedRender
 
     internal SvgFontDatabase SvgFonts { get; init; } = SvgFontDatabase.Shared;
 
+    /// <summary>
+    /// The tree this layout was prepared from. A CSSOM snapshot needs it for the handful of
+    /// properties Chromium reports as *used* values - a positioned box's insets, and whether
+    /// the automatic minimum size applies - because those depend on the element's parent and
+    /// containing block rather than on its own style. The DOM must not be mutated while a
+    /// PreparedRender is reused, so this reference is exactly as current as the layout.
+    /// </summary>
+    internal DomTree? TreeValue { get; init; }
+
     /// <summary>The retained final layout (Rust's <c>layout</c> field and <c>layout()</c>).</summary>
     public DomLayout Layout { get; internal set; } = new();
 
@@ -573,7 +582,10 @@ public sealed class PreparedRender
             : "auto";
         output["visibility"] = style.VisibilityHidden == true ? "hidden" : "visible";
         output["opacity"] = PaintCssValues.CssNumber(style.Opacity ?? 1f);
-        output["background-color"] = PaintCssValues.CssColor(style.BackgroundColor ?? new RgbaColor(0, 0, 0, 0));
+        RgbaColor background = style.BackgroundColor ?? new RgbaColor(0, 0, 0, 0);
+        output["background-color"] = style.BackgroundColorIsSrgbFunction
+            ? PaintCssValues.SrgbFunctionColor(background)
+            : PaintCssValues.CssColor(background);
         output["background-origin"] = style.BackgroundOrigin switch
         {
             BackgroundOrigin.BorderBox => "border-box",
@@ -587,7 +599,10 @@ public sealed class PreparedRender
             BackgroundClip.ContentBox => "content-box",
             _ => "text",
         };
-        output["color"] = PaintCssValues.CssColor(style.Color ?? new RgbaColor(0, 0, 0, 255));
+        RgbaColor foreground = style.Color ?? new RgbaColor(0, 0, 0, 255);
+        output["color"] = style.ColorIsSrgbFunction
+            ? PaintCssValues.SrgbFunctionColor(foreground)
+            : PaintCssValues.CssColor(foreground);
 
         // The four inherited SVG paint properties. Chromium reports them on every element, not
         // only inside the SVG namespace, so they are unconditional here too.
@@ -675,11 +690,19 @@ public sealed class PreparedRender
             output["height"] = PaintCssValues.DimensionCss(style.Height, "auto");
         }
 
-        output["min-width"] = PaintCssValues.DimensionCss(style.MinWidth, "auto");
-        output["min-height"] = PaintCssValues.DimensionCss(style.MinHeight, "auto");
+        // CSS Sizing: the initial `auto` minimum computes to `0px` everywhere except on a flex
+        // or grid item, where it stays `auto` and means the automatic minimum size. Reporting
+        // `auto` unconditionally is what page script sees as a min-height it never set.
+        bool automaticMinimumSize = HasAutomaticMinimumSize(id, style);
+        output["min-width"] = MinSizeCss(style.MinWidth, automaticMinimumSize);
+        output["min-height"] = MinSizeCss(style.MinHeight, automaticMinimumSize);
         output["max-width"] = PaintCssValues.DimensionCss(style.MaxWidth, "none");
         output["max-height"] = PaintCssValues.DimensionCss(style.MaxHeight, "none");
         output["box-sizing"] = style.BoxSizing == BoxSizing.BorderBox ? "border-box" : "content-box";
+        output["aspect-ratio"] = style.AspectRatioSpecified ?? "auto";
+
+        // Reported only; see LayoutStyle.OverflowClipMargin.
+        output["overflow-clip-margin"] = style.OverflowClipMargin ?? "0px";
 
         // The cascade keeps the five overflow keywords apart; anything scrollable used to be
         // reported as `auto`, which was wrong for `hidden` and `scroll` alike.
@@ -687,14 +710,20 @@ public sealed class PreparedRender
         output["overflow-y"] = style.ComputedOverflowCss(false);
         output["overflow"] = CollapseAxes(output["overflow-x"], output["overflow-y"]);
 
-        // Chromium reports `auto` for an inset nobody specified. Without these the snapshot let
-        // bootstrap's fallback answer from the element's box, which reads `0px` on most boxes.
+        // Chromium reports `auto` for an inset nobody specified on a static box. Without these
+        // the snapshot let bootstrap's fallback answer from the element's box, which reads
+        // `0px` on most boxes. On a *positioned* box it reports the used offsets instead, so a
+        // `top: 50%` box in a 34px containing block is `top: 17px` / `bottom: 7px` and a
+        // `position: relative` box that specified nothing is `0px` on all four sides.
         string[] insetNames = ["top", "right", "bottom", "left"];
+        float[]? usedInsets = UsedInsets(id, style, rect);
         for (int side = 0; side < insetNames.Length; side++)
         {
-            output[insetNames[side]] = style.Inset[side] is { } inset
-                ? PaintCssValues.DimensionCss(inset, "auto")
-                : "auto";
+            output[insetNames[side]] = usedInsets is { } used
+                ? PaintCssValues.CssPx(used[side])
+                : style.Inset[side] is { } inset
+                    ? PaintCssValues.DimensionCss(inset, "auto")
+                    : "auto";
         }
 
         (string Name, float Value, bool Auto)[] margins =
@@ -849,7 +878,12 @@ public sealed class PreparedRender
             + " " + output["background-origin"]
             + " " + output["background-clip"];
 
-        output["flex-direction"] = (style.FlexDirection ?? TaffyFlexDirection.Row) switch
+        // A table box is laid out as an internal flex container, which is an implementation
+        // detail: CSS gives a table no flex formatting context, so the property keeps its
+        // initial value unless the author set it. `display` is reported the same way above.
+        output["flex-direction"] = (style.InternalFlexContainer && !style.FlexDirectionAuthored
+            ? TaffyFlexDirection.Row
+            : style.FlexDirection ?? TaffyFlexDirection.Row) switch
         {
             TaffyFlexDirection.Row => "row",
             TaffyFlexDirection.RowReverse => "row-reverse",
@@ -862,6 +896,9 @@ public sealed class PreparedRender
             TaffyFlexWrap.Wrap => "wrap",
             _ => "wrap-reverse",
         };
+        output["align-self"] = style.AlignSelf is { } alignSelf
+            ? PaintCssValues.AlignItemsCss(alignSelf)
+            : "auto";
         output["align-items"] = style.AlignItems is { } alignItems
             ? PaintCssValues.AlignItemsCss(alignItems)
             : "normal";
@@ -880,7 +917,10 @@ public sealed class PreparedRender
 
         output["flex-grow"] = PaintCssValues.CssNumber(style.FlexGrow ?? 0f);
         output["flex-shrink"] = PaintCssValues.CssNumber(style.FlexShrink ?? 1f);
-        output["flex-basis"] = PaintCssValues.DimensionCss(style.FlexBasis, "auto");
+        // A percentage-dependent `calc()` basis keeps its math function as the computed value,
+        // exactly as it was specified; everything else is an absolute length or `auto`.
+        output["flex-basis"] = style.FlexBasisSpecified
+            ?? PaintCssValues.DimensionCss(style.FlexBasis, "auto");
         output["flex"] = output["flex-grow"] + " " + output["flex-shrink"] + " " + output["flex-basis"];
         output["grid-auto-flow"] = (style.GridAutoFlow ?? TaffyGridAutoFlow.Row) switch
         {
@@ -902,6 +942,150 @@ public sealed class PreparedRender
             ? PaintCssValues.CssNumber(scale.X) + " " + PaintCssValues.CssNumber(scale.Y)
             : "none";
         return output;
+    }
+
+    /// <summary>
+    /// The computed value of <c>min-width</c>/<c>min-height</c>: the initial <c>auto</c> is
+    /// <c>0px</c> unless the automatic minimum size applies to this box.
+    /// </summary>
+    private static string MinSizeCss(Dimension value, bool automaticMinimumSize) =>
+        value.IsAuto
+            ? automaticMinimumSize ? "auto" : "0px"
+            : PaintCssValues.DimensionCss(value, "auto");
+
+    /// <summary>
+    /// Whether an <c>auto</c> minimum size on this box means the automatic minimum size, which
+    /// is true exactly for an in-flow flex or grid item.
+    /// </summary>
+    private bool HasAutomaticMinimumSize(NodeId id, LayoutStyle style)
+    {
+        // `float` is not excluded: it does not apply to a flex or grid item, which stays one.
+        if (TreeValue is not { } tree
+            || style.Position == TaffyPosition.Absolute
+            || style.PositionFixed)
+        {
+            return false;
+        }
+
+        return DomTraversal.RenderedParent(tree, id) is { } parent
+            && Layout.Styles.TryGetValue(parent, out LayoutStyle? parentStyle)
+            && !parentStyle.InternalFlexContainer
+            && parentStyle.Display is Display.Flex or Display.Grid;
+    }
+
+    /// <summary>
+    /// The four used inset values of a positioned box, or <c>null</c> when the box is static
+    /// and its insets are reported as specified.
+    /// </summary>
+    /// <remarks>
+    /// An absolutely positioned box is measured off its laid-out margin box, which is the only
+    /// place the resolved offsets exist; a relatively positioned one is its resolved offset and
+    /// the negation of it on the opposite side, which is what its box was shifted by.
+    /// </remarks>
+    private float[]? UsedInsets(NodeId id, LayoutStyle style, Rect? rect)
+    {
+        if (TreeValue is not { } tree)
+        {
+            return null;
+        }
+
+        bool absolute = style.Position == TaffyPosition.Absolute || style.PositionFixed;
+        bool relative = !absolute && !style.PositionSticky && style.Position == TaffyPosition.Relative;
+        if ((!absolute && !relative) || ContainingBlockBox(tree, id, absolute) is not { } cb)
+        {
+            return null;
+        }
+
+        if (relative)
+        {
+            float usedTop = ResolveInset(style, 0, cb.Height)
+                ?? (ResolveInset(style, 2, cb.Height) is { } bottom ? -bottom : 0f);
+            float usedLeft = ResolveInset(style, 3, cb.Width)
+                ?? (ResolveInset(style, 1, cb.Width) is { } right ? -right : 0f);
+
+            return [usedTop, -usedLeft, -usedTop, usedLeft];
+        }
+
+        if (rect is not { } box)
+        {
+            return null;
+        }
+
+        float marginTop = style.MarginAuto[0] ? 0f : style.Margin.Top;
+        float marginLeft = style.MarginAuto[3] ? 0f : style.Margin.Left;
+        float marginBottom = style.MarginAuto[2] ? 0f : style.Margin.Bottom;
+        float marginRight = style.MarginAuto[1] ? 0f : style.Margin.Right;
+        float top = box.Y - marginTop - cb.Y;
+        float left = box.X - marginLeft - cb.X;
+
+        return
+        [
+            top,
+            cb.Width - left - (marginLeft + box.Width + marginRight),
+            cb.Height - top - (marginTop + box.Height + marginBottom),
+            left,
+        ];
+    }
+
+    /// <summary>One inset resolved against its axis of the containing block.</summary>
+    private float? ResolveInset(LayoutStyle style, int side, float basis)
+    {
+        if (style.Inset[side] is not { } inset)
+        {
+            return null;
+        }
+
+        Dimension resolved = inset.Resolve(
+            style.FontSize ?? 16f,
+            RootFontSize,
+            ViewportSize.Width / 100f,
+            ViewportSize.Height / 100f);
+
+        return resolved.Kind switch
+        {
+            DimensionKind.Px => resolved.Value,
+            DimensionKind.Percent => resolved.Value * basis,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// This element's containing block: the padding box of the nearest positioned ancestor for
+    /// an absolutely positioned box, the parent's content box otherwise, and the initial
+    /// containing block when neither exists.
+    /// </summary>
+    private Rect? ContainingBlockBox(DomTree tree, NodeId id, bool absolute)
+    {
+        NodeId? ancestor = DomTraversal.RenderedParent(tree, id);
+        while (ancestor is { } candidate)
+        {
+            if (Layout.Styles.TryGetValue(candidate, out LayoutStyle? ancestorStyle)
+                && Layout.Rects.TryGetValue(candidate, out Rect ancestorRect))
+            {
+                bool positioned = ancestorStyle.Position is not null
+                    || ancestorStyle.PositionFixed
+                    || ancestorStyle.PositionSticky
+                    || ancestorStyle.EstablishesPositioningContainingBlock();
+                if (!absolute || positioned)
+                {
+                    Edges padding = absolute ? Edges.Zero : ancestorStyle.Padding;
+                    float left = ancestorStyle.Border.Left + padding.Left;
+                    float top = ancestorStyle.Border.Top + padding.Top;
+                    float right = ancestorStyle.Border.Right + padding.Right;
+                    float bottom = ancestorStyle.Border.Bottom + padding.Bottom;
+
+                    return new Rect(
+                        ancestorRect.X + left,
+                        ancestorRect.Y + top,
+                        F32.Max(ancestorRect.Width - left - right, 0f),
+                        F32.Max(ancestorRect.Height - top - bottom, 0f));
+                }
+            }
+
+            ancestor = DomTraversal.RenderedParent(tree, candidate);
+        }
+
+        return new Rect(0f, 0f, ViewportSize.Width, ViewportSize.Height);
     }
 
     /// <summary>CSS 1-to-4 collapsing of a top/right/bottom/left shorthand, CSSOM's rule.</summary>

@@ -164,7 +164,13 @@ internal static class TaffyStyleMapping
             s.FlexShrink = flexShrink;
         }
 
-        if (!style.FlexBasis.IsAuto)
+        if (style.FlexBasisCalc is { } flexBasisCalc)
+        {
+            // Percentage-dependent math, resolved by the flex algorithm against the container's
+            // inner main size through the same handle a grid track uses.
+            s.FlexBasis = Layout.Dimension.FromCalc(flexBasisCalc.Handle);
+        }
+        else if (!style.FlexBasis.IsAuto)
         {
             s.FlexBasis = ToDimension(style.FlexBasis);
         }

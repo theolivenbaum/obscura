@@ -181,6 +181,10 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>set_grid_calc_context</c>.</summary>
     public static void SetGridCalcContext(LayoutStyle style, float emPx, float remPx, float vw, float vh)
     {
+        // A percentage-dependent `flex-basis` is the same kind of late-resolved expression and
+        // reaches taffy through the same handle, so it takes its context from here too.
+        style.FlexBasisCalc?.SetContext(emPx, remPx, vw, vh);
+
         if (style.GridCalcExpressions is not { } buckets)
         {
             return;
