@@ -1371,6 +1371,13 @@ public sealed class LayoutStyle
     public LayoutStyle? PlaceholderPseudo;
 
     /// <summary>
+    /// Computed author style for a range input's <c>::-webkit-slider-thumb</c> pseudo-element.
+    /// The thumb is a native box the control paints itself; it never enters layout, so this is
+    /// the only record of the size, radius, background and border the author gave it.
+    /// </summary>
+    public LayoutStyle? SliderThumbPseudo;
+
+    /// <summary>
     /// True for <c>inline-block</c>/<c>inline-flex</c>/<c>inline-grid</c>: participates in the
     /// surrounding inline flow from the outside, like plain <c>inline</c> (both currently
     /// collapse to <see cref="Obscura.Render.Display.Inline"/>, since this engine has no
@@ -1646,6 +1653,7 @@ public sealed class LayoutStyle
         copy.BeforePseudo = BeforePseudo?.Clone();
         copy.AfterPseudo = AfterPseudo?.Clone();
         copy.PlaceholderPseudo = PlaceholderPseudo?.Clone();
+        copy.SliderThumbPseudo = SliderThumbPseudo?.Clone();
         copy.TransformOps = [.. TransformOps];
         copy.WaapiSampleState = WaapiSampleState?.Clone();
         copy.IndividualTranslateExpressions = (string?[])IndividualTranslateExpressions.Clone();

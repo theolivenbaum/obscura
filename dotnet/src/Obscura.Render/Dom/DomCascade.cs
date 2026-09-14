@@ -509,6 +509,21 @@ internal static class DomCascade
                         style.Padding = Edges.Zero;
                         style.Border = Edges.Zero;
                         break;
+                    case "date":
+                    case "datetime-local":
+                    case "month":
+                    case "week":
+                    case "time":
+                        // DEVIATION from crates/obscura-render/src/dom.rs, which gives these the
+                        // plain `input` box. Chromium's UA sheet puts the date/time controls in
+                        // monospace and drops the field's horizontal padding to 1px on the left,
+                        // because their sub-fields carry their own. Without it the field text is
+                        // measured and painted in the wrong face and the control is ~50px too
+                        // wide. See "Known deviations" in todo.md.
+                        style.FontFamily = "monospace";
+                        style.FontFamilySpecified = "monospace";
+                        style.Padding = new Edges(0f, 0f, 0f, 1f);
+                        break;
                 }
             }
 
@@ -629,7 +644,10 @@ internal static class DomCascade
             context.CustomProperties[id] = thisProps;
             style.IsReplacedBox |= style.ContentImage is not null;
             style.HasReplacedSizing |= style.ContentImage is not null;
-            (LayoutStyle? beforePseudo, LayoutStyle? afterPseudo, LayoutStyle? placeholderPseudo) =
+            (LayoutStyle? beforePseudo,
+                LayoutStyle? afterPseudo,
+                LayoutStyle? placeholderPseudo,
+                LayoutStyle? sliderThumbPseudo) =
                 sheet.AllPseudoStyles(tree, matcher, id, thisProps, style, containerEvaluator);
             foreach (LayoutStyle? pseudo in new[] { beforePseudo, afterPseudo })
             {
@@ -651,6 +669,7 @@ internal static class DomCascade
             style.BeforePseudo = beforePseudo;
             style.AfterPseudo = afterPseudo;
             style.PlaceholderPseudo = placeholderPseudo;
+            style.SliderThumbPseudo = sliderThumbPseudo;
             descendantColorSchemeDark = style.ColorSchemeDark;
             context.Styles[id] = style;
         }

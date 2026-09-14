@@ -722,6 +722,66 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Dirty form state is mirrored onto the arena so the renderer can see it
+
+HTML keeps `element.value` and `element.checked` off the content attributes once script
+assigns them, and `bootstrap.js` models that with two globals keyed by node id
+(`_formValues` / `_formChecked`). Neither engine's renderer can read a JS global, so in
+`crates/obscura-render` a field whose value came from script paints its *placeholder*:
+`getComputedStyle` and `el.value` are right, only the paint is wrong. On
+`#/spaces/new` in Curiosity Workspace, Obscura painted the grey "My Space" where
+Chromium 141 paints "My awesome space".
+
+`bootstrap.js` is shared verbatim with the Rust engine, so the fix sits on this side of
+the boundary: `Obscura.Js.Runtime.FormStateMirror` installs both globals as proxies
+*before* bootstrap.js runs (it adopts them, `globalThis.X = globalThis.X || {}`), and
+their write traps forward to two op_dom commands the Rust op table does not have,
+`set_form_value` / `set_form_checked`. Those land in `DomTree`'s dirty-form-state tables,
+which `PaintNativeControls.ShownValue` / `.IsChecked` read ahead of the attribute. Reads,
+key order and `undefined` semantics are untouched, which is what bootstrap.js's
+`!== undefined` checks depend on. The entry is dropped when the node's arena slot is
+freed, so a recycled `NodeId` cannot inherit it.
+
+Not yet mirrored: selector matching. `:checked` and `:placeholder-shown` still consult the
+attributes, so a script-driven state change restyles only what the attribute says.
+
+### Native form controls are painted; the reference paints none of them
+
+`crates/obscura-render/src/paint.rs` paints no widget of its own, so against Chromium 141
+an unstyled checkbox and radio are blank, a range input has no thumb, and a date/time
+input is an empty box sized as though it were a 20-character text field, which collapses a
+shrink-to-fit ancestor around it (Curiosity Workspace's `.tss-daterange-picker` measured
+80px against Chromium's 324px). `Obscura.Render.PaintNativeControls` paints all of them,
+and three pieces of it are worth knowing:
+
+- **`::-webkit-slider-thumb` is matched and cascaded properly**, not replaced by a UA
+  default: a page restyles the thumb's size, radius, background and border and those are
+  what get painted. It is a fourth `PseudoRuleMap` in `CssCascade` beside
+  before/after/placeholder, gated on `input[type=range]`, landing in
+  `LayoutStyle.SliderThumbPseudo`, and it defaults to `box-sizing: border-box` the way
+  Chromium's UA sheet does. `::-moz-range-thumb` is indexed nowhere, because Chromium
+  honours only the WebKit spelling and this engine presents itself as Chromium. With no
+  author rule a plain Chromium-style track and round knob are drawn instead.
+- **A zero-height slider still has ink.** The thumb stands outside the control, and a page
+  that draws its own track commonly leaves the input with no height at all, so
+  `PaintDom`'s ancestor-clip cull asks `PaintNativeControls.NativeInkBounds` before
+  dropping a box whose own rect has no area.
+- **A date/time control is sized from its field text.** Chromium fills it with read-only
+  sub-fields (`mm/dd/yyyy`, `Week --, ----`, …) plus a picker indicator; the port measures
+  the same text through the inline engine and adds `FieldChromeWidth`, a fixed per-type
+  constant read off Chromium (the sub-field padding plus the ~34.33px indicator). That
+  lands within 1px of Chromium for all five types. The indicator itself is drawn as a small
+  calendar or clock outline rather than Chromium's icon asset. The UA style for these types
+  also switches to monospace with 1px of left padding, as Chromium's does.
+  A **percentage** width cannot resolve while intrinsic sizes are computed, so the
+  intrinsic width is additionally published as a `min-width`: Chromium has shadow content
+  to contribute where this engine has no box for it. It differs from Chromium only where
+  such a control is deliberately squeezed below its own content width.
+
+Related fix in the same arm: the general `<input>` path painted the `value` attribute as
+text for *every* type, which put "50" beside a slider. Only the text-field types show a
+value now, and only the text-field types show a placeholder.
+
 ### The promise-rejection callback contains everything, and is detached before dispose
 
 deno_core installs V8's `PromiseRejectCallback` and reports from it directly; the ops

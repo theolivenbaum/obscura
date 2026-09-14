@@ -39,6 +39,9 @@ public static class BootstrapLoader
             })();
             """);
 
+        // Ahead of bootstrap.js, which adopts the two globals this installs.
+        FormStateMirror.Install(engine);
+
         // EngineText, not Text: the shim's dynamic-classic-script call sites are
         // bridged onto op_run_classic_script on the way in. See BootstrapSource.
         engine.Execute(new DocumentInfo("bootstrap.js"), BootstrapSource.EngineText);

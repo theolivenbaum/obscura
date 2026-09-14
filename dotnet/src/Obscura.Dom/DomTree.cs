@@ -19,6 +19,21 @@ public sealed partial class DomTree
     private readonly Dictionary<NodeId, NodeId> _shadowRootsByHost = [];
 
     /// <summary>
+    /// Dirty form state: the value a form control carries after script assigned
+    /// <c>element.value</c> / <c>element.checked</c>. HTML keeps that off the content
+    /// attribute, so it is not reachable through <see cref="Node.GetAttribute"/>.
+    ///
+    /// DEVIATION from crates/obscura-dom, which has no equivalent: in the Rust engine this
+    /// state lives only in bootstrap.js (<c>_formValues</c> / <c>_formChecked</c>) and never
+    /// reaches the renderer, so a field whose value was set from script paints its
+    /// placeholder. The C# host mirrors those two maps in here as script writes them. See
+    /// "Known deviations" in todo.md.
+    /// </summary>
+    private Dictionary<NodeId, string>? _dirtyFormValues;
+
+    private Dictionary<NodeId, bool>? _dirtyFormChecked;
+
+    /// <summary>
     /// Full-document HTML parsing enables declarative shadow roots. Fragment parsing (including
     /// innerHTML) deliberately leaves this false.
     /// </summary>
@@ -38,6 +53,50 @@ public sealed partial class DomTree
     }
 
     public NodeId Document { get; }
+
+    /// <summary>Record the value script assigned to a form control's <c>value</c> IDL attribute.</summary>
+    public void SetDirtyFormValue(NodeId id, string value)
+    {
+        _dirtyFormValues ??= [];
+        _dirtyFormValues[id] = value;
+    }
+
+    /// <summary>Read back a script-assigned <c>value</c>, if there is one.</summary>
+    public bool TryGetDirtyFormValue(NodeId id, out string value)
+    {
+        if (_dirtyFormValues is { } values)
+        {
+            return values.TryGetValue(id, out value!);
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    /// <summary>Record the state script assigned to a form control's <c>checked</c> IDL attribute.</summary>
+    public void SetDirtyFormChecked(NodeId id, bool state)
+    {
+        _dirtyFormChecked ??= [];
+        _dirtyFormChecked[id] = state;
+    }
+
+    /// <summary>Read back a script-assigned <c>checked</c>, if there is one.</summary>
+    public bool TryGetDirtyFormChecked(NodeId id, out bool state)
+    {
+        if (_dirtyFormChecked is { } checkedStates)
+        {
+            return checkedStates.TryGetValue(id, out state);
+        }
+
+        state = false;
+        return false;
+    }
+
+    private void ForgetDirtyFormState(NodeId id)
+    {
+        _dirtyFormValues?.Remove(id);
+        _dirtyFormChecked?.Remove(id);
+    }
 
     /// <summary>Record whether the document was parsed in (full) quirks mode.</summary>
     public void SetQuirks(bool quirks) => _quirks = quirks;
@@ -627,6 +686,10 @@ public sealed partial class DomTree
             {
                 _nodes[id.Index] = null;
                 _freeList.Add(id.Value);
+
+                // The slot is handed out again, so dirty form state recorded against it must
+                // not survive onto whatever node lands there next.
+                ForgetDirtyFormState(id);
             }
         }
     }
