@@ -114,14 +114,26 @@ public class ComputedStyleTests
         foreach (string property in new[] { "filter", "backdrop-filter", "-webkit-backdrop-filter" })
         {
             Assert.True(Supports(property, "none"), property);
-            // blur() is painted, so it is advertised.
             Assert.True(Supports(property, "blur(2px)"), property);
             Assert.True(Supports(property, "blur(2px) blur(3px)"), property);
-            // Everything else still only does containing-block bookkeeping, and a mixed
-            // list must not be advertised on the strength of its blurs.
+            Assert.False(Supports(property, "blur(-2px)"), property);
+        }
+
+        // `filter` now paints every function except url(), so it advertises them. That is
+        // what separates it from `backdrop-filter`, which still paints blur() only and must
+        // not be advertised on the strength of a mixed list's blurs.
+        Assert.True(Supports("filter", "grayscale(1)"));
+        Assert.True(Supports("filter", "blur(2px) grayscale(1)"));
+        Assert.True(Supports("filter", "drop-shadow(1px 2px 3px red)"));
+        // A url() reference parses and is reported, but no SVG filter element is applied,
+        // so advertising it would promise an effect that never paints.
+        Assert.False(Supports("filter", "url(#f)"));
+        Assert.False(Supports("filter", "blur(2px) url(#f)"));
+
+        foreach (string property in new[] { "backdrop-filter", "-webkit-backdrop-filter" })
+        {
             Assert.False(Supports(property, "grayscale(1)"), property);
             Assert.False(Supports(property, "blur(2px) grayscale(1)"), property);
-            Assert.False(Supports(property, "blur(-2px)"), property);
         }
 
         Assert.False(Supports("perspective", "800px"));
@@ -1951,23 +1963,87 @@ public class ComputedStyleTests
         Assert.Null(style.BoxShadow);
     }
     [Fact]
-    public void FilterBlurParsesOnlyBlurOnlyLists()
+    public void FilterParsesTheWholeFunctionList()
     {
-        static float? Sigma(string css) => Compute("div", css).FilterBlur;
+        static FilterFunction[]? Filter(string css) => Compute("div", css).Filter;
 
-        Assert.Equal(6f, Sigma("filter:blur(6px)"));
-        Assert.Null(Sigma("filter:none"));
-        Assert.Null(Sigma("filter:grayscale(1)"));
-        // A mixed list is not reduced to its blurs: painting a wrong result is worse than
-        // painting none, and @supports reports it unsupported.
-        Assert.Null(Sigma("filter:blur(4px) grayscale(1)"));
-        Assert.Null(Sigma("filter:blur(-2px)"));
-        // Successive gaussians compose in quadrature: sqrt(3^2 + 4^2) = 5.
-        float combined = Sigma("filter:blur(3px) blur(4px)")!.Value;
-        Assert.True(MathF.Abs(combined - 5f) < 1e-4f, $"{combined}");
-        // backdrop-filter shares the parse, including the -webkit- alias.
+        Assert.Null(Filter("filter:none"));
+        Assert.Null(Filter("filter:"));
+
+        FilterFunction[] blur = Filter("filter:blur(6px)")!;
+        Assert.Equal(FilterFunctionKind.Blur, Assert.Single(blur).Kind);
+        Assert.Equal(6f, blur[0].Amount);
+
+        // Every function is kept in order now, not just a blur-only list.
+        FilterFunction[] mixed = Filter("filter:blur(4px) grayscale(1) hue-rotate(90deg)")!;
+        Assert.Equal(3, mixed.Length);
+        Assert.Equal(FilterFunctionKind.Blur, mixed[0].Kind);
+        Assert.Equal(FilterFunctionKind.Grayscale, mixed[1].Kind);
+        Assert.Equal(FilterFunctionKind.HueRotate, mixed[2].Kind);
+        Assert.Equal(90f, mixed[2].Amount);
+
+        // A percentage argument computes to a number; an omitted one to the function's
+        // initial value, which is 1 for a multiplier and 0 for blur.
+        Assert.Equal(0.5f, Filter("filter:brightness(50%)")![0].Amount);
+        Assert.Equal(1f, Filter("filter:grayscale()")![0].Amount);
+        Assert.Equal(0f, Filter("filter:blur()")![0].Amount);
+
+        // Out of range above the maximum clamps; below zero invalidates the declaration.
+        // Both were measured against Chromium 141.
+        Assert.Equal(1f, Filter("filter:grayscale(2)")![0].Amount);
+        Assert.Equal(1f, Filter("filter:opacity(1.5)")![0].Amount);
+        Assert.Equal(2f, Filter("filter:saturate(2)")![0].Amount);
+        Assert.Null(Filter("filter:saturate(-0.5)"));
+        Assert.Null(Filter("filter:blur(-2px)"));
+
+        // One invalid function drops the whole list, not just itself.
+        Assert.Null(Filter("filter:blur(4px) brightness(-1)"));
+        Assert.Null(Filter("filter:blur(4px) nonsense(1)"));
+
+        // backdrop-filter keeps the blur-only parse, including the -webkit- alias.
         Assert.Equal(18f, Compute("div", "backdrop-filter:blur(18px)").BackdropBlur);
         Assert.Equal(8f, Compute("div", "-webkit-backdrop-filter:blur(8px)").BackdropBlur);
+        Assert.Null(Compute("div", "backdrop-filter:grayscale(1)").BackdropBlur);
+    }
+
+    [Fact]
+    public void FilterDropShadowTakesItsColorOnEitherSide()
+    {
+        static FilterFunction Shadow(string css) => Compute("div", css).Filter![0];
+
+        // Both orders are legal and compute to the same shadow.
+        FilterFunction trailing = Shadow("filter:drop-shadow(2px 3px 4px red)");
+        FilterFunction leading = Shadow("filter:drop-shadow(red 2px 3px 4px)");
+        Assert.Equal(trailing, leading);
+        Assert.Equal(FilterFunctionKind.DropShadow, trailing.Kind);
+        Assert.Equal(2f, trailing.OffsetX);
+        Assert.Equal(3f, trailing.OffsetY);
+        Assert.Equal(4f, trailing.ShadowBlur);
+        Assert.Equal(new RgbaColor(255, 0, 0, 255), trailing.Color);
+
+        // A bare `0` is an offset, not a failed colour, and the blur defaults to 0.
+        FilterFunction zero = Shadow("filter:drop-shadow(0 0 rgba(0,0,0,.5))");
+        Assert.Equal(0f, zero.OffsetX);
+        Assert.Equal(0f, zero.OffsetY);
+        Assert.Equal(0f, zero.ShadowBlur);
+        Assert.Equal(128, zero.Color.A);
+
+        // An omitted colour resolves to the element's currentColor, and so does the keyword
+        // written out - which the colour parser does not take, so it needs its own arm or the
+        // unrecognised token invalidates the whole declaration.
+        Assert.Equal(
+            new RgbaColor(10, 20, 30, 255),
+            Shadow("color:rgb(10,20,30);filter:drop-shadow(1px 2px)").Color);
+        Assert.Equal(
+            new RgbaColor(10, 20, 30, 255),
+            Shadow("color:rgb(10,20,30);filter:drop-shadow(currentColor 1px 2px)").Color);
+
+        // A negative blur radius is invalid, unlike a negative offset.
+        Assert.Null(Compute("div", "filter:drop-shadow(1px 2px -3px red)").Filter);
+        Assert.Equal(-1f, Shadow("filter:drop-shadow(-1px 2px)").OffsetX);
+
+        // One offset is not enough.
+        Assert.Null(Compute("div", "filter:drop-shadow(1px)").Filter);
     }
 
 }

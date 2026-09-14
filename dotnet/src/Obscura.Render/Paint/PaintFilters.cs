@@ -1,5 +1,6 @@
 // Port of the CSS filter blur kernel in crates/obscura-render/src/paint.rs.
 using System.Runtime.InteropServices;
+using SkiaSharp;
 
 namespace Obscura.Render;
 
@@ -262,5 +263,326 @@ internal static class PaintFilters
 
         Mask? clip = PaintClips.IntersectClipMasks(ancestorClip?.Clone(), boxMask);
         Surface.DrawPixmap(pixmap, x0, y0, backdrop, 1f, false, Affine2.Identity, clip);
+    }
+
+    /// <summary>
+    /// Whether a computed <c>filter</c> list changes any pixel, and so is worth the group
+    /// layer a filter has to paint into.
+    /// </summary>
+    /// <remarks>
+    /// An identity function is common enough to be worth testing for - a stylesheet that
+    /// animates <c>blur()</c> or <c>grayscale()</c> spends most frames at the identity end,
+    /// and a layer allocated for it would be a full-surface pixmap plus a full subtree repaint.
+    /// <para>
+    /// A <c>url()</c> reference answers <c>false</c>: SVG filter elements are not modeled, so
+    /// it is reported through <c>getComputedStyle</c> but paints nothing. A list of nothing but
+    /// references therefore takes no layer at all rather than an empty one.
+    /// </para>
+    /// </remarks>
+    internal static bool HasVisibleEffect(FilterFunction[]? filter)
+    {
+        if (filter is null)
+        {
+            return false;
+        }
+
+        foreach (FilterFunction function in filter)
+        {
+            bool visible = function.Kind switch
+            {
+                FilterFunctionKind.Blur => float.IsFinite(function.Amount) && function.Amount > 0f,
+                FilterFunctionKind.HueRotate =>
+                    float.IsFinite(function.Amount) && MathF.IEEERemainder(function.Amount, 360f) != 0f,
+                FilterFunctionKind.DropShadow => function.Color.A != 0,
+                FilterFunctionKind.Grayscale or FilterFunctionKind.Invert
+                    or FilterFunctionKind.Sepia => function.Amount > 0f,
+                FilterFunctionKind.Brightness or FilterFunctionKind.Contrast
+                    or FilterFunctionKind.Opacity or FilterFunctionKind.Saturate =>
+                        function.Amount != 1f,
+                _ => false,
+            };
+
+            if (visible) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Apply a computed <c>filter</c> list to a finished group layer, in place and in order.
+    /// </summary>
+    /// <remarks>
+    /// The whole chain runs on the premultiplied surface the rest of the paint stack uses, so
+    /// this mirrors <see cref="BlurPixmap"/> rather than reaching for Skia's
+    /// <c>SKImageFilter</c>: the group layer is already a <see cref="Pixmap"/>, and the
+    /// colour-matrix functions are defined on the same 8-bit sRGB values it stores. Filter
+    /// Effects specifies these with <c>color-interpolation-filters: sRGB</c>, so there is no
+    /// linearization step.
+    /// </remarks>
+    internal static void ApplyFilterChain(Pixmap layer, FilterFunction[] filter)
+    {
+        foreach (FilterFunction function in filter)
+        {
+            switch (function.Kind)
+            {
+                case FilterFunctionKind.Blur:
+                    if (float.IsFinite(function.Amount) && function.Amount > 0f)
+                    {
+                        BlurPixmap(layer, function.Amount, BlurEdge.Transparent);
+                    }
+
+                    break;
+
+                case FilterFunctionKind.DropShadow:
+                    DrawDropShadowUnder(layer, function);
+                    break;
+
+                case FilterFunctionKind.Opacity:
+                    ScaleAlpha(layer, function.Amount);
+                    break;
+
+                // url() is reported but never painted: SVG filter elements are not modeled.
+                case FilterFunctionKind.Reference:
+                    break;
+
+                default:
+                    ApplyColorMatrix(layer, ColorMatrixFor(function));
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A 3x3 sRGB colour matrix plus the offset the shorthand filters add equally to all three
+    /// channels. Alpha is untouched by every function that uses one.
+    /// </summary>
+    private readonly record struct ColorMatrix(
+        float M00, float M01, float M02,
+        float M10, float M11, float M12,
+        float M20, float M21, float M22,
+        float Offset);
+
+    /// <summary>
+    /// The <c>feColorMatrix</c> each shorthand filter is defined as, from Filter Effects
+    /// &#xA7;<c>filter-effects-1</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>grayscale(a)</c> is not its own matrix: the spec defines it as
+    /// <c>saturate(1 - a)</c>, so it is forwarded rather than duplicated. The luminance
+    /// weights here are <c>feColorMatrix</c>'s historical 0.213 / 0.715 / 0.072, which are not
+    /// quite the 0.2126 / 0.7152 / 0.0722 of Rec. 709; Chromium uses the spec's.
+    /// </remarks>
+    private static ColorMatrix ColorMatrixFor(FilterFunction function)
+    {
+        float amount = function.Amount;
+        switch (function.Kind)
+        {
+            case FilterFunctionKind.Brightness:
+                return new ColorMatrix(amount, 0f, 0f, 0f, amount, 0f, 0f, 0f, amount, 0f);
+
+            case FilterFunctionKind.Contrast:
+                return new ColorMatrix(
+                    amount, 0f, 0f,
+                    0f, amount, 0f,
+                    0f, 0f, amount,
+                    (1f - amount) * 0.5f);
+
+            case FilterFunctionKind.Invert:
+            {
+                float slope = 1f - (2f * amount);
+                return new ColorMatrix(slope, 0f, 0f, 0f, slope, 0f, 0f, 0f, slope, amount);
+            }
+
+            case FilterFunctionKind.Sepia:
+            {
+                float s = 1f - amount;
+                return new ColorMatrix(
+                    0.393f + (0.607f * s), 0.769f - (0.769f * s), 0.189f - (0.189f * s),
+                    0.349f - (0.349f * s), 0.686f + (0.314f * s), 0.168f - (0.168f * s),
+                    0.272f - (0.272f * s), 0.534f - (0.534f * s), 0.131f + (0.869f * s),
+                    0f);
+            }
+
+            case FilterFunctionKind.HueRotate:
+            {
+                float radians = amount * (MathF.PI / 180f);
+                float cos = MathF.Cos(radians);
+                float sin = MathF.Sin(radians);
+                return new ColorMatrix(
+                    0.213f + (cos * 0.787f) - (sin * 0.213f),
+                    0.715f - (cos * 0.715f) - (sin * 0.715f),
+                    0.072f - (cos * 0.072f) + (sin * 0.928f),
+                    0.213f - (cos * 0.213f) + (sin * 0.143f),
+                    0.715f + (cos * 0.285f) + (sin * 0.140f),
+                    0.072f - (cos * 0.072f) - (sin * 0.283f),
+                    0.213f - (cos * 0.213f) - (sin * 0.787f),
+                    0.715f - (cos * 0.715f) + (sin * 0.715f),
+                    0.072f + (cos * 0.928f) + (sin * 0.072f),
+                    0f);
+            }
+
+            // grayscale(a) is saturate(1 - a).
+            case FilterFunctionKind.Grayscale:
+                amount = 1f - amount;
+                goto case FilterFunctionKind.Saturate;
+
+            case FilterFunctionKind.Saturate:
+            default:
+                return new ColorMatrix(
+                    0.213f + (0.787f * amount), 0.715f - (0.715f * amount), 0.072f - (0.072f * amount),
+                    0.213f - (0.213f * amount), 0.715f + (0.285f * amount), 0.072f - (0.072f * amount),
+                    0.213f - (0.213f * amount), 0.715f - (0.715f * amount), 0.072f + (0.928f * amount),
+                    0f);
+        }
+    }
+
+    /// <summary>
+    /// Apply a colour matrix in place, unpremultiplying each pixel and premultiplying the
+    /// result back.
+    /// </summary>
+    /// <remarks>
+    /// A fully transparent pixel is skipped rather than transformed: an offset matrix
+    /// (<c>contrast</c>, <c>invert</c>) gives transparent black a non-zero colour, which
+    /// premultiplying by a zero alpha discards again. Skipping is both the same answer and the
+    /// common case, since a group layer is surface-sized and mostly empty.
+    /// </remarks>
+    private static void ApplyColorMatrix(Pixmap pixmap, in ColorMatrix matrix)
+    {
+        Span<PremultipliedColor> pixels = pixmap.Pixels.AsSpan();
+        for (int index = 0; index < pixels.Length; index++)
+        {
+            PremultipliedColor pixel = pixels[index];
+            if (pixel.A == 0)
+            {
+                continue;
+            }
+
+            float inverse = 1f / pixel.A;
+            float r = pixel.R * inverse;
+            float g = pixel.G * inverse;
+            float b = pixel.B * inverse;
+
+            float outR = (matrix.M00 * r) + (matrix.M01 * g) + (matrix.M02 * b) + matrix.Offset;
+            float outG = (matrix.M10 * r) + (matrix.M11 * g) + (matrix.M12 * b) + matrix.Offset;
+            float outB = (matrix.M20 * r) + (matrix.M21 * g) + (matrix.M22 * b) + matrix.Offset;
+
+            pixels[index] = new PremultipliedColor(
+                PremultiplyClamped(outR, pixel.A),
+                PremultiplyClamped(outG, pixel.A),
+                PremultiplyClamped(outB, pixel.A),
+                pixel.A);
+        }
+    }
+
+    /// <summary>
+    /// Clamp a straight-alpha channel to the unit range and premultiply it, which is what keeps
+    /// the surface's <c>colour &lt;= alpha</c> invariant across an out-of-gamut matrix result.
+    /// </summary>
+    private static byte PremultiplyClamped(float channel, byte alpha) =>
+        (byte)F32.Round(Math.Clamp(channel, 0f, 1f) * alpha);
+
+    /// <summary><c>opacity()</c>: scale the whole premultiplied pixel.</summary>
+    private static void ScaleAlpha(Pixmap pixmap, float amount)
+    {
+        float scale = Math.Clamp(amount, 0f, 1f);
+        if (scale >= 1f)
+        {
+            return;
+        }
+
+        Span<PremultipliedColor> pixels = pixmap.Pixels.AsSpan();
+        for (int index = 0; index < pixels.Length; index++)
+        {
+            PremultipliedColor pixel = pixels[index];
+            if (pixel.A == 0)
+            {
+                continue;
+            }
+
+            pixels[index] = new PremultipliedColor(
+                (byte)F32.Round(pixel.R * scale),
+                (byte)F32.Round(pixel.G * scale),
+                (byte)F32.Round(pixel.B * scale),
+                (byte)F32.Round(pixel.A * scale));
+        }
+    }
+
+    /// <summary>
+    /// <c>drop-shadow()</c>: the layer's own alpha, blurred and tinted, composited back
+    /// underneath it at the shadow's offset.
+    /// </summary>
+    /// <remarks>
+    /// Compositing is <c>DstOver</c> onto the layer itself, so one scratch pixmap is enough and
+    /// the layer is never replaced. That matters for the case this was written for - Curiosity
+    /// outlines its avatar with four drop-shadows, and a second surface-sized pixmap per
+    /// function would be four more megabyte allocations per paint.
+    /// <para>
+    /// The shadow is built premultiplied straight away rather than as an alpha mask that is
+    /// tinted afterwards. Both give the same answer - the tint is a constant, and a box blur is
+    /// linear - but building it premultiplied lets <see cref="BlurPixmap"/> run over it
+    /// unchanged.
+    /// </para>
+    /// <para>
+    /// The blur argument is a <em>radius</em>, twice the sigma, which is <c>box-shadow</c>'s
+    /// convention and the opposite of <c>blur()</c>, whose argument is sigma itself. Filter
+    /// Effects defines <c>drop-shadow()</c> as <c>feDropShadow</c> with
+    /// <c>stdDeviation = radius / 2</c>.
+    /// </para>
+    /// <para>
+    /// Offsetting is done at composite time rather than when the shadow is built, because a box
+    /// blur commutes with a translation and doing it here costs no extra pass.
+    /// </para>
+    /// </remarks>
+    private static void DrawDropShadowUnder(Pixmap layer, FilterFunction shadow)
+    {
+        if (shadow.Color.A == 0)
+        {
+            return;
+        }
+
+        Pixmap? scratch = Pixmap.New(layer.Width, layer.Height);
+        if (scratch is null)
+        {
+            return;
+        }
+
+        using Pixmap owned = scratch;
+
+        // Premultiplied tint of a fully opaque source pixel; every shadow pixel is this scaled
+        // by the source's coverage.
+        float alphaScale = shadow.Color.A / 255f;
+        Span<PremultipliedColor> shadowPixels = owned.Pixels.AsSpan();
+        ReadOnlySpan<PremultipliedColor> sourcePixels = layer.Pixels.AsSpan();
+        for (int index = 0; index < sourcePixels.Length; index++)
+        {
+            byte coverage = sourcePixels[index].A;
+            if (coverage == 0)
+            {
+                continue;
+            }
+
+            float alpha = coverage * alphaScale;
+            shadowPixels[index] = new PremultipliedColor(
+                (byte)F32.Round(shadow.Color.R * alpha / 255f),
+                (byte)F32.Round(shadow.Color.G * alpha / 255f),
+                (byte)F32.Round(shadow.Color.B * alpha / 255f),
+                (byte)F32.Round(alpha));
+        }
+
+        if (shadow.ShadowBlur > 0f)
+        {
+            BlurPixmap(owned, shadow.ShadowBlur * 0.5f, BlurEdge.Transparent);
+        }
+
+        Surface.DrawPixmap(
+            layer,
+            0,
+            0,
+            owned,
+            1f,
+            false,
+            Affine2.Translate(shadow.OffsetX, shadow.OffsetY),
+            null,
+            SKBlendMode.DstOver);
     }
 }

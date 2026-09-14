@@ -96,6 +96,87 @@ internal readonly record struct BorderCascadeOp(
     bool ColorSet,
     RgbaColor? Color);
 
+/// <summary>Which <c>filter</c> function a <see cref="FilterFunction"/> carries.</summary>
+/// <remarks>
+/// DEVIATION FROM RUST: <c>crates/obscura-render</c> models <c>filter</c> as a single optional
+/// blur sigma, so every other function is dropped at parse time and the property reports as
+/// absent. The port models the whole list, because Chromium reports it through
+/// <c>getComputedStyle</c> and page script compares the string.
+/// </remarks>
+public enum FilterFunctionKind
+{
+    /// <summary><c>blur(&lt;length&gt;)</c>; the argument is sigma itself.</summary>
+    Blur,
+
+    /// <summary><c>brightness(&lt;number|percentage&gt;)</c>, unbounded above.</summary>
+    Brightness,
+
+    /// <summary><c>contrast(&lt;number|percentage&gt;)</c>, unbounded above.</summary>
+    Contrast,
+
+    /// <summary><c>drop-shadow(&lt;color&gt;? &lt;x&gt; &lt;y&gt; &lt;blur&gt;?)</c>.</summary>
+    DropShadow,
+
+    /// <summary><c>grayscale(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Grayscale,
+
+    /// <summary><c>hue-rotate(&lt;angle&gt;)</c>, in degrees.</summary>
+    HueRotate,
+
+    /// <summary><c>invert(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Invert,
+
+    /// <summary><c>opacity(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Opacity,
+
+    /// <summary><c>saturate(&lt;number|percentage&gt;)</c>, unbounded above.</summary>
+    Saturate,
+
+    /// <summary><c>sepia(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Sepia,
+
+    /// <summary>
+    /// <c>url(&lt;reference&gt;)</c>, an SVG filter element. Parsed and reported; never painted.
+    /// </summary>
+    Reference,
+}
+
+/// <summary>One function of a computed <c>filter</c> list.</summary>
+/// <remarks>
+/// A single struct rather than a hierarchy: the list is walked once per filtered element in the
+/// paint pass, and a flat value type keeps that walk allocation-free. Only the fields its
+/// <see cref="Kind"/> names are meaningful.
+/// <para>
+/// <see cref="Amount"/> carries the single argument of every one-argument function - sigma for
+/// <c>blur()</c>, degrees for <c>hue-rotate()</c>, and the multiplier for the colour-matrix
+/// functions, always as a number even when the value was authored as a percentage. The
+/// <c>drop-shadow()</c> fields are the two offsets, the blur <em>radius</em> (twice sigma, the
+/// <c>box-shadow</c> convention, unlike <c>blur()</c>), and the resolved colour with
+/// <c>currentColor</c> already substituted.
+/// </para>
+/// </remarks>
+public readonly record struct FilterFunction(
+    FilterFunctionKind Kind,
+    float              Amount,
+    float              OffsetX,
+    float              OffsetY,
+    float              ShadowBlur,
+    RgbaColor          Color,
+    string?            Reference)
+{
+    /// <summary>A one-argument function: <c>blur()</c>, <c>hue-rotate()</c>, or a matrix.</summary>
+    public static FilterFunction Scalar(FilterFunctionKind kind, float amount) =>
+        new(kind, amount, 0f, 0f, 0f, default, null);
+
+    /// <summary><c>drop-shadow()</c>, with <c>currentColor</c> already resolved.</summary>
+    public static FilterFunction DropShadowOf(float offsetX, float offsetY, float blur, RgbaColor color) =>
+        new(FilterFunctionKind.DropShadow, 0f, offsetX, offsetY, blur, color, null);
+
+    /// <summary><c>url()</c>, kept verbatim so the computed value round-trips.</summary>
+    public static FilterFunction ReferenceTo(string reference) =>
+        new(FilterFunctionKind.Reference, 0f, 0f, 0f, 0f, default, reference);
+}
+
 /// <summary>The subset of CSS that influences box layout. Expanded in later phases.</summary>
 /// <remarks>
 /// Allocated once per element, so this is a class rather than a struct. Every field initializer
@@ -1026,21 +1107,31 @@ public sealed class LayoutStyle
     /// </summary>
     public float? Opacity;
 
-    /// <summary>
-    /// <c>filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS pixels.
-    /// </summary>
+    /// <summary>The computed <c>filter</c> list, in application order; <c>null</c> for
+    /// <c>none</c> and for a list that failed to parse.</summary>
     /// <remarks>
-    /// <c>blur()</c>'s argument <em>is</em> sigma, unlike <c>box-shadow</c>'s blur radius,
-    /// which is 2 sigma. Only a blur-only filter list is recorded: a list carrying any
-    /// other function stays unimplemented rather than being silently reduced to its
-    /// blurs, which would paint a wrong result instead of no result.
+    /// CSS makes the whole declaration invalid when any one function is, so this is all-or-
+    /// nothing rather than the parseable prefix. Treat the array as immutable - it is shared
+    /// between the styles that <see cref="Clone"/> produces.
+    /// <para>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render</c> keeps only a blur sigma here and
+    /// drops every other function, so <c>filter</c> never reaches the computed-style snapshot
+    /// and the four <c>drop-shadow()</c>s Curiosity outlines its pixel avatar with paint
+    /// nothing. The port models the list.
+    /// </para>
     /// </remarks>
-    public float? FilterBlur;
+    public FilterFunction[]? Filter;
 
     /// <summary>
     /// <c>backdrop-filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS
-    /// pixels. Same restriction as <see cref="FilterBlur"/>.
+    /// pixels.
     /// </summary>
+    /// <remarks>
+    /// <c>blur()</c>'s argument <em>is</em> sigma, unlike <c>box-shadow</c>'s blur radius,
+    /// which is 2 sigma. Unlike <see cref="Filter"/>, only a blur-only list is recorded:
+    /// nothing paints a backdrop sepia, so reducing a mixed list to its blurs would paint a
+    /// wrong result where painting none at least matches what <c>@supports</c> advertises.
+    /// </remarks>
     public float? BackdropBlur;
 
     /// <summary>First CSS animation name and its timing contract.</summary>
@@ -1377,6 +1468,14 @@ public sealed class LayoutStyle
         copy.PaddingExpressions = (string?[])PaddingExpressions.Clone();
         copy.BorderCascadeOps = [.. BorderCascadeOps];
         copy.ClipPath = ClipPath?.Clone();
+
+        // Null-guarded rather than unconditional: almost nothing carries a filter, and this
+        // runs once per element.
+        if (Filter is { } filter)
+        {
+            copy.Filter = (FilterFunction[])filter.Clone();
+        }
+
         copy.BackgroundGradient = BackgroundGradient is { } linear
             ? (linear.Angle, [.. linear.Stops])
             : null;

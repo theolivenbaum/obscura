@@ -262,6 +262,98 @@ public class PaintTests
     }
 
     [Fact]
+    public void FilterDropShadowOutlinesTheElementOnAllFourSides()
+    {
+        // The shape Curiosity outlines its pixel-art avatar with: four 1px hard-edged
+        // drop-shadows, one per direction. Before `filter` carried more than a blur these
+        // parsed to nothing and the avatar rendered with no outline at all.
+        DomTree plain = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+            <div style="position:absolute;left:30px;top:30px;width:20px;height:20px;
+                        background:rgb(0,255,0)"></div>
+            </body></html>
+            """);
+        DomTree outlined = Parse(
+            """
+            <html style="margin:0"><body style="margin:0;background:white">
+            <div style="position:absolute;left:30px;top:30px;width:20px;height:20px;
+                        background:rgb(0,255,0);
+                        filter:drop-shadow(rgb(0,0,0) 1px 0 0) drop-shadow(rgb(0,0,0) -1px 0 0)
+                               drop-shadow(rgb(0,0,0) 0 1px 0) drop-shadow(rgb(0,0,0) 0 -1px 0)"></div>
+            </body></html>
+            """);
+        Pixmap a = RenderPaint.PaintDom(plain, (100f, 100f), null)!;
+        Pixmap b = RenderPaint.PaintDom(outlined, (100f, 100f), null)!;
+
+        // Unfiltered, the pixel ring just outside the box is the white page on all four
+        // sides.
+        Assert.Equal((255, 255, 255), Rgb(a, 29, 40));
+        Assert.Equal((255, 255, 255), Rgb(a, 50, 40));
+        Assert.Equal((255, 255, 255), Rgb(a, 40, 29));
+        Assert.Equal((255, 255, 255), Rgb(a, 40, 50));
+
+        // Filtered, each of those becomes the opaque black shadow: one side per function,
+        // which is what proves the whole list is applied and not just its first entry.
+        Assert.Equal((0, 0, 0), Rgb(b, 29, 40));
+        Assert.Equal((0, 0, 0), Rgb(b, 50, 40));
+        Assert.Equal((0, 0, 0), Rgb(b, 40, 29));
+        Assert.Equal((0, 0, 0), Rgb(b, 40, 50));
+
+        // The element itself still paints on top of its own shadows, unchanged.
+        Assert.Equal((0, 255, 0), Rgb(b, 40, 40));
+        // A zero blur radius stays hard: two pixels out is still the page.
+        Assert.Equal((255, 255, 255), Rgb(b, 28, 40));
+    }
+
+    [Fact]
+    public void FilterColorMatrixFunctionsRecolorTheSubtree()
+    {
+        static Pixmap Render(string filter) => RenderPaint.PaintDom(
+            Parse(
+                $"""
+                <html style="margin:0"><body style="margin:0;background:white">
+                <div style="position:absolute;left:10px;top:10px;width:40px;height:40px;
+                            background:rgb(200,100,50);filter:{filter}"></div>
+                </body></html>
+                """),
+            (100f, 100f),
+            null)!;
+
+        // grayscale(1) collapses to feColorMatrix's luminance:
+        // 0.213*200 + 0.715*100 + 0.072*50 = 117.7.
+        (byte R, byte G, byte B) grey = Rgb(Render("grayscale(1)"), 30, 30);
+        Assert.Equal(grey.R, grey.G);
+        Assert.Equal(grey.G, grey.B);
+        Assert.InRange(grey.R, 116, 119);
+
+        // invert(1) is 255 - channel.
+        Assert.Equal((55, 155, 205), Rgb(Render("invert(1)"), 30, 30));
+
+        // brightness(0.5) halves each channel, and clamps rather than wrapping when a
+        // channel would overflow.
+        Assert.Equal((100, 50, 25), Rgb(Render("brightness(0.5)"), 30, 30));
+        Assert.Equal((255, 200, 100), Rgb(Render("brightness(2)"), 30, 30));
+
+        // opacity(0.5) halves alpha, so the white page shows through half way. Alpha
+        // quantizes to 128/255 rather than exactly 0.5, which is what puts the red channel
+        // at round(200*0.5) + 255*(1 - 128/255) = 227 and not 228.
+        Assert.Equal((227, 177, 152), Rgb(Render("opacity(0.5)"), 30, 30));
+
+        // An identity function must leave the element byte-for-byte alone.
+        Assert.Equal((200, 100, 50), Rgb(Render("grayscale(0)"), 30, 30));
+        Assert.Equal((200, 100, 50), Rgb(Render("hue-rotate(0deg)"), 30, 30));
+
+        // The list applies in order. grayscale and invert would not show that - a luminance
+        // matrix whose weights sum to 1 commutes with `1 - c` - but brightness and invert do,
+        // because brightness clips at the top of the range before invert sees it. On the red
+        // channel (200/255): brightening first saturates to 1 and inverts to 0, while
+        // inverting first gives 55/255 and doubles to 110.
+        Assert.Equal(0, Rgb(Render("brightness(2) invert(1)"), 30, 30).R);
+        Assert.Equal(110, Rgb(Render("invert(1) brightness(2)"), 30, 30).R);
+    }
+
+    [Fact]
     public void BorderRadiusHalfTheSideDrawsACircleNotASquircle()
     {
         // Corners were quadratic Beziers controlled by the corner point, which is a

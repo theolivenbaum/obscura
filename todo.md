@@ -722,6 +722,76 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### `filter` carries the whole function list; the reference keeps only a blur
+
+`style.rs` parses `filter` for `blur()` alone and stores one sigma (`FilterBlur`), so a
+list carrying any other function is dropped entirely: nothing is reported through
+`getComputedStyle`, and nothing but blur is painted.
+
+The C# side models the list. `LayoutStyle.Filter` is a `FilterFunction[]`,
+`ComputedStyle.ParseFilterFunctions` reads it, `PaintCssValues.FilterCss` serializes it
+into the computed-style snapshot, and `PaintFilters.ApplyFilterChain` paints it onto the
+group layer the element already gets for `opacity`. Parsed, reported and painted:
+`blur()`, `drop-shadow()`, `brightness()`, `contrast()`, `grayscale()`, `invert()`,
+`opacity()`, `saturate()`, `sepia()`, `hue-rotate()`.
+
+Found on Curiosity Workspace, where `.tss-pixelavatar-canvas` outlines the pixel-art
+avatar with four 1px `drop-shadow()`s and the avatar rendered with no outline at all.
+45 `filter` values were measured against Chromium 141 and 44 now serialize identically
+(the 45th is the `em` gap below). Three details of Blink's serialization are load-bearing
+and are the reason `box-shadow` cannot share the code: the `drop-shadow()` colour comes
+first, all three of its lengths are always emitted, and the multiplier functions report a
+number rather than the authored percentage.
+
+`backdrop-filter` deliberately keeps the blur-only parse: nothing paints a backdrop
+sepia, so reducing a mixed list to its blurs would paint a wrong result where painting
+none matches what `@supports` advertises. `@supports (filter: ...)` now answers true for
+everything except `url()`.
+
+Not painted, and reported anyway: `filter: url(#svg-filter)`. SVG filter elements are not
+modeled, so the reference round-trips through `getComputedStyle` (Chromium reports
+`url("#svg-filter")`, and reporting `none` instead would be a second wrong answer) while
+`PaintFilters.HasVisibleEffect` returns false for it, so it takes no layer and paints
+nothing. `@supports` reports it unsupported for that reason.
+
+Covered by `FilterParsesTheWholeFunctionList`,
+`FilterDropShadowTakesItsColorOnEitherSide`, `FilterIsReportedAndDefaultsToNone`,
+`FilterDropShadowSerializesColorFirstAndAlwaysThreeLengths`,
+`FilterDropShadowOutlinesTheElementOnAllFourSides` and
+`FilterColorMatrixFunctionsRecolorTheSubtree`.
+
+### A shadow or filter length in `em` resolves against 16px, not the element's font
+
+`px_value` in `style.rs` scales every font-relative unit by a flat 16, and the C# port
+carries that verbatim in `ComputedStyle.PxValue`. It is the token reader behind
+`box-shadow`'s and `filter`'s lengths, so `filter: blur(1em)` and
+`box-shadow: 0 0 1em red` both compute to 16px on a 13px element where Chromium reports
+13px. Ordinary length properties are unaffected: `padding: 1em` goes through
+`ResolveContextualLength` and is exact.
+
+Pre-existing and shared by both properties rather than introduced with the filter list
+above; the fix is to give `PxValue` the element's font size, which means settling what it
+should do when `font-size` is declared after the property that reads it in the same rule.
+
+### `button` takes the colour Chromium paints, not the one it computes
+
+Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder`. On a button
+`ButtonBorder` computes to `rgb(0, 0, 0)` - unlike `select` and `input`, whose border
+colour computes to `rgb(118, 118, 118)` - and Chromium then never paints that black,
+because a button with the default `appearance` is drawn by the native form-control
+painter as a flat 1px `rgb(118, 118, 118)` stroke over an `rgb(239, 239, 239)` face.
+
+There is no native-appearance painter here, so taking the computed black literally would
+paint a heavy black bevel where Chromium shows thin grey. The `button` arm carries the
+colour Chromium paints instead. The cost is the reported `border-color`: this port says
+`rgb(118, 118, 118)` where Chromium says `rgb(0, 0, 0)`. Width and style are exact
+(`2px` / `outset`), and so is the resulting geometry.
+
+Still unmodeled, and separate: a button's `rgb(239, 239, 239)` UA background, which this
+port leaves transparent.
+
+Covered by `ButtonCarriesTheUserAgentOutsetBorder`.
+
 ### `height: fit-content` is implemented; the reference ignores it
 
 `style.rs` handles `fit-content` on `width`/`inline-size` only (`width_fit_content`),
@@ -790,9 +860,11 @@ from 4 per row to Chromium's 5.
 Covered by `ButtonTakesTheWidestItemOfAColumnFlexChildNotTheirSum` and
 `ButtonStillSumsInlineLevelContentOnOneLine`.
 
-Still short of Chromium by 4px on a button with no author border, because this port's
-`button` UA arm carries `padding: 1px 6px` but not Chromium's `border: 2px outset`. That
-is a separate pre-existing gap and is not what the fix above changes.
+The 4px that was still missing on a button with no author border is now carried too: the
+`button` UA arm sets `border: 2px outset` alongside its `padding: 1px 6px`. On the
+`btn-min.html` repro every element matches Chromium exactly (b1/b2/b4 180x46, b3 67x26,
+d1 164x40), where the buttons read 176 and 63 before. Covered by
+`ButtonCarriesTheUserAgentOutsetBorder`.
 
 ### `align-content: baseline` uses its fallback alignment
 

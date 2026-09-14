@@ -744,11 +744,10 @@ internal static class PaintDomPainter
             // context is post-processed once, never each primitive. Sharing the opacity
             // group's bookkeeping keeps one suppression flag and one recursion rather
             // than a second, near-identical layer path.
-            float? groupBlur = style.FilterBlur is { } blurSigma
-                && float.IsFinite(blurSigma) && blurSigma > 0f
-                    ? blurSigma
-                    : null;
-            if (pass.SuppressOpacityFor != nid && (ownOpacity < 1f || groupBlur is not null))
+            FilterFunction[]? groupFilter = PaintFilters.HasVisibleEffect(style.Filter)
+                ? style.Filter
+                : null;
+            if (pass.SuppressOpacityFor != nid && (ownOpacity < 1f || groupFilter is not null))
             {
                 opacitySubtreeSkip.Add(nid);
                 foreach (NodeId member in DomTraversal.RenderedDescendants(tree, nid))
@@ -782,9 +781,9 @@ internal static class PaintDomPainter
                     return null;
                 }
 
-                if (groupBlur is { } sigma)
+                if (groupFilter is { } functions)
                 {
-                    PaintFilters.BlurPixmap(painted, sigma, PaintFilters.BlurEdge.Transparent);
+                    PaintFilters.ApplyFilterChain(painted, functions);
                 }
 
                 Surface.DrawPixmap(pixmap, 0, 0, painted, ownOpacity, false, Affine2.Identity, null);

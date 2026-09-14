@@ -1,6 +1,7 @@
 // Port of the CSSOM serialization helpers in crates/obscura-render/src/paint.rs
 // (`css_number` .. `transform_origin_css`).
 using System.Globalization;
+using System.Text;
 using Obscura.Render.Layout;
 using RgbaColor = Obscura.Render.Css.RgbaColor;
 
@@ -195,4 +196,84 @@ internal static class PaintCssValues
                 ? CssPx(value.Value * axis)
                 : DimensionCss(value, "0px");
     }
+
+    /// <summary>
+    /// Serialize a computed <c>filter</c> list the way Blink's
+    /// <c>ComputedStyleUtils::ValueForFilter</c> does.
+    /// </summary>
+    /// <remarks>
+    /// Three details are Blink's and were measured against Chromium 141 rather than inferred
+    /// from the grammar, because all three differ from the authored spelling:
+    /// <list type="bullet">
+    /// <item>The <c>drop-shadow()</c> colour comes <em>first</em> and is always present, even
+    /// when the author wrote it last or omitted it - the computed value has already resolved
+    /// <c>currentColor</c>. This is the opposite of the shadow order everywhere else in CSS,
+    /// and the reason <c>box-shadow</c> above cannot share this code.</item>
+    /// <item>All three <c>drop-shadow()</c> lengths are emitted, so an omitted blur reports as
+    /// <c>0px</c>.</item>
+    /// <item>The multiplier functions report a number, never a percentage:
+    /// <c>brightness(50%)</c> computes to <c>brightness(0.5)</c>. <c>hue-rotate()</c> is the
+    /// exception that keeps a unit, always <c>deg</c>.</item>
+    /// </list>
+    /// </remarks>
+    internal static string FilterCss(FilterFunction[]? filter)
+    {
+        if (filter is null || filter.Length == 0)
+        {
+            return "none";
+        }
+
+        StringBuilder output = new();
+        foreach (FilterFunction function in filter)
+        {
+            if (output.Length != 0)
+            {
+                output.Append(' ');
+            }
+
+            switch (function.Kind)
+            {
+                case FilterFunctionKind.Blur:
+                    output.Append("blur(").Append(CssPx(function.Amount)).Append(')');
+                    break;
+
+                case FilterFunctionKind.HueRotate:
+                    output.Append("hue-rotate(").Append(CssNumber(function.Amount)).Append("deg)");
+                    break;
+
+                case FilterFunctionKind.DropShadow:
+                    output.Append("drop-shadow(")
+                        .Append(CssColor(function.Color))
+                        .Append(' ').Append(CssPx(function.OffsetX))
+                        .Append(' ').Append(CssPx(function.OffsetY))
+                        .Append(' ').Append(CssPx(function.ShadowBlur))
+                        .Append(')');
+                    break;
+
+                case FilterFunctionKind.Reference:
+                    output.Append("url(\"").Append(function.Reference).Append("\")");
+                    break;
+
+                default:
+                    output.Append(FilterFunctionName(function.Kind))
+                        .Append('(')
+                        .Append(CssNumber(function.Amount))
+                        .Append(')');
+                    break;
+            }
+        }
+
+        return output.ToString();
+    }
+
+    private static string FilterFunctionName(FilterFunctionKind kind) => kind switch
+    {
+        FilterFunctionKind.Brightness => "brightness",
+        FilterFunctionKind.Contrast => "contrast",
+        FilterFunctionKind.Grayscale => "grayscale",
+        FilterFunctionKind.Invert => "invert",
+        FilterFunctionKind.Opacity => "opacity",
+        FilterFunctionKind.Saturate => "saturate",
+        _ => "sepia",
+    };
 }
