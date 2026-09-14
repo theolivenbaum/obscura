@@ -4161,6 +4161,167 @@ public class DomLayoutTests
             $"height:100% must resolve against the 120px flex basis minus its edges: {Get("bar")}");
     }
 
+    /// <summary>
+    /// DEVIATION from the Rust reference, which calls a box's block size definite only when
+    /// `height` itself is a length or percentage, so a flex item sized by the flex algorithm
+    /// is an indefinite containing block and every descendant `height: %` under it computes to
+    /// `auto`. CSS Flexbox 9.8 makes a flex item's post-flexing MAIN size definite whenever the
+    /// container's main size is definite. Tesserae nests a `height: 100%` column inside a
+    /// `flex-grow: 1` item carrying no height of its own, so the reference collapsed the chain
+    /// to 0 and the connect-apps grid clipped 1676px of cards into an 8px box.
+    /// Chromium (Playwright, /opt/pw-browsers/chromium) lays every box in this fixture out
+    /// 400px tall.
+    /// </summary>
+    [Fact]
+    public void AColumnFlexItemsPostFlexHeightIsDefiniteForDescendantPercentages()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #col { display:flex; flex-direction:column; height:400px; width:200px }
+              #item { flex-grow:1 }
+              #a { height:100% }
+              #b { height:100% }
+              #c { height:50% }
+            </style>
+            <div id="col">
+              <div id="item"><div id="a"><div id="b"><div id="c"></div></div></div></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("item").Height - 400f) < 0.01f, $"{Get("item")}");
+        Assert.True(MathF.Abs(Get("a").Height - 400f) < 0.01f, $"{Get("a")}");
+        Assert.True(
+            MathF.Abs(Get("b").Height - 400f) < 0.01f,
+            $"the percentage must keep chaining past the first level: {Get("b")}");
+        Assert.True(MathF.Abs(Get("c").Height - 200f) < 0.01f, $"{Get("c")}");
+    }
+
+    /// <summary>
+    /// The other half of CSS Flexbox 9.8: a STRETCHED item's cross size is definite whenever
+    /// the container's cross size is, which is the block axis for a row container. Chromium
+    /// lays the stretched item and its `height: 100%` child out 400px tall.
+    /// </summary>
+    [Fact]
+    public void AStretchedRowFlexItemsCrossSizeIsDefiniteForDescendantPercentages()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #row { display:flex; flex-direction:row; height:400px; width:300px }
+              #item { width:100px }
+              #fill { height:100% }
+            </style>
+            <div id="row"><div id="item"><div id="fill"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("item").Height - 400f) < 0.01f, $"{Get("item")}");
+        Assert.True(MathF.Abs(Get("fill").Height - 400f) < 0.01f, $"{Get("fill")}");
+    }
+
+    /// <summary>
+    /// The negative cases, so a fix that simply calls every flex item definite cannot pass.
+    /// Verified against Chromium (Playwright, /opt/pw-browsers/chromium): a row item that is
+    /// not stretched (`align-items: flex-start`, or an auto block-axis margin) and an item in a
+    /// container whose own block size is indefinite all lay their `height: 100%` child out 0px
+    /// tall, because in none of those does the flex algorithm hand the item a definite height.
+    /// </summary>
+    [Fact]
+    public void AnUnstretchedOrIndefinitelySizedFlexItemStaysAnIndefiniteContainingBlock()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              .row { display:flex; flex-direction:row; height:400px; width:300px }
+              .item { width:100px }
+              .filler { height:50px }
+              .fill { height:100% }
+              #auto-col { display:flex; flex-direction:column; width:200px }
+            </style>
+            <div class="row" style="align-items:flex-start">
+              <div id="start-item" class="item">
+                <div class="filler"></div><div id="start-fill" class="fill"></div></div></div>
+            <div class="row">
+              <div id="margin-item" class="item" style="margin-top:auto">
+                <div class="filler"></div><div id="margin-fill" class="fill"></div></div></div>
+            <div id="auto-col">
+              <div id="auto-item" style="flex-grow:1">
+                <div class="filler"></div><div id="auto-fill" class="fill"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("start-item").Height - 50f) < 0.01f, $"{Get("start-item")}");
+        Assert.True(MathF.Abs(Get("start-fill").Height) < 0.01f, $"{Get("start-fill")}");
+        Assert.True(MathF.Abs(Get("margin-item").Height - 50f) < 0.01f, $"{Get("margin-item")}");
+        Assert.True(MathF.Abs(Get("margin-fill").Height) < 0.01f, $"{Get("margin-fill")}");
+        Assert.True(MathF.Abs(Get("auto-item").Height - 50f) < 0.01f, $"{Get("auto-item")}");
+        Assert.True(MathF.Abs(Get("auto-fill").Height) < 0.01f, $"{Get("auto-fill")}");
+    }
+
+    /// <summary>
+    /// The chain the connect-apps panel actually builds, reduced from the live DOM. Its whole
+    /// weight rests on `#content`: a `flex-grow: 1` item of a definite-height COLUMN container,
+    /// carrying no height of its own. Once that is an indefinite containing block, the
+    /// `height: 100%` on every box below it computes to `auto` in turn, and the grid ends up
+    /// its padding box tall with `overflow: auto` clipping the cards. `#shell` and `#pane` are
+    /// each 400px either way, because a row container stretches them - which is why the live
+    /// symptom looked like a paint bug and has to be checked at the ANCESTORS.
+    /// Chromium lays every box in this fixture out 400px tall and the grid 360px.
+    /// </summary>
+    [Fact]
+    public void APercentageStackUnderAFlexGrownItemKeepsItsScrollableGridOpen()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #modal { display:flex; flex-direction:column; height:400px; width:300px }
+              #content { display:flex; flex-grow:1; width:100%; overflow:hidden auto }
+              #shell { display:flex; flex-direction:row; width:100%; height:100%; min-height:0 }
+              #pane { height:100%; min-height:0; width:1px; flex-grow:1 }
+              #outer { display:flex; flex-direction:column; height:100%; min-height:0;
+                       overflow:hidden auto }
+              #hub { display:flex; flex-direction:column; height:100%; min-height:0 }
+              #card { flex-grow:1; flex-shrink:0; height:10px; overflow:hidden }
+              #defer { width:100%; height:100%; min-height:0 }
+              #inner { display:flex; flex-direction:column; height:100%; min-height:0;
+                       overflow:hidden auto }
+              #grid { display:grid; grid-template-columns:1fr; overflow:auto; width:100% }
+              #grid > div { height:60px }
+            </style>
+            <div id="modal"><div id="content"><div id="shell"><div id="pane"><div id="outer">
+              <div id="hub"><div id="card"><div id="defer"><div id="inner">
+                <div id="grid">
+                  <div></div><div></div><div></div><div></div><div></div><div></div>
+                </div>
+              </div></div></div></div>
+            </div></div></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        foreach (string id in new[] { "content", "shell", "pane", "outer", "hub", "card", "defer", "inner" })
+        {
+            Assert.True(MathF.Abs(Get(id).Height - 400f) < 0.01f, $"#{id} {Get(id)}");
+        }
+
+        Assert.True(
+            MathF.Abs(Get("grid").Height - 360f) < 0.01f,
+            $"the scrollable grid must keep its six 60px rows, not collapse: {Get("grid")}");
+    }
+
     [Fact]
     public void AutoFitRepetitionCountsAMathFunctionTrackMinimumAsFixed()
     {

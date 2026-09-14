@@ -652,6 +652,34 @@ DEVIATION comment at the C# code that differs.
   column item, so the reference computed them to `auto`, every bar laid out 0px
   tall, and the chart rendered as an empty box (Chromium: 107px bars in a 120px
   row).
+- **DEVIATION - a flex item sized by the flex algorithm was an indefinite
+  containing block.** The general form of the entry above, and the reason the
+  connect-apps panel rendered as an empty box. The reference calls a box's block
+  size definite only when `height` itself is a length or percentage, so a flex
+  item that gets its height from flexing rather than from its own style is an
+  indefinite containing block and every descendant `height: %` under it computes
+  to `auto`. CSS Flexbox 9.8 says otherwise in two halves that Chromium both
+  implements: a flex item's post-flexing MAIN size is definite whenever the
+  container's main size is definite, and a stretched item's CROSS size is definite
+  whenever the container's cross size is. The block axis is the main axis of a
+  column container and the cross axis of a row one, so each half covers one
+  `flex-direction`. Tesserae's modal grows its content pane with `flex-grow: 1`
+  inside a `height: 80vh` column and then stacks four `height: 100%` boxes under
+  it, so the reference collapsed the whole chain (758/682/666/1677 in Chromium
+  against 92/16/0/8) and the grid's `overflow: auto` clipped 1676px of cards into
+  an 8px box. The port marks such a box definite but NOT known - the post-flex
+  size is decided after this top-down pass - so a bare percentage survives and
+  taffy resolves it against the used size, the same way the grid-item case does.
+  A functional `calc()` percentage under such a box still flattens to `auto`,
+  which is the same residual gap the grid case accepts. The taffy layer was
+  already correct on its own; only the DOM style pass destroyed the percentage.
+  `RenderDom.IsFlexSizedDefiniteBlock` / `IsStretchedFlexItem`, whose three
+  stretch conditions are the ones `FlexboxLayout.DetermineUsedCrossSize` applies.
+  Still open on that same chain, and separate: `min-height: min-content` computes
+  to `auto` (`.tss-grid` carries it), so the grid settles at its scroll parent's
+  666px where Chromium expands it to its 1676px min-content height. Both engines
+  show the same first screen and both scroll; only which box owns the scrollbar
+  differs.
 - **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
   properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
   `inherit` has to copy the parent's computed value explicitly; the reference
