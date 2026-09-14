@@ -572,3 +572,93 @@ It was not a selector bug. It was the same `background: rgba(...) none repeat sc
 defect that workstream fixed: the alpha component arrived as the unparseable `"0.12)"` and was
 silently dropped, which is why all three properties were wrong together and why it looked like a
 cascade miss.
+
+---
+
+# Third pass: regression check on the re-survey, and a new finding
+
+The goal was "fix all identified issues against chromium, then re-run the check and ensure no
+new issues were introduced". The re-run is above. Three of its numbers moved in the wrong
+direction, so each was checked element by element rather than accepted at face value.
+
+## The `display` / `fontSize` increase is content drift, not a regression
+
+| property | previous run | verification run |
+|---|---|---|
+| display | 226 | 242 |
+| fontSize | 68 | 75 |
+
+Broken down per route, the whole `fontSize` increase and all but two of the `display`
+increase land on a single route, `#/manage/operate/usage`, whose aligned-pair count also grew
+(569 -> 591):
+
+```
+display   049_manage_operate_usage   prev=75 new=89   pairs 569->591
+display   026_browse                 prev=2  new=4    pairs 291->290
+fontSize  049_manage_operate_usage   prev=24 new=31   pairs 569->591
+```
+
+Element level, the extra mismatches are all the same three kinds, just more instances of them:
+
+```
+('rect',  '', chromium='inline', obscura='block')   14 -> 21
+('title', '', chromium='inline', obscura='none')     7 -> 14
+('text',  '', chromium='10px',   obscura='13px')    24 -> 31
+```
+
+`#/manage/operate/usage` renders an LLM-usage bar chart. Every extra bar is one more `rect`,
+one more `<title>` tooltip and one more `<text>` label, and the session accumulated usage
+between the two captures. The per-element defect rate is unchanged; the chart simply has more
+bars. Same for the two on `#/browse`: one extra instance of a class that was already
+mismatching.
+
+## `tss-sidebar-has-shift` is pre-existing
+
+The remaining ~170-element gap on `#/users` (Chromium 654 elements, Obscura 485) first
+diverges at index 74, where Chromium has `tss-sidebar-has-shift` and Obscura does not. Checked
+against the pre-fix captures:
+
+| capture | route has the class | routes affected |
+|---|---|---|
+| Chromium, previous run | yes | 31 / 157 |
+| Chromium, verification run | yes | 31 / 157 |
+| Obscura, **before** the fixes | no | 1 / 157 |
+| Obscura, after the fixes | no | 1 / 157 |
+
+Identical before and after, so the fixes neither caused nor touched it. Left open.
+
+## F20 — NEW: UA style defaults are namespace-blind, and SVG presentation attributes are ignored
+
+The three `#/manage/operate/usage` mismatches above are not chart-specific. Reduced to a
+standalone probe (`svg-probe.html`), `getComputedStyle` on an SVG subtree disagrees with
+Chromium on most of it:
+
+| element | Chromium | Obscura |
+|---|---|---|
+| `svg`, `rect`, `g`, `circle`, `use`, `defs`, `symbol`, `tspan`, `a` | `display: inline` | `display: block` |
+| `title`, `desc` (in SVG) | `display: inline` | `display: none` |
+| `text`, `foreignObject` | `display: block` | `display: block` (correct) |
+| `<text font-size="10">` | `10px` | `13px` (attribute ignored) |
+| `<g font-family="monospace">` | `monospace` | `sans-serif` (attribute ignored) |
+| `<circle visibility="hidden">` | `hidden` | `visible` (attribute ignored) |
+| `fill` / `stroke` / `stroke-width` / `text-anchor` | `rgb(0, 0, 0)` / `none` / `1px` / `start` | empty string (properties do not exist) |
+| SVG `<a>` and its children | `color: rgb(0, 0, 0)` | `color: rgb(0, 0, 238)` (HTML link colour leaks in) |
+
+`<text style="font-size:11px">` is correct in both, so the `style` attribute path works; it is
+the presentation attributes that never reach the cascade.
+
+Three separate causes:
+
+1. `ComputedStyle`'s default-`display` table (`dotnet/src/Obscura.Render/Style/ComputedStyle.cs`)
+   switches on the local name with no namespace test, so SVG elements take the HTML `block`
+   fallback and `title`/`desc` take HTML's `display: none`.
+2. SVG presentation attributes are not mapped to declarations at all. In Chromium they are
+   author-origin declarations at the bottom of the cascade, below every CSS rule and below
+   `style=`.
+3. `fill`, `stroke`, `stroke-width` and `text-anchor` are not modelled as CSS properties, so
+   there is nothing for `getComputedStyle` to report.
+
+Painting is unaffected: `Paint/SvgRenderer.cs` is a separate path that reads the attributes
+itself and skips `title`/`desc`/`defs` by tag name, not by computed `display`. The Rust
+reference has the same namespace-blind table (`crates/obscura-render/src/style.rs`), so fixing
+this is a deliberate C#-side deviation under ground rule 2.
