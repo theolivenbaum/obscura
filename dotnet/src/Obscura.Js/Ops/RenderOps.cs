@@ -90,6 +90,37 @@ public static class RenderOps
         false);
 
     /// <summary>
+    /// <c>op_font_resource_loaded</c>. Whether the renderer is holding usable bytes for
+    /// an <c>@font-face</c> source URL, i.e. whether text can be shaped with that face
+    /// right now.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// PORT ADDITION, with no counterpart in <c>crates/obscura-js/src/ops.rs</c>. It
+    /// backs the <c>status</c> of the CSS-connected <c>FontFace</c> objects in
+    /// <c>document.fonts</c>, and therefore <c>document.fonts.check()</c>. Those faces
+    /// are discovered by the shim from the page's own <c>@font-face</c> rules, but the
+    /// renderer downloads their sources itself and never told JS, so every one of them
+    /// stayed <c>unloaded</c> for the life of the page and <c>check()</c> answered
+    /// false for a webfont the page was visibly rendering with.
+    /// </para>
+    /// <para>
+    /// The argument is an already-absolute URL: the shim resolves <c>url()</c> against
+    /// <c>document.baseURI</c>, which is the same resolution the warm-up path used to
+    /// fetch it. Data-URL sources never reach here - a <c>FontFace</c> built from bytes
+    /// is loaded by construction.
+    /// </para>
+    /// </remarks>
+    public static bool OpFontResourceLoaded(ObscuraState state, string url) => OpGuard.Run(
+        "op_font_resource_loaded",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            return !string.IsNullOrEmpty(url) && state.RenderResources.HasCachedBytes(url);
+        },
+        false);
+
+    /// <summary>
     /// <c>op_canvas_register_surface</c>. Retains the JavaScript-owned Canvas2D pixel
     /// buffer without copying it. A canvas resize supplies a new fixed backing store
     /// and atomically replaces the previous surface for the same DOM node.

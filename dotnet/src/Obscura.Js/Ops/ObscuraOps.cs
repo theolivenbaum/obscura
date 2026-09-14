@@ -265,6 +265,16 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
             input => RenderOps.OpWaapiCreate(Page, S(input))));
         Bind(ops, "op_waapi_control", (Func<object?, object?, object?, bool>)(
             (id, action, value) => RenderOps.OpWaapiControl(Page, D(id), S(action), D(value))));
+        Bind(ops, "op_font_resource_loaded", (Func<object?, bool>)(
+            url => RenderOps.OpFontResourceLoaded(Page, S(url))));
+
+        // --- Performance timeline ------------------------------------------
+        // Page-scoped on purpose: the host records a subresource against the page it
+        // fetched for, not the realm whose script happened to reference it.
+        Bind(ops, "op_resource_timings", (Func<object?, string>)(
+            sinceIndex => PerformanceOps.OpResourceTimings(Page, D(sinceIndex))));
+        Bind(ops, "op_resource_timing_count", (Func<double>)(
+            () => PerformanceOps.OpResourceTimingCount(Page)));
     }
 
     /// <summary>

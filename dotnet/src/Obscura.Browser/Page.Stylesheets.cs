@@ -1,4 +1,5 @@
 using Obscura.Dom;
+using Obscura.Js.Ops;
 using Obscura.Js.Url;
 using Obscura.Net;
 
@@ -158,11 +159,21 @@ public sealed partial class Page
                 {
                     ResourceRequest request =
                         ResourceRequest.Subresource(ResourceType.Stylesheet, NetUrl.From(documentUrl));
+                    double startedAt = PerformanceOps.UnixMilliseconds();
                     try
                     {
                         Response response = await HttpClient
                             .FetchResourceWithCallbacksAsync(NetUrl.From(requestedUrl), request, _callbacks, cancellationToken)
                             .ConfigureAwait(false);
+                        // A nested @import is initiated by a stylesheet, not by the
+                        // <link> element, which is what Chromium's "css" initiator
+                        // type means; depth 0 is the <link> itself.
+                        RecordResourceTiming(
+                            NetUrl.To(response.Url).Href,
+                            depth == 0 ? "link" : "css",
+                            response,
+                            startedAt,
+                            PerformanceOps.UnixMilliseconds());
                         return (key, requestedUrl, depth, (Response?)response);
                     }
                     catch (Exception error) when (error is not OperationCanceledException)
