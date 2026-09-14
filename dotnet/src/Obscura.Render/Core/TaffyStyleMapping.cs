@@ -293,6 +293,7 @@ internal static class TaffyStyleMapping
         // fall back to its raw magnitude (em/rem ~16px) rather than panicking.
         DimensionKind.Em or DimensionKind.Rem => TaffyDimension.FromLength(value.Value * 16f),
         DimensionKind.Ex => TaffyDimension.FromLength(value.Value * 16f * Dimension.ExPerEm),
+        DimensionKind.Ch => TaffyDimension.FromLength(value.Value * 16f * Dimension.ChPerEm),
         _ => TaffyDimension.FromLength(value.Value),
     };
 

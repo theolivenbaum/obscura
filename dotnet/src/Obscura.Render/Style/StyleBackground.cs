@@ -1031,7 +1031,15 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>parse_box_shadow</c>.</summary>
-    internal static BoxShadow? ParseBoxShadow(string value, RgbaColor? currentColor, bool darkScheme)
+    internal static BoxShadow? ParseBoxShadow(string value, RgbaColor? currentColor, bool darkScheme) =>
+        ParseBoxShadow(value, currentColor, darkScheme, FontLengthContext.Initial);
+
+    /// <inheritdoc cref="ParseBoxShadow(string, RgbaColor?, bool)"/>
+    internal static BoxShadow? ParseBoxShadow(
+        string value,
+        RgbaColor? currentColor,
+        bool darkScheme,
+        in FontLengthContext context)
     {
         string trimmed = value.Trim();
         if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
@@ -1063,7 +1071,7 @@ public static partial class ComputedStyle
             }
 
             // A bare `0` must be an offset, not a failed color.
-            if (lengths.Count < 4 && PxValue(current) is { } length)
+            if (lengths.Count < 4 && Px(current, context) is { } length)
             {
                 lengths.Add(length);
                 continue;

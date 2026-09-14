@@ -50,6 +50,7 @@ internal static class PaintCssValues
         DimensionKind.Percent => CssNumber(value.Value * 100f) + "%",
         DimensionKind.Em => CssNumber(value.Value) + "em",
         DimensionKind.Ex => CssNumber(value.Value) + "ex",
+        DimensionKind.Ch => CssNumber(value.Value) + "ch",
         DimensionKind.Rem => CssNumber(value.Value) + "rem",
         DimensionKind.Vw => CssNumber(value.Value) + "vw",
         DimensionKind.Vh => CssNumber(value.Value) + "vh",

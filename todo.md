@@ -760,37 +760,121 @@ Covered by `FilterParsesTheWholeFunctionList`,
 `FilterDropShadowOutlinesTheElementOnAllFourSides` and
 `FilterColorMatrixFunctionsRecolorTheSubtree`.
 
-### A shadow or filter length in `em` resolves against 16px, not the element's font
+### A font-relative length resolves against the element's font, not a flat 16px
 
-`px_value` in `style.rs` scales every font-relative unit by a flat 16, and the C# port
-carries that verbatim in `ComputedStyle.PxValue`. It is the token reader behind
-`box-shadow`'s and `filter`'s lengths, so `filter: blur(1em)` and
-`box-shadow: 0 0 1em red` both compute to 16px on a 13px element where Chromium reports
-13px. Ordinary length properties are unaffected: `padding: 1em` goes through
-`ResolveContextualLength` and is exact.
+`px_value` in `style.rs` scales every font-relative unit by a flat 16 and has no way to
+be told otherwise. The port carried that verbatim, so on a 13px element
+`filter: blur(1em)` and `box-shadow: 0 0 1em red` both computed to 16px where Chromium
+reports 13px, and `1ch` had its unit stripped and read as the bare number - `1ch` meant
+1px. Ordinary length properties were never affected: `padding`, `margin`, `line-height`,
+`letter-spacing`, `gap` and `font-size` itself all keep a `Dimension` or an expression and
+resolve in the DOM top-down pass, which is why `padding: 1em` was exact throughout.
 
-Pre-existing and shared by both properties rather than introduced with the filter list
-above; the fix is to give `PxValue` the element's font size, which means settling what it
-should do when `font-size` is declared after the property that reads it in the same rule.
+`PxValue` and `Px` now take the em and rem sizes their units are relative to. Nothing can
+hand them those while a declaration is being cascaded - `font-size` is itself cascaded, and
+inherited when absent - so the three properties that read a length on the spot keep the
+declaration text when it carries an `em`, `rem`, `ex` or `ch`
+(`LayoutStyle.FilterFontRelative`, `BackdropFilterFontRelative`, `BoxShadowFontRelative`)
+and `ComputedStyle.ResolveFontRelativeDeclarations` re-reads it from the top-down pass,
+next to `SetGridCalcContext`, which already did the same job for grid tracks. An element
+with no font-relative value in those three keeps nothing and pays one null check.
 
-### `button` takes the colour Chromium paints, not the one it computes
+Measured against Chromium 141 on a 13px element, before -> after: `blur(1em)` 16px -> 13px
+(Chromium 13px), `blur(0.5em)` 8px -> 6.5px (6.5px), `blur(1rem)` 16px -> 16px (16px),
+`drop-shadow(1em 2em)` 16/32px -> 13/26px (13/26px), `box-shadow: 0 0 1em` 16px -> 13px
+(13px). Two things came with it, both previously broken rather than merely imprecise:
+`calc()` inside one of these lengths (`blur(calc(1em + 2px))` invalidated the whole
+declaration, because a bare-token reader cannot see into a function; now 15px, as Chromium
+says), and `currentcolor` in a re-read value, which now resolves against the inherited
+colour rather than whatever `color` the element had reached mid-cascade.
 
-Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder`. On a button
-`ButtonBorder` computes to `rgb(0, 0, 0)` - unlike `select` and `input`, whose border
-colour computes to `rgb(118, 118, 118)` - and Chromium then never paints that black,
-because a button with the default `appearance` is drawn by the native form-control
-painter as a flat 1px `rgb(118, 118, 118)` stroke over an `rgb(239, 239, 239)` face.
+Covered by `FontRelativeLengthsResolveAgainstTheElementsOwnFontSize`,
+`EmInAFilterFollowsTheInheritedFontSizeToo`, `CalcResolvesInsideAFilterOrShadowLength` and
+`ChResolvesAgainstTheFontSizeInsteadOfBeingDroppedOrReadAsPx`.
 
-There is no native-appearance painter here, so taking the computed black literally would
-paint a heavy black bevel where Chromium shows thin grey. The `button` arm carries the
-colour Chromium paints instead. The cost is the reported `border-color`: this port says
-`rgb(118, 118, 118)` where Chromium says `rgb(0, 0, 0)`. Width and style are exact
-(`2px` / `outset`), and so is the resulting geometry.
+**Still eagerly resolved, and still wrong for a font-relative value:** a `border-width` in
+`em` (`StyleBorder.StrictBorderLength`), `border-spacing`, `background-size` and
+`background-position`. Each reads its length through the parameterless `PxValue`/`Px` and
+would need the same deferral; none was measured as a live difference, so none was moved.
 
-Still unmodeled, and separate: a button's `rgb(239, 239, 239)` UA background, which this
-port leaves transparent.
+### DEVIATION - `ex` and `ch` are one constant each, where Chromium measures the face
 
-Covered by `ButtonCarriesTheUserAgentOutsetBorder`.
+CSS defines `1ex` as the font's x-height and `1ch` as the advance of its `0` glyph, both
+per face. The parser has no font at hand, so both are a fraction of the em:
+`Dimension.ExPerEm` = 0.528_320_3 (the reference's own constant, Liberation Sans' OS/2
+`sxHeight`, 1082/2048) and `Dimension.ChPerEm` = 0.556_152_3, added here as Liberation
+Sans' advance for `0`, 1139/2048, read out of
+`crates/obscura-render/assets/liberation-sans.ttf`.
+
+Liberation Sans is the choice for the same reason it was `ExPerEm`'s: it is what
+`FontAssets.ResolveFontFamily` returns for an element that names no family, so it is the
+face this renderer actually paints unstyled text with. The cost is a page that names a
+different generic: Liberation Mono's `0` is 0.600_1 em and Liberation Serif's is 0.5, so a
+monospace or serif `ch` is ~8% out either way. Chromium measured on the same markup
+reports `1ch` = 0.5 em and `1ex` = 0.458_98 em, both of its default *serif* face - this
+port's default family is sans, which is a separate, pre-existing difference.
+
+`ch` was not a unit anywhere in the port before this: `DimensionValue` did not know it, so
+`width: 1ch` fell through to `auto`, and `PxValue` stripped the unit and read `1ch` as 1.
+`DimensionKind.Ch` is appended last so no ordinal moves, and every switch that enumerates
+the relative kinds carries an arm for it.
+
+### DEVIATION - a native control's border computes one colour and paints another
+
+Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder` and `input`
+`border: 2px inset ButtonBorder`, and `ButtonBorder` resolves differently on the two:
+`rgb(0, 0, 0)` on a button, `rgb(118, 118, 118)` on an input and a select. Chromium paints
+neither. A control with the default `appearance` goes to the native form-control painter,
+which strokes a flat 1px `rgb(118, 118, 118)` line - confirmed on the glass, by sampling a
+Chromium 141 capture of a bare `<button>` and `<input>`: one grey pixel, then the face.
+
+The computed value and the painted one are therefore two different things, and an earlier
+pass here conflated them - it put the painted grey in the `button` arm, so every button in
+the app reported a `border-color` Chromium does not. They are now separate:
+`ComputedStyle` computes what `getComputedStyle` has to say (black on a button, grey and
+`inset` on an input), and `LayoutStyle.NativeControlAppearance` gets
+`PaintBorders.PaintNativeControlBorder` to draw the flat 1px grey in place of the two-tone
+relief those values would otherwise produce.
+
+The port does not model `appearance`, so "is this control still native" is read back off
+the border: the flag applies only while the border is exactly `2px outset` black or
+`2px inset` rgb(118, 118, 118) on all four sides. An author rule that reaches the border
+moves one of those and takes the native paint away, which is what Chromium does too. The
+gap is an author who writes exactly the UA border back by hand.
+
+Before -> after, on `<button>Hi</button>` and `<input value=x>`: button `border-color`
+rgb(118, 118, 118) -> rgb(0, 0, 0) (Chromium rgb(0, 0, 0)); input `border-style` `solid` ->
+`inset` (Chromium `inset`); button paint a 2px 156/85 bevel -> a flat 1px 118 stroke
+(Chromium flat 1px 118); input paint a flat 2px 118 band -> a flat 1px 118 stroke
+(Chromium flat 1px 118). Width, style and geometry were already exact and did not move.
+
+Still unmodeled, and separate: a control's `rgb(239, 239, 239)` UA background, which this
+port leaves transparent on a button.
+
+Covered by `ButtonCarriesTheUserAgentOutsetBorder`,
+`ButtonComputesTheBlackUserAgentBorderChromiumReports`,
+`InputComputesTheInsetUserAgentBorderChromiumReports`,
+`SelectKeepsItsSolidGreyUserAgentBorder` and
+`NativeControlsPaintTheFlatOnePixelStrokeChromiumDraws`.
+
+### An `<input>`'s intrinsic width is a curve fit, and it is ~8px narrow in a sans face
+
+`dom.rs` sizes a text input's content box as `size * font-size * 0.6 + font-size * 0.675`,
+a fit rather than a measurement, and the port carries it. Chromium computes it from the
+resolved face: `ceil(avgCharWidth * size)` plus `maxCharWidth - avgCharWidth`.
+
+On a bare `<input value=x>` at the UA 13.3333px, Chromium 141 reports a 185px border box
+and this port 177px. The whole 8px is in the content width, not in the UA box: with
+`border: 0; padding: 0` the two are 177 and 169, and the 8px of padding and border the
+default adds is identical in both. `font-family: monospace` closes it almost completely -
+Chromium 178, port 177 - which is what says it is a font metric: the 0.6 em per character
+happens to be Liberation Mono's advance exactly (0.600_1 em) and undershoots Arial's.
+
+Left alone deliberately. Matching it means replicating Blink's
+`PreferredContentLogicalWidth` against the same face Chromium resolves, which is work in
+the text layer and would move every control's intrinsic size; forcing the number with
+another constant would only move the error to a different family. `<select>` is 1px out
+(Chromium 30, port 31) for the same kind of reason.
 
 ### `height: fit-content` is implemented; the reference ignores it
 

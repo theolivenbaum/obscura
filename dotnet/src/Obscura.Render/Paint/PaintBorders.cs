@@ -49,6 +49,12 @@ internal static class PaintBorders
             return;
         }
 
+        if (style.NativeControlAppearance && IsUserAgentControlBorder(style))
+        {
+            PaintNativeControlBorder(pixmap, rect, style, mask, rasterScale);
+            return;
+        }
+
         RgbaColor current = style.Color ?? new RgbaColor(0, 0, 0, 255);
         Sides<RgbaColor> colors = style.BorderModel.Colors.Map(
             color => color ?? style.BorderColor ?? current);
@@ -132,6 +138,72 @@ internal static class PaintBorders
                     break;
             }
         }
+    }
+
+    /// <summary>
+    /// What Chromium's native form-control painter strokes a control's edge with, measured off
+    /// a Chromium 141 capture of a bare <c>&lt;button&gt;</c> and <c>&lt;input&gt;</c>: one flat
+    /// 1px line, in both cases, whatever the control's border computes to.
+    /// </summary>
+    internal static readonly RgbaColor NativeControlStroke = new(118, 118, 118, 255);
+
+    /// <summary>The width both native-control user-agent arms set, on all four sides.</summary>
+    private static readonly Edges UserAgentControlWidths = new(2f, 2f, 2f, 2f);
+
+    private static readonly Sides<RgbaColor?> UserAgentButtonColors =
+        Sides<RgbaColor?>.All(new RgbaColor(0, 0, 0, 255));
+
+    private static readonly Sides<RgbaColor?> UserAgentInputColors =
+        Sides<RgbaColor?>.All(NativeControlStroke);
+
+    /// <summary>
+    /// Whether a native control still carries the border its user-agent arm gave it, rather
+    /// than one an author rule replaced.
+    /// </summary>
+    /// <remarks>
+    /// Chromium drops a control's native appearance as soon as the page styles its border, so
+    /// the native stroke below has to stop applying at the same point. Reading the border back
+    /// is how that is detected here: the port does not model <c>appearance</c>, and an author
+    /// rule that reaches the border necessarily moves the width, the style or the colour. The
+    /// two pairs are the whole set - <c>outset</c> over black is <c>button</c>, <c>inset</c>
+    /// over rgb(118, 118, 118) is <c>input</c>.
+    /// </remarks>
+    private static bool IsUserAgentControlBorder(LayoutStyle style)
+    {
+        if (style.Border != UserAgentControlWidths)
+        {
+            return false;
+        }
+
+        Sides<BorderStyle> styles = style.BorderModel.Styles;
+        Sides<RgbaColor?> colors = style.BorderModel.Colors;
+
+        return (styles == Sides<BorderStyle>.All(BorderStyle.Outset) && colors == UserAgentButtonColors)
+            || (styles == Sides<BorderStyle>.All(BorderStyle.Inset) && colors == UserAgentInputColors);
+    }
+
+    /// <summary>
+    /// Paint a default-<c>appearance</c> control's edge the way Chromium's native form-control
+    /// painter does: one flat 1px <see cref="NativeControlStroke"/> line around the border box.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render</c> gives <c>button</c> no border at all,
+    /// so it paints nothing here and lays a button out 4px short each way, and it paints
+    /// <c>input</c>'s user-agent border literally. The port keeps the user-agent
+    /// <c>border: 2px outset|inset</c> for its geometry and its computed value - which is what
+    /// <c>getComputedStyle</c> has to report - and paints this instead of the two-tone relief
+    /// that value would otherwise produce. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static void PaintNativeControlBorder(
+        Pixmap pixmap,
+        in Rect rect,
+        LayoutStyle style,
+        Mask? mask,
+        float rasterScale)
+    {
+        ResolvedBorderRadii radii = style.BorderModel.Radii.Resolve(rect.Width, rect.Height);
+
+        PaintUniformBorder(pixmap, rect, 1f, BorderStyle.Solid, NativeControlStroke, radii, mask, rasterScale);
     }
 
     internal static void PaintCssOutline(

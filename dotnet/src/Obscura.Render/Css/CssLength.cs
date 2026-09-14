@@ -180,6 +180,11 @@ public static class CssLength
             return ex * context.EmPx * 0.528_320_3f;
         }
 
+        if (Suffix(lower, "ch") is { } ch)
+        {
+            return ch * context.EmPx * 0.556_152_3f;
+        }
+
         if (Suffix(lower, "vmin") is { } vmin)
         {
             return vmin * MathF.Min(context.Vw, context.Vh);

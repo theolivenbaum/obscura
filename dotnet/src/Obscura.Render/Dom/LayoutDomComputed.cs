@@ -368,6 +368,7 @@ public static partial class RenderDom
         // em in non-font-size properties is relative to this element's OWN computed font-size.
         float emPx = style.FontSize ?? parentFs;
         ComputedStyle.SetGridCalcContext(style, emPx, rootFs, vw, vh);
+        ComputedStyle.ResolveFontRelativeDeclarations(style, emPx, rootFs, vw, vh);
         if (style.LetterSpacingExpression is { } letterSpacingExpression)
         {
             style.LetterSpacing = ComputedStyle.ResolveContextualLength(
@@ -1059,6 +1060,7 @@ public static partial class RenderDom
 
             float pseudoEm = pseudo.FontSize ?? hostFontSize;
             ComputedStyle.SetGridCalcContext(pseudo, pseudoEm, rootFs, vw, vh);
+            ComputedStyle.ResolveFontRelativeDeclarations(pseudo, pseudoEm, rootFs, vw, vh);
             if (pseudo.LetterSpacingExpression is { } letterSpacingExpression)
             {
                 pseudo.LetterSpacing = ComputedStyle.ResolveContextualLength(

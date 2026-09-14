@@ -250,6 +250,23 @@ public sealed class LayoutStyle
     internal bool IsTableBox;
 
     /// <summary>
+    /// This box came out of the <c>button</c> or <c>input</c> user-agent arm, so it is a form
+    /// control Chromium hands to its native theme painter rather than painting the CSS border
+    /// of.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render</c> has no counterpart, because its
+    /// <c>button</c> arm sets no border at all and its <c>input</c> arm paints the one it sets.
+    /// Both controls compute a 2px relief border that Chromium never draws - it strokes a flat
+    /// 1px rgb(118, 118, 118) line instead - so the computed value and the painted one are two
+    /// different things, and this flag is what lets the port report the first and draw the
+    /// second. <see cref="PaintBorders"/> honours it only while the border is still the
+    /// untouched user-agent one, because an author border makes Chromium drop the native
+    /// appearance too. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal bool NativeControlAppearance;
+
+    /// <summary>
     /// The computed <c>table-layout: fixed</c> value. The fixed algorithm is only activated
     /// when the table also has a definite inline size; otherwise CSS requires the automatic
     /// table layout algorithm.
@@ -1121,6 +1138,26 @@ public sealed class LayoutStyle
     /// </para>
     /// </remarks>
     public FilterFunction[]? Filter;
+
+    /// <summary>
+    /// The <c>filter</c> declaration as written, kept only while it carries an <c>em</c>,
+    /// <c>rem</c>, <c>ex</c> or <c>ch</c> length, so the top-down pass can re-read it once the
+    /// element's font size exists. <c>null</c> for every other value.
+    /// </summary>
+    /// <remarks>
+    /// These three are the properties whose lengths the cascade resolves on the spot, where
+    /// <c>padding</c>, <c>margin</c>, <c>line-height</c>, <c>letter-spacing</c>, <c>gap</c> and
+    /// <c>font-size</c> itself all keep a <see cref="Dimension"/> or an expression and resolve
+    /// in the top-down pass. Storing the text rather than adding a fourth kind of deferral is
+    /// what keeps the parsers single-pass; nothing but a font-relative value pays for it.
+    /// </remarks>
+    internal string? FilterFontRelative;
+
+    /// <inheritdoc cref="FilterFontRelative"/>
+    internal string? BackdropFilterFontRelative;
+
+    /// <inheritdoc cref="FilterFontRelative"/>
+    internal string? BoxShadowFontRelative;
 
     /// <summary>
     /// <c>backdrop-filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS

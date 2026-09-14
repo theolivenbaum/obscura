@@ -3601,11 +3601,14 @@ public class DomLayoutTests
         Assert.Equal(new Edges(2f, 2f, 2f, 2f), Style("plain").Border);
         Assert.Equal(BorderStyle.Outset, Style("plain").BorderModel.Styles.Top);
 
-        // DEVIATION: Chromium computes a button's `ButtonBorder` to rgb(0, 0, 0) and then
-        // paints rgb(118, 118, 118) through its native form-control painter. Having no such
-        // painter, this port carries the colour Chromium paints. See the `button` arm of
-        // ComputedStyle and "Known deviations" in todo.md.
-        Assert.Equal(new RgbaColor(118, 118, 118, 255), Style("plain").BorderModel.Colors.Top);
+        // A button's `ButtonBorder` computes to rgb(0, 0, 0) - Chromium 141 on a bare
+        // `<button>Hi</button>` reports exactly that - and the rgb(118, 118, 118) Chromium
+        // shows comes from its native form-control painter, not from this value. This arm
+        // carried the painted colour for a while and made every button report a border-colour
+        // Chromium does not. The grey is PaintBorders' job; see NativeControlAppearance.
+        Assert.Equal(new RgbaColor(0, 0, 0, 255), Style("plain").BorderModel.Colors.Top);
+        Assert.Equal(new RgbaColor(0, 0, 0, 255), Style("plain").BorderColor);
+        Assert.True(Style("plain").NativeControlAppearance);
 
         // The UA border is a normal declaration, so an author rule still replaces it in
         // either direction.
