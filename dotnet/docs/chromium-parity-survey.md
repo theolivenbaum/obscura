@@ -1025,3 +1025,49 @@ numbers are therefore slightly pessimistic about Obscura, not optimistic.
 It also means the harness needs fixing before the next run: once F9b lands, Obscura will inherit
 the same pollution and the two engines will merely be wrong together. Either force a real document
 load between routes, or dismiss overlays before capturing.
+
+## The harness was measuring itself: forcing a real load per route closes most of the structural gap
+
+`capture.js` now appends a cache-busting `?r=<i>_<ts>` **before** the hash, which makes Chromium
+treat each route as a cross-document navigation instead of a same-document fragment change. The
+router only reads the hash, so the query is inert. Obscura already reloaded, so this is what makes
+the two engines do the same thing.
+
+Re-captured four routes with the new reference and diffed against the same unchanged Obscura
+captures:
+
+| route | Chromium before | Chromium after | Obscura | element gap |
+|---|---|---|---|---|
+| `#/spaces/connect-apps` | 1098 | **1001** | 999 | 99 -> **2** |
+| `#/users` | 654 | **476** | 485 | 169 -> **9** |
+| `#/abbreviations` | 628 | **457** | 459 | 169 -> **2** |
+| `#/manage/data/file-indexing` | 990 | **974** | 976 | 14 -> **2** |
+
+Strictly-aligned pairs nearly double where the modal was (194 -> 362 on `#/users`, 168 -> 343 on
+`#/abbreviations`), and the style mismatches on those pairs collapse:
+
+| route | old reference | new reference |
+|---|---|---|
+| `#/users` | fontSize 1, color 13, overflow 8, display 2, background 1, width 31 | color 6, overflow 1, background 1, width 72 |
+| `#/abbreviations` | fontSize 1, color 13, overflow 8, display 2, background 1, width 31 | color 6, overflow 1, background 1, width 72 |
+| `#/spaces/connect-apps` | fontSize 1, color 7, overflow 8, display 2, width 206 | overflow 1, width 247 |
+
+### This retracts the `tss-sidebar-has-shift` finding
+
+With a forced load, Chromium does **not** have the class either — `shift` is now `False` on all
+four routes for both engines. The ~170-element gap on `#/users` was Chromium carrying sidebar
+scaffolding and a modal across thirteen routes, not Obscura failing to build them. The earlier
+framing above ("Obscura reboots and never inherits the scaffolding") had the right mechanism and
+the wrong conclusion: nothing was missing from Obscura's rendering.
+
+F9b remains a genuine defect — a `Page.navigate` differing only in the fragment must not reload the
+document, `popstate` must fire, `pushState` must not fire `hashchange`, and an anchor click to a
+fragment must navigate. It is just not the cause of a rendering gap, and the fix for it will make
+the *unbusted* harness produce the same pollution in both engines rather than in one.
+
+### What survives
+
+Width. It does not move with the harness change and on `#/spaces/connect-apps` it grows (206 ->
+247) simply because more pairs now align. On the new reference `#/users` and `#/abbreviations` show
+72 width mismatches in ~350 pairs, and `#/manage/data/file-indexing` is unchanged at 110 in 859.
+Together with F29 (the `calc()` percentage base) that is the remaining geometry work.
