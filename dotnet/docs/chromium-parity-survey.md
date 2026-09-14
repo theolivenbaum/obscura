@@ -528,3 +528,47 @@ Both engines re-driven over all 157 routes with the same harness, Obscura runnin
   Note that a slice of this is genuine content drift (the Logs page differs by 11.9% almost
   entirely because it lists different log lines), so the true rendering difference is lower than
   the raw number.
+
+
+---
+
+# Second pass: two findings retracted by investigation
+
+## F14 — RETRACTED. The script 404 is not an Obscura defect.
+I previously marked "Dynamic script fetch error: HTTP 404" as Obscura-specific, on the grounds
+that the Chromium survey recorded console errors on only four routes and none was a script 404.
+That was wrong. Capturing the actual request stream on `#/manage/shell` shows **both engines do
+the same thing**:
+
+| | Chromium | Obscura |
+|---|---|---|
+| requests `/assets/js/monaco/vs/loader.js` | yes (200) | yes (200) |
+| requests `/assets/js/monaco/vs/loader.min.js` | **yes, 404** | yes, 404 |
+
+That is `Transpose.Require.RequireAsync` doing exactly what it is documented to do - trying both
+the `.js` and `.min.js` spellings, because a site keeps whichever variant its own build produced.
+The 404 is expected and harmless in both engines. What differed was only which layer *logged* it:
+Chromium prints its own "Failed to load resource" message, while in Obscura the app's own handler
+printed "Dynamic script fetch error", because Monaco's init was separately broken by the missing
+`document.queryCommandSupported` (F12, since fixed). Nothing to fix here.
+
+**Method note:** the original mistake was treating "absent from my console-error capture" as
+"did not happen". A 404 on a subresource does not necessarily surface as a `console.error` event
+in the shape my harness recorded. Request-level instrumentation was needed to tell the two apart.
+
+## Sidenav active state — RESOLVED, by the colour-parser fix
+The paint workstream flagged one live difference it had not chased: `a.tss-btn.tss-sidenav-btn` in
+its active state, with background, colour and border all wrong at once, which it suspected was a
+selector or cascade miss. Re-measured on `#/manage/ai` after that workstream merged, all eight
+sidenav items agree exactly:
+
+| | Chromium | Obscura |
+|---|---|---|
+| active item background | `rgba(4, 67, 211, 0.12)` | `rgba(4, 67, 211, 0.12)` |
+| active item colour | `rgb(4, 67, 211)` | `rgb(4, 67, 211)` |
+| active item border | `rgba(4, 67, 211, 0.25) 1px solid` | `rgba(4, 67, 211, 0.25) 1px solid` |
+
+It was not a selector bug. It was the same `background: rgba(...) none repeat scroll …` shorthand
+defect that workstream fixed: the alpha component arrived as the unparseable `"0.12)"` and was
+silently dropped, which is why all three properties were wrong together and why it looked like a
+cascade miss.
