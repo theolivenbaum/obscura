@@ -196,6 +196,29 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **`filter` is parsed only for `blur()`, so `drop-shadow()` neither reports nor
+  paints.** `getComputedStyle(el).filter` returns `""` where Chromium returns the
+  authored list, and the product's four-way
+  `drop-shadow(rgba(0, 0, 0, 0.5) 1px 0px 0px) ...` outline around
+  `.tss-pixelavatar-canvas` renders with no outline at all. Confirmed visually
+  against Chromium.
+
+  Both halves live outside the paint/color surface: the `case "filter":` arm is
+  in `Obscura.Render/Style/ComputedStyle.cs` and its only storage is
+  `LayoutStyle.FilterBlur` in `Obscura.Render/Core/LayoutStyle.cs`, so reporting
+  the value needs a new `LayoutStyle` member and painting it needs a
+  `SKImageFilter.CreateDropShadow` pass in `PaintDom`. Nothing is stubbed: the
+  property is silently absent today, not wrongly reported.
+
+- **`PerformanceNavigationTiming.nextHopProtocol` is missing, and it stops the
+  Curiosity Workspace front end from booting.** The app's `SupportsDuplexStream`
+  probe reads it off the navigation entry, throws
+  `TypeError: Cannot read properties of undefined (reading 'nextHopProtocol')`,
+  and the shell retries forever ("Failed to load page, reloading now"), so the
+  page never renders past its loading skeleton. That makes any whole-app
+  differential run against this product impossible: Obscura reports 4
+  `button.tss-btn` on every route where Chromium reports 39-58.
+
 - **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
   Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
   which routes every call from `bootstrap.js` through ClearScript's
@@ -606,7 +629,9 @@ DEVIATION comment at the C# code that differs.
   on every one, which shrank the label span and wrapped it, and then failed to wrap
   the button row Chromium wraps. The port counts a definite-width child as its own
   outer box, carries every child's horizontal edges, and shapes `::before`/`::after`
-  content with the pseudo's own style.
+  content with the pseudo's own style. Follow-up: that accumulation was a *sum* over
+  the whole subtree, which is only right on one line - see "An auto-sized `<button>`
+  accumulates by line" under Known deviations.
 - **DEVIATION - `repeat(auto-fit, minmax(<math function>, 1fr))` collapsed to one
   column.** Vendored taffy (so the reference too) counts only a bare length or
   percentage as a track's fixed component, so `min()`/`calc()` reads as
@@ -627,6 +652,32 @@ DEVIATION comment at the C# code that differs.
   column item, so the reference computed them to `auto`, every bar laid out 0px
   tall, and the chart rendered as an empty box (Chromium: 107px bars in a 120px
   row).
+- **DEVIATION - a flex item sized by the flex algorithm was an indefinite
+  containing block.** The general form of the entry above, and the reason the
+  connect-apps panel rendered as an empty box. The reference calls a box's block
+  size definite only when `height` itself is a length or percentage, so a flex
+  item that gets its height from flexing rather than from its own style is an
+  indefinite containing block and every descendant `height: %` under it computes
+  to `auto`. CSS Flexbox 9.8 says otherwise in two halves that Chromium both
+  implements: a flex item's post-flexing MAIN size is definite whenever the
+  container's main size is definite, and a stretched item's CROSS size is definite
+  whenever the container's cross size is. The block axis is the main axis of a
+  column container and the cross axis of a row one, so each half covers one
+  `flex-direction`. Tesserae's modal grows its content pane with `flex-grow: 1`
+  inside a `height: 80vh` column and then stacks four `height: 100%` boxes under
+  it, so the reference collapsed the whole chain (758/682/666/1677 in Chromium
+  against 92/16/0/8) and the grid's `overflow: auto` clipped 1676px of cards into
+  an 8px box. The port marks such a box definite but NOT known - the post-flex
+  size is decided after this top-down pass - so a bare percentage survives and
+  taffy resolves it against the used size, the same way the grid-item case does.
+  A functional `calc()` percentage under such a box still flattens to `auto`,
+  which is the same residual gap the grid case accepts. The taffy layer was
+  already correct on its own; only the DOM style pass destroyed the percentage.
+  `RenderDom.IsFlexSizedDefiniteBlock` / `IsStretchedFlexItem`, whose three
+  stretch conditions are the ones `FlexboxLayout.DetermineUsedCrossSize` applies.
+  The `min-height: min-content` half of that same chain (`.tss-grid` carries it)
+  is fixed below - the grid now expands to 1677px, so the scroll parent owns the
+  scrollbar as it does in Chromium.
 - **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
   properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
   `inherit` has to copy the parent's computed value explicitly; the reference
@@ -696,6 +747,873 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Shaped inline items flush before a level's positive z-index layers, not after them
+
+`paint.rs` paints one stacking context as bands (negative z, normal, floats, positive z) and
+then, after that whole loop, walks the level's nodes again to paint the shaped inline items
+"last, in tree order". That trailing flush also puts them above the level's *own* positive
+z-index stacking contexts, which CSS 2.1 Appendix E does not: inline-level content is step 7,
+positive z-index stacking contexts are step 9.
+
+The visible symptom is that box backgrounds obey stacking order and text does not. On
+Curiosity Workspace `#/spaces/new` the modal's white panel covers the page's backgrounds while
+the page's headline and bullet lines paint straight through it; Chromium hides them. Reduced
+to `render-repros`-style markup: a static block of text plus a later
+`position: fixed; z-index: 1010` panel over it.
+
+`PaintDomPainter.PaintLaidDomScrolled` now flushes the inline band where the positive-z band
+begins instead of after the loop, excluding the remaining entries' subtrees first (each of
+them repaints its own subtree through its recursion). Negative-z layers, in-flow block
+backgrounds and floats still paint below the text, unchanged.
+
+Covered by `PaintStackingOrderTests`; all 64 `render-repros` fixtures render byte-identically
+before and after.
+
+### Dirty form state is mirrored onto the arena so the renderer can see it
+
+HTML keeps `element.value` and `element.checked` off the content attributes once script
+assigns them, and `bootstrap.js` models that with two globals keyed by node id
+(`_formValues` / `_formChecked`). Neither engine's renderer can read a JS global, so in
+`crates/obscura-render` a field whose value came from script paints its *placeholder*:
+`getComputedStyle` and `el.value` are right, only the paint is wrong. On
+`#/spaces/new` in Curiosity Workspace, Obscura painted the grey "My Space" where
+Chromium 141 paints "My awesome space".
+
+`bootstrap.js` is shared verbatim with the Rust engine, so the fix sits on this side of
+the boundary: `Obscura.Js.Runtime.FormStateMirror` installs both globals as proxies
+*before* bootstrap.js runs (it adopts them, `globalThis.X = globalThis.X || {}`), and
+their write traps forward to two op_dom commands the Rust op table does not have,
+`set_form_value` / `set_form_checked`. Those land in `DomTree`'s dirty-form-state tables,
+which `PaintNativeControls.ShownValue` / `.IsChecked` read ahead of the attribute. Reads,
+key order and `undefined` semantics are untouched, which is what bootstrap.js's
+`!== undefined` checks depend on. The entry is dropped when the node's arena slot is
+freed, so a recycled `NodeId` cannot inherit it.
+
+Not yet mirrored: selector matching. `:checked` and `:placeholder-shown` still consult the
+attributes, so a script-driven state change restyles only what the attribute says.
+
+### Native form controls are painted; the reference paints none of them
+
+`crates/obscura-render/src/paint.rs` paints no widget of its own, so against Chromium 141
+an unstyled checkbox and radio are blank, a range input has no thumb, and a date/time
+input is an empty box sized as though it were a 20-character text field, which collapses a
+shrink-to-fit ancestor around it (Curiosity Workspace's `.tss-daterange-picker` measured
+80px against Chromium's 324px). `Obscura.Render.PaintNativeControls` paints all of them,
+and three pieces of it are worth knowing:
+
+- **`::-webkit-slider-thumb` is matched and cascaded properly**, not replaced by a UA
+  default: a page restyles the thumb's size, radius, background and border and those are
+  what get painted. It is a fourth `PseudoRuleMap` in `CssCascade` beside
+  before/after/placeholder, gated on `input[type=range]`, landing in
+  `LayoutStyle.SliderThumbPseudo`, and it defaults to `box-sizing: border-box` the way
+  Chromium's UA sheet does. `::-moz-range-thumb` is indexed nowhere, because Chromium
+  honours only the WebKit spelling and this engine presents itself as Chromium. With no
+  author rule a plain Chromium-style track and round knob are drawn instead.
+- **A zero-height slider still has ink.** The thumb stands outside the control, and a page
+  that draws its own track commonly leaves the input with no height at all, so
+  `PaintDom`'s ancestor-clip cull asks `PaintNativeControls.NativeInkBounds` before
+  dropping a box whose own rect has no area.
+- **A date/time control is sized from its field text.** Chromium fills it with read-only
+  sub-fields (`mm/dd/yyyy`, `Week --, ----`, …) plus a picker indicator; the port measures
+  the same text through the inline engine and adds `FieldChromeWidth`, a fixed per-type
+  constant read off Chromium (the sub-field padding plus the ~34.33px indicator). That
+  lands within 1px of Chromium for all five types. The indicator itself is drawn as a small
+  calendar or clock outline rather than Chromium's icon asset. The UA style for these types
+  also switches to monospace with 1px of left padding, as Chromium's does.
+  A **percentage** width cannot resolve while intrinsic sizes are computed, so the
+  intrinsic width is additionally published as a `min-width`: Chromium has shadow content
+  to contribute where this engine has no box for it. It differs from Chromium only where
+  such a control is deliberately squeezed below its own content width.
+
+Related fix in the same arm: the general `<input>` path painted the `value` attribute as
+text for *every* type, which put "50" beside a slider. Only the text-field types show a
+value now, and only the text-field types show a placeholder.
+
+### The promise-rejection callback contains everything, and is detached before dispose
+
+deno_core installs V8's `PromiseRejectCallback` and reports from it directly; the ops
+around it are wrapped in `catch_unwind`, so nothing unwinds into V8. ClearScript's
+equivalent hook (`V8ScriptEngine.PromiseRejectionCallback`) has no such wrapper: its
+host-object and fast-function thunks all convert a managed exception into a scheduled
+script exception, but the promise-rejection thunk does not, so an exception thrown in
+that callback unwinds into V8's own frame.
+
+That is a live process-kill path, because the callback re-enters script to deliver the
+report and the watchdog terminates isolates. A page terminated mid-checkpoint made every
+re-entry raise `ScriptInterruptedException`, which the callback deliberately rethrew; and
+once ClearScript had torn the engine down, the thunk itself raised
+`ObjectDisposedException` before any of our code ran. A 157-route survey died on the
+second form: `Unhandled exception. System.ObjectDisposedException ... at
+V8SplitProxyManaged.<get_InvokePromiseRejectionCallbackFastMethodPtr>g__Thunk`.
+
+So `DenoCoreShim.Report` contains every exception, the interrupt included, and suspends
+further delivery until `ObscuraJsRuntime.CancelTermination` clears the termination (a
+terminated page can raise thousands of rejections, each one a re-entry). And
+`DenoCoreShim.Detach` unregisters the hook before `ObscuraJsRuntime.Dispose` /
+`FrameRealm.Dispose` destroy the engine, which is the actual fix for the disposed-engine
+form: the catch cannot reach an exception thrown inside the thunk.
+
+Observable difference from Rust: a rejection raised while the isolate is terminating is
+dropped rather than reported. The page is being torn down or reset at that point, and the
+watchdog's own `ScriptInterruptedException` still reaches the host through the call it
+interrupted.
+
+Covered by `RejectionEventTests.Terminating_a_page_that_is_producing_rejections_stays_contained`
+and `Rejection_reporting_resumes_after_the_termination_is_cleared`.
+
+### A grid item's percentage height resolves against its grid area
+
+`dom.rs` drops a block-axis percentage whenever the parent box has no definite height,
+which is right for a block container and wrong for a grid item: a grid item's containing
+block is its **grid area**, so `grid-template-rows: 24px` gives it a definite basis no
+matter what the grid container's own height is. The reference computed `height: 100%` on
+such an item to `auto`, and with a non-stretch `align-items` nothing else could supply a
+height, so the item laid out 0px tall.
+
+`LayoutDomComputed.ResolveOneComputedStyle` now keeps the percentage when the element's
+rendered parent is a grid container, and hands it to taffy, which already resolves a grid
+item's size against the area itself (`grid/alignment.rs align_and_position_item`, with
+`GridItem.KnownDimensions` passing `None` for a track that is still indefinite, so an
+`auto` row is sized from content and does not go circular).
+
+Found on Curiosity Workspace: `.tss-gridpicker` (`grid-template-rows: 24px` x8,
+`align-items: center`, buttons with inline `height: 100%; width: 100%`) rendered every
+cell 24x2 instead of 24x24 and its absolutely-positioned overlays 22x0 instead of 22x22,
+504 elements each across `#/preferences?id=file-indexing-schedule`,
+`#/preferences?id=file-indexing-monitoring` and `#/manage/data/file-indexing`. The cells
+were visibly collapsed in the screenshot. `align-items: stretch` masked the bug, so the
+non-stretch case is the one that has to be tested.
+
+`Inherited.CbHeightKnown` is the second half of the change. A percentage basis can now be
+definite (bare percentages survive and taffy resolves them) while its pixel value is
+unavailable in the style pass, which is exactly a grid item's situation. A **functional**
+block-axis percentage has to be flattened to px before layout, so it is gated on the
+numeric flag instead: `calc(100% - 4px)` inside a percentage-height grid item stays
+`auto` rather than flattening against a basis we would have had to invent.
+
+**Remaining gap:** that `calc()` case. Chromium resolves it to 20px (24 - 4) and the port
+gives it the content height. Closing it means resolving the item's row track during the
+style pass, which is grid placement and track sizing done twice; not worth it until
+something needs it.
+
+Covered by `GridItemPercentageHeightResolvesAgainstGridAreaWithoutStretch`,
+`GridItemPercentageHeightResolvesAgainstGridAreaWhenStretched`,
+`GridItemPercentageHeightAgainstAutoRowUsesContentHeight`,
+`PercentageHeightUnderAutoHeightBlockParentStillBehavesAsAuto` and
+`CalcPercentageHeightInsideGridItemStaysWithinTheGridArea`.
+
+### The UA style table is namespace-aware, and SVG presentation attributes cascade
+
+`style.rs`'s `ua_style` is keyed on the tag name alone and `dom.rs` maps HTML presentational
+attributes only. The HTML and SVG UA sheets share a lot of names, so an element in the SVG
+namespace picked up HTML defaults: an SVG `<a>` got the link colour `rgb(0, 0, 238)` and an
+underline (which its `<rect>` children then inherited), `<title>` / `<desc>` got
+`display: none`, and every shape reported `display: block`. Chromium gives every SVG element
+`display: inline` except `text` and `foreignObject`, which are `block`, and hides none of them
+through `display` - `title` / `desc` / `metadata` / `defs` are non-rendered through the SVG
+rendering model, which is why `SvgRenderer` skips them by tag name.
+
+So `ComputedStyle.UaStyle` takes the namespace and answers from an SVG table when it is the
+SVG one, and `DomCascade.ApplySvgPresentationAttributes` maps the 18 presentation attributes a
+real chart uses (`fill`, `stroke`, `stroke-width`, `opacity`, `text-anchor`, `visibility`,
+`display`, `color`, `font-size`, `font-family`, ...) into the cascade at author origin, below
+every author rule and below the `style` attribute. A bare number on a length-valued attribute
+is in user units, i.e. px.
+
+The four SVG-only properties are reported by `getComputedStyle` through `LayoutStyle.SvgPaint`
+(`SvgPaintValues`: `fill` `rgb(0, 0, 0)`, `stroke` `none`, `stroke-width` `1px`, `text-anchor`
+`start`, all inherited, all reported on every element the way Chromium reports them). That
+record is deliberately separate from the specified `SvgFill` / `SvgStroke` / `SvgStrokeWidth`
+that `PaintSvg` pushes back into the serialized SVG document as `!important` declarations:
+pushing an inherited value there would override the rasterizer's own inheritance, and a `<use>`
+of a `<symbol>` in `<defs>` inherits its fill from the use site, not from the `<svg>` root.
+
+One layout bug fell out of `<svg>` becoming inline and is fixed rather than worked around:
+`DomBuild.InlineWrapsOnlyInFlowBlocks` spliced any inline element whose children are all
+block-level, which now matched an `<svg>` wrapping `<text>`. A replaced box is atomic, so it
+now refuses `IsReplacedBox` - without that the svg laid out 0x0 and its SVG text was laid out
+and painted as HTML in the body.
+
+Found on Curiosity Workspace, where a 157-route survey showed every SVG chart on the admin
+pages mismatching Chromium. The 13-element probe page now matches Chromium 141 exactly on
+`display`, `fontSize`, `fontFamily`, `fill`, `stroke`, `strokeWidth`, `opacity`, `textAnchor`,
+`visibility` and `color`.
+
+Covered by `SvgStyleTests` (13 facts), which also pins that an SVG `<title>` computing to
+`inline` still puts no ink on the page.
+
+### A `calc()` percentage is resolved by layout, not flattened by the style pass
+
+`dom.rs` flattens every functional length to px during the top-down computed-value pass,
+against a basis it picks there: the viewport height for a box offset's block axis, and
+`Inherited.CbWidth` - the pass's own block-flow estimate of the containing block - for the
+inline axis. Both are wrong for a percentage, and no basis picked in that pass can be
+right, because the pass runs before layout:
+
+- An **absolutely positioned** box resolves its offsets against the **padding box of the
+  nearest positioned ancestor**, which is not the parent the pass is walking and whose used
+  size layout has not produced yet. `top: calc(50% - var(--tiny) / 2)` on a chevron inside
+  a 34px-tall `position: relative` combobox came out 355px (half of the 720px viewport)
+  where Chromium computes 12px, so every Tesserae dropdown chevron sat hundreds of pixels
+  below its box and off the page. Measured on `#/manage/data/file-indexing`: container at
+  `y=583`, icon at `y=1053`, a constant +470 (`0.5 * 950 - 5`).
+- An **inline-axis** size resolves against the used containing block, which the estimate
+  only sometimes matches: a flex item that ends 200px wide inside a 300px row gave
+  `width: calc(100% + 20px)` as 320px instead of 220px.
+
+Taffy resolves a bare percentage against the real containing block already, and its
+`calc()` support (`CompactLength.Calc`, the tree's `CalcResolver`) resolves an opaque
+handle the same way. So a percentage-bearing expression is no longer flattened for layout:
+`LayoutDomComputed.ResolveOneComputedStyle` parses it into a `GridCalcExpression` - now
+shared with the grid track path, with an `allowNegative` flag because an offset may be
+negative where a track size may not - and stores it in `LayoutStyle.InsetCalc` /
+`LayoutStyle.SizeCalc`, which `TaffyStyleMapping` hands to taffy as a calc value.
+
+Two parts stay flattened, deliberately:
+
+- **The block axis of a relative offset.** Taffy resolves those against a hard 0
+  (`BlockLayout`'s `item.Inset.ZipSize(new Size(containerInnerWidth, 0.0f), ...)`), because
+  the container's height is not final where the offset is applied. So it keeps being
+  flattened, now against the containing block's content-box height, and becomes `auto` when
+  that height is indefinite - which is what Chromium computes for a percentage offset it
+  cannot resolve (a relative `top: calc(50% - 5px)` under an auto-height parent moves the
+  box 0px, not -5px).
+- **The block axis of a size.** Its definite/indefinite rules are applied in the style pass
+  (see the `.tss-card` entry above) and taffy is not told which case it is in.
+
+Everything else keeps the flattened value too, because layout is not its only reader: the
+sticky-offset pass, an inline box's relative shift, pseudo-element paint and the
+computed-style projection all read `style.Inset` / `style.Width`. Those get the better basis
+as a side effect wherever the style pass does know the containing block's height -
+`getComputedStyle().top` on the probe's chevron reports `12px` where it reported `355px` -
+and keep the viewport fallback where it does not, so a chevron in a content-sized combobox
+is laid out at 12px and still reports `470px`. That reporting gap is the separate
+`getComputedStyle` used-value work, not this.
+
+Verified against headless Chromium at 1280x720 on a six-case probe (bare `top`/`bottom`
+percentages and a percentage `margin-top` as tripwires), on padding-box, auto-height,
+non-parent-ancestor and border-inset ancestors, and on a shrinking flex item.
+
+Covered by `FunctionalInsetsResolveAgainstTheAbsolutePositioningContainingBlock`,
+`FunctionalInsetsSampleThePaddingBoxOfTheNearestPositionedAncestor`,
+`FunctionalRelativeOffsetsResolveAgainstTheContainingBlockHeight` and
+`FunctionalInlineSizesSampleTheUsedContainingBlockWidth`.
+
+**Remaining gap, and it is not this one:** a `calc()` percentage under a flex item that
+**shrinks** still resolves against the item's pre-shrink inner size.
+`FlexboxLayout.GenerateAnonymousFlexItems` resolves every child size against
+`constants.NodeInnerSize` once and the flex algorithm reuses that resolution, so after the
+item is shrunk nothing re-resolves it. Minimal repro: a 250px `flex: 0 1 auto` column with
+`padding: 0 12px` in a 600px row whose sibling forces a shrink - the column settles at
+226px (inner 202px) and a child `width: calc(100% + 32px)` comes out 219px instead of
+Chromium's 234px, while a bare `width: 100%` and `width: 150%` beside it are exact. This is
+what leaves Curiosity Workspace's sidebar subtree 15px narrow on `#/users`
+(`.msk-sidebar-brand` 208px against Chromium's 223.141px, from a basis of 176 where the
+reported containing block is 191.141). Not a style-pass basis problem: instrumenting the
+resolver shows both 191.14764 and 176 reaching it, and the surviving geometry is the 176
+one. Belongs to the flex algorithm, not to the computed-value pass.
+
+### `filter` carries the whole function list; the reference keeps only a blur
+
+`style.rs` parses `filter` for `blur()` alone and stores one sigma (`FilterBlur`), so a
+list carrying any other function is dropped entirely: nothing is reported through
+`getComputedStyle`, and nothing but blur is painted.
+
+The C# side models the list. `LayoutStyle.Filter` is a `FilterFunction[]`,
+`ComputedStyle.ParseFilterFunctions` reads it, `PaintCssValues.FilterCss` serializes it
+into the computed-style snapshot, and `PaintFilters.ApplyFilterChain` paints it onto the
+group layer the element already gets for `opacity`. Parsed, reported and painted:
+`blur()`, `drop-shadow()`, `brightness()`, `contrast()`, `grayscale()`, `invert()`,
+`opacity()`, `saturate()`, `sepia()`, `hue-rotate()`.
+
+Found on Curiosity Workspace, where `.tss-pixelavatar-canvas` outlines the pixel-art
+avatar with four 1px `drop-shadow()`s and the avatar rendered with no outline at all.
+45 `filter` values were measured against Chromium 141 and 44 now serialize identically
+(the 45th is the `em` gap below). Three details of Blink's serialization are load-bearing
+and are the reason `box-shadow` cannot share the code: the `drop-shadow()` colour comes
+first, all three of its lengths are always emitted, and the multiplier functions report a
+number rather than the authored percentage.
+
+`backdrop-filter` deliberately keeps the blur-only parse: nothing paints a backdrop
+sepia, so reducing a mixed list to its blurs would paint a wrong result where painting
+none matches what `@supports` advertises. `@supports (filter: ...)` now answers true for
+everything except `url()`.
+
+Not painted, and reported anyway: `filter: url(#svg-filter)`. SVG filter elements are not
+modeled, so the reference round-trips through `getComputedStyle` (Chromium reports
+`url("#svg-filter")`, and reporting `none` instead would be a second wrong answer) while
+`PaintFilters.HasVisibleEffect` returns false for it, so it takes no layer and paints
+nothing. `@supports` reports it unsupported for that reason.
+
+Covered by `FilterParsesTheWholeFunctionList`,
+`FilterDropShadowTakesItsColorOnEitherSide`, `FilterIsReportedAndDefaultsToNone`,
+`FilterDropShadowSerializesColorFirstAndAlwaysThreeLengths`,
+`FilterDropShadowOutlinesTheElementOnAllFourSides` and
+`FilterColorMatrixFunctionsRecolorTheSubtree`.
+
+### A font-relative length resolves against the element's font, not a flat 16px
+
+`px_value` in `style.rs` scales every font-relative unit by a flat 16 and has no way to
+be told otherwise. The port carried that verbatim, so on a 13px element
+`filter: blur(1em)` and `box-shadow: 0 0 1em red` both computed to 16px where Chromium
+reports 13px, and `1ch` had its unit stripped and read as the bare number - `1ch` meant
+1px. Ordinary length properties were never affected: `padding`, `margin`, `line-height`,
+`letter-spacing`, `gap` and `font-size` itself all keep a `Dimension` or an expression and
+resolve in the DOM top-down pass, which is why `padding: 1em` was exact throughout.
+
+`PxValue` and `Px` now take the em and rem sizes their units are relative to. Nothing can
+hand them those while a declaration is being cascaded - `font-size` is itself cascaded, and
+inherited when absent - so the three properties that read a length on the spot keep the
+declaration text when it carries an `em`, `rem`, `ex` or `ch`
+(`LayoutStyle.FilterFontRelative`, `BackdropFilterFontRelative`, `BoxShadowFontRelative`)
+and `ComputedStyle.ResolveFontRelativeDeclarations` re-reads it from the top-down pass,
+next to `SetGridCalcContext`, which already did the same job for grid tracks. An element
+with no font-relative value in those three keeps nothing and pays one null check.
+
+Measured against Chromium 141 on a 13px element, before -> after: `blur(1em)` 16px -> 13px
+(Chromium 13px), `blur(0.5em)` 8px -> 6.5px (6.5px), `blur(1rem)` 16px -> 16px (16px),
+`drop-shadow(1em 2em)` 16/32px -> 13/26px (13/26px), `box-shadow: 0 0 1em` 16px -> 13px
+(13px). Two things came with it, both previously broken rather than merely imprecise:
+`calc()` inside one of these lengths (`blur(calc(1em + 2px))` invalidated the whole
+declaration, because a bare-token reader cannot see into a function; now 15px, as Chromium
+says), and `currentcolor` in a re-read value, which now resolves against the inherited
+colour rather than whatever `color` the element had reached mid-cascade.
+
+Covered by `FontRelativeLengthsResolveAgainstTheElementsOwnFontSize`,
+`EmInAFilterFollowsTheInheritedFontSizeToo`, `CalcResolvesInsideAFilterOrShadowLength` and
+`ChResolvesAgainstTheFontSizeInsteadOfBeingDroppedOrReadAsPx`.
+
+**Still eagerly resolved, and still wrong for a font-relative value:** a `border-width` in
+`em` (`StyleBorder.StrictBorderLength`), `border-spacing`, `background-size` and
+`background-position`. Each reads its length through the parameterless `PxValue`/`Px` and
+would need the same deferral; none was measured as a live difference, so none was moved.
+
+### DEVIATION - `ex` and `ch` are one constant each, where Chromium measures the face
+
+CSS defines `1ex` as the font's x-height and `1ch` as the advance of its `0` glyph, both
+per face. The parser has no font at hand, so both are a fraction of the em:
+`Dimension.ExPerEm` = 0.528_320_3 (the reference's own constant, Liberation Sans' OS/2
+`sxHeight`, 1082/2048) and `Dimension.ChPerEm` = 0.556_152_3, added here as Liberation
+Sans' advance for `0`, 1139/2048, read out of
+`crates/obscura-render/assets/liberation-sans.ttf`.
+
+Liberation Sans is the choice for the same reason it was `ExPerEm`'s: it is what
+`FontAssets.ResolveFontFamily` returns for an element that names no family, so it is the
+face this renderer actually paints unstyled text with. The cost is a page that names a
+different generic: Liberation Mono's `0` is 0.600_1 em and Liberation Serif's is 0.5, so a
+monospace or serif `ch` is ~8% out either way. Chromium measured on the same markup
+reports `1ch` = 0.5 em and `1ex` = 0.458_98 em, both of its default *serif* face - this
+port's default family is sans, which is a separate, pre-existing difference.
+
+`ch` was not a unit anywhere in the port before this: `DimensionValue` did not know it, so
+`width: 1ch` fell through to `auto`, and `PxValue` stripped the unit and read `1ch` as 1.
+`DimensionKind.Ch` is appended last so no ordinal moves, and every switch that enumerates
+the relative kinds carries an arm for it.
+
+### DEVIATION - a native control's border computes one colour and paints another
+
+Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder` and `input`
+`border: 2px inset ButtonBorder`, and `ButtonBorder` resolves differently on the two:
+`rgb(0, 0, 0)` on a button, `rgb(118, 118, 118)` on an input and a select. Chromium paints
+neither. A control with the default `appearance` goes to the native form-control painter,
+which strokes a flat 1px `rgb(118, 118, 118)` line - confirmed on the glass, by sampling a
+Chromium 141 capture of a bare `<button>` and `<input>`: one grey pixel, then the face.
+
+The computed value and the painted one are therefore two different things, and an earlier
+pass here conflated them - it put the painted grey in the `button` arm, so every button in
+the app reported a `border-color` Chromium does not. They are now separate:
+`ComputedStyle` computes what `getComputedStyle` has to say (black on a button, grey and
+`inset` on an input), and `LayoutStyle.NativeControlAppearance` gets
+`PaintBorders.PaintNativeControlBorder` to draw the flat 1px grey in place of the two-tone
+relief those values would otherwise produce.
+
+The port does not model `appearance`, so "is this control still native" is read back off
+the border: the flag applies only while the border is exactly `2px outset` black or
+`2px inset` rgb(118, 118, 118) on all four sides. An author rule that reaches the border
+moves one of those and takes the native paint away, which is what Chromium does too. The
+gap is an author who writes exactly the UA border back by hand.
+
+Before -> after, on `<button>Hi</button>` and `<input value=x>`: button `border-color`
+rgb(118, 118, 118) -> rgb(0, 0, 0) (Chromium rgb(0, 0, 0)); input `border-style` `solid` ->
+`inset` (Chromium `inset`); button paint a 2px 156/85 bevel -> a flat 1px 118 stroke
+(Chromium flat 1px 118); input paint a flat 2px 118 band -> a flat 1px 118 stroke
+(Chromium flat 1px 118). Width, style and geometry were already exact and did not move.
+
+Still unmodeled, and separate: a control's `rgb(239, 239, 239)` UA background, which this
+port leaves transparent on a button.
+
+Covered by `ButtonCarriesTheUserAgentOutsetBorder`,
+`ButtonComputesTheBlackUserAgentBorderChromiumReports`,
+`InputComputesTheInsetUserAgentBorderChromiumReports`,
+`SelectKeepsItsSolidGreyUserAgentBorder` and
+`NativeControlsPaintTheFlatOnePixelStrokeChromiumDraws`.
+
+### An `<input>`'s intrinsic width is a curve fit, and it is ~8px narrow in a sans face
+
+`dom.rs` sizes a text input's content box as `size * font-size * 0.6 + font-size * 0.675`,
+a fit rather than a measurement, and the port carries it. Chromium computes it from the
+resolved face: `ceil(avgCharWidth * size)` plus `maxCharWidth - avgCharWidth`.
+
+On a bare `<input value=x>` at the UA 13.3333px, Chromium 141 reports a 185px border box
+and this port 177px. The whole 8px is in the content width, not in the UA box: with
+`border: 0; padding: 0` the two are 177 and 169, and the 8px of padding and border the
+default adds is identical in both. `font-family: monospace` closes it almost completely -
+Chromium 178, port 177 - which is what says it is a font metric: the 0.6 em per character
+happens to be Liberation Mono's advance exactly (0.600_1 em) and undershoots Arial's.
+
+Left alone deliberately. Matching it means replicating Blink's
+`PreferredContentLogicalWidth` against the same face Chromium resolves, which is work in
+the text layer and would move every control's intrinsic size; forcing the number with
+another constant would only move the error to a different family. `<select>` is 1px out
+(Chromium 30, port 31) for the same kind of reason.
+
+### `height: fit-content` is implemented; the reference ignores it
+
+`style.rs` handles `fit-content` on `width`/`inline-size` only (`width_fit_content`),
+and its `height`/`block-size` arm parses the keyword as a plain dimension, which falls
+back to `auto`. A box declaring `height: fit-content` therefore keeps an automatic
+block size and a flex or grid item carrying it stretches to fill its line or row.
+
+`LayoutStyle.HeightFitContent` is the C# counterpart. In the block axis `fit-content`
+sizes to content exactly like `auto`, so `Height` stays `Auto`; the one observable
+difference is that the box is no longer automatically sized, and CSS stretch alignment
+applies to an auto cross size only. `DomStyleFixups.ApplyFitContentBlockSize` writes
+that used alignment into the item's own `align-self` (taffy's box-size dimension
+cannot carry an intrinsic keyword), leaving an authored `align-items: center` / `end`
+alone.
+
+Measured against Chromium on Curiosity Workspace, where Tesserae sizes avatars,
+buttons, context cards, cron editors and date-range pickers with
+`:where(...) { width: fit-content; height: fit-content }`: a suggestion card came out
+163px tall against Chromium's 56px, with every child sized identically in both engines.
+
+Covered by `HeightFitContentHugsContentInsteadOfStretching` and
+`HeightFitContentRespectsExplicitCrossAxisAlignment`.
+
+### `width: max-content` / `min-content` are implemented; the reference ignores them
+
+`style.rs` recognizes `fit-content` on `width`/`inline-size` and nothing else, so
+`max-content` and `min-content` parse as an unknown dimension and fall back to `auto`.
+An `auto` inline size on a block-level box fills its containing block, which is the
+opposite of what both keywords ask for: a `width: max-content` column flex box inside a
+1200px parent came out 1200px wide against Chromium's 202px.
+
+`LayoutStyle.WidthFitContent` / `HeightFitContent` are now the "is an intrinsic
+keyword" predicates over `WidthIntrinsicKeyword` / `HeightIntrinsicKeyword`
+(`IntrinsicSizeKeyword`), which say *which* keyword it is. Taffy's box-size dimension
+still cannot carry any of them, so the dimension stays `Auto` and
+`DomPasses.ApplyIntrinsicInlineSizes` resolves it once the containing space is known:
+`min-content` takes the min-content measurement, `max-content` the max-content one, and
+`fit-content` keeps the existing `clamp(min-content, stretch-fit, max-content)`. In the
+block axis all three size to content like `auto`, so they share
+`ApplyFitContentBlockSize` and only stop the box from being stretched.
+
+Covered by `WidthMaxContentAndMinContentSizeToTheirMeasurement`.
+
+### `min-*` / `max-*` take the intrinsic sizing keywords too; the reference ignores them
+
+Same gap one level further: `style.rs` reads `min-width`/`min-height`/`max-width`/
+`max-height` through `dimension_value`, which has no keyword path at all, so all three
+keywords computed to the initial value and the declaration was silently dropped. On a
+300px container with content whose min-content width is 77px and max-content 511px, 13
+of 22 probe cases differed from Chromium - `min-width: max-content` stayed at 300,
+`max-height: min-content` left a `height: 400px` box at 400, a shrinking column flex
+item ignored `min-height: min-content`, and so on.
+
+The four properties now carry their own `IntrinsicSizeKeyword` on `LayoutStyle`
+(`MinWidthIntrinsicKeyword`, …), parsed by the same `IntrinsicSizeKeywordValue` the
+preferred sizes use, and follow the same mechanism: the dimension stays at its initial
+value and a convergence pass writes the measured length.
+
+- **Inline axis** - `ApplyIntrinsicInlineSizes` (the renamed `ApplyFitContentWidths`)
+  now measures for `width`, `min-width` and `max-width` in one pass. The measurement
+  drops *every* inline-axis declaration on the box first, a plain length included: a
+  keyword names an intrinsic size of the content, so `min-width: max-content` beside
+  `max-width: 200px` is 511px of min-width that the 200px maximum then loses to, not
+  200px measured through its own clamp.
+- **Block axis** - `ApplyIntrinsicBlockSizes` runs after the inline pass and its
+  relayout, and re-lays each box out at its used inline size with every block-axis
+  constraint removed. For a box whose inline size is definite, min-content, max-content
+  and the stretch-fit clamp between them are all the content height, so one measurement
+  serves all three keywords. `height` needs no counterpart: sizing to content there is
+  what `auto` already does.
+- `getComputedStyle` reports the keyword for these four (it is their computed value),
+  unlike `width`/`height`, which report a used length.
+
+All 22 probe cases now match Chromium, and 27 further cases were added to the probe -
+a keyword competing with a length or a percentage, a min-height losing to a larger
+height, a max-height beating one, out-of-flow and replaced boxes, and the containing
+block widths that make `min-width: min-content` / `max-width: max-content`
+non-vacuous. Covered by `MinAndMaxWidthResolveTheIntrinsicSizingKeywords`,
+`MinAndMaxHeightResolveTheIntrinsicSizingKeywords`,
+`IntrinsicMinAndMaxSizesApplyToFlexGridAndOutOfFlowBoxes` and
+`IntrinsicSizingKeywordsAreTheComputedMinAndMaxSizes`.
+
+Found while checking it, and separate: a fixed-width `<img>` in a *narrower* containing
+block is shrunk to the container (`width: 160px` in a 100px block gives 100px against
+Chromium's 160px). The probe carries two keyword-free controls that show it, and it is
+untouched here - it is replaced-element sizing, not keyword resolution.
+
+### An auto-sized `<button>` accumulates by line, not over the whole subtree
+
+`native_button_intrinsic_content` in `dom.rs` walks a button's subtree and adds up every
+descendant's contribution. That is a row accumulation, and it is only correct when the
+content really does share one line. A `<button>` wrapping a column flex container - the
+shape of every stacked Tesserae button - therefore measured the *sum* of the column's
+items instead of the widest of them: 227px against Chromium's 180px for a
+[51px, 164px] column. The same subtree under an inline-block `<div>` was already right,
+because a div is sized by real CSS intrinsic sizing rather than by this shortcut.
+
+The port's walk asks each container how its children stack before combining them
+(`DomStyleFixups.StacksChildrenInBlockAxis`): a column flex container, a single-column
+grid, and a block container holding block-level children each give their in-flow
+children their own line, so the container contributes the widest line; anything else
+keeps summing along the line. Consecutive inline-level children of a block container are
+still measured as one run.
+
+Measured against Chromium on Curiosity Workspace `#/preferences?id=themes`, where each
+theme tile is a `<button class="tss-btn">` around a `.tss-stack` column contributing 51
+and 164: the tile went from 257px to Chromium's 206px, and the wrapping row of tiles
+from 4 per row to Chromium's 5.
+
+Covered by `ButtonTakesTheWidestItemOfAColumnFlexChildNotTheirSum` and
+`ButtonStillSumsInlineLevelContentOnOneLine`.
+
+The 4px that was still missing on a button with no author border is now carried too: the
+`button` UA arm sets `border: 2px outset` alongside its `padding: 1px 6px`. On the
+`btn-min.html` repro every element matches Chromium exactly (b1/b2/b4 180x46, b3 67x26,
+d1 164x40), where the buttons read 176 and 63 before. Covered by
+`ButtonCarriesTheUserAgentOutsetBorder`.
+
+### `align-content: baseline` uses its fallback alignment
+
+`content_alignment_value` in `style.rs` does not accept the baseline keywords, so the
+declaration is dropped and the container keeps `normal`, which for content distribution
+is `stretch`. Baseline alignment does not apply to content distribution at all: CSS Box
+Alignment gives it a fallback alignment, `start` for a first baseline and `end` for a
+last one, which is what Chromium does.
+
+Found while checking the `height: fit-content` fix against the real app. Tesserae's
+`.tss-grid` asks for `align-content: baseline`, so stretching its auto rows made a
+400x56 card sit in a 175px row; Chromium sizes the row to the card. With both fixes the
+home route's four suggestion cards land on Chromium's exact rows.
+
+Chromium reports the computed value as `baseline` while behaving as `start`; the port
+reports the fallback, because taffy's `AlignContent` has no baseline variant to carry.
+
+Covered by `BaselineContentAlignmentUsesItsFallbackInsteadOfStretching`.
+
+### `font-family: inherit` is honoured on form controls
+
+`style.rs` skips the `inherit` keyword on `font-family` (`if family != "inherit"`), so
+the declaration is dropped rather than resolved, and whatever the UA sheet put there
+survives. Every form control carries an explicit `arial`, and the reset rule every
+page ships - `input, textarea, select, button, optgroup { font-family: inherit }` - is
+exactly how the page's own face is supposed to reach them, so all of them rendered in
+Arial. On Curiosity Workspace that was 889 of 1715 aligned elements: every `<button>`
+and everything inside one. `font-size: inherit` in the same rule already worked, so
+the two halves of the same declaration disagreed.
+
+The C# arm treats `inherit`/`unset` as "clear the family", which is what the top-down
+pass reads as inherit, and `revert`/`revert-layer` as "keep the UA value" - the same
+shape the `font-weight` arm already had.
+
+A visible consequence: an icon `<i>` inside a button takes its glyph from a `::before`
+whose rule sets `content` but deliberately not `font-family`. Inheriting Arial left the
+private-use codepoint without a glyph and the icon rendered as tofu.
+
+Covered by `FontFamilyInheritClearsTheUserAgentFormControlFont` and
+`FormControlsInheritThePageFontFamilyThroughTheAuthorRule`.
+
+### The five overflow keywords are kept apart, and an image clips
+
+`style.rs` collapses `hidden`, `scroll`, `auto` and `overlay` onto one code, so the
+computed value cannot say which of the four an element specified and a computed-style
+query answers `auto` for all of them. `OverflowSpecifiedX`/`Y` now carry the specified
+keyword (0 `visible`, 1 `clip`, 2 `hidden`, 3 `scroll`, 4 `auto`, `overlay` sharing
+`auto`'s code), `OverflowComputedX`/`Y` carry it after the CSS Overflow computed-value
+coupling, and `LayoutStyle.ComputedOverflowCss` renders it. Every code from 2 up is a
+scroll container, which is what keeps the coupling and the layout booleans unchanged:
+the coupling now turns `visible` into `auto` and `clip` into `hidden` on the other axis
+rather than making both codes equal.
+
+`ua_style`'s `img` arm sets display only. Chromium's UA sheet gives an image
+`overflow: clip; overflow-clip-margin: content-box`, so an image computes `clip` on
+both axes and its content cannot paint outside its box; that was 11 of 1715 aligned
+elements on Curiosity Workspace, all images.
+
+**Still outstanding, in `Paint/PreparedRender.cs`:** its local `OverflowAxis` helper
+reports `"auto"` for anything scrollable, so `hidden` and `scroll` are still reported
+as `auto` (322 and 298 of the 1715 aligned pairs). The model now carries the right
+value - the fix is to read `style.ComputedOverflowCss(true)` / `(false)` for
+`overflow-x` / `overflow-y`, and the same helper serves the missing `overflow`
+shorthand.
+
+Covered by `OverflowKeywordsKeepTheirComputedIdentity`.
+### A `font-family` computed value keeps the author's spelling
+
+`style.rs` stores the family list lower-cased (`CssText.AsciiLower` on the C# side),
+because every face lookup matches against it case-insensitively. That spelling is also
+what the snapshot reported, so Chromium's
+`"Plus Jakarta Sans", Inter, "Segoe UI", sans-serif` came back as
+`"plus jakarta sans", "inter", ...` - wrong on 816 of 1715 aligned element pairs on
+Curiosity Workspace.
+
+`LayoutStyle.FontFamilySpecified` carries the reporting spelling next to the
+lower-cased `FontFamily`, and follows it everywhere including inheritance and the
+pseudo-element settle. `ComputedStyle.SerializeFontFamilyList` re-serializes the list
+the way Blink does: the author's casing, one `", "` between families, and quotes only
+where a family does not round-trip as an identifier - so an unquoted `Plus Jakarta
+Sans` gains quotes, a quoted `"Inter"` loses them, and a quoted `"sans-serif"` keeps
+them because it is a string rather than the generic keyword. Checked against
+Chromium 141 for each of those shapes.
+
+Covered by `FontFamilyKeepsTheAuthorsSpellingForReporting`.
+
+### The cascade models `cursor` and `pointer-events`
+
+Neither property exists in `style.rs`, so neither reached the snapshot and
+`getComputedStyle` fell through to bootstrap's inline-declaration fallback: `cursor`
+was wrong on ~1200 of 1715 aligned pairs and `pointer-events` on ~400. Both are
+inherited with initial `auto`, both are stored as the validated keyword (null while
+inheriting), and `PreparedRender.ComputedStyle` emits them.
+
+The UA values come with them: `button` and `select` are `default`, `input` is `text`,
+and `a` is `pointer` when it has an `href` - which is why that one is set in
+`DomCascade` rather than in the tag-keyed `UaStyle`.
+
+`pointer-events` is reporting only. Hit testing runs in JavaScript through
+`document.elementFromPoint` in `Obscura.Js`, which does not consult the cascade, so
+making the property behavioural is a separate change there.
+
+Covered by `CursorAndPointerEventsAreModelled` and
+`CursorAndPointerEventsInheritDownTheTree`.
+
+### The CSSOM snapshot serializes numbers and shorthands like Chromium, not like Rust
+
+`computed_style` in `crates/obscura-render/src/paint.rs` writes each `f32` with
+Rust's `Display`, i.e. the shortest decimal that round-trips, so `font-size:11px`
+with `line-height:1.3` serializes as `14.299999px`. Blink formats a CSS number
+with WTF's `String::Number` - `%.6g` with trailing zeros truncated - and reports
+`14.3px`. `PaintCssValues.CssNumber` now does the Chromium thing, so every length
+the snapshot emits (and the one SVG `opacity` attribute that shares the helper)
+matches what page script compares against. Verified against Chromium 141 on
+14.3 / 20.8002 / 0.333333 / 1261.33 / 3.35544e+07 / 0.123457.
+
+`PreparedRender.ComputedStyle` also emits properties the Rust snapshot never had:
+the `margin` / `padding` / `border-width` / `border-style` / `border-color` /
+`border-radius` / `border` / `outline` / `overflow` / `gap` / `flex` shorthands,
+`top` / `right` / `bottom` / `left`, the `flex-*` longhands, `background*`,
+`box-shadow`, `text-decoration*` and `font-style`. A property missing from the
+snapshot falls through to bootstrap's inline-declaration fallback, which answers
+the empty string or a box-derived number, so ~1700 of 1715 measured element pairs
+read a wrong value. Covered by
+`dotnet/tests/Obscura.Render.Tests/ComputedStyleSnapshotTests.cs`, whose
+expectations are all taken from Chromium.
+
+`cursor`, `pointer-events` and the `font-family` casing were on that list and are
+now modeled in the cascade - see "The cascade models `cursor` and `pointer-events`"
+and "A `font-family` computed value keeps the author's spelling" above. Still not
+matched: `text-decoration-line` other than `underline`; computed insets on a
+positioned box, which Chromium reports as used values and the port reports as the
+specified value; and `background-image` gradients, which are re-serialized from the
+parsed layer rather than from their source text.
+### Alpha is serialized the way Blink spells it, not as `A / 255`
+
+`css_color` in `crates/obscura-render/src/paint.rs` writes a translucent color's
+alpha as the raw `a as f32 / 255.0` ratio, so an authored `rgba(4, 67, 211, 0.1)`
+read back as `rgba(4, 67, 211, 0.10196079)`. `PaintCssValues.CssAlpha` instead
+searches decimals with 0..3 fraction digits and emits the first that quantizes
+back to the same byte, which is what Blink's `Color::SerializeAsCSSColor` does.
+
+Storing alpha in 8 bits was never the bug and is not changed: Chromium quantizes
+too, and reports `rgba(1, 2, 3, 0.9999)` as the opaque `rgb(1, 2, 3)`. Verified
+against headless Chromium for all 256 alpha values; that table is pinned in
+`PaintColorTests.AlphaSerializationMatchesChromiumForEveryByte`.
+
+### A whole `background` shorthand layer can be handed to the color parser
+
+`parse_color_for_scheme` reads a color out of the front of whatever string it is
+given - the hex and keyword paths take only the first whitespace-delimited token -
+but the functional notations did not, so
+`background: rgb(255, 255, 255) none repeat scroll 0% 0%` lost its color
+entirely and `background: rgba(4, 67, 211, 0.12) none ...` came back *opaque*,
+because the alpha component arrived as the unparseable `"0.12)"` and was
+silently dropped. That declaration shape is what
+`background: var(--x) none repeat scroll 0% 0%` becomes whenever the custom
+property resolves to a functional color, which is pervasive in Tesserae.
+
+C# makes the functional parsers strict about their closing paren and adds
+`CssColor.ParseBackgroundLayerColor`, which retries a multi-component value by
+picking the component that is a color. The retry only applies when every other
+component is something a `background` layer may actually contain, so
+`background-color: rgb(1, 2, 3) garbage` and `light-dark(red, blue) trailing`
+still invalidate the declaration.
+
+### `color(srgb ...)` parses, and reads back as legacy `rgb()`
+
+Neither engine parsed the CSS Color 4 `color()` function, so
+`background-color: color(srgb 0.0156863 0.262745 0.827451 / 0.14)` painted
+nothing at all. C# parses the `srgb` space (`ParseColorFunction`); wider spaces
+still parse as nothing rather than being silently clipped into sRGB.
+
+`RgbaColor` is Rust's `[u8; 4]`, so `getComputedStyle` returned the equivalent
+`rgba(4, 67, 211, 0.14)` where Chromium preserves the `color(srgb ...)`
+spelling. The spelling is now carried (below); the numbers are still 8-bit.
+
+### A non-legacy sRGB colour serializes as `color(srgb ...)`
+
+Chromium keeps the space a colour was specified in. The legacy notations - a
+hex, a named colour, `rgb()`, `hsl()`, `hwb()` - serialize as
+`rgb()`/`rgba()`, while `color(srgb ...)` and a `color-mix()` interpolated in a
+space that resolves to sRGB serialize as `color(srgb 0.0156863 0.262745
+0.827451 / 0.14)`. `crates/obscura-render` has no notion of a colour's space and
+reports every colour as `rgb()`/`rgba()`; that was 25 of the mismatches in one
+survey of Curiosity Workspace, all of them Tesserae's `color-mix()` surfaces.
+
+`ComputedStyle.IsSrgbFunctionColor` decides it from the specified text, two
+bools on `LayoutStyle` carry it for `color` and `background-color`, and
+`PaintCssValues.SrgbFunctionColor` renders it. Two limits, both from the 8-bit
+colour model:
+
+- Only the sRGB family is recognised. `lab()`, `oklch()`, `color(display-p3 ...)`
+  and a `color-mix(in oklab, ...)` keep their own notation in Chromium and are
+  still reported as `rgb()` here.
+- The channels are the stored bytes, so a mix of two opaque colours can differ in
+  the sixth digit (`color-mix(in srgb, red, blue)` is `0.501961` here against
+  Chromium's `0.5`). A mix with `transparent`, which is the Tesserae pattern,
+  keeps the other colour's channels exactly.
+
+The flag is per declaration, so a descendant that *inherits* a `color-mix()`
+`color` reports it as `rgb()` where Chromium keeps the space. Carrying it would
+mean copying the flag beside `Color` in the top-down inheritance pass.
+
+Covered by `ColorMixInSrgbSerializesAsAColorFunction` and
+`LegacyColourNotationsStillSerializeAsRgb`.
+
+### A `flex-basis` can be `calc()`, and it resolves against the flex container
+
+`parse_flex_shorthand` splits on plain whitespace, so `flex: 1 1 calc(50% - 6px)`
+arrived as three fragments, none of them a basis, and the declaration lost its
+basis entirely: the item fell back to its `width` (820px, one per row, where
+Chromium lays out two 404px items per row) or, with no width, collapsed to zero.
+The longhand did parse, but `dimension_value` flattens the expression against the
+initial 16px, so `flex-basis: calc(50% - 6px)` became a 2px basis and reported
+`2px`.
+
+The percentage basis of a flex basis is the container's inner main size and is
+not known at computed-value time, exactly as for a grid track. So
+`ComputedStyle.SetFlexBasis` keeps a percentage-dependent expression whole in
+`LayoutStyle.FlexBasisCalc` (a `GridCalcExpression`, taking its font/viewport
+context from the same `SetGridCalcContext` call), `TaffyStyleMapping` hands taffy
+the calc handle, and the flex algorithm resolves it through the existing
+`CalcResolver`. `FlexBasis` itself stays `auto` while that is set, so nothing that
+reads the dimension directly sees a flattened value. The computed value reports
+the math function, which is what Chromium reports.
+
+This was Tesserae's chat suggestion cards
+(`.msk-chat-view-suggestions > .tss-stack-item { flex: 1 1 calc(50% - 6px) }`):
+four full-width cards where Chromium lays out four 404px cards two per row.
+
+Covered by `FlexShorthandKeepsAPercentageCalcBasis`,
+`FlexBasisLonghandResolvesACalcAgainstTheContainer` and
+`FlexBasisWithoutAPercentageComputesToALength`.
+
+### The UA sheet's overflow and colour defaults for controls and replaced boxes
+
+`ua_style` gives neither the form controls nor `canvas`/`video` an `overflow`, and
+gives no control a colour. Chromium's UA sheet gives `input` `overflow: clip`,
+`textarea` `overflow: auto`, and `canvas`/`video` the same
+`overflow: clip; overflow-clip-margin: content-box` an image already had here, so
+an input's value and a canvas's children could paint outside their boxes. It also
+gives every form control `color: fieldtext`, which is black and does *not*
+inherit, and clears the field background on the two controls it paints itself:
+
+- `input` and `textarea` compute `color: rgb(0, 0, 0)` rather than inheriting the
+  page's.
+- `input[type=checkbox]` / `[type=radio]` compute `background-color:
+  rgba(0, 0, 0, 0)`, not the text field's white. Unlike Chromium the engine has no
+  native control painter, so an unstyled checkbox now paints as its border alone
+  rather than as a white box.
+- `input[type=file]` takes its colour back from the page (`color: inherit`) and
+  has no field background either. The two per-type rules are in `DomCascade`
+  beside the other rules that need the `type` attribute.
+
+Not carried, and still reported wrong: `select` and `button` compute
+`color: rgb(0, 0, 0)` and `background-color: rgb(239, 239, 239)` in Chromium,
+`select` reports white here and `button` reports transparent; a checkbox's and a
+file input's border colour is `currentColor` in Chromium (black, and the page
+colour) against the text field's grey here.
+
+Covered by `UserAgentOverflowDefaultsMatchChromium`,
+`UserAgentFormControlColoursMatchChromium` and
+`AuthorColoursWinOverTheFormControlDefaults`.
+
+### `overflow-clip-margin`, `align-self` and `aspect-ratio` are reported
+
+The CSSOM snapshot omitted all three, so page script read the empty string for
+each. `align-self` is `auto` initially and otherwise the alignment keyword;
+`overflow-clip-margin` is `0px` unless the UA or the author set it, and is
+reported only - an element with `overflow: clip` still clips at its padding box,
+so a `content-box` origin or a non-zero margin does not move the clip edge.
+
+`aspect-ratio` cannot be rebuilt from `LayoutStyle.AspectRatio`, which is one
+float: Chromium writes both terms out (`1.5` reports as `1.5 / 1`) and keeps
+`auto` in front of a ratio (`auto 16 / 9`). `AspectRatioSpecified` carries the
+authored text in CSSOM's form. A ratio mapped from an image's `width`/`height`
+attributes, or from decoded media, is not the property's computed value and
+reports `auto`, as it does in Chromium.
+
+Covered by `SelfAlignmentAndRatioAreReported` and
+`OverflowClipMarginReportsTheAuthoredValue`.
+
+### A positioned box reports used insets, and an `auto` minimum reports `0px`
+
+Two more CSSOM values Chromium derives from layout rather than from the
+declaration, which the reference reports as specified:
+
+- **Insets.** A positioned box reports its *used* offsets on all four sides. An
+  absolutely positioned box is measured off its laid-out margin box against its
+  containing block's padding box (`top: 50%` in a 34px containing block reports
+  `top: 17px` / `bottom: 7px`), and a relatively positioned one reports the shift
+  it was given and the negation of it on the opposite side (`position: relative`
+  with no offsets is `0px` on all four). A static box still reports `auto`, and a
+  sticky box still reports its specified offsets.
+- **Minimum size.** The initial `auto` minimum computes to `0px` except on a flex
+  or grid item, where it stays `auto` and means the automatic minimum size.
+  Reporting `auto` everywhere told script the box had a minimum it never set.
+
+Both need the element's parent and containing block, which the snapshot did not
+have: `PreparedRender.TreeValue` is the tree the layout was prepared from, set in
+`PaintPrepare` beside the layout itself. The DOM must not be mutated while a
+`PreparedRender` is reused, so the reference is exactly as current as the layout.
+
+The one case not carried is an absolutely positioned box with `margin: auto`,
+whose resolved auto margins are not kept on the style, so its used insets are off
+by the margin the centring added.
+
+Covered by `RelativeInsetsReportTheUsedOffsets`,
+`AutomaticMinimumSizeIsReportedOnlyForFlexAndGridItems` and the widened
+`InsetsAreAutoUntilSpecified`.
+
+### A table box reports the initial `flex-direction`
+
+Tables are laid out as internal flex containers
+(`LayoutStyle.InternalFlexContainer`, with `flex-direction: column` on `table`,
+`thead`, `tbody`, `th` and `td`). That is an implementation detail: CSS gives a
+table no flex formatting context, so Chromium reports the initial `row`. The
+snapshot already hides the same detail for `display`; `flex-direction` now follows
+it, unless the author set the property (`FlexDirectionAuthored`), in which case
+the authored value is reported as Chromium reports it. Nothing about how tables
+lay out changes.
+
+Still reported wrong on the same boxes, and not part of this change: `display` is
+`block` rather than `table`/`table-row-group`/`table-cell`, and `align-items` is
+`stretch`/`flex-start` rather than `normal`.
+
+Covered by `TableBoxesReportTheInitialFlexDirection` and
+`AnAuthoredFlexDirectionOnATableBoxIsReported`.
 
 ### Decoded web faces are cached; the reference re-decodes them
 
@@ -1095,6 +2013,22 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   `navigate*` branches on `Err`, so `PageException` carries a `PageErrorKind`
   and, for `TooManyClientNavigations`, the limit; the messages are the ones
   `thiserror` renders. Same for `RasterPdfError` -> `RasterPdfException`.
+- **A same-document URL change is reported as `Page.navigatedWithinDocument`.**
+  Rust's `sync_virtual_url` answers a bare `bool` and `obscura-cdp` turns any
+  URL change into `Page.frameNavigated`, which in CDP means a new document: the
+  client retires the frame's execution contexts, so the next `Runtime.evaluate`
+  fails with "Execution context was destroyed". Driving a single page app whose
+  views persist their tab through `history.replaceState` lost 20 of 157 routes
+  that way, where Chromium captured all 157. `SyncVirtualUrl` /
+  `ProcessPendingNavigationOutcomeAsync` now answer a `PageNavigationOutcome`,
+  and `Runtime.evaluate` / `Input.dispatchMouseEvent` emit
+  `Page.navigatedWithinDocument` (`navigationType` `fragment` or `historyApi`)
+  plus `Target.targetInfoChanged` for a URL change that fetched no document. A
+  real document navigation still emits the full `frameNavigated` sequence.
+  `Page.navigatedWithinDocument` appears nowhere in `crates/obscura-cdp`, so
+  this is a fix rather than a port correction, and the C# half of
+  `page_frame_contract` asserts the new event where the Rust test asserts the
+  frame. Covered by `SameDocumentNavigationEvents`.
 - **The navigation deadline is a `CancellationTokenSource`, not a dropped
   future.** `tokio::time::timeout` cancels the inner future at its next await
   point; the port threads the token into every HTTP call and awaits on the
@@ -1161,3 +2095,222 @@ skip reason.
   cause as the existing "ClearScript cannot tell a static import from a dynamic
   one" deviation, but it also changes *when* the work happens. Pinned by
   `PageTests.LazyModuleGraphIsPostLoadWorkUntilCallerSettles`.
+
+### A dynamically inserted classic script runs as a script, not as an eval
+
+`bootstrap.js` executes a dynamically inserted classic script with
+`(0, eval)(source)` twice: on a fetched `script.src` body in `__runDynScriptTask`
+and on an inserted element's own text in `__prepareInsertedScript`. Indirect eval
+does run in the global scope, but ES semantics confine a *strict* eval's top-level
+`var` and `function` declarations to the eval's own variable environment. So any
+inserted script whose source begins with `"use strict"` - every bundler prologue,
+and the whole `"use strict"; var lib = (() => { ... })();` library shape - loaded,
+fired `load`, and published nothing: `globalThis.lib` stayed `undefined` and even
+a later `eval('lib')` threw. Chromium evaluates the element as a top-level classic
+script, where those declarations create global bindings whatever the strictness.
+Parser-inserted scripts were never affected; they go through
+`Page.ExecuteClassic` -> `ObscuraJsRuntime.ExecuteScript`, which already compiles
+a script.
+
+The fix belongs in the shim, which is shared with Rust and read-only here (rule 1),
+so the port rewrites those two call sites on the way into V8
+(`BootstrapSource.EngineText`) onto `op_run_classic_script`, a port-added op that
+compiles the source as a top-level script in the calling realm. The directive is
+left in the source, so the body still runs in strict mode. Rust keeps the eval and
+therefore keeps the bug.
+
+Two smaller consequences. A script error now reaches the shim's `catch` as an
+`Error` whose message carries the original error's name (`TypeError: boom` rather
+than `boom`), which only changes the console text the shim prints; the error is
+still caught at the insertion point and the page keeps running. And the third
+indirect eval in the shim, the one compiling an inline event-handler attribute, is
+deliberately left alone - that source is a function body, not a script.
+
+Pinned by `ClassicScriptScopeTests` (7 facts, including that the bridge applied and
+that strict-mode semantics still hold inside the inserted script).
+
+### Resource timing is real, and the C# host is the only one that reports it
+
+`performance.getEntriesByType('resource')` was hard-coded to `[]` in the shim, on
+the reasoning that "the host fetches scripts, styles and images without telling
+JS, and there is no op exposing them". The first half is true and the second half
+was the whole problem: the host does know every subresource it fetched, it just
+had no way to say so. Chromium reports 27 resource entries for a normal load of
+the Curiosity app and Obscura reported 0, which is visible to any page that sizes
+its own payload, reports its own web vitals, or waits on a resource it did not
+request itself.
+
+Three port-added ops close it. `op_resource_timings(since_index)` hands over the
+records the host appended for the current document; `op_resource_timing_count`
+reports how many exist; the shim keeps its own cursor, so a `getEntries()` in a
+loop costs one empty array. The producers are the five places the engine fetches
+a subresource - `Page.Scripts`, `Page.Stylesheets`, `Page.Capture` (images and
+webfonts), `Page.Frames` (frame documents) and `op_fetch_url` (`fetch()`/XHR) -
+each recording at its own fetch lambda, which is the only place that brackets the
+transport. The Page's existing `RecordNetworkEvent*` could not be reused: it fires
+where a resource is *used* (a classic script is recorded as it executes, long
+after it arrived), and a resource-timing entry needs the request's own start.
+
+**What is measured and what is zero.** Real: `name`, `initiatorType`,
+`responseStatus`, `contentType`, `decodedBodySize`, `startTime`, `fetchStart`,
+`responseEnd` and therefore `duration`. `encodedBodySize` is real when
+`content-length` survives (it equals `decodedBodySize` otherwise, because
+`SocketsHttpHandler` drops `content-length` along with `content-encoding` when it
+transparently decompresses, and guessing a ratio would be worse than saying the
+body was its own size). `transferSize` is `encodedBodySize + 300`, which is
+Chromium's own flat header-overhead placeholder and the convention the navigation
+entry already used. `nextHopProtocol` is derived from the scheme, as the
+navigation entry already did, because the negotiated ALPN protocol never reaches
+JS. Everything else is **0 and deliberately so**: `redirectStart`/`End`,
+`workerStart`, `domainLookupStart`/`End`, `connectStart`/`End`,
+`secureConnectionStart`, `requestStart`, `responseStart`,
+`firstInterimResponseStart`. The transport does not instrument those phases, and
+0 is what Resource Timing prescribes for a phase that did not occur or cannot be
+reported - so a consumer computing TTFB gets 0, not an invented number.
+
+The buffer lives in the shim, because its size and its clearing are the page's:
+`clearResourceTimings()` drops what is buffered without letting it reappear,
+`setResourceTimingBufferSize()` sets the maximum without evicting, and
+`onresourcetimingbufferfull` fires once when the cap is reached. The host caps its
+own list at 1000 records and drops on arrival rather than trimming from the front,
+so a cursor never goes stale.
+
+`bootstrap.js` is shared, so all three call sites are guarded by a
+`typeof ... === 'function'` test: the Rust engine, which binds none of these ops,
+keeps exactly the empty `resource` list it had.
+
+Pinned by `PerformanceTimelineTests` (6 resource facts). Measured live against the
+Curiosity app: 80 entries where Chromium reports 50, the difference being the
+eager font warm-up described below.
+
+### `document.fonts.check()` answers from the renderer, not from a status nobody sets
+
+`document.fonts.check('13px "Plus Jakarta Sans"')` returned false on a page whose
+body text was visibly rendering in that webfont. The font set itself was right -
+`document.fonts.size` was 51 and `status` was `"loaded"`, both matching Chromium -
+and text measurement was already accurate, so this was a `check()` predicate bug
+and nothing else.
+
+The cause: the shim discovers a `FontFace` for every `@font-face` rule in the
+page's own stylesheets and constructs it `unloaded`, because a face built from a
+CSS source string has not been fetched by *this code*. But the renderer downloads
+those sources itself and never told JS, so a CSS-connected face stayed `unloaded`
+for the life of the page, and `check()`, which is `all matched faces are loaded`,
+answered false. Libraries gate on `check()` to decide whether to wait before
+measuring text, so the false negative makes a page loop or mis-measure.
+
+`op_font_resource_loaded(url)` is the renderer's own answer: whether it is holding
+usable bytes for that source, i.e. whether text can be shaped with the face right
+now. The shim resolves the face's `url()` against `document.baseURI` - the same
+resolution the warm-up path used to fetch it - and a CSS-connected face's `status`
+getter consults it, latching once loaded. A data-URL source is loaded by
+construction and never asks. A script-created `FontFace` is unaffected: it is the
+page's to load, and `check()` on one still returns false until `load()` resolves,
+which is what Chromium does and what `FontFaceLoadUpdatesStatusSetReadiness`
+already pinned.
+
+**Deviation from Chromium, in the safe direction.** Chromium fetches a webfont
+only when something uses it, so on the Curiosity app it marks 2 of the 51 faces
+loaded and `check('13px Inter')` is false. Obscura eagerly warms every font URL
+the page's CSS names (so the first screenshot does not stall on serial font HTTP),
+so it genuinely has all 23 and reports them all loaded, and `check('13px Inter')`
+is true. That is a true statement about Obscura's renderer rather than a guess,
+and it errs towards "go ahead and measure" rather than towards the loop. Narrowing
+it would need the renderer's used-font set, which is not worth a new seam.
+
+Rust keeps the old behaviour: it does not bind the op, the shim's guarded call
+returns false, and every CSS-connected face stays `unloaded` there.
+
+Pinned by `PerformanceTimelineTests` (3 font facts).
+
+### Computed-style lengths are integers because layout rounds, not because JS does
+
+Chromium reports `getComputedStyle` lengths at LayoutUnit precision (1/64 px):
+a `28.4844px` box reads back as `28.4844px`, and `getBoundingClientRect().height`
+as `28.484375`. Obscura reports `28px` and `28`. This was checked on the JS side
+first and it is **not** there: `op_computed_style` passes the renderer's snapshot
+through verbatim, and `PaintCssValues.CssNumber` is `%.6g`, which prints fractions
+happily - an inline-block whose used width is fractional still reads back as
+`221.4px` today.
+
+The integers come from taffy's layout rounding: `Compute.RoundLayout`
+(`Obscura.Render/Layout/Compute.cs`), driven from `TaffyTree.cs`, snaps every
+rect to whole pixels, which is what the reference engine does and what Chromium
+does not. Fixing it means giving the CSSOM and rect paths an unrounded layout to
+read, which is a renderer change; it is recorded here and left alone.
+
+### A fragment navigation keeps the document, and CDP is told so
+
+Four things about same-document navigation were wrong against Chromium, measured side by
+side on a trivial page with a `window` marker and `hashchange` / `popstate` counters. All
+four are fixed on the C# and shared-shim sides; `crates/` has the same gaps.
+
+- **`Page.navigate` to a URL differing only in the fragment refetched the document.**
+  `Page.TryNavigateSameDocumentAsync` (`Obscura.Browser/Page.Navigation.cs`) now asks
+  `bootstrap.js` whether the target is same-document and, if so, performs it there: no
+  request, the realm and every `window` property intact, `Page.navigatedWithinDocument`
+  instead of a `Page.frameNavigated` + load cycle. Both navigate entry points consult it -
+  `CdpServer.ProcessWithInterceptionAsync` (the path live `Page.navigate` traffic takes)
+  and `Domains.Page.DoNavigateAsync` - and `Page.reload` deliberately does not, because it
+  is handed the current URL and means the document literally. The response carries
+  **no `loaderId`**: that field is the id of the document the navigation created, and
+  Playwright reads it as `newDocumentId` and then waits for a load lifecycle that never
+  comes. Chromium omits it here for the same reason.
+- **`popstate` never fired.** HTML's "navigate to a fragment" queues `hashchange` (only
+  when the fragment moved) and then `popstate`; Obscura fired `hashchange` alone.
+  `_fragmentNavigate` in `bootstrap.js` now owns both.
+- **`history.pushState` fired a spurious `hashchange`.** `pushState` and `replaceState`
+  fire nothing at all, even when the URL they write differs in its fragment. The dispatch
+  moved out of them and into the location-driven path, which is where it belongs; a router
+  that both pushes state and listens for `hashchange` was routing twice per navigation.
+- **Clicking an `<a href="#/x">` did nothing.** Both click paths - `Element.click()` in
+  `bootstrap.js` and the CDP mouse path's `MouseReleasedJs` (`Obscura.Cdp/Domains/Input.cs`,
+  which mirrors `crates/obscura-cdp/src/domains/input.rs`) - skipped a fragment href
+  outright. That was correct back when `location.assign` tore the document down; it now
+  means an in-page link, how most single page apps route, was inert.
+
+One supporting detail: an empty fragment is not the same as no fragment, though
+`new URL(u).hash` reports `''` for both. `_rawFragment` reads the raw string so
+`<a href="#">` from a fragmentless URL fires `hashchange` and a second click does not,
+matching Chromium.
+
+Measured on the Curiosity Workspace SPA: walking seven hash routes now costs zero document
+requests and keeps one long-lived app instance, with node counts within two of Chromium on
+every route. Before, the app rebooted on each.
+
+Pinned by `FragmentNavigationTests` (12 facts, `Obscura.Js.Tests`) and
+`SameDocumentNavigationEvents` (6 facts, `Obscura.Cdp.Tests`).
+
+### The SVG viewport is a real viewport, and an `overflow: visible` raster grows right/down
+
+`crates/obscura-render` hands every SVG to resvg, so the reference has no viewport code of
+its own to port. The in-tree rasterizer that stands in for it (`SvgRenderer`, see the PORT
+NOTE at the top of the file) had three geometry gaps, all found on Curiosity Workspace and
+all measured against Chromium 141 on `svg-probe.html` / `imgsvg2-probe.html`:
+
+- **An author `overflow: visible` on an outermost `<svg>` was ignored.** The UA sheet's
+  `overflow: hidden` is spelled here as "the pixmap is exactly the CSS viewport", so there
+  was nothing for an author declaration to override. `SvgRenderer` now measures the
+  content and grows the raster. **The deviation: only the right and bottom overflow is
+  recovered.** `PaintDom` blits the raster at the element's border-box origin, so content
+  left of or above the viewport has nowhere to land; carrying it needs an origin offset
+  out of `PaintDom`, which resvg does not need because it rasterizes the whole page tree.
+  Growth is capped at 8192px per side.
+- **A nested `<svg>` established no viewport.** Its `x`/`y`/`width`/`height` were dropped
+  and its `viewBox` never applied, so its content painted in its own user units at the
+  parent's origin: the probe's inner rect covered 60 pixels at [0,0,10,6] where Chromium
+  paints 6000 at [50,20,100,60]. `SvgPaintState` now carries the current viewport, which
+  is also what a percentage length on a nested `<svg>` resolves against.
+- **A `clipPath` ignored its shapes' `transform`.** Every Figma export wraps its artboard
+  clip in `transform="translate(...)"`, and dropping it moved the clip to the origin: the
+  workspace's empty-search illustration was cut to the top 203 rows of 444.
+
+`<filter>` is the fourth: `feGaussianBlur` now applies through a Skia blur image filter,
+including the transparent `feFlood` + normal `feBlend` preamble every Figma export emits
+ahead of it. Anything else in a filter still paints unfiltered rather than approximated,
+which is the same "skip what usvg cannot represent" rule the rest of the file follows. A
+`userSpaceOnUse` filter region is applied as a `ClipRect` as well as the layer bounds,
+because Skia treats a layer's bounds as a rasterization hint that an image filter expands
+past.
+
+Pinned by `SvgViewportTests` (13 facts, `Obscura.Render.Tests`).

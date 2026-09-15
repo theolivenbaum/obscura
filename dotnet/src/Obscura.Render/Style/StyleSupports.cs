@@ -111,10 +111,12 @@ public static partial class ComputedStyle
             case "clip-path":
             case "-webkit-clip-path":
                 return CssText.EqualsAscii(value, "none") || ParseClipPathPolygon(value) is not null;
-            // blur() is painted, so it may be advertised. Every other filter function
-            // still participates only in containing-block bookkeeping, and advertising an
-            // unpainted effect is worse than a conservative false result.
+            // Every `filter` function except url() is painted, so a list may be advertised
+            // once it parses and carries no SVG filter reference. `backdrop-filter` still
+            // paints blur() only, and advertising an unpainted effect is worse than a
+            // conservative false result.
             case "filter":
+                return CssText.EqualsAscii(value, "none") || IsPaintedFilterList(value);
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
                 return CssText.EqualsAscii(value, "none") || ParseFilterBlur(value) is not null;
@@ -168,6 +170,10 @@ public static partial class ComputedStyle
                 return lower is "visible" or "hidden" or "collapse";
             case "scrollbar-gutter":
                 return lower is "auto" or "stable" or "stable both-edges";
+            case "cursor":
+                return ComputedStyle.IsCursorKeyword(lower);
+            case "pointer-events":
+                return ComputedStyle.IsPointerEventsKeyword(lower);
             case "overflow":
             case "overflow-x":
             case "overflow-y":
@@ -1077,9 +1083,9 @@ public static partial class ComputedStyle
         {
             case "width":
             case "inline-size":
-                return lower == "fit-content" || DimensionSupported(value, true);
             case "height":
             case "block-size":
+                return lower == "fit-content" || DimensionSupported(value, true);
             case "min-width":
             case "min-inline-size":
             case "min-height":
@@ -1435,7 +1441,7 @@ public static partial class ComputedStyle
         "background-repeat", "background-origin", "background-clip", "-webkit-background-clip",
         "mask-image", "-webkit-mask-image", "mask-size", "-webkit-mask-size", "mask-repeat",
         "-webkit-mask-repeat", "color", "content", "-webkit-text-fill-color", "fill", "stroke",
-        "stroke-width", "border-color", "outline", "outline-width", "outline-style", "outline-color",
+        "stroke-width", "text-anchor", "border-color", "outline", "outline-width", "outline-style", "outline-color",
         "outline-offset", "color-scheme", "font-size", "letter-spacing", "font", "font-weight",
         "font-family", "font-style", "font-optical-sizing", "font-variation-settings", "text-align",
         "text-indent", "text-transform", "text-decoration", "text-decoration-line", "line-height",
@@ -1459,6 +1465,30 @@ public static partial class ComputedStyle
         "grid-column-end", "grid-row-start", "grid-row-end", "transform", "transform-origin",
         "translate", "rotate", "scale", "filter", "backdrop-filter", "-webkit-backdrop-filter",
         "perspective", "contain", "will-change", "content-visibility", "box-shadow",
-        "-webkit-box-shadow",
+        "-webkit-box-shadow", "cursor", "pointer-events",
     };
+
+    /// <summary>
+    /// Whether a <c>filter</c> value both parses and is painted in full, which is what
+    /// <c>@supports</c> may advertise.
+    /// </summary>
+    /// <remarks>
+    /// The colour that <c>drop-shadow()</c> falls back to does not change whether the list
+    /// parses, so resolving against black here rather than the element's <c>currentColor</c>
+    /// (which an <c>@supports</c> query has no element to read) is exact.
+    /// </remarks>
+    private static bool IsPaintedFilterList(string value)
+    {
+        if (ParseFilterFunctions(value, null, darkScheme: false) is not { } functions)
+        {
+            return false;
+        }
+
+        foreach (FilterFunction function in functions)
+        {
+            if (function.Kind == FilterFunctionKind.Reference) return false;
+        }
+
+        return true;
+    }
 }

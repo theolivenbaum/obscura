@@ -207,12 +207,15 @@ public static class CssAnimationSampler
             case AnimatedProperty.MaxWidth:
             case AnimatedProperty.MaxHeight:
             {
-                if (property == AnimatedProperty.Width && style.WidthFitContent)
+                var index = SizeIndex(property);
+
+                // An intrinsic sizing keyword is not a length, so there is nothing to
+                // interpolate from or to; the declaration stays put for the whole animation.
+                if (style.SizeIntrinsicKeyword(index) != IntrinsicSizeKeyword.None)
                 {
                     return null;
                 }
 
-                var index = SizeIndex(property);
                 var dimension = property switch
                 {
                     AnimatedProperty.Width => style.Width,
@@ -358,6 +361,10 @@ public static class CssAnimationSampler
             case AnimatedProperty.FlexBasis
                 when value is AnimationValue.Length { Value: AnimatedLength.DimensionLength basis }:
                 style.FlexBasis = basis.Value;
+
+                // The sampled value replaces the declaration, math function included.
+                style.FlexBasisCalc = null;
+                style.FlexBasisSpecified = null;
                 break;
 
             case AnimatedProperty.Opacity when value is AnimationValue.Number number:
@@ -544,23 +551,28 @@ public static class CssAnimationSampler
             case AnimatedProperty.Width:
                 style.Width = dimension;
                 style.WidthSet = true;
-                style.WidthFitContent = false;
+                style.WidthIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.Height:
                 style.Height = dimension;
                 style.HeightSet = true;
+                style.HeightIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.MinWidth:
                 style.MinWidth = dimension;
+                style.MinWidthIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.MinHeight:
                 style.MinHeight = dimension;
+                style.MinHeightIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             case AnimatedProperty.MaxWidth:
                 style.MaxWidth = dimension;
+                style.MaxWidthIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
             default:
                 style.MaxHeight = dimension;
+                style.MaxHeightIntrinsicKeyword = IntrinsicSizeKeyword.None;
                 break;
         }
     }
@@ -687,6 +699,7 @@ public static class CssAnimationSampler
         DimensionKind.Percent => Format(value.Value * 100f) + "%",
         DimensionKind.Em => Format(value.Value) + "em",
         DimensionKind.Ex => Format(value.Value) + "ex",
+        DimensionKind.Ch => Format(value.Value) + "ch",
         DimensionKind.Rem => Format(value.Value) + "rem",
         DimensionKind.Vw => Format(value.Value) + "vw",
         DimensionKind.Vh => Format(value.Value) + "vh",
@@ -840,6 +853,7 @@ public static class CssAnimationSampler
             DimensionKind.Percent => Dimension.Percent(0f),
             DimensionKind.Em => Dimension.Em(0f),
             DimensionKind.Ex => Dimension.Ex(0f),
+            DimensionKind.Ch => Dimension.Ch(0f),
             DimensionKind.Rem => Dimension.Rem(0f),
             DimensionKind.Vw => Dimension.Vw(0f),
             DimensionKind.Vh => Dimension.Vh(0f),

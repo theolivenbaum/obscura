@@ -39,6 +39,7 @@ public static partial class RenderDom
             float childCbWidth = inh.CbWidth;
             bool childCbHeightDefinite = false;
             float childCbHeight = 0f;
+            bool childCbHeightKnown = false;
             bool reusedComputedStyle = freshStyles is { } fresh && !fresh.Contains(id);
             if (reusedComputedStyle)
             {
@@ -46,12 +47,10 @@ public static partial class RenderDom
                 // once. Seed the inherited context from the prior computed values instead.
                 if (styles.TryGetValue(id, out LayoutStyle? retainedStyle))
                 {
-                    ComputedStyle.SetGridCalcContext(
-                        retainedStyle,
-                        retainedStyle.FontSize ?? inh.FontSize ?? 16f,
-                        rootFs,
-                        vw,
-                        vh);
+                    float retainedEm = retainedStyle.FontSize ?? inh.FontSize ?? 16f;
+                    ComputedStyle.SetGridCalcContext(retainedStyle, retainedEm, rootFs, vw, vh);
+                    SetLateCalcContext(retainedStyle.InsetCalc, retainedEm, rootFs, vw, vh);
+                    SetLateCalcContext(retainedStyle.SizeCalc, retainedEm, rootFs, vw, vh);
                     inh.Display = retainedStyle.Display;
                     inh.Direction = retainedStyle.Direction ?? inh.Direction;
                     inh.DisplayContents = retainedStyle.DisplayContents;
@@ -65,6 +64,7 @@ public static partial class RenderDom
                     if (retainedStyle.FontFamily is { } family)
                     {
                         inh.FontFamily = family;
+                        inh.FontFamilySpecified = retainedStyle.FontFamilySpecified;
                     }
 
                     if (retainedStyle.FontOpticalSizing is { } optical)
@@ -102,6 +102,7 @@ public static partial class RenderDom
 
                     inh.VisibilityHidden = retainedStyle.VisibilityHidden ?? inh.VisibilityHidden;
                     inh.HasZeroOpacity |= retainedStyle.Opacity is { } opacity && opacity <= 0f;
+                    inh.Svg = retainedStyle.SvgPaint ?? inh.Svg;
                     if (retainedStyle.ListStyle is { } listStyle)
                     {
                         inh.ListStyle = listStyle;
@@ -154,15 +155,25 @@ public static partial class RenderDom
                         inh.TableVerticalAlign = verticalAlign;
                     }
 
-                    inh.OverflowX = retainedStyle.OverflowScrollX
-                        ? (byte)2
-                        : retainedStyle.OverflowClipX ? (byte)1 : (byte)0;
-                    inh.OverflowY = retainedStyle.OverflowScrollY
-                        ? (byte)2
-                        : retainedStyle.OverflowClipY ? (byte)1 : (byte)0;
+                    inh.OverflowX = retainedStyle.OverflowComputedX;
+                    inh.OverflowY = retainedStyle.OverflowComputedY;
                     childCbHeightDefinite = retainedStyle.Height.Kind
                         is DimensionKind.Px or DimensionKind.Percent;
                     childCbHeight = ContentBoxBlockSize(retainedStyle, inh.CbHeight);
+                    childCbHeightKnown = childCbHeightDefinite
+                        && (retainedStyle.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
+
+                    // The flex-sized rule below applies to a retained style too: the box is the
+                    // same box, and which containing block its children resolve against cannot
+                    // depend on whether this pass happened to recompute its style.
+                    if (!childCbHeightDefinite
+                        && IsFlexSizedDefiniteBlock(
+                            tree, styles, id, retainedStyle, inh.CbHeightDefinite))
+                    {
+                        childCbHeightDefinite = true;
+                        childCbHeightKnown = false;
+                    }
+
                     if (childCbHeightDefinite)
                     {
                         definiteHeightNodes.Add(id);
@@ -194,6 +205,7 @@ public static partial class RenderDom
                 inh.CbWidth = childCbWidth;
                 inh.CbHeightDefinite = childCbHeightDefinite;
                 inh.CbHeight = childCbHeight;
+                inh.CbHeightKnown = childCbHeightKnown;
                 List<NodeId> retainedChildren = DomTraversal.StyleChildren(tree, id);
                 for (int index = retainedChildren.Count - 1; index >= 0; index--)
                 {
@@ -242,18 +254,134 @@ public static partial class RenderDom
                     initialCbWidth,
                     out childCbWidth,
                     out childCbHeightDefinite,
-                    out childCbHeight);
+                    out childCbHeight,
+                    out childCbHeightKnown);
             }
 
             inh.CbWidth = childCbWidth;
             inh.CbHeightDefinite = childCbHeightDefinite;
             inh.CbHeight = childCbHeight;
+            inh.CbHeightKnown = childCbHeightKnown;
             List<NodeId> children = DomTraversal.StyleChildren(tree, id);
             for (int index = children.Count - 1; index >= 0; index--)
             {
                 queue.Add((children[index], inh.Clone()));
             }
         }
+    }
+
+    /// <summary>
+    /// Fold this element's specified SVG paint properties onto the inherited ones and serialize
+    /// the result the way <c>getComputedStyle</c> reports it.
+    /// </summary>
+    /// <remarks>
+    /// The inherited instance is returned unchanged when the element specifies none of the four,
+    /// which is the overwhelmingly common case, so an ordinary page allocates one record for the
+    /// whole document.
+    /// </remarks>
+    private static SvgPaintValues ResolveSvgPaint(
+        LayoutStyle    style,
+        SvgPaintValues inherited,
+        float          emPx,
+        float          rootFs,
+        float          vw,
+        float          vh)
+    {
+        if (style.SvgFill is null
+            && style.SvgStroke is null
+            && style.SvgStrokeWidth is null
+            && style.SvgTextAnchor is null)
+        {
+            return inherited;
+        }
+
+        string fill = style.SvgFill is { } specifiedFill
+            ? SvgPaintCss(specifiedFill, style, inherited.Fill)
+            : inherited.Fill;
+        string stroke = style.SvgStroke is { } specifiedStroke
+            ? SvgPaintCss(specifiedStroke, style, inherited.Stroke)
+            : inherited.Stroke;
+        string strokeWidth = style.SvgStrokeWidth is { } specifiedWidth
+            ? SvgStrokeWidthCss(specifiedWidth, emPx, rootFs, vw, vh, inherited.StrokeWidth)
+            : inherited.StrokeWidth;
+        string textAnchor = style.SvgTextAnchor switch
+        {
+            null => inherited.TextAnchor,
+            "initial" => SvgPaintValues.Initial.TextAnchor,
+            "start" or "middle" or "end" => style.SvgTextAnchor,
+            _ => inherited.TextAnchor,
+        };
+
+        return new SvgPaintValues(fill, stroke, strokeWidth, textAnchor);
+    }
+
+    /// <summary>Serialize one specified <c>fill</c> / <c>stroke</c> value.</summary>
+    /// <remarks>
+    /// A paint server (<c>url(#gradient)</c>) and the <c>none</c> / <c>context-*</c> keywords
+    /// have no colour to resolve and report their own text; everything else is a colour, and
+    /// <c>currentColor</c> resolves against this element's computed <c>color</c>.
+    /// </remarks>
+    private static string SvgPaintCss(string specified, LayoutStyle style, string inherited)
+    {
+        string value = specified.Trim();
+        string lower = CssText.AsciiLower(value);
+        if (lower is "" or "inherit" or "unset")
+        {
+            return inherited;
+        }
+
+        if (lower == "currentcolor")
+        {
+            return PaintCssValues.CssColor(style.Color ?? new RgbaColor(0, 0, 0, 255));
+        }
+
+        if (lower is "none" or "context-fill" or "context-stroke")
+        {
+            return lower;
+        }
+
+        if (lower.StartsWith("url(", StringComparison.Ordinal))
+        {
+            return value;
+        }
+
+        return CssColor.ParseForScheme(value, style.ColorSchemeDark) is { } color
+            ? PaintCssValues.CssColor(color)
+            : inherited;
+    }
+
+    /// <summary>Serialize one specified <c>stroke-width</c> value.</summary>
+    private static string SvgStrokeWidthCss(
+        string specified,
+        float  emPx,
+        float  rootFs,
+        float  vw,
+        float  vh,
+        string inherited)
+    {
+        string value = specified.Trim();
+        string lower = CssText.AsciiLower(value);
+        if (lower is "" or "inherit" or "unset")
+        {
+            return inherited;
+        }
+
+        if (lower == "initial")
+        {
+            return SvgPaintValues.Initial.StrokeWidth;
+        }
+
+        Dimension dimension = ComputedStyle.DimensionValue(value);
+        if (dimension.Kind == DimensionKind.Percent)
+        {
+            return PaintCssValues.CssNumber(dimension.Value * 100f) + "%";
+        }
+
+        Dimension resolved = dimension.Resolve(emPx, rootFs, vw, vh);
+
+        return resolved is { Kind: DimensionKind.Px } px && float.IsFinite(px.Value)
+            ? PaintCssValues.CssPx(px.Value)
+            : inherited;
     }
 
     private static void ResolveOneComputedStyle(
@@ -274,7 +402,8 @@ public static partial class RenderDom
         float initialCbWidth,
         out float childCbWidth,
         out bool childCbHeightDefinite,
-        out float childCbHeight)
+        out float childCbHeight,
+        out bool childCbHeightKnown)
     {
         if (style.GridAutoColumnsInherit)
         {
@@ -370,7 +499,13 @@ public static partial class RenderDom
 
         // em in non-font-size properties is relative to this element's OWN computed font-size.
         float emPx = style.FontSize ?? parentFs;
+
+        // `fill` / `stroke` / `stroke-width` / `text-anchor` all inherit, and all four need the
+        // element's own computed colour and font-size to serialize, so they resolve here.
+        inh.Svg = ResolveSvgPaint(style, inh.Svg, emPx, rootFs, vw, vh);
+        style.SvgPaint = inh.Svg;
         ComputedStyle.SetGridCalcContext(style, emPx, rootFs, vw, vh);
+        ComputedStyle.ResolveFontRelativeDeclarations(style, emPx, rootFs, vw, vh);
         if (style.LetterSpacingExpression is { } letterSpacingExpression)
         {
             style.LetterSpacing = ComputedStyle.ResolveContextualLength(
@@ -427,8 +562,8 @@ public static partial class RenderDom
         }
 
         ComputedStyle.RecomputeOverflow(style);
-        inh.OverflowX = style.OverflowScrollX ? (byte)2 : style.OverflowClipX ? (byte)1 : (byte)0;
-        inh.OverflowY = style.OverflowScrollY ? (byte)2 : style.OverflowClipY ? (byte)1 : (byte)0;
+        inh.OverflowX = style.OverflowComputedX;
+        inh.OverflowY = style.OverflowComputedY;
         if (style.RowGapExpression is { } rowGapExpression)
         {
             style.RowGap = ComputedStyle.ResolveContextualLength(
@@ -483,6 +618,7 @@ public static partial class RenderDom
                 }
 
                 style.SizeExpressions[index] = sizeInheritFrom.SizeExpressions[index];
+                style.SetSizeIntrinsicKeyword(index, sizeInheritFrom.SizeIntrinsicKeyword(index));
                 switch (index)
                 {
                     case 0: style.Width = sizeInheritFrom.Width; break;
@@ -497,6 +633,11 @@ public static partial class RenderDom
 
         for (int index = 0; index < 6; index++)
         {
+            if (style.SizeCalc is { } clearedSize)
+            {
+                clearedSize[index] = null;
+            }
+
             if (style.SizeExpressions[index] is not { } expression)
             {
                 continue;
@@ -523,7 +664,7 @@ public static partial class RenderDom
             bool blockAxis = index is 1 or 3 or 5;
             if (blockAxis
                 && expression.Contains('%', StringComparison.Ordinal)
-                && !inh.CbHeightDefinite
+                && !inh.CbHeightKnown
                 && style.Position != TaffyPosition.Absolute)
             {
                 switch (index)
@@ -534,6 +675,26 @@ public static partial class RenderDom
                 }
 
                 continue;
+            }
+
+            // DEVIATION from crates/obscura-render/src/dom.rs, which has no counterpart:
+            // an INLINE-axis percentage inside a functional size is handed to taffy as a
+            // late-resolved calc() value, the same way a functional inset is above. `cbW` is
+            // this pass's own block-flow estimate of the containing block, and it is only an
+            // estimate - it is computed before the box it describes has been laid out, so a
+            // container that settles at a different width leaves it stale. Tesserae's sidebar
+            // resolved `width: calc(100% + 32px)` against 176px while the containing block it
+            // reports is 191.141px, which pulled the whole sidebar subtree 15px narrow. Taffy
+            // resolves an inline percentage against the used containing block, so the
+            // percentage is left for it. The block axis keeps the flattening above: its
+            // definite/indefinite rules are applied here, not by taffy. See "Known
+            // deviations" in todo.md.
+            if (!blockAxis
+                && expression.Contains('%', StringComparison.Ordinal)
+                && GridCalcExpression.Parse(expression) is { } lateSize)
+            {
+                lateSize.SetContext(emPx, rootFs, vw, vh);
+                (style.SizeCalc ??= new GridCalcExpression?[6])[index] = lateSize;
             }
 
             float percentBase = blockAxis ? inh.CbHeight : cbW;
@@ -562,8 +723,29 @@ public static partial class RenderDom
         style.MaxWidth = style.MaxWidth.Resolve(emPx, rootFs, vw, vh);
         style.MaxHeight = style.MaxHeight.Resolve(emPx, rootFs, vw, vh);
         style.FlexBasis = style.FlexBasis.Resolve(emPx, rootFs, vw, vh);
+        // DEVIATION from crates/obscura-render/src/dom.rs, which drops a block-axis
+        // percentage whenever the parent box has no definite height. A grid item's
+        // containing block is its GRID AREA, not the grid container's content box, so the
+        // container's own height says nothing about whether the percentage is resolvable:
+        // `grid-template-rows: 24px` gives a definite area under an auto-height container.
+        // Taffy resolves a grid item's size against the grid area itself (grid/alignment.rs
+        // `align_and_position_item`, and `GridItem.KnownDimensions` passes `None` for a
+        // track that is still indefinite), so the percentage has to survive this pass and
+        // reach it. The reference computed it to `auto` and every item laid out 0px tall -
+        // Tesserae's `.tss-gridpicker` cells (`height: 100%` in a 24px row with
+        // `align-items: center`, so no stretch to mask it) collapsed to 24x2. See "Known
+        // deviations" in todo.md.
+        // Only a percentage height asks the question, and the parent walk is not free, so it
+        // stays behind that test: every other box skips it.
+        bool isGridItem = style.Height.Kind == DimensionKind.Percent
+            && style.Position != TaffyPosition.Absolute
+            && DomTraversal.RenderedParent(tree, id) is { } gridAreaParent
+            && styles.TryGetValue(gridAreaParent, out LayoutStyle? gridAreaContainer)
+            && gridAreaContainer.Display == Display.Grid;
+
         if (style.Height.Kind == DimensionKind.Percent
             && !inh.CbHeightDefinite
+            && !isGridItem
             && style.Position != TaffyPosition.Absolute)
         {
             style.Height = Dimension.Auto;
@@ -571,6 +753,11 @@ public static partial class RenderDom
 
         childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
         childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
+
+        // A percentage height only yields a number when its own basis was one. A grid item's
+        // basis is the grid area, which this pass cannot see, so it stays definite-but-unknown.
+        childCbHeightKnown = childCbHeightDefinite
+            && (style.Height.Kind == DimensionKind.Px || (inh.CbHeightKnown && !isGridItem));
 
         // DEVIATION from crates/obscura-render/src/dom.rs, which calls a box's block size
         // definite only when `height` itself is a length or percentage. CSS Flexbox 9.8 also
@@ -590,6 +777,7 @@ public static partial class RenderDom
                 is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse)
         {
             childCbHeightDefinite = true;
+            childCbHeightKnown = true;
             childCbHeight = style.BoxSizing == BoxSizing.ContentBox
                 ? style.FlexBasis.Value
                 : F32.Max(
@@ -601,19 +789,88 @@ public static partial class RenderDom
                     0f);
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which calls a box's block size
+        // definite only when `height` itself is a length or percentage. A flex item sized by
+        // the flex algorithm has no such `height`, so the reference made it an INDEFINITE
+        // containing block and every descendant `height: %` under it computed to `auto`.
+        // CSS Flexbox 9.8 says otherwise, in two halves that Chromium both implements:
+        // a flex item's post-flexing MAIN size is definite whenever the container's main size
+        // is, and a stretched item's CROSS size is definite whenever the container's cross
+        // size is. The block axis is the main axis of a column container and the cross axis of
+        // a row one, so either half can make this box a definite containing block.
+        // Tesserae nests a `height: 100%` column inside a `flex-grow: 1` item carrying no
+        // height of its own, so the reference collapsed that whole chain to 0 and the
+        // connect-apps grid clipped 1676px of cards into an 8px box.
+        // The post-flex size is not knowable in this top-down pass - it is decided by the flex
+        // algorithm later - so the box is marked definite but NOT known: a bare percentage
+        // survives as a percentage and taffy resolves it against the used size, exactly as the
+        // grid-item case above does. A functional `calc()` percentage still flattens to `auto`,
+        // which is the same residual gap the grid case accepts. See "Known deviations" in
+        // todo.md.
+        if (!childCbHeightDefinite
+            && IsFlexSizedDefiniteBlock(tree, styles, id, style, inh.CbHeightDefinite))
+        {
+            childCbHeightDefinite = true;
+            childCbHeightKnown = false;
+        }
+
         if (childCbHeightDefinite)
         {
             definiteHeightNodes.Add(id);
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which flattens a functional inset
+        // to px here against the viewport height (block axis) or this element's own
+        // containing-block width (inline axis). Neither is the basis a box offset resolves
+        // against: an absolutely positioned box takes the PADDING BOX of its nearest
+        // positioned ancestor, which this top-down style pass cannot know - the ancestor's
+        // used size is settled by layout, and for an auto-height ancestor it is not knowable
+        // beforehand at all. `top: calc(50% - 5px)` in a 34px-tall relative container came out
+        // as 355px (half the 720px viewport) instead of 12px, which put every Tesserae
+        // dropdown chevron hundreds of pixels below its combobox. Taffy already resolves a
+        // bare percentage inset against the real containing block, and its calc() support
+        // resolves an opaque handle the same way, so the expression is handed over as a
+        // late-resolved value instead. See "Known deviations" in todo.md.
+        //
+        // The one basis taffy does not have is the block axis of a RELATIVE box: it resolves
+        // those against a hard 0 (BlockLayout's `ZipSize(new Size(containerInnerWidth, 0))`)
+        // because the container's height is not final where the offset is applied. So a
+        // relative block-axis offset keeps being flattened, against the containing block's
+        // content-box height, and becomes `auto` when that height is indefinite - which is
+        // what Chromium computes for a percentage offset it cannot resolve.
+        bool lateResolvedInsets = style.Position == TaffyPosition.Absolute && !style.PositionSticky;
         for (int index = 0; index < 4; index++)
         {
             if (style.InsetExpressions[index] is not { } expression)
             {
+                if (style.InsetCalc is { } cleared)
+                {
+                    cleared[index] = null;
+                }
+
                 continue;
             }
 
-            float percentBase = index is 1 or 3 ? cbW : viewport.Height;
+            bool blockAxisInset = index is 0 or 2;
+            bool percentBearing = expression.Contains('%', StringComparison.Ordinal);
+            GridCalcExpression? late = percentBearing && (lateResolvedInsets || !blockAxisInset)
+                ? GridCalcExpression.Parse(expression, allowNegative: true)
+                : null;
+            late?.SetContext(emPx, rootFs, vw, vh);
+            (style.InsetCalc ??= new GridCalcExpression?[4])[index] = late;
+
+            if (percentBearing && blockAxisInset && !lateResolvedInsets && !inh.CbHeightKnown)
+            {
+                style.Inset[index] = null;
+                continue;
+            }
+
+            // The flattened value is what layout reads on the paths above that keep it, and
+            // what the readers layout does not feed read throughout: sticky offsets, an inline
+            // box's relative shift, pseudo-element paint and the computed-style projection.
+            float percentBase = blockAxisInset
+                ? (inh.CbHeightKnown ? inh.CbHeight : viewport.Height)
+                : cbW;
             float? resolved = ComputedStyle.ResolveContextualLength(
                 expression, emPx, rootFs, vw, vh, percentBase);
             style.Inset[index] = resolved is { } value ? Dimension.Px(value) : null;
@@ -646,6 +903,8 @@ public static partial class RenderDom
 
             childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
             childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
+            childCbHeightKnown = childCbHeightDefinite
+                && (style.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
         }
 
         ushort computedWeight = ComputedStyle.ComputedFontWeight(style.FontWeight, inh.FontWeight);
@@ -654,10 +913,30 @@ public static partial class RenderDom
         if (style.FontFamily is { } fontFamily)
         {
             inh.FontFamily = fontFamily;
+            inh.FontFamilySpecified = style.FontFamilySpecified;
         }
         else
         {
             style.FontFamily = inh.FontFamily;
+            style.FontFamilySpecified = inh.FontFamilySpecified;
+        }
+
+        if (style.Cursor is { } cursor)
+        {
+            inh.Cursor = cursor;
+        }
+        else
+        {
+            style.Cursor = inh.Cursor;
+        }
+
+        if (style.PointerEvents is { } pointerEvents)
+        {
+            inh.PointerEvents = pointerEvents;
+        }
+        else
+        {
+            style.PointerEvents = inh.PointerEvents;
         }
 
         if (style.FontOpticalSizing is { } opticalSizing)
@@ -876,6 +1155,63 @@ public static partial class RenderDom
     }
 
     /// <summary>
+    /// Whether the flex algorithm gives this box a definite block size even though its own
+    /// <c>height</c> is not a length or a percentage, which makes it a definite containing
+    /// block for a descendant's percentage height.
+    /// </summary>
+    /// <remarks>
+    /// CSS Flexbox 9.8 in two halves, both of which Chromium implements: a flex item's
+    /// post-flexing MAIN size is definite whenever the container's main size is definite, and
+    /// a stretched item's CROSS size is definite whenever the container's cross size is. The
+    /// block axis is the main axis of a column container and the cross axis of a row one, so
+    /// each half covers one <c>flex-direction</c>. The
+    /// <paramref name="containingBlockHeightDefinite"/> flag is the container's content-box
+    /// block size definiteness, which is the container size both halves ask about.
+    /// </remarks>
+    private static bool IsFlexSizedDefiniteBlock(
+        DomTree tree,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        NodeId id,
+        LayoutStyle style,
+        bool containingBlockHeightDefinite)
+    {
+        // An absolutely positioned box is not a flex item; its containing block is the padding
+        // box of its nearest positioned ancestor.
+        if (!containingBlockHeightDefinite || style.Position == TaffyPosition.Absolute)
+        {
+            return false;
+        }
+
+        if (DomTraversal.RenderedParent(tree, id) is not { } parent
+            || !styles.TryGetValue(parent, out LayoutStyle? container)
+            || container.Display != Display.Flex)
+        {
+            return false;
+        }
+
+        return container.FlexDirection
+                is TaffyFlexDirection.Column or TaffyFlexDirection.ColumnReverse
+            || IsStretchedFlexItem(style, container);
+    }
+
+    /// <summary>
+    /// Whether a row flex container stretches this item across the cross (block) axis, which
+    /// is what CSS Flexbox 9.8 makes its cross size definite. The three conditions are the
+    /// ones <c>FlexboxLayout.DetermineUsedCrossSize</c> itself applies, so a box counted here
+    /// is a box taffy will actually stretch.
+    /// </summary>
+    private static bool IsStretchedFlexItem(LayoutStyle style, LayoutStyle container)
+    {
+        var alignSelf = style.AlignSelf ?? container.AlignItems ?? TaffyAlignItems.Stretch;
+
+        return alignSelf.Keyword
+                is Layout.AlignItemsKeyword.Stretch or Layout.AlignItemsKeyword.Normal
+            && style.Height.IsAuto
+            && !style.MarginAuto[0]
+            && !style.MarginAuto[2];
+    }
+
+    /// <summary>
     /// The content-box block size a definite-height box hands its children as a
     /// percentage basis. Mirrors the inline-axis rule: a definite content-box height is
     /// already the value, and a border-box or auto height includes padding and border,
@@ -910,6 +1246,30 @@ public static partial class RenderDom
                 0f);
     }
 
+    /// <summary>
+    /// Refresh the viewport basis of the late-resolved expressions a retained style carries.
+    /// A retained style skips <c>ResolveOneComputedStyle</c>, so this is the only place a
+    /// `calc(50% - 2vh)` inset hears about a new layout viewport. Mirrors what
+    /// <c>ComputedStyle.SetGridCalcContext</c> does for the grid track buckets.
+    /// </summary>
+    private static void SetLateCalcContext(
+        GridCalcExpression?[]? expressions,
+        float emPx,
+        float remPx,
+        float vw,
+        float vh)
+    {
+        if (expressions is null)
+        {
+            return;
+        }
+
+        foreach (GridCalcExpression? expression in expressions)
+        {
+            expression?.SetContext(emPx, remPx, vw, vh);
+        }
+    }
+
     private static Edges SetEdge(Edges edges, int index, float value) => index switch
     {
         0 => edges with { Top = value },
@@ -941,6 +1301,9 @@ public static partial class RenderDom
         bool hostLetterSpacingNonNormal = style.LetterSpacingNonNormal ?? false;
         ushort hostWeight = ComputedStyle.UsedFontWeight(style);
         string? hostFamily = style.FontFamily;
+        string? hostFamilySpecified = style.FontFamilySpecified;
+        string? hostCursor = style.Cursor;
+        string? hostPointerEvents = style.PointerEvents;
         FontOpticalSizing? hostOpticalSizing = style.FontOpticalSizing;
         List<FontVariationSetting>? hostVariationSettings = style.FontVariationSettings;
         LineHeight? hostLineHeight = style.LineHeight;
@@ -964,8 +1327,8 @@ public static partial class RenderDom
         List<Layout.TrackSizingFunction> hostGridAutoRows = [.. style.GridAutoRows];
         List<object> hostGridAutoColumnCalcs = [.. GridCalcBucket(style, 2)];
         List<object> hostGridAutoRowCalcs = [.. GridCalcBucket(style, 3)];
-        byte hostOverflowX = style.OverflowScrollX ? (byte)2 : style.OverflowClipX ? (byte)1 : (byte)0;
-        byte hostOverflowY = style.OverflowScrollY ? (byte)2 : style.OverflowClipY ? (byte)1 : (byte)0;
+        byte hostOverflowX = style.OverflowComputedX;
+        byte hostOverflowY = style.OverflowComputedY;
 
         void Settle(LayoutStyle pseudo)
         {
@@ -1039,6 +1402,7 @@ public static partial class RenderDom
 
             float pseudoEm = pseudo.FontSize ?? hostFontSize;
             ComputedStyle.SetGridCalcContext(pseudo, pseudoEm, rootFs, vw, vh);
+            ComputedStyle.ResolveFontRelativeDeclarations(pseudo, pseudoEm, rootFs, vw, vh);
             if (pseudo.LetterSpacingExpression is { } letterSpacingExpression)
             {
                 pseudo.LetterSpacing = ComputedStyle.ResolveContextualLength(
@@ -1124,7 +1488,14 @@ public static partial class RenderDom
 
             ushort weight = ComputedStyle.ComputedFontWeight(pseudo.FontWeight, hostWeight);
             pseudo.FontWeight = weight.ToString(CultureInfo.InvariantCulture);
-            pseudo.FontFamily ??= hostFamily;
+            if (pseudo.FontFamily is null)
+            {
+                pseudo.FontFamily = hostFamily;
+                pseudo.FontFamilySpecified = hostFamilySpecified;
+            }
+
+            pseudo.Cursor ??= hostCursor;
+            pseudo.PointerEvents ??= hostPointerEvents;
             pseudo.FontOpticalSizing ??= hostOpticalSizing;
             pseudo.FontVariationSettings ??= hostVariationSettings is null
                 ? null

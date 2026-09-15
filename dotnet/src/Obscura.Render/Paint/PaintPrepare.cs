@@ -143,6 +143,7 @@ internal static class PaintApi
             ScrollTree = derived.ScrollTree,
             SelectedImages = selectedImages,
             SvgFonts = svgFonts,
+            TreeValue = tree,
             Layout = laid,
         };
     }

@@ -11,6 +11,29 @@ using Obscura.Render.Css;
 namespace Obscura.Render;
 
 /// <summary>
+/// The sizes a font- or viewport-relative length resolves against: the element's own computed
+/// <c>font-size</c>, the root element's, and a hundredth of each viewport axis.
+/// </summary>
+/// <remarks>
+/// None of these exist while a declaration is being cascaded - <c>font-size</c> is itself
+/// cascaded, and inherited when absent - so a property that reads a length eagerly can only be
+/// right about <c>px</c>. The ones that do are re-read from
+/// <see cref="ComputedStyle.ResolveFontRelativeDeclarations"/> during the top-down pass, which
+/// is where these are known.
+/// </remarks>
+internal readonly record struct FontLengthContext(float Em, float Rem, float Vw, float Vh)
+{
+    /// <summary>
+    /// What a length read before layout resolves against: CSS's initial 16px font size, and a
+    /// viewport of zero so a viewport unit reads as it did before this context existed.
+    /// </summary>
+    internal static FontLengthContext Initial => new(16.0f, 16.0f, 0.0f, 0.0f);
+
+    /// <summary>Whether this is <see cref="Initial"/>, and so tells a reader nothing new.</summary>
+    internal bool IsInitial => this == Initial;
+}
+
+/// <summary>
 /// Computed-style lite: the layout-relevant subset of CSS, parsed from a small
 /// built-in UA sheet plus already-cascaded declaration blocks.
 /// </summary>
@@ -224,8 +247,31 @@ public static partial class ComputedStyle
 
     // ------------------------------------------------------------- lengths
 
-    /// <summary>Rust <c>px_value</c>: a bare length token in CSS pixels.</summary>
-    internal static float? PxValue(string token)
+    /// <summary>
+    /// Rust <c>px_value</c>: a bare length token in CSS pixels, resolved against the initial
+    /// 16px font size.
+    /// </summary>
+    /// <remarks>
+    /// Only correct for a token that cannot carry a font-relative unit, or for one read before
+    /// the element's font size is known. Anything reachable from a declaration a page can write
+    /// should take the overload below and be re-read from
+    /// <see cref="ComputedStyle.ResolveFontRelativeDeclarations"/> once the font size exists.
+    /// </remarks>
+    internal static float? PxValue(string token) => PxValue(token, 16.0f, 16.0f);
+
+    /// <summary>
+    /// Rust <c>px_value</c>, given the font sizes its relative units are relative to:
+    /// <paramref name="emPx"/> is the element's own computed <c>font-size</c> and
+    /// <paramref name="remPx"/> the root element's.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>px_value</c> in <c>style.rs</c> scales every font-relative unit
+    /// by a flat 16 and has no way to be told otherwise, so <c>filter: blur(1em)</c> and
+    /// <c>box-shadow: 0 0 1em red</c> on a 13px element both came out 16px where Chromium
+    /// reports 13px, and <c>1ch</c> lost its unit and read as the bare number. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    internal static float? PxValue(string token, float emPx, float remPx)
     {
         string number = token;
         float scale = 1.0f;
@@ -239,20 +285,30 @@ public static partial class ComputedStyle
             number = number[..^2];
             scale = 1.333f;
         }
-        else if (number.EndsWith("em", StringComparison.Ordinal) || number.EndsWith("rem", StringComparison.Ordinal))
+        else if (number.EndsWith("rem", StringComparison.Ordinal))
         {
             number = TrimEndAsciiAlphabetic(number);
-            scale = 16.0f;
+            scale = remPx;
+        }
+        else if (number.EndsWith("em", StringComparison.Ordinal))
+        {
+            number = TrimEndAsciiAlphabetic(number);
+            scale = emPx;
         }
         else if (number.EndsWith("ex", StringComparison.Ordinal))
         {
             number = TrimEndAsciiAlphabetic(number);
-            scale = 16.0f * 0.528_320_3f;
+            scale = emPx * Dimension.ExPerEm;
+        }
+        else if (number.EndsWith("ch", StringComparison.Ordinal))
+        {
+            number = TrimEndAsciiAlphabetic(number);
+            scale = emPx * Dimension.ChPerEm;
         }
         else if (number.EndsWith('%'))
         {
             number = number[..^1];
-            scale = 16.0f / 100.0f;
+            scale = emPx / 100.0f;
         }
         else
         {
@@ -291,6 +347,121 @@ public static partial class ComputedStyle
         }
 
         return Token(value) is { } token ? PxValue(token) : null;
+    }
+
+    /// <summary>
+    /// Rust <c>px</c>, resolving font- and viewport-relative units against
+    /// <paramref name="context"/> rather than against CSS's initial values.
+    /// </summary>
+    /// <remarks>
+    /// A functional length goes to <see cref="CssLength.ResolveContextual"/>, the typed
+    /// <c>calc()</c> evaluator that already takes a context, instead of the context-free
+    /// <see cref="ResolveLength"/> the parameterless overload uses. The percentage base is the
+    /// element's font size, which is what the properties reading this - <c>filter</c> and
+    /// <c>box-shadow</c> - would mean by one, though neither accepts a percentage.
+    /// </remarks>
+    internal static float? Px(string value, in FontLengthContext context)
+    {
+        if (context.IsInitial)
+        {
+            return Px(value);
+        }
+
+        string trimmed = value.Trim();
+        if (trimmed.Contains('('))
+        {
+            return CssLength.ResolveContextual(
+                trimmed, context.Em, context.Rem, context.Vw, context.Vh, context.Em);
+        }
+
+        return Token(value) is { } token ? PxValue(token, context.Em, context.Rem) : null;
+    }
+
+    /// <summary>
+    /// Whether a declaration carries a length in a unit relative to the element's own font, and
+    /// so cannot be resolved until the cascade has settled that font's size.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately loose in one direction only: a word that happens to end in one of these
+    /// after a digit costs a re-read and nothing else, while missing one would leave the
+    /// declaration resolved against the wrong font size with no sign of it.
+    /// </remarks>
+    internal static bool ContainsFontRelativeUnit(string value)
+    {
+        int index = 0;
+        while (index < value.Length)
+        {
+            if (!CssText.IsAsciiDigit(value[index]) && value[index] != '.')
+            {
+                index++;
+                continue;
+            }
+
+            while (index < value.Length && (CssText.IsAsciiDigit(value[index]) || value[index] == '.'))
+            {
+                index++;
+            }
+
+            int start = index;
+            while (index < value.Length && CssText.IsAsciiAlphabetic(value[index]))
+            {
+                index++;
+            }
+
+            ReadOnlySpan<char> unit = value.AsSpan(start, index - start);
+            if (unit.Equals("em", StringComparison.OrdinalIgnoreCase)
+                || unit.Equals("rem", StringComparison.OrdinalIgnoreCase)
+                || unit.Equals("ex", StringComparison.OrdinalIgnoreCase)
+                || unit.Equals("ch", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Re-read the declarations whose lengths the cascade could only resolve against CSS's
+    /// initial 16px, now that the element's own computed font size is known.
+    /// </summary>
+    /// <remarks>
+    /// Called from the DOM top-down pass, immediately after <c>font-size</c> settles and beside
+    /// <see cref="SetGridCalcContext"/>, which does the same job for grid tracks. Only a
+    /// declaration that carried a font-relative unit was kept, so this is a no-op for almost
+    /// every element. <c>currentcolor</c> in a re-read value resolves against the inherited
+    /// colour rather than whatever <c>color</c> the element had reached mid-cascade, which is
+    /// what Chromium does and a second improvement from reading these late.
+    /// </remarks>
+    public static void ResolveFontRelativeDeclarations(
+        LayoutStyle style,
+        float emPx,
+        float remPx,
+        float vw,
+        float vh)
+    {
+        if (style.FilterFontRelative is null
+            && style.BackdropFilterFontRelative is null
+            && style.BoxShadowFontRelative is null)
+        {
+            return;
+        }
+
+        FontLengthContext context = new(emPx, remPx, vw, vh);
+        if (style.FilterFontRelative is { } filter)
+        {
+            style.Filter = ParseFilterFunctions(filter, style.Color, style.ColorSchemeDark, context);
+        }
+
+        if (style.BackdropFilterFontRelative is { } backdropFilter)
+        {
+            style.BackdropBlur = ParseFilterBlur(backdropFilter, context);
+        }
+
+        if (style.BoxShadowFontRelative is { } boxShadow)
+        {
+            style.BoxShadow = ParseBoxShadow(boxShadow, style.Color, style.ColorSchemeDark, context);
+        }
     }
 
     /// <summary>Rust <c>deferred_length_expression</c>.</summary>
@@ -650,6 +821,21 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>dimension_value</c>.</summary>
+    /// <summary>
+    /// Classify a <c>width</c>/<c>height</c> declaration as one of the CSS intrinsic sizing
+    /// keywords. None of them is representable as a <see cref="Dimension"/>, so the caller
+    /// keeps the dimension <c>auto</c> and resolves the keyword during layout convergence.
+    /// </summary>
+    internal static IntrinsicSizeKeyword IntrinsicSizeKeywordValue(string token)
+    {
+        string value = token.Trim();
+        if (CssText.EqualsAscii(value, "fit-content")) return IntrinsicSizeKeyword.FitContent;
+        if (CssText.EqualsAscii(value, "max-content")) return IntrinsicSizeKeyword.MaxContent;
+        if (CssText.EqualsAscii(value, "min-content")) return IntrinsicSizeKeyword.MinContent;
+
+        return IntrinsicSizeKeyword.None;
+    }
+
     internal static Dimension DimensionValue(string token)
     {
         string value = token.Trim();
@@ -683,6 +869,11 @@ public static partial class ComputedStyle
         if (Suffix(lower, "ex") is { } ex)
         {
             return Dimension.Ex(ex);
+        }
+
+        if (Suffix(lower, "ch") is { } ch)
+        {
+            return Dimension.Ch(ch);
         }
 
         if (Suffix(lower, "vmin") is { } vmin)
@@ -1105,6 +1296,101 @@ public static partial class ComputedStyle
         }
 
         return float.IsFinite(ratio) && ratio > 0f ? ratio : null;
+    }
+
+    /// <summary>
+    /// The CSSOM form of an <c>aspect-ratio</c> declaration: both terms of the ratio, with the
+    /// implicit <c>1</c> written out, and <c>auto</c> kept in front of it when present.
+    /// </summary>
+    /// <remarks>
+    /// Chromium reports <c>1.5</c> as <c>1.5 / 1</c> and <c>auto 16/9</c> as
+    /// <c>auto 16 / 9</c>, so the computed value cannot be rebuilt from
+    /// <see cref="LayoutStyle.AspectRatio"/>, which is one float.
+    /// </remarks>
+    internal static string? SerializeAspectRatio(string value)
+    {
+        bool auto = false;
+        List<string> kept = [];
+        foreach (string token in SplitWhitespace(value.Trim()))
+        {
+            if (CssText.EqualsAscii(token, "auto"))
+            {
+                auto = true;
+            }
+            else
+            {
+                kept.Add(token);
+            }
+        }
+
+        if (kept.Count == 0)
+        {
+            return null;
+        }
+
+        string ratioPart = string.Join(string.Empty, kept);
+        int slash = ratioPart.IndexOf('/');
+        string? width = slash >= 0 ? ratioPart[..slash].Trim() : ratioPart.Trim();
+        string? height = slash >= 0 ? ratioPart[(slash + 1)..].Trim() : "1";
+        if (ParseF32(width) is not { } numerator
+            || ParseF32(height) is not { } denominator
+            || numerator <= 0f
+            || denominator <= 0f)
+        {
+            return null;
+        }
+
+        string ratio = PaintCssValues.CssNumber(numerator) + " / " + PaintCssValues.CssNumber(denominator);
+
+        return auto ? "auto " + ratio : ratio;
+    }
+
+    /// <summary>
+    /// Whether a specified colour computes to a non-legacy sRGB colour, which CSSOM serializes
+    /// as <c>color(srgb r g b)</c> rather than <c>rgb()</c>/<c>rgba()</c>.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/style.rs, which has no notion of a colour's
+    /// space and reports every colour as <c>rgb()</c>/<c>rgba()</c>. Chromium keeps the space a
+    /// colour was specified in: the legacy notations (a hex, a named colour, <c>rgb()</c>,
+    /// <c>hsl()</c>, <c>hwb()</c>) serialize as <c>rgb()</c>, while <c>color(srgb …)</c> and a
+    /// <c>color-mix()</c> interpolated in a space that resolves to sRGB serialize as
+    /// <c>color(srgb …)</c>. Page script string-compares computed values, and Tesserae's
+    /// <c>color-mix()</c> surfaces (cards, hovers, the icon chips) were 25 of the mismatches in
+    /// one survey.
+    /// <para>
+    /// Only the sRGB family is recognised. A colour specified as <c>lab()</c>, <c>oklch()</c> or
+    /// <c>color(display-p3 …)</c> keeps its own notation in Chromium, and reproducing that needs
+    /// a wider colour than the engine's 8-bit sRGB - those stay <c>rgb()</c>. For the same
+    /// reason the channels reported here are the stored bytes: a mix of two opaque colours can
+    /// differ from Chromium in the sixth digit. See "Known deviations" in todo.md.
+    /// </para>
+    /// </remarks>
+    internal static bool IsSrgbFunctionColor(string value)
+    {
+        string lower = CssText.AsciiLower(value.Trim());
+        if (lower.StartsWith("color(", StringComparison.Ordinal))
+        {
+            List<string> parts = SplitWsParen(lower["color(".Length..]);
+            return parts.Count != 0 && parts[0] == "srgb";
+        }
+
+        if (!lower.StartsWith("color-mix(", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // The mix result is a colour in the interpolation space; the three sRGB spellings all
+        // serialize through `color(srgb …)`.
+        List<string> arguments = SplitTopLevel(lower["color-mix(".Length..], ',');
+        if (arguments.Count == 0)
+        {
+            return false;
+        }
+
+        List<string> space = SplitWsParen(arguments[0]);
+
+        return space.Count >= 2 && space[0] == "in" && space[1] is "srgb" or "hsl" or "hwb";
     }
 
     /// <summary>Rust <c>parse_url</c>.</summary>

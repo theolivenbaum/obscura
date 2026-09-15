@@ -774,6 +774,141 @@ public class DomLayoutTests
         Assert.True(MathF.Abs(flex.Width - 900f) < 0.01f, $"{flex}");
     }
 
+    /// <summary>
+    /// A grid item's containing block is its grid area, so a percentage block size resolves
+    /// against the row track even when the grid container itself has no definite height.
+    /// `align-items: center` is the case that matters: the item is not stretched, so nothing
+    /// else can supply its height. Chromium lays the item and its absolutely-positioned
+    /// child out 24px tall; the engine used to compute the percentage to `auto` and collapse
+    /// both to 0.
+    /// </summary>
+    [Fact]
+    public void GridItemPercentageHeightResolvesAgainstGridAreaWithoutStretch()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:24px;width:200px;align-items:center}
+                .item{height:100%;width:100%;padding:0;border:0;position:relative}
+                .abs{position:absolute;top:0;left:0;width:100%;height:100%}
+            </style>
+            <div class="grid">
+              <div id="item" class="item"><div id="abs" class="abs"></div></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+        Rect abs = laid.Rects[Id(tree, "abs")];
+
+        Assert.True(MathF.Abs(item.Width - 40f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(item.Height - 24f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(abs.Width - 40f) < 0.01f, $"{abs}");
+        Assert.True(MathF.Abs(abs.Height - 24f) < 0.01f, $"{abs}");
+    }
+
+    /// <summary>
+    /// The stretched variant reaches the same size down a different path (stretch alignment
+    /// rather than the item's own percentage), and is here so a change that only repairs one
+    /// of the two cannot look complete.
+    /// </summary>
+    [Fact]
+    public void GridItemPercentageHeightResolvesAgainstGridAreaWhenStretched()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:24px;width:200px;align-items:stretch}
+                .item{height:100%;width:100%;padding:0;border:0}
+            </style>
+            <div class="grid"><div id="item" class="item"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+
+        Assert.True(MathF.Abs(item.Width - 40f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(item.Height - 24f) < 0.01f, $"{item}");
+    }
+
+    /// <summary>
+    /// An `auto` row is sized from its items, so the percentage must not feed back into the
+    /// track: the item contributes its content height and then takes all of it. Chromium
+    /// gives 10px, the height of the one child.
+    /// </summary>
+    [Fact]
+    public void GridItemPercentageHeightAgainstAutoRowUsesContentHeight()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:auto;width:200px;align-items:center}
+                .item{height:100%;width:100%;padding:0;border:0}
+                .spacer{height:10px}
+            </style>
+            <div class="grid"><div id="item" class="item"><div class="spacer"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+
+        Assert.True(MathF.Abs(item.Width - 40f) < 0.01f, $"{item}");
+        Assert.True(MathF.Abs(item.Height - 10f) < 0.01f, $"{item}");
+    }
+
+    /// <summary>
+    /// The grid-area rule is scoped to grid items: a percentage height under an ordinary
+    /// auto-height block parent still behaves as `auto` and takes the content height (7px in
+    /// Chromium), which is what keeps `.tss-card` from filling the viewport.
+    /// </summary>
+    [Fact]
+    public void PercentageHeightUnderAutoHeightBlockParentStillBehavesAsAuto()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .parent{width:60px}
+                .pct{height:50%}
+                .filler{height:7px}
+            </style>
+            <div class="parent"><div id="pct" class="pct"><div class="filler"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect pct = laid.Rects[Id(tree, "pct")];
+
+        Assert.True(MathF.Abs(pct.Width - 60f) < 0.01f, $"{pct}");
+        Assert.True(MathF.Abs(pct.Height - 7f) < 0.01f, $"{pct}");
+    }
+
+    /// <summary>
+    /// A functional block-axis percentage has to be flattened to px before layout, and a
+    /// grid item's area size is not available in that pass, so a `calc()` height inside one
+    /// stays `auto` rather than flattening against an invented basis. Chromium resolves it
+    /// to 20px (24 - 4); the tripwire here is only that it stays inside the grid area
+    /// instead of going negative or escaping it. See "Known deviations" in todo.md.
+    /// </summary>
+    [Fact]
+    public void CalcPercentageHeightInsideGridItemStaysWithinTheGridArea()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .grid{display:grid;grid-template-columns:40px;grid-template-rows:24px;width:200px;align-items:center}
+                .item{height:100%;width:100%;padding:0;border:0}
+                .calcchild{height:calc(100% - 4px)}
+            </style>
+            <div class="grid"><div id="item" class="item"><div id="calcchild" class="calcchild"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 300f));
+        Rect item = laid.Rects[Id(tree, "item")];
+        Rect calc = laid.Rects[Id(tree, "calcchild")];
+
+        Assert.True(MathF.Abs(item.Height - 24f) < 0.01f, $"{item}");
+        Assert.True(calc.Height >= 0f && calc.Height <= 24f, $"{calc}");
+    }
+
     [Fact]
     public void StickyNormalFlowExcludesOwnPixelAndPercentageTranslates()
     {
@@ -3315,6 +3450,265 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void CursorAndPointerEventsInheritDownTheTree()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0 }
+               #clickable { cursor:pointer }
+               #inert { pointer-events:none }
+               </style>
+               <div id="clickable"><span id="inner">x</span></div>
+               <div id="inert"><span id="inert-inner">y</span></div>
+               <a id="link" href="#">z</a>
+               <a id="anchor">w</a>
+               <p id="plain">p</p>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+
+        Assert.Equal("pointer", laid.Styles[Id(tree, "clickable")].Cursor);
+        Assert.Equal("pointer", laid.Styles[Id(tree, "inner")].Cursor);
+        Assert.Equal("none", laid.Styles[Id(tree, "inert")].PointerEvents);
+        Assert.Equal("none", laid.Styles[Id(tree, "inert-inner")].PointerEvents);
+
+        // Chromium's UA sheet points at a link, and only at one that is a link.
+        Assert.Equal("pointer", laid.Styles[Id(tree, "link")].Cursor);
+        Assert.Equal("auto", laid.Styles[Id(tree, "anchor")].Cursor);
+        Assert.Equal("auto", laid.Styles[Id(tree, "plain")].Cursor);
+        Assert.Equal("auto", laid.Styles[Id(tree, "plain")].PointerEvents);
+    }
+
+    [Fact]
+    public void FormControlsInheritThePageFontFamilyThroughTheAuthorRule()
+    {
+        // The UA sheet's `arial` on a control is right; the author sheet every reset carries
+        // is what takes it back off, and the label inside the button follows the control.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px; font-family:"Page Face", sans-serif }
+               .app input, .app select, .app button { font-family:inherit; font-size:inherit }
+               </style>
+               <div class="app"><button id="btn"><span id="label">Go</span></button></div>
+               <button id="ua">Plain</button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+
+        Assert.Equal("\"page face\", sans-serif", laid.Styles[Id(tree, "btn")].FontFamily);
+        Assert.Equal("\"page face\", sans-serif", laid.Styles[Id(tree, "label")].FontFamily);
+        Assert.Equal(16f, laid.Styles[Id(tree, "btn")].FontSize);
+
+        // Out of the author rule's reach the UA font is still what a control gets.
+        Assert.Equal("arial", laid.Styles[Id(tree, "ua")].FontFamily);
+    }
+
+    [Fact]
+    public void BaselineContentAlignmentUsesItsFallbackInsteadOfStretching()
+    {
+        // Baseline alignment does not apply to content distribution; `align-content: baseline`
+        // falls back to `start`, so the auto rows of a taller-than-content grid keep their
+        // content size rather than being stretched to fill it.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px }
+               #grid { display:grid; grid-template-columns:100px 100px; row-gap:12px;
+                       align-content:baseline; width:220px; height:400px }
+               .cell { height:40px }
+               #stretchy { display:grid; grid-template-columns:100px; row-gap:12px;
+                           width:100px; height:400px }
+               </style>
+               <div id="grid">
+                 <div id="a" class="cell"></div><div class="cell"></div>
+                 <div id="b" class="cell"></div><div class="cell"></div>
+               </div>
+               <div id="stretchy"><div class="cell"></div><div id="c" class="cell"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("a").Height - 40f) < 0.01f, $"{Get("a")}");
+        Assert.True(MathF.Abs(Get("b").Y - (Get("a").Y + 52f)) < 0.01f, $"{Get("b")}");
+
+        // `align-content: normal` still spreads the same grid's rows over the extra space.
+        Assert.True(Get("c").Y > 200f, $"{Get("c")}");
+    }
+
+    [Fact]
+    public void HeightFitContentHugsContentInsteadOfStretching()
+    {
+        // `height: fit-content` sizes to content in the block axis exactly like `auto`, but it
+        // is not an automatic size, so stretch alignment does not apply to it.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px }
+               #row { display:flex; width:400px; height:200px }
+               #card, #stretchy { width:100px }
+               #card { height:fit-content }
+               #grid { display:grid; width:400px; height:200px }
+               #gcard { height:fit-content }
+               .inner { height:40px }
+               </style>
+               <div id="row">
+                 <div id="card"><div class="inner"></div></div>
+                 <div id="stretchy"><div class="inner"></div></div>
+               </div>
+               <div id="grid"><div id="gcard"><div class="inner"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(laid.Styles[Id(tree, "card")].HeightFitContent);
+        Assert.True(MathF.Abs(Get("card").Height - 40f) < 0.01f, $"{Get("card")}");
+        Assert.True(MathF.Abs(Get("stretchy").Height - 200f) < 0.01f, $"{Get("stretchy")}");
+        Assert.True(MathF.Abs(Get("gcard").Height - 40f) < 0.01f, $"{Get("gcard")}");
+
+        // The card is still placed at the start of its flex line.
+        Assert.True(MathF.Abs(Get("card").Y - Get("row").Y) < 0.01f, $"{Get("card")}");
+    }
+
+    [Fact]
+    public void HeightFitContentRespectsExplicitCrossAxisAlignment()
+    {
+        // Only the `normal`/`stretch` alignment is replaced; an authored align-items still wins.
+        DomTree tree = Parse(
+            """
+            <style>
+               html, body { margin:0; font-size:16px }
+               #row { display:flex; align-items:center; width:400px; height:200px }
+               #card { width:100px; height:fit-content }
+               .inner { height:40px }
+               </style>
+               <div id="row"><div id="card"><div class="inner"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 600f));
+        Rect row = laid.Rects[Id(tree, "row")];
+        Rect card = laid.Rects[Id(tree, "card")];
+
+        Assert.True(MathF.Abs(card.Height - 40f) < 0.01f, $"{card}");
+        Assert.True(MathF.Abs(card.Y - (row.Y + 80f)) < 0.01f, $"{card}");
+    }
+
+    /// <summary>
+    /// The inline-axis content of these fixtures is three 100px inline blocks, so min-content
+    /// is 100px and max-content 300px with no text measurement involved. Every expectation
+    /// was read off Chromium 141 on the same markup.
+    /// </summary>
+    [Fact]
+    public void MinAndMaxWidthResolveTheIntrinsicSizingKeywords()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font-size:16px }
+              .chip { display:inline-block; width:100px; height:20px }
+              #cb { width:200px }
+              #narrow { width:50px }
+              #wide { width:400px }
+              #a { min-width:max-content }
+              #b { max-width:min-content }
+              #c { min-width:min-content }
+              #d { max-width:fit-content }
+            </style>
+            <div id="cb">
+              <div id="a"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+              <div id="b"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            <div id="narrow">
+              <div id="c"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            <div id="wide">
+              <div id="d"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // A min-width keyword grows the box past its containing block; a max-width one shrinks
+        // it below. Neither was applied at all before: the declaration computed to `auto`.
+        Assert.True(MathF.Abs(Get("a").Width - 300f) < 0.01f, $"{Get("a")}");
+        Assert.True(MathF.Abs(Get("b").Width - 100f) < 0.01f, $"{Get("b")}");
+        Assert.True(MathF.Abs(Get("c").Width - 100f) < 0.01f, $"{Get("c")}");
+        Assert.True(MathF.Abs(Get("d").Width - 300f) < 0.01f, $"{Get("d")}");
+    }
+
+    [Fact]
+    public void MinAndMaxHeightResolveTheIntrinsicSizingKeywords()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font-size:16px }
+              .tall { height:150px }
+              #cb { width:200px }
+              #e { width:100px; height:40px; min-height:min-content; overflow:hidden }
+              #f { width:100px; height:400px; max-height:max-content; overflow:hidden }
+              #g { width:100px; height:400px; min-height:min-content; overflow:hidden }
+              #h { width:100px; height:20px; padding:10px; box-sizing:border-box;
+                   min-height:min-content; overflow:hidden }
+              #i { width:100px; height:20px; padding:10px; box-sizing:content-box;
+                   min-height:min-content; overflow:hidden }
+            </style>
+            <div id="cb">
+              <div id="e"><div class="tall"></div></div>
+              <div id="f"><div class="tall"></div></div>
+              <div id="g"><div class="tall"></div></div>
+              <div id="h"><div class="tall"></div></div>
+              <div id="i"><div class="tall"></div></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("e").Height - 150f) < 0.01f, $"{Get("e")}");
+        Assert.True(MathF.Abs(Get("f").Height - 150f) < 0.01f, $"{Get("f")}");
+
+        // A min-height keyword still loses to a larger `height`.
+        Assert.True(MathF.Abs(Get("g").Height - 400f) < 0.01f, $"{Get("g")}");
+
+        // The resolved block size is a border-box measurement, so the padding is inside it
+        // under `border-box` and outside it under `content-box`.
+        Assert.True(MathF.Abs(Get("h").Height - 170f) < 0.01f, $"{Get("h")}");
+        Assert.True(MathF.Abs(Get("i").Height - 170f) < 0.01f, $"{Get("i")}");
+        Assert.True(MathF.Abs(Get("i").Width - 120f) < 0.01f, $"{Get("i")}");
+    }
+
+    [Fact]
+    public void IntrinsicMinAndMaxSizesApplyToFlexGridAndOutOfFlowBoxes()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0; font-size:16px }
+              .chip { display:inline-block; width:100px; height:20px }
+              .tall { height:150px }
+              #col { display:flex; flex-direction:column; width:200px; height:60px }
+              #grid { display:grid; grid-template-columns:200px; width:200px; height:60px }
+              #abs { position:relative; width:200px; height:60px }
+              #ci { width:100px; min-height:min-content; overflow:hidden }
+              #gi { min-width:max-content }
+              #ai { position:absolute; left:0; top:0; min-width:max-content }
+            </style>
+            <div id="col"><div id="ci"><div class="tall"></div></div></div>
+            <div id="grid">
+              <div id="gi"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            <div id="abs">
+              <div id="ai"><span class="chip"></span><span class="chip"></span><span class="chip"></span></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // Without the min-height the column item shrinks to the container's 60px.
+        Assert.True(MathF.Abs(Get("ci").Height - 150f) < 0.01f, $"{Get("ci")}");
+        Assert.True(MathF.Abs(Get("gi").Width - 300f) < 0.01f, $"{Get("gi")}");
+        Assert.True(MathF.Abs(Get("ai").Width - 300f) < 0.01f, $"{Get("ai")}");
+    }
+
+    [Fact]
     public void CalcPercentagesResolveAgainstAResizableFlexItemsUsedWidth()
     {
         // A row flex item's declared inline size is not its used inline size once
@@ -3405,6 +3799,154 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void FunctionalInsetsResolveAgainstTheAbsolutePositioningContainingBlock()
+    {
+        // DEVIATION from the Rust reference, which flattens a functional inset against the
+        // viewport height. Every expected value below was read off headless Chromium at
+        // 1280x720 (Tesserae's dropdown chevron reduced to its CSS).
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif;height:2000px}
+              :root{--tiny:10px}
+              .ctr{position:relative;width:300px;height:34px;margin-top:200px}
+              .k{position:absolute;width:10px;height:10px}
+              #a{right:8px;top:calc(50% - var(--tiny) / 2)}
+              #b{right:30px;top:50%}
+              #c{right:52px;top:calc(50% - 5px)}
+              #d{right:74px;top:calc(50% - var(--tiny))}
+              #e{right:96px;bottom:50%}
+              #f{right:118px;top:0;margin-top:calc(50% - 5px)}
+            </style>
+            <div class="ctr" id="ctr">
+              <div class="k" id="a"></div><div class="k" id="b"></div><div class="k" id="c"></div>
+              <div class="k" id="d"></div><div class="k" id="e"></div><div class="k" id="f"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        float container = laid.Rects[Id(tree, "ctr")].Y;
+        float Offset(string id) => laid.Rects[Id(tree, id)].Y - container;
+
+        // Half of the 34px containing block, not half of the 720px viewport.
+        Assert.True(MathF.Abs(Offset("a") - 12f) < 0.01f, $"a: {Offset("a")}");
+        Assert.True(MathF.Abs(Offset("c") - 12f) < 0.01f, $"c: {Offset("c")}");
+        Assert.True(MathF.Abs(Offset("d") - 7f) < 0.01f, $"d: {Offset("d")}");
+
+        // Tripwires: the bare percentages and the percentage margin were already right.
+        Assert.True(MathF.Abs(Offset("b") - 17f) < 0.01f, $"b: {Offset("b")}");
+        Assert.True(MathF.Abs(Offset("e") - 7f) < 0.01f, $"e: {Offset("e")}");
+        Assert.True(MathF.Abs(Offset("f") - 145f) < 0.01f, $"f: {Offset("f")}");
+    }
+
+    [Fact]
+    public void FunctionalInsetsSampleThePaddingBoxOfTheNearestPositionedAncestor()
+    {
+        // Chromium at 1280x720. The basis is the ancestor's padding box on both axes, the
+        // ancestor need not be the parent, and an auto-height ancestor still has a used
+        // height a percentage resolves against.
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif}
+              .k{position:absolute;width:10px;height:10px}
+              #p1{position:relative;width:300px;height:34px;padding:20px 30px}
+              #g1{top:calc(50% - 5px);left:calc(50% - 5px)}
+              #p2{position:relative;width:300px}
+              #p2 .filler{height:60px}
+              #g2{top:calc(50% - 5px)}
+              #p3{position:relative;width:300px;height:80px}
+              #p3 .mid{height:20px}
+              #g3{top:calc(50% - 5px);left:calc(25% - 5px)}
+              #p7{position:relative;width:300px;height:40px;border:5px solid #999}
+              #g7{bottom:calc(50% - 5px);right:calc(50% - 5px)}
+            </style>
+            <div id="p1"><div class="k" id="g1"></div></div>
+            <div id="p2"><div class="filler"></div><div class="k" id="g2"></div></div>
+            <div id="p3"><div class="mid"><div class="k" id="g3"></div></div></div>
+            <div id="p7"><div class="k" id="g7"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+        float Top(string child, string ancestor) => Get(child).Y - Get(ancestor).Y;
+        float Left(string child, string ancestor) => Get(child).X - Get(ancestor).X;
+
+        // 360x74 padding box: 0.5*74 - 5 and 0.5*360 - 5.
+        Assert.True(MathF.Abs(Top("g1", "p1") - 32f) < 0.01f, $"g1 top: {Get("g1")}");
+        Assert.True(MathF.Abs(Left("g1", "p1") - 175f) < 0.01f, $"g1 left: {Get("g1")}");
+
+        // The ancestor's height is content-derived (60px) and still the basis.
+        Assert.True(MathF.Abs(Top("g2", "p2") - 25f) < 0.01f, $"g2: {Get("g2")}");
+
+        // #p3, not the 20px-tall .mid the box is parented to.
+        Assert.True(MathF.Abs(Top("g3", "p3") - 35f) < 0.01f, $"g3 top: {Get("g3")}");
+        Assert.True(MathF.Abs(Left("g3", "p3") - 70f) < 0.01f, $"g3 left: {Get("g3")}");
+
+        // `bottom` off a padding box inset by the 5px border: 5 + 40 - 15 - 10.
+        Assert.True(MathF.Abs(Top("g7", "p7") - 20f) < 0.01f, $"g7 top: {Get("g7")}");
+        Assert.True(MathF.Abs(Left("g7", "p7") - 150f) < 0.01f, $"g7 left: {Get("g7")}");
+    }
+
+    [Fact]
+    public void FunctionalRelativeOffsetsResolveAgainstTheContainingBlockHeight()
+    {
+        // Chromium at 1280x720. A relative offset is not taffy's to resolve on the block
+        // axis (it passes a hard 0 there), so it stays flattened - against the containing
+        // block's content-box height, and as `auto` when that height is indefinite.
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif}
+              .k{width:10px;height:10px}
+              #p4{width:300px;height:100px}
+              #g4{position:relative;top:calc(50% - 5px);left:calc(10% - 5px)}
+              #p5{width:300px}
+              #g5{position:relative;top:calc(50% - 5px)}
+              #g5b{position:relative;top:50%}
+            </style>
+            <div id="p4"><div class="k" id="g4"></div></div>
+            <div id="p5"><div class="k" id="g5"></div><div class="k" id="g5b"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        // Definite 100px containing block: half of it, not half of the 720px viewport.
+        Assert.True(MathF.Abs(Get("g4").Y - (Get("p4").Y + 45f)) < 0.01f, $"g4: {Get("g4")}");
+        Assert.True(MathF.Abs(Get("g4").X - (Get("p4").X + 25f)) < 0.01f, $"g4: {Get("g4")}");
+
+        // Indefinite containing block: the offset computes to auto, exactly as the bare
+        // percentage beside it does.
+        Assert.True(MathF.Abs(Get("g5").Y - Get("p5").Y) < 0.01f, $"g5: {Get("g5")}");
+        Assert.True(MathF.Abs(Get("g5b").Y - (Get("p5").Y + 10f)) < 0.01f, $"g5b: {Get("g5b")}");
+    }
+
+    [Fact]
+    public void FunctionalInlineSizesSampleTheUsedContainingBlockWidth()
+    {
+        // Chromium at 1280x720. `#cb` is a flex item that ends 200px wide; the top-down
+        // style pass's own block-flow estimate of its width is the 300px row, so a
+        // `calc()` percentage flattened there came out 100px too wide.
+        DomTree tree = Parse(
+            """
+            <style>
+              body{margin:0;font:13px sans-serif}
+              .row{display:flex;width:300px}
+              .fixed{flex:0 0 100px;height:20px}
+              .grow{flex:1 1 auto;min-width:0}
+              #t{width:calc(100% + 20px);height:10px}
+              #t2{width:calc(50% - 10px);height:10px}
+            </style>
+            <div class="row"><div class="fixed"></div>
+              <div class="grow" id="cb"><div id="t"></div><div id="t2"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("cb").Width - 200f) < 0.01f, $"cb: {Get("cb")}");
+        Assert.True(MathF.Abs(Get("t").Width - 220f) < 0.01f, $"t: {Get("t")}");
+        Assert.True(MathF.Abs(Get("t2").Width - 90f) < 0.01f, $"t2: {Get("t2")}");
+    }
+
+    [Fact]
     public void ButtonsTakeTheUserAgentControlFontIncludingLineHeightNormal()
     {
         // DEVIATION from the Rust reference, whose `button` UA arm sets no font, so a button
@@ -3434,8 +3976,162 @@ public class DomLayoutTests
 
         // Ordinary content still inherits the page font and its 1.8 line-height.
         Assert.True(MathF.Abs((Style("ref").FontSize ?? 0f) - 20f) < 0.01f);
-        Assert.True(MathF.Abs(laid.Rects[Id(tree, "plain")].Height - 17f) < 1.01f);
+        // 17px of line box plus the UA `border: 2px outset` top and bottom, which is
+        // Chromium's 21px exactly.
+        Assert.True(MathF.Abs(laid.Rects[Id(tree, "plain")].Height - 21f) < 1.01f);
         Assert.True(MathF.Abs(laid.Rects[Id(tree, "ref")].Height - 22f) < 1.01f);
+    }
+
+    [Fact]
+    public void ButtonCarriesTheUserAgentOutsetBorder()
+    {
+        // Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder`. This arm set
+        // padding but no border, so every unstyled button was 4px narrower and 4px shorter
+        // than Chromium's, and painted with no border at all.
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0}</style>
+            <button id=plain>x</button>
+            <button id=none style="border:0">x</button>
+            <button id=author style="border:5px dashed red">x</button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        LayoutStyle Style(string id) => laid.Styles[Id(tree, id)];
+
+        Assert.Equal(new Edges(2f, 2f, 2f, 2f), Style("plain").Border);
+        Assert.Equal(BorderStyle.Outset, Style("plain").BorderModel.Styles.Top);
+
+        // A button's `ButtonBorder` computes to rgb(0, 0, 0) - Chromium 141 on a bare
+        // `<button>Hi</button>` reports exactly that - and the rgb(118, 118, 118) Chromium
+        // shows comes from its native form-control painter, not from this value. This arm
+        // carried the painted colour for a while and made every button report a border-colour
+        // Chromium does not. The grey is PaintBorders' job; see NativeControlAppearance.
+        Assert.Equal(new RgbaColor(0, 0, 0, 255), Style("plain").BorderModel.Colors.Top);
+        Assert.Equal(new RgbaColor(0, 0, 0, 255), Style("plain").BorderColor);
+        Assert.True(Style("plain").NativeControlAppearance);
+
+        // The UA border is a normal declaration, so an author rule still replaces it in
+        // either direction.
+        Assert.Equal(new Edges(0f, 0f, 0f, 0f), Style("none").Border);
+        Assert.Equal(new Edges(5f, 5f, 5f, 5f), Style("author").Border);
+        Assert.Equal(BorderStyle.Dashed, Style("author").BorderModel.Styles.Top);
+
+        // Which is exactly the 4px each way that separated this port from Chromium.
+        float plainWidth = laid.Rects[Id(tree, "plain")].Width;
+        float noneWidth = laid.Rects[Id(tree, "none")].Width;
+        Assert.True(MathF.Abs((plainWidth - noneWidth) - 4f) < 0.01f, $"{plainWidth} vs {noneWidth}");
+        Assert.True(
+            MathF.Abs(laid.Rects[Id(tree, "plain")].Height - laid.Rects[Id(tree, "none")].Height - 4f) < 0.01f);
+    }
+
+    [Fact]
+    public void ButtonTakesTheWidestItemOfAColumnFlexChildNotTheirSum()
+    {
+        // The native-control sizing pass walks a button's subtree and accumulates every
+        // descendant's contribution, which is a row accumulation: only right when the content
+        // shares one line. A column flex container gives each item its own line, so the
+        // button's contribution is the widest item. Summing them made a [51px, 164px] column
+        // measure 215px of content instead of 164px, and the identical subtree under an
+        // inline-block div (which goes through real intrinsic sizing, not the shortcut) was
+        // already correct - that mismatch is the invariant this pins.
+        DomTree tree = Parse(
+            """
+            <style>
+             html,body{margin:0}
+             .col{display:flex;flex-direction:column}
+             .a{width:164px;height:20px}
+             .b{width:51px;height:20px}
+             .plainbox{display:inline-block;border:0;padding:0}
+            </style>
+            <button id=b1><div class=col><div class=b></div><div class=a></div></div></button>
+            <button id=b2><div class=col><div class=a></div></div></button>
+            <div class=plainbox id=d1><div class=col><div class=b></div><div class=a></div></div></div>
+            <button id=b4 style="display:flex"><div class=col><div class=b></div><div class=a></div></div></button>
+            <button id=b5><div class=a></div><div class=b></div></button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 950f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The plain inline-block is the oracle: max, not sum.
+        Assert.True(MathF.Abs(Width("d1") - 164f) < 0.01f, $"inline-block: {Width("d1")}");
+
+        // The button adds its UA `padding: 1px 6px` and its UA `border: 2px outset`, so
+        // 164 + 12 + 4 = 180, which is what Chromium reports for all four. These read 176
+        // while the UA arm still carried no border.
+        Assert.True(MathF.Abs(Width("b1") - 180f) < 0.01f, $"column child: {Width("b1")}");
+        Assert.True(MathF.Abs(Width("b2") - 180f) < 0.01f, $"single-item column: {Width("b2")}");
+        Assert.True(
+            MathF.Abs(Width("b4") - 180f) < 0.01f,
+            $"display:flex button around the same column: {Width("b4")}");
+
+        // Block-level children of the button itself stack the same way.
+        Assert.True(MathF.Abs(Width("b5") - 180f) < 0.01f, $"block children: {Width("b5")}");
+    }
+
+    [Fact]
+    public void ButtonStillSumsInlineLevelContentOnOneLine()
+    {
+        // The guard for the fix above: a row of inline-level children does share a line, so
+        // their contributions still add up. This is the shape of every icon-plus-label button
+        // (`<i style="width:12px"></i><span style="margin-left:10px">...</span>`).
+        DomTree tree = Parse(
+            """
+            <style>
+             html,body{margin:0}
+             button{padding:0;border:0}
+             .icon{display:inline-block;width:12px;height:12px}
+             .gap{display:inline-block;width:30px;height:12px;margin-left:10px}
+            </style>
+            <button id=b><span class=icon></span><span class=gap></span></button>
+            <button id=row style="display:flex"><div class=icon></div><div class=gap></div></button>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 950f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        Assert.True(MathF.Abs(Width("b") - 52f) < 0.01f, $"inline run: {Width("b")}");
+        Assert.True(MathF.Abs(Width("row") - 52f) < 0.01f, $"flex row: {Width("row")}");
+    }
+
+    [Fact]
+    public void WidthMaxContentAndMinContentSizeToTheirMeasurement()
+    {
+        // `fit-content` was the only intrinsic sizing keyword the width parse recognized; the
+        // other two fell through to `auto` and filled the 1200px containing block.
+        DomTree tree = Parse(
+            """
+            <style>
+              html,body{margin:0}
+              .box{padding:0 20px;border:1px solid #999;box-sizing:border-box}
+              .wide{width:160px;height:20px}
+              .narrow{width:50px;height:20px}
+            </style>
+            <div style="width:1200px">
+              <div class=box id=mx style="display:flex;flex-direction:column;width:max-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+              <div class=box id=mn style="display:flex;flex-direction:column;width:min-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+              <div class=box id=rw style="display:flex;width:max-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+              <div class=box id=fc style="display:flex;flex-direction:column;width:fit-content">
+                <div class=wide></div><div class=narrow></div>
+              </div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 950f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // max(160, 50) + 40 padding + 2 border.
+        Assert.True(MathF.Abs(Width("mx") - 202f) < 0.01f, $"column max-content: {Width("mx")}");
+        Assert.True(MathF.Abs(Width("mn") - 202f) < 0.01f, $"column min-content: {Width("mn")}");
+
+        // A row sums its items: 160 + 50 + 42.
+        Assert.True(MathF.Abs(Width("rw") - 252f) < 0.01f, $"row max-content: {Width("rw")}");
+
+        // fit-content is unchanged, and here clamps to the same max-content.
+        Assert.True(MathF.Abs(Width("fc") - 202f) < 0.01f, $"column fit-content: {Width("fc")}");
     }
 
     [Fact]
@@ -3580,6 +4276,167 @@ public class DomLayoutTests
         Assert.True(
             MathF.Abs(Get("bar").Height - 107f) < 0.01f,
             $"height:100% must resolve against the 120px flex basis minus its edges: {Get("bar")}");
+    }
+
+    /// <summary>
+    /// DEVIATION from the Rust reference, which calls a box's block size definite only when
+    /// `height` itself is a length or percentage, so a flex item sized by the flex algorithm
+    /// is an indefinite containing block and every descendant `height: %` under it computes to
+    /// `auto`. CSS Flexbox 9.8 makes a flex item's post-flexing MAIN size definite whenever the
+    /// container's main size is definite. Tesserae nests a `height: 100%` column inside a
+    /// `flex-grow: 1` item carrying no height of its own, so the reference collapsed the chain
+    /// to 0 and the connect-apps grid clipped 1676px of cards into an 8px box.
+    /// Chromium (Playwright, /opt/pw-browsers/chromium) lays every box in this fixture out
+    /// 400px tall.
+    /// </summary>
+    [Fact]
+    public void AColumnFlexItemsPostFlexHeightIsDefiniteForDescendantPercentages()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #col { display:flex; flex-direction:column; height:400px; width:200px }
+              #item { flex-grow:1 }
+              #a { height:100% }
+              #b { height:100% }
+              #c { height:50% }
+            </style>
+            <div id="col">
+              <div id="item"><div id="a"><div id="b"><div id="c"></div></div></div></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("item").Height - 400f) < 0.01f, $"{Get("item")}");
+        Assert.True(MathF.Abs(Get("a").Height - 400f) < 0.01f, $"{Get("a")}");
+        Assert.True(
+            MathF.Abs(Get("b").Height - 400f) < 0.01f,
+            $"the percentage must keep chaining past the first level: {Get("b")}");
+        Assert.True(MathF.Abs(Get("c").Height - 200f) < 0.01f, $"{Get("c")}");
+    }
+
+    /// <summary>
+    /// The other half of CSS Flexbox 9.8: a STRETCHED item's cross size is definite whenever
+    /// the container's cross size is, which is the block axis for a row container. Chromium
+    /// lays the stretched item and its `height: 100%` child out 400px tall.
+    /// </summary>
+    [Fact]
+    public void AStretchedRowFlexItemsCrossSizeIsDefiniteForDescendantPercentages()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #row { display:flex; flex-direction:row; height:400px; width:300px }
+              #item { width:100px }
+              #fill { height:100% }
+            </style>
+            <div id="row"><div id="item"><div id="fill"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("item").Height - 400f) < 0.01f, $"{Get("item")}");
+        Assert.True(MathF.Abs(Get("fill").Height - 400f) < 0.01f, $"{Get("fill")}");
+    }
+
+    /// <summary>
+    /// The negative cases, so a fix that simply calls every flex item definite cannot pass.
+    /// Verified against Chromium (Playwright, /opt/pw-browsers/chromium): a row item that is
+    /// not stretched (`align-items: flex-start`, or an auto block-axis margin) and an item in a
+    /// container whose own block size is indefinite all lay their `height: 100%` child out 0px
+    /// tall, because in none of those does the flex algorithm hand the item a definite height.
+    /// </summary>
+    [Fact]
+    public void AnUnstretchedOrIndefinitelySizedFlexItemStaysAnIndefiniteContainingBlock()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              .row { display:flex; flex-direction:row; height:400px; width:300px }
+              .item { width:100px }
+              .filler { height:50px }
+              .fill { height:100% }
+              #auto-col { display:flex; flex-direction:column; width:200px }
+            </style>
+            <div class="row" style="align-items:flex-start">
+              <div id="start-item" class="item">
+                <div class="filler"></div><div id="start-fill" class="fill"></div></div></div>
+            <div class="row">
+              <div id="margin-item" class="item" style="margin-top:auto">
+                <div class="filler"></div><div id="margin-fill" class="fill"></div></div></div>
+            <div id="auto-col">
+              <div id="auto-item" style="flex-grow:1">
+                <div class="filler"></div><div id="auto-fill" class="fill"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 900f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("start-item").Height - 50f) < 0.01f, $"{Get("start-item")}");
+        Assert.True(MathF.Abs(Get("start-fill").Height) < 0.01f, $"{Get("start-fill")}");
+        Assert.True(MathF.Abs(Get("margin-item").Height - 50f) < 0.01f, $"{Get("margin-item")}");
+        Assert.True(MathF.Abs(Get("margin-fill").Height) < 0.01f, $"{Get("margin-fill")}");
+        Assert.True(MathF.Abs(Get("auto-item").Height - 50f) < 0.01f, $"{Get("auto-item")}");
+        Assert.True(MathF.Abs(Get("auto-fill").Height) < 0.01f, $"{Get("auto-fill")}");
+    }
+
+    /// <summary>
+    /// The chain the connect-apps panel actually builds, reduced from the live DOM. Its whole
+    /// weight rests on `#content`: a `flex-grow: 1` item of a definite-height COLUMN container,
+    /// carrying no height of its own. Once that is an indefinite containing block, the
+    /// `height: 100%` on every box below it computes to `auto` in turn, and the grid ends up
+    /// its padding box tall with `overflow: auto` clipping the cards. `#shell` and `#pane` are
+    /// each 400px either way, because a row container stretches them - which is why the live
+    /// symptom looked like a paint bug and has to be checked at the ANCESTORS.
+    /// Chromium lays every box in this fixture out 400px tall and the grid 360px.
+    /// </summary>
+    [Fact]
+    public void APercentageStackUnderAFlexGrownItemKeepsItsScrollableGridOpen()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #modal { display:flex; flex-direction:column; height:400px; width:300px }
+              #content { display:flex; flex-grow:1; width:100%; overflow:hidden auto }
+              #shell { display:flex; flex-direction:row; width:100%; height:100%; min-height:0 }
+              #pane { height:100%; min-height:0; width:1px; flex-grow:1 }
+              #outer { display:flex; flex-direction:column; height:100%; min-height:0;
+                       overflow:hidden auto }
+              #hub { display:flex; flex-direction:column; height:100%; min-height:0 }
+              #card { flex-grow:1; flex-shrink:0; height:10px; overflow:hidden }
+              #defer { width:100%; height:100%; min-height:0 }
+              #inner { display:flex; flex-direction:column; height:100%; min-height:0;
+                       overflow:hidden auto }
+              #grid { display:grid; grid-template-columns:1fr; overflow:auto; width:100% }
+              #grid > div { height:60px }
+            </style>
+            <div id="modal"><div id="content"><div id="shell"><div id="pane"><div id="outer">
+              <div id="hub"><div id="card"><div id="defer"><div id="inner">
+                <div id="grid">
+                  <div></div><div></div><div></div><div></div><div></div><div></div>
+                </div>
+              </div></div></div></div>
+            </div></div></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        foreach (string id in new[] { "content", "shell", "pane", "outer", "hub", "card", "defer", "inner" })
+        {
+            Assert.True(MathF.Abs(Get(id).Height - 400f) < 0.01f, $"#{id} {Get(id)}");
+        }
+
+        Assert.True(
+            MathF.Abs(Get("grid").Height - 360f) < 0.01f,
+            $"the scrollable grid must keep its six 60px rows, not collapse: {Get("grid")}");
     }
 
     [Fact]

@@ -311,6 +311,28 @@ public static class DomOps
                 return SerdeJson.StringArray(names);
             }
 
+            // DEVIATION from crates/obscura-js: two commands the Rust op table does not have.
+            // `element.value` / `element.checked` are dirty IDL state that HTML deliberately
+            // keeps off the content attribute, so bootstrap.js parks them in the `_formValues`
+            // / `_formChecked` globals - where the renderer cannot see them, and a field whose
+            // value came from script paints its placeholder. The C# host mirrors those two
+            // globals onto the arena as script writes them (see FormStateMirror), which is what
+            // these two commands are for. bootstrap.js never calls them, so the shared shim and
+            // the op protocol it depends on are unchanged. See "Known deviations" in todo.md.
+            case "set_form_value":
+            {
+                dom.SetDirtyFormValue(ParseNodeOrZero(arg1), arg2);
+                return "null";
+            }
+
+            case "set_form_checked":
+            {
+                dom.SetDirtyFormChecked(
+                    ParseNodeOrZero(arg1),
+                    string.Equals(arg2, "true", StringComparison.Ordinal));
+                return "null";
+            }
+
             case "set_attribute":
             {
                 var nodeId = ParseNodeOrZero(arg1);

@@ -87,7 +87,9 @@ internal static class TaffyStyleMapping
             s.FlexWrap = TaffyFlexWrap.NoWrap;
         }
 
-        s.Size = new Layout.Size<TaffyDimension>(ToDimension(style.Width), ToDimension(style.Height));
+        s.Size = new Layout.Size<TaffyDimension>(
+            SizeDimension(style, 0, style.Width),
+            SizeDimension(style, 1, style.Height));
 
         // Tell taffy's layout algorithm about computed overflow, not just our paint-time clips:
         // a flex/grid automatic minimum depends on the relevant axis. Overflow propagated from
@@ -104,8 +106,12 @@ internal static class TaffyStyleMapping
                     : style.ClipsOverflowY() ? TaffyOverflow.Clip : TaffyOverflow.Visible);
         }
 
-        s.MinSize = new Layout.Size<TaffyDimension>(ToDimension(style.MinWidth), ToDimension(style.MinHeight));
-        s.MaxSize = new Layout.Size<TaffyDimension>(ToDimension(style.MaxWidth), ToDimension(style.MaxHeight));
+        s.MinSize = new Layout.Size<TaffyDimension>(
+            SizeDimension(style, 2, style.MinWidth),
+            SizeDimension(style, 3, style.MinHeight));
+        s.MaxSize = new Layout.Size<TaffyDimension>(
+            SizeDimension(style, 4, style.MaxWidth),
+            SizeDimension(style, 5, style.MaxHeight));
         if (style.AspectRatio is { } aspectRatio && float.IsFinite(aspectRatio) && aspectRatio > 0f)
         {
             s.AspectRatio = aspectRatio;
@@ -164,7 +170,13 @@ internal static class TaffyStyleMapping
             s.FlexShrink = flexShrink;
         }
 
-        if (!style.FlexBasis.IsAuto)
+        if (style.FlexBasisCalc is { } flexBasisCalc)
+        {
+            // Percentage-dependent math, resolved by the flex algorithm against the container's
+            // inner main size through the same handle a grid track uses.
+            s.FlexBasis = Layout.Dimension.FromCalc(flexBasisCalc.Handle);
+        }
+        else if (!style.FlexBasis.IsAuto)
         {
             s.FlexBasis = ToDimension(style.FlexBasis);
         }
@@ -224,10 +236,10 @@ internal static class TaffyStyleMapping
             if (!style.PositionSticky)
             {
                 s.Inset = new Layout.Rect<TaffyLengthPercentageAuto>(
-                    InsetLpa(style.Inset[3]),
-                    InsetLpa(style.Inset[1]),
-                    InsetLpa(style.Inset[0]),
-                    InsetLpa(style.Inset[2]));
+                    InsetLpa(style, 3),
+                    InsetLpa(style, 1),
+                    InsetLpa(style, 0),
+                    InsetLpa(style, 2));
             }
         }
 
@@ -275,6 +287,26 @@ internal static class TaffyStyleMapping
         return s;
     }
 
+    /// <summary>
+    /// A percentage inside a functional inline-axis size is resolved by taffy against the
+    /// used containing block, so it reaches layout as an opaque calc() handle rather than as
+    /// the px value the style pass flattened for the non-layout readers.
+    /// </summary>
+    private static TaffyDimension SizeDimension(LayoutStyle style, int slot, Dimension value) =>
+        style.SizeCalc?[slot] is { } late
+            ? TaffyDimension.FromCalc(late.Handle)
+            : ToDimension(value);
+
+    /// <summary>
+    /// A percentage inside a functional inset is resolved by taffy against the used
+    /// containing block, so it reaches layout as an opaque calc() handle rather than as the
+    /// px value the style pass flattened for the non-layout readers.
+    /// </summary>
+    private static TaffyLengthPercentageAuto InsetLpa(LayoutStyle style, int index) =>
+        style.InsetCalc?[index] is { } late
+            ? TaffyLengthPercentageAuto.FromCalc(late.Handle)
+            : InsetLpa(style.Inset[index]);
+
     private static TaffyLengthPercentageAuto InsetLpa(Dimension? value) => value?.Kind switch
     {
         DimensionKind.Px => TaffyLengthPercentageAuto.FromLength(value!.Value.Value),
@@ -293,6 +325,7 @@ internal static class TaffyStyleMapping
         // fall back to its raw magnitude (em/rem ~16px) rather than panicking.
         DimensionKind.Em or DimensionKind.Rem => TaffyDimension.FromLength(value.Value * 16f),
         DimensionKind.Ex => TaffyDimension.FromLength(value.Value * 16f * Dimension.ExPerEm),
+        DimensionKind.Ch => TaffyDimension.FromLength(value.Value * 16f * Dimension.ChPerEm),
         _ => TaffyDimension.FromLength(value.Value),
     };
 

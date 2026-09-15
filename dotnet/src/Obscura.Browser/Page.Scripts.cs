@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using Obscura.Dom;
+using Obscura.Js.Ops;
 using Obscura.Js.Runtime;
 using Obscura.Js.Url;
 using Obscura.Net;
@@ -213,11 +214,18 @@ public sealed partial class Page
 
                 ResourceRequest request =
                     ResourceRequest.Subresource(ResourceType.Script, NetUrl.From(scriptInitiator));
+                double startedAt = PerformanceOps.UnixMilliseconds();
                 try
                 {
                     Response response = await HttpClient
                         .FetchResourceWithCallbacksAsync(NetUrl.From(parsed), request, _callbacks, cancellationToken)
                         .ConfigureAwait(false);
+                    RecordResourceTiming(
+                        response.Url.AbsoluteUri,
+                        "script",
+                        response,
+                        startedAt,
+                        PerformanceOps.UnixMilliseconds());
                     return (index, url, response);
                 }
                 catch (Exception error) when (error is not OperationCanceledException)

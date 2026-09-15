@@ -197,15 +197,17 @@ public static class Input
                 }
                 else if (eventType == "mouseReleased")
                 {
-                    (string PageId, string FrameId, string Url)? movedFrame = null;
+                    (string PageId, string FrameId, string Url, Obscura.Browser.PageNavigationOutcome Outcome)?
+                        movedFrame = null;
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
                         page.Evaluate(MouseReleasedJs(
                             x, y, buttonCode, clickCount, altKey, ctrlKey, metaKey, shiftKey));
-                        bool moved;
+                        Obscura.Browser.PageNavigationOutcome moved;
                         try
                         {
-                            moved = await page.ProcessPendingNavigationAsync().ConfigureAwait(false);
+                            moved = await page.ProcessPendingNavigationOutcomeAsync()
+                                .ConfigureAwait(false);
                         }
                         catch (Obscura.Browser.PageException error)
                         {
@@ -215,33 +217,49 @@ public static class Input
                         // Fork: a single page app answers a click by routing itself, with no
                         // document fetch. The client still has to be told the frame moved, or the
                         // click looks like it did nothing.
-                        if (moved)
+                        if (moved.Navigated)
                         {
-                            movedFrame = (page.Id, page.FrameId, page.UrlString());
+                            movedFrame = (page.Id, page.FrameId, page.UrlString(), moved);
                         }
                     }
 
                     if (movedFrame is { } frame)
                     {
-                        string loaderId =
-                            ctx.CurrentLoaderIds.TryGetValue(frame.PageId, out string? existing)
-                                ? existing
-                                : "loader-blank-" + frame.PageId;
-                        ctx.PendingEvents.Add(new CdpEvent
+                        if (frame.Outcome.IsSameDocument)
                         {
-                            Method = "Page.frameNavigated",
-                            Params = new JsonObject
+                            // A click a router answered with pushState kept the document, so
+                            // announcing frameNavigated would retire the client's execution
+                            // context for a page that never reloaded.
+                            Page.EmitSameDocumentNavigation(
+                                ctx,
+                                sessionId,
+                                frame.FrameId,
+                                frame.Url,
+                                frame.PageId,
+                                frame.Outcome.NavigationType);
+                        }
+                        else
+                        {
+                            string loaderId =
+                                ctx.CurrentLoaderIds.TryGetValue(frame.PageId, out string? existing)
+                                    ? existing
+                                    : "loader-blank-" + frame.PageId;
+                            ctx.PendingEvents.Add(new CdpEvent
                             {
-                                ["frame"] = Page.FrameValue(
-                                    frame.FrameId,
-                                    null,
-                                    loaderId,
-                                    frame.Url,
-                                    "text/html"),
-                                ["type"] = "Navigation",
-                            },
-                            SessionId = sessionId ?? string.Empty,
-                        });
+                                Method = "Page.frameNavigated",
+                                Params = new JsonObject
+                                {
+                                    ["frame"] = Page.FrameValue(
+                                        frame.FrameId,
+                                        null,
+                                        loaderId,
+                                        frame.Url,
+                                        "text/html"),
+                                    ["type"] = "Navigation",
+                                },
+                                SessionId = sessionId ?? string.Empty,
+                            });
+                        }
                     }
                 }
                 else if (eventType == "mouseWheel")
@@ -469,7 +487,13 @@ public static class Input
             + "if (!link && tag === 'A' && clickTarget.getAttribute('href')) link = clickTarget;"
             + "if (link) {"
             + "var href = link.getAttribute('href');"
-            + "if (href && !href.startsWith('#') && !href.startsWith('javascript:')) location.assign(href);"
+            // Deviation from crates/obscura-cdp/src/domains/input.rs, which skips a
+            // fragment href here: it did so because location.assign used to tear the
+            // document down, so an in-page link would have rebooted the realm. Fragment
+            // navigation is same-document now, and skipping it made a real mouse click on
+            // an SPA's own link do nothing at all. Same fix as the el.click() path in
+            // bootstrap.js.
+            + "if (href && !href.startsWith('javascript:')) location.assign(href);"
             + "} else if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {"
             + "var form = clickTarget.closest ? clickTarget.closest('form') : null;"
             + "if (form) { try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(clickTarget); }"

@@ -202,6 +202,7 @@ internal static class DomTransforms
         DimensionKind.Percent => d.Value * basis,
         DimensionKind.Em or DimensionKind.Rem => d.Value * 16f,
         DimensionKind.Ex => d.Value * 16f * Dimension.ExPerEm,
+        DimensionKind.Ch => d.Value * 16f * Dimension.ChPerEm,
         DimensionKind.Vw or DimensionKind.Vh or DimensionKind.Vmin or DimensionKind.Vmax => d.Value,
         _ => 0f,
     };

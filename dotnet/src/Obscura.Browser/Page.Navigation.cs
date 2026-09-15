@@ -1,11 +1,65 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json.Nodes;
 using Obscura.Dom;
 using Obscura.Js.Runtime;
 using Obscura.Js.Url;
 using Obscura.Net;
 
 namespace Obscura.Browser;
+
+/// <summary>What a URL change was, so a CDP client is told the truth about the document.</summary>
+/// <remarks>
+/// CDP draws a hard line here: <c>Page.frameNavigated</c> announces a new document and every
+/// client (Puppeteer, Playwright, chromiumoxide) retires the frame's execution contexts when
+/// it arrives. A History API or fragment-only URL change keeps the document, and is
+/// <c>Page.navigatedWithinDocument</c> instead.
+/// </remarks>
+public enum PageNavigationKind
+{
+    /// <summary>The URL did not move.</summary>
+    None,
+
+    /// <summary>The URL moved without fetching a document; the realm and its contexts survive.</summary>
+    SameDocument,
+
+    /// <summary>A document was fetched and replaced; the old contexts are gone.</summary>
+    CrossDocument,
+}
+
+/// <summary>The outcome of draining a page's pending navigation.</summary>
+/// <param name="Kind">Whether anything moved, and whether the document survived.</param>
+/// <param name="NavigationType">
+/// The CDP <c>navigationType</c> a same-document change is reported with.
+/// </param>
+public readonly record struct PageNavigationOutcome(PageNavigationKind Kind, string NavigationType)
+{
+    /// <summary>A <c>history.pushState</c> / <c>replaceState</c> URL change.</summary>
+    public const string HistoryApiType = "historyApi";
+
+    /// <summary>A change to nothing but the fragment.</summary>
+    public const string FragmentType = "fragment";
+
+    /// <summary>Anything else, including a real document navigation.</summary>
+    public const string OtherType = "other";
+
+    /// <summary>Nothing moved.</summary>
+    public static PageNavigationOutcome None => new(PageNavigationKind.None, OtherType);
+
+    /// <summary>A document was fetched and replaced.</summary>
+    public static PageNavigationOutcome CrossDocument =>
+        new(PageNavigationKind.CrossDocument, OtherType);
+
+    /// <summary>A URL change the document survived, reported as <paramref name="navigationType"/>.</summary>
+    public static PageNavigationOutcome SameDocument(string navigationType) =>
+        new(PageNavigationKind.SameDocument, navigationType);
+
+    /// <summary>Whether the URL moved at all.</summary>
+    public bool Navigated => Kind != PageNavigationKind.None;
+
+    /// <summary>Whether the URL moved without replacing the document.</summary>
+    public bool IsSameDocument => Kind == PageNavigationKind.SameDocument;
+}
 
 public sealed partial class Page
 {
@@ -607,7 +661,103 @@ public sealed partial class Page
         }
     }
 
-    public async Task<bool> ProcessPendingNavigationAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Navigate to <paramref name="url"/> without fetching a document, when it names the
+    /// document already loaded and differs from it in nothing but the fragment.
+    /// </summary>
+    /// <remarks>
+    /// An automation client navigating to <c>page.html#/route</c> from <c>page.html</c> is
+    /// doing what a user does by clicking an in-page link, and Chromium answers it the same
+    /// way: no request, the realm and every <c>window</c> property intact, <c>hashchange</c>
+    /// and <c>popstate</c> fired. Refetching instead reboots a single page app on every
+    /// route change, which is what a client driving one with <c>goto(base + '#/route')</c>
+    /// does on every step.
+    /// <para>
+    /// The decision and the events belong to <c>bootstrap.js</c>
+    /// (<c>__obscura_tryFragmentNavigate</c>), which already owns the fragment path for
+    /// <c>location.href</c> / <c>assign</c> / <c>replace</c> and the component setters. The
+    /// host asks rather than re-deciding, so the two cannot disagree about what counts as a
+    /// fragment navigation.
+    /// </para>
+    /// <para>
+    /// Deviation from <c>crates/obscura-cdp/src/domains/page.rs</c>, whose <c>navigate</c>
+    /// always fetches. The Rust tree has the same gap; this is a fix against Chromium, not a
+    /// port correction.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// <see cref="PageNavigationOutcome.SameDocument"/> when the navigation was handled
+    /// here; <see cref="PageNavigationOutcome.None"/> when the caller must fetch.
+    /// </returns>
+    public async Task<PageNavigationOutcome> TryNavigateSameDocumentAsync(
+        string url,
+        CancellationToken cancellationToken = default)
+    {
+        if (Js is null || Url is null || string.IsNullOrEmpty(url))
+        {
+            return PageNavigationOutcome.None;
+        }
+
+        // A fragment can only be same-document relative to a document that is actually
+        // loaded; about:blank has nothing to stay on.
+        if (string.Equals(Url.Scheme, "about", StringComparison.Ordinal))
+        {
+            return PageNavigationOutcome.None;
+        }
+
+        string literal = System.Text.Json.JsonSerializer.Serialize(url);
+        JsonNode? handled;
+        try
+        {
+            handled = Evaluate($"globalThis.__obscura_tryFragmentNavigate({literal}, false)");
+        }
+        catch (JsRuntimeException)
+        {
+            return PageNavigationOutcome.None;
+        }
+        if (handled?.GetValueKind() != System.Text.Json.JsonValueKind.True)
+        {
+            return PageNavigationOutcome.None;
+        }
+
+        // bootstrap.js moved __virtualUrl; adopt it host-side so page.url() and every CDP
+        // payload that reports it agree with what the page now thinks it is.
+        SyncVirtualUrl();
+
+        // Routers answer hashchange/popstate by queueing work. Give that a bounded turn so
+        // the navigation is observed after the route has had a chance to render, the way a
+        // document navigation already settles before returning.
+        if (Js is { } js)
+        {
+            try
+            {
+                await js.RunEventLoopBoundedAsync(
+                    PageHelpers.EnvUlong("OBSCURA_FRAGMENT_NAV_SETTLE_MS", 250)).ConfigureAwait(false);
+            }
+            catch (JsRuntimeException)
+            {
+                // A router that throws must not fail the navigation.
+            }
+        }
+        await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false);
+
+        return PageNavigationOutcome.SameDocument(PageNavigationOutcome.FragmentType);
+    }
+
+    /// <summary>Whether anything moved; <see cref="ProcessPendingNavigationOutcomeAsync"/> says what.</summary>
+    public async Task<bool> ProcessPendingNavigationAsync(CancellationToken cancellationToken = default) =>
+        (await ProcessPendingNavigationOutcomeAsync(cancellationToken).ConfigureAwait(false)).Navigated;
+
+    /// <summary>
+    /// Drain a pending navigation, answering whether the document was replaced.
+    /// </summary>
+    /// <remarks>
+    /// The caller needs the distinction to pick the CDP event: only a fetched document is a
+    /// <c>Page.frameNavigated</c>. A page that routed itself through the History API kept
+    /// its document, and saying otherwise destroys the client's execution context.
+    /// </remarks>
+    public async Task<PageNavigationOutcome> ProcessPendingNavigationOutcomeAsync(
+        CancellationToken cancellationToken = default)
     {
         if (TakePendingNavigation() is not { } pending)
         {
@@ -635,7 +785,7 @@ public sealed partial class Page
                 $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
         }
         PushHistory(UrlString());
-        return true;
+        return PageNavigationOutcome.CrossDocument;
     }
 
     private static ulong ElapsedMilliseconds(long startTimestamp) =>

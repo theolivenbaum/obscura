@@ -122,6 +122,19 @@ public sealed class ObscuraState
     public List<JsNetworkEvent> JsNetworkEvents { get; } = [];
 
     /// <summary>
+    /// Subresources this document actually fetched, in completion order, for
+    /// <c>performance.getEntriesByType('resource')</c>. Appended by the host transport
+    /// (scripts, stylesheets, images, fonts) and by <c>op_fetch_url</c>; read
+    /// incrementally by <c>op_resource_timings</c> and reset with the document.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="JsNetworkEvents"/> this is not drained by the Page: the
+    /// performance timeline is the page's own to clear, so entries stay until page
+    /// script calls <c>clearResourceTimings()</c> or a new document replaces them.
+    /// </remarks>
+    public List<ResourceTimingRecord> ResourceTimings { get; } = [];
+
+    /// <summary>
     /// Frame documents that have been fetched and are waiting for a realm. Building
     /// one needs the whole runtime, which an op cannot reach, so
     /// <c>op_frame_document_ready</c> queues here and the Page drains it between
@@ -411,6 +424,50 @@ public sealed class JsNetworkEvent
     public required int BodySize { get; init; }
 
     public required double Timestamp { get; init; }
+}
+
+/// <summary>
+/// One subresource the engine fetched for the current document, as
+/// <c>PerformanceResourceTiming</c> sees it.
+/// </summary>
+/// <remarks>
+/// Only fields the transport genuinely measured are carried. The engine has no
+/// per-connection instrumentation, so DNS / TCP / TLS / request phases are absent
+/// here rather than estimated; the shim leaves them at 0, which is what the
+/// Resource Timing spec prescribes for a phase that did not occur or is unavailable.
+/// </remarks>
+public sealed class ResourceTimingRecord
+{
+    /// <summary>Absolute URL of the response, after redirects.</summary>
+    public required string Url { get; init; }
+
+    /// <summary>
+    /// Resource Timing <c>initiatorType</c>: "script", "link", "img", "css",
+    /// "fetch", "xmlhttprequest", "other".
+    /// </summary>
+    public required string InitiatorType { get; init; }
+
+    /// <summary>HTTP status of the final response.</summary>
+    public required int Status { get; init; }
+
+    /// <summary>Unix-epoch milliseconds at which the request was handed to the transport.</summary>
+    public required double StartedAtUnixMs { get; init; }
+
+    /// <summary>Unix-epoch milliseconds at which the body finished arriving.</summary>
+    public required double EndedAtUnixMs { get; init; }
+
+    /// <summary>Size of the body after content decoding, in bytes.</summary>
+    public required long DecodedBodySize { get; init; }
+
+    /// <summary>
+    /// Size of the body as it travelled, from <c>content-length</c>. Equal to
+    /// <see cref="DecodedBodySize"/> when the header is absent, which is what the
+    /// handler leaves behind once it has transparently decompressed a response.
+    /// </summary>
+    public required long EncodedBodySize { get; init; }
+
+    /// <summary>The response's <c>content-type</c>, or the empty string.</summary>
+    public required string ContentType { get; init; }
 }
 
 /// <summary>A frame document waiting to be given a realm.</summary>

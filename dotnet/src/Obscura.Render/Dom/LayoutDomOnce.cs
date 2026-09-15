@@ -41,6 +41,9 @@ public static partial class RenderDom
         internal float? FontSize;
         internal ushort FontWeight = 400;
         internal string? FontFamily;
+        internal string? FontFamilySpecified;
+        internal string? Cursor = "auto";
+        internal string? PointerEvents = "auto";
         internal FontOpticalSizing FontOpticalSizing = Render.FontOpticalSizing.Auto;
         internal List<FontVariationSetting> FontVariationSettings = [];
         internal float LetterSpacing;
@@ -52,6 +55,7 @@ public static partial class RenderDom
         internal bool LegacyCenter;
         internal bool VisibilityHidden;
         internal bool HasZeroOpacity;
+        internal SvgPaintValues Svg = SvgPaintValues.Initial;
         internal ListStyle ListStyle = ListStyle.Disc;
         internal LineHeight LineHeight = LineHeight.Normal;
         internal WhiteSpace WhiteSpace = WhiteSpace.Normal;
@@ -91,6 +95,19 @@ public static partial class RenderDom
         /// </remarks>
         internal float CbHeight;
 
+        /// <summary>
+        /// Whether <see cref="CbHeight"/> is a usable number, and not merely definite.
+        /// Implies <see cref="CbHeightDefinite"/>.
+        /// </summary>
+        /// <remarks>
+        /// A grid item's containing block is its grid area, whose size is only known once
+        /// track sizing has run. Its percentage height is therefore definite (taffy
+        /// resolves it against the area) while its pixel value is unavailable during this
+        /// style pass, so a descendant's <c>calc(100% - 4px)</c> must stay <c>auto</c>
+        /// rather than flatten against a basis we had to invent.
+        /// </remarks>
+        internal bool CbHeightKnown;
+
         internal Inherited Clone() => new()
         {
             Display = Display,
@@ -104,6 +121,9 @@ public static partial class RenderDom
             FontSize = FontSize,
             FontWeight = FontWeight,
             FontFamily = FontFamily,
+            FontFamilySpecified = FontFamilySpecified,
+            Cursor = Cursor,
+            PointerEvents = PointerEvents,
             FontOpticalSizing = FontOpticalSizing,
             FontVariationSettings = [.. FontVariationSettings],
             LetterSpacing = LetterSpacing,
@@ -115,6 +135,7 @@ public static partial class RenderDom
             LegacyCenter = LegacyCenter,
             VisibilityHidden = VisibilityHidden,
             HasZeroOpacity = HasZeroOpacity,
+            Svg = Svg,
             ListStyle = ListStyle,
             LineHeight = LineHeight,
             WhiteSpace = WhiteSpace,
@@ -131,6 +152,7 @@ public static partial class RenderDom
             CbWidth = CbWidth,
             CbHeightDefinite = CbHeightDefinite,
             CbHeight = CbHeight,
+            CbHeightKnown = CbHeightKnown,
         };
     }
 
@@ -279,6 +301,7 @@ public static partial class RenderDom
                 CbWidth = initialCbWidth,
                 CbHeightDefinite = true,
                 CbHeight = viewport.Height,
+                CbHeightKnown = true,
             };
 
             // Computed definiteness after walking the real containing-block chain.
@@ -507,13 +530,31 @@ public static partial class RenderDom
                     return t.GetLayout(node).Size.Width;
                 }
 
+                float? IntrinsicHeight(TaffyTree t, TaffyNodeId node, float width)
+                {
+                    t.ComputeLayoutWithMeasure(
+                        node,
+                        new Layout.Size<TaffyAvailableSpace>(
+                            TaffyAvailableSpace.Definite(width),
+                            TaffyAvailableSpace.MaxContent),
+                        Measure);
+                    return t.GetLayout(node).Size.Height;
+                }
+
                 ApplyTableUsedWidths(
                     tree, taffyTree, taffyRoot, idMap, styles, ifcItems, initialCbWidth, available, Measure);
 
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 if (deferredCyclicInlineSizes.Count == 0
-                    && DomPasses.ApplyFitContentWidths(
+                    && DomPasses.ApplyIntrinsicInlineSizes(
                         taffyTree, idMap, styles, initialCbWidth, IntrinsicWidth))
+                {
+                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                }
+
+                // Block-axis keywords measure at the used inline size, so they follow the
+                // inline pass and its relayout.
+                if (DomPasses.ApplyIntrinsicBlockSizes(taffyTree, idMap, styles, IntrinsicHeight))
                 {
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
@@ -544,12 +585,20 @@ public static partial class RenderDom
                         {
                             t.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                         }
-                        else if (DomPasses.ApplyFitContentWidths(
+                        else if (DomPasses.ApplyIntrinsicInlineSizes(
                             t, idMap, resolvedStyles, initialCbWidth, IntrinsicWidth))
                         {
                             t.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                         }
                     });
+
+                // A deferred cyclic inline size skips the pass above, so the block-axis
+                // keywords under it are only measurable once those widths have settled.
+                if (deferredCyclicInlineSizes.Count != 0
+                    && DomPasses.ApplyIntrinsicBlockSizes(taffyTree, idMap, styles, IntrinsicHeight))
+                {
+                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                }
 
                 if (DomPasses.ApplyMulticolBalance(taffyTree, ifcItems.Multicol))
                 {

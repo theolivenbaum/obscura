@@ -431,15 +431,66 @@ public static partial class Page
         });
         ctx.PendingEvents.AddRange(phase3);
 
-        // Target.targetInfoChanged: strict CDP clients (browser-use, and
-        // Puppeteer/Playwright `page.url()` tracking) cache the TargetInfo from
-        // attachedToTarget and only refresh it on this event. Without it they keep
-        // reporting the pre-navigation url/title (about:blank) and never see the loaded
-        // page. Emit it browser-level (no sessionId) with the new url/title.
+        ctx.PendingEvents.Add(TargetInfoChanged(ctx, pageId, pageUrl));
+    }
+
+    /// <summary>
+    /// Announce a URL change the document survived: a History API call, or a change to
+    /// nothing but the fragment.
+    /// </summary>
+    /// <remarks>
+    /// In CDP <c>Page.frameNavigated</c> means a new document, and every client retires the
+    /// frame's execution contexts when it arrives. Reporting a <c>pushState</c> that way
+    /// made the client's next <c>Runtime.evaluate</c> fail with "Execution context was
+    /// destroyed", which is what a single page app does on every route change: driving one
+    /// over CDP lost 20 of 157 routes. Chrome emits <c>Page.navigatedWithinDocument</c>
+    /// instead, and nothing else - no loader, no lifecycle, no context churn - because
+    /// nothing about the document changed but its URL.
+    /// <para>
+    /// The Rust tree has the same gap (<c>Page.navigatedWithinDocument</c> appears nowhere
+    /// in <c>crates/obscura-cdp</c>), so this is a fix rather than a port correction.
+    /// </para>
+    /// </remarks>
+    public static void EmitSameDocumentNavigation(
+        CdpContext ctx,
+        string? sessionId,
+        string frameId,
+        string pageUrl,
+        string pageId,
+        string navigationType)
+    {
+        ArgumentNullException.ThrowIfNull(ctx);
+        ctx.PendingEvents.Add(new CdpEvent
+        {
+            Method = "Page.navigatedWithinDocument",
+            Params = new JsonObject
+            {
+                ["frameId"] = frameId,
+                ["url"] = pageUrl,
+                ["navigationType"] = navigationType,
+            },
+            SessionId = sessionId,
+        });
+
+        // A client that tracks the page url from TargetInfo alone (browser-use, and
+        // Puppeteer/Playwright target bookkeeping) would otherwise keep reporting the
+        // pre-route url, exactly as it would across a document navigation.
+        ctx.PendingEvents.Add(TargetInfoChanged(ctx, pageId, pageUrl));
+    }
+
+    /// <summary>The target's new url/title, browser-level (no sessionId).</summary>
+    /// <remarks>
+    /// Strict CDP clients (browser-use, and Puppeteer/Playwright <c>page.url()</c>
+    /// tracking) cache the TargetInfo from attachedToTarget and only refresh it on this
+    /// event. Without it they keep reporting the pre-navigation url/title (about:blank) and
+    /// never see the loaded page. <c>canAccessOpener</c> is mandatory: generated clients
+    /// reject a TargetInfo payload missing it.
+    /// </remarks>
+    private static CdpEvent TargetInfoChanged(CdpContext ctx, string pageId, string pageUrl)
+    {
         BrowserPage? navigated = ctx.GetPage(pageId);
-        string ticTitle = navigated?.Title ?? string.Empty;
-        string ticContext = navigated?.Context.Id ?? string.Empty;
-        ctx.PendingEvents.Add(CdpEvent.New(
+
+        return CdpEvent.New(
             "Target.targetInfoChanged",
             new JsonObject
             {
@@ -447,13 +498,13 @@ public static partial class Page
                 {
                     ["targetId"] = pageId,
                     ["type"] = "page",
-                    ["title"] = ticTitle,
+                    ["title"] = navigated?.Title ?? string.Empty,
                     ["url"] = pageUrl,
                     ["attached"] = true,
                     ["canAccessOpener"] = false,
-                    ["browserContextId"] = ticContext,
+                    ["browserContextId"] = navigated?.Context.Id ?? string.Empty,
                 },
-            }));
+            });
     }
 
     /// <summary>
@@ -640,11 +691,17 @@ public static partial class Page
         return WaitUntil.DomContentLoaded;
     }
 
+    /// <param name="allowSameDocument">
+    /// Whether a target differing from the loaded document in nothing but its fragment may
+    /// be answered without fetching. True for <c>Page.navigate</c>; false for
+    /// <c>Page.reload</c>, which is handed the current URL and means the document literally.
+    /// </param>
     private static async Task<JsonNode?> DoNavigateAsync(
         string url,
         JsonNode? parameters,
         CdpContext ctx,
-        string? sessionId)
+        string? sessionId,
+        bool allowSameDocument)
     {
         WaitUntil waitUntil = ParseWaitUntil(parameters);
 
@@ -667,6 +724,35 @@ public static partial class Page
         BrowserPage page = ctx.GetSessionPageMut(sessionId)
             ?? throw new DomainError("No page for session");
         string frameId = page.FrameId;
+
+        // Navigating to the loaded document's own URL with a different fragment is a
+        // same-document navigation, not a load: Chromium fetches nothing, keeps the realm
+        // and every window property, and fires hashchange then popstate. Fetching instead
+        // rebooted a single page app on every route change, which is exactly what a client
+        // driving one with goto(base + '#/route') asks for on every step.
+        if (allowSameDocument
+            && await page.TryNavigateSameDocumentAsync(url).ConfigureAwait(false)
+                is { IsSameDocument: true } sameDocument)
+        {
+            page.SyncJsNetworkEvents();
+            List<NetworkEvent> routerEvents = [.. page.NetworkEvents];
+            page.NetworkEvents.Clear();
+            EmitRuntimeNetworkEvents(
+                ctx, sessionId, frameId, page.UrlString(), page.Id, routerEvents);
+            EmitSameDocumentNavigation(
+                ctx,
+                sessionId,
+                frameId,
+                page.UrlString(),
+                page.Id,
+                sameDocument.NavigationType);
+
+            // No loaderId: that field is the id of the document the navigation created, and
+            // nothing was created. A client reading it as the new document id would wait
+            // for a load lifecycle that never comes.
+            return new JsonObject { ["frameId"] = frameId };
+        }
+
         string loaderId = $"loader-{Guid.NewGuid()}";
 
         // Preloads (addBinding shims, addScriptToEvaluateOnNewDocument sources) must run
@@ -839,7 +925,8 @@ public static partial class Page
                 string url = parameters.Get("url").AsString()
                     ?? throw new DomainError("url required");
                 return DomainResult.Ok(
-                    await DoNavigateAsync(url, parameters, ctx, sessionId).ConfigureAwait(false));
+                    await DoNavigateAsync(url, parameters, ctx, sessionId, allowSameDocument: true)
+                        .ConfigureAwait(false));
             }
 
             case "reload":
@@ -850,8 +937,9 @@ public static partial class Page
                     ["waitUntil"] = parameters.Get("waitUntil").Clone()
                         ?? JsonValue.Create("load"),
                 };
-                return DomainResult.Ok(await DoNavigateAsync(currentUrl, reloadParams, ctx, sessionId)
-                    .ConfigureAwait(false));
+                return DomainResult.Ok(
+                    await DoNavigateAsync(currentUrl, reloadParams, ctx, sessionId, allowSameDocument: false)
+                        .ConfigureAwait(false));
             }
 
             case "getFrameTree":

@@ -53,40 +53,136 @@ public sealed class DenoCoreShim
     /// Browsers report an unhandled rejection WITHOUT terminating the page's event
     /// loop, so a throwing handler is contained rather than propagated.
     /// </para>
+    /// <para>
+    /// This callback is a reverse-P/Invoke boundary, the same class of frame
+    /// <c>OpGuard</c> exists for: V8 calls it from its own promise-reject hook, so
+    /// nothing may leave <see cref="Report"/>. See the comments there.
+    /// </para>
     /// </remarks>
     public void AttachTo(V8ScriptEngine engine, ScriptObject tracker)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(tracker);
+        _engine = engine;
         _tracker = tracker;
+        _detached = false;
+        _suspended = false;
 
         // Hand the tracker the two handlers bootstrap.js registered, so delivery
         // happens entirely inside JS and the promise argument keeps its identity.
         tracker.InvokeMethod("setHandlers", UnhandledRejectionHandler!, HandledRejectionHandler!);
 
-        engine.PromiseRejectionCallback = (kind, promise, value) =>
+        engine.PromiseRejectionCallback = Report;
+    }
+
+    /// <summary>
+    /// V8's promise-reject hook. Nothing may throw out of here.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ClearScript's thunk for this callback does NOT convert a managed exception
+    /// into a scheduled script exception the way the host-object and fast-function
+    /// thunks do, so an exception thrown here unwinds into V8's own frame. That is
+    /// what <c>catch_unwind</c> prevents around every op in the Rust engine, and it
+    /// is not theoretical: an isolate terminated by the watchdog makes every
+    /// re-entry into script raise <see cref="ScriptInterruptedException"/>, and
+    /// this callback re-enters script on every rejection. Letting the interrupt
+    /// through here left the process wedged or dead (an unhandled
+    /// <c>ObjectDisposedException</c> reported against
+    /// <c>V8SplitProxyManaged.InvokePromiseRejectionCallback</c>) rather than
+    /// letting the watchdog do its job.
+    /// </para>
+    /// <para>
+    /// So every exception is contained, the interrupt included. A rejection report
+    /// is diagnostic; dropping it while the isolate is being torn down is the
+    /// correct outcome, and the watchdog's own
+    /// <see cref="ScriptInterruptedException"/> still reaches the host through the
+    /// call it interrupted.
+    /// </para>
+    /// </remarks>
+    private void Report(V8PromiseRejectionEventKind kind, ScriptObject promise, object value)
+    {
+        if (_detached || _suspended || _tracker is not { } tracker)
         {
-            try
+            return;
+        }
+
+        try
+        {
+            switch (kind)
             {
-                switch (kind)
-                {
-                    case V8PromiseRejectionEventKind.RejectedWithoutHandler:
-                        tracker.InvokeMethod("rejected", promise!, value!);
-                        break;
-                    case V8PromiseRejectionEventKind.HandlerAddedAfterRejection:
-                        tracker.InvokeMethod("handlerAdded", promise!, value!);
-                        break;
-                    default:
-                        // The remaining kinds are re-settlement attempts, which
-                        // browsers do not surface.
-                        break;
-                }
+                case V8PromiseRejectionEventKind.RejectedWithoutHandler:
+                    tracker.InvokeMethod("rejected", promise!, value!);
+                    break;
+                case V8PromiseRejectionEventKind.HandlerAddedAfterRejection:
+                    tracker.InvokeMethod("handlerAdded", promise!, value!);
+                    break;
+                default:
+                    // The remaining kinds are re-settlement attempts, which
+                    // browsers do not surface.
+                    break;
             }
-            catch (Exception ex) when (ex is not ScriptInterruptedException)
-            {
-                RejectionDeliveryFailed?.Invoke(ex);
-            }
-        };
+        }
+        catch (ScriptInterruptedException)
+        {
+            // The isolate is terminating. Stop re-entering it on every further
+            // rejection - a terminated page can raise thousands - until the host
+            // clears the termination through ResumeDelivery.
+            _suspended = true;
+        }
+        catch (ObjectDisposedException)
+        {
+            // The engine went away under us. Nothing can be delivered again.
+            _suspended = true;
+        }
+        catch (Exception ex)
+        {
+            RejectionDeliveryFailed?.Invoke(ex);
+        }
+    }
+
+    /// <summary>
+    /// Re-enable rejection delivery after a termination was cleared.
+    /// </summary>
+    public void ResumeDelivery()
+    {
+        if (!_detached)
+        {
+            _suspended = false;
+        }
+    }
+
+    /// <summary>
+    /// Unregister the promise-rejection callback. Must run BEFORE the engine is
+    /// disposed.
+    /// </summary>
+    /// <remarks>
+    /// The ordering is the actual fix, not the defensive catch in
+    /// <see cref="Report"/>: while the callback is registered, V8 can call into a
+    /// half-disposed engine on a frame with no managed handler above it, and the
+    /// <c>ObjectDisposedException</c> ClearScript raises for it is thrown inside
+    /// the thunk, before this class gets to run at all. Detaching first means
+    /// there is nothing left to call.
+    /// </remarks>
+    public void Detach()
+    {
+        _detached = true;
+        _tracker = null;
+        var engine = _engine;
+        _engine = null;
+        if (engine is null)
+        {
+            return;
+        }
+
+        try
+        {
+            engine.PromiseRejectionCallback = null;
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already gone; the callback went with it.
+        }
     }
 
     /// <summary>
@@ -95,7 +191,7 @@ public sealed class DenoCoreShim
     /// </summary>
     public void FlushRejections()
     {
-        if (_tracker is null)
+        if (_detached || _tracker is null)
         {
             return;
         }
@@ -111,6 +207,12 @@ public sealed class DenoCoreShim
     }
 
     private ScriptObject? _tracker;
+    private V8ScriptEngine? _engine;
+
+    // Written from the V8 callback frame and read from the host thread, so both
+    // are volatile. They are only ever flipped, never compared-and-swapped.
+    private volatile bool _detached;
+    private volatile bool _suspended;
 
     /// <summary>Diagnostics for a handler that threw while delivering a rejection.</summary>
     public event Action<Exception>? RejectionDeliveryFailed;

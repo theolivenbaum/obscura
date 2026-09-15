@@ -335,6 +335,10 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
         {
             // Nothing left to un-interrupt.
         }
+
+        // A rejection reported while the isolate was terminating could not be
+        // delivered, so the shim stopped trying. The isolate is usable again.
+        _shim.ResumeDelivery();
     }
 
     // ------------------------------------------------------- script execution
@@ -617,6 +621,13 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
             realm.Dispose();
         }
         _realms.Clear();
+
+        // Before the engine, not after: while V8's promise-reject hook is still
+        // registered it can call back into a half-disposed engine, and
+        // ClearScript raises that ObjectDisposedException inside its own thunk,
+        // where no managed frame of ours can contain it. That killed an
+        // `obscura serve` process outright. See DenoCoreShim.Detach.
+        _shim.Detach();
         _engine.Dispose();
         _v8.Dispose();
     }

@@ -96,6 +96,87 @@ internal readonly record struct BorderCascadeOp(
     bool ColorSet,
     RgbaColor? Color);
 
+/// <summary>Which <c>filter</c> function a <see cref="FilterFunction"/> carries.</summary>
+/// <remarks>
+/// DEVIATION FROM RUST: <c>crates/obscura-render</c> models <c>filter</c> as a single optional
+/// blur sigma, so every other function is dropped at parse time and the property reports as
+/// absent. The port models the whole list, because Chromium reports it through
+/// <c>getComputedStyle</c> and page script compares the string.
+/// </remarks>
+public enum FilterFunctionKind
+{
+    /// <summary><c>blur(&lt;length&gt;)</c>; the argument is sigma itself.</summary>
+    Blur,
+
+    /// <summary><c>brightness(&lt;number|percentage&gt;)</c>, unbounded above.</summary>
+    Brightness,
+
+    /// <summary><c>contrast(&lt;number|percentage&gt;)</c>, unbounded above.</summary>
+    Contrast,
+
+    /// <summary><c>drop-shadow(&lt;color&gt;? &lt;x&gt; &lt;y&gt; &lt;blur&gt;?)</c>.</summary>
+    DropShadow,
+
+    /// <summary><c>grayscale(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Grayscale,
+
+    /// <summary><c>hue-rotate(&lt;angle&gt;)</c>, in degrees.</summary>
+    HueRotate,
+
+    /// <summary><c>invert(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Invert,
+
+    /// <summary><c>opacity(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Opacity,
+
+    /// <summary><c>saturate(&lt;number|percentage&gt;)</c>, unbounded above.</summary>
+    Saturate,
+
+    /// <summary><c>sepia(&lt;number|percentage&gt;)</c>, clamped to 1.</summary>
+    Sepia,
+
+    /// <summary>
+    /// <c>url(&lt;reference&gt;)</c>, an SVG filter element. Parsed and reported; never painted.
+    /// </summary>
+    Reference,
+}
+
+/// <summary>One function of a computed <c>filter</c> list.</summary>
+/// <remarks>
+/// A single struct rather than a hierarchy: the list is walked once per filtered element in the
+/// paint pass, and a flat value type keeps that walk allocation-free. Only the fields its
+/// <see cref="Kind"/> names are meaningful.
+/// <para>
+/// <see cref="Amount"/> carries the single argument of every one-argument function - sigma for
+/// <c>blur()</c>, degrees for <c>hue-rotate()</c>, and the multiplier for the colour-matrix
+/// functions, always as a number even when the value was authored as a percentage. The
+/// <c>drop-shadow()</c> fields are the two offsets, the blur <em>radius</em> (twice sigma, the
+/// <c>box-shadow</c> convention, unlike <c>blur()</c>), and the resolved colour with
+/// <c>currentColor</c> already substituted.
+/// </para>
+/// </remarks>
+public readonly record struct FilterFunction(
+    FilterFunctionKind Kind,
+    float              Amount,
+    float              OffsetX,
+    float              OffsetY,
+    float              ShadowBlur,
+    RgbaColor          Color,
+    string?            Reference)
+{
+    /// <summary>A one-argument function: <c>blur()</c>, <c>hue-rotate()</c>, or a matrix.</summary>
+    public static FilterFunction Scalar(FilterFunctionKind kind, float amount) =>
+        new(kind, amount, 0f, 0f, 0f, default, null);
+
+    /// <summary><c>drop-shadow()</c>, with <c>currentColor</c> already resolved.</summary>
+    public static FilterFunction DropShadowOf(float offsetX, float offsetY, float blur, RgbaColor color) =>
+        new(FilterFunctionKind.DropShadow, 0f, offsetX, offsetY, blur, color, null);
+
+    /// <summary><c>url()</c>, kept verbatim so the computed value round-trips.</summary>
+    public static FilterFunction ReferenceTo(string reference) =>
+        new(FilterFunctionKind.Reference, 0f, 0f, 0f, 0f, default, reference);
+}
+
 /// <summary>The subset of CSS that influences box layout. Expanded in later phases.</summary>
 /// <remarks>
 /// Allocated once per element, so this is a class rather than a struct. Every field initializer
@@ -169,6 +250,23 @@ public sealed class LayoutStyle
     internal bool IsTableBox;
 
     /// <summary>
+    /// This box came out of the <c>button</c> or <c>input</c> user-agent arm, so it is a form
+    /// control Chromium hands to its native theme painter rather than painting the CSS border
+    /// of.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render</c> has no counterpart, because its
+    /// <c>button</c> arm sets no border at all and its <c>input</c> arm paints the one it sets.
+    /// Both controls compute a 2px relief border that Chromium never draws - it strokes a flat
+    /// 1px rgb(118, 118, 118) line instead - so the computed value and the painted one are two
+    /// different things, and this flag is what lets the port report the first and draw the
+    /// second. <see cref="PaintBorders"/> honours it only while the border is still the
+    /// untouched user-agent one, because an author border makes Chromium drop the native
+    /// appearance too. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal bool NativeControlAppearance;
+
+    /// <summary>
     /// The computed <c>table-layout: fixed</c> value. The fixed algorithm is only activated
     /// when the table also has a definite inline size; otherwise CSS requires the automatic
     /// table layout algorithm.
@@ -192,15 +290,106 @@ public sealed class LayoutStyle
 
     public Dimension Width;
 
-    /// <summary>The preferred inline size is the intrinsic <c>fit-content</c> keyword.</summary>
+    /// <summary>
+    /// Which intrinsic sizing keyword the preferred inline size carries, if any.
+    /// </summary>
     /// <remarks>
     /// Taffy's box-size dimension cannot represent intrinsic sizing keywords, so <c>Width</c>
-    /// remains <c>Auto</c> while the DOM layout convergence pass applies the CSS shrink-to-fit
-    /// formula from min/max-content measurements.
+    /// remains <c>Auto</c> while the DOM layout convergence pass resolves the keyword from
+    /// min/max-content measurements: <c>fit-content</c> applies the shrink-to-fit formula,
+    /// <c>max-content</c> and <c>min-content</c> take the measurement directly.
+    /// DEVIATION: crates/obscura-render implements none of the three (its <c>width</c> parse
+    /// drops every keyword to <c>auto</c>), so all of them fill the containing block there.
+    /// See "Known deviations" in todo.md.
     /// </remarks>
-    public bool WidthFitContent;
+    public IntrinsicSizeKeyword WidthIntrinsicKeyword;
+
+    /// <summary>The preferred inline size is one of the intrinsic sizing keywords.</summary>
+    public bool WidthFitContent => WidthIntrinsicKeyword != IntrinsicSizeKeyword.None;
 
     public Dimension Height;
+
+    /// <summary>
+    /// Which intrinsic sizing keyword the preferred block size carries, if any.
+    /// </summary>
+    /// <remarks>
+    /// In the block axis all three keywords size to content exactly like <c>auto</c>, so
+    /// <c>Height</c> stays <c>Auto</c>. The one observable difference is that none of them is
+    /// an automatic size, so a flex or grid item carrying one is never stretched to fill its
+    /// line or row.
+    /// DEVIATION: crates/obscura-render implements none of them (it has no counterpart of
+    /// this field), so the keywords there leave the box free to stretch. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    public IntrinsicSizeKeyword HeightIntrinsicKeyword;
+
+    /// <summary>The preferred block size is one of the intrinsic sizing keywords.</summary>
+    public bool HeightFitContent => HeightIntrinsicKeyword != IntrinsicSizeKeyword.None;
+
+    /// <summary>
+    /// Which intrinsic sizing keyword <c>min-width</c> carries, if any.
+    /// </summary>
+    /// <remarks>
+    /// Like the preferred sizes above, the dimension stays at its initial value and the
+    /// keyword is resolved from a measurement during layout convergence
+    /// (<c>DomPasses.ApplyIntrinsicInlineSizes</c>).
+    /// DEVIATION: crates/obscura-render implements none of the intrinsic sizing keywords on
+    /// the min/max properties either. See "Known deviations" in todo.md.
+    /// </remarks>
+    public IntrinsicSizeKeyword MinWidthIntrinsicKeyword;
+
+    /// <summary>Which intrinsic sizing keyword <c>min-height</c> carries, if any.</summary>
+    public IntrinsicSizeKeyword MinHeightIntrinsicKeyword;
+
+    /// <summary>Which intrinsic sizing keyword <c>max-width</c> carries, if any.</summary>
+    public IntrinsicSizeKeyword MaxWidthIntrinsicKeyword;
+
+    /// <summary>Which intrinsic sizing keyword <c>max-height</c> carries, if any.</summary>
+    public IntrinsicSizeKeyword MaxHeightIntrinsicKeyword;
+
+    /// <summary>Any inline-axis size property carries an intrinsic sizing keyword.</summary>
+    public bool HasInlineIntrinsicKeyword =>
+        WidthIntrinsicKeyword != IntrinsicSizeKeyword.None
+        || MinWidthIntrinsicKeyword != IntrinsicSizeKeyword.None
+        || MaxWidthIntrinsicKeyword != IntrinsicSizeKeyword.None;
+
+    /// <summary>A min/max block-axis size property carries an intrinsic sizing keyword.</summary>
+    /// <remarks>
+    /// <c>height</c> itself is excluded: all three keywords size a block box to its content
+    /// there, which is what <c>auto</c> already does, so it needs no measurement.
+    /// </remarks>
+    public bool HasBlockMinMaxIntrinsicKeyword =>
+        MinHeightIntrinsicKeyword != IntrinsicSizeKeyword.None
+        || MaxHeightIntrinsicKeyword != IntrinsicSizeKeyword.None;
+
+    /// <summary>
+    /// Read the intrinsic sizing keyword of one of the six box-size slots, in the order
+    /// <c>width</c>, <c>height</c>, <c>min-width</c>, <c>min-height</c>, <c>max-width</c>,
+    /// <c>max-height</c> that <see cref="SizeExpressions"/> and <see cref="SizeInherit"/> use.
+    /// </summary>
+    internal IntrinsicSizeKeyword SizeIntrinsicKeyword(int index) => index switch
+    {
+        0 => WidthIntrinsicKeyword,
+        1 => HeightIntrinsicKeyword,
+        2 => MinWidthIntrinsicKeyword,
+        3 => MinHeightIntrinsicKeyword,
+        4 => MaxWidthIntrinsicKeyword,
+        _ => MaxHeightIntrinsicKeyword,
+    };
+
+    /// <summary>Write the intrinsic sizing keyword of one of the six box-size slots.</summary>
+    internal void SetSizeIntrinsicKeyword(int index, IntrinsicSizeKeyword keyword)
+    {
+        switch (index)
+        {
+            case 0: WidthIntrinsicKeyword = keyword; break;
+            case 1: HeightIntrinsicKeyword = keyword; break;
+            case 2: MinWidthIntrinsicKeyword = keyword; break;
+            case 3: MinHeightIntrinsicKeyword = keyword; break;
+            case 4: MaxWidthIntrinsicKeyword = keyword; break;
+            default: MaxHeightIntrinsicKeyword = keyword; break;
+        }
+    }
 
     /// <summary>
     /// Which box edge <c>width</c>/<c>height</c> and min/max sizes describe. CSS starts at
@@ -261,6 +450,14 @@ public sealed class LayoutStyle
     /// given one, so a <c>width:100%</c> image gets a real height instead of collapsing to zero.
     /// </remarks>
     public float? AspectRatio;
+
+    /// <summary>
+    /// The authored <c>aspect-ratio</c>, already in CSSOM's <c>W / H</c> form. Only an
+    /// authored declaration sets it: a ratio derived from <c>width</c>/<c>height</c>
+    /// attributes or from decoded media is not the computed value of the property, and
+    /// Chromium reports <c>auto</c> for it.
+    /// </summary>
+    public string? AspectRatioSpecified;
 
     /// <summary>
     /// Whether the preferred ratio came from decoded intrinsic media and therefore applies to
@@ -530,6 +727,16 @@ public sealed class LayoutStyle
     /// <summary>Foreground (text) color for the paint step.</summary>
     public RgbaColor? Color;
 
+    /// <summary>
+    /// Whether <see cref="Color"/> / <see cref="BackgroundColor"/> were specified in a
+    /// non-legacy sRGB notation, which decides only how <c>getComputedStyle</c> serializes
+    /// them: <c>color(srgb r g b)</c> rather than <c>rgb()</c>/<c>rgba()</c>.
+    /// </summary>
+    public bool ColorIsSrgbFunction;
+
+    /// <inheritdoc cref="ColorIsSrgbFunction"/>
+    public bool BackgroundColorIsSrgbFunction;
+
     /// <summary>Computed SVG presentation properties supplied by author CSS.</summary>
     /// <remarks>
     /// Inline SVG is serialized into a standalone document for the SVG rasterizer; without
@@ -541,6 +748,24 @@ public sealed class LayoutStyle
     public string? SvgStroke;
 
     public string? SvgStrokeWidth;
+
+    /// <summary>Specified <c>text-anchor</c>, before inheritance.</summary>
+    public string? SvgTextAnchor;
+
+    /// <summary>
+    /// The four SVG paint properties after inheritance, serialized the way
+    /// <c>getComputedStyle</c> reports them.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately separate from <see cref="SvgFill"/> / <see cref="SvgStroke"/> /
+    /// <see cref="SvgStrokeWidth"/>, which stay *specified* values: those three are pushed back
+    /// into the serialized SVG document as <c>!important</c> inline declarations, and pushing an
+    /// inherited value there would override the SVG rasterizer's own inheritance - a
+    /// <c>&lt;use&gt;</c> of a <c>&lt;symbol&gt;</c> in <c>&lt;defs&gt;</c> inherits its fill from
+    /// the use site, not from the <c>&lt;svg&gt;</c> root the defs subtree sits under.
+    /// <c>null</c> means every property still holds its initial value.
+    /// </remarks>
+    public SvgPaintValues? SvgPaint;
 
     /// <summary>
     /// Compatibility mirror for uniform border colors. New code should use
@@ -611,6 +836,44 @@ public sealed class LayoutStyle
     public string? FontFamily;
 
     /// <summary>
+    /// The <c>font-family</c> list as the author spelled it, re-serialized the way a
+    /// computed-style query reports it: original casing, one <c>", "</c> between families, and
+    /// quotes only where a family does not round-trip as an identifier.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="FontFamily"/> stays lower-cased because every face lookup matches against it
+    /// case-insensitively; this is the reporting spelling only, and follows
+    /// <see cref="FontFamily"/> everywhere, inheritance included.
+    /// DEVIATION: crates/obscura-render keeps only the lower-cased list, so it reports
+    /// <c>"plus jakarta sans", "inter"</c> where Chromium reports
+    /// <c>"Plus Jakarta Sans", Inter</c>. See "Known deviations" in todo.md.
+    /// </remarks>
+    public string? FontFamilySpecified;
+
+    /// <summary>
+    /// The computed <c>cursor</c> keyword, or null while it still inherits. Inherited, initial
+    /// <c>auto</c>.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: crates/obscura-render does not model <c>cursor</c> at all, so a
+    /// computed-style query falls back to the inline declaration and answers <c>auto</c> for
+    /// every element styled by a rule. See "Known deviations" in todo.md.
+    /// </remarks>
+    public string? Cursor;
+
+    /// <summary>
+    /// The computed <c>pointer-events</c> keyword, or null while it still inherits. Inherited,
+    /// initial <c>auto</c>.
+    /// </summary>
+    /// <remarks>
+    /// Reporting only: hit testing runs in JavaScript through <c>document.elementFromPoint</c>,
+    /// which does not consult this.
+    /// DEVIATION: crates/obscura-render does not model <c>pointer-events</c>. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    public string? PointerEvents;
+
+    /// <summary>
     /// Computed inherited <c>font-optical-sizing</c>. <c>null</c> during cascade means inherit;
     /// the top-down pass resolves every element to a value.
     /// </summary>
@@ -673,6 +936,31 @@ public sealed class LayoutStyle
     /// width without it.
     /// </summary>
     public Dimension FlexBasis;
+
+    /// <summary>
+    /// A <c>flex-basis</c> written as CSS math that depends on the percentage basis, kept
+    /// unresolved so the flex algorithm can resolve it against the container's inner main
+    /// size the way a bare percentage is resolved.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="FlexBasis"/> stays <c>auto</c> while this is set;
+    /// <c>TaffyStyleMapping</c> hands taffy the calc handle instead. The percentage basis is
+    /// not known at computed-value time, and flattening it against the initial 16px made
+    /// <c>flex: 1 1 calc(50% - 6px)</c> a 2px basis.
+    /// </remarks>
+    public GridCalcExpression? FlexBasisCalc;
+
+    /// <summary>
+    /// The specified <c>flex-basis</c> text when the computed value keeps its math function
+    /// (a percentage-dependent <c>calc()</c>), which is what <c>getComputedStyle</c> reports.
+    /// </summary>
+    public string? FlexBasisSpecified;
+
+    /// <summary>
+    /// Whether <c>flex-direction</c> (or <c>flex-flow</c>) was authored, as opposed to
+    /// <see cref="FlexDirection"/> carrying the internal table approximation's column.
+    /// </summary>
+    internal bool FlexDirectionAuthored;
 
     // CSS Grid. Tracks are stored as taffy sizing functions; GridAreas is the parsed
     // `grid-template-areas` matrix (one list per row, "." for a null cell), resolved to line
@@ -820,6 +1108,41 @@ public sealed class LayoutStyle
     public string?[] InsetExpressions = new string?[4];
 
     /// <summary>
+    /// The late-resolved form of a percentage-bearing <see cref="InsetExpressions"/> entry,
+    /// allocated lazily and in the same top/right/bottom/left order. Non-null only where the
+    /// expression's percentage has to be resolved against the used containing block during
+    /// layout rather than flattened to px beforehand.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in <c>crates/obscura-render</c>, which flattens every
+    /// functional inset against the viewport at computed-value time. See the remarks on the
+    /// inset loop in <c>LayoutDomComputed.ResolveOneComputedStyle</c>.
+    /// </remarks>
+    public GridCalcExpression?[]? InsetCalc;
+
+    /// <summary>
+    /// The late-resolved form of an inline-axis <c>SizeExpressions</c> entry, allocated lazily
+    /// and in the same six-slot order. Non-null only where the expression's percentage has to
+    /// be resolved against the used containing block during layout.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in <c>crates/obscura-render</c>. See the remarks on the size
+    /// loop in <c>LayoutDomComputed.ResolveOneComputedStyle</c>.
+    /// </remarks>
+    public GridCalcExpression?[]? SizeCalc;
+
+    /// <summary>
+    /// <c>overflow-clip-margin</c>, reported only. <c>null</c> is the initial <c>0px</c>; the
+    /// UA sheet gives a replaced element <c>content-box</c>.
+    /// </summary>
+    /// <remarks>
+    /// The property has no paint effect here: an element with <c>overflow: clip</c> clips at
+    /// its padding box, which is what <c>0px</c> means. A <c>content-box</c> origin (and any
+    /// non-zero margin) would move that edge and is not modeled.
+    /// </remarks>
+    public string? OverflowClipMargin;
+
+    /// <summary>
     /// <c>overflow</c>/-x/-y other than <c>visible</c>: clips this element's descendants to its
     /// border box during paint.
     /// </summary>
@@ -841,9 +1164,29 @@ public sealed class LayoutStyle
 
     internal bool OverflowAxesSet;
 
+    /// <summary>
+    /// The specified <c>overflow-x</c> keyword: 0 <c>visible</c>, 1 <c>clip</c>, 2
+    /// <c>hidden</c>, 3 <c>scroll</c>, 4 <c>auto</c>. <c>overlay</c> is the legacy alias of
+    /// <c>auto</c> and shares its code, and every code from 2 up establishes a scroll
+    /// container - the order is what <see cref="ComputedStyle.RecomputeOverflow"/> tests.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: crates/obscura-render collapses <c>hidden</c>, <c>scroll</c>, <c>auto</c> and
+    /// <c>overlay</c> onto one code, so it cannot report which of them an element specified and
+    /// answers `auto` for all four. See "Known deviations" in todo.md.
+    /// </remarks>
     internal byte OverflowSpecifiedX;
 
     internal byte OverflowSpecifiedY;
+
+    /// <summary>
+    /// The computed <c>overflow-x</c> keyword, in the same encoding as
+    /// <see cref="OverflowSpecifiedX"/>, after the CSS Overflow computed-value coupling has
+    /// run. This is the value a computed-style query has to report.
+    /// </summary>
+    internal byte OverflowComputedX;
+
+    internal byte OverflowComputedY;
 
     internal bool OverflowInheritX;
 
@@ -942,21 +1285,51 @@ public sealed class LayoutStyle
     /// </summary>
     public float? Opacity;
 
+    /// <summary>The computed <c>filter</c> list, in application order; <c>null</c> for
+    /// <c>none</c> and for a list that failed to parse.</summary>
+    /// <remarks>
+    /// CSS makes the whole declaration invalid when any one function is, so this is all-or-
+    /// nothing rather than the parseable prefix. Treat the array as immutable - it is shared
+    /// between the styles that <see cref="Clone"/> produces.
+    /// <para>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render</c> keeps only a blur sigma here and
+    /// drops every other function, so <c>filter</c> never reaches the computed-style snapshot
+    /// and the four <c>drop-shadow()</c>s Curiosity outlines its pixel avatar with paint
+    /// nothing. The port models the list.
+    /// </para>
+    /// </remarks>
+    public FilterFunction[]? Filter;
+
     /// <summary>
-    /// <c>filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS pixels.
+    /// The <c>filter</c> declaration as written, kept only while it carries an <c>em</c>,
+    /// <c>rem</c>, <c>ex</c> or <c>ch</c> length, so the top-down pass can re-read it once the
+    /// element's font size exists. <c>null</c> for every other value.
     /// </summary>
     /// <remarks>
-    /// <c>blur()</c>'s argument <em>is</em> sigma, unlike <c>box-shadow</c>'s blur radius,
-    /// which is 2 sigma. Only a blur-only filter list is recorded: a list carrying any
-    /// other function stays unimplemented rather than being silently reduced to its
-    /// blurs, which would paint a wrong result instead of no result.
+    /// These three are the properties whose lengths the cascade resolves on the spot, where
+    /// <c>padding</c>, <c>margin</c>, <c>line-height</c>, <c>letter-spacing</c>, <c>gap</c> and
+    /// <c>font-size</c> itself all keep a <see cref="Dimension"/> or an expression and resolve
+    /// in the top-down pass. Storing the text rather than adding a fourth kind of deferral is
+    /// what keeps the parsers single-pass; nothing but a font-relative value pays for it.
     /// </remarks>
-    public float? FilterBlur;
+    internal string? FilterFontRelative;
+
+    /// <inheritdoc cref="FilterFontRelative"/>
+    internal string? BackdropFilterFontRelative;
+
+    /// <inheritdoc cref="FilterFontRelative"/>
+    internal string? BoxShadowFontRelative;
 
     /// <summary>
     /// <c>backdrop-filter: blur(&lt;length&gt;)</c>, as the standard deviation in CSS
-    /// pixels. Same restriction as <see cref="FilterBlur"/>.
+    /// pixels.
     /// </summary>
+    /// <remarks>
+    /// <c>blur()</c>'s argument <em>is</em> sigma, unlike <c>box-shadow</c>'s blur radius,
+    /// which is 2 sigma. Unlike <see cref="Filter"/>, only a blur-only list is recorded:
+    /// nothing paints a backdrop sepia, so reducing a mixed list to its blurs would paint a
+    /// wrong result where painting none at least matches what <c>@supports</c> advertises.
+    /// </remarks>
     public float? BackdropBlur;
 
     /// <summary>First CSS animation name and its timing contract.</summary>
@@ -1061,6 +1434,13 @@ public sealed class LayoutStyle
     /// Its anonymous glyphs are painted by the control.
     /// </summary>
     public LayoutStyle? PlaceholderPseudo;
+
+    /// <summary>
+    /// Computed author style for a range input's <c>::-webkit-slider-thumb</c> pseudo-element.
+    /// The thumb is a native box the control paints itself; it never enters layout, so this is
+    /// the only record of the size, radius, background and border the author gave it.
+    /// </summary>
+    public LayoutStyle? SliderThumbPseudo;
 
     /// <summary>
     /// True for <c>inline-block</c>/<c>inline-flex</c>/<c>inline-grid</c>: participates in the
@@ -1263,6 +1643,17 @@ public sealed class LayoutStyle
 
     internal bool EstablishesPositioningContainingBlock() => ContainingBlockTriggers != 0;
 
+    /// <summary>The CSS keyword a computed-style query reports for one overflow axis.</summary>
+    public string ComputedOverflowCss(bool horizontal) =>
+        (horizontal ? OverflowComputedX : OverflowComputedY) switch
+        {
+            1 => "clip",
+            2 => "hidden",
+            3 => "scroll",
+            4 => "auto",
+            _ => "visible",
+        };
+
     internal bool ClipsOverflowX() => OverflowAxesSet ? OverflowClipX : OverflowHidden;
 
     internal bool ClipsOverflowY() => OverflowAxesSet ? OverflowClipY : OverflowHidden;
@@ -1282,6 +1673,14 @@ public sealed class LayoutStyle
         copy.PaddingExpressions = (string?[])PaddingExpressions.Clone();
         copy.BorderCascadeOps = [.. BorderCascadeOps];
         copy.ClipPath = ClipPath?.Clone();
+
+        // Null-guarded rather than unconditional: almost nothing carries a filter, and this
+        // runs once per element.
+        if (Filter is { } filter)
+        {
+            copy.Filter = (FilterFunction[])filter.Clone();
+        }
+
         copy.BackgroundGradient = BackgroundGradient is { } linear
             ? (linear.Angle, [.. linear.Stops])
             : null;
@@ -1310,6 +1709,8 @@ public sealed class LayoutStyle
             : new Dictionary<string, short>(GridRowLineNames, StringComparer.Ordinal);
         copy.Inset = (Dimension?[])Inset.Clone();
         copy.InsetExpressions = (string?[])InsetExpressions.Clone();
+        copy.InsetCalc = InsetCalc is null ? null : (GridCalcExpression?[])InsetCalc.Clone();
+        copy.SizeCalc = SizeCalc is null ? null : (GridCalcExpression?[])SizeCalc.Clone();
         copy.CounterReset = [.. CounterReset];
         copy.CounterIncrement = [.. CounterIncrement];
         copy.CounterSet = [.. CounterSet];
@@ -1317,6 +1718,7 @@ public sealed class LayoutStyle
         copy.BeforePseudo = BeforePseudo?.Clone();
         copy.AfterPseudo = AfterPseudo?.Clone();
         copy.PlaceholderPseudo = PlaceholderPseudo?.Clone();
+        copy.SliderThumbPseudo = SliderThumbPseudo?.Clone();
         copy.TransformOps = [.. TransformOps];
         copy.WaapiSampleState = WaapiSampleState?.Clone();
         copy.IndividualTranslateExpressions = (string?[])IndividualTranslateExpressions.Clone();
@@ -1354,6 +1756,21 @@ public static class LayoutStyleExtensions
 
         style.IsInlineBlock = false;
     }
+}
+
+/// <summary>
+/// The inherited SVG paint properties, already serialized as CSSOM computed values.
+/// </summary>
+/// <remarks>
+/// They are ordinary inherited CSS properties in Chromium and apply to every element, not only
+/// to the SVG namespace: <c>getComputedStyle(document.body).fill</c> is <c>rgb(0, 0, 0)</c>.
+/// One shared immutable instance is threaded down a subtree, so an element that specifies none
+/// of them costs no allocation.
+/// </remarks>
+public sealed record SvgPaintValues(string Fill, string Stroke, string StrokeWidth, string TextAnchor)
+{
+    /// <summary>The initial values, which are what an element with no SVG paint style reports.</summary>
+    public static readonly SvgPaintValues Initial = new("rgb(0, 0, 0)", "none", "1px", "start");
 }
 
 /// <summary>

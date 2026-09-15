@@ -35,7 +35,11 @@ public static partial class ComputedStyle
     /// least matches what the engine advertises through <c>@supports</c>.
     /// </para>
     /// </remarks>
-    internal static float? ParseFilterBlur(string value)
+    internal static float? ParseFilterBlur(string value) =>
+        ParseFilterBlur(value, FontLengthContext.Initial);
+
+    /// <inheritdoc cref="ParseFilterBlur(string)"/>
+    internal static float? ParseFilterBlur(string value, in FontLengthContext context)
     {
         string trimmed = value.Trim();
         if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
@@ -64,7 +68,7 @@ public static partial class ComputedStyle
             {
                 sigma = 0f;
             }
-            else if (Px(args) is { } parsed && float.IsFinite(parsed) && parsed >= 0f)
+            else if (Px(args, context) is { } parsed && float.IsFinite(parsed) && parsed >= 0f)
             {
                 sigma = parsed;
             }
@@ -727,6 +731,14 @@ public static partial class ComputedStyle
         CssText.AsciiLower(value.Trim()) switch
         {
             "normal" or "stretch" => Layout.AlignContent.Stretch,
+            // Baseline alignment does not apply to content distribution, which uses the
+            // fallback alignment instead: `start` for a first baseline, `end` for a last one.
+            // DEVIATION: crates/obscura-render drops the keyword, so the declaration does
+            // nothing and the container keeps `normal`, i.e. stretch. Tesserae's grid asks for
+            // `align-content: baseline`, and stretching its auto rows made every card in it
+            // fill the container. See "Known deviations" in todo.md.
+            "baseline" or "first baseline" => Layout.AlignContent.Start,
+            "last baseline" => Layout.AlignContent.End,
             "start" => Layout.AlignContent.Start,
             "end" => Layout.AlignContent.End,
             "flex-start" => Layout.AlignContent.FlexStart,
@@ -772,9 +784,43 @@ public static partial class ComputedStyle
 
     // -------------------------------------------------------------- flex
 
+    /// <summary>
+    /// Apply one <c>flex-basis</c> value, from the longhand or from the <c>flex</c> shorthand's
+    /// basis component.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/style.rs, which runs every basis through
+    /// <c>dimension_value</c> and so flattens a <c>calc()</c> against the initial 16px - the
+    /// percentage basis is the flex container's inner main size and is not known at
+    /// computed-value time. <c>flex-basis: calc(50% - 6px)</c> became a 2px basis, and the
+    /// computed value was reported as <c>2px</c> rather than the math function Chromium keeps.
+    /// A percentage-dependent expression is kept whole here, exactly as a grid track's is, and
+    /// taffy resolves it against the used basis. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static void SetFlexBasis(LayoutStyle style, string value)
+    {
+        style.FlexBasisCalc = null;
+        style.FlexBasisSpecified = null;
+
+        string trimmed = value.Trim();
+        if (trimmed.Contains('%', StringComparison.Ordinal)
+            && trimmed.Contains('(', StringComparison.Ordinal)
+            && GridCalcExpression.Parse(trimmed) is { } calc)
+        {
+            style.FlexBasisCalc = calc;
+            style.FlexBasisSpecified = string.Join(" ", SplitWhitespace(trimmed));
+            style.FlexBasis = Dimension.Auto;
+            return;
+        }
+
+        style.FlexBasis = DimensionValue(trimmed);
+    }
+
     /// <summary>Rust <c>parse_flex_shorthand</c>.</summary>
     internal static void ParseFlexShorthand(LayoutStyle style, string value)
     {
+        style.FlexBasisCalc = null;
+        style.FlexBasisSpecified = null;
         switch (value.Trim())
         {
             case "none":
@@ -795,8 +841,11 @@ public static partial class ComputedStyle
         }
 
         List<float> numbers = [];
-        Dimension? basis = null;
-        foreach (string token in SplitWhitespace(value))
+        string? basis = null;
+
+        // A math function is one token: splitting on plain whitespace tore `calc(50% - 6px)`
+        // into three fragments, none of them a basis, and the declaration lost it entirely.
+        foreach (string token in SplitWsParen(value))
         {
             if (ParseF32(token) is { } number)
             {
@@ -806,12 +855,12 @@ public static partial class ComputedStyle
                 }
                 else
                 {
-                    basis = DimensionValue(token);
+                    basis = token;
                 }
             }
             else
             {
-                basis = DimensionValue(token);
+                basis = token;
             }
         }
 
@@ -828,7 +877,7 @@ public static partial class ComputedStyle
 
         if (basis is { } explicitBasis)
         {
-            style.FlexBasis = explicitBasis;
+            SetFlexBasis(style, explicitBasis);
         }
         else if (numbers.Count != 0)
         {

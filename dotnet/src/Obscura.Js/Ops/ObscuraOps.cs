@@ -147,6 +147,8 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
             nid => CoreOps.OpScriptMarkStarted(Page, U32(nid))));
         Bind(ops, "op_script_try_start", (Func<object?, bool>)(
             nid => CoreOps.OpScriptTryStart(Page, U32(nid))));
+        Bind(ops, "op_run_classic_script", (Action<object?, object?>)(
+            (source, url) => RunClassicScript(engine, S(source), S(url))));
         Bind(ops, "op_shadow_attach", (Func<object?, object?, int>)(
             (nid, mode) => CoreOps.OpShadowAttach(Page, U32(nid), S(mode))));
         Bind(ops, "op_shadow_root_info", (Func<object?, string>)(
@@ -263,6 +265,16 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
             input => RenderOps.OpWaapiCreate(Page, S(input))));
         Bind(ops, "op_waapi_control", (Func<object?, object?, object?, bool>)(
             (id, action, value) => RenderOps.OpWaapiControl(Page, D(id), S(action), D(value))));
+        Bind(ops, "op_font_resource_loaded", (Func<object?, bool>)(
+            url => RenderOps.OpFontResourceLoaded(Page, S(url))));
+
+        // --- Performance timeline ------------------------------------------
+        // Page-scoped on purpose: the host records a subresource against the page it
+        // fetched for, not the realm whose script happened to reference it.
+        Bind(ops, "op_resource_timings", (Func<object?, string>)(
+            sinceIndex => PerformanceOps.OpResourceTimings(Page, D(sinceIndex))));
+        Bind(ops, "op_resource_timing_count", (Func<double>)(
+            () => PerformanceOps.OpResourceTimingCount(Page)));
     }
 
     /// <summary>
@@ -374,6 +386,47 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
     private static Action<double> Callback(object? value) => value is ScriptObject function
         ? generation => function.InvokeAsFunction(generation)
         : _ => { };
+
+    /// <summary>
+    /// <c>op_run_classic_script</c>. Compiles and runs a dynamically inserted
+    /// classic script's source as a top-level script in the calling realm.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Port-added op, with no counterpart in <c>ops.rs</c>. The shim reaches it
+    /// through the rewrite in <see cref="BootstrapSource.EngineText"/>, which is
+    /// where the reason is written down: <c>(0, eval)(source)</c> drops a strict
+    /// script's top-level <c>var</c> and <c>function</c> declarations instead of
+    /// publishing them as globals, and a script is the only evaluation form that
+    /// publishes them while still running the body in strict mode.
+    /// </para>
+    /// <para>
+    /// Deliberately not wrapped in <see cref="OpGuard"/>: the two call sites each
+    /// catch and report what the script threw, exactly as they did when eval
+    /// threw it, so a failure has to travel back into JavaScript rather than be
+    /// contained here. A script error arrives at the shim's <c>catch</c> as an
+    /// <c>Error</c> whose message carries the original error's name and text; a
+    /// watchdog interrupt keeps unwinding and stays uncatchable.
+    /// </para>
+    /// </remarks>
+    private static void RunClassicScript(ScriptEngine engine, string source, string url)
+    {
+        if (source.Length == 0)
+        {
+            return;
+        }
+
+        engine.Execute(ScriptDocumentInfo(url), source);
+    }
+
+    /// <summary>
+    /// Names a script the way the parser-inserted path does: the script URL, so a
+    /// stack trace and <c>import()</c>'s referrer both resolve against it.
+    /// </summary>
+    private static DocumentInfo ScriptDocumentInfo(string url) =>
+        url.Length == 0
+            ? new DocumentInfo("<dynamic-script>")
+            : Uri.TryCreate(url, UriKind.Absolute, out var uri) ? new DocumentInfo(uri) : new DocumentInfo(url);
 
     private static object Uint8Array(ScriptEngine engine, byte[] bytes)
     {

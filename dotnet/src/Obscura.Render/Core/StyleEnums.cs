@@ -18,6 +18,29 @@ public enum Display
 }
 
 /// <summary>
+/// The CSS intrinsic sizing keyword a preferred size (<c>width</c>/<c>height</c>) carries.
+/// </summary>
+/// <remarks>
+/// Taffy's box-size dimension cannot represent any of these, so the dimension stays
+/// <c>Auto</c> and the DOM layout convergence pass resolves the keyword from min/max-content
+/// measurements once the containing space is known.
+/// </remarks>
+public enum IntrinsicSizeKeyword : byte
+{
+    /// <summary>Not an intrinsic keyword.</summary>
+    None = 0,
+
+    /// <summary><c>fit-content</c>: <c>clamp(min-content, stretch-fit, max-content)</c>.</summary>
+    FitContent,
+
+    /// <summary><c>max-content</c>.</summary>
+    MaxContent,
+
+    /// <summary><c>min-content</c>.</summary>
+    MinContent,
+}
+
+/// <summary>
 /// Computed <c>container-type</c> value. Stage A carries it through the cascade; the layout
 /// convergence stage will use it for query eligibility.
 /// </summary>

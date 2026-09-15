@@ -278,7 +278,47 @@ internal static class SvgRenderer
             return null;
         }
 
-        Pixmap? pixmap = Pixmap.New(width, height);
+        (float X, float Y, float Width, float Height) viewBox = default;
+        bool scaled = false;
+        if (ParseViewBox(document.Root.Attribute("viewBox")?.Value) is { } parsed
+            && parsed.Width > 0f && parsed.Height > 0f)
+        {
+            viewBox = parsed;
+            scaled = true;
+        }
+
+        SKMatrix fit = scaled
+            ? ViewBoxMatrix(
+                viewBox,
+                width,
+                height,
+                document.Root.Attribute("preserveAspectRatio")?.Value)
+            : SKMatrix.Identity;
+        SvgPaintState initial = SvgPaintState.Initial(fonts, document) with
+        {
+            ViewportWidth = scaled ? viewBox.Width : width,
+            ViewportHeight = scaled ? viewBox.Height : height,
+        };
+
+        // The UA sheet gives an outermost `<svg>` `overflow: hidden`, which this raster spells
+        // as "the pixmap is exactly the viewport". An author `overflow: visible` overrides it,
+        // so grow the raster to cover what hangs outside.
+        //
+        // DEVIATION: only the right and bottom overflow is recovered. The HTML paint layer
+        // blits this pixmap at the element's border-box origin, so content left of or above the
+        // viewport has nowhere to land; carrying it would need an origin offset out of
+        // `PaintDom`. resvg, which crates/obscura-render calls, has no such limit. See
+        // "Known deviations" in todo.md.
+        uint rasterWidth = width;
+        uint rasterHeight = height;
+        if (OverflowIsVisible(document.Root))
+        {
+            SKRect content = ContentBounds(document, fonts, initial, fit, width, height);
+            rasterWidth = RasterSide(content.Right, width);
+            rasterHeight = RasterSide(content.Bottom, height);
+        }
+
+        Pixmap? pixmap = Pixmap.New(rasterWidth, rasterHeight);
         if (pixmap is null)
         {
             return null;
@@ -289,22 +329,15 @@ internal static class SvgRenderer
             SKCanvas canvas = pixmap.Canvas;
             canvas.Save();
             canvas.ResetMatrix();
-            (float X, float Y, float Width, float Height)? viewBox =
-                ParseViewBox(document.Root.Attribute("viewBox")?.Value);
-            if (viewBox is { } box && box.Width > 0f && box.Height > 0f)
+            if (scaled)
             {
-                SKMatrix fit = ViewBoxMatrix(
-                    box,
-                    width,
-                    height,
-                    document.Root.Attribute("preserveAspectRatio")?.Value);
                 canvas.Concat(fit);
             }
 
-            SvgPaintState state = SvgPaintState.Initial(fonts, document);
+            SvgPaintState state = initial.Inherit(document.Root);
             foreach (XElement child in document.Root.Elements())
             {
-                RenderElement(canvas, child, state.Inherit(document.Root), document, fonts);
+                RenderElement(canvas, child, state, document, fonts);
             }
 
             canvas.Restore();
@@ -315,6 +348,233 @@ internal static class SvgRenderer
             pixmap.Dispose();
             return null;
         }
+    }
+
+    /// <summary>The largest raster side an <c>overflow: visible</c> root may grow to.</summary>
+    private const float MAX_OVERFLOW_RASTER_SIDE = 8192f;
+
+    /// <summary>The raster extent covering <paramref name="edge"/>, never below the viewport.</summary>
+    private static uint RasterSide(float edge, uint viewport)
+    {
+        if (!float.IsFinite(edge))
+        {
+            return viewport;
+        }
+
+        float wanted = F32.Min(MathF.Ceiling(edge), MAX_OVERFLOW_RASTER_SIDE);
+        return wanted <= viewport ? viewport : (uint)wanted;
+    }
+
+    /// <summary>
+    /// An explicit <c>overflow: visible</c> (or the <c>auto</c> that means the same thing on an
+    /// SVG viewport) which suppresses the clip that viewport would otherwise impose.
+    /// </summary>
+    private static bool OverflowIsVisible(XElement element) =>
+        SvgPaintState.Property(element, "overflow")?.Trim().ToLowerInvariant()
+            is "visible" or "auto";
+
+    /// <summary>The painted extent of a document's content, unioned with its viewport.</summary>
+    private static SKRect ContentBounds(
+        SvgDocument     document,
+        SvgFontDatabase fonts,
+        SvgPaintState   initial,
+        SKMatrix        fit,
+        uint            width,
+        uint            height)
+    {
+        SKRect bounds = new(0f, 0f, width, height);
+        SvgPaintState state = initial.Inherit(document.Root);
+        foreach (XElement child in document.Root.Elements())
+        {
+            AccumulateBounds(child, state, document, fonts, fit, ref bounds, 0);
+        }
+
+        return bounds;
+    }
+
+    /// <summary>
+    /// Union one element's painted extent, in device space, into <paramref name="bounds"/>.
+    /// Geometry only: this exists to size an <c>overflow: visible</c> raster, so an element it
+    /// cannot measure contributes nothing rather than guessing.
+    /// </summary>
+    private static void AccumulateBounds(
+        XElement        element,
+        SvgPaintState   inherited,
+        SvgDocument     document,
+        SvgFontDatabase fonts,
+        SKMatrix        matrix,
+        ref SKRect      bounds,
+        int             depth)
+    {
+        if (depth > 24)
+        {
+            return;
+        }
+
+        string tag = element.Name.LocalName;
+        if (tag is "defs" or "symbol" or "clipPath" or "mask" or "pattern" or "linearGradient"
+            or "radialGradient" or "style" or "title" or "desc" or "metadata" or "filter")
+        {
+            return;
+        }
+
+        SvgPaintState state = inherited.Inherit(element);
+        if (state.Display == "none" || state.Visibility == "hidden")
+        {
+            return;
+        }
+
+        SKMatrix local = ParseTransform(element.Attribute("transform")?.Value) is { } transform
+            ? matrix.PreConcat(transform)
+            : matrix;
+
+        switch (tag)
+        {
+            case "svg":
+            {
+                // A nested viewport clips its own content, so it contributes only its own box.
+                if (NestedViewport(element, state) is { } viewport)
+                {
+                    bounds = SKRect.Union(bounds, local.MapRect(viewport));
+                }
+
+                return;
+            }
+
+            case "g":
+            case "a":
+            case "switch":
+            {
+                foreach (XElement child in element.Elements())
+                {
+                    AccumulateBounds(child, state, document, fonts, local, ref bounds, depth + 1);
+                }
+
+                return;
+            }
+
+            case "use":
+            {
+                string? href = element.Attributes()
+                    .FirstOrDefault(a => a.Name.LocalName == "href")?.Value;
+                if (href is null || !href.StartsWith('#')
+                    || !document.ById.TryGetValue(href[1..], out XElement? target))
+                {
+                    return;
+                }
+
+                float useX = ParseLength(element.Attribute("x")?.Value) ?? 0f;
+                float useY = ParseLength(element.Attribute("y")?.Value) ?? 0f;
+                SKMatrix used = local.PreConcat(SKMatrix.CreateTranslation(useX, useY));
+                if (target.Name.LocalName is "symbol" or "svg")
+                {
+                    foreach (XElement child in target.Elements())
+                    {
+                        AccumulateBounds(
+                            child,
+                            state.Inherit(target),
+                            document,
+                            fonts,
+                            used,
+                            ref bounds,
+                            depth + 1);
+                    }
+                }
+                else
+                {
+                    AccumulateBounds(target, state, document, fonts, used, ref bounds, depth + 1);
+                }
+
+                return;
+            }
+
+            case "text":
+            {
+                string content = TextContent(element);
+                if (content.Trim().Length == 0)
+                {
+                    return;
+                }
+
+                float textX = ParseLength(element.Attribute("x")?.Value) ?? 0f;
+                float textY = ParseLength(element.Attribute("y")?.Value) ?? 0f;
+                SKTypeface typeface = fonts.Resolve(
+                    state.FontFamily,
+                    state.FontWeight >= 600,
+                    state.FontItalic);
+                using SKFont font = new(typeface, state.FontSize);
+                float advance = font.MeasureText(content);
+                float originX = state.TextAnchor switch
+                {
+                    "middle" => textX - (advance / 2f),
+                    "end" => textX - advance,
+                    _ => textX,
+                };
+                bounds = SKRect.Union(bounds, local.MapRect(new SKRect(
+                    originX,
+                    textY - state.FontSize,
+                    originX + advance,
+                    textY + (state.FontSize * 0.3f))));
+                return;
+            }
+
+            case "image":
+            {
+                float imageX = ParseLength(element.Attribute("x")?.Value) ?? 0f;
+                float imageY = ParseLength(element.Attribute("y")?.Value) ?? 0f;
+                float imageWidth = ParseLength(element.Attribute("width")?.Value) ?? 0f;
+                float imageHeight = ParseLength(element.Attribute("height")?.Value) ?? 0f;
+                if (imageWidth > 0f && imageHeight > 0f)
+                {
+                    bounds = SKRect.Union(bounds, local.MapRect(new SKRect(
+                        imageX,
+                        imageY,
+                        imageX + imageWidth,
+                        imageY + imageHeight)));
+                }
+
+                return;
+            }
+
+            default:
+            {
+                SKPath? path = ShapePath(element);
+                if (path is null)
+                {
+                    return;
+                }
+
+                using SKPath owned = path;
+                SKRect box = owned.Bounds;
+                if (state.StrokeWidth > 0f && (state.Stroke is not null || state.StrokeRef is not null))
+                {
+                    box.Inflate(state.StrokeWidth / 2f, state.StrokeWidth / 2f);
+                }
+
+                bounds = SKRect.Union(bounds, local.MapRect(box));
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The viewport a nested <c>&lt;svg&gt;</c> establishes, in its parent's user units.
+    /// <c>null</c> when it is zero-sized, which disables rendering of the element.
+    /// </summary>
+    private static SKRect? NestedViewport(XElement element, SvgPaintState state)
+    {
+        float x = ParseNumberOrPercent(element.Attribute("x")?.Value ?? "0", state.ViewportWidth) ?? 0f;
+        float y = ParseNumberOrPercent(element.Attribute("y")?.Value ?? "0", state.ViewportHeight) ?? 0f;
+        float width = ParseNumberOrPercent(
+                element.Attribute("width")?.Value ?? "100%",
+                state.ViewportWidth)
+            ?? state.ViewportWidth;
+        float height = ParseNumberOrPercent(
+                element.Attribute("height")?.Value ?? "100%",
+                state.ViewportHeight)
+            ?? state.ViewportHeight;
+
+        return width > 0f && height > 0f ? new SKRect(x, y, x + width, y + height) : null;
     }
 
     internal static SKMatrix ViewBoxMatrix(
@@ -400,21 +660,11 @@ internal static class SvgRenderer
                 && document.ById.TryGetValue(clipId, out XElement? clipElement)
                 && string.Equals(clipElement.Name.LocalName, "clipPath", StringComparison.Ordinal))
             {
-                using SKPathBuilder builder = new();
-                foreach (XElement shape in clipElement.Elements())
+                using SKPath? clipPath = ClipPathFor(clipElement);
+                if (clipPath is not null)
                 {
-                    SKPath? part = ShapePath(shape);
-                    if (part is null)
-                    {
-                        continue;
-                    }
-
-                    builder.AddPath(part, SKPathAddMode.Append);
-                    part.Dispose();
+                    canvas.ClipPath(clipPath, SKClipOperation.Intersect, antialias: true);
                 }
-
-                using SKPath clipPath = builder.Detach();
-                canvas.ClipPath(clipPath, SKClipOperation.Intersect, antialias: true);
             }
 
             if (state.Opacity < 1f)
@@ -426,9 +676,30 @@ internal static class SvgRenderer
                 canvas.SaveLayer(layerPaint);
             }
 
+            // `filter` composites the element's own rendering, so it goes inside the group
+            // opacity layer and wraps everything the element paints.
+            using SKImageFilter? blur = ResolveGaussianBlur(element, document);
+            using SKPaint? filterPaint = blur is null ? null : new SKPaint { ImageFilter = blur };
+            if (filterPaint is not null)
+            {
+                if (FilterRegion(element, state, document) is { } region)
+                {
+                    // A layer's bounds are only a rasterization hint to Skia, and an image
+                    // filter expands past them; the filter region is a clip, so say so.
+                    canvas.ClipRect(region);
+                    canvas.SaveLayer(region, filterPaint);
+                }
+                else
+                {
+                    canvas.SaveLayer(filterPaint);
+                }
+            }
+
             switch (tag)
             {
                 case "svg":
+                    RenderNestedViewport(canvas, element, state, document, fonts, depth);
+                    break;
                 case "g":
                 case "a":
                 case "switch":
@@ -460,6 +731,11 @@ internal static class SvgRenderer
                 }
             }
 
+            if (filterPaint is not null)
+            {
+                canvas.Restore();
+            }
+
             if (state.Opacity < 1f)
             {
                 canvas.Restore();
@@ -473,6 +749,167 @@ internal static class SvgRenderer
         {
             canvas.RestoreToCount(saved);
         }
+    }
+
+    /// <summary>The union of a <c>clipPath</c>'s shapes, in the referencing element's user space.</summary>
+    private static SKPath? ClipPathFor(XElement clipElement)
+    {
+        // Each clip shape carries its own `transform`, and so may the `clipPath`. Dropping
+        // either silently moves the clip: every Figma export wraps its artboard clip in a
+        // `transform="translate(...)"`, and ignoring that cropped the whole illustration.
+        SKMatrix outer = ParseTransform(clipElement.Attribute("transform")?.Value) ?? SKMatrix.Identity;
+        using SKPathBuilder builder = new();
+        bool any = false;
+        foreach (XElement shape in clipElement.Elements())
+        {
+            SKPath? part = ShapePath(shape);
+            if (part is null)
+            {
+                continue;
+            }
+
+            using SKPath owned = part;
+            SKMatrix matrix = ParseTransform(shape.Attribute("transform")?.Value) is { } local
+                ? outer.PreConcat(local)
+                : outer;
+            builder.AddPath(owned, matrix, SKPathAddMode.Append);
+            any = true;
+        }
+
+        return any ? builder.Detach() : null;
+    }
+
+    /// <summary>
+    /// A nested <c>&lt;svg&gt;</c> establishes a new viewport: <c>x</c>/<c>y</c> place it,
+    /// <c>width</c>/<c>height</c> size it, and its own <c>viewBox</c> plus
+    /// <c>preserveAspectRatio</c> set the scale inside it.
+    /// </summary>
+    private static void RenderNestedViewport(
+        SKCanvas        canvas,
+        XElement        element,
+        SvgPaintState   state,
+        SvgDocument     document,
+        SvgFontDatabase fonts,
+        int             depth)
+    {
+        if (NestedViewport(element, state) is not { } viewport)
+        {
+            return;
+        }
+
+        canvas.Translate(viewport.Left, viewport.Top);
+        if (!OverflowIsVisible(element))
+        {
+            canvas.ClipRect(new SKRect(0f, 0f, viewport.Width, viewport.Height));
+        }
+
+        SvgPaintState nested = state with
+        {
+            ViewportWidth = viewport.Width,
+            ViewportHeight = viewport.Height,
+        };
+        if (ParseViewBox(element.Attribute("viewBox")?.Value) is { } box
+            && box.Width > 0f && box.Height > 0f)
+        {
+            canvas.Concat(ViewBoxMatrix(
+                box,
+                viewport.Width,
+                viewport.Height,
+                element.Attribute("preserveAspectRatio")?.Value));
+            nested = nested with { ViewportWidth = box.Width, ViewportHeight = box.Height };
+        }
+
+        foreach (XElement child in element.Elements())
+        {
+            RenderElement(canvas, child, nested, document, fonts, depth + 1);
+        }
+    }
+
+    /// <summary>
+    /// The blur of a referenced <c>&lt;filter&gt;</c>, which is the whole filter vocabulary the
+    /// engine paints: a lone <c>feGaussianBlur</c>, optionally behind the transparent
+    /// <c>feFlood</c> + normal <c>feBlend</c> preamble every Figma export emits ahead of it.
+    /// Anything else needs a real filter graph and paints unfiltered rather than approximated.
+    /// </summary>
+    private static SKImageFilter? ResolveGaussianBlur(XElement element, SvgDocument document)
+    {
+        if (SvgPaintState.Property(element, "filter") is not { } value
+            || SvgPaintState.ReferenceId(value) is not { } id
+            || !document.ById.TryGetValue(id, out XElement? filter)
+            || !string.Equals(filter.Name.LocalName, "filter", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        float sigmaX = 0f;
+        float sigmaY = 0f;
+        foreach (XElement primitive in filter.Elements())
+        {
+            switch (primitive.Name.LocalName)
+            {
+                case "feGaussianBlur":
+                {
+                    List<float> deviation = ParseNumberList(
+                        primitive.Attribute("stdDeviation")?.Value ?? "0");
+                    if (deviation.Count == 0)
+                    {
+                        return null;
+                    }
+
+                    sigmaX = deviation[0];
+                    sigmaY = deviation.Count > 1 ? deviation[1] : deviation[0];
+                    break;
+                }
+
+                case "feFlood" when
+                    ParseNumberOrPercent(
+                        SvgPaintState.Property(primitive, "flood-opacity") ?? "1",
+                        1f) is 0f:
+                case "feBlend" when
+                    (primitive.Attribute("mode")?.Value ?? "normal")
+                        .Equals("normal", StringComparison.OrdinalIgnoreCase):
+                    break;
+                default:
+                    return null;
+            }
+        }
+
+        return sigmaX > 0f || sigmaY > 0f ? SKImageFilter.CreateBlur(sigmaX, sigmaY) : null;
+    }
+
+    /// <summary>
+    /// The filter region of a referenced <c>&lt;filter&gt;</c> in the current user space, which
+    /// clips the filtered result. <c>null</c> leaves the layer unbounded, which is what an
+    /// <c>objectBoundingBox</c> region (the default) resolves to here.
+    /// </summary>
+    private static SKRect? FilterRegion(
+        XElement      element,
+        SvgPaintState state,
+        SvgDocument   document)
+    {
+        if (SvgPaintState.Property(element, "filter") is not { } value
+            || SvgPaintState.ReferenceId(value) is not { } id
+            || !document.ById.TryGetValue(id, out XElement? filter)
+            || !string.Equals(
+                filter.Attribute("filterUnits")?.Value,
+                "userSpaceOnUse",
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (ParseNumberOrPercent(filter.Attribute("x")?.Value, state.ViewportWidth) is not { } x
+            || ParseNumberOrPercent(filter.Attribute("y")?.Value, state.ViewportHeight) is not { } y
+            || ParseNumberOrPercent(filter.Attribute("width")?.Value, state.ViewportWidth)
+                is not { } width
+            || ParseNumberOrPercent(filter.Attribute("height")?.Value, state.ViewportHeight)
+                is not { } height
+            || width <= 0f || height <= 0f)
+        {
+            return null;
+        }
+
+        return new SKRect(x, y, x + width, y + height);
     }
 
     private static void RenderUse(
@@ -1259,6 +1696,14 @@ internal sealed record SvgPaintState
     /// <summary>Nesting depth through paint servers, bounding pattern self-reference.</summary>
     internal int ServerDepth { get; init; }
 
+    /// <summary>
+    /// The current SVG viewport in user units, which percentage lengths and a nested
+    /// <c>&lt;svg&gt;</c>'s own <c>x</c>/<c>y</c>/<c>width</c>/<c>height</c> resolve against.
+    /// </summary>
+    internal float ViewportWidth { get; init; } = 100f;
+
+    internal float ViewportHeight { get; init; } = 100f;
+
     internal static SvgPaintState Initial(SvgFontDatabase fonts, SvgDocument document) => new()
     {
         Fill = new RgbaColor(0, 0, 0, 255),
@@ -1452,7 +1897,8 @@ internal sealed record SvgPaintState
         return parsed is { } color ? (color, null) : (inheritedColor, inheritedReference);
     }
 
-    private static string? ReferenceId(string value)
+    /// <summary>The id inside a <c>url(#id)</c> reference, or <c>null</c> for anything else.</summary>
+    internal static string? ReferenceId(string value)
     {
         string trimmed = value.Trim();
         if (!trimmed.StartsWith("url(", StringComparison.OrdinalIgnoreCase))

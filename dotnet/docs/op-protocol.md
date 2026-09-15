@@ -130,3 +130,48 @@ text_content
    the Rust output in a parity test rather than reasoning about it.
 4. **`frame_id` selects the realm state.** Ops that take `frame_id` resolve
    per-frame state; the main realm is frame 0.
+
+## Port-added ops (4)
+
+These have no counterpart in `ops.rs`. For `op_run_classic_script` the shim as
+shipped does not call it; `BootstrapSource.EngineText` rewrites a call site onto
+it on the way into V8, so the shared JavaScript file stays untouched. The other
+three ARE called from `bootstrap.js`, which is shared with the Rust engine, so
+every one of those call sites is guarded by a `typeof ... === 'function'` test
+and the shim falls back to exactly the behaviour it had before when the host does
+not bind them.
+
+| Op | Kind | Arguments | Returns |
+|---|---|---|---|
+| `op_run_classic_script` | sync | `source: String, url: String` | `(void)` |
+| `op_resource_timings` | fast | `since_index: f64` | `String` (JSON array) |
+| `op_resource_timing_count` | fast | `(none)` | `f64` |
+| `op_font_resource_loaded` | fast | `url: &str` | `bool` |
+
+`op_resource_timings` returns the subresources the host fetched for the current
+document at index >= `since_index`, as a JSON array of
+`{name, initiatorType, responseStatus, startedAt, endedAt, decodedBodySize,
+encodedBodySize, contentType}`. `startedAt`/`endedAt` are unix-epoch
+milliseconds; the shim rebases them onto `performance.timeOrigin`, which only it
+knows. Records are appended, never trimmed from the front, so an index stays
+valid; the host stops appending at 1000 records. It backs
+`performance.getEntriesByType('resource')`. Only measured values travel: the
+transport does not instrument DNS, TCP, TLS or the request/response split, and
+those phases are absent from the payload and left at 0 by the shim, which is what
+Resource Timing prescribes for a phase that cannot be reported.
+
+`op_font_resource_loaded` answers whether the renderer holds usable bytes for an
+already-absolute `@font-face` source URL. It backs the `status` of the
+CSS-connected `FontFace` objects in `document.fonts`, and therefore
+`document.fonts.check()`.
+
+`op_run_classic_script` compiles `source` as a top-level classic script in the
+calling realm. It replaces the two `(0, eval)(source)` calls that execute a
+dynamically inserted classic script, which dropped the top-level `var` and
+`function` declarations of any script beginning with `"use strict"` instead of
+publishing them as globals. See "A dynamically inserted classic script runs as a
+script, not as an eval" in `todo.md`.
+
+It is the one op that deliberately does not go through `OpGuard`: both call sites
+catch and report what the script threw, exactly as they did when eval threw it, so
+the failure has to travel back into JavaScript rather than be contained.

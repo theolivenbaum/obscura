@@ -37,6 +37,40 @@ public sealed partial class Page
         StoreResponseBody(requestId, body, base64Encoded);
     }
 
+    /// <summary>
+    /// Record a subresource this page's own transport fetched, for
+    /// <c>performance.getEntriesByType('resource')</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Separate from <see cref="RecordNetworkEvent"/> on purpose. The network events
+    /// are recorded where the resource is <em>used</em> (a classic script is recorded
+    /// as it executes, which can be long after it arrived), while a resource-timing
+    /// entry has to carry the request's own start and end. So the call sites are the
+    /// fetch lambdas, which are the only places that bracket the transport.
+    /// </para>
+    /// <para>
+    /// <paramref name="startedAtUnixMs"/> / <paramref name="endedAtUnixMs"/> are
+    /// unix-epoch milliseconds; the shim rebases them onto the document's
+    /// <c>performance.timeOrigin</c>.
+    /// </para>
+    /// </remarks>
+    internal void RecordResourceTiming(
+        string url,
+        string initiatorType,
+        Response response,
+        double startedAtUnixMs,
+        double endedAtUnixMs) =>
+        Js?.RecordResourceTiming(
+            url,
+            initiatorType,
+            response.Status,
+            startedAtUnixMs,
+            endedAtUnixMs,
+            response.Body.Length,
+            PerformanceOps.EncodedBodySize(response.Headers, response.Body.Length),
+            response.ContentType() ?? string.Empty);
+
     private string RecordNetworkEventInner(
         string url,
         string method,

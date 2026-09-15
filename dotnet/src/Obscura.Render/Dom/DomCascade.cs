@@ -109,6 +109,72 @@ internal static class DomCascade
         }
     }
 
+    /// <summary>
+    /// SVG presentation attributes that map onto a CSS property of the same name, and whether a
+    /// bare number on one means user units (i.e. px) rather than a unitless value.
+    /// </summary>
+    private static readonly (string Name, bool BareNumberIsLength)[] SvgPresentationAttributes =
+    [
+        ("display",           false),
+        ("visibility",        false),
+        ("opacity",           false),
+        ("color",             false),
+        ("fill",              false),
+        ("fill-opacity",      false),
+        ("stroke",            false),
+        ("stroke-width",      true),
+        ("stroke-opacity",    false),
+        ("stroke-linecap",    false),
+        ("stroke-linejoin",   false),
+        ("stroke-dasharray",  false),
+        ("text-anchor",       false),
+        ("dominant-baseline", false),
+        ("font-size",         true),
+        ("font-family",       false),
+        ("font-weight",       false),
+        ("font-style",        false),
+    ];
+
+    /// <summary>
+    /// Apply the SVG presentation attributes of an SVG-namespace element at their cascade
+    /// origin: author origin, below every author rule (a type selector included) and below the
+    /// <c>style</c> attribute, which the caller applies afterwards.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render/src/dom.rs</c>, which maps HTML presentational
+    /// attributes only and drops SVG presentation attributes entirely. Every SVG chart then
+    /// renders its text at the page font size and reports no fill or stroke at all, because a
+    /// real chart carries <c>font-size</c>, <c>font-family</c>, <c>fill</c> and
+    /// <c>text-anchor</c> as attributes rather than as CSS. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static void ApplySvgPresentationAttributes(Node node, LayoutStyle style)
+    {
+        foreach ((string name, bool bareNumberIsLength) in SvgPresentationAttributes)
+        {
+            if (node.GetAttribute(name) is not { } raw)
+            {
+                continue;
+            }
+
+            string value = raw.Trim();
+
+            // A CSS value never holds a top-level `;`, so one here is a malformed attribute that
+            // would otherwise smuggle extra declarations through ApplyInline.
+            if (value.Length == 0 || value.Contains(';', StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // A bare number on a length-valued attribute is in user units, which are px.
+            if (bareNumberIsLength && ParseFloat(value) is not null)
+            {
+                value += "px";
+            }
+
+            ComputedStyle.ApplyInline(style, $"{name}: {value}");
+        }
+    }
+
     private static bool AllAsciiDigits(string value)
     {
         if (value.Length == 0)
@@ -335,7 +401,8 @@ internal static class DomCascade
                 descendantCellPadding = FilterCellPadding(node.GetAttribute("cellpadding"));
             }
 
-            LayoutStyle style = ComputedStyle.UaStyle(local);
+            bool isSvgNamespace = string.Equals(elem.Name.Ns, Namespaces.Svg, StringComparison.Ordinal);
+            LayoutStyle style = ComputedStyle.UaStyle(local, elem.Name.Ns);
             style.IsReplacedBox = Inline.IsReplaced(local);
             style.HasReplacedSizing = Inline.HasReplacedSizing(local)
                 || (string.Equals(local, "input", StringComparison.Ordinal)
@@ -400,6 +467,14 @@ internal static class DomCascade
                 style.MarginRelative[2] = Dimension.Em(1f);
             }
 
+            // Chromium's UA sheet gives `a:any-link` a pointer cursor, which needs the
+            // attribute a tag-keyed UA style cannot see.
+            if (string.Equals(local, "a", StringComparison.Ordinal)
+                && node.GetAttribute("href") is not null)
+            {
+                style.Cursor = "pointer";
+            }
+
             if (string.Equals(local, "input", StringComparison.Ordinal))
             {
                 string inputType = (node.GetAttribute("type") ?? "text").Trim().ToLowerInvariant();
@@ -415,12 +490,39 @@ internal static class DomCascade
                         style.Margin = new Edges(3f, 3f, 3f, 4f);
                         style.Padding = Edges.Zero;
                         style.Border = Edges.Zero;
+
+                        // Chromium's UA sheet clears the field background on the two controls
+                        // it paints itself; the tag-keyed `input` arm gave them the white one
+                        // a text field gets.
+                        style.BackgroundColor = null;
+                        break;
+                    case "file":
+                        // `input[type=file] { color: inherit; background-color: initial }` -
+                        // the file control is the one input whose label takes the page's
+                        // colour. Null restores inheritance in the top-down pass.
+                        style.Color = null;
+                        style.BackgroundColor = null;
                         break;
                     case "range":
                     case "color":
                         style.Margin = new Edges(2f, 2f, 2f, 2f);
                         style.Padding = Edges.Zero;
                         style.Border = Edges.Zero;
+                        break;
+                    case "date":
+                    case "datetime-local":
+                    case "month":
+                    case "week":
+                    case "time":
+                        // DEVIATION from crates/obscura-render/src/dom.rs, which gives these the
+                        // plain `input` box. Chromium's UA sheet puts the date/time controls in
+                        // monospace and drops the field's horizontal padding to 1px on the left,
+                        // because their sub-fields carry their own. Without it the field text is
+                        // measured and painted in the wrong face and the control is ~50px too
+                        // wide. See "Known deviations" in todo.md.
+                        style.FontFamily = "monospace";
+                        style.FontFamilySpecified = "monospace";
+                        style.Padding = new Edges(0f, 0f, 0f, 1f);
                         break;
                 }
             }
@@ -434,6 +536,11 @@ internal static class DomCascade
             }
 
             ApplyPresentationalHints(node, style);
+            if (isSvgNamespace)
+            {
+                ApplySvgPresentationAttributes(node, style);
+            }
+
             ApplyPictureSourceHints(tree, id, context.Viewport, style);
             string? nodeId = node.GetAttribute("id");
             List<string> classes = [];
@@ -537,7 +644,10 @@ internal static class DomCascade
             context.CustomProperties[id] = thisProps;
             style.IsReplacedBox |= style.ContentImage is not null;
             style.HasReplacedSizing |= style.ContentImage is not null;
-            (LayoutStyle? beforePseudo, LayoutStyle? afterPseudo, LayoutStyle? placeholderPseudo) =
+            (LayoutStyle? beforePseudo,
+                LayoutStyle? afterPseudo,
+                LayoutStyle? placeholderPseudo,
+                LayoutStyle? sliderThumbPseudo) =
                 sheet.AllPseudoStyles(tree, matcher, id, thisProps, style, containerEvaluator);
             foreach (LayoutStyle? pseudo in new[] { beforePseudo, afterPseudo })
             {
@@ -559,6 +669,7 @@ internal static class DomCascade
             style.BeforePseudo = beforePseudo;
             style.AfterPseudo = afterPseudo;
             style.PlaceholderPseudo = placeholderPseudo;
+            style.SliderThumbPseudo = sliderThumbPseudo;
             descendantColorSchemeDark = style.ColorSchemeDark;
             context.Styles[id] = style;
         }

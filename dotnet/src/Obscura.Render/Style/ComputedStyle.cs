@@ -20,9 +20,35 @@ public static partial class ComputedStyle
         return style;
     }
 
-    /// <summary>Rust <c>ua_style</c>: the built-in UA defaults.</summary>
-    public static LayoutStyle UaStyle(string tag)
+    /// <summary>Rust <c>ua_style</c>: the built-in UA defaults for an HTML-namespace tag.</summary>
+    public static LayoutStyle UaStyle(string tag) => UaStyle(tag, null);
+
+    /// <summary>
+    /// Rust <c>ua_style</c>, resolved against the element's namespace as well as its tag name.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render/src/style.rs</c>, whose <c>ua_style</c> is keyed
+    /// on the tag name alone. The HTML and SVG UA sheets share a lot of names - <c>a</c>,
+    /// <c>title</c>, <c>desc</c>, <c>style</c>, <c>script</c>, <c>text</c> - and applying the
+    /// HTML rule to an SVG element is wrong in both directions: an SVG <c>&lt;a&gt;</c> was
+    /// picking up the link colour <c>rgb(0, 0, 238)</c> and underlining, and every shape in an
+    /// SVG chart was reporting <c>display: block</c> where Chromium reports <c>inline</c>.
+    /// Chromium's SVG UA sheet gives every SVG element <c>display: inline</c> except
+    /// <c>text</c> and <c>foreignObject</c>, and notably does *not* give <c>title</c> /
+    /// <c>desc</c> / <c>defs</c> <c>display: none</c> - those are non-rendered through the SVG
+    /// rendering model instead, which is why the SVG rasterizer skips them by tag name. See
+    /// "Known deviations" in todo.md.
+    /// </remarks>
+    public static LayoutStyle UaStyle(string tag, string? ns)
     {
+        if (string.Equals(ns, Obscura.Dom.Namespaces.Svg, StringComparison.Ordinal))
+        {
+            return new LayoutStyle
+            {
+                Display = tag is "text" or "foreignObject" ? Display.Block : Display.Inline,
+            };
+        }
+
         LayoutStyle style = new();
         if (tag is "b" or "strong")
         {
@@ -129,11 +155,34 @@ public static partial class ComputedStyle
         }
         else if (tag == "button")
         {
+            style.Cursor = "default";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.TextAlign = Layout.AlignItems.Center;
             style.BoxSizing = BoxSizing.BorderBox;
             style.Padding = new Edges(1.0f, 6.0f, 1.0f, 6.0f);
+
+            // Chromium's UA sheet gives `button` `border: 2px outset ButtonBorder`, which this
+            // arm set no part of - an unstyled button came out 4px narrower and 4px shorter
+            // than Chromium's (176x63 against 180x67 on the btn-min repro).
+            //
+            // The computed colour and the painted colour are two different values, and
+            // conflating them is what this arm got wrong. `ButtonBorder` computes to
+            // rgb(0, 0, 0) on a button - unlike `select` and `input`, whose border colour
+            // computes to the rgb(118, 118, 118) used below - and Chromium then never paints
+            // that black, because a button with the default `appearance` is drawn by the
+            // native form-control painter as a flat 1px rgb(118, 118, 118) stroke. So the
+            // computed value is black, matching `getComputedStyle`, and the grey stroke is
+            // PaintBorders' native-control path, keyed off NativeControlAppearance below.
+            style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
+            style.BorderModel = style.BorderModel with
+            {
+                SpecifiedWidths = Sides<float>.All(2.0f),
+                Styles = Sides<BorderStyle>.All(BorderStyle.Outset),
+                Colors = Sides<RgbaColor?>.All(new RgbaColor(0, 0, 0, 255)),
+            };
+            style.BorderColor = new RgbaColor(0, 0, 0, 255);
+            style.NativeControlAppearance = true;
 
             // DEVIATION from crates/obscura-render/src/style.rs, whose `button` arm sets no
             // font at all, so a button inherits the page's font-size, family and line-height.
@@ -146,14 +195,17 @@ public static partial class ComputedStyle
             // instead of one. See "Known deviations" in todo.md.
             style.FontSize = 13.333_333f;
             style.FontFamily = "arial";
+            style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
         }
         else if (tag == "select")
         {
+            style.Cursor = "default";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
             style.FontFamily = "arial";
+            style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.Padding = new Edges(1.0f, 20.0f, 1.0f, 2.0f);
             style.Border = new Edges(1.0f, 1.0f, 1.0f, 1.0f);
@@ -168,28 +220,54 @@ public static partial class ComputedStyle
         }
         else if (tag == "input")
         {
+            style.Cursor = "text";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
             style.FontFamily = "arial";
+            style.FontFamilySpecified = "Arial";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.Padding = new Edges(1.0f, 2.0f, 1.0f, 2.0f);
+
+            // Chromium's UA sheet gives `input` `border: 2px inset ButtonBorder`, and on an
+            // input `ButtonBorder` computes to rgb(118, 118, 118) - not to the rgb(0, 0, 0) a
+            // button reports. The style was `solid` here, which is the one part of the box
+            // getComputedStyle disagreed with. As with `button` the relief is never painted:
+            // Chromium's native text-field painter strokes a flat 1px rgb(118, 118, 118),
+            // which is what NativeControlAppearance gets PaintBorders to draw.
             style.Border = new Edges(2.0f, 2.0f, 2.0f, 2.0f);
             style.BorderModel = style.BorderModel with
             {
                 SpecifiedWidths = Sides<float>.All(2.0f),
-                Styles = Sides<BorderStyle>.All(BorderStyle.Solid),
+                Styles = Sides<BorderStyle>.All(BorderStyle.Inset),
                 Colors = Sides<RgbaColor?>.All(new RgbaColor(118, 118, 118, 255)),
             };
             style.BorderColor = new RgbaColor(118, 118, 118, 255);
             style.BackgroundColor = new RgbaColor(255, 255, 255, 255);
+            style.NativeControlAppearance = true;
+
+            // DEVIATION from crates/obscura-render/src/style.rs, whose `input` arm sets no
+            // colour and no overflow, so a text field inherited the page's `color` and let its
+            // value paint outside the box. Chromium's UA sheet gives every form control
+            // `color: fieldtext`, which is black and does not inherit, and gives `input`
+            // `overflow: clip`. `input[type=file]` takes its colour back from the page and
+            // checkbox/radio/file clear the field background - those need the `type` attribute
+            // and are in DomCascade beside the other per-type UA rules. See "Known deviations"
+            // in todo.md.
+            style.Color = new RgbaColor(0, 0, 0, 255);
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 1;
+            style.OverflowSpecifiedY = 1;
+            RecomputeOverflow(style);
         }
         else if (tag == "textarea")
         {
+            style.Cursor = "text";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
             style.FontFamily = "monospace";
+            style.FontFamilySpecified = "monospace";
             style.LineHeight = Obscura.Render.LineHeight.Normal;
             style.WhiteSpace = Obscura.Render.WhiteSpace.PreWrap;
             style.BoxSizing = BoxSizing.BorderBox;
@@ -203,6 +281,14 @@ public static partial class ComputedStyle
             };
             style.BorderColor = new RgbaColor(118, 118, 118, 255);
             style.BackgroundColor = new RgbaColor(255, 255, 255, 255);
+
+            // Chromium's UA sheet: `textarea { color: fieldtext; overflow: auto }`. The scroller
+            // is what keeps a long value inside the box instead of painting past it.
+            style.Color = new RgbaColor(0, 0, 0, 255);
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 4;
+            style.OverflowSpecifiedY = 4;
+            RecomputeOverflow(style);
         }
         else if (tag is "table" or "tbody" or "thead" or "tfoot")
         {
@@ -247,6 +333,25 @@ public static partial class ComputedStyle
         else if (tag == "img")
         {
             style.Display = Display.Inline;
+
+            // DEVIATION from crates/obscura-render/src/style.rs, whose `img` arm sets display
+            // only. Chromium's UA sheet gives an image `overflow: clip; overflow-clip-margin:
+            // content-box`, so every image computes `overflow-x: clip` rather than `visible`
+            // and its content cannot paint outside its box. See "Known deviations" in todo.md.
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 1;
+            style.OverflowSpecifiedY = 1;
+            style.OverflowClipMargin = "content-box";
+            RecomputeOverflow(style);
+        }
+        else if (tag is "canvas" or "video")
+        {
+            // The same UA rule as `img`: a replaced element clips to its content box.
+            style.OverflowAxesSet = true;
+            style.OverflowSpecifiedX = 1;
+            style.OverflowSpecifiedY = 1;
+            style.OverflowClipMargin = "content-box";
+            RecomputeOverflow(style);
         }
 
         return style;
@@ -382,7 +487,10 @@ public static partial class ComputedStyle
         {
             "visible" => new ParsedOverflowAxis(0, false),
             "clip" => new ParsedOverflowAxis(1, false),
-            "hidden" or "scroll" or "auto" or "overlay" => new ParsedOverflowAxis(2, false),
+            "hidden" => new ParsedOverflowAxis(2, false),
+            "scroll" => new ParsedOverflowAxis(3, false),
+            // `overlay` is the legacy alias of `auto` and computes to it.
+            "auto" or "overlay" => new ParsedOverflowAxis(4, false),
             "inherit" => new ParsedOverflowAxis(0, true),
             "initial" or "unset" or "revert" or "revert-layer" => new ParsedOverflowAxis(0, false),
             _ => null,
@@ -454,22 +562,24 @@ public static partial class ComputedStyle
         // `visible` on the other computes to `auto` and `clip` computes to `hidden`.
         byte computedX = style.OverflowSpecifiedX;
         byte computedY = style.OverflowSpecifiedY;
-        if ((computedX == 2) != (computedY == 2))
+        if ((computedX >= 2) != (computedY >= 2))
         {
-            if (computedX == 2)
+            if (computedX >= 2)
             {
-                computedY = 2;
+                computedY = computedY == 1 ? (byte)2 : (byte)4;
             }
             else
             {
-                computedX = 2;
+                computedX = computedX == 1 ? (byte)2 : (byte)4;
             }
         }
 
+        style.OverflowComputedX = computedX;
+        style.OverflowComputedY = computedY;
         style.OverflowClipX = computedX != 0;
         style.OverflowClipY = computedY != 0;
-        style.OverflowScrollX = computedX == 2;
-        style.OverflowScrollY = computedY == 2;
+        style.OverflowScrollX = computedX >= 2;
+        style.OverflowScrollY = computedY >= 2;
         style.OverflowHidden = style.OverflowClipX || style.OverflowClipY;
         style.OverflowScrollContainer = style.OverflowScrollX || style.OverflowScrollY;
     }
@@ -610,6 +720,7 @@ public static partial class ComputedStyle
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
+            case DimensionKind.Ch:
             case DimensionKind.Rem:
             case DimensionKind.Vw:
             case DimensionKind.Vh:
@@ -660,6 +771,7 @@ public static partial class ComputedStyle
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
+            case DimensionKind.Ch:
             case DimensionKind.Rem:
             case DimensionKind.Vw:
             case DimensionKind.Vh:
@@ -956,9 +1068,126 @@ public static partial class ComputedStyle
             ApplyValue(style, "line-height", resolvedLineHeight);
         }
 
-        style.FontFamily = CssText.AsciiLower(
-            string.Join(" ", tokens.GetRange(familyIndex, tokens.Count - familyIndex)));
+        string families = string.Join(" ", tokens.GetRange(familyIndex, tokens.Count - familyIndex));
+        style.FontFamily = CssText.AsciiLower(families);
+        style.FontFamilySpecified = SerializeFontFamilyList(families);
     }
+
+    /// <summary>
+    /// Re-serialize a <c>font-family</c> list the way a computed-style query reports it: the
+    /// author's casing, one <c>", "</c> between families, and quotes only where a family does
+    /// not round-trip as a CSS identifier sequence.
+    /// </summary>
+    internal static string SerializeFontFamilyList(string value)
+    {
+        List<string> families = [];
+        foreach (string token in SplitTopLevelCommas(value))
+        {
+            string family = token.Trim();
+            if (family.Length == 0)
+            {
+                continue;
+            }
+
+            if (family.Length >= 2
+                && (family[0] == '"' || family[0] == '\'')
+                && family[^1] == family[0])
+            {
+                // A quoted family keeps its quotes unless the name is an identifier that a
+                // reader would not mistake for a generic keyword.
+                string inner = family[1..^1];
+                families.Add(IsCssIdentifier(inner) && !IsGenericFontFamily(inner)
+                    ? inner
+                    : '"' + inner + '"');
+                continue;
+            }
+
+            // An unquoted family is a sequence of identifiers; more than one means the name
+            // carries spaces and is serialized as a string.
+            string[] words = family.Split(
+                (char[]?)null,
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            families.Add(words.Length == 1 ? words[0] : '"' + string.Join(' ', words) + '"');
+        }
+
+        return string.Join(", ", families);
+    }
+
+    private static List<string> SplitTopLevelCommas(string value)
+    {
+        List<string> parts = [];
+        int start = 0;
+        char quote = '\0';
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (quote != '\0')
+            {
+                if (c == quote)
+                {
+                    quote = '\0';
+                }
+            }
+            else if (c is '"' or '\'')
+            {
+                quote = c;
+            }
+            else if (c == ',')
+            {
+                parts.Add(value[start..i]);
+                start = i + 1;
+            }
+        }
+
+        parts.Add(value[start..]);
+        return parts;
+    }
+
+    private static bool IsCssIdentifier(string value)
+    {
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            bool head = c == '_' || c > '\u007f' || char.IsAsciiLetter(c);
+            if (head || (i > 0 && (c == '-' || char.IsAsciiDigit(c))))
+            {
+                continue;
+            }
+
+            if (i == 0 && c == '-' && value.Length > 1)
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return !char.IsAsciiDigit(value[0]);
+    }
+
+    /// <summary>The CSS Basic UI <c>cursor</c> keywords, without the <c>url()</c> forms.</summary>
+    internal static bool IsCursorKeyword(string value) =>
+        value is "auto" or "default" or "none" or "context-menu" or "help" or "pointer"
+            or "progress" or "wait" or "cell" or "crosshair" or "text" or "vertical-text"
+            or "alias" or "copy" or "move" or "no-drop" or "not-allowed" or "grab"
+            or "grabbing" or "e-resize" or "n-resize" or "ne-resize" or "nw-resize"
+            or "s-resize" or "se-resize" or "sw-resize" or "w-resize" or "ew-resize"
+            or "ns-resize" or "nesw-resize" or "nwse-resize" or "col-resize"
+            or "row-resize" or "all-scroll" or "zoom-in" or "zoom-out";
+
+    internal static bool IsPointerEventsKeyword(string value) =>
+        value is "auto" or "none" or "visiblepainted" or "visiblefill" or "visiblestroke"
+            or "visible" or "painted" or "fill" or "stroke" or "all";
+
+    private static bool IsGenericFontFamily(string value) =>
+        CssText.AsciiLower(value) is "serif" or "sans-serif" or "cursive" or "fantasy"
+            or "monospace" or "system-ui" or "ui-serif" or "ui-sans-serif" or "ui-monospace"
+            or "ui-rounded" or "math" or "emoji" or "fangsong";
 
     // -------------------------------------------------- declaration dispatch
 
@@ -1055,7 +1284,7 @@ public static partial class ComputedStyle
             case "width":
             case "inline-size":
                 style.Width = DimensionValue(value);
-                style.WidthFitContent = CssText.EqualsAscii(value.Trim(), "fit-content");
+                style.WidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[0] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 0, value);
                 style.WidthSet = true;
@@ -1064,6 +1293,7 @@ public static partial class ComputedStyle
             case "height":
             case "block-size":
                 style.Height = DimensionValue(value);
+                style.HeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[1] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 1, value);
                 style.HeightSet = true;
@@ -1095,6 +1325,7 @@ public static partial class ComputedStyle
             case "min-width":
             case "min-inline-size":
                 style.MinWidth = DimensionValue(value);
+                style.MinWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[2] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 2, value);
                 return true;
@@ -1102,6 +1333,7 @@ public static partial class ComputedStyle
             case "min-height":
             case "min-block-size":
                 style.MinHeight = DimensionValue(value);
+                style.MinHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[3] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 3, value);
                 return true;
@@ -1109,6 +1341,7 @@ public static partial class ComputedStyle
             case "max-width":
             case "max-inline-size":
                 style.MaxWidth = DimensionValue(value);
+                style.MaxWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[4] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 4, value);
                 return true;
@@ -1116,12 +1349,14 @@ public static partial class ComputedStyle
             case "max-height":
             case "max-block-size":
                 style.MaxHeight = DimensionValue(value);
+                style.MaxHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SizeExpressions[5] = DeferredLengthExpression(value);
                 SetSizeInherit(style, 5, value);
                 return true;
 
             case "aspect-ratio":
                 style.AspectRatio = ParseAspectRatio(value);
+                style.AspectRatioSpecified = SerializeAspectRatio(value);
                 style.AspectRatioIsMapped = false;
                 style.AspectRatioIsIntrinsic = false;
                 return true;
@@ -1349,6 +1584,8 @@ public static partial class ComputedStyle
 
             case "background-color":
                 style.BackgroundColor = CssColor.ParseForScheme(value, style.ColorSchemeDark);
+                style.BackgroundColorIsSrgbFunction =
+                    style.BackgroundColor is not null && IsSrgbFunctionColor(value);
                 return true;
 
             case "background":
@@ -1357,6 +1594,7 @@ public static partial class ComputedStyle
                 if (value.Trim().Length != 0)
                 {
                     style.BackgroundColor = null;
+                    style.BackgroundColorIsSrgbFunction = false;
                     SetBackgroundGradients(style, value);
                     // The shorthand's <color> belongs to its final layer, and it coexists
                     // with the image layers above it: `background: linear-gradient(...),
@@ -1368,6 +1606,8 @@ public static partial class ComputedStyle
                         backgroundLayers.Count > 0 ? backgroundLayers[^1].Trim() : value;
                     style.BackgroundColor =
                         CssColor.ParseForScheme(finalLayer, style.ColorSchemeDark);
+                    style.BackgroundColorIsSrgbFunction =
+                        style.BackgroundColor is not null && IsSrgbFunctionColor(finalLayer);
 
                     style.BackgroundImage = ParseUrl(value);
                     style.BackgroundSize = null;
@@ -1440,6 +1680,7 @@ public static partial class ComputedStyle
             case "color":
             case "-webkit-text-fill-color":
                 style.Color = CssColor.ParseForScheme(value, style.ColorSchemeDark);
+                style.ColorIsSrgbFunction = style.Color is not null && IsSrgbFunctionColor(value);
                 return true;
 
             case "fill":
@@ -1450,6 +1691,9 @@ public static partial class ComputedStyle
                 return true;
             case "stroke-width":
                 style.SvgStrokeWidth = value.Trim();
+                return true;
+            case "text-anchor":
+                style.SvgTextAnchor = CssText.AsciiLower(value.Trim());
                 return true;
 
             case "font-size":
@@ -1489,9 +1733,91 @@ public static partial class ComputedStyle
             case "font-family":
             {
                 string family = CssText.AsciiLower(value.Trim());
-                if (family.Length != 0 && family != "inherit")
+                switch (family)
                 {
-                    style.FontFamily = family;
+                    // `font-family` is inherited, so `unset` is `inherit`. A null family is
+                    // what the top-down pass reads as "take the parent's computed value", so
+                    // the keyword has to clear whatever the UA sheet put here - every form
+                    // control carries an explicit `arial`, and the author sheets that reach
+                    // them do it through `input, textarea, select, button { font-family:
+                    // inherit }`. Dropping the declaration left those controls on Arial.
+                    case "inherit":
+                    case "unset":
+                        style.FontFamily = null;
+                        style.FontFamilySpecified = null;
+                        break;
+
+                    // Roll back to the UA value, which is the value already in `style`.
+                    case "revert":
+                    case "revert-layer":
+                        break;
+
+                    default:
+                        if (family.Length != 0)
+                        {
+                            style.FontFamily = family;
+                            style.FontFamilySpecified = SerializeFontFamilyList(value);
+                        }
+
+                        break;
+                }
+
+                return true;
+            }
+
+            case "cursor":
+            {
+                // DEVIATION: not modeled by crates/obscura-render, which reports whatever the
+                // inline declaration said. It is inherited, so a null value means "inherit".
+                string cursor = CssText.AsciiLower(value.Trim());
+                switch (cursor)
+                {
+                    case "inherit":
+                    case "unset":
+                        style.Cursor = null;
+                        break;
+                    case "initial":
+                        style.Cursor = "auto";
+                        break;
+                    case "revert":
+                    case "revert-layer":
+                        break;
+                    default:
+                        if (IsCursorKeyword(cursor))
+                        {
+                            style.Cursor = cursor;
+                        }
+
+                        break;
+                }
+
+                return true;
+            }
+
+            case "pointer-events":
+            {
+                // DEVIATION: not modeled by crates/obscura-render. Reporting only - hit testing
+                // runs in JavaScript through `document.elementFromPoint`.
+                string pointerEvents = CssText.AsciiLower(value.Trim());
+                switch (pointerEvents)
+                {
+                    case "inherit":
+                    case "unset":
+                        style.PointerEvents = null;
+                        break;
+                    case "initial":
+                        style.PointerEvents = "auto";
+                        break;
+                    case "revert":
+                    case "revert-layer":
+                        break;
+                    default:
+                        if (IsPointerEventsKeyword(pointerEvents))
+                        {
+                            style.PointerEvents = pointerEvents;
+                        }
+
+                        break;
                 }
 
                 return true;
@@ -1669,6 +1995,7 @@ public static partial class ComputedStyle
                     // A shorthand always assigns both longhands.
                     style.FlexDirection = flow.Direction;
                     style.FlexWrap = flow.Wrap;
+                    style.FlexDirectionAuthored = true;
                 }
 
                 return true;
@@ -1678,15 +2005,19 @@ public static partial class ComputedStyle
                 {
                     case "row":
                         style.FlexDirection = Layout.FlexDirection.Row;
+                        style.FlexDirectionAuthored = true;
                         break;
                     case "row-reverse":
                         style.FlexDirection = Layout.FlexDirection.RowReverse;
+                        style.FlexDirectionAuthored = true;
                         break;
                     case "column":
                         style.FlexDirection = Layout.FlexDirection.Column;
+                        style.FlexDirectionAuthored = true;
                         break;
                     case "column-reverse":
                         style.FlexDirection = Layout.FlexDirection.ColumnReverse;
+                        style.FlexDirectionAuthored = true;
                         break;
                 }
 
@@ -1733,7 +2064,7 @@ public static partial class ComputedStyle
                 return true;
 
             case "flex-basis":
-                style.FlexBasis = DimensionValue(value.Trim());
+                SetFlexBasis(style, value);
                 return true;
 
             case "flex":
@@ -1922,6 +2253,30 @@ public static partial class ComputedStyle
 
                 style.OverflowAxesSet = true;
                 RecomputeOverflow(style);
+                return true;
+            }
+
+            case "overflow-clip-margin":
+            {
+                // Reported only - see LayoutStyle.OverflowClipMargin. A box keyword or a
+                // length; anything else leaves the UA value in place, as an invalid
+                // declaration must.
+                string clipMargin = CssText.AsciiLower(value.Trim());
+                if (clipMargin is "border-box" or "padding-box" or "content-box")
+                {
+                    style.OverflowClipMargin = clipMargin;
+                }
+                else if (clipMargin is "initial" or "unset" or "revert" or "revert-layer")
+                {
+                    style.OverflowClipMargin = null;
+                }
+                else if (DimensionValue(clipMargin) is { Kind: DimensionKind.Px } margin)
+                {
+                    style.OverflowClipMargin = margin.Value == 0f
+                        ? null
+                        : PaintCssValues.CssPx(margin.Value);
+                }
+
                 return true;
             }
 
@@ -2458,12 +2813,14 @@ public static partial class ComputedStyle
 
             case "filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Filter, NonNoneValue(value));
-                style.FilterBlur = ParseFilterBlur(value);
+                style.Filter = ParseFilterFunctions(value, style.Color, style.ColorSchemeDark);
+                style.FilterFontRelative = ContainsFontRelativeUnit(value) ? value : null;
                 return true;
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.BackdropFilter, NonNoneValue(value));
                 style.BackdropBlur = ParseFilterBlur(value);
+                style.BackdropFilterFontRelative = ContainsFontRelativeUnit(value) ? value : null;
                 return true;
             case "perspective":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Perspective, NonNoneValue(value));
@@ -2512,6 +2869,7 @@ public static partial class ComputedStyle
             case "box-shadow":
             case "-webkit-box-shadow":
                 style.BoxShadow = ParseBoxShadow(value, style.Color, style.ColorSchemeDark);
+                style.BoxShadowFontRelative = ContainsFontRelativeUnit(value) ? value : null;
                 return true;
 
             default:
@@ -2637,5 +2995,202 @@ public static partial class ComputedStyle
                 style.Display = Display.Inline;
                 break;
         }
+    }
+
+    /// <summary>
+    /// Parse a <c>filter</c> value into its computed function list, Chromium's way.
+    /// </summary>
+    /// <remarks>
+    /// Returns <c>null</c> for <c>none</c>, for an empty value, and for any list carrying one
+    /// invalid function - CSS invalidates the whole declaration rather than the offending
+    /// function, which is why a bad argument drops the list instead of being skipped.
+    /// <para>
+    /// The two ways an out-of-range argument is handled are not interchangeable, and Chromium
+    /// was measured for each: a negative argument is <em>invalid</em> everywhere, while a value
+    /// above the maximum of a bounded function is <em>clamped</em> - <c>grayscale(2)</c>
+    /// computes to <c>grayscale(1)</c>, but <c>saturate(-0.5)</c> drops the declaration.
+    /// <c>brightness</c>, <c>contrast</c> and <c>saturate</c> have no upper bound.
+    /// </para>
+    /// </remarks>
+    internal static FilterFunction[]? ParseFilterFunctions(
+        string value,
+        RgbaColor? currentColor,
+        bool darkScheme) =>
+        ParseFilterFunctions(value, currentColor, darkScheme, FontLengthContext.Initial);
+
+    /// <inheritdoc cref="ParseFilterFunctions(string, RgbaColor?, bool)"/>
+    internal static FilterFunction[]? ParseFilterFunctions(
+        string value,
+        RgbaColor? currentColor,
+        bool darkScheme,
+        in FontLengthContext context)
+    {
+        string trimmed = value.Trim();
+        if (trimmed.Length == 0 || CssText.EqualsAscii(trimmed, "none"))
+        {
+            return null;
+        }
+
+        List<(string Name, string Arguments)> functions = TransformFunctions(trimmed);
+        if (functions.Count == 0)
+        {
+            return null;
+        }
+
+        FilterFunction[] parsed = new FilterFunction[functions.Count];
+        for (int index = 0; index < functions.Count; index++)
+        {
+            (string name, string arguments) = functions[index];
+            if (BuildFilterFunction(CssText.AsciiLower(name), arguments, currentColor, darkScheme, context)
+                is not { } function)
+            {
+                return null;
+            }
+
+            parsed[index] = function;
+        }
+
+        return parsed;
+    }
+
+    private static FilterFunction? BuildFilterFunction(
+        string name,
+        string arguments,
+        RgbaColor? currentColor,
+        bool darkScheme,
+        in FontLengthContext context)
+    {
+        string args = arguments.Trim();
+        switch (name)
+        {
+            // An omitted argument is the function's initial value: 0 for blur and hue-rotate,
+            // 1 for every multiplier. `grayscale()` computes to `grayscale(1)`.
+            case "blur":
+                return args.Length == 0
+                    ? FilterFunction.Scalar(FilterFunctionKind.Blur, 0f)
+                    : NonNegativeLength(args, context) is { } sigma
+                        ? FilterFunction.Scalar(FilterFunctionKind.Blur, sigma)
+                        : null;
+
+            case "hue-rotate":
+                return args.Length == 0
+                    ? FilterFunction.Scalar(FilterFunctionKind.HueRotate, 0f)
+                    : AngleDegrees(CssText.AsciiLower(args)) is { } degrees && float.IsFinite(degrees)
+                        ? FilterFunction.Scalar(FilterFunctionKind.HueRotate, degrees)
+                        : null;
+
+            case "brightness": return Multiplier(FilterFunctionKind.Brightness, args, float.PositiveInfinity);
+            case "contrast": return Multiplier(FilterFunctionKind.Contrast, args, float.PositiveInfinity);
+            case "saturate": return Multiplier(FilterFunctionKind.Saturate, args, float.PositiveInfinity);
+            case "grayscale": return Multiplier(FilterFunctionKind.Grayscale, args, 1f);
+            case "invert": return Multiplier(FilterFunctionKind.Invert, args, 1f);
+            case "opacity": return Multiplier(FilterFunctionKind.Opacity, args, 1f);
+            case "sepia": return Multiplier(FilterFunctionKind.Sepia, args, 1f);
+
+            case "drop-shadow": return DropShadow(args, currentColor, darkScheme, context);
+
+            // url() is kept verbatim so the computed value round-trips. It is never painted;
+            // SVG filter elements are not modeled.
+            case "url": return args.Length == 0 ? null : FilterFunction.ReferenceTo(args);
+
+            default: return null;
+        }
+
+        static FilterFunction? Multiplier(FilterFunctionKind kind, string args, float maximum)
+        {
+            if (args.Length == 0)
+            {
+                return FilterFunction.Scalar(kind, 1f);
+            }
+
+            if (ScaleNumber(CssText.AsciiLower(args)) is not { } amount
+                || !float.IsFinite(amount)
+                || amount < 0f)
+            {
+                return null;
+            }
+
+            return FilterFunction.Scalar(kind, F32.Min(amount, maximum));
+        }
+    }
+
+    /// <summary>
+    /// <c>drop-shadow(&lt;color&gt;? &lt;x&gt; &lt;y&gt; &lt;blur&gt;?)</c>, where the colour may
+    /// sit on either side of the lengths.
+    /// </summary>
+    /// <remarks>
+    /// Shares <c>box-shadow</c>'s token walk, minus <c>inset</c> and spread, which
+    /// <c>drop-shadow()</c> does not accept. Both offsets are required; the blur defaults to 0
+    /// and, unlike <c>blur()</c>, is a radius - twice sigma.
+    /// </remarks>
+    private static FilterFunction? DropShadow(
+        string args,
+        RgbaColor? currentColor,
+        bool darkScheme,
+        in FontLengthContext context)
+    {
+        RgbaColor? color = null;
+        List<float> lengths = [];
+        foreach (string token in SplitWsParen(args))
+        {
+            string current = token.Trim();
+            if (current.Length == 0)
+            {
+                continue;
+            }
+
+            // A bare `0` must be an offset, not a failed colour, so lengths are tried first
+            // while any slot is still open.
+            if (lengths.Count < 3 && Px(CssText.AsciiLower(current), context) is { } length)
+            {
+                lengths.Add(length);
+                continue;
+            }
+
+            // `currentcolor` is a keyword the colour parser does not take, and it has to be
+            // handled rather than skipped: an unrecognised token here invalidates the whole
+            // declaration, so `drop-shadow(currentColor 1px 2px)` would otherwise compute to
+            // `none` where Chromium reports the resolved colour.
+            RgbaColor? parsed = CssText.EqualsAscii(current, "currentcolor")
+                ? currentColor ?? new RgbaColor(0, 0, 0, 255)
+                : CssColor.ParseForScheme(current, darkScheme);
+            if (parsed is null)
+            {
+                return null;
+            }
+
+            // A second colour is a parse error, not an override.
+            if (color is not null)
+            {
+                return null;
+            }
+
+            color = parsed;
+        }
+
+        if (lengths.Count < 2)
+        {
+            return null;
+        }
+
+        float blur = lengths.Count > 2 ? lengths[2] : 0f;
+        if (!float.IsFinite(lengths[0]) || !float.IsFinite(lengths[1]) || !float.IsFinite(blur) || blur < 0f)
+        {
+            return null;
+        }
+
+        return FilterFunction.DropShadowOf(
+            lengths[0],
+            lengths[1],
+            blur,
+            color ?? currentColor ?? new RgbaColor(0, 0, 0, 255));
+    }
+
+    private static float? NonNegativeLength(string args, in FontLengthContext context)
+    {
+        // `Px`, not `PxValue`: a bare token reader cannot see into `calc()`, so
+        // `blur(calc(1em + 2px))` invalidated the whole filter list where Chromium resolves it.
+        float? length = Px(CssText.AsciiLower(args.Trim()), context);
+        return length is { } parsed && float.IsFinite(parsed) && parsed >= 0f ? parsed : null;
     }
 }
