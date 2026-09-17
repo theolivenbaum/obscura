@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 
 namespace Obscura.Render.Css;
@@ -133,26 +133,28 @@ internal static class CssNumber
             return false;
         }
 
-        // Rust accepts `inf`, `infinity` and `nan` (any ASCII case) with an
-        // optional sign; .NET spells those differently.
+        // DEVIATION from Rust: css.rs parses a numeric token with
+        // `str::parse::<f32>()`, which accepts `inf`, `infinity` and `nan`, and
+        // .NET's parser accepts `NaN`/`Infinity` on top of that. CSS has no such
+        // token - a <number-token> is digits (CSS Syntax 3 4.3.3), and `nan` or
+        // `infinity` tokenizes as an identifier - so Chromium drops
+        // `left: NaN%` / `top: Infinitypx` as an invalid declaration. Accepting
+        // them let a non-finite number reach layout, where it poisons the box
+        // permanently: masonry-layout writes exactly those strings on its first
+        // (pre-measure) pass, and the unplaced box then measured as 0, so every
+        // later pass recomputed NaN and the whole component stayed unrendered.
+        // Rejecting the spelling here is what makes the declaration invalid; a
+        // finite number that overflows to infinity is still parsed, matching
+        // Rust.
         var body = value;
-        var sign = 1f;
         if (body[0] is '+' or '-')
         {
-            sign = body[0] == '-' ? -1f : 1f;
             body = body[1..];
         }
 
-        if (CssText.EqualsAscii(body, "inf") || CssText.EqualsAscii(body, "infinity"))
+        if (body.IsEmpty || (!CssText.IsAsciiDigit(body[0]) && body[0] != '.'))
         {
-            result = sign * float.PositiveInfinity;
-            return true;
-        }
-
-        if (CssText.EqualsAscii(body, "nan"))
-        {
-            result = float.NaN;
-            return true;
+            return false;
         }
 
         return float.TryParse(value, FloatStyles, CultureInfo.InvariantCulture, out result);

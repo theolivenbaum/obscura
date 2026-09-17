@@ -1,4 +1,4 @@
-// xUnit port of `mod tests` in crates/obscura-render/src/dom.rs, in source order.
+﻿// xUnit port of `mod tests` in crates/obscura-render/src/dom.rs, in source order.
 using System.Globalization;
 using Obscura.Dom;
 using Obscura.Render;
@@ -4787,6 +4787,45 @@ public class DomLayoutTests
         // broken the non-scrolling case.
         Assert.True(MathF.Abs(Width("c") - 392f) < 0.01f, $"{Width("c")}");
         Assert.True(MathF.Abs(Width("d") - 396f) < 0.01f, $"{Width("d")}");
+    }
+
+    [Fact]
+    public void ANonFiniteInsetIsAnInvalidDeclaration()
+    {
+        // `nan` and `infinity` are identifiers in CSS, not numbers, so Chromium drops
+        // `left: NaN%` / `top: Infinitypx` and the box keeps its static position.
+        // masonry-layout writes exactly those strings on its first, pre-measure pass; a
+        // box that accepted them laid out nowhere, measured as 0, and every later pass
+        // recomputed NaN from that. Values measured against Chromium 141 over CDP.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .box { position:relative; width:400px }
+              .a { position:absolute; width:100%; height:20px; left:NaN%; top:Infinitypx }
+              .b { position:absolute; width:NaNpx; height:20px; left:-Infinitypx; top:0 }
+              .c { position:absolute; width:100%; height:20px; left:25%; top:40px }
+            </style>
+            <div class="box">
+              <i id="a" class="a"></i><i id="b" class="b"></i><i id="c" class="c"></i>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        Rect Box(string id) => laid.Rects[Id(tree, id)];
+
+        // The invalid inset leaves the box at its static position, full containing-block wide.
+        Assert.True(MathF.Abs(Box("a").X - 0f) < 0.01f, $"{Box("a").X}");
+        Assert.True(MathF.Abs(Box("a").Y - 0f) < 0.01f, $"{Box("a").Y}");
+        Assert.True(MathF.Abs(Box("a").Width - 400f) < 0.01f, $"{Box("a").Width}");
+        Assert.True(MathF.Abs(Box("a").Height - 20f) < 0.01f, $"{Box("a").Height}");
+
+        // An invalid width falls back to the auto/shrink-to-fit behavior, not to NaN.
+        Assert.True(float.IsFinite(Box("b").Width), $"{Box("b").Width}");
+        Assert.True(MathF.Abs(Box("b").X - 0f) < 0.01f, $"{Box("b").X}");
+
+        // Control: a valid inset on the same shape still positions.
+        Assert.True(MathF.Abs(Box("c").X - 100f) < 0.01f, $"{Box("c").X}");
+        Assert.True(MathF.Abs(Box("c").Y - 40f) < 0.01f, $"{Box("c").Y}");
     }
 
     [Fact]
