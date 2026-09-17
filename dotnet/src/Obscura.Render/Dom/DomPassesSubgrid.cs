@@ -1122,6 +1122,43 @@ internal static class DomSubgridPasses
     }
 
     /// <summary>
+    /// Re-resolve the functional (calc()/min()/max()/clamp()) inline sizes of an already-resolved
+    /// deferred set against the geometry the tree has now.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ResolveFunctionalInlineSizes"/> flattens each expression to a px length off its
+    /// parent's content box, so a later pass that changes that parent's width leaves the length
+    /// stale - a bare percentage sibling re-resolves because it reaches taffy typed, a calc() does
+    /// not. Reserving a classic scrollbar narrows a scroll container after this set was resolved,
+    /// which is exactly that case.
+    /// </remarks>
+    internal static bool ReresolveFunctionalInlineSizes(
+        DomTree tree,
+        TaffyTree taffyTree,
+        IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
+        Dictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        float rootFs,
+        float vw,
+        float vh,
+        Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
+    {
+        if (deferred.Count == 0)
+        {
+            return false;
+        }
+
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+        {
+            taffyByDom[domId] = taffyId;
+        }
+
+        return ResolveFunctionalInlineSizes(
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+    }
+
+    /// <summary>
     /// Taffy cannot retain an arbitrary calc()/min()/max()/clamp() expression in a box-size
     /// field. Resolve those expressions only after their parent has final geometry.
     /// </summary>
@@ -1185,6 +1222,7 @@ internal static class DomSubgridPasses
 
         functional = [.. functional.OrderBy(pair => pair.Rank)];
 
+        bool anyChanged = false;
         int start = 0;
         while (start < functional.Count)
         {
@@ -1195,6 +1233,7 @@ internal static class DomSubgridPasses
                 end++;
             }
 
+            bool rankChanged = false;
             for (int index = start; index < end; index++)
             {
                 DeferredCyclicInlineSize entry = functional[index].Entry;
@@ -1240,6 +1279,15 @@ internal static class DomSubgridPasses
                 }
 
                 float value = F32.Max(resolved, 0f);
+
+                // A repeat call only has work where the basis moved, so a slot that already
+                // holds this exact length is left alone and costs no reflow.
+                if (taffyByDom.TryGetValue(entry.Node, out TaffyNodeId currentNode)
+                    && SlotHoldsLength(taffyTree.GetStyle(currentNode), entry.Slot, value))
+                {
+                    continue;
+                }
+
                 if (styles.TryGetValue(entry.Node, out LayoutStyle? updated))
                 {
                     Dimension dimension = Dimension.Px(value);
@@ -1292,12 +1340,34 @@ internal static class DomSubgridPasses
                 }
 
                 taffyTree.SetStyle(nodeId, resolvedStyle);
+                rankChanged = true;
             }
 
-            relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
+            if (rankChanged)
+            {
+                anyChanged = true;
+                relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
+            }
+
             start = end;
         }
 
-        return true;
+        return anyChanged;
+    }
+
+    /// <summary>
+    /// Whether the inline-axis <paramref name="slot"/> of <paramref name="style"/> already holds
+    /// exactly <paramref name="value"/> as a definite length.
+    /// </summary>
+    private static bool SlotHoldsLength(TaffyStyle style, int slot, float value)
+    {
+        TaffyDimension current = slot switch
+        {
+            0 => style.Size.Width,
+            2 => style.MinSize.Width,
+            _ => style.MaxSize.Width,
+        };
+
+        return current.IntoOption() == value;
     }
 }

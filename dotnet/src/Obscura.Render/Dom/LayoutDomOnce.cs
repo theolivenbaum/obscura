@@ -681,8 +681,9 @@ public static partial class RenderDom
                 // this follows every intrinsic, table and fragmentation repair, for the same
                 // reason the static-position harvest below does. The pass only ever adds
                 // gutters, so the loop terminates; two rounds cover a vertical bar narrowing a
-                // box into needing a horizontal one.
-                for (int pass = 0; pass < 2; pass++)
+                // box into needing a horizontal one, and the third covers a box that overflows
+                // only once the re-resolution below has widened something under it.
+                for (int pass = 0; pass < 3; pass++)
                 {
                     if (!DomScrollbarPasses.ApplyScrollbarGutters(taffyTree, idMap, styles))
                     {
@@ -690,6 +691,28 @@ public static partial class RenderDom
                     }
 
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+
+                    // A calc() inline size under a cyclic flex item was flattened to a px length
+                    // against the containing block as it stood before the gutter was taken out of
+                    // it, and unlike a bare percentage - which reaches taffy typed and re-resolves
+                    // on its own - nothing puts it right. Re-resolve those expressions against the
+                    // narrowed box. A no-op costs one dictionary walk and no reflow.
+                    DomSubgridPasses.ReresolveFunctionalInlineSizes(
+                        tree,
+                        taffyTree,
+                        idMap,
+                        styles,
+                        deferredCyclicInlineSizes,
+                        rootFs,
+                        vw,
+                        vh,
+                        (t, _, phase) =>
+                        {
+                            if (phase == DeferredFlexReflowPhase.Layout)
+                            {
+                                t.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                            }
+                        });
                 }
 
                 // A fully-auto positioned axis uses the box's static position in its original

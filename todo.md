@@ -2541,3 +2541,50 @@ Pinned by `DomLayoutTests.AClassicScrollbarIsReservedByAnOverflowingScrollContai
 `AStableScrollbarGutterIsReservedOnANestedScrollContainer` was corrected with them: it asserted that
 `overflow-y: scroll` with no `scrollbar-gutter` reserves nothing, which is only true under
 `--hide-scrollbars`.
+
+#### ...and the gutter relayout re-resolves the calc() sizes below it
+
+Reserving the gutter narrows the scroll container, and the tree is laid out again - but by then
+`DomSubgridPasses.ResolveFunctionalInlineSizes` has already flattened every cyclic-flex
+`calc()`/`min()`/`max()`/`clamp()` inline size to a **px length** taken off its parent's content
+box. A bare percentage under the same container re-resolves on its own, because
+`RestoreTypedPercentages` hands it to taffy typed and taffy resolves it against the used
+containing block; the flattened expression has nothing left to re-resolve. So on the Tesserae
+sample app's `#/view/Searchable List` the scroll container came out right at 1117 and
+`.tss-card` (`width: calc(100% - 4px)`) kept 1118 - the value it had against the 1126 the
+container was before the gutter - where Chromium says 1109. 4,332 of that survey's 6,001
+strictly-aligned pairs differed in width, 4,217 of them by exactly +9px.
+
+`DomSubgridPasses.ReresolveFunctionalInlineSizes` is the same rank-ordered resolution run again
+against the geometry the tree has now, called from the gutter loop in `LayoutDomOnce` after each
+reserving relayout. It is cheap when there is nothing to do: an entry whose slot already holds
+exactly the length it would write is skipped, and a rank group that wrote nothing does not
+reflow, so a page with no reservation pays one walk of the deferred list and no layout.
+
+The loop is one iteration longer (three, was two) because the re-resolution is a feedback edge:
+a narrower container is a narrower basis, which can widen or narrow a descendant, which can make
+a *different* box overflow. It still terminates on the same argument as before - a reservation
+only ever grows, and is capped per axis at that box's scrollbar thickness, so
+`ApplyScrollbarGutters` can answer "changed" at most twice per box however the sizes below it
+move. Instrumented over 200 layouts on 15 Tesserae routes: round one every time, round two in 38
+of 200, round three never. The extra slot is headroom, not a working iteration.
+
+Over the 101-route Tesserae survey against Chromium, mean absolute width error on strictly
+aligned pairs went 5.6680 -> 5.0704, pairs off by more than 2px 16,430 -> 2,953, and pairs at
+exactly +9px 13,629 -> 449; 75 routes improved, 22 unchanged, 4 regressed by 0.13 to 0.25. Those
+four are an existing defect made more visible: they each have a `.tss-stack` that Obscura already
+reserved a gutter out of and Chromium does not, so the descendants now correctly follow a
+container width that is itself wrong. That belongs to the overflow tolerance above, not here.
+
+**Not fixed with it: a pinned flex item keeps its pre-gutter width.** `PinFlexItems` writes the
+item's *used* width as a definite length, and that happens before the gutter too. When the row
+flex container is inside the scroll container rather than above it, the item stays at its
+pre-gutter width and its descendants follow (measured on a reduction: item 400 against Chromium's
+391). Correcting it means un-pinning and re-running the whole deferred cyclic resolution after
+the gutter, which is the ordering F34 records as wrong, so it is left. On the Tesserae routes
+that showed this defect the pinned item is above the scroll container, which is why the card is
+right there.
+
+Pinned by `DomLayoutTests.AReservedScrollbarReResolvesFunctionalWidthsBelowIt`, which carries the
+non-scrolling control in the same fact: the same subtree in an `overflow: hidden` box must keep
+the wider pre-gutter numbers.

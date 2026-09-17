@@ -478,3 +478,95 @@ block unless `scrollbar-gutter` asks for it, and `--hide-scrollbars` is not a fl
 reads - worth considering, since Playwright always sends it. taffy also carries one
 `ScrollbarWidth` for both axes, so a `::-webkit-scrollbar` setting different `width` and
 `height` reserves the larger on both.
+
+## F35 - the scrollbar-gutter relayout does not re-resolve calc() widths below it (FIXED)
+
+**Found on the Tesserae sample app**, `#/view/Searchable List` and
+`#/view/Searchable Grouped List`: **4,332 of 6,001 strictly-aligned pairs differ in width,
+4,217 of them by exactly +9px.** It is the same +9 as F34 and it survived that fix.
+
+The chain (both engines agree above the card, and disagree at it):
+
+| | Chromium | Obscura |
+|---|---|---|
+| `div.tss-card-container` (`padding: 2px`) | 1117 | **1117** |
+| `div.tss-card` (`width: calc(100% - 4px)`) | **1109** | **1118** |
+
+Chromium: container content box 1117 - 4 = 1113, card = 1113 - 4 = **1109**. Correct.
+
+Obscura's 1118 is what that calc gives against a **1126** container - which is the container's
+width *before* the scrollbar gutter was reserved. On a page that does not scroll
+(`#/view/Menu`) the container is 1126 in both engines and the card is 1118 in both, so the
+card's sizing is right; it is the re-resolution after the gutter pass that is missing.
+
+So F34's pass shrinks the scroll container and relayouts, but a descendant whose width is a
+`calc()` keeps the value it resolved against the pre-gutter containing block. The workspace
+survey could not surface this: there the gutter landed at a level with no percentage-sized
+descendants.
+
+**Cause, narrowed.** It is only the *functional* sizes, not percentages in general. A bare
+`width: 100%` reaches taffy as a typed percentage and taffy resolves it against the used
+containing block on every layout, so it follows the gutter by itself. A `calc()` under a cyclic
+flex item does not: `DomSubgridPasses.ResolveFunctionalInlineSizes` flattens it to a px length
+off the parent's content box, and that pass runs before the gutter is reserved. The minimal
+reduction is four divs - `display:flex` row > `flex:1 1 auto` item > `overflow-y:auto` box >
+`padding:2px` container > `width:calc(100% - 4px)` card - and it separates the two cleanly:
+
+| box | Chromium | Obscura before | Obscura after |
+|---|---|---|---|
+| `calc(100% - 4px)` card | 383 | **392** | 383 |
+| `width: 100%` sibling | 387 | 387 | 387 |
+| same card, `overflow:hidden` control | 392 | 392 | 392 |
+
+**Fix.** `DomSubgridPasses.ReresolveFunctionalInlineSizes` re-runs that resolution against the
+geometry the tree has after the gutter relayout, from the loop in `LayoutDomOnce`. An entry
+whose slot already holds the length it would write is skipped and a rank group that wrote
+nothing does not reflow, so a page that reserves nothing pays one list walk. The loop went from
+two iterations to three because the re-resolution feeds back into what overflows; it still
+terminates because a reservation only grows and is capped at the box's scrollbar thickness.
+Instrumented over 15 representative routes (200 layouts) the first round ran every time, the
+second in 38 of 200, and the third never - the extra slot is headroom, not a working iteration.
+
+**Cost, measured.** 101 Tesserae routes at 1440x950, Chromium as reference, strictly-aligned
+pairs only, the same capture path before and after:
+
+| | before | after |
+|---|---|---|
+| mean abs width error | 5.6680 | **5.0704** |
+| ... excluding the unrelated Masonry outlier | 4.8793 | **4.2760** |
+| pairs differing at all | 26,866 | **13,143** |
+| pairs off by more than 2px | 16,430 | **2,953** |
+| pairs at exactly +9px | 13,629 | **449** |
+
+75 routes improved, 22 unchanged, 4 regressed. The two reported routes carry most of it:
+`#/view/Searchable List` 6.5742 -> 0.2398 and `#/view/Searchable Grouped List` 6.5974 -> 0.2877,
+their 8,337 +9px pairs down to 10. `#/view/Menu`, the non-scrolling control, is byte-identical
+before and after, with `.tss-card` at 1118 in both engines.
+
+**The four regressed routes are an existing defect made more visible, not a new one.** Time
+Picker, Stepper, Mark Highlighter and Navbar each have a `.tss-stack` that Chromium leaves at
+1126 and Obscura reserves a gutter out of at 1117 - Obscura calling an `auto` axis overflowing
+where Chromium does not. That -9 was already there before this change (17, 17, 14 and 12 pairs);
+correctly re-resolving the calc() descendants now carries the wrong container width down to them
+too (63, 61, 48 and 37 pairs), for +0.13 to +0.25 mean abs each. The fix is faithful; the
+container width it resolves against is what is wrong, and that belongs to F34's overflow
+tolerance.
+
+**Residual, reduced and not fixed here.** `PinFlexItems` pins a cyclic flex item to its *used*
+width as a definite length, and that pin is taken before the gutter as well. When the row flex
+container is **inside** the scroll container rather than above it, the item keeps its pre-gutter
+width and everything below it follows:
+
+| box (row flex inside an `overflow-y: auto` box) | Chromium | Obscura |
+|---|---|---|
+| `flex: 1 1 auto` item | 391 | **400** |
+| `calc(100% - 4px)` card under it | 383 | **392** |
+
+Un-pinning and re-pinning means re-running the whole deferred cyclic resolution after the
+gutter, which is the ordering F34 warns about, so it is left alone. In the Tesserae app the
+pinned item sits above the scroll container on the affected routes, which is why the card is
+right there. The largest remaining +9 cluster is `#/view/Omni Result` (333 of the 449), whose
+route mean still improved (1.6649 -> 1.2037).
+
+See "Known deviations" in todo.md and
+`DomLayoutTests.AReservedScrollbarReResolvesFunctionalWidthsBelowIt`.

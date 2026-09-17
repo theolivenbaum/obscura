@@ -4746,6 +4746,50 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void AReservedScrollbarReResolvesFunctionalWidthsBelowIt()
+    {
+        // Reserving a classic scrollbar narrows the scroll container after the deferred cyclic
+        // flex sizes have been resolved, and a functional inline size was flattened to a px
+        // length against the containing block as it stood before that. Values measured against
+        // Chromium 141 driven over CDP - Playwright launches browsers with `--hide-scrollbars`,
+        // under which nothing is reserved and every box here is the control's width.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              ::-webkit-scrollbar { width:9px; height:9px }
+              .row { display:flex; width:400px }
+              .item { flex:1 1 auto }
+              .scroller { height:100px; overflow-y:auto; overflow-x:hidden }
+              .noscroll { height:100px; overflow:hidden }
+              .cont { padding:2px }
+              .card { display:block; width:calc(100% - 4px); box-sizing:border-box; height:10px }
+              .pct { display:block; width:100%; height:10px }
+              u { display:block; height:400px }
+            </style>
+            <div class="row"><div class="item"><div class="scroller">
+              <div class="cont"><i id="a" class="card"></i><i id="b" class="pct"></i></div><u></u>
+            </div></div></div>
+            <div class="row"><div class="item"><div class="noscroll">
+              <div class="cont"><i id="c" class="card"></i><i id="d" class="pct"></i></div><u></u>
+            </div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The scrollport is 400 - 9 = 391, so the container's content box is 387 and the card
+        // 383. The bare percentage sibling reaches taffy typed and always re-resolved; the
+        // calc() is the one that used to keep 392, its pre-gutter value.
+        Assert.True(MathF.Abs(Width("a") - 383f) < 0.01f, $"{Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 387f) < 0.01f, $"{Width("b")}");
+
+        // Control: the same subtree in a box that reserves nothing. A fix that moves these has
+        // broken the non-scrolling case.
+        Assert.True(MathF.Abs(Width("c") - 392f) < 0.01f, $"{Width("c")}");
+        Assert.True(MathF.Abs(Width("d") - 396f) < 0.01f, $"{Width("d")}");
+    }
+
+    [Fact]
     public void FinalFlexReflowFinalizesFitContentBeforeDescendantCalc()
     {
         DomTree tree = Parse(
