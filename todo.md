@@ -196,6 +196,30 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
+- **A forced geometry read after any style write re-lays out the whole document,
+  and a component that interleaves the two gets terminated by the task
+  watchdog.** `RenderState.EnsurePreparedRender` rebuilds whenever
+  `PendingStyleMutations` is non-empty, and the retained path
+  (`PaintApi.PrepareDomWithRetainedStylesWithAnimationState`) retains the
+  *style* maps and then runs `PrepareInternal` over the whole tree - there is no
+  dirty-subtree layout invalidation. Measured on a 2059-node page: 50 read-only
+  `offsetWidth` reads cost 130ms, but 50 (write, read) pairs cost 3.1-3.4s
+  against Chromium's 0.3-4.0ms, and it scales linearly with document size
+  (~25us per node per forced read). Tesserae's Masonry interleaves ~50 such
+  pairs, so its one `layout()` pass exceeds the 5.5s autonomous task budget, V8
+  is terminated inside it (uncatchably, so nothing retries), and the container
+  keeps the `left: NaN%` it computed in its earlier zero-width pass forever.
+  That is finding F39 in `dotnet/docs/round3-findings.md`, which has the full
+  measurement.
+
+  This is a speed gap, not a logic deviation: `crates/obscura-render` has the
+  same retained-style / full-relayout split and
+  `run_autonomous_event_loop_turn` arms the same budget around the same batch,
+  so at the Rust engine's speed the 50 relayouts fit. The fix is incremental
+  layout invalidation - carry a dirty set on `PreparedRender` so a retained
+  restyle of one node re-runs layout for its formatting context rather than the
+  document. Raising the watchdog budget only moves the threshold.
+
 - **`filter` is parsed only for `blur()`, so `drop-shadow()` neither reports nor
   paints.** `getComputedStyle(el).filter` returns `""` where Chromium returns the
   authored list, and the product's four-way
@@ -822,6 +846,37 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### The MutationObserver shim follows DOM 4.3.4; the Rust shim's registration rules are wrong
+
+`bootstrap.js` is the port's own copy now (CLAUDE.md rule 5), and the shim in
+`dotnet/src/Obscura.Js/js/bootstrap.js` diverges from the one in
+`crates/obscura-js/js/bootstrap.js` in four places, all of them bugs against DOM 4.3.4 and
+against Chromium. Measured with `mo2probe.html` (expected / Rust shim / this one):
+
+| case | Chromium | Rust shim | here |
+|---|---|---|---|
+| one observer watching two nodes, mutate one | 1 record | 2 records | 1 record |
+| `disconnect()` after the mutation, before the checkpoint | 0 callbacks | 1 callback | 0 callbacks |
+| `observe(el, { attributeFilter: ['data-x'] })` | 1 record | 0 records | 1 record |
+
+- `observe()` pushed `this` onto `globalThis.__mutationObservers` on every call, so an observer
+  watching N nodes was listed N times and `__notifyMutation` delivered each record N times. It is
+  now listed once, and re-observing a node replaces that registration's options.
+- `disconnect()` removed one list entry and left the record queue alone. It now removes every
+  entry, empties the queue and drops the observer from the notify set.
+- `attributeOldValue` / `attributeFilter` now imply `attributes`, `characterDataOldValue` implies
+  `characterData` (observe() steps 3-4), and `attributeFilter` filters by name.
+- The notify set is drained by one microtask per checkpoint instead of one promise job per
+  mutation. Delivery was already batched correctly - the first job spliced every record and the
+  rest found an empty queue - so this is allocation, not behaviour, but 20,000 mutations under an
+  observer queued 20,000 jobs to deliver one callback.
+
+Delivery *placement* was never the problem: the notify set is drained by
+`ObscuraJsRuntime.PumpTick`'s `PerformMicrotaskCheckpoint()`, at the top of the turn and after
+every posted task and timer callback, which is where the HTML event loop puts it. Covered by
+`Obscura.Js.Tests/MutationObserverTests.cs` (7 facts). Worth carrying back to the Rust shim if
+`crates/` ever stops being read-only.
 
 ### Shaped inline items flush before a level's positive z-index layers, not after them
 

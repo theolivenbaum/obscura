@@ -693,27 +693,107 @@ table's max-content is ~27px short, which is not the clamp this finding was abou
 Swept over the 101 Tesserae routes against `out-tssChrL`: 98 comparable, **4 improved, 0 worse**;
 geometry divergences over 2px 18,933 -> 14,634, mean absolute box error 46.25 -> 17.04.
 
-## F39 - MutationObserver callbacks are delivered an order of magnitude late
+## F39 - Masonry never lays out: the mount callback's layout pass is killed by the task watchdog
 
-Found while fixing F36 and **not fixed**; it is orthogonal to the CSS parser and was equally
-present before that fix.
+The title this finding was filed under - "MutationObserver callbacks are delivered an order of
+magnitude late" - is wrong, and the measurement that produced it was timing the wrong thing.
+`MutationObserver` delivery was measured directly and it is on the microtask checkpoint, in both
+engines. What is actually broken is the `Masonry.layout()` pass that the delivered callback goes
+on to run: it exceeds the 5.5s autonomous task budget and V8 is terminated inside it.
 
-Tesserae's `DomObserver.WhenMounted` drives Masonry's real `layout()` off a
-`MutationObserver` on `document.body`. Measured from navigation on `#/view/Masonry`:
+### Where the notify set is drained
 
-| | time for `div.tss-masonry` to reach its 7340px height |
-|---|---|
-| Chromium | **~0.8 s**, and immediately on a warm page with no observer attached |
-| Obscura, page-level `MutationObserver` attached | **~8.8 s** |
-| Obscura, no `MutationObserver` attached | **never** - 31 s of polling, items at their static position with correct widths, container 0 |
+`bootstrap.js`'s `MutationObserver._notify` queues a promise job; the host drains it in
+`ObscuraJsRuntime.PumpTick`, which calls `PerformMicrotaskCheckpoint()` at the top of the turn,
+after every posted task and after every timer callback (`ObscuraJsRuntime.EventLoop.cs`). That is
+the placement DOM 4.3.4 and the HTML event loop ask for. An isolated probe (a `MutationObserver`
+on `document.body`, one `appendChild`, timestamps against a `queueMicrotask` scheduled just before
+it) shows the callback in the **same checkpoint** as the microtask and ahead of `setTimeout(0)` and
+`requestAnimationFrame`, in Obscura exactly as in Chromium.
 
-Two consequences worth keeping in mind:
+### What actually happens on `#/view/Masonry`
 
-- **The survey under-measures any observer-driven component.** The automated snapshot of
-  `#/view/Masonry` still catches an intermediate state (container 0, items unpositioned but
-  correctly sized) while a probe that waits long enough matches Chromium exactly. The capture's
-  own DOM-quiet settle is itself a `MutationObserver`, so the harness is measuring the thing it
-  depends on.
-- The third row is the sharper one: with no observer attached at all the layout never runs,
-  which suggests the delivery is being driven by something incidental rather than by the
-  microtask checkpoint the spec puts it on.
+Instrumenting `Masonry.prototype.layout` on both engines (wrap, log entry and exit):
+
+| | | |
+|---|---|---|
+| 1st `layout()` - Outlayer's init layout, element still detached | in at 2.1s, out at 2.7s | 0 items, **620ms** |
+| 2nd `layout()` - from `DomObserver.WhenMounted` -> rAF -> `setTimeout(16)` | in at 3.8s, **never returns** | 50 items, container measures 1084 |
+
+The mount callback fires. The record reaches it. The layout it runs is entered with the right
+geometry and is then terminated part-way through: one
+`autonomous browser task exceeded its task budget` lands in the server log per navigation, exactly
+at that point. The termination is a V8 `TerminateExecution`, so it unwinds through JavaScript
+without running `catch` blocks - the wrapper's `try` around the call never sees it. Masonry is left
+carrying the `left: NaN%; top: Infinitypx` it computed in its **first**, zero-width layout, so the
+container stays 0 forever and nothing schedules another pass. Calling `Masonry.data(el).layout()`
+by hand afterwards produces the correct 7340 immediately.
+
+That is also the answer to the third row of the original table. "No observer attached" does not
+hang because delivery needs an observer to drive it; it hangs because the one layout pass the page
+gets is killed and nothing else pokes the DOM afterwards. Attaching a page-level observer adds
+mutation traffic, which gives Tesserae further mount callbacks and therefore further chances for a
+`layout()` to land in a cheaper moment - which is what the "~8.8s" reading was.
+
+### Root cause: a forced geometry read after any style write re-lays out the whole document
+
+`thrash.html` - 2059 nodes, 50 items, alternating one inline-style write with one `offsetWidth`
+read:
+
+| | Obscura | Chromium |
+|---|---|---|
+| 50x read-only `offsetWidth` | 130ms | 29.3ms |
+| 50x (write `opacity`, read `offsetWidth`) | 3353ms | 0.3ms |
+| 50x (write `left`/`top`, read `offsetWidth`) | 3122ms | 4.0ms |
+| 50x (write `class`, read `offsetWidth`) | 3068ms | 0.1ms |
+| 50x write `left`/`top`, **no** read | 3ms | 0.1ms |
+| one read after that batch | 106ms | 0.3ms |
+
+Every write-then-read pair costs one whole-document prepare (~65ms here), and it scales linearly
+with document size - 20 pairs cost 249ms at 230 nodes, 650ms at 1030, 2485ms at 4030, i.e. ~25us
+per node per forced read. `RenderState.EnsurePreparedRender` rebuilds whenever
+`PendingStyleMutations` is non-empty; the retained path
+(`PaintApi.PrepareDomWithRetainedStylesWithAnimationState`) retains the **style** maps and then
+runs `PrepareInternal`, which re-lays the whole tree. There is no dirty-subtree layout
+invalidation. Masonry interleaves ~50 such pairs, so one `layout()` costs 3.3s when the page is
+quiet and more than the 5.5s budget during boot.
+
+This is a port *speed* gap, not a logic deviation: `crates/obscura-render` has the same
+retained-style / full-relayout split, and `run_autonomous_event_loop_turn` in
+`crates/obscura-js/src/runtime.rs` arms the same
+`SYNCHRONOUS_TASK_FLOOR_MS + WATCHDOG_SCHEDULING_MARGIN_MS` around the same batch. At the Rust
+engine's speed 50 forced relayouts fit inside the budget; at the port's they do not.
+
+**Scoped proposal (not done here):** incremental layout invalidation - carry a dirty set on
+`PreparedRender` so a retained restyle of one node re-runs layout for its formatting context
+rather than the document. Until that exists, any component that interleaves style writes with
+geometry reads over tens of elements is at risk of the same termination, and raising the watchdog
+budget only moves the threshold.
+
+### Fixed here: the MutationObserver shim's notify set and registration rules
+
+Measuring the above turned up three real spec divergences in the shared shim, all of them now
+fixed in `dotnet/src/Obscura.Js/js/bootstrap.js` - the port owns its copy now, so this is a deviation from the Rust shim and is recorded in `todo.md` (`mo2probe.html`, expected/Obscura-before/after):
+
+| case | Chromium | before | after |
+|---|---|---|---|
+| one observer watching two nodes, mutate one | 1 record | **2 records** | 1 record |
+| `disconnect()` after the mutation, before the checkpoint | 0 callbacks | **1 callback** | 0 callbacks |
+| `observe(el, { attributeFilter: ['data-x'] })` | 1 record | **0 records** | 1 record |
+
+- `observe()` pushed `this` onto `globalThis.__mutationObservers` on **every** call, so an
+  observer watching N nodes was listed N times and `__notifyMutation` delivered each record N
+  times. It is now listed once, and re-observing a node replaces that registration's options.
+- `disconnect()` removed one entry and left the record queue alone. It now removes every entry,
+  empties the queue and drops the observer from the notify set.
+- `attributeOldValue` / `attributeFilter` now imply `attributes` and `characterDataOldValue`
+  implies `characterData` (observe() steps 3-4), and `attributeFilter` actually filters.
+- The notify set is drained by **one** microtask per checkpoint rather than one per mutation.
+  Delivery was already correctly batched - the first job spliced every record and the rest found
+  an empty queue - so this is shape and allocation, not behaviour: 20,000 mutations under an
+  observer queued 20,000 promise jobs to deliver one callback.
+
+Pinned by `Obscura.Js.Tests/MutationObserverTests.cs` (7 facts). Cost: interleaved A/B of the two
+builds on `#/view/Button`, five runs each, 8418ms vs 8431ms (0.15%, noise floor ~10%); a
+20,000-mutation churn page is likewise unchanged. The three `#/view/Masonry` timings are
+**unchanged**, as expected - they are governed by the forced-layout cost above.

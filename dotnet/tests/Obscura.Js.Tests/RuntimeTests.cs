@@ -6651,10 +6651,17 @@ public sealed class RuntimeTests
             """,
             returnByValue: true,
             awaitPromise: true);
+        // The root is 105 wide, not the 120 this asserted before a classic scrollbar
+        // started taking layout space: the box is 100 content + 10+10 padding + 5+5
+        // border, its offsetWidth is 130, and `overflow: auto` with 120px of content
+        // in an 80px box reserves 15 for the vertical scrollbar. IntersectionObserver's
+        // root rectangle is the content area, so it excludes that, and the intersection
+        // narrows to 85 with it. Both values measured in Chromium 141 - launched by
+        // hand, since Playwright passes --hide-scrollbars and would reserve nothing.
         AssertJson(
             """
-            [{"intersecting":false,"ratio":0,"root":[15,25,120,100],"intersection":[0,0,0,0]},
-             {"intersecting":true,"ratio":1,"root":[15,25,120,100],"intersection":[25,95,100,20]}]
+            [{"intersecting":false,"ratio":0,"root":[15,25,105,100],"intersection":[0,0,0,0]},
+             {"intersecting":true,"ratio":1,"root":[15,25,105,100],"intersection":[25,95,85,20]}]
             """,
             result.Value);
     }
