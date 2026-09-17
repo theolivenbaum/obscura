@@ -857,9 +857,13 @@ public static partial class RenderDom
             }
         }
 
+        Dictionary<NodeId, Rect> svgRects = [];
+        SvgBoxes.Measure(tree, styles, rects, svgRects);
+
         DomLayout layout = new()
         {
             Rects = rects,
+            SvgRects = svgRects,
             InlineFragments = inlineFragments,
             Styles = styles,
             CustomProperties = customProperties,

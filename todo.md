@@ -2390,6 +2390,57 @@ past.
 
 Pinned by `SvgViewportTests` (13 facts, `Obscura.Render.Tests`).
 
+### An SVG shape answers `getBoundingClientRect()`, and the reference has nothing to port
+
+An inline `<svg>` is an atomic replaced box, so its children never become taffy nodes and
+`DomLayout.Rects` holds nothing for them. `crates/obscura-render` is in the same position and
+does not care: it hands the whole subtree to resvg as one opaque raster, so the reference has
+no per-element SVG geometry either. CSSOM View does care - Chromium answers
+`getBoundingClientRect()` on an SVG shape with the element's **object bounding box** mapped
+through its CTM - and the gap showed up as 366 elements reading `[0, 0, 0, 0]` on one chart
+route of the Tesserae sample app (143 `circle`, 116 `text`, 44 `rect`, 43 `line`, 13 `path`,
+7 `g`), with no other divergence on that route at all. Charting libraries measure their own
+output, so a whole class of app is unmeasurable without it.
+
+`SvgBoxes` (`Obscura.Render/Dom/SvgBoxes.cs`) is a post-layout pass that walks the SVG
+rendering tree of every outermost `<svg>` that got a box, resolves each element's user-space
+box through the viewport and `transform` chain, and writes document-space rects into
+`DomLayout.SvgRects`. `PreparedRender.DocumentRect` / `FragmentSource` fall back to that map.
+It is kept **apart from** `Rects` on purpose: an SVG shape has no CSS layout box, so
+`ClientSize` answers `(0, 0)` for one rather than its bounding box.
+
+What the walk reproduces, all measured against Chromium 141 on `svgbox-probe.html`:
+
+- The box is the **fill** bounding box: a `stroke-width="3"` horizontal `<line>` is
+  zero-height, and a `<path>`'s curves contribute their tight extrema, not their control
+  points.
+- A container (`g` / `a` / `switch`) unions its children **in its own user space**, before its
+  own `transform` - which is also why a `clip-path` does not shrink it and an empty one keeps a
+  zero box at that space's origin.
+- Nothing outside the SVG rendering model gets a box, and neither does its subtree: `defs`,
+  `clipPath`, `mask`, `marker`, `symbol`, `pattern`, the gradients, `filter`, `title`, `desc`,
+  `metadata`, and anything under `display: none`.
+- A nested `<svg>` reports its own viewport rectangle and re-bases its children on it,
+  `viewBox` fitting included.
+
+Three deliberate deviations inside it:
+
+- **Text is one run.** The box is the anchored advance wide and the face's ascent + descent
+  tall, both rounded to whole pixels the way Blink normalizes font metrics (11px Liberation
+  Sans is 10 above the baseline and 2 below). Per-`tspan` positioning is not modelled, so a
+  `<tspan>` gets no box of its own. Measured widths land within 0.5px of Chromium.
+- **`<use>` gets no box.** Resolving one means deciding what the referenced element inside
+  `<defs>` reports, and nothing in the survey needed it; answering nothing is better than
+  answering wrongly.
+- **`clientWidth` / `clientHeight` are 0 for every SVG element.** Blink's `<text>` is a
+  block-flow underneath and does report a client width there; reporting 0 keeps every SVG
+  element consistent instead of reproducing that one internal detail.
+
+`SvgRenderer.ShapePath` was generalized to `(tag, attribute-accessor)` so the raster's parsed
+`XElement` document and this pass's live DOM nodes build shape geometry from the same code.
+
+Pinned by `SvgBoxTests` (10 facts, `Obscura.Render.Tests`).
+
 ### A text control's intrinsic width comes from the face's metrics, not a fixed em fraction
 
 `dom.rs` sizes a single-line text control as `size * font_size * 0.6 + font_size * 0.675`,
@@ -2588,3 +2639,38 @@ right there.
 Pinned by `DomLayoutTests.AReservedScrollbarReResolvesFunctionalWidthsBelowIt`, which carries the
 non-scrolling control in the same fact: the same subtree in an `overflow: hidden` box must keep
 the wider pre-gutter numbers.
+
+### `nan` and `infinity` are identifiers in CSS, so a length spelling one is invalid
+
+`css.rs` parses a numeric token with `str::parse::<f32>()`, and the port's
+`CssNumber.TryParseFloat` reproduced that faithfully - it even added explicit `inf` /
+`infinity` / `nan` branches because Rust accepts those spellings and .NET spells them
+differently. CSS has no such token: a `<number-token>` is digits (CSS Syntax 3 4.3.3) and
+`nan` or `infinity` tokenizes as an identifier, so Chromium rejects `left: NaN%` /
+`top: Infinitypx` as an invalid declaration and the box keeps its static position.
+
+Accepting them let a non-finite number reach layout, where it poisons the box for good.
+`masonry-layout` is constructed before its element is in the document, so its first
+measuring pass has no container width and no items and computes `columnWidth` from the
+option *string*; every item it has already adopted is then written
+`left: NaN%; top: Infinitypx; transform: translate3d(0px, -Infinitypx, 0)`. Chromium drops
+all three, the items stay measurable, and the real pass 16 ms later lays them out. Here the
+declarations stuck, the items laid out nowhere and measured 0x0, and each later pass
+recomputed NaN from that - so on `#/view/Masonry` of the Tesserae sample app
+`div.tss-masonry` was `1084 x 0` against Chromium's `1084 x 7340` and all 50
+`.tss-masonry-item` children were `[0, 0, 0, 0]` (round-3 finding F36).
+
+`CssNumber.TryParseFloat` now requires the first character after an optional sign to be a
+digit or `.`, which is the whole CSS number grammar's entry condition. A finite number that
+*overflows* to infinity (`1e400`) still parses, matching Rust; only the spelling is refused.
+The whole port funnels through this one helper (`StylePrimitives.ParseF32`, `CssLength`,
+`CssColor`, keyframe offsets, container queries), so nothing else needed changing.
+
+Not fixed, and deliberately: the CSSOM still *stores* the invalid declaration, so
+`getAttribute('style')` keeps `left: NaN%` where Chromium's string never contains it. That
+validation lives in `bootstrap.js`, which is shared verbatim with the Rust engine and has no
+value grammar at all; a per-property validator there is a much larger piece of work and buys
+nothing observable in layout, which now matches.
+
+Pinned by `CssTests.ANonNumericTokenIsNotACssNumber` / `ACssNumberStillParses` /
+`ANonFiniteLengthDoesNotResolve` and `DomLayoutTests.ANonFiniteInsetIsAnInvalidDeclaration`.

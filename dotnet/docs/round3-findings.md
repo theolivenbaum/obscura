@@ -582,7 +582,7 @@ Everything above the masonry container matches to the pixel, so the page is othe
 Masonry positions its items absolutely from JavaScript after measuring them, so the first
 thing to establish is whether that code ran and what it measured.
 
-## F37 - a chart's SVG children collapse to zero
+## F37 - a chart's SVG children collapse to zero (FIXED)
 
 `#/view/Charts`. **366 SVG elements are `[0, 0, 0, 0]` in Obscura** where Chromium gives them
 real geometry - 143 `circle`, 116 `text`, 44 `rect`, 43 `line`, 13 `path`, 7 `g`, including a
@@ -591,6 +591,32 @@ real geometry - 143 `circle`, 116 `text`, 44 `rect`, 43 `line`, 13 `path`, 7 `g`
 The telling statistic: on that route there are **zero** divergences that are not a collapse to
 zero. Every chart element is either exactly right or completely absent, which points at a
 whole subtree never being laid out rather than at a sizing rule.
+
+**Nothing separated the collapsed elements from the working ones, because there were no
+working ones.** Across the whole 101-route capture, 0 of 451 SVG descendants (`circle`,
+`rect`, `line`, `path`, `text`, `g`, `polyline`, `polygon`) had any geometry, while every
+`<svg>` root itself was sized correctly. An inline `<svg>` is an atomic replaced box, so its
+children never become taffy nodes and `DomLayout.Rects` has no entry for them;
+`op_layout_geometry` then returns the empty string and `getBoundingClientRect()` answers all
+zeros. The Rust engine is in the same position and does not care - it hands the subtree to
+resvg as one raster - so there was no reference behaviour to port, only Chromium's to
+reproduce.
+
+Fixed by `SvgBoxes`, a post-layout pass that resolves each SVG element's object bounding box
+through the viewport and `transform` chain into `DomLayout.SvgRects`, which
+`PreparedRender.DocumentRect` / `FragmentSource` fall back to. Reduced to `svgbox-probe.html`
+(26 elements: shapes, anchored text, a transformed group, a clipped group, an empty group, a
+nested viewport, `defs` / `clipPath` / `display:none`), where all 26 now match Chromium within
+0.5px. See "An SVG shape answers `getBoundingClientRect()`" under Known deviations in
+`todo.md` for what the walk does and does not model.
+
+On the route: **410 collapsed elements -> 0**. What is left is 36 divergences of up to 8px,
+and they are all one pre-existing, unrelated defect: the seventh chart's `<svg>` is
+`[317, 3315, 1043, 200]` here against Chromium's `...192`. Its parent `div.tss-chart` is 200
+tall with an 8px top offset, so `height="100%"` has to resolve against the 192px content box;
+resolving it against 200 makes the `preserveAspectRatio="none"` y-scale 1.0 instead of 0.96
+and drags all 36 of that chart's children with it. That is a percentage-height defect, not an
+SVG one.
 
 ## F38 - the Code Diff view, two separate defects
 
