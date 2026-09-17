@@ -39,12 +39,21 @@ Read `todo.md` for the live port status and the ordered work queue.
    dependency needs an explicit decision recorded in `todo.md` first. In
    particular: no native TLS stack, which is why stealth TLS impersonation is
    a tracked gap rather than a port target.
-5. **`bootstrap.js` is shared, not ported.** `crates/obscura-js/js/bootstrap.js`
-   is JavaScript and runs unchanged on the C# side. `Obscura.Js` embeds it by
-   linking that exact file (see the `EmbeddedResource` in `Obscura.Js.csproj`),
-   never by copying it, so the two engines cannot drift. Fix the shim in place
-   and both engines pick the fix up. It reaches V8 through
+5. **`bootstrap.js` is ours now.** `dotnet/src/Obscura.Js/js/bootstrap.js` began
+   as a verbatim copy of `crates/obscura-js/js/bootstrap.js` and is embedded from
+   that local path. It used to be linked out of the Rust tree so the two engines
+   could not drift, but `crates/**` is read-only (rule 1), which made a shim bug
+   unfixable: the two rules contradicted each other and this one gave way. Fix
+   the shim in the C# copy, comment the divergence at the site, and record it
+   under "Known deviations" in `todo.md` like any other. Carry a fix the other
+   way by hand only if it is worth carrying. It reaches V8 through
    `BootstrapLoader.Install`, which installs the `Deno.core` shim first.
+
+   The same applies to the other two things the build used to take out of
+   `crates/`: the tracker blocklist (`dotnet/src/Obscura.Net/Resources/pgl_domains.txt`)
+   and the embedded fonts (`dotnet/src/Obscura.Render/Assets/*.ttf`). Nothing in
+   `dotnet/` reads across into the Rust tree any more, so the port can stand on
+   its own when `crates/` eventually goes away.
 6. **The op protocol is a contract.** `bootstrap.js` calls ~53 ops, and `op_dom`
    multiplexes ~90 string commands over `(cmd, arg1, arg2) -> string`. The C#
    implementation must accept and return byte-identical payloads. See
@@ -121,10 +130,11 @@ dotnet/
 
 The engine never uses system fonts. It embeds its own faces (Liberation, DejaVu,
 Noto Color Emoji) so rasterization is identical on every host and works on
-distroless images with no fontconfig. The C# build links those font files
-directly out of `crates/obscura-render/assets/` rather than copying them, so the
-two engines can never rasterize against different binaries. Resolve typefaces
-with `SKTypeface.FromData` over the embedded resources; never
+distroless images with no fontconfig. They live in
+`dotnet/src/Obscura.Render/Assets/` and are byte-identical copies of
+`crates/obscura-render/assets/`; if that tree's faces are ever updated, re-copy
+them or the two engines will rasterize differently. Resolve typefaces with
+`SKTypeface.FromData` over the embedded resources; never
 `SKTypeface.FromFamilyName`.
 
 ## Build
