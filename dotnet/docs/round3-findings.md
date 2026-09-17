@@ -630,4 +630,23 @@ SVG one.
 - **753 sizing divergences**, led by a `textarea.tss-textarea` 238 -> 257 (+19), its
   containers +19, and `div.tss-codediff` 821 -> 889 (+68).
 
-The second is the tractable half and may be the cause of the first.
+### Decomposed (from the d9-d16 chain, both engines index-aligned)
+
+It is three defects, and the third is the one that matters:
+
+1. **`textarea.tss-textarea` is 19px too wide** - 238 -> 257, and its container and the stack
+   item above it follow. Its height is identical (220/220), so this is the control's intrinsic
+   *width* only. F32 set `textarea content = ceil(charWidth * cols) + 15`; something about this
+   one (it carries `.tss-textarea` CSS) puts it 19 over.
+2. **`div.tss-codediff` is 68px too wide** - 821 -> 889, x 555 -> 574, and the whole
+   `d2h-*` tree under it inherits both.
+3. **The diff table does not get its max-content width, so every code line wraps.**
+   `table.d2h-diff-table` is **2535 wide x 267 tall** in Chromium and **1073 x 1878** here; a
+   second one is 1212 x 164 against 1073 x 778. Its `div.d2h-file-side-diff` parent is
+   `overflow: scroll hidden`, i.e. horizontally scrollable, so the table should size to its
+   content and overflow. Obscura clamps it to the container's 1073 and the lines wrap, which
+   is what produces the 225 collapsed `d2h-code-line-*` spans, the `d2h-code-wrapper` heights
+   of 13,920 and 14,794 against Chromium's 836, and the line container at y 29,798 against
+   y 3,955.
+
+(3) subsumes most of the route's 990 divergent pairs and is the one to fix first.
