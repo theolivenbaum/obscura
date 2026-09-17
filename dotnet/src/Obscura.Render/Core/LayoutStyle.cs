@@ -515,6 +515,14 @@ public sealed class LayoutStyle
     /// </summary>
     internal bool HasReplacedSizing;
 
+    /// <summary>
+    /// A native form control's intrinsic content box, published when its own <c>width</c> cannot
+    /// give it one. A control has no child boxes, so once a percentage width fails to resolve
+    /// there is nothing left to size it from and it collapses to its padding; this is what the
+    /// leaf measure hands back instead.
+    /// </summary>
+    internal (float Width, float Height)? NativeControlContent;
+
     public Edges Margin;
 
     /// <summary>Which margin sides are <c>auto</c> (top, right, bottom, left).</summary>
@@ -1249,12 +1257,61 @@ public sealed class LayoutStyle
             return 0f;
         }
 
-        return ScrollbarWidthKind switch
+        return ScrollbarThickness(vertical: true);
+    }
+
+    /// <summary>
+    /// The author's <c>::-webkit-scrollbar</c> <c>width</c> in CSS pixels, or <c>null</c> when
+    /// the sheet styles no scrollbar box for this element.
+    /// </summary>
+    /// <remarks>
+    /// Chromium sizes a custom scrollbar from that pseudo-element's <c>width</c> (vertical) and
+    /// <c>height</c> (horizontal), and the resulting thickness is taken out of the scrollport,
+    /// so it is layout input and not decoration. Tesserae asks for 9px on every scroll pane.
+    /// </remarks>
+    internal float? ScrollbarPseudoWidth;
+
+    /// <summary>The author's <c>::-webkit-scrollbar</c> <c>height</c> in CSS pixels.</summary>
+    internal float? ScrollbarPseudoHeight;
+
+    /// <summary>
+    /// Width of the vertical scrollbar this box actually reserves, decided after a layout pass
+    /// because an <c>overflow: auto</c> axis only gets one when its content overflows.
+    /// </summary>
+    internal float ReservedScrollbarY;
+
+    /// <summary>Height of the horizontal scrollbar this box actually reserves.</summary>
+    internal float ReservedScrollbarX;
+
+    /// <summary>
+    /// Thickness of this box's scrollbar on the given axis - <paramref name="vertical"/> for the
+    /// one that takes width out of the scrollport.
+    /// </summary>
+    internal float ScrollbarThickness(bool vertical)
+    {
+        if (ScrollbarWidthKind == 2)
         {
-            1 => ThinScrollbarGutter,
-            2 => 0f,
-            _ => ClassicScrollbarGutter,
-        };
+            return 0f;
+        }
+
+        if ((vertical ? ScrollbarPseudoWidth : ScrollbarPseudoHeight) is { } custom)
+        {
+            return F32.Max(custom, 0f);
+        }
+
+        return ScrollbarWidthKind == 1 ? ThinScrollbarGutter : ClassicScrollbarGutter;
+    }
+
+    /// <summary>
+    /// Whether the given axis is one a classic scrollbar can appear on: <c>scroll</c> always
+    /// shows one, <c>auto</c> shows one only when the content overflows, and every other
+    /// keyword (including <c>hidden</c>, which clips without a scrollbar) shows none.
+    /// </summary>
+    internal bool ScrollbarAxisKind(bool vertical, out bool always)
+    {
+        byte computed = vertical ? OverflowComputedY : OverflowComputedX;
+        always = computed == 3;
+        return computed is 3 or 4;
     }
 
     /// <summary>Classic scrollbar gutter width, matching Chromium on this platform.</summary>

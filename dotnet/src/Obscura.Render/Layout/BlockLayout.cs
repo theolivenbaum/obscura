@@ -399,8 +399,28 @@ public static class BlockLayout
             return LayoutOutput.FromOuterSize(new Size<float>(containerOuterWidth, 0.0f));
         }
 
+        // DEVIATION from vendor/taffy/src/compute/block.rs, which falls back to
+        // `min_size.height` as the children's percentage basis whenever this box has no
+        // resolved height of its own. `min-height: 0` is the initial value and says nothing
+        // about the used height, so that fallback hands every `height: %` child a basis of
+        // 0 and collapses it, where Chromium sizes the box from its content and resolves the
+        // percentage against that. Only a POSITIVE minimum carries information - the box will
+        // be at least that tall - so a zero one now leaves the basis unresolved, which makes
+        // the child content-sized, the same answer Chromium computes.
+        // The reference never reached this: crates/obscura-render/src/dom.rs rewrites every
+        // percentage height under an indefinite box to `auto`, so no percentage survived to
+        // be resolved here. Marking a flex-sized box a definite containing block (the
+        // Flexbox 9.8 deviation in Dom/LayoutDomComputed.cs) is what lets them through, and
+        // that exposed this. Curiosity Workspace's `#/manage/configure/subscription` nests
+        // `height: 100%; min-height: 0` twice under an auto-height flex item; the inner
+        // `overflow: hidden auto` stack came out 24px tall instead of 473px and the route
+        // rendered blank. See "Known deviations" in todo.md.
+        float? percentageResolutionMinHeight =
+            minSize.Height is { } minimumHeight && minimumHeight > 0.0f ? minimumHeight : null;
         var containerPercentageResolutionHeight =
-            knownDimensions.Height ?? size.Height.MaybeMax(minSize.Height) ?? minSize.Height;
+            knownDimensions.Height
+            ?? size.Height.MaybeMax(minSize.Height)
+            ?? percentageResolutionMinHeight;
 
         // 3. Perform final item layout and return content height
         var resolvedPadding = rawPadding.ResolveOrZero((float?)containerOuterWidth, calc);

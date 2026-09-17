@@ -48,6 +48,9 @@ internal enum PseudoOrigin
 
     /// <summary><c>::-webkit-slider-thumb</c>.</summary>
     SliderThumb,
+
+    /// <summary><c>::-webkit-scrollbar</c>.</summary>
+    Scrollbar,
 }
 
 /// <summary>The declarations one shadow encapsulation scope contributes.</summary>
@@ -81,6 +84,8 @@ internal sealed class PseudoRuleMap
     public List<int> Universal { get; } = [];
 
     public int CandidateSlotCount { get; private set; }
+
+    public bool IsEmpty => Rules.Count == 0;
 
     public void Push(PseudoRule rule)
     {
@@ -361,6 +366,13 @@ public sealed class Stylesheet
     internal PseudoRuleMap SliderThumbRules { get; } = new();
 
     /// <summary>
+    /// Author rules for <c>::-webkit-scrollbar</c>. Only the box's own <c>width</c>/<c>height</c>
+    /// are read from it, because those are what Chromium takes out of a scroll container's
+    /// scrollport; the track and thumb sub-pseudos are decoration and are not indexed.
+    /// </summary>
+    internal PseudoRuleMap ScrollbarRules { get; } = new();
+
+    /// <summary>
     /// Dependency metadata for conservative incremental-style invalidation.
     /// Building this map does not itself enable incremental cascade skipping.
     /// </summary>
@@ -514,7 +526,17 @@ public sealed class Stylesheet
                         rule,
                         order,
                         "-webkit-slider-thumb",
-                        sheet.SliderThumbRules))
+                        sheet.SliderThumbRules)
+                    || TryPushPseudo(
+                        sheet,
+                        tree,
+                        trimmed,
+                        declarations,
+                        rule,
+                        order,
+                        "-webkit-scrollbar",
+                        sheet.ScrollbarRules,
+                        universalWhenBare: true))
                 {
                     order++;
                     continue;
@@ -589,6 +611,22 @@ public sealed class Stylesheet
         return sheet;
     }
 
+    /// <summary>
+    /// Whether <paramref name="selector"/> is exactly the pseudo-element <paramref name="which"/>
+    /// with no originating compound, in either the <c>::</c> or the legacy <c>:</c> spelling.
+    /// </summary>
+    private static bool IsBarePseudoElement(string selector, string which)
+    {
+        ReadOnlySpan<char> span = selector.AsSpan().Trim();
+        int colons = 0;
+        while (colons < span.Length && colons < 2 && span[colons] == ':')
+        {
+            colons++;
+        }
+
+        return colons != 0 && span[colons..].SequenceEqual(which);
+    }
+
     private static bool TryPushPseudo(
         Stylesheet sheet,
         DomTree tree,
@@ -597,9 +635,25 @@ public sealed class Stylesheet
         ParsedRule rule,
         int order,
         string which,
-        PseudoRuleMap target)
+        PseudoRuleMap target,
+        bool universalWhenBare = false)
     {
-        if (CssSelectorText.StripPseudoElement(selector, which) is not { } baseSelector)
+        string? baseSelector;
+        if (universalWhenBare && IsBarePseudoElement(selector, which))
+        {
+            // A pseudo-element written with no originating compound (`::-webkit-scrollbar { }`)
+            // is `*::-webkit-scrollbar`, which is how every sheet spells a page-wide scrollbar.
+            // StripPseudoElement leaves a stray colon (or nothing) for that shape, so the
+            // universal base is supplied here rather than changing what it returns for
+            // ::before/::after, which are indexed by the same helper and would start matching
+            // rules they do not match today.
+            baseSelector = "*";
+        }
+        else if (CssSelectorText.StripPseudoElement(selector, which) is { } stripped)
+        {
+            baseSelector = stripped;
+        }
+        else
         {
             return false;
         }
@@ -847,11 +901,12 @@ public sealed class Stylesheet
         IReadOnlyDictionary<string, string> props,
         LayoutStyle hostStyle)
     {
-        var (before, after, _, _) = PseudoStylesInternal(tree, matcher, nid, props, hostStyle, null);
+        var (before, after, _, _, _) = PseudoStylesInternal(tree, matcher, nid, props, hostStyle, null);
         return (before, after);
     }
 
-    public (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder, LayoutStyle? SliderThumb)
+    public (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder, LayoutStyle? SliderThumb,
+        LayoutStyle? Scrollbar)
         AllPseudoStyles(
             DomTree tree,
             Matcher matcher,
@@ -861,7 +916,8 @@ public sealed class Stylesheet
             ContainerQueryEvaluator? evaluator) =>
         PseudoStylesInternal(tree, matcher, nid, props, hostStyle, evaluator);
 
-    private (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder, LayoutStyle? SliderThumb)
+    private (LayoutStyle? Before, LayoutStyle? After, LayoutStyle? Placeholder, LayoutStyle? SliderThumb,
+        LayoutStyle? Scrollbar)
         PseudoStylesInternal(
             DomTree tree,
             Matcher matcher,
@@ -884,7 +940,14 @@ public sealed class Stylesheet
             BuildPseudo(BeforeRules, PseudoOrigin.Generated),
             BuildPseudo(AfterRules, PseudoOrigin.Generated),
             supportsPlaceholder ? BuildPseudo(PlaceholderRules, PseudoOrigin.Placeholder) : null,
-            supportsSliderThumb ? BuildPseudo(SliderThumbRules, PseudoOrigin.SliderThumb) : null);
+            supportsSliderThumb ? BuildPseudo(SliderThumbRules, PseudoOrigin.SliderThumb) : null,
+
+            // Only a scroll container can show a scrollbar, and a page-wide
+            // `::-webkit-scrollbar` rule matches every element, so the gate keeps this off the
+            // hot path for the overwhelming majority of the tree.
+            hostStyle.OverflowScrollContainer && !ScrollbarRules.IsEmpty
+                ? BuildPseudo(ScrollbarRules, PseudoOrigin.Scrollbar)
+                : null);
 
         LayoutStyle? BuildPseudo(PseudoRuleMap rules, PseudoOrigin origin)
         {
@@ -1082,6 +1145,13 @@ public sealed class Stylesheet
                 // The thumb is a native box, not a generated one: it exists because the
                 // control does, so it is returned whatever the author declared on it.
                 style.Color ??= hostStyle.Color;
+                return style;
+            }
+
+            if (origin == PseudoOrigin.Scrollbar)
+            {
+                // Same: the scrollbar box exists because the scroll container does, and only its
+                // declared thickness is read back off it.
                 return style;
             }
 

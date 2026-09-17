@@ -77,11 +77,13 @@ internal static class FontTables
             lineGap = BinaryPrimitives.ReadInt16BigEndian(hhea.AsSpan(8));
         }
 
+        short averageCharWidth = 0;
         byte[]? os2 = TryGetTable(typeface, Os2Tag);
         if (os2 is { Length: >= 78 })
         {
             ushort version = BinaryPrimitives.ReadUInt16BigEndian(os2.AsSpan(0));
             ushort fsSelection = BinaryPrimitives.ReadUInt16BigEndian(os2.AsSpan(62));
+            averageCharWidth = BinaryPrimitives.ReadInt16BigEndian(os2.AsSpan(2));
             if (version >= 4 && (fsSelection & UseTypoMetrics) != 0)
             {
                 ascender = BinaryPrimitives.ReadInt16BigEndian(os2.AsSpan(68));
@@ -90,11 +92,23 @@ internal static class FontTables
             }
         }
 
+        // Skia reports `SkFontMetrics::fMaxCharWidth` as the head bounding box's width, not the
+        // widest advance, and Chromium sizes a text control's chrome from that value.
+        float maxCharWidth = 0f;
+        if (head is { Length: >= 44 })
+        {
+            short xMin = BinaryPrimitives.ReadInt16BigEndian(head.AsSpan(36));
+            short xMax = BinaryPrimitives.ReadInt16BigEndian(head.AsSpan(40));
+            maxCharWidth = Math.Max(xMax - xMin, 0);
+        }
+
         return new FaceMetrics(
             Math.Max(ascender, (short)0),
             -Math.Min(descender, (short)0),
             Math.Max(lineGap, (short)0),
-            unitsPerEm);
+            unitsPerEm,
+            Math.Max(averageCharWidth, (short)0),
+            maxCharWidth);
     }
 
     /// <summary>The face's variation axes, straight from <c>fvar</c>.</summary>

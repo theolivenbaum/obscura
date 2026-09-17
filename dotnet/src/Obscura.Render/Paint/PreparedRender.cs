@@ -494,9 +494,10 @@ public sealed class PreparedRender
             return (0f, 0f);
         }
 
+        // A classic scrollbar sits inside the padding box, so the client box excludes it.
         return (
-            F32.Max(rect.Width - style.Border.Left - style.Border.Right, 0f),
-            F32.Max(rect.Height - style.Border.Top - style.Border.Bottom, 0f));
+            F32.Max(rect.Width - style.Border.Left - style.Border.Right - style.ReservedScrollbarY, 0f),
+            F32.Max(rect.Height - style.Border.Top - style.Border.Bottom - style.ReservedScrollbarX, 0f));
     }
 
     /// <summary>A compact CSSOM snapshot derived from the same cascade paint uses.</summary>

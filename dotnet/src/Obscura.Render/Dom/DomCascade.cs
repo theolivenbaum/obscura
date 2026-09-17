@@ -647,7 +647,8 @@ internal static class DomCascade
             (LayoutStyle? beforePseudo,
                 LayoutStyle? afterPseudo,
                 LayoutStyle? placeholderPseudo,
-                LayoutStyle? sliderThumbPseudo) =
+                LayoutStyle? sliderThumbPseudo,
+                LayoutStyle? scrollbarPseudo) =
                 sheet.AllPseudoStyles(tree, matcher, id, thisProps, style, containerEvaluator);
             foreach (LayoutStyle? pseudo in new[] { beforePseudo, afterPseudo })
             {
@@ -670,6 +671,18 @@ internal static class DomCascade
             style.AfterPseudo = afterPseudo;
             style.PlaceholderPseudo = placeholderPseudo;
             style.SliderThumbPseudo = sliderThumbPseudo;
+            if (scrollbarPseudo is not null)
+            {
+                // A custom scrollbar is sized by the pseudo-element's own width/height, and only
+                // an absolute length can size one - a percentage has no basis on a box that is
+                // not in flow.
+                style.ScrollbarPseudoWidth = scrollbarPseudo.Display == Display.None
+                    ? 0f
+                    : scrollbarPseudo.Width.Kind == DimensionKind.Px ? scrollbarPseudo.Width.Value : null;
+                style.ScrollbarPseudoHeight = scrollbarPseudo.Display == Display.None
+                    ? 0f
+                    : scrollbarPseudo.Height.Kind == DimensionKind.Px ? scrollbarPseudo.Height.Value : null;
+            }
             descendantColorSchemeDark = style.ColorSchemeDark;
             context.Styles[id] = style;
         }

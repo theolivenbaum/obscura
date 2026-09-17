@@ -148,6 +148,42 @@ public sealed partial class TextEngine : IDisposable
         return ascent + descent;
     }
 
+    /// <summary>
+    /// The two font metrics Chromium sizes a native text control from: the character width it
+    /// multiplies by the <c>size</c>/<c>cols</c> attribute, and the widest character box, which
+    /// pays for the control's chrome.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which multiplies the font size by a fixed
+    /// 0.6 (0.6075 for a textarea) and adds another 0.675em, so every face gets the same control
+    /// width. Chromium reads the face: the per-character term is the OS/2 <c>xAvgCharWidth</c>
+    /// scaled to the used font size, raised to the next integer only when rounding would round it
+    /// up (<c>max(avg, round(avg))</c> - Blink rounds the metric but never below the real advance),
+    /// and the constant is the head bounding box's width, rounded, less that character width.
+    /// Reproduced exactly on Liberation Sans, DejaVu Sans, Liberation Mono and Plus Jakarta Sans
+    /// at font sizes 10-20. See "Known deviations" in todo.md.
+    /// </remarks>
+    public (float CharWidth, float MaxCharWidth) ControlCharacterMetrics(LayoutStyle style)
+    {
+        float fontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
+        ResolvedFont font = FontResolution.ResolveLoadedFont(
+            style.FontFamily,
+            ComputedStyle.UsedFontWeight(style),
+            style.FontStyleItalic ?? false,
+            _loadedFamilies);
+        FaceMetrics metrics = font.Metrics;
+        float unitsPerEm = metrics.UnitsPerEm > 0f ? metrics.UnitsPerEm : 1000f;
+        float average = metrics.AverageCharWidth / unitsPerEm * fontSize;
+        if (!(average > 0f))
+        {
+            // No usable OS/2 entry: Chromium falls back to the advance of '0'.
+            float zero = MeasureControlLabel("0", style);
+            return (F32.Max(zero, 0f), 0f);
+        }
+
+        return (F32.Max(average, F32.Round(average)), F32.Round(metrics.MaxCharWidth / unitsPerEm * fontSize));
+    }
+
     public (float Ascent, float Descent) InlineFontBoxMetrics(LayoutStyle style)
     {
         ResolvedFont font = FontResolution.ResolveLoadedFont(

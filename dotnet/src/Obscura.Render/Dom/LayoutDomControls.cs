@@ -204,7 +204,13 @@ public static partial class RenderDom
                     + style.Padding.Bottom
                     + style.Border.Top
                     + style.Border.Bottom;
-                float intrinsicWidth = (cols * fontSize * 0.6075f) + horizontalEdges;
+                // DEVIATION from crates/obscura-render/src/dom.rs, which uses a fixed
+                // `cols * fontSize * 0.6075`. Chromium sizes the box from the face's own average
+                // character width and then reserves the textarea's scrollbar gutter, which is the
+                // whole of the constant term. See "Known deviations" in todo.md.
+                (float charWidth, _) = engine.ControlCharacterMetrics(style);
+                float intrinsicWidth =
+                    MathF.Ceiling(cols * charWidth) + TextareaScrollbarWidth + horizontalEdges;
                 float intrinsicHeight =
                     (F32.Max(FontResolution.UsedLineHeight(style), 1f) * rows) + verticalEdges;
                 DomStyleFixups.AssignNativeControlSize(
@@ -319,7 +325,7 @@ public static partial class RenderDom
                 {
                     float size = ParsePositiveInt(node.GetAttribute("size")) ?? 20;
                     intrinsic = (
-                        (size * inputFontSize * 0.6f) + (inputFontSize * 0.675f) + inputHorizontalEdges,
+                        SizeBasedContentWidth(engine, style, size) + inputHorizontalEdges,
                         defaultHeight);
                     break;
                 }
@@ -333,6 +339,22 @@ public static partial class RenderDom
                 inputHorizontalEdges,
                 inputVerticalEdges);
         }
+    }
+
+    /// <summary>Chromium's textarea scrollbar gutter, the whole of its intrinsic constant term.</summary>
+    private const float TextareaScrollbarWidth = 15f;
+
+    /// <summary>
+    /// The content width a text control's <c>size</c> attribute asks for, the way Chromium
+    /// computes it: the face's average character width per column, plus whatever the widest
+    /// character box costs over one of them.
+    /// </summary>
+    internal static float SizeBasedContentWidth(TextEngine engine, LayoutStyle style, float size)
+    {
+        (float charWidth, float maxCharWidth) = engine.ControlCharacterMetrics(style);
+        float extra = maxCharWidth > charWidth ? maxCharWidth - charWidth : 0f;
+
+        return MathF.Ceiling((charWidth * size) + extra);
     }
 
     private static int? ParsePositiveInt(string? value) =>

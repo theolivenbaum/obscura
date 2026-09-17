@@ -1,6 +1,7 @@
 // Port of the full-span column-subgrid reduction and the deferred cyclic flex inline-size
 // resolution in crates/obscura-render/src/dom.rs.
 using Obscura.Dom;
+using TaffyAvailableSpace = Obscura.Render.Layout.AvailableSpace;
 using TaffyDimension = Obscura.Render.Layout.Dimension;
 using TaffyDirection = Obscura.Render.Layout.Direction;
 using TaffyFlexDirection = Obscura.Render.Layout.FlexDirection;
@@ -571,6 +572,10 @@ internal static class DomSubgridPasses
                 // reference's zero is the safer neutral - carrying `auto` into those made
                 // `width: 100%` sidebar buttons shrink-wrap to their min-width (swept: 0.59,
                 // 0.48, 0.46 and 0.30 mean abs worse on four samples).
+                // The one thing the zero does get wrong for a declared-width item is that
+                // item's automatic minimum size, which is measured from this very content.
+                // That is re-derived on its own in ApplyDeferredFlexAutomaticMinimums rather
+                // than by widening this arm.
                 bool contentSizedItem =
                     styles.TryGetValue(resolvedFlexItem, out LayoutStyle? itemSizing)
                     && itemSizing.Width.IsAuto
@@ -600,6 +605,200 @@ internal static class DomSubgridPasses
         }
 
         return deferred;
+    }
+
+    /// <summary>
+    /// Give a flex item holding a cyclic-percentage descendant the content-based automatic
+    /// minimum size that descendant contributes when it behaves as <c>auto</c>.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which has no counterpart to this pass.
+    /// <see cref="DeferCyclicFlexInlineSizes"/> neutralizes a bare percentage inline size under
+    /// a declared-width flex item to a definite <c>0px</c>, and that zero is what the whole
+    /// intrinsic pass measures - including the min-content measurement Flexbox 4.5 derives the
+    /// item's automatic minimum size from, so the item gets no content-based floor at all. A
+    /// `flex: 0 1 200px` item holding one `white-space: nowrap` child shrank to 29 where
+    /// Chromium floors it at the child's min-content.
+    ///
+    /// Neutralizing the percentage to <c>auto</c> instead is what CSS Sizing 3 5.2.2 says, but
+    /// it was swept over 136 samples and measured worse on four of them (0.59 / 0.48 / 0.46 /
+    /// 0.30 mean abs), because it also changes the max-content and flex-base measurements the
+    /// item is *pinned* from. The two measurements want different neutralizations, and a single
+    /// style rewrite cannot serve both. So the zero stays, and only the automatic minimum size
+    /// is re-derived here: the percentages are put back typed, each affected item's min-content
+    /// is measured with its own inline declarations dropped (Flexbox 4.5's content size
+    /// suggestion), the neutralization is restored, and the result is installed as the item's
+    /// definite <c>min-width</c>. Taffy then reads that in place of the measurement it would
+    /// have taken off the collapsed subtree. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static bool ApplyDeferredFlexAutomaticMinimums(
+        TaffyTree taffyTree,
+        IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        Func<TaffyTree, TaffyNodeId, TaffyAvailableSpace, float?> intrinsicWidth)
+    {
+        if (deferred.Count == 0)
+        {
+            return false;
+        }
+
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+        {
+            taffyByDom[domId] = taffyId;
+        }
+
+        // Only an item whose automatic minimum size is actually content-based is a candidate:
+        // a declared `min-width` wins outright, and a scroll container's is zero.
+        List<TaffyNodeId> candidates = [];
+        HashSet<NodeId> seenItems = [];
+        foreach (DeferredCyclicInlineSize entry in deferred)
+        {
+            if (!seenItems.Add(entry.FlexItem)
+                || !taffyByDom.TryGetValue(entry.FlexItem, out TaffyNodeId itemNode))
+            {
+                continue;
+            }
+
+            TaffyStyle itemStyle = taffyTree.GetStyle(itemNode);
+            if (!itemStyle.MinSize.Width.IsAuto
+                || Layout.OverflowExtensions.IsScrollContainer(itemStyle.Overflow.X))
+            {
+                continue;
+            }
+
+            candidates.Add(itemNode);
+        }
+
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        // Put every neutralized percentage back typed for the duration of the measurement. The
+        // subtree is measured with no definite inline size above it, so Taffy resolves each one
+        // against an indefinite basis - which is exactly the `auto` behaviour the spec asks for -
+        // while a percentage under a box that *does* have a definite width still resolves.
+        List<(TaffyNodeId Node, TaffyStyle Style)> neutralized = [];
+        HashSet<TaffyNodeId> snapshotted = [];
+        foreach (DeferredCyclicInlineSize entry in deferred)
+        {
+            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent
+                || !taffyByDom.TryGetValue(entry.Node, out TaffyNodeId node))
+            {
+                continue;
+            }
+
+            TaffyStyle current = taffyTree.GetStyle(node);
+            if (snapshotted.Add(node))
+            {
+                neutralized.Add((node, current));
+            }
+
+            TaffyStyle typed = current.Clone();
+            TaffyDimension percentValue = TaffyDimension.FromPercent(entry.Percent);
+            switch (entry.Slot)
+            {
+                case 0:
+                {
+                    Layout.Size<TaffyDimension> size = typed.Size;
+                    size.Width = percentValue;
+                    typed.Size = size;
+
+                    // The measured-leaf build encodes a maximum inline size as
+                    // `min(preferred, maximum)`, and the preferred width it sampled was the
+                    // deferred zero - the same restore `RestoreTypedPercentages` performs.
+                    if (styles.TryGetValue(entry.Node, out LayoutStyle? leafStyle))
+                    {
+                        Layout.Size<TaffyDimension> maxSize = typed.MaxSize;
+                        maxSize.Width = leafStyle.MaxWidth.Kind switch
+                        {
+                            DimensionKind.Percent => TaffyDimension.FromPercent(leafStyle.MaxWidth.Value),
+                            DimensionKind.Px => TaffyDimension.FromLength(
+                                F32.Max(leafStyle.MaxWidth.Value, 0f)),
+                            _ => TaffyDimension.Auto,
+                        };
+                        typed.MaxSize = maxSize;
+                    }
+
+                    break;
+                }
+
+                case 2:
+                {
+                    Layout.Size<TaffyDimension> minSize = typed.MinSize;
+                    minSize.Width = percentValue;
+                    typed.MinSize = minSize;
+                    break;
+                }
+
+                default:
+                {
+                    Layout.Size<TaffyDimension> maxSize = typed.MaxSize;
+                    maxSize.Width = percentValue;
+                    typed.MaxSize = maxSize;
+                    break;
+                }
+            }
+
+            taffyTree.SetStyle(node, typed);
+        }
+
+        Dictionary<TaffyNodeId, float> minimums = [];
+        foreach (TaffyNodeId itemNode in candidates)
+        {
+            // Flexbox 4.5: the content size suggestion is the item's min-content size, which is
+            // measured with the item's own inline declarations dropped and only then clamped by
+            // them.
+            TaffyStyle original = taffyTree.GetStyle(itemNode);
+            TaffyStyle probe = original.Clone();
+            Layout.Size<TaffyDimension> probeSize = probe.Size;
+            Layout.Size<TaffyDimension> probeMax = probe.MaxSize;
+            probeSize.Width = TaffyDimension.Auto;
+            probeMax.Width = TaffyDimension.Auto;
+            probe.Size = probeSize;
+            probe.MaxSize = probeMax;
+            taffyTree.SetStyle(itemNode, probe);
+
+            float? measured = intrinsicWidth(taffyTree, itemNode, TaffyAvailableSpace.MinContent);
+            taffyTree.SetStyle(itemNode, original);
+            if (measured is not { } contentSuggestion)
+            {
+                continue;
+            }
+
+            float clamped = contentSuggestion;
+            if (original.Size.Width.IntoOption() is { } declared)
+            {
+                clamped = F32.Min(clamped, declared);
+            }
+
+            if (original.MaxSize.Width.IntoOption() is { } maximum)
+            {
+                clamped = F32.Min(clamped, maximum);
+            }
+
+            minimums[itemNode] = F32.Max(clamped, 0f);
+        }
+
+        foreach ((TaffyNodeId node, TaffyStyle style) in neutralized)
+        {
+            taffyTree.SetStyle(node, style);
+        }
+
+        bool changed = false;
+        foreach ((TaffyNodeId node, float minimum) in minimums)
+        {
+            TaffyStyle applied = taffyTree.GetStyle(node).Clone();
+            Layout.Size<TaffyDimension> minSize = applied.MinSize;
+            minSize.Width = TaffyDimension.FromLength(minimum);
+            applied.MinSize = minSize;
+            taffyTree.SetStyle(node, applied);
+            changed = true;
+        }
+
+        return changed;
     }
 
     internal static bool ResolveDeferredFlexInlineSizes(
@@ -781,6 +980,22 @@ internal static class DomSubgridPasses
             Layout.Size<TaffyDimension> pinnedSize = pinned.Size;
             pinnedSize.Width = TaffyDimension.FromLength(usedDeclaration);
             pinned.Size = pinnedSize;
+
+            // DEVIATION from crates/obscura-render/src/dom.rs
+            // `resolve_deferred_flex_inline_sizes`, which writes only `size.width` here. The
+            // width it writes is the item's *used* main size - an output of the flex
+            // algorithm - and the relayout below re-runs that algorithm, which reads the
+            // declaration back as the item's flex base size. A flexible item therefore flexes
+            // a second time from its already-flexed size: `width:250px; flex:0 1 auto` in a
+            // 1440px row of 250/8/1440 bases resolves to 212 on the first pass and then to
+            // 184 on the second (Chromium: 212.016). CSS Flexbox 9.2 derives the flex base
+            // size from `flex-basis`/`width` on every pass, never from a previous pass's used
+            // size, so pinning the width is only a pin once the item can no longer flex.
+            // Freeze the factors and the basis alongside it. See "Known deviations" in
+            // todo.md.
+            pinned.FlexGrow = 0f;
+            pinned.FlexShrink = 0f;
+            pinned.FlexBasis = TaffyDimension.FromLength(usedDeclaration);
             taffyTree.SetStyle(taffyId, pinned);
         }
     }

@@ -509,6 +509,20 @@ DEVIATION comment at the C# code that differs.
   outermost-first, restoring each level's percentages and reflowing before
   measuring the next level down (`PinFlexItems` / `RestoreTypedPercentages` /
   `ResolveFunctionalInlineSizes` in `DomPassesSubgrid`).
+- **DEVIATION - pinning a flex item's used width let the flex algorithm shrink it
+  a second time.** `resolve_deferred_flex_inline_sizes` writes only `size.width`
+  when it pins an item, but that width is the item's *used* main size - an output
+  of the flex algorithm - and the relayout right below re-runs that algorithm,
+  which reads the declaration back as the item's flex base size. A still-flexible
+  item therefore flexes again from its already-flexed size. CSS Flexbox 9.2
+  derives the flex base size from `flex-basis`/`width` on every pass, never from
+  a previous pass's used size. In a 1440px row of inner bases 250/8/1440,
+  `width: 250px; flex: 0 1 auto` with a `width: 100%` child resolved to 212 on
+  the first pass and then 184 on the second (Chromium: 212.016); the workspace
+  app's `.msk-app-sidebar-default` was 184 against Chromium's 211.98. `PinFlexItems`
+  now freezes `FlexGrow`, `FlexShrink` and `FlexBasis` alongside the width, so the
+  pin actually pins. Verified against Chromium on 20 probe cases (D1-D12, E1-E8)
+  and on the app sidebar tree, which now matches Chromium node for node.
 - **DEVIATION - a cyclic *functional* inline size neutralized to `0px` instead of
   `auto`.** CSS Sizing 3 says a cyclic percentage behaves as `auto` for intrinsic
   contribution; the reference writes a definite `Px(max(value, 0))`, which is
@@ -678,6 +692,33 @@ DEVIATION comment at the C# code that differs.
   The `min-height: min-content` half of that same chain (`.tss-grid` carries it)
   is fixed below - the grid now expands to 1677px, so the scroll parent owns the
   scrollbar as it does in Chromium.
+- **DEVIATION - `min-height: 0` was used as the percentage basis for children.**
+  Vendored taffy (`compute/block.rs`, and so the reference, which shares it) falls
+  back to `min_size.height` as the children's percentage resolution height whenever
+  a block has no resolved height of its own:
+  `known_dimensions.height.or(size.height.maybe_max(min_size.height)).or(min_size.height)`.
+  `min-height: 0` is the initial value and says nothing about the used height, so
+  that fallback handed every `height: %` child a basis of 0 and collapsed it, where
+  Chromium sizes the box from its content and resolves the percentage against that.
+  `BlockLayout.ComputeInner` now only takes a POSITIVE minimum as the basis; a zero
+  one leaves it unresolved, which makes the child content-sized - the same answer
+  Chromium computes. A positive `min-height` still provides the basis, which is what
+  Chromium does when the minimum is what the box ends up at.
+  The reference never reaches this, because `dom.rs` rewrites every percentage height
+  under an indefinite box to `auto` so no percentage survives to be resolved here;
+  the entry above, which marks a flex-sized box a definite containing block, is what
+  lets them through, and that exposed it. Curiosity Workspace's
+  `#/manage/configure/subscription` nests `height: 100%; min-height: 0` twice under
+  an auto-height flex item and its inner `overflow: hidden auto` stack came out 24px
+  tall instead of 473px, so the route rendered blank while every leaf inside it sat
+  at the right position. Chain heights, Obscura before -> after, against Chromium:
+  `.msk-setting-group` 82 -> 546 (538), `.msk-setting-content` 40 -> 497 (489),
+  the scrolling `.tss-stack` 24 -> 481 (473).
+  Residual gap, unchanged by this: a positive `min-height` SMALLER than the content
+  height is still used as the basis, where Chromium uses the content height
+  (`min-height: 200px` over 437px of content gives 200px here and 437px there).
+  Fixing that needs the box's used height before its children are laid out, which is
+  a second block-layout pass.
 - **DEVIATION - the CSS-wide keyword `inherit` was dropped on the box-size
   properties.** `width`/`height`/`min-*`/`max-*` are not inherited properties, so
   `inherit` has to copy the parent's computed value explicitly; the reference
@@ -743,6 +784,40 @@ DEVIATION comment at the C# code that differs.
   0px, because the cyclic neutralization writes a definite `0px` rather than
   behaving as `auto` for intrinsic contribution. Not a regression; predates the
   fix above.
+- **DEVIATION - a flex item's automatic minimum size ignored a percentage-width
+  descendant.** The definite `0px` that `DeferCyclicFlexInlineSizes` writes was
+  also what the min-content measurement behind Flexbox 4.5 read, so the item got
+  no content-based floor at all. Repro: a `flex: 0 1 200px` item in a 600px row
+  against a `flex: 0 1 4000px; min-width: 0` sibling, holding one
+  `white-space: nowrap` child. With the child `width: auto` both engines floored
+  the item at its text (165 / 164.047); with the child `width: 100%` (or `50%`,
+  or `box-sizing: border-box`, or nested a level deeper, or with the item itself
+  a flex container) Chromium still floored at 164.047 and this engine dropped to
+  the unfloored 29 - nine of ten probe shapes wrong.
+
+  Flipping the `Percent` arm to `Auto` is what CSS Sizing 3 5.2.2 prescribes, but
+  it was already swept and measured worse on four samples, because that arm also
+  decides what the *max-content* and flex-base measurements see - and those are
+  what `PinFlexItems` pins the item from. The two measurements want different
+  neutralizations and one style rewrite cannot serve both, so the narrowing is to
+  leave the arm alone and re-derive only the automatic minimum size:
+  `DomSubgridPasses.ApplyDeferredFlexAutomaticMinimums` (new, in
+  `DomPassesSubgrid`, called from `LayoutDomOnce` just before the first layout)
+  puts the deferred percentages back typed, measures each affected item's
+  min-content with the item's own `width`/`max-width` dropped, restores the
+  neutralization, and installs the clamped result as the item's definite
+  `min-width`. Taffy reads that in place of the measurement it would have taken
+  off the collapsed subtree. Only an item whose automatic minimum size is really
+  content-based is touched (`min-width: auto`, not a scroll container).
+
+  All ten probe shapes now agree (165 against Chromium's 164.047, the same ~1px
+  text-metric bias the `width: auto` control already had). Curiosity Workspace's
+  admin sidebar on `#/manage/operate/usage` goes from 205 to 215 against
+  Chromium's 214.422; over that sidebar's 127 boxes the mean absolute width error
+  falls from 5.811 to 0.445 and the boxes off by more than 0.75px from 83 to 5.
+  The `width: 100%` nav buttons that the `Auto` flip shrink-wrapped keep filling
+  their row (199 against Chromium's 198.422), which was the specific regression
+  to avoid.
 
 ## Known deviations
 
@@ -2314,3 +2389,155 @@ because Skia treats a layer's bounds as a rasterization hint that an image filte
 past.
 
 Pinned by `SvgViewportTests` (13 facts, `Obscura.Render.Tests`).
+
+### A text control's intrinsic width comes from the face's metrics, not a fixed em fraction
+
+`dom.rs` sizes a single-line text control as `size * font_size * 0.6 + font_size * 0.675`,
+and a textarea as `cols * font_size * 0.6075`. Both are one calibration applied to every
+face, so the box is right only for whatever font it was calibrated against.
+
+Chromium reads the face. Reproduced exactly (Chromium 141, Liberation Sans, DejaVu Sans,
+Liberation Mono and Plus Jakarta Sans, all loaded as web fonts so both engines rasterize the
+same bytes, font sizes 10-20):
+
+```
+charWidth = max(avg, round(avg))            avg = OS/2 xAvgCharWidth scaled to the used size
+input     = ceil(charWidth * size + max(0, round(maxCharWidth) - charWidth))
+textarea  = ceil(charWidth * cols) + 15     15 is the scrollbar gutter
+```
+
+`maxCharWidth` is the `head` bounding box's width, which is what Skia reports as
+`SkFontMetrics::fMaxCharWidth` - not the widest advance. The `max(avg, round(avg))` is
+Blink rounding the metric but never below the real advance: at 13px Liberation Sans measures
+7.668 and Chromium multiplies by 8, while at 16px it measures 9.4375 and Chromium multiplies
+by 9.4375. A face with no usable OS/2 entry falls back to the advance of `0`, as Blink does.
+
+`FaceMetrics` carries the two new values (`Obscura.Render.Inline`), `TextEngine
+.ControlCharacterMetrics` scales them, and `LayoutDomControls` applies the two formulas.
+
+What is left is a font difference, not a formula difference: an `<input>` with no
+`font-family` renders in Chromium's system Arial substitute, whose head bounding box is
+about 8px wider at 13px than the Liberation Sans this engine embeds, so the two disagree by
+that 8px on a control that names no face. With the same file on both sides they agree
+exactly.
+
+Pinned by `DomLayoutTests.TextControlSizeAttributeMeasuresTheFaceAverageCharacterWidth` and
+`TextareaIntrinsicBoxComesFromRowsAndCols`.
+
+### A form control with a percentage width contributes its size-based width, not its padding
+
+`assign_native_control_size` in `dom.rs` publishes a control's intrinsic box only into an
+`auto` width. Every other case keeps the declared width, and for a percentage that no
+containing block can resolve there is then nothing left to size the control from: a control
+has no child boxes, so it collapsed to its padding. `<input style="width:100%">` reported an
+8px max-content width against Chromium's 184, and Curiosity Workspace's own search box
+reported 10 against 182 - `.tss-searchbox` and `.tss-textbox` both carry `width: 100%`, so
+this was every text field in the product.
+
+A percentage that cannot be resolved behaves as `auto` for an intrinsic contribution (CSS
+Sizing 3 5.2.2). The size-based box is now published as the leaf's measured content
+(`LayoutStyle.NativeControlContent`, carried to the taffy leaf through `IfcRegistry
+.NativeControlContent` and returned by the measure function in `LayoutDomOnce`), which is
+used exactly when the percentage cannot resolve and ignored when it can.
+
+The measure answers 0 for a min-content pass, because Chromium contributes the size-based
+width to a max-content pass only: measured in Chromium, a `width: 100%` field's max-content
+contribution is its full 182 and its min-content contribution is its 10px of padding, so it
+must not floor the flex item that holds it.
+
+Pinned by `DomLayoutTests.TextControlWithPercentageWidthStillContributesItsSizeBasedWidth`
+and `TextControlSizeDoesNotRaiseAFlexItemAutomaticMinimumSize`.
+
+### An atomic inline with a definite inline size overflows its line instead of shrinking
+
+Our inline formatting context is a wrapping row flex container (`DomBuildCore`), so every
+inline-level box in it is a flex item at taffy's default `flex-shrink: 1`. That is right for
+an `auto` width - shrinking to the line is exactly CSS 2.1 10.3.9 shrink-to-fit - and wrong
+for a definite one: a `width`/`calc()`/percentage that resolves wider than the line is used as
+specified and overflows. Measured in Chromium 141 against a 98px content box, an
+`inline-block` / `inline-flex` / `inline-grid` / `inline-table` at `width: 200px` is 200 in
+every case, `calc(100% + 40px)` is 138 and `150%` is 147; this engine answered 98 for all of
+them, and 76 once the box also carried `margin-right: 22px`.
+
+`dom.rs` has no counterpart, so `DomBuild.BuildAny` now zeroes `flex-shrink` on an in-flow
+inline-level box whose `width` is not `auto` (or that carries a size expression), alongside
+the `vertical-align` -> `align-self` mapping that was already there. Floats and
+absolutely-positioned boxes are excluded; they are not line participants.
+
+The user-visible case was the Tesserae dropdown, the widest-spread remaining width defect in
+the parity survey (309 divergent element pairs over 32 routes, deltas clustering at -3, -6 and
+-7). `.tss-dropdown` carries `width: calc(100% - 16px)` inside a shrink-wrapping flex item, so
+the cyclic percentage behaves as `auto` while the item is measured (the item lands on the
+dropdown's max-content) and then resolves against that definite result - which in Chromium
+overflows the item by the 22px margin it was measured with. On `#/` the dropdown is 123.7 in
+Chromium and was 118 here; it is now 124, with its button at 114 against Chromium's 113.7.
+
+Pinned by `AtomicInlineSizingTests`.
+
+Still short of Chromium: a *bare* cyclic `width: 100%` on such a box. `width: 100%` plus
+`margin-right: 22px` inside a shrink-wrapping flex item is 139.7 in Chromium and 118 here,
+because `DeferCyclicFlexInlineSizes` neutralizes that one to `Auto` before the build, so the
+box no longer looks definite when `BuildAny` runs, and `RestoreTypedPercentages` puts the
+percentage back without revisiting `flex-shrink`. The `calc()` form is unaffected because its
+`SizeExpressions[0]` survives the neutralization.
+
+### A classic scrollbar takes space out of its scroll container
+
+`crates/obscura-render` reserves a scrollbar gutter only out of the initial containing block, and
+this port added `scrollbar-gutter: stable` on top of that (see the entry above). Neither reserves
+anything for the scrollbar a box actually shows. Headless Chromium driven over CDP draws **classic**
+(non-overlay) scrollbars, so it does: a vertical scrollbar narrows the scrollport by its thickness
+and a horizontal one shortens it. The reason this was never noticed is that Playwright launches
+every browser with `--hide-scrollbars`, so a probe taken through `chromium.launch()` reports no
+reservation at all - measure this against a browser started by hand.
+
+Curiosity Workspace sets `::-webkit-scrollbar { width: 9px; height: 9px }` page-wide, so on
+`#/manage/search/settings` the settings rows inside the scrolling pane came out 1037 against
+Chromium's 1028, and every right-aligned control in them 9px too far right - 403 of that route's
+870 strictly-aligned pairs carried exactly +9px of x offset, 218 origin boxes over 12 routes.
+
+Three pieces:
+
+- **`::-webkit-scrollbar` is indexed like the other pseudo-elements** (`Stylesheet.ScrollbarRules`,
+  a fifth `PseudoRuleMap` beside before/after/placeholder/slider-thumb). Only the box's own
+  `width`, `height` and `display: none` are read back off it, into
+  `LayoutStyle.ScrollbarPseudoWidth`/`Height`; the track and thumb sub-pseudos are decoration and
+  are not indexed at all. The cascade builds it only for a box that is already a scroll container,
+  which is what keeps a page-wide rule off the hot path. `TryPushPseudo` gained
+  `universalWhenBare`, because a pseudo-element written with no originating compound is
+  `*::-webkit-scrollbar` and `StripPseudoElement` leaves a stray colon for that shape - the flag is
+  set for this map only, since making ::before/::after universal-when-bare would change what rules
+  they match.
+- **`LayoutStyle.ScrollbarThickness(vertical)`** resolves the custom width, then
+  `scrollbar-width` (`none` 0, `thin` 10, otherwise the classic 15). `scrollbar-gutter: stable`
+  now sizes its gutter through the same helper, so a custom scrollbar sizes that too.
+- **`DomScrollbarPasses.ApplyScrollbarGutters`** decides what is actually reserved.
+  `overflow: scroll` always shows a scrollbar; `overflow: auto` shows one only when the content
+  overflows, and that is knowable only from a completed layout - so the pass runs in `LayoutDomOnce`
+  after every intrinsic, table and fragmentation repair, for the same reason the static-position
+  harvest does, and re-lays out. Running it after the *first* layout instead is wrong and was tried:
+  the app's `.tss-segmentedpivot-content` panes overflow by a few pixels in the provisional layout
+  and then do not, so they grew scrollbars Chromium does not show. What it reserves is parked in
+  `ReservedScrollbarX`/`Y`, read by `TaffyStyleMapping` (which marks the axis `Overflow.Scroll`, the
+  one taffy reservation shape) and subtracted by `PreparedRender.ClientSize` and the scroll tree, so
+  `clientWidth`/`clientHeight` report the scrollport. Reservation only ever grows - narrowing a box
+  can make its content overflow harder, never less - so the loop terminates; two rounds cover a
+  vertical bar narrowing a box into needing a horizontal one. A retained style carries its
+  reservation into the next layout, so `ResetScrollbarGutters` clears it before the tree is built.
+
+taffy carries one thickness for both axes, so a `::-webkit-scrollbar` that sets `width` and
+`height` to different values reserves the larger on both; no sheet seen here does that.
+
+An `auto` axis is called overflowing at more than 1px, not at any positive amount. Chromium decides
+it in LayoutUnits, but this engine's text metrics differ from Chromium's by a fraction of a pixel
+per line, and a whole-pixel tolerance is what stops that inventing a scrollbar - and 9 or 15px of
+width error with it.
+
+Not covered: the document's own scrollbar still does not come out of the initial containing block
+unless `scrollbar-gutter` asks for it, and `--hide-scrollbars` is not a flag this engine reads.
+
+Pinned by `DomLayoutTests.AClassicScrollbarIsReservedByAnOverflowingScrollContainer` and
+`ACustomWebkitScrollbarSizesTheReservedScrollbar`, both asserting values measured in Chromium 141.
+`AStableScrollbarGutterIsReservedOnANestedScrollContainer` was corrected with them: it asserted that
+`overflow-y: scroll` with no `scrollbar-gutter` reserves nothing, which is only true under
+`--hide-scrollbars`.

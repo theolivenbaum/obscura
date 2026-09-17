@@ -234,3 +234,247 @@ keyword failure.
 
 This is what leaves the connect-apps grid at its scroll parent's 666px where Chromium expands it
 to 1677px.
+
+## F31 - a flex item that is shrinking is shrunk twice when it has a percentage-sized child
+
+**Symptom (user-reported).** The app sidebar is a different width in the two engines on
+81 of 143 routes. On `#/chat-ai` the root `.msk-app-sidebar-default` is 211.98 in
+Chromium and 184 in Obscura, and every box below it inherits the 28px shortfall.
+
+**Not a text-measurement problem.** The widest labels inside the sidebar measure within
+0.5px of each other (Curiosity 108.56 vs 109, Ctrl+Shift+O 94.38 vs 95, ...).
+
+**Not a flex-base problem.** With `flex-shrink: 0` forced on every item of the row, both
+engines report exactly the same base sizes: `[0, 250, 8, 1440]` in a 1440px row.
+`.tss-sidebar` carries a definite `width: 250px` in tss.css.
+
+**Not the shrink algorithm in isolation.** A synthetic three-item row with those exact
+numbers matches Chromium to the rounding (212.016 / 6.781 / 1221.203 vs 212 / 7 / 1221),
+and so do variants with unequal shrink factors, padding + border-box, and a content-driven
+third item.
+
+### Minimal repro
+
+```html
+<div style="display:flex;width:1440px">
+  <div style="width:250px;flex:0 1 auto"><div style="width:100%"></div></div>
+  <div style="width:8px;flex:0 1 auto"></div>
+  <div style="width:100%;min-width:0;flex:0 1 auto"></div>
+</div>
+```
+
+| | item 1 | item 2 | item 3 |
+|---|---|---|---|
+| Chromium | 212.016 | 6.781 | 1221.203 |
+| Obscura | **184** | 7 | **1249** |
+
+Remove the `width:100%` child and Obscura gives 212. Replace it with `width:100px` or
+`height:50%` and Obscura gives 212. Any percentage *width* on the child reproduces it
+(`100%`, `50%`, `calc(100% + 24px)`, `calc(100% - 24px)`); a percentage *padding* or
+*margin* does not.
+
+### What the numbers say it is doing
+
+Spec (CSS Flexbox 9.7): scaled flex shrink factor = flex-shrink x **inner** flex base
+size; the deficit is computed on outer sizes. For the repro: inner bases 250 / 8 / 1440,
+outer total 1698, deficit 258, so item 1 loses `250/1698 * 258 = 38.0` and lands on
+**212.0** - which is what Chromium produces.
+
+Obscura's output is exactly what you get by running that same computation **twice**, with
+the second pass taking the item's flex base size from the first pass's *resolved* width
+instead of from its specified `width`:
+
+```
+pass 1: base 250 -> 250 - 250/1698*258      = 212.0
+pass 2: base 212 -> 212 - 212/1660*220      = 183.9   (observed 184)
+        item 3   -> 1440 - 1440/1660*220    = 1249.2  (observed 1249)
+```
+
+The model reproduces every measurement taken, in the app and in the synthetic page, at
+five different flex-basis values for item 3 (1200 -> 244, 1300 -> 216, 1400 -> 192,
+1440 -> 184, all predicted to within the integer rounding), and with padding +
+`box-sizing: border-box` it predicts 189 where Obscura gives 189 and Chromium 215.172.
+
+So the percentage child makes the item's layout re-run, and the re-run re-derives the
+flex base size from the used size rather than from the style. A flex item's flex base
+size must come from `flex-basis`/`width` on every pass; it is not an output of the
+previous pass.
+
+## F32 - a form control with a percentage width contributes nothing to intrinsic sizing
+
+**Symptom.** After F31 the remaining width divergence concentrates in the admin pages:
+`#/manage/operate/usage` 42% of aligned pairs, announcement 41%, packages 39%, migrations
+37%, llm-usage 35%, user-analytics 36%, queries 34%, code 34%, profiling 35%. On every one
+of them the admin sidebar is **214.42 in Chromium and 205 in Obscura**, and the whole
+subtree inherits the 9.4px.
+
+**Here Obscura matches the naive spec result and Chromium does not.** Flex bases are
+identical in both engines (`[72, 250, 8, 1440]` with `flex-shrink: 0` forced), container
+1440, deficit 330, sidenav frozen at `flex: 0 0 auto`. Inner bases 226 / 8 / 1440, so the
+sidebar loses `226/1674 * 330 = 44.55` and lands on **205.45** - which is Obscura's answer.
+Chromium stops at 214.42 because the sidebar's `min-width: auto` resolves to a
+**content-based minimum size** of 214.42 and clamps the shrink there. Emptying the sidebar
+in Chromium drops it to 205.42, confirming the floor is its content.
+
+**What makes up that floor.** 214.42 = 190.422 + 24 (the sidebar's padding).
+
+**CORRECTION (verified by mutation, not arithmetic).** The 190.422 is *not* the search
+input. Hiding each `.tss-sidebar-middle` child in Chromium one at a time and re-reading the
+sidebar shows exactly one that moves it: the `File Processing Queue` nav button, whose
+`white-space: nowrap` label makes its min-content 190.422. Hiding the search box changes
+nothing, because its `width: 100%` gives it a min-content contribution of 10 in Chromium
+too (its max-content contribution is 182 - the two passes differ). Setting the search box
+to `width: auto` raises the sidebar to 216, which is what made the arithmetic look right.
+
+The nav buttons carry `width: 100%` from `.tss-sidebar-btn-open .tss-sidebar-btn`, and a
+percentage-width descendant is invisible to this engine's flex automatic minimum size - see
+"a flex item's automatic minimum size ignores a percentage-width descendant" in todo.md.
+That is a third defect, in `DeferCyclicFlexInlineSizes`, and it is what the sidebar waits
+on. The two input defects below are real and are fixed; they do not move the sidebar.
+
+### The defect
+
+`.tss-searchbox` and `.tss-textbox` both carry **`width: 100%`** - every Tesserae text
+input does. A percentage that cannot be resolved behaves as `auto` for intrinsic
+contribution (CSS Sizing 3 §5.2.2), and `width: auto` on a text control gives the
+size-based intrinsic width. Measured in the live app, same font (Plus Jakarta Sans 13px),
+by cloning the element into a `width: max-content` wrapper:
+
+| | Chromium | Obscura |
+|---|---|---|
+| the app's own `.tss-searchbox` (no `size` attribute) | **182** | **10** |
+| `<input style="width:100%">` | 180 | **8** |
+| `<input size="20">` | 180 | 173 |
+
+Obscura falls back to **zero** and reports only the 5+5 padding. With `size` present and no
+percentage width it gets the intrinsic width roughly right, so the fallback path is the bug,
+not the metric.
+
+This is the same shape as the already-recorded deviation *"a cyclic functional inline size
+neutralized to `0px` instead of `auto`"*, one layer over: there the neutralized value was a
+`calc()`, here it is a plain percentage, and the box is a form control whose `auto` width is
+not zero.
+
+### Second, smaller: the size-based intrinsic width is short
+
+Sweeping `size` in the app's font, `width: max-content`, no percentage:
+
+| `size` | 1 | 2 | 5 | 10 | 20 | 30 | 50 |
+|---|---|---|---|---|---|---|---|
+| Chromium | 28 | 36 | 60 | 100 | 180 | 260 | 420 |
+| Obscura | 25 | 32 | 56 | 95 | 173 | 251 | 407 |
+
+Chromium is exactly `8.0 * size + 20`; Obscura is `7.80 * size + 17.2`. The 8.0 is the
+font's OS/2 `xAvgCharWidth` (the `0` advance in this face is 9.52 and `x` is 6.33, so it is
+neither), and the +20 is the control chrome. Both terms are slightly low in Obscura.
+
+**Resolved.** Chromium's formula, recovered exactly on four faces at font sizes 10-20, is
+`ceil(charWidth * size + max(0, round(maxCharWidth) - charWidth))` with
+`charWidth = max(avg, round(avg))`, `avg` the OS/2 `xAvgCharWidth` scaled to the used size
+and `maxCharWidth` the `head` bounding box's width. A textarea is
+`ceil(charWidth * cols) + 15`, the 15 being the scrollbar gutter. Both are implemented; see
+todo.md. The residual on a control that names no `font-family` is a font difference, not a
+formula one - Chromium substitutes a system Arial whose bounding box is ~8px wider at 13px
+than the Liberation Sans this engine embeds.
+
+**Ruled out.** The automatic minimum size itself is implemented correctly - a seven-case
+probe (unbreakable label, `overflow: hidden`, explicit `min-width: 0`, fixed-width child,
+replaced image, padded border-box, empty) matches Chromium on every one. A span measured
+inside an offscreen absolutely-positioned host reported 0 in one probe run; re-tested
+standalone it is 72.3 in both engines, so that was a probe artifact, not a defect.
+
+## F33 - an atomic inline is squeezed into its line instead of overflowing it (FIXED)
+
+**Symptom (user-reported).** The Tesserae Dropdown is ~6px narrower than in Chromium. It is
+the widest-spread remaining width defect in the parity survey: 309 divergent element pairs
+across 32 routes, deltas clustering at -3, -6 and -7. On `#/`, `div.tss-dropdown` is 123.7 in
+Chromium and 118 here; its button is 113.7 against 108; the leaves agree (24 / 83.7).
+
+**The dropdown is not `width: auto`.** `.tss-dropdown` in tss.css carries
+`width: calc(100% - 16px)`, which nothing in the subtree dump shows because
+`getComputedStyle` reports the used value. Its parent `.tss-dropdown-container` is a
+content-sized flex item of `div.tss-stack.msk-home-view-selectors`, so the percentage is
+cyclic:
+
+- intrinsic pass: the percentage behaves as `auto` (CSS Sizing 3 5.2.2), the container
+  shrink-wraps the dropdown's max-content 117.7 plus its 22px margin plus 2px border = 141.7;
+- layout pass: 100% is now the container's definite 139.7 content box, so the dropdown is
+  139.7 - 16 = **123.7** and overflows the container by the margin it was measured with.
+
+Both numbers are Chromium's, and 141.7/123.7 is not a contradiction - it is what a cyclic
+percentage does.
+
+**Root cause, and it is much wider than the dropdown.** The inline formatting context is
+modelled as a wrapping row flex container, so an atomic inline is a flex item at taffy's
+default `flex-shrink: 1` and gets squeezed into the line. Reduced to a 98px content box:
+
+| | Chromium | Obscura (before) |
+|---|---|---|
+| `inline-block` / `inline-flex` / `inline-grid` / `inline-table` `width: 200px` | 200 | **98** |
+| the same plus `margin-right: 22px` | 200 | **76** |
+| `width: calc(100% + 40px)` | 138 | **98** |
+| `width: 150%` | 147 | **98** |
+| `width: 50px` (fits) | 50 | 50 |
+| `min-width: 200px` (no width) | 200 | 200 |
+
+`min-width` surviving is the tell: the item was shrinking and stopping at its minimum.
+
+**Fix.** `DomBuild.BuildAny` zeroes `flex-shrink` on an in-flow inline-level box whose width
+is definite. See "Known deviations" in todo.md and `AtomicInlineSizingTests`.
+
+**Residual.** A bare cyclic `width: 100%` on an atomic inline is still clamped, because
+`DeferCyclicFlexInlineSizes` has already rewritten it to `Auto` by the time the box is built.
+
+## F34 - a classic scrollbar takes no space out of its scroll container (FIXED)
+
+**Symptom.** A settings row was 9px too wide and every control laid out from its right edge
+moved with it. On `#/manage/search/settings`, **403 of 870 strictly-aligned pairs had exactly
++9px of x offset and nothing else wrong** - correct widths, correct y, correct heights.
+
+**Cause.** Headless Chromium driven over CDP draws **classic (non-overlay) scrollbars**, which
+occupy layout space, and `tss.css` sets `::-webkit-scrollbar { width: 9px; height: 9px }`
+page-wide. The pane that holds the row is `overflow: auto` with 1100px of content in a 567px
+box, so Chromium's border box is 1037.22 and its **client box 1028**. Obscura reserved nothing
+and gave the children the full 1037.
+
+### The methodology trap, which is the more important half
+
+**Playwright launches every browser with `--hide-scrollbars`.** A reference measured through
+`chromium.launch()` therefore reports *zero* reservation, while the survey reference
+(`out-chrR3`) was captured against a hand-launched `--headless=new` Chromium, which reserves.
+The two disagree, and the probe is the one that lies. Verified directly on `sbar-probe.html`,
+same page, same binary, same moment:
+
+| case | via `chromium.launch()` | hand-launched `--headless=new` |
+|---|---|---|
+| `overflow: auto`, vertical overflow | client 400 | client **393** (7px UA default) |
+| `+ ::-webkit-scrollbar { width: 9px }` | client 400 | client **391** |
+| `overflow: scroll`, not overflowing | client 400 | client **391** |
+| `overflow: hidden` / no overflow / `sb0` | client 400 | client 400 |
+
+So **any probe comparison taken through `runprobe.js chr` is only valid where scrollbars are
+not involved.** When a box is a scroll container, launch the reference by hand
+(`/opt/pw-browsers/chromium --headless=new --remote-debugging-port=N`) and connect over CDP,
+the way the survey does.
+
+This also invalidated an existing test:
+`AStableScrollbarGutterIsReservedOnANestedScrollContainer` asserted that `overflow-y: scroll`
+with no `scrollbar-gutter` reserves nothing (300px). That is true only under
+`--hide-scrollbars`; the reference browser gives 290 (`scrollbar-width: thin`) and 285
+(classic). Corrected at the assertion.
+
+### Two judgement calls worth keeping
+
+- **An `auto` axis counts as overflowing at more than 1px, not at any positive amount.** This
+  engine's text metrics differ from Chromium's by a fraction of a pixel per line, and an exact
+  test invents scrollbars - and 9-15px of width error - out of that noise.
+- **The pass runs after every intrinsic/table/fragmentation repair, not after the first
+  layout.** Running it earlier was tried: the app's `.tss-segmentedpivot-content` panes
+  overflow by a few px provisionally and then do not, so they grew scrollbars Chromium never
+  shows and the whole chain came out 15px narrow.
+
+**Still open:** the *document's* own scrollbar does not come out of the initial containing
+block unless `scrollbar-gutter` asks for it, and `--hide-scrollbars` is not a flag this engine
+reads - worth considering, since Playwright always sends it. taffy also carries one
+`ScrollbarWidth` for both axes, so a `::-webkit-scrollbar` setting different `width` and
+`height` reserves the larger on both.

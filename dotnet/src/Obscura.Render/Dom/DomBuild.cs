@@ -61,6 +61,12 @@ internal sealed class IfcRegistry
 
     /// <summary>CSS multi-column containers built as a row of anonymous fragmentainers.</summary>
     internal List<MulticolBuild> Multicol { get; } = [];
+
+    /// <summary>
+    /// Measured content boxes for native form controls whose own width cannot size them, keyed
+    /// by the taffy leaf that stands in for the control.
+    /// </summary>
+    internal Dictionary<TaffyNodeId, Layout.Size<float>> NativeControlContent { get; } = [];
 }
 
 internal sealed class BuildContext
@@ -140,6 +146,20 @@ internal static partial class DomBuild
             };
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which leaves every inline-level box
+        // at taffy's default `flex-shrink: 1`. Our inline formatting context is a wrapping row
+        // flex container, so that default squeezes an atomic inline into the line it sits on.
+        // CSS 2.1 10.3.9 shrink-to-fits an atomic inline only when its `width` is `auto`; a
+        // definite inline size is used as specified and overflows the line box. Tesserae's
+        // `.tss-dropdown { width: calc(100% - 16px) }` is one of those, and was coming out at
+        // the line's width instead. See "Known deviations" in todo.md.
+        bool pinsInlineSize = style is not null
+            && LayoutStyleExtensions.IsInlineLevelBox(style)
+            && !style.IgnoresUsedBoxSizes()
+            && style.Float is null
+            && style.Position != TaffyPosition.Absolute
+            && (!style.Width.IsAuto || style.SizeExpressions[0] is not null);
+
         bool needsOuter = style is not null
             && style.IsInlineBlock
             && style.Display is Display.Flex or Display.Grid
@@ -147,10 +167,19 @@ internal static partial class DomBuild
             && style.SizeExpressions[0] is null;
         if (!needsOuter)
         {
-            if (inlineAlign is { } align)
+            if (inlineAlign is not null || pinsInlineSize)
             {
                 TaffyStyle adjusted = context.TaffyTree.GetStyle(inner).Clone();
-                adjusted.AlignSelf = align;
+                if (inlineAlign is { } align)
+                {
+                    adjusted.AlignSelf = align;
+                }
+
+                if (pinsInlineSize)
+                {
+                    adjusted.FlexShrink = 0f;
+                }
+
                 context.TaffyTree.SetStyle(inner, adjusted);
             }
 
