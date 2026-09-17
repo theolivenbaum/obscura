@@ -573,7 +573,16 @@ public static partial class RenderDom
                 }
 
                 ApplyTableUsedWidths(
-                    tree, taffyTree, taffyRoot, idMap, styles, ifcItems, initialCbWidth, available, Measure);
+                    tree,
+                    taffyTree,
+                    taffyRoot,
+                    idMap,
+                    styles,
+                    ifcItems,
+                    initialCbWidth,
+                    available,
+                    deferredCyclicInlineSizes,
+                    Measure);
 
                 // The cyclic-percentage neutralization above collapses the very content a flex
                 // item's automatic minimum size is measured from, so that floor is re-derived

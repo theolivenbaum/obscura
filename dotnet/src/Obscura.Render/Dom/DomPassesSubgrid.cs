@@ -608,6 +608,104 @@ internal static class DomSubgridPasses
     }
 
     /// <summary>
+    /// Put every neutralized cyclic percentage back typed for the duration of an intrinsic
+    /// measurement, and return the styles <see cref="ExitTypedPercentageScope"/> restores.
+    /// </summary>
+    /// <remarks>
+    /// The subtree is measured with no definite inline size above it, so Taffy resolves each one
+    /// against an indefinite basis - which is exactly the <c>auto</c> behaviour CSS Sizing 3 asks
+    /// for - while a percentage under a box that *does* have a definite width still resolves.
+    /// <paramref name="exclude"/> names nodes whose style the caller owns for the duration, so
+    /// that what it writes there is not undone by the exit.
+    /// </remarks>
+    internal static List<(TaffyNodeId Node, TaffyStyle Style)> EnterTypedPercentageScope(
+        TaffyTree taffyTree,
+        IReadOnlyDictionary<NodeId, TaffyNodeId> taffyByDom,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        IReadOnlyList<DeferredCyclicInlineSize> deferred,
+        IReadOnlySet<TaffyNodeId>? exclude)
+    {
+        List<(TaffyNodeId Node, TaffyStyle Style)> neutralized = [];
+        HashSet<TaffyNodeId> snapshotted = [];
+        foreach (DeferredCyclicInlineSize entry in deferred)
+        {
+            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent
+                || !taffyByDom.TryGetValue(entry.Node, out TaffyNodeId node)
+                || exclude?.Contains(node) == true)
+            {
+                continue;
+            }
+
+            TaffyStyle current = taffyTree.GetStyle(node);
+            if (snapshotted.Add(node))
+            {
+                neutralized.Add((node, current));
+            }
+
+            TaffyStyle typed = current.Clone();
+            TaffyDimension percentValue = TaffyDimension.FromPercent(entry.Percent);
+            switch (entry.Slot)
+            {
+                case 0:
+                {
+                    Layout.Size<TaffyDimension> size = typed.Size;
+                    size.Width = percentValue;
+                    typed.Size = size;
+
+                    // The measured-leaf build encodes a maximum inline size as
+                    // `min(preferred, maximum)`, and the preferred width it sampled was the
+                    // deferred zero - the same restore `RestoreTypedPercentages` performs.
+                    if (styles.TryGetValue(entry.Node, out LayoutStyle? leafStyle))
+                    {
+                        Layout.Size<TaffyDimension> maxSize = typed.MaxSize;
+                        maxSize.Width = leafStyle.MaxWidth.Kind switch
+                        {
+                            DimensionKind.Percent => TaffyDimension.FromPercent(leafStyle.MaxWidth.Value),
+                            DimensionKind.Px => TaffyDimension.FromLength(
+                                F32.Max(leafStyle.MaxWidth.Value, 0f)),
+                            _ => TaffyDimension.Auto,
+                        };
+                        typed.MaxSize = maxSize;
+                    }
+
+                    break;
+                }
+
+                case 2:
+                {
+                    Layout.Size<TaffyDimension> minSize = typed.MinSize;
+                    minSize.Width = percentValue;
+                    typed.MinSize = minSize;
+                    break;
+                }
+
+                default:
+                {
+                    Layout.Size<TaffyDimension> maxSize = typed.MaxSize;
+                    maxSize.Width = percentValue;
+                    typed.MaxSize = maxSize;
+                    break;
+                }
+            }
+
+            taffyTree.SetStyle(node, typed);
+        }
+
+        return neutralized;
+    }
+
+    /// <summary>Undo <see cref="EnterTypedPercentageScope"/>.</summary>
+    internal static void ExitTypedPercentageScope(
+        TaffyTree taffyTree,
+        List<(TaffyNodeId Node, TaffyStyle Style)> neutralized)
+    {
+        foreach ((TaffyNodeId node, TaffyStyle style) in neutralized)
+        {
+            taffyTree.SetStyle(node, style);
+        }
+    }
+
+    /// <summary>
     /// Give a flex item holding a cyclic-percentage descendant the content-based automatic
     /// minimum size that descendant contributes when it behaves as <c>auto</c>.
     /// </summary>
@@ -676,74 +774,8 @@ internal static class DomSubgridPasses
             return false;
         }
 
-        // Put every neutralized percentage back typed for the duration of the measurement. The
-        // subtree is measured with no definite inline size above it, so Taffy resolves each one
-        // against an indefinite basis - which is exactly the `auto` behaviour the spec asks for -
-        // while a percentage under a box that *does* have a definite width still resolves.
-        List<(TaffyNodeId Node, TaffyStyle Style)> neutralized = [];
-        HashSet<TaffyNodeId> snapshotted = [];
-        foreach (DeferredCyclicInlineSize entry in deferred)
-        {
-            if (entry.SourceKind != DeferredCyclicInlineSourceKind.Percent
-                || !taffyByDom.TryGetValue(entry.Node, out TaffyNodeId node))
-            {
-                continue;
-            }
-
-            TaffyStyle current = taffyTree.GetStyle(node);
-            if (snapshotted.Add(node))
-            {
-                neutralized.Add((node, current));
-            }
-
-            TaffyStyle typed = current.Clone();
-            TaffyDimension percentValue = TaffyDimension.FromPercent(entry.Percent);
-            switch (entry.Slot)
-            {
-                case 0:
-                {
-                    Layout.Size<TaffyDimension> size = typed.Size;
-                    size.Width = percentValue;
-                    typed.Size = size;
-
-                    // The measured-leaf build encodes a maximum inline size as
-                    // `min(preferred, maximum)`, and the preferred width it sampled was the
-                    // deferred zero - the same restore `RestoreTypedPercentages` performs.
-                    if (styles.TryGetValue(entry.Node, out LayoutStyle? leafStyle))
-                    {
-                        Layout.Size<TaffyDimension> maxSize = typed.MaxSize;
-                        maxSize.Width = leafStyle.MaxWidth.Kind switch
-                        {
-                            DimensionKind.Percent => TaffyDimension.FromPercent(leafStyle.MaxWidth.Value),
-                            DimensionKind.Px => TaffyDimension.FromLength(
-                                F32.Max(leafStyle.MaxWidth.Value, 0f)),
-                            _ => TaffyDimension.Auto,
-                        };
-                        typed.MaxSize = maxSize;
-                    }
-
-                    break;
-                }
-
-                case 2:
-                {
-                    Layout.Size<TaffyDimension> minSize = typed.MinSize;
-                    minSize.Width = percentValue;
-                    typed.MinSize = minSize;
-                    break;
-                }
-
-                default:
-                {
-                    Layout.Size<TaffyDimension> maxSize = typed.MaxSize;
-                    maxSize.Width = percentValue;
-                    typed.MaxSize = maxSize;
-                    break;
-                }
-            }
-
-            taffyTree.SetStyle(node, typed);
-        }
+        List<(TaffyNodeId Node, TaffyStyle Style)> neutralized =
+            EnterTypedPercentageScope(taffyTree, taffyByDom, styles, deferred, exclude: null);
 
         Dictionary<TaffyNodeId, float> minimums = [];
         foreach (TaffyNodeId itemNode in candidates)
@@ -782,10 +814,7 @@ internal static class DomSubgridPasses
             minimums[itemNode] = F32.Max(clamped, 0f);
         }
 
-        foreach ((TaffyNodeId node, TaffyStyle style) in neutralized)
-        {
-            taffyTree.SetStyle(node, style);
-        }
+        ExitTypedPercentageScope(taffyTree, neutralized);
 
         bool changed = false;
         foreach ((TaffyNodeId node, float minimum) in minimums)

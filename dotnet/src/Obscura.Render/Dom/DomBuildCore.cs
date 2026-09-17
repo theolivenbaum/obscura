@@ -458,6 +458,24 @@ internal static partial class DomBuild
             taffyStyle.Display = TaffyDisplay.Block;
         }
 
+        // Deviation from crates/obscura-render/src/dom.rs: there a definite-width inline-block
+        // keeps taffy's wrapping-flex-row stand-in, so an in-flow block child becomes a flex item
+        // and is shrunk below its own definite width - flexbox's automatic minimum size is the
+        // *content* size suggestion, which is zero for a box that carries its width itself.
+        // Chromium lays an inline-block's contents out in a block formatting context, where such
+        // a child overflows the inline-block instead. Give it the same real block layout
+        // `display: block` already gets. An auto width keeps the stand-in: its shrink-to-fit
+        // width is measured from it.
+        if (style.Display == Display.Inline
+            && style.IsInlineBlock
+            && !style.Width.IsAuto
+            && hasInFlowBlockChild
+            && !hasInlineIshContent
+            && !hasFloatChild)
+        {
+            taffyStyle.Display = TaffyDisplay.Block;
+        }
+
         // A block with mixed inline + block children keeps real block layout.
         if ((style.Display == Display.Block || (isInternalTableCell && hasInFlowBlockChild))
             && hasInlineIshContent

@@ -2674,3 +2674,45 @@ nothing observable in layout, which now matches.
 
 Pinned by `CssTests.ANonNumericTokenIsNotACssNumber` / `ACssNumberStillParses` /
 `ANonFiniteLengthDoesNotResolve` and `DomLayoutTests.ANonFiniteInsetIsAnInvalidDeclaration`.
+
+### A table's used width is floored by its min-content width, and an inline-block does block layout
+
+Three related places where Obscura squeezed content that Chromium lets overflow. All three
+show up together on the Tesserae `#/view/Code Diff` route (F38 in
+`dotnet/docs/round3-findings.md`), where the diff table sat at its container's 1073px and
+every code line wrapped, giving `d2h-code-wrapper` heights of 13,920 and 14,794 against
+Chromium's 836.
+
+**1. A percentage-width table.** `crates/obscura-render/src/dom.rs` skips such a table in the
+table used-width pass ("A percentage-width table resolves against its container, so leave
+taffy's percentage handling in place") and taffy then resolves `width: 100%` and stops there.
+CSS 2.1 17.5.2 makes the used width the *greater* of the specified width and what the columns
+need, so a percentage that resolves narrower than the content has to overflow instead. C#
+keeps taffy's percentage resolution and adds a `min-width` floor of the table's min-content
+width (`ApplyTableUsedWidths` in `Dom/LayoutDomControls.cs`).
+
+**2. Those intrinsic measurements ran through neutralized percentages.**
+`DeferCyclicFlexInlineSizes` flattens a cyclic percentage inline size to a definite `0px`
+before the box tree is built, so every `width: 100%` box *inside* a table reads as zero-wide
+when the table's own min-content is measured - the table then reports the width of whatever
+is not percentage-sized. The restore-measure-undo that `ApplyDeferredFlexAutomaticMinimums`
+already did for flex items is now the shared
+`DomSubgridPasses.EnterTypedPercentageScope` / `ExitTypedPercentageScope`, and the table pass
+measures inside one (excluding the table nodes themselves, so the used widths it writes
+survive the exit). The same scope is what lets the neutralized width be recognised as the
+percentage it was authored as, rather than as `width: 0`.
+
+**3. A definite-width inline-block shrank its block children.** Taffy's stand-in for an
+inline box is a wrapping flex row, and the reference keeps it for any inline-block that is not
+auto-width. A block-level child is then a flex item, and flexbox's automatic minimum size is
+the *content* size suggestion - zero for a box that carries its width itself - so a
+`width: 461px` child of a `width: 100%` inline-block was shrunk to the inline-block's 400.
+Chromium lays an inline-block's contents out in a block formatting context, where the child
+overflows. `DomBuildCore` now gives a definite-width inline-block whose in-flow children are
+all block-level the same real block layout `display: block` already gets. An auto-width
+inline-block keeps the stand-in, because its shrink-to-fit width is measured from it.
+
+Pinned by `DomLayoutTests.PercentageWidthTableIsFlooredByItsMinContentWidth`,
+`PercentageWidthTableThatFitsKeepsItsContainingBlockWidth`,
+`DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren` and
+`TableInAScrollableBoxTakesItsContentWidth`.

@@ -381,14 +381,32 @@ public static partial class RenderDom
         IfcRegistry ifcItems,
         float initialCbWidth,
         Layout.Size<TaffyAvailableSpace> available,
+        IReadOnlyList<DeferredCyclicInlineSize> deferredInlineSizes,
         Layout.TreeMeasureFunction<int?> measure)
     {
+        // `DeferCyclicFlexInlineSizes` has already rewritten a cyclic percentage inline size to a
+        // definite `0px`, and it runs before the box tree this pass reads. A table whose authored
+        // width is such a percentage would therefore be sized here as if it were `width: 0`, so
+        // recover what was authored.
+        Dictionary<NodeId, float> deferredPercentWidths = [];
+        foreach (DeferredCyclicInlineSize entry in deferredInlineSizes)
+        {
+            if (entry.Slot == 0 && entry.SourceKind == DeferredCyclicInlineSourceKind.Percent)
+            {
+                deferredPercentWidths[entry.Node] = entry.Percent;
+            }
+        }
+
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
         List<(TaffyNodeId Taffy, NodeId Dom, int Depth)> tables = [];
+        HashSet<TaffyNodeId> tableNodes = [];
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
+            taffyByDom[domId] = taffyId;
             if (ifcItems.TableRows.ContainsKey(taffyId))
             {
                 tables.Add((taffyId, domId, DomTableSupport.TableAncestorDepth(tree, domId, styles)));
+                tableNodes.Add(taffyId);
             }
         }
 
@@ -449,6 +467,16 @@ public static partial class RenderDom
                     }
                 }
             }
+
+            // Every width below is an intrinsic measurement, and `DeferCyclicFlexInlineSizes`
+            // has flattened the cyclic percentages inside these tables to a definite `0px`.
+            // Measuring through that reports a table's min-content as the width of whatever is
+            // not percentage-sized, which is what let a code-diff table sit at its container's
+            // width while every line inside it overflowed. The tables themselves are excluded so
+            // the used widths chosen below survive the exit.
+            List<(TaffyNodeId Node, TaffyStyle Style)> typedPercentages =
+                DomSubgridPasses.EnterTypedPercentageScope(
+                    taffyTree, taffyByDom, styles, deferredInlineSizes, tableNodes);
 
             foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
             {
@@ -515,9 +543,41 @@ public static partial class RenderDom
 
                 // A percentage-width table resolves against its container, so leave taffy's
                 // percentage handling in place.
-                Dimension widthStyle = tableStyle.Width;
+                Dimension widthStyle = deferredPercentWidths.TryGetValue(dom, out float authored)
+                    ? Dimension.Percent(authored)
+                    : tableStyle.Width;
                 if (widthStyle.Kind == DimensionKind.Percent)
                 {
+                    // Deviation from crates/obscura-render/src/dom.rs, which stops here. CSS 2.1
+                    // 17.5.2 makes a table's used width the greater of its specified width and
+                    // what its columns need, so a percentage resolving narrower than the content
+                    // must overflow its container rather than wrap every cell. Floor the box with
+                    // the table's min-content width and let taffy resolve the percentage.
+                    taffyTree.ComputeLayoutWithMeasure(
+                        tnode,
+                        new Layout.Size<TaffyAvailableSpace>(
+                            TaffyAvailableSpace.MinContent,
+                            TaffyAvailableSpace.MaxContent),
+                        measure);
+                    float percentMin = F32.Max(
+                        F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f),
+                        DomTableSupport.MaxDefiniteTableContentWidth(tree, dom, styles) ?? 0f);
+                    if (tableStyle.BoxSizing == BoxSizing.ContentBox)
+                    {
+                        percentMin = F32.Max(
+                            percentMin - DomStyleFixups.TableInlineOuterEdges(tableStyle), 0f);
+                    }
+
+                    TaffyStyle percentStyle = taffyTree.GetStyle(tnode);
+                    if (percentMin > (percentStyle.MinSize.Width.IntoOption() ?? 0f))
+                    {
+                        TaffyStyle floored = percentStyle.Clone();
+                        Layout.Size<TaffyDimension> percentMinSize = floored.MinSize;
+                        percentMinSize.Width = TaffyDimension.FromLength(percentMin);
+                        floored.MinSize = percentMinSize;
+                        taffyTree.SetStyle(tnode, floored);
+                    }
+
                     continue;
                 }
 
@@ -727,6 +787,7 @@ public static partial class RenderDom
                 }
             }
 
+            DomSubgridPasses.ExitTypedPercentageScope(taffyTree, typedPercentages);
             tableIndex = groupEnd;
         }
     }

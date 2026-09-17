@@ -634,22 +634,64 @@ SVG one.
 
 It is three defects, and the third is the one that matters:
 
-1. **`textarea.tss-textarea` is 19px too wide** - 238 -> 257, and its container and the stack
-   item above it follow. Its height is identical (220/220), so this is the control's intrinsic
-   *width* only. F32 set `textarea content = ceil(charWidth * cols) + 15`; something about this
-   one (it carries `.tss-textarea` CSS) puts it 19 over.
+1. **`textarea.tss-textarea` is 19px too wide** - 238 -> 257. **[Corrected below: this is not
+   an intrinsic-width defect and not independent. The textarea is `width: 100%`, and its column
+   and the codediff column are the two items of one 1075px flex row with the textarea column at
+   `flex: 1 1 auto`, so both this +19 and the +68 on `div.tss-codediff` are two readings of the
+   single quantity the diff table's width sets. Probed on its own the control measures 181 /
+   201 / 201 in both engines.]**
 2. **`div.tss-codediff` is 68px too wide** - 821 -> 889, x 555 -> 574, and the whole
    `d2h-*` tree under it inherits both.
 3. **The diff table does not get its max-content width, so every code line wraps.**
    `table.d2h-diff-table` is **2535 wide x 267 tall** in Chromium and **1073 x 1878** here; a
    second one is 1212 x 164 against 1073 x 778. Its `div.d2h-file-side-diff` parent is
    `overflow: scroll hidden`, i.e. horizontally scrollable, so the table should size to its
-   content and overflow. Obscura clamps it to the container's 1073 and the lines wrap, which
+   content and overflow. **[Corrected below: the scrollable ancestor is irrelevant. The table
+   is `width: 100%`, and Chromium's 2535 is CSS 2.1 17.5.2's min-content floor - the used width
+   is the greater of the specified width and what the columns need. See "Resolved".]**
+   Obscura clamps it to the container's 1073 and the lines wrap, which
    is what produces the 225 collapsed `d2h-code-line-*` spans, the `d2h-code-wrapper` heights
    of 13,920 and 14,794 against Chromium's 836, and the line container at y 29,798 against
    y 3,955.
 
 (3) subsumes most of the route's 990 divergent pairs and is the one to fix first.
+
+### Resolved
+
+(3) was three things stacked, and (1) and (2) were downstream of it, not separate defects.
+
+- **A percentage-width table had no min-content floor.** The reference skips such a table in
+  the table used-width pass and lets taffy resolve the percentage; CSS 2.1 17.5.2 makes the
+  used width the greater of the specified width and what the columns need. `ApplyTableUsedWidths`
+  now floors the box with the table's min-content width.
+- **The table's intrinsic measurements ran through neutralized percentages.**
+  `DeferCyclicFlexInlineSizes` flattens a cyclic percentage inline size to `0px` before the box
+  tree is built, so the `width: 100%` spans holding the code text read as zero-wide while the
+  table's min-content was measured - the table reported the width of the line-number column
+  alone, and its own `width: 100%` reached the pass as `width: 0`. The restore-measure-undo
+  `ApplyDeferredFlexAutomaticMinimums` already had is now
+  `DomSubgridPasses.EnterTypedPercentageScope` / `ExitTypedPercentageScope`, and the table pass
+  measures inside one.
+- **A definite-width inline-block shrank its block children.** Taffy's inline-box stand-in is a
+  wrapping flex row, and flexbox's automatic minimum size is the content size suggestion - zero
+  for a box carrying its own width - so a `width: 461px` child of a `width: 100%` inline-block
+  came out at the parent's width. A definite-width inline-block whose in-flow children are all
+  block-level now gets real block layout.
+
+On the route: `table.d2h-diff-table` 1073 x 1878 -> **2540 x 267** (Chromium 2534.53 x 267.31),
+the second 1073 x 778 -> 1221 x 198 (1211.83 x 164.34), the side-by-side pair 541 x 13,920 /
+541 x 14,794 -> 541 x 819 / 541 x 782 (537 x 836), collapsed `d2h-code-line-*` spans 225 -> 135.
+
+(1) is not an intrinsic-width defect at all: `textarea.tss-textarea` is `width: 100%` inside
+`.tss-textarea-container`, and probing the control on its own gives 181 / 201 / 201 against
+Chromium's 181 / 201 / 201. It and (2) are both the same flex row - the textarea column is
+`flex: 1 1 auto` and fills what the `.tss-codediff` column leaves, so both numbers are set by
+the first diff table's width. That table is now 792 against Chromium's 818.7 (was 887), and the
+textarea follows at 274 against 246.31 (was 257). What is left there is one residual: the first
+table's max-content is ~27px short, which is not the clamp this finding was about.
+
+Swept over the 101 Tesserae routes against `out-tssChrL`: 98 comparable, **4 improved, 0 worse**;
+geometry divergences over 2px 18,933 -> 14,634, mean absolute box error 46.25 -> 17.04.
 
 ## F39 - MutationObserver callbacks are delivered an order of magnitude late
 

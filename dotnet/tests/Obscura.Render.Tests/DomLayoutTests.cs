@@ -6822,6 +6822,117 @@ public class DomLayoutTests
         Assert.True(MathF.Abs(a.Width - 215.172f) < 0.5f, $"{a.Width}");
         Assert.True(MathF.Abs(Get("pct").Width - (a.Width - 24f)) < 0.5f, $"{Get("pct").Width}");
     }
+
+    private const string TableFloorFixture = """
+        <style>
+            html,body{margin:0;padding:0}
+            table{border-spacing:0;border-collapse:collapse}
+            td{padding:0}
+            .outer{width:400px}
+        </style>
+        <div class=outer>
+          <table id=wide style="width:100%"><tr><td><div style="width:461px;height:6px"></div></td></tr></table>
+        </div>
+        <div class=outer>
+          <table id=narrow style="width:100%"><tr><td><div style="width:100px;height:6px"></div></td></tr></table>
+        </div>
+        <div class=outer>
+          <table id=twocol style="width:100%">
+            <tr><td><div style="width:461px;height:6px"></div></td>
+                <td><div style="width:120px;height:6px"></div></td></tr>
+          </table>
+        </div>
+        """;
+
+    /// <summary>
+    /// CSS 2.1 17.5.2: a table's used width is the greater of its specified width and what its
+    /// columns need, so a `width: 100%` that resolves narrower than the content overflows its
+    /// containing block instead of squeezing the columns. Chromium: 461 / 400 / 581.
+    /// </summary>
+    [Fact]
+    public void PercentageWidthTableIsFlooredByItsMinContentWidth()
+    {
+        DomTree tree = Parse(TableFloorFixture);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("wide").Width - 461f) < 0.5f, $"wide {Get("wide").Width}");
+        Assert.True(MathF.Abs(Get("twocol").Width - 581f) < 0.5f, $"twocol {Get("twocol").Width}");
+    }
+
+    /// <summary>The contrasting case: content that fits leaves the percentage alone.</summary>
+    [Fact]
+    public void PercentageWidthTableThatFitsKeepsItsContainingBlockWidth()
+    {
+        DomTree tree = Parse(TableFloorFixture);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+
+        Rect narrow = laid.Rects[Id(tree, "narrow")];
+        Assert.True(MathF.Abs(narrow.Width - 400f) < 0.5f, $"narrow {narrow.Width}");
+    }
+
+    /// <summary>
+    /// An inline-block with a definite width lays its contents out in a block formatting
+    /// context: a block-level child keeps its own definite width and overflows rather than
+    /// being shrunk, and an auto-width one still fills. Chromium: 461 / 461 / 400.
+    /// </summary>
+    [Fact]
+    public void DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0;padding:0}
+                table{border-spacing:0;border-collapse:collapse}
+                td{padding:0}
+                .outer{width:400px}
+                .host{display:inline-block;width:100%}
+            </style>
+            <div class=outer><div class=host><div id=fixed style="width:461px;height:6px"></div></div></div>
+            <div class=outer><div class=host>
+              <table id=auto style="width:auto"><tr><td><div style="width:461px;height:6px"></div></td></tr></table>
+            </div></div>
+            <div class=outer><div class=host><div id=fill style="height:6px"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("fixed").Width - 461f) < 0.5f, $"fixed {Get("fixed").Width}");
+        Assert.True(MathF.Abs(Get("auto").Width - 461f) < 0.5f, $"auto {Get("auto").Width}");
+        Assert.True(MathF.Abs(Get("fill").Width - 400f) < 0.5f, $"fill {Get("fill").Width}");
+    }
+
+    /// <summary>
+    /// The Code Diff reduction: a table inside a horizontally scrollable box takes its
+    /// max-content width and overflows the scrollport, while one whose content fits does not.
+    /// Chromium, with the same fixture at 13px monospace: the nowrap table is wider than its
+    /// 300px scrollport, the wrappable one is exactly 300.
+    /// </summary>
+    [Fact]
+    public void TableInAScrollableBoxTakesItsContentWidth()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0;padding:0}
+                table{border-spacing:0;border-collapse:collapse;width:100%}
+                td{padding:0}
+                .box{width:300px;overflow-x:scroll;overflow-y:hidden;display:inline-block}
+                .cell{display:inline-block;height:14px}
+            </style>
+            <div class=box><table id=nowrap><tr><td>
+              <span class=cell style="white-space:nowrap"><i style="display:inline-block;width:900px;height:6px"></i></span>
+            </td></tr></table></div>
+            <div class=box><table id=fits><tr><td>
+              <span class=cell><i style="display:inline-block;width:90px;height:6px"></i></span>
+            </td></tr></table></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(Get("nowrap").Width > 880f, $"nowrap {Get("nowrap").Width}");
+        Assert.True(MathF.Abs(Get("fits").Width - 300f) < 1f, $"fits {Get("fits").Width}");
+    }
 }
 
 /// <summary>Deterministic reflected dump of renderer style graphs, used as a Debug analogue.</summary>
