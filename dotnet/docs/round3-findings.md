@@ -570,3 +570,38 @@ route mean still improved (1.6649 -> 1.2037).
 
 See "Known deviations" in todo.md and
 `DomLayoutTests.AReservedScrollbarReResolvesFunctionalWidthsBelowIt`.
+
+## F36 - the Masonry component renders nothing
+
+`#/view/Masonry` on the Tesserae sample app. `div.tss-masonry` is **1084 x 7340** in Chromium
+and **1084 x 0** in Obscura, and every one of its 50 `position: absolute`
+`.tss-masonry-item` children is `[0, 0, 0, 0]` - not merely mis-sized, entirely unplaced.
+Chromium lays them out at x 301, width 1084, heights 80-200, stacked down to y 7632.
+
+Everything above the masonry container matches to the pixel, so the page is otherwise fine.
+Masonry positions its items absolutely from JavaScript after measuring them, so the first
+thing to establish is whether that code ran and what it measured.
+
+## F37 - a chart's SVG children collapse to zero
+
+`#/view/Charts`. **366 SVG elements are `[0, 0, 0, 0]` in Obscura** where Chromium gives them
+real geometry - 143 `circle`, 116 `text`, 44 `rect`, 43 `line`, 13 `path`, 7 `g`, including a
+`g` that Chromium lays out at `[342, 467, 1009, 141]` and a `line` at `[345, 649, 1003, 0]`.
+
+The telling statistic: on that route there are **zero** divergences that are not a collapse to
+zero. Every chart element is either exactly right or completely absent, which points at a
+whole subtree never being laid out rather than at a sizing rule.
+
+## F38 - the Code Diff view, two separate defects
+
+`#/view/Code Diff`, 990 of 2,972 aligned pairs. Two distinct things:
+
+- **237 elements collapse to zero** - 225 `span` (`d2h-code-line-prefix`,
+  `d2h-code-line-ctn hljs markdown`) and 12 `path`. One line container is
+  `[423, 3955, 2117, 18]` in Chromium and `[502, 29798, 0, 18]` here: zero width and a y
+  seven times further down, so the diff table's line boxes are laid out on a completely
+  different geometry.
+- **753 sizing divergences**, led by a `textarea.tss-textarea` 238 -> 257 (+19), its
+  containers +19, and `div.tss-codediff` 821 -> 889 (+68).
+
+The second is the tractable half and may be the cause of the first.
