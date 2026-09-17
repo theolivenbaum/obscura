@@ -650,3 +650,28 @@ It is three defects, and the third is the one that matters:
    y 3,955.
 
 (3) subsumes most of the route's 990 divergent pairs and is the one to fix first.
+
+## F39 - MutationObserver callbacks are delivered an order of magnitude late
+
+Found while fixing F36 and **not fixed**; it is orthogonal to the CSS parser and was equally
+present before that fix.
+
+Tesserae's `DomObserver.WhenMounted` drives Masonry's real `layout()` off a
+`MutationObserver` on `document.body`. Measured from navigation on `#/view/Masonry`:
+
+| | time for `div.tss-masonry` to reach its 7340px height |
+|---|---|
+| Chromium | **~0.8 s**, and immediately on a warm page with no observer attached |
+| Obscura, page-level `MutationObserver` attached | **~8.8 s** |
+| Obscura, no `MutationObserver` attached | **never** - 31 s of polling, items at their static position with correct widths, container 0 |
+
+Two consequences worth keeping in mind:
+
+- **The survey under-measures any observer-driven component.** The automated snapshot of
+  `#/view/Masonry` still catches an intermediate state (container 0, items unpositioned but
+  correctly sized) while a probe that waits long enough matches Chromium exactly. The capture's
+  own DOM-quiet settle is itself a `MutationObserver`, so the harness is measuring the thing it
+  depends on.
+- The third row is the sharper one: with no observer attached at all the layout never runs,
+  which suggests the delivery is being driven by something incidental rather than by the
+  microtask checkpoint the spec puts it on.
