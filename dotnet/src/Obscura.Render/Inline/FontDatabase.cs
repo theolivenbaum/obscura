@@ -26,7 +26,13 @@ public enum FaceStyle
 /// Port of the Rust <c>FaceMetrics</c>. Kept in design units so a used pixel size can be
 /// applied and each component rounded independently, the way Chromium's FreeType path does.
 /// </remarks>
-public readonly record struct FaceMetrics(float Ascent, float Descent, float LineGap, float UnitsPerEm);
+public readonly record struct FaceMetrics(
+    float Ascent,
+    float Descent,
+    float LineGap,
+    float UnitsPerEm,
+    float AverageCharWidth = 0f,
+    float MaxCharWidth = 0f);
 
 /// <summary>One OpenType variation axis and the range it accepts.</summary>
 public readonly record struct FontAxis(VariationTag Tag, float Min, float Default, float Max);

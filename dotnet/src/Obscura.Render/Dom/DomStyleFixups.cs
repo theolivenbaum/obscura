@@ -848,6 +848,19 @@ internal static class DomStyleFixups
                 ? F32.Max(intrinsicWidth - horizontalEdges, 0f)
                 : intrinsicWidth);
         }
+        else if (style.Width.Kind == DimensionKind.Percent)
+        {
+            // DEVIATION from crates/obscura-render/src/dom.rs, which publishes the intrinsic size
+            // only into an `auto` width and so leaves a percentage-width control contributing
+            // nothing but its padding. A percentage that cannot be resolved behaves as `auto` for
+            // an intrinsic contribution (CSS Sizing 3 5.2.2), and a control has no child boxes to
+            // fall back on, so the size-based intrinsic box is published as the leaf's measured
+            // content instead. Every Tesserae text input carries `width: 100%`, and each one
+            // reported 8px of padding as its max-content width. See "Known deviations" in todo.md.
+            style.NativeControlContent = (
+                F32.Max(intrinsicWidth - horizontalEdges, 0f),
+                F32.Max(intrinsicHeight - verticalEdges, 0f));
+        }
 
         if (style.Height.IsAuto && !stretchedGridItem.Block)
         {

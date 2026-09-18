@@ -474,7 +474,9 @@ public sealed class PreparedRender
     {
         if (!Layout.Rects.TryGetValue(id, out Rect rect))
         {
-            return null;
+            // An SVG shape has no CSS box, so CSSOM View answers from the SVG object bounding
+            // boxes instead.
+            return Layout.SvgRects.TryGetValue(id, out Rect svgRect) ? svgRect : null;
         }
 
         return Layout.Transforms.TryGetValue(id, out Affine2 transform) ? transform.MapRect(rect) : rect;
@@ -486,7 +488,13 @@ public sealed class PreparedRender
         if (!Layout.Rects.TryGetValue(id, out Rect rect)
             || !Layout.Styles.TryGetValue(id, out LayoutStyle? style))
         {
-            return null;
+            // An SVG shape reports a bounding box but no client box: it is not a CSS layout box,
+            // and Chromium answers 0 for `clientWidth` / `clientHeight` on one.
+            //
+            // DEVIATION from Chromium, narrowly: Blink's `<text>` is a block-flow underneath, so
+            // it does report a client width there. Reporting 0 keeps every SVG element
+            // consistent rather than reproducing that one internal detail.
+            return Layout.SvgRects.ContainsKey(id) ? (0f, 0f) : null;
         }
 
         if (style.IgnoresUsedBoxSizes())
@@ -494,9 +502,10 @@ public sealed class PreparedRender
             return (0f, 0f);
         }
 
+        // A classic scrollbar sits inside the padding box, so the client box excludes it.
         return (
-            F32.Max(rect.Width - style.Border.Left - style.Border.Right, 0f),
-            F32.Max(rect.Height - style.Border.Top - style.Border.Bottom, 0f));
+            F32.Max(rect.Width - style.Border.Left - style.Border.Right - style.ReservedScrollbarY, 0f),
+            F32.Max(rect.Height - style.Border.Top - style.Border.Bottom - style.ReservedScrollbarX, 0f));
     }
 
     /// <summary>A compact CSSOM snapshot derived from the same cascade paint uses.</summary>
@@ -1340,7 +1349,12 @@ public sealed class PreparedRender
             return [.. fragments];
         }
 
-        return Layout.Rects.TryGetValue(id, out Rect rect) ? [rect] : null;
+        if (Layout.Rects.TryGetValue(id, out Rect rect))
+        {
+            return [rect];
+        }
+
+        return Layout.SvgRects.TryGetValue(id, out Rect svgRect) ? [svgRect] : null;
     }
 
     private List<Rect> MapFragments(NodeId id, List<Rect> source, (float X, float Y) movement)

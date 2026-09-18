@@ -1382,14 +1382,22 @@ internal static class SvgRenderer
         return color.WithAlpha((byte)Math.Clamp((int)MathF.Round(alpha * 255f), 0, 255));
     }
 
-    internal static SKPath? ShapePath(XElement element)
+    internal static SKPath? ShapePath(XElement element) =>
+        ShapePath(element.Name.LocalName, name => element.Attribute(name)?.Value);
+
+    /// <summary>
+    /// The geometry of one shape, read through <paramref name="attribute"/> so the same
+    /// construction serves both the parsed SVG document the raster walks and the live DOM
+    /// nodes <see cref="SvgBoxes"/> measures for <c>getBoundingClientRect()</c>.
+    /// </summary>
+    internal static SKPath? ShapePath(string tag, Func<string, string?> attribute)
     {
         using SKPathBuilder builder = new();
-        switch (element.Name.LocalName)
+        switch (tag)
         {
             case "path":
             {
-                string? d = element.Attribute("d")?.Value;
+                string? d = attribute("d");
                 if (d is null || d.Contains("var(", StringComparison.Ordinal))
                 {
                     return null;
@@ -1401,17 +1409,17 @@ internal static class SvgRenderer
 
             case "rect":
             {
-                float x = ParseLength(element.Attribute("x")?.Value) ?? 0f;
-                float y = ParseLength(element.Attribute("y")?.Value) ?? 0f;
-                float width = ParseNumberOrPercent(element.Attribute("width")?.Value, 100f) ?? 0f;
-                float height = ParseNumberOrPercent(element.Attribute("height")?.Value, 100f) ?? 0f;
+                float x = ParseLength(attribute("x")) ?? 0f;
+                float y = ParseLength(attribute("y")) ?? 0f;
+                float width = ParseNumberOrPercent(attribute("width"), 100f) ?? 0f;
+                float height = ParseNumberOrPercent(attribute("height"), 100f) ?? 0f;
                 if (width <= 0f || height <= 0f)
                 {
                     return null;
                 }
 
-                float rx = ParseLength(element.Attribute("rx")?.Value) ?? 0f;
-                float ry = ParseLength(element.Attribute("ry")?.Value) ?? rx;
+                float rx = ParseLength(attribute("rx")) ?? 0f;
+                float ry = ParseLength(attribute("ry")) ?? rx;
                 if (rx > 0f || ry > 0f)
                 {
                     builder.AddRoundRect(new SKRect(x, y, x + width, y + height), rx, ry, SKPathDirection.Clockwise);
@@ -1426,9 +1434,9 @@ internal static class SvgRenderer
 
             case "circle":
             {
-                float cx = ParseLength(element.Attribute("cx")?.Value) ?? 0f;
-                float cy = ParseLength(element.Attribute("cy")?.Value) ?? 0f;
-                float r = ParseLength(element.Attribute("r")?.Value) ?? 0f;
+                float cx = ParseLength(attribute("cx")) ?? 0f;
+                float cy = ParseLength(attribute("cy")) ?? 0f;
+                float r = ParseLength(attribute("r")) ?? 0f;
                 if (r <= 0f)
                 {
                     return null;
@@ -1440,10 +1448,10 @@ internal static class SvgRenderer
 
             case "ellipse":
             {
-                float cx = ParseLength(element.Attribute("cx")?.Value) ?? 0f;
-                float cy = ParseLength(element.Attribute("cy")?.Value) ?? 0f;
-                float rx = ParseLength(element.Attribute("rx")?.Value) ?? 0f;
-                float ry = ParseLength(element.Attribute("ry")?.Value) ?? 0f;
+                float cx = ParseLength(attribute("cx")) ?? 0f;
+                float cy = ParseLength(attribute("cy")) ?? 0f;
+                float rx = ParseLength(attribute("rx")) ?? 0f;
+                float ry = ParseLength(attribute("ry")) ?? 0f;
                 if (rx <= 0f || ry <= 0f)
                 {
                     return null;
@@ -1455,10 +1463,10 @@ internal static class SvgRenderer
 
             case "line":
             {
-                float x1 = ParseLength(element.Attribute("x1")?.Value) ?? 0f;
-                float y1 = ParseLength(element.Attribute("y1")?.Value) ?? 0f;
-                float x2 = ParseLength(element.Attribute("x2")?.Value) ?? 0f;
-                float y2 = ParseLength(element.Attribute("y2")?.Value) ?? 0f;
+                float x1 = ParseLength(attribute("x1")) ?? 0f;
+                float y1 = ParseLength(attribute("y1")) ?? 0f;
+                float x2 = ParseLength(attribute("x2")) ?? 0f;
+                float y2 = ParseLength(attribute("y2")) ?? 0f;
                 builder.MoveTo(x1, y1);
                 builder.LineTo(x2, y2);
                 return builder.Detach();
@@ -1467,7 +1475,7 @@ internal static class SvgRenderer
             case "polyline":
             case "polygon":
             {
-                string? points = element.Attribute("points")?.Value;
+                string? points = attribute("points");
                 if (points is null)
                 {
                     return null;
@@ -1485,7 +1493,7 @@ internal static class SvgRenderer
                     builder.LineTo(numbers[index], numbers[index + 1]);
                 }
 
-                if (element.Name.LocalName == "polygon")
+                if (tag == "polygon")
                 {
                     builder.Close();
                 }

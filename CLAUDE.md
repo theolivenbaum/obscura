@@ -5,29 +5,44 @@ Guidance for AI coding agents working on the **C# / .NET 10 port of Obscura**.
 Obscura is a headless browser engine: it runs real JavaScript through V8, keeps
 a real DOM tree, owns its layout and paint pipeline, speaks the Chrome DevTools
 Protocol, and is a drop-in replacement for headless Chrome with Puppeteer and
-Playwright. The reference implementation is the Rust workspace in `crates/`.
-This repository is being ported to C# under `dotnet/`.
+Playwright. The deliverable is the C# engine under `dotnet/`; the Rust workspace
+in `crates/` is kept only as reference to read while porting, and goes away when
+the port is done.
 
 Read `todo.md` for the live port status and the ordered work queue.
 
 ## Ground rules for the port
 
-1. **The Rust tree in `crates/` is the specification, and it is read-only.**
-   It stays in the repo during the port and is the authority on behavior. When
-   C# and Rust disagree, Rust is right unless the Rust code is provably wrong.
-   Do not edit `crates/**` - not to make a C# test pass, and not to carry a fix
-   across. Fix C# only.
+1. **The Rust tree in `crates/` is reference material, and it is read-only.**
+   It is kept to read while porting - what an area does, in what order, with what
+   edge cases - and for nothing else. It is not maintained, it is not the
+   deliverable, and it will go away when the port is done.
+
+   **Chromium is the authority on observable behaviour, not Rust.** Where the two
+   disagree, measure Chromium and match it. Rust is a useful prior and often
+   right, but it is provably wrong in a good number of places: a flex item pinned
+   to its used width and then shrunk again (F31), one hard-coded character-width
+   calibration for every typeface (F32), no layout space for a classic scrollbar
+   (F34), no `getBoundingClientRect()` for SVG descendants at all (F37), and four
+   `MutationObserver` registration rules (F39). See `dotnet/docs/round3-findings.md`.
+
+   Never edit `crates/**` - not to make a C# test pass, not to carry a fix across,
+   not to keep the trees in step. Fix C# only, and leave the Rust tree where it is.
 2. **Where C# deviates from Rust deliberately, say so in a comment at the
    deviation.** Once a bug is fixed on the C# side and not in `crates/**`, the
    two trees no longer agree, and the next reader diffing them needs to know
    which side is intentional. Put a short comment at the C# code that differs:
    what Rust does, what C# does instead, and why (a bug fix against Chromium, a
    platform difference, a deliberate simplification). Record the same thing under
-   "Known deviations" in `todo.md`. A deviation with no comment is a defect,
-   because the next port pass will "correct" it back to the Rust behavior.
-3. **Port behavior, not syntax.** Match observable behavior exactly (the same
-   JSON payloads, the same op protocol strings, the same CDP wire messages, the
-   same DOM semantics). Write idiomatic modern C#, not transliterated Rust.
+   "Known deviations" in `todo.md`. The point is not to reconcile the trees -
+   they are allowed to diverge and increasingly do - it is so the next reader
+   diffing them can tell an intentional fix from an unfinished port, and does not
+   "correct" a deliberate fix back to the Rust behaviour.
+3. **Port behavior, not syntax.** The wire surfaces have to match the Rust
+   engine byte for byte - the same JSON payloads, the same op protocol strings,
+   the same CDP messages - because clients depend on them. DOM, CSS and layout
+   semantics have to match **Chromium**, which is what the parity survey measures.
+   Write idiomatic modern C#, not transliterated Rust.
 4. **Native dependencies are a closed set: V8, Skia, HarfBuzz.** Nothing else.
    - `Microsoft.ClearScript.V8.Native.*` - the JavaScript engine.
    - `SkiaSharp.NativeAssets.*` - rasterization and image codecs. tiny-skia (the
@@ -39,12 +54,21 @@ Read `todo.md` for the live port status and the ordered work queue.
    dependency needs an explicit decision recorded in `todo.md` first. In
    particular: no native TLS stack, which is why stealth TLS impersonation is
    a tracked gap rather than a port target.
-5. **`bootstrap.js` is shared, not ported.** `crates/obscura-js/js/bootstrap.js`
-   is JavaScript and runs unchanged on the C# side. `Obscura.Js` embeds it by
-   linking that exact file (see the `EmbeddedResource` in `Obscura.Js.csproj`),
-   never by copying it, so the two engines cannot drift. Fix the shim in place
-   and both engines pick the fix up. It reaches V8 through
-   `BootstrapLoader.Install`, which installs the `Deno.core` shim first.
+5. **`bootstrap.js` is ours now.** `dotnet/src/Obscura.Js/js/bootstrap.js` began
+   as a verbatim copy of `crates/obscura-js/js/bootstrap.js` and is embedded from
+   that local path. It used to be linked out of the Rust tree so the two engines
+   could not drift, but `crates/**` is read-only (rule 1), which made a shim bug
+   unfixable: the two rules contradicted each other and this one gave way. Fix
+   the shim in the C# copy, comment the divergence at the site, and record it
+   under "Known deviations" in `todo.md` like any other, and do not carry it back
+   to the Rust copy. It reaches V8 through `BootstrapLoader.Install`, which
+   installs the `Deno.core` shim first.
+
+   The same applies to the other two things the build used to take out of
+   `crates/`: the tracker blocklist (`dotnet/src/Obscura.Net/Resources/pgl_domains.txt`)
+   and the embedded fonts (`dotnet/src/Obscura.Render/Assets/*.ttf`). Nothing in
+   `dotnet/` reads across into the Rust tree any more, so the port can stand on
+   its own when `crates/` eventually goes away.
 6. **The op protocol is a contract.** `bootstrap.js` calls ~53 ops, and `op_dom`
    multiplexes ~90 string commands over `(cmd, arg1, arg2) -> string`. The C#
    implementation must accept and return byte-identical payloads. See
@@ -121,10 +145,11 @@ dotnet/
 
 The engine never uses system fonts. It embeds its own faces (Liberation, DejaVu,
 Noto Color Emoji) so rasterization is identical on every host and works on
-distroless images with no fontconfig. The C# build links those font files
-directly out of `crates/obscura-render/assets/` rather than copying them, so the
-two engines can never rasterize against different binaries. Resolve typefaces
-with `SKTypeface.FromData` over the embedded resources; never
+distroless images with no fontconfig. They live in
+`dotnet/src/Obscura.Render/Assets/` and are byte-identical copies of
+`crates/obscura-render/assets/`; if that tree's faces are ever updated, re-copy
+them or the two engines will rasterize differently. Resolve typefaces with
+`SKTypeface.FromData` over the embedded resources; never
 `SKTypeface.FromFamilyName`.
 
 ## Build
@@ -262,8 +287,10 @@ when C# layout drifts from Rust:
 3. Port the Rust unit tests (`#[cfg(test)] mod tests`) as xUnit facts in the
    same order, then the integration tests under `crates/<crate>/tests/`.
 4. Run `dotnet test` for the area. Green means the port is *plausible*.
-5. Add or extend a parity test that runs the same input through both engines.
-   Green parity means the port is *done*.
+5. Check the behaviour against **Chromium**, which is the authority (rule 1) -
+   a parity test against the Rust binary is a cheap way to catch a transcription
+   slip, but green parity only means the port matches a reference that is itself
+   wrong in places. Measuring Chromium is what says the port is *done*.
 6. Update `todo.md`: move the component's line from `[ ]` to `[x]` and record
    any deliberate deviation under "Known deviations".
 

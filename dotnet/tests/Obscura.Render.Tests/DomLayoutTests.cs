@@ -1,4 +1,4 @@
-// xUnit port of `mod tests` in crates/obscura-render/src/dom.rs, in source order.
+﻿// xUnit port of `mod tests` in crates/obscura-render/src/dom.rs, in source order.
 using System.Globalization;
 using Obscura.Dom;
 using Obscura.Render;
@@ -4439,6 +4439,117 @@ public class DomLayoutTests
             $"the scrollable grid must keep its six 60px rows, not collapse: {Get("grid")}");
     }
 
+    /// <summary>
+    /// DEVIATION from vendored taffy (`compute/block.rs`), which falls back to
+    /// `min_size.height` as the children's percentage basis when a block has no resolved
+    /// height. `min-height: 0` is the initial value and carries no information about the used
+    /// height, so the fallback gave every `height: %` child a basis of 0 and collapsed it.
+    /// Chromium sizes the box from its content and resolves the percentage against that, so
+    /// `#gc` is 437px tall, not 0.
+    /// Verified with Chromium (Playwright, /opt/pw-browsers/chromium).
+    /// </summary>
+    [Fact]
+    public void AZeroMinHeightIsNotAPercentageBasisForChildren()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #col { display:flex; flex-direction:column; height:950px; width:1000px }
+              #mid { height:100%; min-height:0 }
+              #gc { height:100% }
+              #k { height:437px }
+            </style>
+            <div id="col"><div id="item"><div id="mid"><div id="gc">
+              <div id="k"></div>
+            </div></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 950f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        foreach (string id in new[] { "item", "mid", "gc", "k" })
+        {
+            Assert.True(MathF.Abs(Get(id).Height - 437f) < 0.01f, $"#{id} {Get(id)}");
+        }
+    }
+
+    /// <summary>
+    /// The other side of the same rule: a POSITIVE `min-height` does say how tall the box will
+    /// be, and Chromium resolves a child percentage against it. A fix that simply drops the
+    /// `min_size.height` fallback makes `#gc` 437px here instead of 600px.
+    /// </summary>
+    [Fact]
+    public void APositiveMinHeightStaysAPercentageBasisForChildren()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #col { display:flex; flex-direction:column; height:950px; width:1000px }
+              #mid { height:100%; min-height:600px }
+              #gc { height:100% }
+              #k { height:437px }
+            </style>
+            <div id="col"><div id="item"><div id="mid"><div id="gc">
+              <div id="k"></div>
+            </div></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 950f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        foreach (string id in new[] { "item", "mid", "gc" })
+        {
+            Assert.True(MathF.Abs(Get(id).Height - 600f) < 0.01f, $"#{id} {Get(id)}");
+        }
+
+        Assert.True(MathF.Abs(Get("k").Height - 437f) < 0.01f, $"{Get("k")}");
+    }
+
+    /// <summary>
+    /// The chain `#/manage/configure/subscription` actually builds, reduced from the live DOM:
+    /// a settings group is an auto-height item of the app's definite-height COLUMN container,
+    /// and it stacks two `height: 100%; min-height: 0` boxes, the inner one an
+    /// `overflow: hidden auto` scroller. The zero minimum handed the scroller a percentage
+    /// basis of 0, so it came out its padding box tall and scrolled all 464px of content away -
+    /// the route rendered blank while every leaf sat at the right position inside it.
+    /// Chromium (Playwright, /opt/pw-browsers/chromium): 512 / 496 / 480, with the two rows at
+    /// their own 27px and 437px.
+    /// </summary>
+    [Fact]
+    public void ASettingsGroupsScrollableStackKeepsItsContentHeight()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              * { box-sizing:border-box }
+              #app { display:flex; flex-direction:column; height:950px; width:1000px }
+              #group { display:flex; flex-direction:column; width:100%; min-width:0;
+                       padding:8px }
+              #content { width:100%; min-width:0; height:100%; min-height:0; padding:8px }
+              #stack { display:flex; flex-direction:column; width:100%; min-width:0;
+                       height:100%; min-height:0; padding:8px; overflow:hidden auto }
+              #head { height:27px }
+              #body { height:437px }
+            </style>
+            <div id="app"><div id="group"><div id="content"><div id="stack">
+              <div id="head"></div><div id="body"></div>
+            </div></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 950f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("group").Height - 512f) < 0.01f, $"#group {Get("group")}");
+        Assert.True(MathF.Abs(Get("content").Height - 496f) < 0.01f, $"#content {Get("content")}");
+        Assert.True(
+            MathF.Abs(Get("stack").Height - 480f) < 0.01f,
+            $"the scroller must keep its content height, not clip it: {Get("stack")}");
+        Assert.True(MathF.Abs(Get("head").Height - 27f) < 0.01f, $"#head {Get("head")}");
+        Assert.True(MathF.Abs(Get("body").Height - 437f) < 0.01f, $"#body {Get("body")}");
+    }
+
     [Fact]
     public void AutoFitRepetitionCountsAMathFunctionTrackMinimumAsFixed()
     {
@@ -4521,15 +4632,200 @@ public class DomLayoutTests
         Assert.True(MathF.Abs(Width("b") - 285f) < 0.01f, $"{Width("b")}");
         Assert.True(MathF.Abs(Width("c") - 290f) < 0.01f, $"{Width("c")}");
 
-        // An overlay scrollbar with no `scrollbar-gutter` declaration takes no space.
-        Assert.True(MathF.Abs(Width("d") - 300f) < 0.01f, $"{Width("d")}");
-        Assert.True(MathF.Abs(Width("e") - 300f) < 0.01f, $"{Width("e")}");
+        // CORRECTION: an earlier version of this test asserted that `overflow-y: scroll` with no
+        // `scrollbar-gutter` declaration takes no space, which is what Chromium does only when it
+        // is told to hide scrollbars - Playwright passes `--hide-scrollbars` for every browser it
+        // launches, and that is what the measurement behind it was taken through. Headless
+        // Chromium driven over CDP without that flag draws classic scrollbars, and a `scroll` axis
+        // always has one: 10px for `scrollbar-width: thin`, the classic 15px otherwise.
+        Assert.True(MathF.Abs(Width("d") - 290f) < 0.01f, $"{Width("d")}");
+        Assert.True(MathF.Abs(Width("e") - 285f) < 0.01f, $"{Width("e")}");
 
         // The gutter comes out of the content area; the padding is untouched by it.
         Assert.True(MathF.Abs(Width("f") - 285f) < 0.01f, $"{Width("f")}");
         Assert.True(
             MathF.Abs(laid.Styles[Id(tree, "padded")].Padding.Right - 10f) < 0.01f,
             "the reserved gutter must not show up as computed padding");
+    }
+
+    [Fact]
+    public void AClassicScrollbarIsReservedByAnOverflowingScrollContainer()
+    {
+        // DEVIATION from the Rust reference, which reserves a scrollbar gutter only out of the
+        // initial containing block. Headless Chromium draws classic (non-overlay) scrollbars, so
+        // a scroll container's scrollbar takes space out of its scrollport: always on an
+        // `overflow: scroll` axis, and on an `overflow: auto` axis once the content overflows.
+        // Values measured against Chromium 141 driven over CDP - note that Playwright launches
+        // browsers with `--hide-scrollbars`, under which none of these reserve anything.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              div { width:400px; height:100px }
+              i { display:block; width:100%; height:10px }
+              u { display:block; height:400px }
+              s { display:block; width:900px; height:10px }
+              #fits   { overflow:auto }
+              #tall   { overflow:auto }
+              #clip   { overflow:hidden }
+              #always { overflow:scroll }
+              #wide   { overflow:auto }
+              #nobar  { overflow:auto; scrollbar-width:none }
+              #thin   { overflow:auto; scrollbar-width:thin }
+            </style>
+            <div id="fits"><i id="a"></i></div>
+            <div id="tall"><i id="b"></i><u></u></div>
+            <div id="clip"><i id="c"></i><u></u></div>
+            <div id="always"><i id="d"></i></div>
+            <div id="wide"><i id="e"></i><s></s></div>
+            <div id="nobar"><i id="f"></i><u></u></div>
+            <div id="thin"><i id="g"></i><u></u></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // Content that fits keeps the whole scrollport; content that does not loses the classic
+        // 15px to the vertical scrollbar.
+        Assert.True(MathF.Abs(Width("a") - 400f) < 0.01f, $"{Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 385f) < 0.01f, $"{Width("b")}");
+
+        // `hidden` clips without a scrollbar; `scroll` shows one whether it is needed or not.
+        Assert.True(MathF.Abs(Width("c") - 400f) < 0.01f, $"{Width("c")}");
+        Assert.True(MathF.Abs(Width("d") - 385f) < 0.01f, $"{Width("d")}");
+
+        // Overflow on the inline axis alone puts a scrollbar along the bottom, which costs
+        // height, not width.
+        Assert.True(MathF.Abs(Width("e") - 400f) < 0.01f, $"{Width("e")}");
+        Assert.True(
+            MathF.Abs(laid.Rects[Id(tree, "wide")].Height - 100f) < 0.01f,
+            $"{laid.Rects[Id(tree, "wide")].Height}");
+
+        // `scrollbar-width` sizes it: `none` removes the scrollbar entirely, `thin` is 10px.
+        Assert.True(MathF.Abs(Width("f") - 400f) < 0.01f, $"{Width("f")}");
+        Assert.True(MathF.Abs(Width("g") - 390f) < 0.01f, $"{Width("g")}");
+    }
+
+    [Fact]
+    public void ACustomWebkitScrollbarSizesTheReservedScrollbar()
+    {
+        // Tesserae asks every scroll pane in Curiosity Workspace for a 9px scrollbar with a
+        // page-wide `::-webkit-scrollbar { width: 9px }`, and Chromium takes exactly that out of
+        // the scrollport - 9px, not the classic 15. A settings row inside one came out 9px too
+        // wide, and every right-aligned control in it 9px too far right, until this was read.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              div { width:400px; height:100px; overflow:auto }
+              i { display:block; width:100%; height:10px }
+              u { display:block; height:400px }
+              ::-webkit-scrollbar { width:7px; height:7px }
+              .nine::-webkit-scrollbar { width:9px; height:9px }
+              #gone::-webkit-scrollbar { display:none }
+            </style>
+            <div id="bare"><i id="a"></i><u></u></div>
+            <div id="nine" class="nine"><i id="b"></i><u></u></div>
+            <div id="gone"><i id="c"></i><u></u></div>
+            <div id="fits" class="nine"><i id="d"></i></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // A pseudo-element rule with no originating compound is `*::-webkit-scrollbar`, and it
+        // beats the user-agent thickness.
+        Assert.True(MathF.Abs(Width("a") - 393f) < 0.01f, $"{Width("a")}");
+
+        // A more specific rule wins over it, as any other declaration would.
+        Assert.True(MathF.Abs(Width("b") - 391f) < 0.01f, $"{Width("b")}");
+
+        // `display: none` on the scrollbar box hides it, so it costs nothing.
+        Assert.True(MathF.Abs(Width("c") - 400f) < 0.01f, $"{Width("c")}");
+
+        // Styling the scrollbar does not make one appear on a box that does not overflow.
+        Assert.True(MathF.Abs(Width("d") - 400f) < 0.01f, $"{Width("d")}");
+    }
+
+    [Fact]
+    public void AReservedScrollbarReResolvesFunctionalWidthsBelowIt()
+    {
+        // Reserving a classic scrollbar narrows the scroll container after the deferred cyclic
+        // flex sizes have been resolved, and a functional inline size was flattened to a px
+        // length against the containing block as it stood before that. Values measured against
+        // Chromium 141 driven over CDP - Playwright launches browsers with `--hide-scrollbars`,
+        // under which nothing is reserved and every box here is the control's width.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              ::-webkit-scrollbar { width:9px; height:9px }
+              .row { display:flex; width:400px }
+              .item { flex:1 1 auto }
+              .scroller { height:100px; overflow-y:auto; overflow-x:hidden }
+              .noscroll { height:100px; overflow:hidden }
+              .cont { padding:2px }
+              .card { display:block; width:calc(100% - 4px); box-sizing:border-box; height:10px }
+              .pct { display:block; width:100%; height:10px }
+              u { display:block; height:400px }
+            </style>
+            <div class="row"><div class="item"><div class="scroller">
+              <div class="cont"><i id="a" class="card"></i><i id="b" class="pct"></i></div><u></u>
+            </div></div></div>
+            <div class="row"><div class="item"><div class="noscroll">
+              <div class="cont"><i id="c" class="card"></i><i id="d" class="pct"></i></div><u></u>
+            </div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The scrollport is 400 - 9 = 391, so the container's content box is 387 and the card
+        // 383. The bare percentage sibling reaches taffy typed and always re-resolved; the
+        // calc() is the one that used to keep 392, its pre-gutter value.
+        Assert.True(MathF.Abs(Width("a") - 383f) < 0.01f, $"{Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 387f) < 0.01f, $"{Width("b")}");
+
+        // Control: the same subtree in a box that reserves nothing. A fix that moves these has
+        // broken the non-scrolling case.
+        Assert.True(MathF.Abs(Width("c") - 392f) < 0.01f, $"{Width("c")}");
+        Assert.True(MathF.Abs(Width("d") - 396f) < 0.01f, $"{Width("d")}");
+    }
+
+    [Fact]
+    public void ANonFiniteInsetIsAnInvalidDeclaration()
+    {
+        // `nan` and `infinity` are identifiers in CSS, not numbers, so Chromium drops
+        // `left: NaN%` / `top: Infinitypx` and the box keeps its static position.
+        // masonry-layout writes exactly those strings on its first, pre-measure pass; a
+        // box that accepted them laid out nowhere, measured as 0, and every later pass
+        // recomputed NaN from that. Values measured against Chromium 141 over CDP.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .box { position:relative; width:400px }
+              .a { position:absolute; width:100%; height:20px; left:NaN%; top:Infinitypx }
+              .b { position:absolute; width:NaNpx; height:20px; left:-Infinitypx; top:0 }
+              .c { position:absolute; width:100%; height:20px; left:25%; top:40px }
+            </style>
+            <div class="box">
+              <i id="a" class="a"></i><i id="b" class="b"></i><i id="c" class="c"></i>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        Rect Box(string id) => laid.Rects[Id(tree, id)];
+
+        // The invalid inset leaves the box at its static position, full containing-block wide.
+        Assert.True(MathF.Abs(Box("a").X - 0f) < 0.01f, $"{Box("a").X}");
+        Assert.True(MathF.Abs(Box("a").Y - 0f) < 0.01f, $"{Box("a").Y}");
+        Assert.True(MathF.Abs(Box("a").Width - 400f) < 0.01f, $"{Box("a").Width}");
+        Assert.True(MathF.Abs(Box("a").Height - 20f) < 0.01f, $"{Box("a").Height}");
+
+        // An invalid width falls back to the auto/shrink-to-fit behavior, not to NaN.
+        Assert.True(float.IsFinite(Box("b").Width), $"{Box("b").Width}");
+        Assert.True(MathF.Abs(Box("b").X - 0f) < 0.01f, $"{Box("b").X}");
+
+        // Control: a valid inset on the same shape still positions.
+        Assert.True(MathF.Abs(Box("c").X - 100f) < 0.01f, $"{Box("c").X}");
+        Assert.True(MathF.Abs(Box("c").Y - 40f) < 0.01f, $"{Box("c").Y}");
     }
 
     [Fact]
@@ -6279,11 +6575,161 @@ public class DomLayoutTests
     }
 
     [Fact]
+    public void TextControlSizeAttributeMeasuresTheFaceAverageCharacterWidth()
+    {
+        // Chromium sizes a text control from its face, not from a fixed fraction of the font
+        // size: `size` columns of the OS/2 average character width, plus whatever the head
+        // bounding box costs over one of them. Measured against Chromium 141 with this exact
+        // face loaded as a web font, the content box is `8 * size + 8` at 13px.
+        DomTree tree = Parse(
+            """
+            <style>
+                html, body { margin: 0 }
+                input { font: 13px "Liberation Sans"; border: 0; padding: 0 }
+                div { display: inline-block; width: max-content }
+            </style>
+            <div><input id="s1" size="1"></div>
+            <div><input id="s2" size="2"></div>
+            <div><input id="s10" size="10"></div>
+            <div><input id="s20" size="20"></div>
+            <div><input id="s50" size="50"></div>
+            <div><input id="dflt"></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        Assert.Equal(16f, Width("s1"), 0.5f);
+        Assert.Equal(24f, Width("s2"), 0.5f);
+        Assert.Equal(88f, Width("s10"), 0.5f);
+        Assert.Equal(168f, Width("s20"), 0.5f);
+        Assert.Equal(408f, Width("s50"), 0.5f);
+
+        // No `size` attribute is HTML's default of 20.
+        Assert.Equal(Width("s20"), Width("dflt"), 0.5f);
+    }
+
+    [Fact]
+    public void TextControlWithPercentageWidthStillContributesItsSizeBasedWidth()
+    {
+        // A percentage width that cannot be resolved behaves as `auto` for an intrinsic
+        // contribution (CSS Sizing 3 5.2.2), and a control has no child boxes to be measured
+        // from, so the size-based box is what it has to contribute. Publishing the intrinsic
+        // size only into an `auto` width left every `width: 100%` text field reporting its
+        // padding - 8px - as its max-content width.
+        DomTree tree = Parse(
+            """
+            <style>
+                html, body { margin: 0 }
+                input { font: 13px "Liberation Sans" }
+                .shrink { display: inline-block; width: max-content }
+            </style>
+            <div class="shrink"><input id="pct" style="width:100%"></div>
+            <div class="shrink"><input id="auto"></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // 8 * 20 + 8 of content, plus the UA control's 2px border and 2px padding per side.
+        Assert.Equal(176f, Width("auto"), 0.5f);
+        Assert.Equal(Width("auto"), Width("pct"), 0.5f);
+    }
+
+    [Fact]
+    public void TextControlSizeDoesNotRaiseAFlexItemAutomaticMinimumSize()
+    {
+        // Chromium contributes the size-based width to a max-content pass only: a text field
+        // shrinks below the box its `size` attribute asks for rather than flooring the flex
+        // item that holds it. A field with a resolvable width is not affected either way, so
+        // only the percentage case can tell the two passes apart.
+        DomTree tree = Parse(
+            """
+            <style>
+                html, body { margin: 0 }
+                input { font: 13px "Liberation Sans" }
+                .row { display: flex; width: 1000px }
+                .holder { flex: 0 1 500px }
+                .filler { flex: 0 1 4000px; min-width: 0 }
+            </style>
+            <div class="row">
+              <div class="holder" id="holder"><input style="width:100%"></div>
+              <div class="filler"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+
+        // 500 and 4000 shrink into 1000, so an unfloored holder lands on 1000/9 = 111.11.
+        Assert.Equal(111.11f, laid.Rects[Id(tree, "holder")].Width, 1f);
+    }
+
+    [Theory]
+    [InlineData("<div class=\"nw\" style=\"width:100%\">File Processing Queue Long</div>", "")]
+    [InlineData("<div class=\"nw\" style=\"width:50%\">File Processing Queue Long</div>", "")]
+    [InlineData(
+        "<div class=\"nw\" style=\"width:100%;box-sizing:border-box\">File Processing Queue Long</div>",
+        "")]
+    [InlineData(
+        "<div><div class=\"nw\" style=\"width:100%\">File Processing Queue Long</div></div>",
+        "")]
+    [InlineData(
+        "<div class=\"nw\" style=\"width:100%;display:inline-flex\">File Processing Queue Long</div>",
+        "")]
+    [InlineData(
+        "<div class=\"nw\" style=\"width:100%;display:flex\">File Processing Queue Long</div>",
+        "")]
+    [InlineData(
+        "<div class=\"nw\" style=\"width:100%;min-width:80px\">File Processing Queue Long</div>",
+        "")]
+    [InlineData(
+        "<div class=\"nw\" style=\"width:100%\">File Processing Queue Long</div>",
+        "display:flex;flex-direction:column")]
+    [InlineData(
+        "<div class=\"nw\" style=\"width:100%\">File Processing Queue Long</div>",
+        "display:flex")]
+    public void PercentageDescendantStillFloorsAFlexItemAutomaticMinimumSize(
+        string childHtml,
+        string itemStyle)
+    {
+        // A cyclic percentage inline size is neutralized to a definite `0px` for the intrinsic
+        // pass, which used to leave the item's content-based automatic minimum size measuring a
+        // collapsed child - the item then shrank to 29 where Chromium floors it at the child's
+        // min-content. Chromium reports 164.047 for every one of these shapes, and 164.047 for
+        // the `width: auto` control below; the engine's own text metrics put that ~1px higher,
+        // so the assertion is a band around Chromium's value plus exact agreement with the
+        // control.
+        DomTree tree = Parse(
+            $$"""
+            <style>
+                html, body { margin: 0; padding: 0; font: 13px "Liberation Sans" }
+                .outer { display: flex; width: 600px }
+                .item { flex: 0 1 200px }
+                .rest { flex: 0 1 4000px; min-width: 0 }
+                .nw { white-space: nowrap }
+            </style>
+            <div class="outer">
+              <div class="item" id="control"><div class="nw">File Processing Queue Long</div></div>
+              <div class="rest"></div>
+            </div>
+            <div class="outer">
+              <div class="item" id="item" style="{{itemStyle}}">{{childHtml}}</div>
+              <div class="rest"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1600f, 900f));
+
+        float control = laid.Rects[Id(tree, "control")].Width;
+        float item = laid.Rects[Id(tree, "item")].Width;
+
+        Assert.Equal(164.047f, control, 1.5f);
+        Assert.Equal(control, item, 0.01f);
+    }
+
+    [Fact]
     public void TextareaIntrinsicBoxComesFromRowsAndCols()
     {
         // #685: an empty textarea must keep a real control box instead of
-        // laying out as a plain block. Chromium calibrates cols=20/rows=2 to
-        // a 168x36 border box with one 15px control line per row.
+        // laying out as a plain block. Chromium lays cols=20/rows=2 out as a
+        // 182x36 border box: 20 columns of the face's average character width,
+        // the 15px scrollbar gutter, and one 15px control line per row.
         DomTree tree = Parse(
             """
             <style>html, body { margin: 0 }</style>
@@ -6296,11 +6742,11 @@ public class DomLayoutTests
         Rect Get(string id) => laid.Rects[Id(tree, id)];
 
         Rect plain = Get("plain");
-        Assert.True(MathF.Abs(plain.Width - 168f) < 0.5f, $"{plain.Width}");
+        Assert.True(MathF.Abs(plain.Width - 182f) < 0.5f, $"{plain.Width}");
         Assert.True(MathF.Abs(plain.Height - 36f) < 0.5f, $"{plain.Height}");
 
         Rect rows8 = Get("rows8");
-        Assert.True(MathF.Abs(rows8.Width - 168f) < 0.5f);
+        Assert.True(MathF.Abs(rows8.Width - 182f) < 0.5f);
         Assert.True(MathF.Abs(rows8.Height - 126f) < 0.5f, $"{rows8.Height}");
 
         // Author height wins over the rows-derived intrinsic height, and the
@@ -6317,6 +6763,175 @@ public class DomLayoutTests
         LayoutStyle style = laid.Styles[Id(tree, "plain")];
         Assert.Equal(Display.Inline, style.Display);
         Assert.True(style.IsInlineBlock);
+    }
+
+    /// <summary>
+    /// A flex item's flex base size comes from its own `flex-basis`/`width`, never from the
+    /// size a previous pass gave it. A percentage-width descendant defers the item's inline
+    /// size to a second flex pass, and that pass used to re-shrink the already-shrunk width.
+    /// Chromium: 212.016 / 6.781 / 1221.203 (inner bases 250/8/1440, deficit 258).
+    /// </summary>
+    [Fact]
+    public void ShrunkFlexItemWithPercentageChildIsNotShrunkTwice()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0}</style>
+            <div style="display:flex;width:1440px">
+              <div id="a" style="width:250px;flex:0 1 auto"><div id="pct" style="width:100%"></div></div>
+              <div id="b" style="width:8px;flex:0 1 auto"></div>
+              <div id="c" style="width:100%;min-width:0;flex:0 1 auto"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Rect a = Get("a");
+        Rect b = Get("b");
+        Rect c = Get("c");
+        Assert.True(MathF.Abs(a.Width - 212.016f) < 0.5f, $"{a.Width}");
+        Assert.True(MathF.Abs(b.Width - 6.781f) < 0.5f, $"{b.Width}");
+        Assert.True(MathF.Abs(c.Width - 1221.203f) < 0.5f, $"{c.Width}");
+
+        // Obscura rounds used rects to integers, so these land on 212 / 7 / 1221.
+        // The descendant percentage still resolves against the item's used inline size.
+        Assert.True(MathF.Abs(Get("pct").Width - a.Width) < 0.5f, $"{Get("pct").Width}");
+    }
+
+    /// <summary>
+    /// Same shape with border-box padding on the shrinking item. The scaled flex shrink
+    /// factor uses the *inner* flex base size (250 - 24 = 226), so Chromium lands on
+    /// 215.172 rather than 212.016.
+    /// </summary>
+    [Fact]
+    public void ShrunkFlexItemWithPaddingAndPercentageChildIsNotShrunkTwice()
+    {
+        DomTree tree = Parse(
+            """
+            <style>html,body{margin:0}</style>
+            <div style="display:flex;width:1440px">
+              <div id="a" style="width:250px;padding:16px 12px;box-sizing:border-box;flex:0 1 auto"><div id="pct" style="width:100%"></div></div>
+              <div id="b" style="width:8px;flex:0 1 auto"></div>
+              <div id="c" style="width:100%;min-width:0;flex:0 1 auto"></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1440f, 720f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Rect a = Get("a");
+        Assert.True(MathF.Abs(a.Width - 215.172f) < 0.5f, $"{a.Width}");
+        Assert.True(MathF.Abs(Get("pct").Width - (a.Width - 24f)) < 0.5f, $"{Get("pct").Width}");
+    }
+
+    private const string TableFloorFixture = """
+        <style>
+            html,body{margin:0;padding:0}
+            table{border-spacing:0;border-collapse:collapse}
+            td{padding:0}
+            .outer{width:400px}
+        </style>
+        <div class=outer>
+          <table id=wide style="width:100%"><tr><td><div style="width:461px;height:6px"></div></td></tr></table>
+        </div>
+        <div class=outer>
+          <table id=narrow style="width:100%"><tr><td><div style="width:100px;height:6px"></div></td></tr></table>
+        </div>
+        <div class=outer>
+          <table id=twocol style="width:100%">
+            <tr><td><div style="width:461px;height:6px"></div></td>
+                <td><div style="width:120px;height:6px"></div></td></tr>
+          </table>
+        </div>
+        """;
+
+    /// <summary>
+    /// CSS 2.1 17.5.2: a table's used width is the greater of its specified width and what its
+    /// columns need, so a `width: 100%` that resolves narrower than the content overflows its
+    /// containing block instead of squeezing the columns. Chromium: 461 / 400 / 581.
+    /// </summary>
+    [Fact]
+    public void PercentageWidthTableIsFlooredByItsMinContentWidth()
+    {
+        DomTree tree = Parse(TableFloorFixture);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("wide").Width - 461f) < 0.5f, $"wide {Get("wide").Width}");
+        Assert.True(MathF.Abs(Get("twocol").Width - 581f) < 0.5f, $"twocol {Get("twocol").Width}");
+    }
+
+    /// <summary>The contrasting case: content that fits leaves the percentage alone.</summary>
+    [Fact]
+    public void PercentageWidthTableThatFitsKeepsItsContainingBlockWidth()
+    {
+        DomTree tree = Parse(TableFloorFixture);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+
+        Rect narrow = laid.Rects[Id(tree, "narrow")];
+        Assert.True(MathF.Abs(narrow.Width - 400f) < 0.5f, $"narrow {narrow.Width}");
+    }
+
+    /// <summary>
+    /// An inline-block with a definite width lays its contents out in a block formatting
+    /// context: a block-level child keeps its own definite width and overflows rather than
+    /// being shrunk, and an auto-width one still fills. Chromium: 461 / 461 / 400.
+    /// </summary>
+    [Fact]
+    public void DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0;padding:0}
+                table{border-spacing:0;border-collapse:collapse}
+                td{padding:0}
+                .outer{width:400px}
+                .host{display:inline-block;width:100%}
+            </style>
+            <div class=outer><div class=host><div id=fixed style="width:461px;height:6px"></div></div></div>
+            <div class=outer><div class=host>
+              <table id=auto style="width:auto"><tr><td><div style="width:461px;height:6px"></div></td></tr></table>
+            </div></div>
+            <div class=outer><div class=host><div id=fill style="height:6px"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(MathF.Abs(Get("fixed").Width - 461f) < 0.5f, $"fixed {Get("fixed").Width}");
+        Assert.True(MathF.Abs(Get("auto").Width - 461f) < 0.5f, $"auto {Get("auto").Width}");
+        Assert.True(MathF.Abs(Get("fill").Width - 400f) < 0.5f, $"fill {Get("fill").Width}");
+    }
+
+    /// <summary>
+    /// The Code Diff reduction: a table inside a horizontally scrollable box takes its
+    /// max-content width and overflows the scrollport, while one whose content fits does not.
+    /// Chromium, with the same fixture at 13px monospace: the nowrap table is wider than its
+    /// 300px scrollport, the wrappable one is exactly 300.
+    /// </summary>
+    [Fact]
+    public void TableInAScrollableBoxTakesItsContentWidth()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0;padding:0}
+                table{border-spacing:0;border-collapse:collapse;width:100%}
+                td{padding:0}
+                .box{width:300px;overflow-x:scroll;overflow-y:hidden;display:inline-block}
+                .cell{display:inline-block;height:14px}
+            </style>
+            <div class=box><table id=nowrap><tr><td>
+              <span class=cell style="white-space:nowrap"><i style="display:inline-block;width:900px;height:6px"></i></span>
+            </td></tr></table></div>
+            <div class=box><table id=fits><tr><td>
+              <span class=cell><i style="display:inline-block;width:90px;height:6px"></i></span>
+            </td></tr></table></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 400f));
+        Rect Get(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.True(Get("nowrap").Width > 880f, $"nowrap {Get("nowrap").Width}");
+        Assert.True(MathF.Abs(Get("fits").Width - 300f) < 1f, $"fits {Get("fits").Width}");
     }
 }
 

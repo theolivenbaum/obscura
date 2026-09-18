@@ -1,4 +1,4 @@
-using Obscura.Render.Css;
+﻿using Obscura.Render.Css;
 using Xunit;
 
 namespace Obscura.Render.Tests;
@@ -1106,5 +1106,58 @@ public sealed class CssTests
 
         Assert.True(CssParser.ParseStylesheet("}.after-stray{color:red}")
             .Any(rule => rule.Selector == ".after-stray"));
+    }
+
+    /// <summary>
+    /// DEVIATION from Rust: `nan`, `inf` and `infinity` are identifiers in CSS, never
+    /// numbers, so a declaration spelling one is invalid and Chromium drops it. Rust's
+    /// `str::parse::<f32>()` (and .NET's `NaN`/`Infinity`) accept them, which let a
+    /// non-finite length reach layout. See CssNumber.TryParseFloat.
+    /// </summary>
+    [Theory]
+    [InlineData("nan")]
+    [InlineData("NaN")]
+    [InlineData("-NaN")]
+    [InlineData("inf")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
+    [InlineData("+infinity")]
+    [InlineData("")]
+    [InlineData("-")]
+    [InlineData("auto")]
+    public void ANonNumericTokenIsNotACssNumber(string value)
+    {
+        Assert.False(CssNumber.TryParseFloat(value, out _));
+        Assert.Null(CssNumber.ParseFloat(value));
+    }
+
+    /// <summary>A real CSS number still parses, including the signed and exponent forms.</summary>
+    [Theory]
+    [InlineData("0", 0f)]
+    [InlineData("12", 12f)]
+    [InlineData("-3.5", -3.5f)]
+    [InlineData("+2.25", 2.25f)]
+    [InlineData(".5", 0.5f)]
+    [InlineData("-.5", -0.5f)]
+    [InlineData("1e2", 100f)]
+    public void ACssNumberStillParses(string value, float expected)
+    {
+        Assert.True(CssNumber.TryParseFloat(value, out float parsed));
+        Assert.Equal(expected, parsed, 5);
+    }
+
+    /// <summary>
+    /// A non-finite spelling makes the whole length invalid, whatever unit follows it -
+    /// the shape masonry-layout writes on its first, pre-measure pass.
+    /// </summary>
+    [Theory]
+    [InlineData("NaN%")]
+    [InlineData("NaNpx")]
+    [InlineData("Infinitypx")]
+    [InlineData("-Infinitypx")]
+    [InlineData("nanem")]
+    public void ANonFiniteLengthDoesNotResolve(string value)
+    {
+        Assert.Null(CssLength.ParseLengthPrefix(value, (1280f, 720f), LengthAxis.Width));
     }
 }

@@ -4,6 +4,7 @@ using Obscura.Dom.Selectors;
 using Obscura.Render.Css;
 using TaffyAlignItems = Obscura.Render.Layout.AlignItems;
 using TaffyAvailableSpace = Obscura.Render.Layout.AvailableSpace;
+using TaffyAvailableSpaceKind = Obscura.Render.Layout.AvailableSpaceKind;
 using TaffyDimension = Obscura.Render.Layout.Dimension;
 using TaffyDirection = Obscura.Render.Layout.Direction;
 using TaffyDisplay = Obscura.Render.Layout.Display;
@@ -447,6 +448,10 @@ public static partial class RenderDom
                 }
             }
 
+            // A retained style survives into the next layout, and whether its box still shows a
+            // scrollbar is a property of that layout, not of the style.
+            DomScrollbarPasses.ResetScrollbarGutters(styles);
+
             List<DeferredCyclicInlineSize> deferredCyclicInlineSizes =
                 DomSubgridPasses.DeferCyclicFlexInlineSizes(tree, styles, rootFs, vw, vh);
 
@@ -511,15 +516,41 @@ public static partial class RenderDom
                     TaffyAvailableSpace.Definite(initialCbWidth),
                     TaffyAvailableSpace.Definite(viewport.Height));
 
+                foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+                {
+                    if (styles.TryGetValue(domId, out LayoutStyle? controlStyle)
+                        && controlStyle.NativeControlContent is { } controlContent)
+                    {
+                        ifcItems.NativeControlContent[taffyId] =
+                            new Layout.Size<float>(controlContent.Width, controlContent.Height);
+                    }
+                }
+
                 Layout.Size<float> Measure(
                     Layout.Size<float?> known,
                     Layout.Size<TaffyAvailableSpace> avail,
                     TaffyNodeId node,
                     int? ctx,
-                    TaffyStyle _) =>
-                    ctx is { } index
-                        ? engine.MeasureTaffy(index, known, avail)
-                        : new Layout.Size<float>(0f, 0f);
+                    TaffyStyle _)
+                {
+                    if (ctx is { } index)
+                    {
+                        return engine.MeasureTaffy(index, known, avail);
+                    }
+
+                    if (!ifcItems.NativeControlContent.TryGetValue(node, out Layout.Size<float> content))
+                    {
+                        return new Layout.Size<float>(0f, 0f);
+                    }
+
+                    // Chromium contributes a control's size-based width to a max-content sizing
+                    // pass but not to a min-content one: a text field is allowed to shrink below
+                    // the box its `size` attribute asks for, so it must not raise a flex item's
+                    // automatic minimum size.
+                    float width = avail.Width.Kind == TaffyAvailableSpaceKind.MinContent ? 0f : content.Width;
+
+                    return new Layout.Size<float>(known.Width ?? width, known.Height ?? content.Height);
+                }
 
                 float? IntrinsicWidth(TaffyTree t, TaffyNodeId node, TaffyAvailableSpace width)
                 {
@@ -542,7 +573,22 @@ public static partial class RenderDom
                 }
 
                 ApplyTableUsedWidths(
-                    tree, taffyTree, taffyRoot, idMap, styles, ifcItems, initialCbWidth, available, Measure);
+                    tree,
+                    taffyTree,
+                    taffyRoot,
+                    idMap,
+                    styles,
+                    ifcItems,
+                    initialCbWidth,
+                    available,
+                    deferredCyclicInlineSizes,
+                    Measure);
+
+                // The cyclic-percentage neutralization above collapses the very content a flex
+                // item's automatic minimum size is measured from, so that floor is re-derived
+                // from the typed percentages before the first layout reads it.
+                DomSubgridPasses.ApplyDeferredFlexAutomaticMinimums(
+                    taffyTree, idMap, styles, deferredCyclicInlineSizes, IntrinsicWidth);
 
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 if (deferredCyclicInlineSizes.Count == 0
@@ -637,6 +683,45 @@ public static partial class RenderDom
                 if (DomPasses.ApplyTableCellBlockAlignment(tree, taffyTree, idMap, styles))
                 {
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                }
+
+                // A classic scrollbar takes space out of its scroll container, and whether an
+                // `overflow: auto` box shows one is only knowable from a settled layout - so
+                // this follows every intrinsic, table and fragmentation repair, for the same
+                // reason the static-position harvest below does. The pass only ever adds
+                // gutters, so the loop terminates; two rounds cover a vertical bar narrowing a
+                // box into needing a horizontal one, and the third covers a box that overflows
+                // only once the re-resolution below has widened something under it.
+                for (int pass = 0; pass < 3; pass++)
+                {
+                    if (!DomScrollbarPasses.ApplyScrollbarGutters(taffyTree, idMap, styles))
+                    {
+                        break;
+                    }
+
+                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+
+                    // A calc() inline size under a cyclic flex item was flattened to a px length
+                    // against the containing block as it stood before the gutter was taken out of
+                    // it, and unlike a bare percentage - which reaches taffy typed and re-resolves
+                    // on its own - nothing puts it right. Re-resolve those expressions against the
+                    // narrowed box. A no-op costs one dictionary walk and no reflow.
+                    DomSubgridPasses.ReresolveFunctionalInlineSizes(
+                        tree,
+                        taffyTree,
+                        idMap,
+                        styles,
+                        deferredCyclicInlineSizes,
+                        rootFs,
+                        vw,
+                        vh,
+                        (t, _, phase) =>
+                        {
+                            if (phase == DeferredFlexReflowPhase.Layout)
+                            {
+                                t.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                            }
+                        });
                 }
 
                 // A fully-auto positioned axis uses the box's static position in its original
@@ -781,9 +866,13 @@ public static partial class RenderDom
             }
         }
 
+        Dictionary<NodeId, Rect> svgRects = [];
+        SvgBoxes.Measure(tree, styles, rects, svgRects);
+
         DomLayout layout = new()
         {
             Rects = rects,
+            SvgRects = svgRects,
             InlineFragments = inlineFragments,
             Styles = styles,
             CustomProperties = customProperties,

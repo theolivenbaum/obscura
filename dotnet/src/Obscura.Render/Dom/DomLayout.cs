@@ -35,6 +35,14 @@ public sealed class DomLayout
     public Dictionary<NodeId, Rect> Rects { get; internal set; } = [];
 
     /// <summary>
+    /// Object bounding boxes for the descendants of an inline <c>&lt;svg&gt;</c>, in document
+    /// coordinates. Kept apart from <see cref="Rects"/> deliberately: an SVG shape has no CSS
+    /// layout box, so it answers <c>getBoundingClientRect()</c> but must keep reporting
+    /// <c>clientWidth</c> / <c>clientHeight</c> as zero the way Chromium does.
+    /// </summary>
+    public Dictionary<NodeId, Rect> SvgRects { get; internal set; } = [];
+
+    /// <summary>
     /// Per-line border-box fragments for ordinary non-replaced inline elements.
     /// <see cref="Rects"/> retains their union for <c>getBoundingClientRect()</c>; this list
     /// is the source for background/border painting and <c>getClientRects()</c>.
@@ -498,8 +506,8 @@ public sealed class DomLayout
         if (establishes && style is not null && rect is { } box)
         {
             (float Width, float Height) client = (
-                F32.Max(box.Width - style.Border.Left - style.Border.Right, 0f),
-                F32.Max(box.Height - style.Border.Top - style.Border.Bottom, 0f));
+                F32.Max(box.Width - style.Border.Left - style.Border.Right - style.ReservedScrollbarY, 0f),
+                F32.Max(box.Height - style.Border.Top - style.Border.Bottom - style.ReservedScrollbarX, 0f));
             ScrollId sid = new((uint)containers.Count);
             containers.Add(new ScrollContainer
             {

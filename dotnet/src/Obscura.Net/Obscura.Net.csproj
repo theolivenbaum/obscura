@@ -5,10 +5,10 @@
     <AssemblyName>Obscura.Net</AssemblyName>
   </PropertyGroup>
 
-  <!-- Tracker blocklist shared with the Rust tree; linked, not copied. -->
+  <!-- Tracker blocklist. Copied from crates/obscura-net/src/pgl_domains.txt
+       rather than linked, so the C# tree stands on its own. -->
   <ItemGroup>
-    <EmbeddedResource Include="../../../crates/obscura-net/src/pgl_domains.txt">
-      <Link>Resources/pgl_domains.txt</Link>
+    <EmbeddedResource Include="Resources/pgl_domains.txt">
       <LogicalName>Obscura.Net.pgl_domains.txt</LogicalName>
     </EmbeddedResource>
   </ItemGroup>

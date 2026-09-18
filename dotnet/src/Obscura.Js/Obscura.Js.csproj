@@ -20,11 +20,12 @@
     <PackageReference Include="Microsoft.ClearScript.V8.Native.win-x64" />
   </ItemGroup>
 
-  <!-- bootstrap.js is JavaScript and is shared verbatim with the Rust engine.
-       It is linked, not copied, so the two engines can never drift. -->
+  <!-- The port owns its copy of bootstrap.js. It began as a verbatim copy of
+       crates/obscura-js/js/bootstrap.js, which is read-only, so a shim bug could
+       not be fixed while the file was linked out of that tree. Carry a fix across
+       by hand when it is worth carrying, and note the divergence in todo.md. -->
   <ItemGroup>
-    <EmbeddedResource Include="../../../crates/obscura-js/js/bootstrap.js">
-      <Link>js/bootstrap.js</Link>
+    <EmbeddedResource Include="js/bootstrap.js">
       <LogicalName>Obscura.Js.bootstrap.js</LogicalName>
     </EmbeddedResource>
   </ItemGroup>

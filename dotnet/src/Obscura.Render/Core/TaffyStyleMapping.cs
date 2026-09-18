@@ -254,10 +254,24 @@ internal static class TaffyStyleMapping
         // scrollable axis Hidden. Tesserae's annotated text editor overlays a highlight layer on
         // a `scrollbar-gutter: stable; scrollbar-width: thin` textarea, and without the gutter
         // the overlay sat 10px wider than the text it marks. See "Known deviations" in todo.md.
-        if (style.StableScrollbarGutter() is > 0f and { } gutter)
+        //
+        // The same reservation is what a classic (non-overlay) scrollbar costs. `overflow:
+        // scroll` always shows one, `overflow: auto` only once its content overflows, so the
+        // amount is decided after a layout pass and parked in ReservedScrollbarX/Y; see
+        // DomScrollbarPasses.ApplyScrollbarGutters.
+        float gutterY = style.StableScrollbarGutter() is > 0f and { } stable
+            ? style.ScrollbarGutters == 2 ? stable * 2f : stable
+            : style.ReservedScrollbarY;
+        float gutterX = style.ReservedScrollbarX;
+        if (gutterY > 0f || gutterX > 0f)
         {
-            s.ScrollbarWidth = style.ScrollbarGutters == 2 ? gutter * 2f : gutter;
-            s.Overflow = new Layout.Point<TaffyOverflow>(s.Overflow.X, TaffyOverflow.Scroll);
+            // taffy carries one thickness for both axes. Two different ones only arise from a
+            // `::-webkit-scrollbar` that sets width and height apart, which no sheet seen here
+            // does; the larger is taken so neither axis is under-reserved.
+            s.ScrollbarWidth = F32.Max(gutterX, gutterY);
+            s.Overflow = new Layout.Point<TaffyOverflow>(
+                gutterX > 0f ? TaffyOverflow.Scroll : s.Overflow.X,
+                gutterY > 0f ? TaffyOverflow.Scroll : s.Overflow.Y);
         }
 
         s.Border = RectLp(style.Border);

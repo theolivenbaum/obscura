@@ -20,11 +20,11 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
   </ItemGroup>
 
-  <!-- Font assets are shared with the Rust tree rather than copied, so the two
-       engines can never rasterize against different font binaries. -->
+  <!-- Font assets, copied from crates/obscura-render/assets/ rather than linked.
+       They are byte-identical to the Rust engine's today; re-copy if that tree's
+       faces are ever updated, or the two engines will rasterize differently. -->
   <ItemGroup>
-    <EmbeddedResource Include="../../../crates/obscura-render/assets/*.ttf">
-      <Link>Assets/%(Filename)%(Extension)</Link>
+    <EmbeddedResource Include="Assets/*.ttf">
       <LogicalName>Obscura.Render.Assets.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
