@@ -234,14 +234,6 @@ The largest component. Split into stages; each stage is independently testable.
   `SKImageFilter.CreateDropShadow` pass in `PaintDom`. Nothing is stubbed: the
   property is silently absent today, not wrongly reported.
 
-- **`PerformanceNavigationTiming.nextHopProtocol` is missing, and it stops the
-  Curiosity Workspace front end from booting.** The app's `SupportsDuplexStream`
-  probe reads it off the navigation entry, throws
-  `TypeError: Cannot read properties of undefined (reading 'nextHopProtocol')`,
-  and the shell retries forever ("Failed to load page, reloading now"), so the
-  page never renders past its loading skeleton. That makes any whole-app
-  differential run against this product impossible: Obscura reports 4
-  `button.tss-btn` on every route where Chromium reports 39-58.
 
 - **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
   Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
