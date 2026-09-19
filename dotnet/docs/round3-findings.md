@@ -422,8 +422,17 @@ default `flex-shrink: 1` and gets squeezed into the line. Reduced to a 98px cont
 **Fix.** `DomBuild.BuildAny` zeroes `flex-shrink` on an in-flow inline-level box whose width
 is definite. See "Known deviations" in todo.md and `AtomicInlineSizingTests`.
 
-**Residual.** A bare cyclic `width: 100%` on an atomic inline is still clamped, because
-`DeferCyclicFlexInlineSizes` has already rewritten it to `Auto` by the time the box is built.
+**Residual, since fixed.** A bare cyclic `width: 100%` on an atomic inline was still clamped,
+because `DeferCyclicFlexInlineSizes` had already rewritten it to `Auto` by the time the box was
+built, so `BuildAny` read the declaration as `auto` and left the box shrink-wrapping at taffy's
+default `flex-shrink: 1`. The `calc()` spelling was unaffected only because its
+`SizeExpressions[0]` survives the same neutralization - the two spellings of the same CSS behaved
+differently. `LayoutStyle.DeferredCyclicInlineSlots` now records that the declaration is still
+definite, and both of `BuildAny`'s readings of it - `pinsInlineSize` and the `needsOuter`
+shrink-wrapping participant an `inline-flex`/`inline-grid` gets - consult it. On the reduction
+(`width: 100%; margin-right: 22px` on an `inline-flex` in a shrink-wrapping flex item) the
+dropdown goes from 117 to **139**, which is Chromium, and the container stays at 141. See
+`AtomicInlineSizingTests.ABareCyclicPercentageInlineSizeIsStillDefinite`.
 
 ## F34 - a classic scrollbar takes no space out of its scroll container (FIXED)
 
@@ -563,10 +572,16 @@ width and everything below it follows:
 | `calc(100% - 4px)` card under it | 383 | **392** |
 
 Un-pinning and re-pinning means re-running the whole deferred cyclic resolution after the
-gutter, which is the ordering F34 warns about, so it is left alone. In the Tesserae app the
-pinned item sits above the scroll container on the affected routes, which is why the card is
-right there. The largest remaining +9 cluster is `#/view/Omni Result` (333 of the 449), whose
-route mean still improved (1.6649 -> 1.2037).
+gutter, which is the ordering F34 warns about. **Fixed instead by carrying the pin.**
+`PinFlexItems` now records each pin's provenance - the flex container it was taken against and
+that container's content width at the time - as a `PinnedFlexItem`, and
+`RescalePinnedFlexItems` scales the frozen length with the container from inside the gutter
+loop, outermost-first so a nested pin sees its container's new width. Scaling rather than
+re-deriving is deliberate: the item's flex factors were frozen on purpose, because re-running
+the flex algorithm off an already-flexed size flexes it twice. It is exact for the one-item and
+equal-factor rows this reaches and an approximation for a row of unequal bases, and it costs one
+list walk on a page that reserves nothing. The reduction above is now 391 / 383, both Chromium's.
+See `DomLayoutTests.APinnedCyclicFlexItemFollowsAReservedScrollbarGutter`.
 
 See "Known deviations" in todo.md and
 `DomLayoutTests.AReservedScrollbarReResolvesFunctionalWidthsBelowIt`.

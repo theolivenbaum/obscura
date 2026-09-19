@@ -179,7 +179,8 @@ public static partial class RenderDom
         ContainerSnapshot? snapshot,
         (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? retained,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline)
+        AnimationTimelineState animationTimeline,
+        RetainedLayoutReuseCandidate? reuseCandidate = null)
     {
         Matcher matcher = tree.CreateMatcher();
         Dictionary<NodeId, LayoutStyle> styles = retained?.Maps.Styles ?? [];
@@ -448,6 +449,24 @@ public static partial class RenderDom
                 }
             }
 
+            // The last point at which this pass's style objects are comparable to the ones the
+            // offered layout was produced from: the cascade, the top-down pass and the style
+            // fixups have all run, and nothing below reads a style without also writing layout
+            // output back into it. If no element the cascade recomputed differs in any member a
+            // later pass reads, that layout is still exact and none of the work below is worth
+            // doing. See RetainedLayoutReuse for why this fails closed.
+            if (reuseCandidate is { } candidate
+                && RetainedLayoutReuse.ClassifyAll(candidate.Before, styles)
+                    != RetainedRestyleImpact.Layout)
+            {
+                // The throwaway TextEngine this pass built is left to the GC, exactly as the
+                // engine of every superseded layout already is; nothing in the engine disposes
+                // one, and the faces it loaded are its own.
+                candidate.Previous.Styles = styles;
+                candidate.Previous.CustomProperties = customProperties;
+                return (candidate.Previous, signature, queryStats);
+            }
+
             // A retained style survives into the next layout, and whether its box still shows a
             // scrollbar is a property of that layout, not of the style.
             DomScrollbarPasses.ResetScrollbarGutters(styles);
@@ -616,6 +635,7 @@ public static partial class RenderDom
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
 
+                List<PinnedFlexItem> pinnedFlexItems = [];
                 DomSubgridPasses.ResolveDeferredFlexInlineSizes(
                     tree,
                     taffyTree,
@@ -625,6 +645,7 @@ public static partial class RenderDom
                     rootFs,
                     vw,
                     vh,
+                    pinnedFlexItems,
                     (t, resolvedStyles, phase) =>
                     {
                         if (phase == DeferredFlexReflowPhase.Layout)
@@ -700,6 +721,22 @@ public static partial class RenderDom
                     }
 
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+
+                    // A cyclic flex item was pinned to the width the flex algorithm chose for
+                    // it before any of that width was taken away, and its flex factors were
+                    // frozen with it, so nothing re-derives the pin. Carry it onto the narrowed
+                    // container before the expressions below are resolved against it. Outermost
+                    // first, one round per level: scaling an outer item is what gives the
+                    // container of the next level down its new width.
+                    for (int repin = 0; repin < 3; repin++)
+                    {
+                        if (!DomSubgridPasses.RescalePinnedFlexItems(taffyTree, pinnedFlexItems))
+                        {
+                            break;
+                        }
+
+                        taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                    }
 
                     // A calc() inline size under a cyclic flex item was flattened to a px length
                     // against the containing block as it stood before the gutter was taken out of

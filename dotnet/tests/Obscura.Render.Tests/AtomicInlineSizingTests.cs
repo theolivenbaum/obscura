@@ -117,4 +117,42 @@ public class AtomicInlineSizingTests
         Assert.True(MathF.Abs(Width("dd") - 123f) < 0.01f, $"dd: {Width("dd")}");
         Assert.True(MathF.Abs(Width("leaf") - 107f) < 0.01f, $"leaf: {Width("leaf")}");
     }
+
+    /// <summary>
+    /// The same reduction with a bare <c>width: 100%</c>. It is the same case to CSS, but the
+    /// two spellings did not reach <c>DomBuild</c> the same way: the cyclic neutralization
+    /// rewrites a bare percentage to <c>auto</c>, which made the box look shrink-wrapping and
+    /// left it at taffy's default <c>flex-shrink: 1</c>, so the inline formatting context
+    /// squeezed it into the line. The <c>calc()</c> form kept working only because its
+    /// <c>SizeExpressions[0]</c> survives the same neutralization. F33's known residual.
+    /// </summary>
+    [Fact]
+    public void ABareCyclicPercentageInlineSizeIsStillDefinite()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0;padding:0}
+                *{box-sizing:border-box}
+                .row{display:flex;width:400px;align-items:center}
+                .cont{border:1px solid #000;max-width:200px;position:relative}
+                .dd{display:inline-flex;align-items:center;padding:0 5px;height:32px;overflow:hidden}
+                .leaf{width:107px;height:16px}
+            </style>
+            <div class="row">
+              <div id="cont" class="cont">
+                <div id="dd" class="dd" style="width:100%;margin-right:22px"><div id="leaf" class="leaf"></div></div>
+              </div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 400f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // Chromium 141: the container shrink-wraps 107 + 10 padding + 22 margin + 2 border, and
+        // the dropdown is its whole 139 content box - it overflows the line by the margin it was
+        // measured with instead of being shrunk by it.
+        Assert.True(MathF.Abs(Width("cont") - 141f) < 0.01f, $"cont: {Width("cont")}");
+        Assert.True(MathF.Abs(Width("dd") - 139f) < 0.01f, $"dd: {Width("dd")}");
+        Assert.True(MathF.Abs(Width("leaf") - 107f) < 0.01f, $"leaf: {Width("leaf")}");
+    }
 }

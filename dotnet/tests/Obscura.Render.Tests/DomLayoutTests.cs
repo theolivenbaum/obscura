@@ -6933,7 +6933,103 @@ public class DomLayoutTests
         Assert.True(Get("nowrap").Width > 880f, $"nowrap {Get("nowrap").Width}");
         Assert.True(MathF.Abs(Get("fits").Width - 300f) < 1f, $"fits {Get("fits").Width}");
     }
+
+    [Fact]
+    public void APinnedCyclicFlexItemFollowsAReservedScrollbarGutter()
+    {
+        // F35's residual. `PinFlexItems` writes a cyclic flex item's *used* main size back as a
+        // definite length and freezes its flex factors, so nothing re-derives it; the scrollbar
+        // gutter is reserved afterwards. Where the row flex container sits inside the scroll
+        // container the pin is stale, and everything below it follows. Values measured against
+        // Chromium 141 driven over CDP - Playwright launches with `--hide-scrollbars`, under
+        // which nothing is reserved and every box here is the control's width.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              ::-webkit-scrollbar { width:9px; height:9px }
+              .sc { width:400px; height:100px; overflow-y:auto; overflow-x:hidden }
+              .ns { width:400px; height:100px; overflow:hidden }
+              .row { display:flex }
+              .item { flex:1 1 auto }
+              .cont { padding:2px }
+              .card { display:block; width:calc(100% - 4px); box-sizing:border-box; height:10px }
+              .pct { display:block; width:100%; height:10px }
+              u { display:block; height:400px }
+            </style>
+            <div class="sc"><div class="row"><div id="in" class="item">
+              <div class="cont"><i id="a" class="card"></i><i id="b" class="pct"></i></div>
+            </div></div><u></u></div>
+            <div class="ns"><div class="row"><div id="out" class="item">
+              <div class="cont"><i id="c" class="card"></i><i id="d" class="pct"></i></div>
+            </div></div><u></u></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The scrollport is 400 - 9 = 391, so the item is 391, the container's content box 387
+        // and the card 383.
+        Assert.True(MathF.Abs(Width("in") - 391f) < 0.01f, $"in: {Width("in")}");
+        Assert.True(MathF.Abs(Width("a") - 383f) < 0.01f, $"a: {Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 387f) < 0.01f, $"b: {Width("b")}");
+
+        // Control: the same subtree in a box that reserves nothing.
+        Assert.True(MathF.Abs(Width("out") - 400f) < 0.01f, $"out: {Width("out")}");
+        Assert.True(MathF.Abs(Width("c") - 392f) < 0.01f, $"c: {Width("c")}");
+        Assert.True(MathF.Abs(Width("d") - 396f) < 0.01f, $"d: {Width("d")}");
+    }
+
+    [Fact]
+    public void ACyclicPercentageIsMeasuredAsAutoOnlyWhereTheItemIsContentSized()
+    {
+        // CSS Sizing 3 5.2.2: a cyclic percentage behaves as `auto` for intrinsic contribution.
+        // A content-sized flex item is measured from exactly the content the neutralization
+        // touches, so it gets `auto`; an item sized from a declared width or basis is not
+        // measured from its content, and carrying `auto` there is what made `width: 100%`
+        // buttons shrink-wrap. Both halves are asserted here so a change that widens one
+        // breaks the other. Values measured against Chromium 141 over CDP.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .row { display:flex; width:400px }
+              .p { flex:1 1 auto }
+              .pct { display:block; width:100% }
+              .l1 { display:block; width:40px; height:10px }
+              .l2 { display:block; width:160px; height:10px }
+              .side { width:1px; min-width:0; flex-grow:1 }
+              .btn { display:inline-block; width:100%; border:1px solid #000; box-sizing:border-box; height:20px }
+            </style>
+            <div class="row">
+              <div id="p1" class="p"><div class="pct"><i class="l1"></i></div></div>
+              <div id="p2" class="p"><div class="pct"><i class="l2"></i></div></div>
+            </div>
+            <div class="row">
+              <div id="stf"><div class="pct"><i class="l1"></i></div></div><div class="p"></div>
+            </div>
+            <div class="row">
+              <div id="side" class="side"><span id="btn" class="btn"><i class="l1"></i></span></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // Two `flex: 1 1 auto` panels whose only content is percentage-sized: the bases are the
+        // leaves' 40 and 160, and the 200 of free space is split evenly between them. A zero
+        // base for both would split the row 200/200.
+        Assert.True(MathF.Abs(Width("p1") - 140f) < 0.01f, $"p1: {Width("p1")}");
+        Assert.True(MathF.Abs(Width("p2") - 260f) < 0.01f, $"p2: {Width("p2")}");
+
+        // A shrink-to-fit block in a flex row gets its percentage child's contribution.
+        Assert.True(MathF.Abs(Width("stf") - 40f) < 0.01f, $"stf: {Width("stf")}");
+
+        // The contrast: an item whose width comes from a declaration keeps it, and the
+        // `width: 100%` atomic inline inside fills it rather than shrink-wrapping to 40.
+        Assert.True(MathF.Abs(Width("side") - 400f) < 0.01f, $"side: {Width("side")}");
+        Assert.True(MathF.Abs(Width("btn") - 400f) < 0.01f, $"btn: {Width("btn")}");
+    }
 }
+
 
 /// <summary>Deterministic reflected dump of renderer style graphs, used as a Debug analogue.</summary>
 internal static class StyleDump

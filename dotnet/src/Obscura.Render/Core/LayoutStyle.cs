@@ -443,6 +443,21 @@ public sealed class LayoutStyle
     public byte SizeInherit;
 
     /// <summary>
+    /// Bitmask over the inline-size slots (<c>0</c> width, <c>2</c> min-width, <c>4</c>
+    /// max-width) whose declared value is a cyclic percentage that
+    /// <c>DomSubgridPasses.DeferCyclicFlexInlineSizes</c> has neutralized for the intrinsic
+    /// pass. The size field itself holds the neutral value; this records that the declaration
+    /// is still a definite percentage, for the consumers that ask about definiteness rather
+    /// than about the value.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in crates/obscura-render, which only rewrites the size field
+    /// and so cannot tell a neutralized declaration from an authored <c>auto</c>. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    public byte DeferredCyclicInlineSlots;
+
+    /// <summary>
     /// <c>aspect-ratio</c> as width/height, or an image's intrinsic ratio resolved at layout.
     /// </summary>
     /// <remarks>
@@ -1359,8 +1374,9 @@ public sealed class LayoutStyle
 
     /// <summary>
     /// The <c>filter</c> declaration as written, kept only while it carries an <c>em</c>,
-    /// <c>rem</c>, <c>ex</c> or <c>ch</c> length, so the top-down pass can re-read it once the
-    /// element's font size exists. <c>null</c> for every other value.
+    /// <c>rem</c>, <c>ex</c> or <c>ch</c> length or names <c>currentcolor</c>, so the top-down
+    /// pass can re-read it once the element's font size and computed colour exist.
+    /// <c>null</c> for every other value.
     /// </summary>
     /// <remarks>
     /// These three are the properties whose lengths the cascade resolves on the spot, where
@@ -1697,6 +1713,17 @@ public sealed class LayoutStyle
     /// </summary>
     internal bool IgnoresUsedBoxSizes() =>
         Display == Obscura.Render.Display.Inline && !IsInlineBlock && !IsReplacedBox;
+
+    /// <summary>
+    /// Whether the inline-size <paramref name="slot"/> (<c>0</c> width, <c>2</c> min-width,
+    /// <c>4</c> max-width) currently holds a neutralized cyclic percentage.
+    /// </summary>
+    internal bool HasDeferredCyclicInlineSize(int slot) =>
+        (DeferredCyclicInlineSlots & (1 << (slot >> 1))) != 0;
+
+    /// <summary>Record that the inline-size <paramref name="slot"/> was neutralized.</summary>
+    internal void MarkDeferredCyclicInlineSize(int slot) =>
+        DeferredCyclicInlineSlots |= (byte)(1 << (slot >> 1));
 
     internal bool EstablishesPositioningContainingBlock() => ContainingBlockTriggers != 0;
 
