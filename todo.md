@@ -1058,6 +1058,35 @@ them there. Measured: 6 of 12 runs of
 `ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` before, 13 of 14 and
 then 12 of 12 after.
 
+### An idle verdict during an explicit settle is confirmed against the page
+
+`ObscuraJsRuntime.RunEventLoopUntilQuiescentAsync` no longer stops the moment `PumpTick`
+reports `LoopTick.Idle`: while `__obscura_hasPendingDynamicScripts()` is still true the tick is
+demoted to `Waiting` and the loop parks and re-pumps. `budget` still bounds it, so it cannot
+hang.
+
+DEVIATION from `crates/obscura-js`, which cannot reach this state. deno_core resolves an async
+op's promise inside `poll_event_loop`, so `has_pending_ops` stays true until the page's
+continuation has been delivered. In the port an op is a `Task` whose promise ClearScript
+resolves from its continuation, and the only host-side evidence of the request -
+`ObscuraState.PageInFlight` - is dropped in `FetchOps.FetchUrlAsync`'s `finally`, which runs
+*before* that `Task` completes. A settle landing in that window saw no timers, no posted tasks
+and nothing in flight, called itself idle, and returned with most of its budget unspent while a
+dynamically inserted external script was still waiting for its body.
+
+It only showed under load, which is why it read as a flaky test rather than a defect:
+`Obscura.Cdp.Tests.DynamicScriptOnloadFires.DynamicExternalScriptsExecuteAndFireLoad` failed 1
+of 12 full-suite runs, 2 of 7 with `-maxThreads 16`, and 0 of 10 and 0 of 5 after. Widening the
+window artificially made it deterministic before the fix and harmless after it, out to a 200ms
+gap.
+
+**The same gap is still open for a plain `fetch()` or XHR continuation**, which has no
+dynamic-script counter to report itself. Closing it generally needs the op promise resolved
+from the event loop rather than from the `Task` continuation. Related dead code:
+`ObscuraJsRuntime.TrackAsyncOp` / `_pendingAsyncOps` has no callers, so `HasPendingAsyncOps` is
+always false and contributes nothing to the idle test - either wire it up as that general
+counter or delete it.
+
 ### A neutralized cyclic inline size, and a flex pin, both record what they replaced
 
 `DeferCyclicFlexInlineSizes` rewrites a cyclic percentage inline size before the box tree is
