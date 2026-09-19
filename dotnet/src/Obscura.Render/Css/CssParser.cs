@@ -475,6 +475,14 @@ public static class CssParser
 
             if (quote is { } activeQuote)
             {
+                // CSS Syntax 3 4.3.1: a backslash inside a string escapes the next code point,
+                // so a `\"` does not close it.
+                if (character == '\\' && index + 1 < length)
+                {
+                    index += 2;
+                    continue;
+                }
+
                 if (character == activeQuote)
                 {
                     quote = null;
@@ -526,6 +534,12 @@ public static class CssParser
                         }
                         else if (innerQuote is { } activeInnerQuote)
                         {
+                            if (scanned == '\\' && scan + 1 < length)
+                            {
+                                scan += 2;
+                                continue;
+                            }
+
                             if (scanned == activeInnerQuote)
                             {
                                 innerQuote = null;
