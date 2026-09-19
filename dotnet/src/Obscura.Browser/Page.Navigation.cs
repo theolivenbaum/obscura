@@ -185,6 +185,17 @@ public sealed partial class Page
         Url = url;
         NetworkEvents.Clear();
 
+        // The request ids of the outgoing document go with the events that named
+        // them, so a body still held for one can never be asked for again. Chromium
+        // discards them when the navigation commits for the same reason.
+        //
+        // Deviation from crates/obscura-browser/src/page.rs, which clears
+        // `response_bodies` only from Network.clearBrowserCache: there the buffer
+        // grows by a document's worth of bodies on every navigation until it hits
+        // its 128-entry cap, which on a script-heavy site is hundreds of megabytes
+        // of dead response text per page.
+        ClearResponseBodies();
+
         if (Context.ObeyRobots && url.Scheme is "http" or "https")
         {
             string origin = PageUrl.AsciiOrigin(url);

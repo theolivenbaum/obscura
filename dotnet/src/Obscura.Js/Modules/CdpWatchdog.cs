@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 using Microsoft.ClearScript.V8;
 
@@ -194,56 +195,31 @@ internal sealed class CdpWatchdogCore
         {
             while (true)
             {
-                var now = Stopwatch.GetTimestamp();
-
-                // Terminate every slot that has overrun its deadline. The
-                // dispatcher's Disarm will observe Fired and clear the termination
-                // state before that isolate runs its next command.
-                List<ulong>? expired = null;
-                foreach (var (generation, slot) in _slots)
-                {
-                    if (slot.Deadline <= now)
-                    {
-                        (expired ??= []).Add(generation);
-                    }
-                }
-
-                if (expired is not null)
-                {
-                    foreach (var generation in expired)
-                    {
-                        if (!_slots.Remove(generation, out var slot))
-                        {
-                            continue;
-                        }
-
-                        Volatile.Write(ref slot.Armed.FiredFlag, 1);
-                        try
-                        {
-                            slot.Handle.TerminateExecution();
-                        }
-                        catch
-                        {
-                            // A handle that cannot terminate must not take the
-                            // watchdog thread down with it; every other armed
-                            // command still depends on this loop.
-                        }
-                    }
-                }
+                // The scan runs in its own frame, and that is load-bearing rather
+                // than tidiness. This thread parks on Monitor.Wait below for as long
+                // as nothing is armed, and a Slot left in one of this frame's stack
+                // slots stays a GC root for exactly that long. A Slot holds the
+                // V8IsolateHandle of the page that was executing, and through it
+                // ClearScript's V8ScriptEngine -> DocumentSettings ->
+                // RecordingModuleLoader -> ObscuraJsRuntime -> ObscuraState ->
+                // PreparedRender: the whole previous document. Measured over CDP on
+                // a 60k-node page, that pinned about 440 MB from the moment the
+                // command disarmed until the next command armed - so every
+                // navigation built its new document with the old one still resident,
+                // and an aggressive gen2 collection could not reclaim it.
+                //
+                // Scanning in a callee that has returned puts those references below
+                // the stack pointer, where the GC does not look. Disarm has already
+                // removed the slot from _slots, so nothing else holds it.
+                //
+                // Deviation from crates/obscura-js/src/cdp_watchdog.rs, which needs
+                // no equivalent: Rust drops the IsolateHandle when the slot leaves
+                // the map.
+                long? next = FireExpiredAndFindNextDeadline();
 
                 // Sleep until the nearest remaining deadline, or until arm/disarm
                 // wakes us. The worker holds the lock until it waits, so a pulse
                 // cannot be lost into the void.
-                long? next = null;
-                foreach (var slot in _slots.Values)
-                {
-                    var remaining = slot.Deadline - now;
-                    if (next is null || remaining < next)
-                    {
-                        next = remaining;
-                    }
-                }
-
                 if (next is null)
                 {
                     Monitor.Wait(_gate);
@@ -257,6 +233,67 @@ internal sealed class CdpWatchdogCore
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Terminate every overrun slot and report how long until the nearest deadline
+    /// that is left, or null when nothing is armed. Called with <c>_gate</c> held.
+    /// </summary>
+    /// <remarks>
+    /// Never inlined: see <see cref="WatchdogLoop"/> for why no reference to a
+    /// <c>Slot</c> may survive into the wait.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private long? FireExpiredAndFindNextDeadline()
+    {
+        var now = Stopwatch.GetTimestamp();
+
+        // Terminate every slot that has overrun its deadline. The dispatcher's
+        // Disarm will observe Fired and clear the termination state before that
+        // isolate runs its next command.
+        List<ulong>? expired = null;
+        foreach (var (generation, slot) in _slots)
+        {
+            if (slot.Deadline <= now)
+            {
+                (expired ??= []).Add(generation);
+            }
+        }
+
+        if (expired is not null)
+        {
+            foreach (var generation in expired)
+            {
+                if (!_slots.Remove(generation, out var slot))
+                {
+                    continue;
+                }
+
+                Volatile.Write(ref slot.Armed.FiredFlag, 1);
+                try
+                {
+                    slot.Handle.TerminateExecution();
+                }
+                catch
+                {
+                    // A handle that cannot terminate must not take the watchdog
+                    // thread down with it; every other armed command still depends
+                    // on this loop.
+                }
+            }
+        }
+
+        long? next = null;
+        foreach (var slot in _slots.Values)
+        {
+            var remaining = slot.Deadline - now;
+            if (next is null || remaining < next)
+            {
+                next = remaining;
+            }
+        }
+
+        return next;
     }
 
     private static long Deadline(TimeSpan budget)

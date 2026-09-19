@@ -1087,6 +1087,67 @@ from the event loop rather than from the `Task` continuation. Related dead code:
 always false and contributes nothing to the idle test - either wire it up as that general
 counter or delete it.
 
+### The CDP watchdog scans its slots in a separate frame
+
+`CdpWatchdogCore.WatchdogLoop` calls `FireExpiredAndFindNextDeadline()`
+(`[MethodImpl(MethodImplOptions.NoInlining)]`) rather than scanning inline. The worker parks on
+`Monitor.Wait` for as long as nothing is armed, and a `Slot` left in that frame's stack slots is
+a GC root for that whole time. A `Slot` holds a `V8IsolateHandle`, and through ClearScript's
+`V8ScriptEngine -> DocumentSettings -> RecordingModuleLoader -> ObscuraJsRuntime ->
+ObscuraState -> PreparedRender` that is the entire previous document - about 440 MB on a
+60k-node page, held from the moment a command disarmed until the next one armed. So every
+navigation built its new document with the old one still fully resident, and no collection
+could reclaim it.
+
+DEVIATION from `crates/obscura-js/src/cdp_watchdog.rs`, which needs no equivalent: Rust drops
+the `IsolateHandle` when the slot leaves the map.
+
+Established with `dotnet-dump` + `gcroot` on a server heap, which named the root as
+`Thread 574: CdpWatchdogCore.WatchdogLoop() -> Slot -> V8IsolateHandle -> ... ->
+PreparedRender`. `CdpWatchdogTests.ADisarmedHandleIsNotKeptAliveByTheParkedWorker` pins the
+property but **does not reproduce the bug** - whether a dead local is still reported live
+across the wait is the JIT's choice, and with the scan inline that test passes anyway (verified
+5 of 5). Do not read a pass as licence to move the scan back inline.
+
+### Replacing a document asks the GC to give its memory back
+
+`Page.InitJs` and `Page.Dispose` call `PageHelpers.ReleaseReplacedDocumentMemory()`, a
+`GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true)` gated on the
+managed heap exceeding `OBSCURA_DOCUMENT_GC_THRESHOLD_MB` (default 128, `0` disables).
+
+DEVIATION from `crates/obscura-browser/src/page.rs`, which has nothing equivalent and needs
+nothing: dropping the Rust page frees its allocations and the allocator returns the pages. .NET
+does not. An ordinary blocking, compacting gen2 collection leaves the regions committed - a
+probe with a 549 MB committed heap and 0 MB live stayed at 549 MB RSS after
+`GC.Collect(2, Forced, true, true)` and fell to 37 MB after the `Aggressive` form, in 52 ms.
+
+Measured over CDP on a 60k-node page, five navigations plus a final `about:blank`. The live
+managed set was flat throughout - 421 to 432 MB with a document loaded, 21 MB on `about:blank` -
+so nothing was leaking logically; the runtime simply kept the regions.
+
+| | nav 1 | 2 | 3 | 4 | 5 | peak | after about:blank |
+|---|---|---|---|---|---|---|---|
+| before | 925 | 1392 | 1484 | 1508 | 1534 | 1713 MB | 1493 MB (live 21 MB) |
+| after both fixes | 969 | 964 | 1000 | 1021 | 1007 | 1202 MB | 887 MB (live 8 MB) |
+
+Both fixes are needed and neither suffices: the collect alone reached 1805 MB peak (it compacts
+a heap it cannot free), the watchdog fix alone 1725 MB (dead sooner, still never returned).
+
+Cost: 60-110 ms per navigation on that heap, against a 9.5-11.6 s navigation, so unchanged
+within noise. `DOTNET_GCConserveMemory=9` flattens the curve too without any code change, but
+trades throughput globally and does not address the cause.
+
+### A navigation discards the outgoing document's stored response bodies
+
+`Page.NavigateSingleAsync` calls `ClearResponseBodies()` beside the existing
+`NetworkEvents.Clear()`. The request ids go with the events that named them, so those bodies
+can never be asked for again; Chromium discards them at commit for the same reason.
+
+DEVIATION from `crates/obscura-browser/src/page.rs`, which clears `response_bodies` only from
+`Network.clearBrowserCache`, so the buffer grew by a document's worth of bodies per navigation
+up to its 128-entry cap. That cap times `ResponseBodyByteLimit` is up to 256 MB per target,
+which is a bound but a generous one for a headless engine.
+
 ### A neutralized cyclic inline size, and a flex pin, both record what they replaced
 
 `DeferCyclicFlexInlineSizes` rewrites a cyclic percentage inline size before the box tree is

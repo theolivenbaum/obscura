@@ -33,6 +33,12 @@ internal static partial class PageHelpers
     internal const int MaxStylesheetResources = 128;
     internal const ulong DefaultNavigationTimeoutMs = 30_000;
 
+    /// <summary>
+    /// Managed heap size, in MiB, above which replacing a document releases its
+    /// memory back to the OS. See <see cref="ReleaseReplacedDocumentMemory"/>.
+    /// </summary>
+    internal const ulong DefaultDocumentGcThresholdMb = 128;
+
     /// <summary>The first navigation counts, so the low default stops a page that resets location on every load.</summary>
     internal const int DefaultNavigationChainLimit = 10;
 
@@ -1179,6 +1185,51 @@ internal static partial class PageHelpers
         && ulong.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out ulong parsed)
             ? (int)Math.Min(parsed, int.MaxValue)
             : 2 * 1024 * 1024;
+
+    /// <summary>
+    /// Give a replaced document's memory back to the operating system.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Measured over CDP on a 60k-node page: the live managed set is flat across
+    /// navigations - about 425 MB while a document is loaded, 21 MB once the page
+    /// is on about:blank - yet RSS climbed from 925 MB to 1534 MB over five
+    /// navigations and never came back. The memory is genuinely dead; the runtime
+    /// simply keeps the regions. A blocking, compacting gen2 collection does not
+    /// release them either: only <see cref="GCCollectionMode.Aggressive"/>
+    /// decommits, which on the same shape of heap took RSS from 549 MB to 37 MB.
+    /// </para>
+    /// <para>
+    /// Deviation from <c>crates/obscura-browser/src/page.rs</c>, which has nothing
+    /// equivalent and needs nothing: dropping the Rust page frees its allocations
+    /// and the allocator returns the pages. A managed heap does not, so the port
+    /// asks for it explicitly at the one moment a whole document's worth of objects
+    /// dies at once.
+    /// </para>
+    /// <para>
+    /// The threshold keeps small documents - every test page and most real ones -
+    /// from paying for a collection that has nothing to reclaim.
+    /// <c>OBSCURA_DOCUMENT_GC_THRESHOLD_MB=0</c> disables the release entirely.
+    /// </para>
+    /// </remarks>
+    internal static void ReleaseReplacedDocumentMemory()
+    {
+        ulong thresholdMb = EnvUlong(
+            "OBSCURA_DOCUMENT_GC_THRESHOLD_MB", DefaultDocumentGcThresholdMb);
+        if (thresholdMb == 0)
+        {
+            return;
+        }
+
+        long threshold = (long)Math.Min(thresholdMb, (ulong)(long.MaxValue / (1024 * 1024)))
+            * 1024L * 1024L;
+        if (GC.GetTotalMemory(forceFullCollection: false) < threshold)
+        {
+            return;
+        }
+
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+    }
 
     internal static ulong EnvUlong(string key, ulong fallback) =>
         Environment.GetEnvironmentVariable(key) is { } value
