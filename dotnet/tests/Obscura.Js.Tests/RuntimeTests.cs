@@ -9672,6 +9672,34 @@ public sealed class RuntimeTests
         Assert.Equal(0, rt.State.PageInFlight.Value);
     }
 
+    /// <summary>
+    /// Pumps the runtime until <c>__profileEvents</c> holds <paramref name="count"/>
+    /// entries, or the guard expires.
+    /// </summary>
+    /// <remarks>
+    /// A fixed pump budget is a guess about how long a request takes. Reading the
+    /// counter costs nothing the test is measuring - unlike <c>image.complete</c>,
+    /// which is itself a cache read that can complete the element - so the guard only
+    /// bounds a genuine hang and the assertion that follows is unchanged.
+    /// </remarks>
+    private static async Task PumpUntilProfileEventsAsync(ObscuraJsRuntime rt, int count)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (true)
+        {
+            await rt.RunEventLoopBoundedAsync(50);
+            var seen = rt.Evaluate("__profileEvents.length");
+            if (seen is not null && seen.GetValue<double>() >= count)
+            {
+                return;
+            }
+            if (DateTime.UtcNow >= deadline)
+            {
+                return;
+            }
+        }
+    }
+
     [Fact]
     public async Task ImageLifecycleCacheIsSeparatedByCorsCredentialsProfile()
     {
@@ -9862,22 +9890,26 @@ public sealed class RuntimeTests
             image.addEventListener("error", () => __profileEvents.push("error"));
             void image.complete;
             """);
-        // The reference pumps 100ms per step. The port's first request to a fresh
-        // origin spends longer than that inside SocketsHttpHandler, so the pump
-        // budget is widened; every assertion below is the reference's, unchanged.
-        await rt.RunEventLoopBoundedAsync(1_000);
+        // The reference pumps 100ms per step and reads the result. The port cannot:
+        // its image request finishes on a thread-pool thread, so between the bytes
+        // reaching the cache and the shim's promise reaction dispatching the event
+        // there is a window in which reading `image.complete` completes the element
+        // from cache with no event at all - and the assertion below read
+        // [true, 2, []] in about a quarter of runs. Waiting for the event the step
+        // is about removes the window; every assertion is the reference's, unchanged.
+        await PumpUntilProfileEventsAsync(rt, 1);
         AssertJsonEquals(
             """[true, 2, ["load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("require-anonymous-cors", """image.crossOrigin = "anonymous";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 2);
         AssertJsonEquals(
             """[true, 0, ["load", "error"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("restore-no-cors", "image.removeAttribute('crossorigin');");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 3);
         AssertJsonEquals(
             """[true, 2, ["load", "error", "load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
@@ -9885,19 +9917,19 @@ public sealed class RuntimeTests
         rt.ExecuteScript(
             "load-anonymous-cors",
             $"""image.crossOrigin = "anonymous"; image.src = "{server.Origin}/cors.png";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 4);
         AssertJsonEquals(
             """[true, 2, ["load", "error", "load", "load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("require-credentialed-cors", """image.crossOrigin = "use-credentials";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 5);
         AssertJsonEquals(
             """[true, 0, ["load", "error", "load", "load", "error"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("restore-anonymous-cors", """image.crossOrigin = "anonymous";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 6);
         AssertJsonEquals(
             """[true, 2, ["load", "error", "load", "load", "error", "load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));

@@ -57,7 +57,17 @@ internal sealed class TestHttpServer : IDisposable
         _listener.Start();
         Origin = "http://127.0.0.1:"
             + ((IPEndPoint)_listener.LocalEndpoint).Port.ToString(CultureInfo.InvariantCulture);
-        _ = Task.Run(AcceptLoopAsync);
+        // Dedicated threads, not the thread pool: the Rust fixture is
+        // std::thread::spawn + thread::sleep, and a pool-scheduled fixture shares its
+        // scheduler with the engine under test. Under load the pool injects threads
+        // slowly, so a `Task.Delay` standing in for a slow origin arrived hundreds of
+        // milliseconds late, and a case measuring how much of a budget that fetch
+        // spent measured the starvation instead.
+        new Thread(AcceptLoop)
+        {
+            IsBackground = true,
+            Name = "test-http-accept",
+        }.Start();
     }
 
     internal string Origin { get; }
@@ -90,24 +100,28 @@ internal sealed class TestHttpServer : IDisposable
         return paths;
     }
 
-    private async Task AcceptLoopAsync()
+    private void AcceptLoop()
     {
         while (!_stopping.IsCancellationRequested)
         {
             TcpClient client;
             try
             {
-                client = await _listener.AcceptTcpClientAsync(_stopping.Token).ConfigureAwait(false);
+                client = _listener.AcceptTcpClient();
             }
             catch (Exception)
             {
                 return;
             }
-            _ = Task.Run(() => ServeAsync(client));
+            new Thread(() => Serve(client))
+            {
+                IsBackground = true,
+                Name = "test-http-connection",
+            }.Start();
         }
     }
 
-    private async Task ServeAsync(TcpClient client)
+    private void Serve(TcpClient client)
     {
         using (client)
         {
@@ -119,7 +133,7 @@ internal sealed class TestHttpServer : IDisposable
                 int headerEnd = -1;
                 while (headerEnd < 0)
                 {
-                    int read = await stream.ReadAsync(chunk, _stopping.Token).ConfigureAwait(false);
+                    int read = stream.Read(chunk, 0, chunk.Length);
                     if (read == 0)
                     {
                         return;
@@ -149,7 +163,7 @@ internal sealed class TestHttpServer : IDisposable
                 }
                 while (buffer.Count < headerEnd + contentLength)
                 {
-                    int read = await stream.ReadAsync(chunk, _stopping.Token).ConfigureAwait(false);
+                    int read = stream.Read(chunk, 0, chunk.Length);
                     if (read == 0)
                     {
                         break;
@@ -165,7 +179,7 @@ internal sealed class TestHttpServer : IDisposable
                 TestResponse response = _handler(request);
                 if (response.DelayMs > 0)
                 {
-                    await Task.Delay(response.DelayMs, _stopping.Token).ConfigureAwait(false);
+                    Thread.Sleep(response.DelayMs);
                 }
 
                 var head = new StringBuilder();
@@ -180,10 +194,10 @@ internal sealed class TestHttpServer : IDisposable
                     head.Append(CultureInfo.InvariantCulture, $"{name}: {value}\r\n");
                 }
                 head.Append("\r\n");
-                await stream.WriteAsync(Encoding.UTF8.GetBytes(head.ToString()), _stopping.Token)
-                    .ConfigureAwait(false);
-                await stream.WriteAsync(response.Body, _stopping.Token).ConfigureAwait(false);
-                await stream.FlushAsync(_stopping.Token).ConfigureAwait(false);
+                byte[] headBytes = Encoding.UTF8.GetBytes(head.ToString());
+                stream.Write(headBytes, 0, headBytes.Length);
+                stream.Write(response.Body, 0, response.Body.Length);
+                stream.Flush();
             }
             catch (Exception)
             {

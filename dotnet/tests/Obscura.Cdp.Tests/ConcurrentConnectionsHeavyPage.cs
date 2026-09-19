@@ -175,7 +175,16 @@ public sealed class ConcurrentConnectionsHeavyPageTests
             _listener = new TcpListener(IPAddress.Loopback, 0);
             _listener.Start();
             Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-            _ = Task.Run(AcceptAsync);
+            // Dedicated threads with blocking I/O rather than the thread pool. The
+            // fixture serves the page this test is timing, and four clients plus the
+            // server already saturate the pool on a small box: a pool-scheduled
+            // fixture then adds its own scheduling delay to every subresource, on top
+            // of the delay it is supposed to be simulating.
+            new Thread(Accept)
+            {
+                IsBackground = true,
+                Name = "heavy-fixture-accept",
+            }.Start();
         }
 
         internal int Port { get; }
@@ -187,14 +196,14 @@ public sealed class ConcurrentConnectionsHeavyPageTests
         /// </summary>
         internal int Served => Volatile.Read(ref _served);
 
-        private async Task AcceptAsync()
+        private void Accept()
         {
             while (!_stop.IsCancellationRequested)
             {
                 TcpClient client;
                 try
                 {
-                    client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    client = _listener.AcceptTcpClient();
                 }
                 catch (Exception e) when (e is OperationCanceledException or SocketException
                                               or ObjectDisposedException)
@@ -202,11 +211,15 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                     return;
                 }
 
-                _ = Task.Run(() => ServeAsync(client));
+                new Thread(() => Serve(client))
+                {
+                    IsBackground = true,
+                    Name = "heavy-fixture-connection",
+                }.Start();
             }
         }
 
-        private async Task ServeAsync(TcpClient client)
+        private void Serve(TcpClient client)
         {
             using (client)
             {
@@ -214,7 +227,7 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                 {
                     var stream = client.GetStream();
                     var buffer = new byte[2048];
-                    var n = await stream.ReadAsync(buffer.AsMemory(), _stop.Token);
+                    var n = stream.Read(buffer, 0, buffer.Length);
                     if (n == 0)
                     {
                         return;
@@ -233,13 +246,13 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                     byte[] payload;
                     if (string.Equals(path, "/slow.js", StringComparison.Ordinal))
                     {
-                        await Task.Delay(120, _stop.Token);
+                        Thread.Sleep(120);
                         contentType = "application/javascript";
                         payload = "void 0;"u8.ToArray();
                     }
                     else if (string.Equals(path, "/slow.png", StringComparison.Ordinal))
                     {
-                        await Task.Delay(120, _stop.Token);
+                        Thread.Sleep(120);
                         contentType = "image/png";
                         payload = OnePixelPng;
                     }
@@ -252,9 +265,9 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                     var header = Encoding.ASCII.GetBytes(
                         $"HTTP/1.1 200 OK\r\nContent-Type: {contentType}\r\n" +
                         $"Content-Length: {payload.Length}\r\nConnection: close\r\n\r\n");
-                    await stream.WriteAsync(header, _stop.Token);
-                    await stream.WriteAsync(payload, _stop.Token);
-                    await stream.FlushAsync(_stop.Token);
+                    stream.Write(header, 0, header.Length);
+                    stream.Write(payload, 0, payload.Length);
+                    stream.Flush();
                 }
                 catch (Exception e) when (e is IOException or SocketException
                                               or OperationCanceledException or ObjectDisposedException)

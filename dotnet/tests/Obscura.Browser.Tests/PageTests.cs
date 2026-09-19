@@ -19,6 +19,54 @@ public sealed class PageTests
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// Bounds a wait that is expected to finish in milliseconds. It is a hang guard,
+    /// never the thing under test: a case that depends on how long something takes
+    /// waits for the state it needs through <see cref="PumpUntilAsync"/> instead.
+    /// </summary>
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Runs the page's event loop until <paramref name="ready"/> holds, and reports
+    /// whether it did.
+    /// </summary>
+    /// <remarks>
+    /// One pass of <c>RunEventLoopAsync</c> is not a signal that a frame's document has
+    /// arrived. The pump reports idle at any moment with nothing queued - including
+    /// between a frame's two fetches - so a case that pumps once and then inspects the
+    /// frame set is asserting on how the host happened to schedule it, and fails under
+    /// the CPU contention of a full parallel run. Wait for the state the next step needs
+    /// instead, and let the guard bound only a genuine hang.
+    /// </remarks>
+    private static async Task<bool> PumpUntilAsync(Page page, Func<bool> ready, TimeSpan guard)
+    {
+        DateTime deadline = DateTime.UtcNow.Add(guard);
+        while (!ready())
+        {
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return ready();
+            }
+            try
+            {
+                await page.Js!.RunEventLoopAsync().WaitAsync(remaining);
+            }
+            catch (TimeoutException)
+            {
+                return ready();
+            }
+            if (!ready())
+            {
+                // The loop reported idle with the work still outstanding: it is waiting
+                // on a response. Yield rather than spinning on the pump.
+                await Task.Delay(5);
+            }
+        }
+
+        return true;
+    }
+
     [Fact]
     public void NavigationTimeoutEnvironmentDefaultRemainsThirtySeconds()
     {
@@ -622,11 +670,7 @@ public sealed class PageTests
         // Rust runs the event loop to full idle once. The port's pump can return at
         // an idle-looking moment between the two frame fetches, so wait for the
         // documents themselves rather than for one pass of the loop.
-        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
-        while (page.Js!.State.PendingFrames.Count < frameCount && DateTime.UtcNow < deadline)
-        {
-            await page.Js!.RunEventLoopAsync().WaitAsync(TimeSpan.FromSeconds(2));
-        }
+        await PumpUntilAsync(page, () => page.Js!.State.PendingFrames.Count >= frameCount, HangGuard);
         Assert.Equal(frameCount, page.Js!.State.PendingFrames.Count);
         return (server, page, requests, slowSeen);
     }
@@ -775,7 +819,9 @@ public sealed class PageTests
             page.AddPreloadScript("globalThis.__order = ['preload'];");
             using var cancel = new CancellationTokenSource();
             Task advance = page.AdvanceFramesAsync(cancel.Token);
-            Task completed = await Task.WhenAny(advance, slowSeen.Task, Task.Delay(2_000));
+            Task completed = await Task.WhenAny(advance, slowSeen.Task, Task.Delay(HangGuard));
+            // The assertion is that the slow script's request arrived before the batch
+            // finished, not that it arrived inside any particular wall-clock window.
             Assert.Same(slowSeen.Task, completed);
             cancel.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => advance);
@@ -784,10 +830,14 @@ public sealed class PageTests
             page.Js!.Evaluate(
                 "(function(){ const next = document.createElement('iframe'); next.src = '/child.html';"
                 + " document.body.appendChild(next); return 1; })()");
-            await page.Js!.RunEventLoopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            // The replacement frame's document has to have arrived before its element is
+            // removed, or the batch this case is about never exists.
+            Assert.True(
+                await PumpUntilAsync(page, () => page.Js!.State.PendingFrames.Count >= 1, HangGuard),
+                "the replacement frame's document never arrived");
             page.Js!.Evaluate("(document.querySelector('iframe').remove(), 1)");
 
-            await page.AdvanceFramesAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await page.AdvanceFramesAsync().WaitAsync(HangGuard);
             Assert.Single(page.Frames);
             Assert.Empty(page._pendingFrameWork);
             PageFixtures.AssertJson("true", page.EvaluateInFrame(0, "globalThis.__childReady"));
@@ -1046,11 +1096,29 @@ public sealed class PageTests
     [Fact]
     public async Task ModuleGraphAndEvaluationShareOneActiveBudget()
     {
-        // Spend part of the module's allowance loading its graph. The synchronous
-        // top-level work then fits in a freshly reset budget, but cannot fit in the
-        // shared active load+evaluation budget.
+        // Spend part of the module's allowance on its graph. The synchronous top-level
+        // work then fits in a freshly reset budget, but cannot fit in the shared active
+        // load+evaluation budget.
+        //
+        // The imported module spends its share by busy-waiting rather than by being
+        // served slowly. Both are wall-clock spends against the same budget, but a
+        // `while (Date.now() < until) {}` spends exactly what it says whatever else the
+        // host is running, while a delayed response is a network round trip whose
+        // client half runs on the thread pool: under the contention of a full parallel
+        // test run that arrived hundreds of milliseconds late, the whole 350ms budget
+        // went to the fetch, the module never began evaluating, and the test read
+        // [false, false].
+        //
+        // What each assertion needs, against the 1200ms budget:
+        //   started   the 400ms import plus the fetch of two small files - about
+        //             750ms of room, and the only load-sensitive term left
+        //   completed 400 + 1000 > 1200, both deterministic wall-clock spends
+        //   and it still discriminates: 1000 < 1200, so a module handed a freshly
+        //   reset budget after its graph loaded would run to completion.
         using TestHttpServer server = TestHttpServer.Start(_ =>
-            TestResponse.JavaScript("export const delayed = true;") with { DelayMs = 100 });
+            TestResponse.JavaScript(
+                "const until = Date.now() + 400; while (Date.now() < until) {}"
+                + " export const delayed = true;"));
 
         using Page page = PageFixtures.ImportMapTestPage(
             "shared-module-budget",
@@ -1059,12 +1127,12 @@ public sealed class PageTests
             <html><head><script type="module">
                 import "./delayed.js";
                 globalThis.__shared_deadline_started = true;
-                const until = Date.now() + 300;
+                const until = Date.now() + 1000;
                 while (Date.now() < until) {}
                 globalThis.__shared_deadline_completed = true;
             </script></head><body></body></html>
             """);
-        await page.ExecuteScriptsWithModuleBudgetAsync(350, CancellationToken.None);
+        await page.ExecuteScriptsWithModuleBudgetAsync(1200, CancellationToken.None);
 
         Assert.Equal("/app/delayed.js", server.NextPath(RequestTimeout));
         PageFixtures.AssertJson(

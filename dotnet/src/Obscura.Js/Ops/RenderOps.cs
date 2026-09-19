@@ -1020,20 +1020,26 @@ public static class RenderOps
         // Different CORS/credential profiles do not share an in-flight response.
         var requestKey = (documentGeneration, selectedUrl, profile);
         TaskCompletionSource? follower = null;
-        if (shared.RenderImageInFlight.TryGetValue(requestKey, out var waiters))
+        lock (shared.AsyncResourceGate)
         {
-            follower = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            waiters.Add(follower);
-        }
-        else
-        {
-            shared.RenderImageInFlight[requestKey] = [];
+            if (shared.RenderImageInFlight.TryGetValue(requestKey, out var waiters))
+            {
+                follower = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                waiters.Add(follower);
+            }
+            else
+            {
+                shared.RenderImageInFlight[requestKey] = [];
+            }
         }
 
         if (follower is not null)
         {
             await follower.Task.ConfigureAwait(false);
-            return FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
+            lock (shared.AsyncResourceGate)
+            {
+                return FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
+            }
         }
 
         shared.PageInFlight.Increment();
@@ -1060,25 +1066,38 @@ public static class RenderOps
             }
 
             var bytes = response is { Status: >= 200 and < 300 } ok ? ok.Body : null;
-            if (shared.DocumentGeneration == documentGeneration)
-            {
-                if (bytes is not null && RenderPaint.ImageIntrinsicDimensions(bytes) is not null)
-                {
-                    shared.RenderResources.SeedImage(selectedUrl, profile, bytes);
-                    // The leader owns the unknown-to-known cache transition. Followers
-                    // only observe this result and must not invalidate again.
-                    RenderInvalidation.InvalidateRenderResourceGeometry(shared);
-                }
-                else
-                {
-                    shared.RenderResources.SeedImageMissing(selectedUrl, profile);
-                }
-            }
 
+            // Everything from here on reads or writes page state, and concurrent image
+            // requests get here on different thread-pool threads. Rust resumes each
+            // reaction on the one thread that owns the state; the gate is the port's
+            // equivalent. Seeding, invalidating and handing the result to the waiters
+            // is one step: a follower released before the bytes are in the cache reads
+            // its own request back as unknown and reports a load error.
             List<TaskCompletionSource> pending = [];
-            if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+            string result;
+            lock (shared.AsyncResourceGate)
             {
-                pending = registered;
+                if (shared.DocumentGeneration == documentGeneration)
+                {
+                    if (bytes is not null && RenderPaint.ImageIntrinsicDimensions(bytes) is not null)
+                    {
+                        shared.RenderResources.SeedImage(selectedUrl, profile, bytes);
+                        // The leader owns the unknown-to-known cache transition. Followers
+                        // only observe this result and must not invalidate again.
+                        RenderInvalidation.InvalidateRenderResourceGeometry(shared);
+                    }
+                    else
+                    {
+                        shared.RenderResources.SeedImageMissing(selectedUrl, profile);
+                    }
+                }
+
+                if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                {
+                    pending = registered;
+                }
+
+                result = FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
             }
 
             foreach (var waiter in pending)
@@ -1086,10 +1105,27 @@ public static class RenderOps
                 waiter.TrySetResult();
             }
 
-            return FinishAsyncImageMetadata(shared, nodeId, documentGeneration, selectedUrl, profile);
+            return result;
         }
         finally
         {
+            // A leader that failed after registering still owns every waiter on its key.
+            // Leaving them registered strands each follower's op on a promise nothing can
+            // settle, and the element never completes.
+            List<TaskCompletionSource> abandoned = [];
+            lock (shared.AsyncResourceGate)
+            {
+                if (shared.RenderImageInFlight.Remove(requestKey, out var registered))
+                {
+                    abandoned = registered;
+                }
+            }
+
+            foreach (var waiter in abandoned)
+            {
+                waiter.TrySetResult();
+            }
+
             shared.PageInFlight.Decrement();
         }
     }

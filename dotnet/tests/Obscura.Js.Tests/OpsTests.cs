@@ -81,12 +81,15 @@ public sealed class OpsTests
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var endpoint = (IPEndPoint)listener.LocalEndpoint;
-        _ = Task.Run(async () =>
+        // A dedicated thread with blocking I/O, like the Rust fixture's
+        // std::thread::spawn: a pool-scheduled writer shares its scheduler with the
+        // reader under test and stops feeding it when the host is busy.
+        new Thread(() =>
         {
             using (listener)
             {
-                using var socket = await listener.AcceptSocketAsync();
-                await using var stream = new NetworkStream(socket, ownsSocket: false);
+                using var socket = listener.AcceptSocket();
+                using var stream = new NetworkStream(socket, ownsSocket: false);
                 var header = new StringBuilder("HTTP/1.1 200 OK\r\nConnection: close\r\n");
                 if (withContentLength)
                 {
@@ -94,7 +97,8 @@ public sealed class OpsTests
                 }
 
                 header.Append("\r\n");
-                await stream.WriteAsync(Encoding.ASCII.GetBytes(header.ToString()));
+                var headerBytes = Encoding.ASCII.GetBytes(header.ToString());
+                stream.Write(headerBytes, 0, headerBytes.Length);
                 var chunk = new byte[64 * 1024];
                 Array.Fill(chunk, (byte)'a');
                 var sent = 0;
@@ -103,7 +107,7 @@ public sealed class OpsTests
                     var n = Math.Min(chunk.Length, bodyLength - sent);
                     try
                     {
-                        await stream.WriteAsync(chunk.AsMemory(0, n));
+                        stream.Write(chunk, 0, n);
                     }
                     catch (IOException)
                     {
@@ -113,9 +117,27 @@ public sealed class OpsTests
                     sent += n;
                 }
 
-                socket.Shutdown(SocketShutdown.Both);
+                // Half-close and wait for the reader to go away. Shutting down both
+                // directions and dropping the socket while megabytes are still queued
+                // resets the connection, and the reader then sees "connection reset by
+                // peer" instead of the cap it was about to hit - a race the test lost
+                // whenever the host was loaded enough to slow the reader down.
+                try
+                {
+                    socket.Shutdown(SocketShutdown.Send);
+                    while (stream.Read(chunk, 0, chunk.Length) > 0)
+                    {
+                    }
+                }
+                catch (Exception error) when (error is IOException or SocketException or ObjectDisposedException)
+                {
+                }
             }
-        });
+        })
+        {
+            IsBackground = true,
+            Name = "serve-body-once",
+        }.Start();
         return endpoint;
     }
 

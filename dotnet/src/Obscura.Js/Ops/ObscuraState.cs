@@ -258,6 +258,23 @@ public sealed class ObscuraState
         RenderImageInFlight { get; } = [];
 
     /// <summary>
+    /// Serializes the part of an asynchronous subresource completion that touches this
+    /// state.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: <c>op_load_image_metadata</c> is a deno_core async op, so its
+    /// reaction resumes on the same single thread that owns <c>Rc&lt;RefCell&lt;State&gt;&gt;</c>
+    /// and no two completions can overlap. The port awaits the transport with
+    /// <c>ConfigureAwait(false)</c>, so every concurrent image request resumes on its own
+    /// thread-pool thread and they reached <see cref="RenderImageInFlight"/>,
+    /// <see cref="PendingStyleMutations"/> and the renderer cache at once. That corrupted
+    /// plain dictionaries and lists: seeded bytes went missing, in-flight registrations were
+    /// lost, and the shim saw a request it had already made come back unknown. This gate is
+    /// what replaces the reference's single-threaded reaction.
+    /// </remarks>
+    public object AsyncResourceGate { get; } = new();
+
+    /// <summary>
     /// One exact-key compiled author stylesheet for this document. Connected
     /// mutations still discard <see cref="PreparedRender"/>; the next prepare reuses
     /// only parsing/indexing when ordered CSS source and viewport stay identical.
