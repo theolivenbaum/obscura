@@ -170,10 +170,13 @@ public sealed partial class Page
         string referrer,
         CancellationToken cancellationToken)
     {
-        UrlRecord? parsed = PageUrl.TryParse(urlString);
+        UrlRecord? parsed = PageUrl.TryParse(urlString, out UrlParseError parseError);
         if (parsed is null)
         {
-            throw PageException.InvalidUrl("relative URL without a base");
+            // Rust reports `e.to_string()` of the url crate's ParseError, so every reason
+            // is distinct: "empty host", "invalid port number", "invalid IPv6 address".
+            // The port used to hardcode the relative-reference reason for all of them.
+            throw PageException.InvalidUrl(parseError.Message());
         }
         UrlRecord url = parsed;
 
