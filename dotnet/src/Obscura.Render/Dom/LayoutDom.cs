@@ -194,7 +194,8 @@ public static partial class RenderDom
         RetainedStyleMaps retained,
         IReadOnlyList<RetainedStyleMutation> mutations,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline) =>
+        AnimationTimelineState animationTimeline,
+        DomLayout? reusableLayout = null) =>
         LayoutDomWithWebFontsPassLimitAtAnimationTime(
             tree,
             viewport,
@@ -206,7 +207,8 @@ public static partial class RenderDom
             mutations,
             CssMediaType.Screen,
             animationSample,
-            animationTimeline).Layout;
+            animationTimeline,
+            reusableLayout).Layout;
 
     internal static (DomLayout Layout, ContainerLayoutTelemetry Telemetry)
         LayoutDomWithWebFontsMeasured(
@@ -254,7 +256,8 @@ public static partial class RenderDom
             IReadOnlyList<RetainedStyleMutation> mutations,
             CssMediaType mediaType,
             AnimationSample animationSample,
-            AnimationTimelineState animationTimeline)
+            AnimationTimelineState animationTimeline,
+            DomLayout? reusableLayout = null)
     {
         ArgumentNullException.ThrowIfNull(tree);
 
@@ -305,6 +308,24 @@ public static partial class RenderDom
                 tree, sheet, shadowSheets, retained, mutations, stylesheetCacheHit);
         }
 
+        RetainedLayoutReuseCandidate? reuseCandidate =
+            BuildReuseCandidate(tree, reusableLayout, sheet, reuse, mutations);
+
+        // Decided before the cascade walks the tree, because there is nothing for it to
+        // recompute: the offered layout is returned with its style maps handed back.
+        if (reuseCandidate is { NothingRecomputed: true } unchanged && reuse is { } untouched)
+        {
+            unchanged.Previous.Styles = untouched.Maps.Styles;
+            unchanged.Previous.CustomProperties = untouched.Maps.CustomProperties;
+            return (unchanged.Previous, new ContainerLayoutTelemetry(
+                0,
+                ContainerLayoutTermination.NoQueries,
+                default,
+                RetainedReused: untouched.Maps.Styles.Count,
+                RetainedFresh: 0,
+                RetainedFallback: 0));
+        }
+
         int retainedFresh = 0;
         if (reuse is { } prepared)
         {
@@ -330,9 +351,23 @@ public static partial class RenderDom
             null,
             reuse,
             animationSample,
-            animationTimeline);
+            animationTimeline,
+            reuseCandidate);
         DomLayout laid = first.Layout;
         ContainerQueryStats query = first.QueryStats;
+
+        // The gate kept the retained layout, so there is nothing for the container-query loop
+        // below to iterate over. A zero pass count is what says no layout was run.
+        if (reuseCandidate is not null && ReferenceEquals(laid, reuseCandidate.Previous))
+        {
+            return (laid, new ContainerLayoutTelemetry(
+                0,
+                ContainerLayoutTermination.NoQueries,
+                query,
+                retainedReused,
+                retainedFresh,
+                retainedFallback));
+        }
 
         if (!sheet.HasContainerQueries())
         {
@@ -503,6 +538,77 @@ public static partial class RenderDom
         return previousSignature is not null && previousSignature.Equals(signature)
             ? ContainerLayoutTermination.SignatureStable
             : null;
+    }
+
+    /// <summary>
+    /// Offers <see cref="LayoutDomOnce"/> a layout it may keep if the restyle turns out not to
+    /// have changed anything a layout pass can observe.
+    /// </summary>
+    /// <remarks>
+    /// Built only for a batch of pure attribute mutations against a container-query-free sheet:
+    /// a tree, text, resource or animation mutation can change box generation, intrinsic sizes
+    /// or shaping without any element's computed style differing, which is exactly what the
+    /// member comparison cannot see.
+    /// </remarks>
+    private static RetainedLayoutReuseCandidate? BuildReuseCandidate(
+        DomTree tree,
+        DomLayout? reusableLayout,
+        Stylesheet sheet,
+        (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? reuse,
+        IReadOnlyList<RetainedStyleMutation> mutations)
+    {
+        if (!RetainedLayoutReuse.Enabled
+            || reusableLayout is null
+            || reuse is not { } prepared
+            || mutations.Count == 0
+            || sheet.HasContainerQueries())
+        {
+            return null;
+        }
+
+        foreach (RetainedStyleMutation mutation in mutations)
+        {
+            if (mutation is not RetainedStyleMutation.Attribute)
+            {
+                return null;
+            }
+        }
+
+        HashSet<NodeId> fresh = prepared.Fresh;
+        if (fresh.Count > RetainedLayoutReuse.MaxComparedNodes)
+        {
+            return null;
+        }
+
+        // An empty dirty set is the planner saying the attributes that changed cannot reach any
+        // element's style - a class that matches no rule, a `data-` attribute nothing selects
+        // on. Nothing is recomputed, so there is nothing to compare and nothing to lay out.
+        if (fresh.Count == 0)
+        {
+            return new RetainedLayoutReuseCandidate(reusableLayout, [], NothingRecomputed: true);
+        }
+
+        Dictionary<NodeId, LayoutStyle> before = new(fresh.Count);
+        foreach (NodeId node in fresh)
+        {
+            if (prepared.Maps.Styles.TryGetValue(node, out LayoutStyle? style))
+            {
+                before[node] = style;
+                continue;
+            }
+
+            // The dirty set names the text nodes under a restyled element as well, and only
+            // elements carry a computed style. An *element* the offered layout has no style for
+            // generated no box in it, so that layout cannot be trusted to describe it.
+            if (tree.GetNode(node)?.IsElement == true)
+            {
+                return null;
+            }
+        }
+
+        return before.Count == 0
+            ? null
+            : new RetainedLayoutReuseCandidate(reusableLayout, before, NothingRecomputed: false);
     }
 
     private static (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? PrepareRetainedStyles(
