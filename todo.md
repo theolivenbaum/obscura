@@ -196,44 +196,40 @@ The largest component. Split into stages; each stage is independently testable.
 
 ## Open issues
 
-- **A forced geometry read after any style write re-lays out the whole document,
-  and a component that interleaves the two gets terminated by the task
-  watchdog.** `RenderState.EnsurePreparedRender` rebuilds whenever
-  `PendingStyleMutations` is non-empty, and the retained path
-  (`PaintApi.PrepareDomWithRetainedStylesWithAnimationState`) retains the
-  *style* maps and then runs `PrepareInternal` over the whole tree - there is no
-  dirty-subtree layout invalidation. Measured on a 2059-node page: 50 read-only
-  `offsetWidth` reads cost 130ms, but 50 (write, read) pairs cost 3.1-3.4s
-  against Chromium's 0.3-4.0ms, and it scales linearly with document size
-  (~25us per node per forced read). Tesserae's Masonry interleaves ~50 such
-  pairs, so its one `layout()` pass exceeds the 5.5s autonomous task budget, V8
-  is terminated inside it (uncatchably, so nothing retries), and the container
-  keeps the `left: NaN%` it computed in its earlier zero-width pass forever.
-  That is finding F39 in `dotnet/docs/round3-findings.md`, which has the full
-  measurement.
+- **A forced geometry read after a style write that *does* change layout still
+  re-lays out the whole document.** The half that does not is fixed: a retained
+  restyle whose recomputed styles no layout pass can observe now keeps the
+  layout it already has (`RetainedLayoutReuse`, see Known deviations). On the
+  2059-node `thrash.html`, interleaved A/B on one binary, three runs each,
+  50 (write, read) pairs, medians: `opacity` 5261ms -> 1211ms, `class` 4947ms
+  -> 524ms (Chromium 0.2ms and 0.1ms). A write that really changes a box -
+  `left`/`top`, `transform`, `width` - is unchanged at ~5.2s against Chromium's
+  3-4ms, because the gate answers *whether* to lay out and nothing yet answers
+  *how much*.
 
-  This is a speed gap, not a logic deviation: `crates/obscura-render` has the
-  same retained-style / full-relayout split and
-  `run_autonomous_event_loop_turn` arms the same budget around the same batch,
-  so at the Rust engine's speed the 50 relayouts fit. The fix is incremental
-  layout invalidation - carry a dirty set on `PreparedRender` so a retained
-  restyle of one node re-runs layout for its formatting context rather than the
-  document. Raising the watchdog budget only moves the threshold.
+  What is left needs retained layout, not a better gate. One full prepare of a
+  ~2000-node page costs 77ms and of the Tesserae SPA 130-460ms, and almost none
+  of it is avoidable per-write today: it is ~40% HarfBuzz shaping (every text
+  node is reshaped from scratch - the shaping cache is per-pass, and shaping is
+  a pure function of text plus attributes, so a cross-pass cache is the obvious
+  next step), ~12% building the taffy tree, ~13% taffy itself and ~14%
+  `DerivedLayoutState`. The real fix is the proposal on file - retain the box
+  tree so a restyled out-of-flow box re-runs layout for its formatting context
+  rather than the document. Raising the watchdog budget only moves the
+  threshold.
 
-- **`filter` is parsed only for `blur()`, so `drop-shadow()` neither reports nor
-  paints.** `getComputedStyle(el).filter` returns `""` where Chromium returns the
-  authored list, and the product's four-way
-  `drop-shadow(rgba(0, 0, 0, 0.5) 1px 0px 0px) ...` outline around
-  `.tss-pixelavatar-canvas` renders with no outline at all. Confirmed visually
-  against Chromium.
-
-  Both halves live outside the paint/color surface: the `case "filter":` arm is
-  in `Obscura.Render/Style/ComputedStyle.cs` and its only storage is
-  `LayoutStyle.FilterBlur` in `Obscura.Render/Core/LayoutStyle.cs`, so reporting
-  the value needs a new `LayoutStyle` member and painting it needs a
-  `SKImageFilter.CreateDropShadow` pass in `PaintDom`. Nothing is stubbed: the
-  property is silently absent today, not wrongly reported.
-
+- **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
+  attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
+  route runs ~33 prepares totalling 13.4s, of which #7-#31 are twenty-five
+  *single* `style`-attribute writes at 120-460ms each: Outlayer's
+  `Item._transitionTo` reads `getComputedStyle` for the item's current position
+  and then writes the new one, fifty times. Those writes change `left`/`top`
+  and `transform`, so they are layout, not paint, and the gate correctly
+  declines them - measured on and off, the route fails identically. F39's
+  root-cause table was taken on `thrash.html`, which is a much cheaper page
+  (77ms a prepare) and a different write mix; the conclusion that Masonry is
+  "~50 forced relayouts at thrash speed" does not survive measuring Masonry
+  itself.
 
 - **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
   Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
@@ -355,33 +351,19 @@ The largest component. Split into stages; each stage is independently testable.
   at 38ms to deserialize 349 KB against 40ms to compile from source, and the
   execution time behind it does not move, so it is a small net loss.
 
-  Three tests are load-flaky, all of them asserting on a deadline: the
-  `Obscura.Browser.Tests` cases `ModuleGraphAndEvaluationShareOneActiveBudget`
-  and `PruningAnOldBatchDoesNotStrandANewRuntimeBatch`, and the
-  `Obscura.Js.Tests` case `Read_body_capped_rejects_oversized_streamed_body`.
-  Each fails under the CPU contention of a full parallel `dotnet test` and then
-  passes on its own and on a repeat of the same full run. Worth making them
-  deterministic rather than re-running.
+  The three load-flaky cases named here are fixed; see the entries below and in
+  Open issues. None of them needed a longer deadline:
+  `ModuleGraphAndEvaluationShareOneActiveBudget` now spends the graph's share of
+  the budget by busy-waiting inside the imported module instead of waiting on a
+  delayed response, `PruningAnOldBatchDoesNotStrandANewRuntimeBatch` waits for the
+  frame documents it needs instead of for a fixed number of event-loop passes, and
+  `Read_body_capped_rejects_oversized_streamed_body` had a fixture that reset the
+  connection. What remains of this section is the startup cost itself.
 
   When benchmarking publish variants, delete `obj/` and `bin/` for the RID
   between runs. Publishing the same project self-contained and then
   framework-dependent into different folders leaves stale intermediates that
   produce a binary which aborts on startup with no output.
-- **`Url::parse` failure reasons are collapsed into one message.** The `url`
-  crate's `ParseError` has a distinct `Display` per variant and `page.rs` reports
-  it verbatim; `UrlParser.Parse` returns `UrlRecord?` with no error channel, so
-  `Page.Navigation` hardcodes one string and every rejected URL reports
-  "relative URL without a base". Diffed against the reference binary:
-
-      http://              rust: empty host                        port: relative URL without a base
-      http://a:99999/      rust: invalid port number               port: relative URL without a base
-      http://[fe80::1      rust: invalid IPv6 address              port: relative URL without a base
-      https://xn--/        rust: invalid international domain name  port: relative URL without a base
-
-  The classification is right in every case (all four are rejected, and the
-  error kind is `InvalidUrl`); only the reason is lost. Fixing it means threading
-  a reason out of `UrlParser` and `UrlHost`, which have 9 and ~25 failure
-  returns respectively, so it is its own piece of work rather than a one-liner.
 - **`Obscura.Net` still speaks `System.Uri`, so URLs are reserialized at the
   transport boundary.** `Obscura.Browser` now keeps `UrlRecord` throughout, but
   `Response.Url`, `Request.Url` and every `ObscuraHttpClient` entry point take a
@@ -394,45 +376,168 @@ The largest component. Split into stages; each stage is independently testable.
   and `Obscura.Js` can reference - `Obscura.Js` depends on `Obscura.Net`, so it
   cannot go the other way. That mirrors the Rust tree, where `url` is a crate
   both depend on.
-- **`Runtime.evaluate` drops an explicit `"value": null`.** Rust returns
-  `{"type":"object","subtype":"null","description":"null","value":null}`; the
-  port omits the key, so a client reading `result.value` gets `undefined` where
-  Chrome and Rust give `null`.
 
-- **`ConcurrentConnectionsHeavyPageDoNotAbortV8` is load-flaky.** It drives six
-  concurrent CDP connections against a subresource-heavy page under a 30s
-  deadline, and it fails intermittently when the rest of the suite is running.
-  Measured by interleaving three full-suite rounds against the shim before and
-  after the canvas work: the old shim failed 2 of 3 rounds and the new one 2 of
-  3, so it is the test's sensitivity and not a regression. Worth noting because
-  it looked exactly like a regression on a single run each way, and startup cost
-  was ruled out separately (18 interleaved runs: 626ms median before, 622ms
-  after).
-- **`RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` is a
-  real port defect, not host-load flakiness.** Measured on this 4-core box:
-  C# 4-5 passes in 8-10 runs, the Rust counterpart 8 of 8. The earlier note here
-  blamed first-render font-initialization latency collapsing two events into one;
-  the diagnostics say otherwise. In every failing run `__imageTimerRan` is
-  already `true`, so event-loop ordering is fine. What differs is the request
-  count: passing runs issue exactly 4 requests, failing runs issue 5 or 7, with
-  `/one.png` and `/three.png` (one `<img>` each) duplicated. Each duplicate comes
-  back with `Known == false`, which `_applyImageMetadata` turns into an `error`
-  event with `naturalWidth` 0 - the assertion that actually fires. So the chain
-  is: something makes `FinishAsyncImageMetadata` answer `stale` (or
-  `ProfiledCachedImageMetadata` answer null), bootstrap.js re-queues the request
-  on that answer, and the retry observes an unseeded cache entry. Which of the
-  four `Stale` predicates in `RenderOps.FinishAsyncImageMetadata` fires is not
-  yet pinned. Ruled out along the way: the `ObscuraHttpClient.ConnectCallback`
-  change for IP literals (2 of 8 with the old client, so if anything worse), and
-  thread-pool starvation from the harness's blocking handler - `RawHttpServer`
-  now gives each connection a dedicated thread, exactly as the Rust harness's
-  `std::thread::spawn` does, which removes the confound but does not change the
-  pass rate.
-- **`OpsTests.Read_body_capped_rejects_oversized_streamed_body` is timing-flaky.**
-  The first prepared render on a fresh process costs ~300ms in embedded font
-  initialization against ~1ms once warm, so a test that schedules work tens of
-  milliseconds apart can collapse two events into one when the host is busy. Fix
-  the latency rather than the test.
+  Surveyed, not started. The cut is cleaner than the folder suggests, because
+  only part of `Url/` is the `url` crate:
+
+  - **Moves** to a new `src/Obscura.Url/Obscura.Url.csproj` (namespace
+    `Obscura.Url`), which references nothing: `UrlRecord.cs`, `UrlParser.cs`,
+    `UrlHost.cs`, `UrlParseError.cs`, `PercentEncoding.cs`, `Idna.cs`,
+    `Punycode.cs`, `UnicodeNormalization.cs` - ~3.6k lines, no dependency on
+    anything outside themselves. `Obscura.Net`, `Obscura.Js`, `Obscura.Browser`,
+    `Obscura.Cdp`, `Obscura.Cli` and `Obscura` reference it; the solution gains
+    one `<Project Path=.../>` line.
+  - **Stays** in `Obscura.Js`, because each depends on something `Obscura.Url`
+    must not: `UrlOps.cs` (the `ops.rs` layer - needs `OpGuard`),
+    `QueryEncoding.cs` (needs `Obscura.Net.WhatwgEncoding`), and
+    `FormUrlEncoded.cs` / `PublicSuffixList.cs`, which only `UrlOps` calls.
+    Alternatively move `Obscura.Net/Encoding/WhatwgEncoding.cs` +
+    `SingleByteTables.cs` into `Obscura.Url` as well, mirroring `encoding_rs`
+    being a crate both depend on, and then all four move too.
+  - **`using Obscura.Js.Url;`** appears in 20 source files and 7 test files; the
+    moved types need it changed to `using Obscura.Url;`.
+
+  The transport conversion is the larger half: 59 `System.Uri` references across
+  7 files in `Obscura.Net` (`ObscuraHttpClient.cs` 28, `Requests.cs` 8,
+  `CookieJar.cs` 8, `UrlOrigin.cs` 6, `StealthHttpClient.cs` 6, `SsrfGuard.cs` 3,
+  `ObscuraNetException.cs` 1). Four of them are behaviour, not signature, and
+  need their own test:
+
+  - `CookieJar.HostOf` and `UrlOrigin.Host` strip brackets by testing
+    `UriHostNameType.IPv6`; on a `UrlRecord` that is `HostKind.Ipv6`.
+  - `SsrfGuard.ValidateUrl` switches on `UriHostNameType` to decide whether the
+    host is a literal address - same replacement.
+  - `ObscuraHttpClient` resolves a redirect `Location` with
+    `Uri.TryCreate(currentUrl, locationString, out _)`; on a `UrlRecord` that is
+    `Join`, which is WHATWG and therefore resolves a few `Location` values
+    differently. That is the direction of the fix (it is what Rust does), but it
+    is an observable change and wants a redirect test of its own.
+  - One `System.Uri` legitimately survives, at `HttpRequestMessage.RequestUri`.
+    Building it from `UrlRecord.Href` there is what makes `http://a..b/` fail as
+    a transport error naming the URL, the way the reference reports it, instead
+    of as a BCL `UriFormatException`.
+
+  Then `Obscura.Browser/NetUrl.cs` is deleted (15 call sites in `Page.cs`,
+  `Page.Navigation.cs`, `Page.Capture.cs`, `Page.Scripts.cs`,
+  `Page.Stylesheets.cs`), `Obscura/Api/Cookie.cs` loses its port-only
+  "host not representable as a System.Uri" arm, and
+  `Obscura.Cli/Commands/FetchCommand.cs` + `Obscura.Js/Runtime/
+  ObscuraJsRuntime.Modules.cs` can stop gating on `Uri.TryCreate` and report the
+  `UrlParseError` reason like every other rejection does now.
+- **`ConcurrentConnectionsHeavyPageDoNotAbortV8` has room now, and still asserts
+  on a 30s guard.** It drives four concurrent CDP connections against a
+  subresource-heavy page, and each client waits up to 30s for a response. The
+  guard is not the property - a V8 abort kills the process, which is what the test
+  is really watching for - but the run has to fit inside it. Its fixture served the
+  page from the thread pool (`Task.Run` + `Task.Delay(120)`), sharing a scheduler
+  with the CDP server and four clients; on a loaded box the simulated 120ms
+  subresource delay became the host's scheduling delay. The fixture now serves on
+  dedicated threads with blocking I/O and `Thread.Sleep`. Under a 14-burner stress
+  on 4 cores the run went from 24.5/29.2/24.7s to 17.7/20.7/20.3/19.6s - about
+  10s of headroom under the guard instead of about 1s - and it passed either way;
+  idle it is 2.1-2.8s. The deadline itself was left alone.
+
+  What is left is that the rest of the assembly runs alongside it: four
+  connections, an in-process CDP server and the fixture already saturate four
+  cores, and one full-suite round in three still lost a client to the 30s guard
+  (`client 1: The operation was canceled.`). Giving the class the machine to
+  itself with `[CollectionDefinition(DisableParallelization = true)]` was tried
+  and reverted - it hung the assembly: the suite went from 24s to over 300s with
+  no test reported. Whatever the runner does with a non-parallel collection here,
+  it is not worth that, and the guard itself is still the wrong thing to raise.
+- **FIXED - `RuntimeTests.ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop`
+  was a real port defect: concurrent image completions raced on page state.**
+  Measured on this 4-core box: 6 of 12 runs before; 13 of 14, then 12 of 12,
+  after.
+
+  None of the four `Stale` predicates in `RenderOps.FinishAsyncImageMetadata` was
+  firing - instrumenting them showed the failing runs never reached one. What the
+  trace showed instead was a leader logging `SEEDED` for its URL and the very next
+  line, on the same thread, reading that URL back as `known=False`; in other runs a
+  leader vanished between `FETCHED` and `SEEDED` with no seed and no result at all,
+  and the retry that followed registered as a *follower* of an in-flight entry
+  nobody would ever complete, so that element never finished.
+
+  The cause is that `LoadImageMetadataAsync` awaits the transport with
+  `ConfigureAwait(false)` and then writes page state from whatever thread-pool
+  thread the fetch landed on. Rust cannot do this: `op_load_image_metadata` is a
+  deno_core async op whose reaction resumes on the one thread that owns
+  `Rc<RefCell<State>>`, so the five elements' completions are serialized by
+  construction. In the port four of them ran at once against a plain
+  `Dictionary` (`RenderResourceCache._entries` plus its `_order` list and byte
+  counter), a plain `Dictionary` (`ObscuraState.RenderImageInFlight`) and a plain
+  `List` (`PendingStyleMutations`, through `InvalidateRenderResourceGeometry`).
+  Concurrent inserts lost entries outright - which is the seed that reads back
+  unknown - and a lost in-flight removal is the stranded follower. The rest
+  follows: an unknown answer is `{"state":"pending"}`, which `_applyImageMetadata`
+  turns into an `error` event with `naturalWidth` 0, and the shim re-queues,
+  which is where the 5th and 7th requests came from.
+
+  Three changes, all host-side (bootstrap.js needed none):
+
+  - `ObscuraState.AsyncResourceGate`, taken around the whole post-fetch tail in
+    `RenderOps.LoadImageMetadataAsync` - seed, invalidate, remove the in-flight
+    entry, compute the result - and around the in-flight registration and the
+    follower's `FinishAsyncImageMetadata`. Waiters are released outside it.
+  - A `finally` that removes the request key and releases any waiters when the
+    leader fails, so a thrown leader can no longer strand its followers.
+  - A lock inside `RenderResourceCache` over the retained byte cache, because the
+    renderer reads that cache from the pump thread while a page-transport seed
+    writes it from a pool thread, and the gate above cannot cover the reader.
+
+  What is left is the test's `elapsed < 500ms` assertion, which failed once in 14.
+  It is not the image lifecycle: the run issued exactly 4 requests and reported
+  five `load` events, in 717ms. A fresh process JITs the socket and JSON stack
+  inside the measured window - the first request's synchronous prologue alone cost
+  ~70ms in the traces - and `maxActive >= 3` already asserts the overlap that the
+  wall-clock bound is a proxy for. It is the startup-latency gap in this section,
+  not a lifecycle bug.
+
+  Ruled out along the way: the `ObscuraHttpClient.ConnectCallback` change for IP
+  literals, and thread-pool starvation from the harness's blocking handler
+  (`RawHttpServer` already gives each connection a dedicated thread).
+- **FIXED - the two load-flaky `Obscura.Browser.Tests` cases.** Reproduced with
+  CPU burners on this 4-core box rather than by re-running the suite.
+  `ModuleGraphAndEvaluationShareOneActiveBudget` failed 3 of 3 under six burners,
+  always `[false, false]`: the module's whole 350ms budget went to fetching the
+  delayed import, so evaluation never started and the case had nothing to assert
+  on. Instrumenting `graphElapsedMs` showed why the shape was fragile - for an
+  inline module it is ~4ms, because the import is fetched during evaluation, so
+  the budget the case is really splitting is fetch + top-level work. The imported
+  module now spends its share by busy-waiting (a wall-clock spend that contention
+  cannot stretch) instead of being served slowly, against a 1200ms budget and a
+  1000ms top-level loop: 8 of 8 under the same stress.
+  `PruningAnOldBatchDoesNotStrandANewRuntimeBatch` failed 2 of 6 under ten
+  burners, in two different places - a `WaitAsync(2s)` around one event-loop pass
+  in the fixture, and `Assert.Single(page.Frames)` after a single pass that
+  returned idle before the replacement frame's document had arrived. Both now
+  wait for `PendingFrames` to hold what the next step needs: 8 of 8 under the same
+  stress, and unchanged at 1.9s idle. The `TestHttpServer` fixture also serves on
+  dedicated threads now, for the same reason `RawHttpServer` does.
+- **Reading `image.complete` can complete an element from cache with no `load`
+  event.** Found while stabilizing the tests: `_refreshImageFromCache` in
+  `bootstrap.js` applies a cache hit with `dispatchEvent: false`, so a getter read
+  that lands between a request's bytes reaching the renderer cache and that
+  request's promise reaction sets `complete`/`naturalWidth` and swallows the
+  event. `ImageLifecycleCacheIsSeparatedByCorsCredentialsProfile` hit it in 5 of
+  20 runs (2 of 20 once the completions were serialized), reading
+  `[true, 2, []]` where it expects `[true, 2, ["load"]]`. The test now waits for
+  the event count it is about rather than pumping a fixed 1000ms and reading
+  `image.complete`, which is 0 of 20 - but the shim behaviour is still wrong
+  against Chromium, where reading `complete` never cancels a pending event. The
+  window is narrow in Rust (the reaction resumes on the same thread as the
+  getter) and wide here, which is why the port sees it.
+- **FIXED - `OpsTests.Read_body_capped_rejects_oversized_streamed_body` was the
+  fixture resetting the connection.** The earlier note here blamed first-render
+  font initialization; that test never renders. Under load it failed with
+  `IOException: Connection reset by peer` where it expects `OpException`:
+  `ServeBodyOnce` wrote 4 MB, called `Shutdown(SocketShutdown.Both)` and dropped
+  the socket while megabytes were still queued, and the reader - slowed down by
+  the same contention - saw the RST before it reached the 1 MB cap. The fixture
+  now runs on a dedicated thread with blocking I/O (the Rust harness's
+  `std::thread::spawn`), half-closes with `Shutdown(Send)` and drains until the
+  reader goes away. 10 of 10 under a 10-burner stress that previously failed about
+  one run in six. The cap assertion itself is unchanged.
 
 ## 9. Validation
 
@@ -591,25 +696,80 @@ DEVIATION comment at the C# code that differs.
   Not closed: `both-edges` reserves the right total (270px of 300) but taffy
   insets from the end only, so the content does not shift by the leading gutter
   the way Chromium's does.
-- **Open, not fixed: a baseline-aligned atomic inline does not extend the line box
-  by the strut's descent.** Reduced to a fixture: a `display: inline-block` of
-  height 12 with no in-flow content, inside a block with `line-height: 12px`, is
-  14px tall in Chromium and 12 in both engines. An empty inline-block's baseline
-  is its bottom margin edge, so its whole box sits above the baseline and the
-  strut's descent still has to fit below it. `vertical-align: top` (12/12) and an
-  inline-block that contains text (12/12) both agree already, which pins the case
-  precisely. This is the 2px icon-box gap: `<i class="fi-rr-*">` wraps an
-  icon-font `::before` that is exactly this shape.
+- **DEVIATION - an atomic inline whose baseline is its bottom margin edge did not
+  extend the line box by the strut's descent.** CSS 2.1 10.8 makes a line box
+  `max(ascent) + max(descent)` over everything on it *plus the strut*, and 10.8.1
+  puts an atomic inline's baseline at its bottom margin edge when it has no in-flow
+  line boxes or its `overflow` is not `visible`. Such a box is wholly above the
+  baseline, so the strut's descent still has to fit under it: a 12px empty
+  `inline-block` in a `line-height: 12px` block is 14px tall in Chromium 141 and was
+  12 in both engines. The reference models a line box as a wrapping flex row aligned
+  to `flex-start`, which gives every participant the same top edge and cannot express
+  it.
 
-  Root cause located, not fixed. `DomBuild.RunWrapperStyle` models a line box as a
-  wrapping flex row whose strut is a `MinSize.Height`, and `DomBuildMixed` only
-  sets `hasTextStrut` when the run contains a text node. A min-height cannot push
-  an atomic down off the baseline, and switching the wrapper to
-  `AlignItems.Baseline` changes nothing on its own (tried: 649 tests stay green,
-  the fixture stays at 12). A real fix needs the strut to be a zero-width
-  participant carrying the parent font's ascent and descent, present on every
-  line box rather than only text-bearing ones. Glyphs paint in the right place
-  meanwhile; only the wrapper box height differs.
+  `DomBuild.BottomBaselineAtomicStrutDescent` gives such a box a taffy bottom margin
+  of the strut's descent - the half-leading plus the grid-fitted font descent of the
+  block container that owns the line, clamped at zero. A margin is what a flex row can
+  carry, and it is exact for the line's *height* in every case measured. Two narrower
+  things came with it: `VerticalAlign` gained a `Baseline` member, because
+  `vertical-align: baseline` used to parse to `Top` and the whole rule turns on telling
+  those two apart, and native form controls are excluded by tag - they are atomic and
+  childless, so every structural test would let them through, but Chromium gives an
+  `<input>` the baseline of the text it renders itself.
+
+  Measured against Chromium 141 on the fixtures: empty inline-block 12 -> 14, an
+  explicit `vertical-align: baseline` 14, a 30px one 32, an empty `inline-flex` 14, an
+  `<img>` 14, two atomics on one line 22, an atomic beside text 14, `line-height: 0`
+  still 12 (a negative descent adds nothing). Unchanged and still right:
+  `vertical-align: top` 12, an inline-block containing text 12, a flex or grid item 12,
+  an `<input>` 12. Covered by `LineBoxStrutTests`.
+
+  Swept over all 101 Tesserae routes against the Chromium capture, before and after, same
+  page, viewport and settle policy. Restricted to the 54 routes whose two captures settled
+  to the same node count - the app renders its sidebar commands and its deferred sections
+  asynchronously, and a capture that lands a few nodes short narrows the sidebar and shows
+  up as a ~1.9px width error that has nothing to do with the build. Mean abs error against
+  Chromium over strictly aligned pairs: **height 0.546 -> 0.264**, width 0.188 -> 0.191,
+  and the accumulated vertical offset 81.2 -> 1.8 (per-route medians 0.576 -> 0.196,
+  0.053 -> 0.053, 106.3 -> 0.16). The `y` collapse is the whole point: a page stacking
+  fifty short lines was carrying a hundred pixels of drift by its bottom. **No route's
+  height error got worse.** One route's width error moved, `view/Pivot` 0.416 -> 0.571,
+  and it is not this change: its `tss-pivot-line` tab underline lays out 0px wide in both
+  builds, and the after capture happened to have four of them on screen instead of two.
+
+  **Still open, and it is what the product's icon-box gap actually needs.** An atomic
+  inline that *does* have a line box is still aligned to the line's top rather than to
+  its own baseline, so it neither extends the line nor moves within it. The
+  `<i class="fi-rr-*">` icon is one of those, and the earlier note here calling it
+  "exactly this shape" was wrong: its `::before` is an `inline-block` carrying an icon
+  glyph, so it has a line box, and its baseline is that glyph's - which lands on the
+  box's bottom edge only because the icon face's ascent is the whole em and its descent
+  is zero. Chromium 20.19 for a 13px/18.2px icon row, port 18.00; 14 against 12 at
+  12px/12px. The same gap covers an atomic inline shorter than the strut's ascent
+  (Chromium pushes it down by the difference, the margin cannot), an inline-block whose
+  only child generates no line box (Chromium 14, port 12), and
+  `vertical-align: text-top` (Chromium 13, port 12).
+
+  What closing it needs, read off the vendored taffy:
+  - `FlexboxLayout.CalculateCrossSize` already sizes a baseline-aligned line as
+    `max(baseline) - baseline_i + outerHeight_i`, which *is* the CSS formula, and
+    `CalculateChildrenBaseLine` already skips any line with fewer than two
+    baseline-aligned children - which is why turning `AlignItems.Baseline` on by itself
+    changed nothing.
+  - The strut itself needs no new plumbing. A zero-width leaf of height `A` with a
+    bottom margin of `max(D, 0)` and `AlignSelf = Baseline` models it exactly, because
+    a leaf reports no baseline and taffy falls back to its height.
+  - Every *other* participant does. A text leaf's baseline is `A`, not its height
+    `A + D`, and an inline-block's is its first line's - and `Leaf.ComputeLeafLayout`
+    and `BlockLayout` both report `FirstBaselines = None`, so taffy takes the height for
+    both. So: let a measure function report a baseline beside its size, and have
+    `BlockLayout` propagate its first in-flow child's. That is the restructure, it moves
+    the vertical position of everything inside every line box, and it wants its own
+    before/after survey.
+  - The strut is also still absent from a line box that carries no text at all
+    (`RunWrapperStyle`'s `hasTextStrut`, and the block-as-flex-row stand-in has none at
+    any time), so a 12px icon on a `line-height: 20px` line is 12 here against
+    Chromium's 20. That half is independent of baselines and could land first.
 - **PARTLY FIXED - a cyclic percentage under a content-sized flex item is now
   neutralized to `auto`.** A content-sized item is measured from exactly the
   content the neutralization touches, so zeroing it is self-defeating; an item
@@ -624,33 +784,24 @@ DEVIATION comment at the C# code that differs.
   Still open: the first panel measures 363 where Chromium measures 133, and the
   pair sums to 1165 in a 924px row - they overflow rather than shrinking, so the
   pinned base sizes are not being shrunk by the flex algorithm afterwards.
-- **Open, not fixed: a baseline-aligned atomic inline does not extend the line box
-  by the strut's descent.** Reduced to a fixture: a `display: inline-block` of
-  height 12 with no in-flow content, inside a block with `line-height: 12px`, is
-  14px tall in Chromium and 12 in both engines. An empty inline-block's baseline
-  is its bottom margin edge, so its whole box sits above the baseline and the
-  strut's descent still has to fit below it. `vertical-align: top` (12/12) and an
-  inline-block that contains text (12/12) both agree already, which pins the case
-  precisely. This is the 2px icon-box gap: `<i class="fi-rr-*">` wraps an
-  icon-font `::before` that is exactly this shape.
-
-  Root cause located, not fixed. `DomBuild.RunWrapperStyle` models a line box as a
-  wrapping flex row whose strut is a `MinSize.Height`, and `DomBuildMixed` only
-  sets `hasTextStrut` when the run contains a text node. A min-height cannot push
-  an atomic down off the baseline, and switching the wrapper to
-  `AlignItems.Baseline` changes nothing on its own (tried: 649 tests stay green,
-  the fixture stays at 12). A real fix needs the strut to be a zero-width
-  participant carrying the parent font's ascent and descent, present on every
-  line box rather than only text-bearing ones. Glyphs paint in the right place
-  meanwhile; only the wrapper box height differs.
-- **Open, not fixed: Code Diff's two `flex: 1 1 auto` panels split their row
-  evenly.** Both panels' content is percentage-sized, so with the bare-percentage
-  neutralization both flex base sizes measure 0 and the row splits 462/462
-  instead of Chromium's 133/791; the diff table then wraps to three times its
-  height (mean abs 7.17 against a 3.08 median). Fixing it properly needs the
-  intrinsic pass to measure a bare cyclic percentage as `auto` *without* losing
-  the restore that a `width: 100%` button depends on - the two uses want
-  different answers from the same neutralization.
+- **Re-measured, and the even split is gone: Code Diff's two `flex: 1 1 auto`
+  panels.** The `contentSizedItem` narrowing above already closed this; the note
+  predates it. On `#/view/Code Diff` the pair is 282/802 against Chromium's
+  246/829, not 462/462, and a reduction of the shape - a 400px row of two
+  `flex: 1 1 auto` items whose only content is a `width: 100%` block around a
+  40px and a 160px leaf - is exact in both engines (140/260). What is left on
+  that route is two unrelated defects:
+  - the left panel is sized by a `<textarea>` whose intrinsic width is 274 here
+    against Chromium's 238, which is the whole of the panel's 36px error. That
+    is the `cols * charWidth + scrollbar gutter` calculation in
+    `LayoutDomControls`, the same family as the `<input>` curve-fit deviation
+    below, not a cyclic percentage.
+  - the diff tables distribute the width their columns do not claim *equally*
+    where Chromium distributes it in proportion to max-content. A 600px
+    `width: 100%` table of `alpha` / `beta gamma delta` is 142.9/457.1 in
+    Chromium and 258/342 here, and it is wrong in exactly the same way inside a
+    plain 600px block with no flex container anywhere - so it is taffy's grid
+    track sizing under the table build, not this machinery.
 - **DEVIATION - an auto-sized `<button>`'s intrinsic width ignored element
   children.** `native_button_intrinsic_content` recurses past every non-replaced
   element and counts only text plus replaced boxes, so a flex button's child
@@ -794,12 +945,13 @@ DEVIATION comment at the C# code that differs.
   `calc(100% - 4px)` card in the page body to 0. Fixed in both engines by
   treating a growable or shrinkable row-flex item as indefinite. Chromium
   parity on both shapes (1022px grown, 596px shrunk).
-- **Still open: a shrink-to-fit block inside a flex row does not get the
-  intrinsic contribution of a cyclic-percentage child.** `flexrow > block >
-  width:100%` gives Chromium 8px (the child's text max-content) and both engines
-  0px, because the cyclic neutralization writes a definite `0px` rather than
-  behaving as `auto` for intrinsic contribution. Not a regression; predates the
-  fix above.
+- **Closed by the `contentSizedItem` narrowing: a shrink-to-fit block inside a
+  flex row does get the intrinsic contribution of a cyclic-percentage child.**
+  `flexrow > block > width:100%` is 7.828 in Chromium and 8 here. Re-probed over
+  ten shapes - an `inline-block`, a float, a nested flex row and a plain block
+  holding the percentage, each under a content-sized item and under a
+  declared-width one - and all ten agree with Chromium. The note predates that
+  narrowing.
 - **DEVIATION - a flex item's automatic minimum size ignored a percentage-width
   descendant.** The definite `0px` that `DeferCyclicFlexInlineSizes` writes was
   also what the min-content measurement behind Flexbox 4.5 read, so the item got
@@ -838,6 +990,139 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### A retained restyle that changes nothing layout can see keeps its layout
+
+`crates/obscura-render` re-lays the whole document on every retained restyle, and at the Rust
+engine's speed that is affordable. The port is slower per pass - 77ms for a 2059-node page,
+130-460ms for the Tesserae SPA - so a forced geometry read after *any* style write cost a
+whole-document prepare, which is finding F39.
+
+DEVIATION from crates/obscura-render/src/dom.rs, which has no equivalent.
+`Obscura.Render.RetainedLayoutReuse` is a gate in front of the layout half of a retained
+restyle. At the end of the top-down pass - the last point at which this pass's style objects
+are comparable to the ones the previous layout was produced from - it compares every element
+the cascade recomputed against the style object it replaced. If nothing differs, or the only
+differences are in members no pass after that point reads, `LayoutDomOnce` returns the previous
+`DomLayout` itself and `PrepareInternal` reuses its derived geometry too.
+
+It fails closed in three independent ways, because serving stale geometry is worse than serving
+it slowly: only the eight members named in `PaintOnlyMembers` may differ and every other member
+of `LayoutStyle` - including one added later, which is in no list - forces a layout; equality is
+proven structurally and anything the comparer cannot compare counts as changed; and the gate is
+only offered a layout when every mutation in the batch is an attribute mutation, the sheet has
+no container queries and the dirty set is at most 512 elements. A tree, text, resource or
+animation mutation never reaches it.
+
+`OBSCURA_DISABLE_RETAINED_LAYOUT_REUSE=1` turns it off, which is how the A/B below was measured
+on one binary. `dotnet/tests/Obscura.Render.Tests/RetainedLayoutReuseTests.cs` pins the
+behaviour (10 facts), each against a full from-scratch layout of the same mutated tree.
+
+Measured on `thrash.html` (2059 nodes), 50 (write, read) pairs, three interleaved runs each,
+medians: `opacity` 5261ms -> 1211ms, `class` 4947ms -> 524ms; `transform` and `left`/`top`
+unchanged at ~5.2s, correctly, because those change layout.
+
+All 101 Tesserae routes were captured twice from one pinned binary, gate off and gate on. 98 are
+byte-identical in geometry and computed style; the three that are not (`Searchable List`,
+`Masonry`, `Dropdown`) were each captured three more times per arm, and every one of them varies
+*within* an arm by at least as much as it varies between them - `Searchable List` is a virtual
+list whose rendered row count swings between 1789 and 11910 run to run, `Masonry` is the route
+whose layout pass the watchdog terminates at a different item each time, `Dropdown` differs by
+one node. Against the Chromium reference capture, 99 of 101 routes have a bit-identical geometry
+divergence in the two arms and every style column is identical, and the two that move are those
+same nondeterministic routes.
+
+### An async op's page-state tail runs under a gate, where the reference has one thread
+
+`op_load_image_metadata` is a deno_core async op in Rust: its reaction resumes on
+the thread that owns `Rc<RefCell<State>>`, so however many images a page starts,
+their completions touch the DOM, the in-flight table and the renderer cache one at
+a time. The port awaits the transport with `ConfigureAwait(false)` and resumes on
+the thread pool, so five `<img>` elements meant five threads writing plain
+collections, and entries were lost - a seeded image read back as unknown and the
+shim reported a load error for bytes it had successfully fetched.
+
+The port therefore has something Rust has no need for: `ObscuraState.AsyncResourceGate`,
+taken around the whole post-fetch tail of `RenderOps.LoadImageMetadataAsync`, and a
+lock inside `RenderResourceCache` over the retained byte cache (the renderer reads it
+from the pump thread while a page-transport seed writes it from a pool thread, so the
+gate alone cannot cover it). The leader also releases its waiters from a `finally`,
+because a leader that throws after registering used to strand every follower on a
+promise nothing could settle.
+
+Both locks are uncontended on the synchronous render path, and they do not change
+what any op returns. They are the port's replacement for the reference's
+single-threaded reaction, not a behavioural difference - and the reason the C# side
+needs the comment is that a reader diffing `ops.rs` will find nothing resembling
+them there. Measured: 6 of 12 runs of
+`ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` before, 13 of 14 and
+then 12 of 12 after.
+
+### A neutralized cyclic inline size, and a flex pin, both record what they replaced
+
+`DeferCyclicFlexInlineSizes` rewrites a cyclic percentage inline size before the box tree is
+built, and `PinFlexItems` writes a flex item's used main size back as a definite length with its
+flex factors frozen. Both rewrites were **lossy**: afterwards nothing in the tree could tell a
+neutralized `auto` from an authored one, or a pin from a declaration. Every later consumer that
+needed the replaced value back had to reconstruct it - which is what
+`ApplyDeferredFlexAutomaticMinimums` and the typed-percentage scope inside `ApplyTableUsedWidths`
+are - and two defects were left over that no re-measurement could reach, because neither was a
+measurement.
+
+DEVIATION from crates/obscura-render/src/dom.rs, which carries neither record.
+
+- **`LayoutStyle.DeferredCyclicInlineSlots`** is a three-bit record of which inline-size slots
+  hold a neutral value, set where the neutralization is written and cleared at the top of the
+  next layout's pass. Its readers today are both of the places `DomBuild` asks whether an
+  inline-level box's `width` is definite (F33) - and for a bare `width: 100%` under a
+  content-sized flex item the field says `auto`, so the box was built shrink-wrapping and stayed
+  at taffy's default `flex-shrink: 1`, which the line box then squeezed it with. The `calc()`
+  spelling was unaffected only because its `SizeExpressions[0]` survives the same
+  neutralization, which is what made the two spellings behave differently for the same CSS. The
+  record is deliberately *not* another "measure this as auto" scope: the two that exist already
+  are that, and neither could have helped here, because the question `DomBuild` is asking is
+  about the declaration, not about a measurement. The two readings are `pinsInlineSize`, which
+  zeroes the `flex-shrink` the line box would otherwise squeeze the box with, and `needsOuter`,
+  which gives an `inline-flex`/`inline-grid` a shrink-wrapping outer participant that a definite
+  width already suppressed. Both had to change: with only the first, an `inline-flex` carrying
+  `width: 100%; margin-right: 22px` in a shrink-wrapping flex item was 117 against Chromium's
+  139, while the `calc(100% - 16px)` spelling of the same box was already right at 123.
+
+  It is also a new `LayoutStyle` field that the retained-layout-reuse gate above reflects over.
+  It is in no `PaintOnlyMembers` list, so a difference in it forces a layout - which is the
+  correct fail-closed answer and is already what `Width` does on the same boxes, since the same
+  pass rewrites that too.
+
+- **`PinnedFlexItem` / `RescalePinnedFlexItems`** carry each pin's provenance - the flex
+  container it was taken against and that container's content width at the time - so a pass that
+  narrows the container afterwards can move the pin with it. The scrollbar-gutter pass is exactly
+  such a pass (F35's residual): where the row flex container sits *inside* the scroll container
+  rather than above it, a `flex: 1 1 auto` item kept its pre-gutter 400 against Chromium's 391,
+  and the `calc(100% - 4px)` card under it 392 against 383. The pin is carried by scaling it with
+  the container rather than by re-deriving it, because `PinFlexItems` froze the item's factors on
+  purpose - re-running the flex algorithm off an already-flexed size flexes it twice. Scaling is
+  exact for the one-item and equal-factor rows this reaches and an approximation for a row of
+  unequal bases; re-running the whole deferred resolution after the gutter would be exact and is
+  the ordering F34 warns about. It runs inside the gutter loop, three rounds outermost-first so a
+  nested pin sees its container's new width, and costs one list walk when nothing moved.
+
+Measured the same way F35 was, but A/B'd from one binary behind a temporary environment switch so
+a sibling agent's concurrent edits could not land between the two captures. 20 Tesserae routes at
+1440x950, Chromium as reference, strictly-aligned pairs only: mean absolute width error
+**1.0497 -> 1.0175** over 48,344 pairs, boxes off by more than 2px **1,747 -> 1,664**. Re-run
+against the finished build including the `needsOuter` half: **1.0497 -> 1.0151**, 1,747 -> 1,661.
+`#/view/Searchable List` carries most of it (0.2291 -> 0.0347, its 76 boxes over 2px down to 0):
+its `tss-card-container` goes 1084 -> 1066 and its search box 1084 -> 1075, both exactly
+Chromium. `#/view/Pivot` and `#/view/Searchable Grouped List` read as regressions on the first
+pass and improve on a clean re-capture (0.3637 -> 0.1953 and 0.5087 -> 0.0603); both render a
+different number of rows run to run - the legacy-vs-legacy comparison of those two routes moves
+further than the A/B does - so neither is measurable at this resolution.
+
+One route is genuinely worse, and it is F34's tolerance showing through rather than a new defect:
+on `#/view/Details List` the `tss-detailslist` container is corrected 538 -> 534 (Chromium 534),
+and the `tss-detailslist-header` inside it, which this engine reserves a 9px gutter out of where
+Chromium reserves none, moves with it from 529 to 525 - the same -9 it always had, now measured
+against a correct parent instead of an inflated one. +0.0062 mean abs, one more box over 2px.
 
 ### The MutationObserver shim follows DOM 4.3.4; the Rust shim's registration rules are wrong
 
@@ -1173,6 +1458,24 @@ Covered by `FilterParsesTheWholeFunctionList`,
 `FilterDropShadowSerializesColorFirstAndAlwaysThreeLengths`,
 `FilterDropShadowOutlinesTheElementOnAllFourSides` and
 `FilterColorMatrixFunctionsRecolorTheSubtree`.
+
+Re-measured end to end against Chromium 141 over the whole surface - the four-way avatar
+outline, a coloured and an uncoloured `drop-shadow()`, a six-function multiplier chain,
+`url()`, the clamped and the dropped out-of-range forms, `blur(1em)`, an alpha colour -
+and all twelve now report byte-identically. The outline also paints: the same page
+screenshots to 0.048% of pixels differing over the viewport, which is anti-aliasing on the
+blurred cases and nothing on the outline.
+
+One value did not, and its fix is below: `currentcolor` in a `filter` or a `box-shadow`
+was resolved against whatever `color` the cascade had reached when the declaration was
+applied, so `filter: drop-shadow(currentColor 1px 2px 3px); color: rgb(10,20,30)` reported
+black - the `color` declaration comes after it - and so did an element that inherits its
+colour rather than declaring one. Chromium resolves both against the element's final
+computed colour. Such a declaration is now kept for the top-down pass exactly as a
+font-relative one is (`ComputedStyle.NeedsLateResolution`, read in
+`ResolveFontRelativeDeclarations`, where `style.Color` is already settled), which is where
+`filter: blur(1em)` was already being re-read. Covered by
+`CurrentColorInAFilterOrShadowResolvesAgainstTheFinalComputedColor`.
 
 ### A font-relative length resolves against the element's font, not a flat 16px
 
