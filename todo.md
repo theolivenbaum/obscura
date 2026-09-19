@@ -1107,7 +1107,11 @@ Established with `dotnet-dump` + `gcroot` on a server heap, which named the root
 PreparedRender`. `CdpWatchdogTests.ADisarmedHandleIsNotKeptAliveByTheParkedWorker` pins the
 property but **does not reproduce the bug** - whether a dead local is still reported live
 across the wait is the JIT's choice, and with the scan inline that test passes anyway (verified
-5 of 5). Do not read a pass as licence to move the scan back inline.
+5 of 5). `WatchdogLoop` is entered once and never returns, so call counting never promotes it
+and it leaves tier-0 only by on-stack replacement of its loop; tier-0 reports untracked locals
+live for the whole frame, where optimised code need not. A pass therefore says which tier that
+thread was in, not that an inline scan is safe - which is why the fix is structural rather than
+a reliance on liveness reporting. Do not read a pass as licence to move the scan back inline.
 
 ### Replacing a document asks the GC to give its memory back
 

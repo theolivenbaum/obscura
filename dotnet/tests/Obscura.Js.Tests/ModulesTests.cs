@@ -914,8 +914,16 @@ public sealed class CdpWatchdogTests
         // the scan written inline this test passed 5 of 5 anyway. What established
         // the retention was `gcroot` on a server heap naming
         // `WatchdogLoop() -> Slot -> V8IsolateHandle -> ... -> PreparedRender`, and
-        // the RSS curve. Treat a failure here as real; do not read a pass as
-        // evidence that the scan may move back inline.
+        // the RSS curve.
+        //
+        // The result is expected to differ between runs and machines. WatchdogLoop is
+        // entered once and never returns, so call counting never promotes it and it
+        // leaves tier-0 only by on-stack replacement of its loop - and tier-0 reports
+        // untracked locals live for the whole frame, where optimised code need not.
+        // So a pass here says which tier that thread happened to be in, not that an
+        // inline scan is safe. That is why the fix is structural (a popped frame plus
+        // NoInlining) rather than a reliance on liveness reporting. Treat a failure
+        // here as real; do not read a pass as licence to move the scan back inline.
         var core = new CdpWatchdogCore("watchdog-release-test");
         var handle = ArmAndDisarm(core);
 
