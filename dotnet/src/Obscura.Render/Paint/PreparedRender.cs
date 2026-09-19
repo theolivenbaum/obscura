@@ -86,7 +86,7 @@ public sealed class ResolvedScrollState
 /// A final image/font-aware document layout retained across viewport paints. The DOM must not
 /// be mutated while this value is reused.
 /// </summary>
-public sealed class PreparedRender
+public sealed partial class PreparedRender
 {
     internal (float Width, float Height) ViewportSize { get; set; }
 
@@ -509,7 +509,18 @@ public sealed class PreparedRender
     }
 
     /// <summary>A compact CSSOM snapshot derived from the same cascade paint uses.</summary>
-    public Dictionary<string, string>? ComputedStyle(NodeId id)
+    public Dictionary<string, string>? ComputedStyle(NodeId id) => ComputedStyle(id, null);
+
+    /// <summary>
+    /// A compact CSSOM snapshot for an element, or for one of its pseudo-elements.
+    /// </summary>
+    /// <param name="id">The originating element.</param>
+    /// <param name="pseudoElement">
+    /// A pseudo-element selector such as <c>::before</c>, or null for the element itself. An
+    /// unrecognised name returns null, which is what <c>getComputedStyle()</c> answers with an
+    /// empty declaration.
+    /// </param>
+    public Dictionary<string, string>? ComputedStyle(NodeId id, string? pseudoElement)
     {
         if (!Layout.Styles.TryGetValue(id, out LayoutStyle? style))
         {
@@ -517,6 +528,20 @@ public sealed class PreparedRender
         }
 
         Rect? rect = Layout.Rects.TryGetValue(id, out Rect found) ? found : null;
+        bool isPseudo = false;
+        bool generatedContentPseudo = false;
+        if (!string.IsNullOrEmpty(pseudoElement))
+        {
+            if (ResolvePseudoElement(id, style, pseudoElement) is not { } resolved)
+            {
+                return null;
+            }
+
+            style = resolved.Style;
+            rect = resolved.Rect;
+            isPseudo = true;
+            generatedContentPseudo = resolved.GeneratesContent;
+        }
         Dictionary<string, string> output = new(StringComparer.Ordinal);
 
         bool activeWebkitClamp = style.WebkitBoxDisplay is not null
@@ -702,7 +727,7 @@ public sealed class PreparedRender
         // CSS Sizing: the initial `auto` minimum computes to `0px` everywhere except on a flex
         // or grid item, where it stays `auto` and means the automatic minimum size. Reporting
         // `auto` unconditionally is what page script sees as a min-height it never set.
-        bool automaticMinimumSize = HasAutomaticMinimumSize(id, style);
+        bool automaticMinimumSize = !isPseudo && HasAutomaticMinimumSize(id, style);
         // An intrinsic sizing keyword is the computed value of these four properties, so it is
         // what getComputedStyle reports - unlike `width`/`height`, which report a used length.
         output["min-width"] = IntrinsicSizeKeywordCss(style.MinWidthIntrinsicKeyword)
@@ -731,7 +756,7 @@ public sealed class PreparedRender
         // `top: 50%` box in a 34px containing block is `top: 17px` / `bottom: 7px` and a
         // `position: relative` box that specified nothing is `0px` on all four sides.
         string[] insetNames = ["top", "right", "bottom", "left"];
-        float[]? usedInsets = UsedInsets(id, style, rect);
+        float[]? usedInsets = isPseudo ? null : UsedInsets(id, style, rect);
         for (int side = 0; side < insetNames.Length; side++)
         {
             output[insetNames[side]] = usedInsets is { } used
@@ -956,6 +981,13 @@ public sealed class PreparedRender
         output["scale"] = style.IndividualScale is { } scale
             ? PaintCssValues.CssNumber(scale.X) + " " + PaintCssValues.CssNumber(scale.Y)
             : "none";
+
+        // CSS Content 3: `content` is initially `normal`, and `normal` computes to `none` on
+        // ::before and ::after alone. Page script reads this to tell a realized ::before from an
+        // absent one, so the three answers have to stay distinct.
+        output["content"] = !isPseudo
+            ? "normal"
+            : PseudoContentCss(style, generatedContentPseudo);
         return output;
     }
 

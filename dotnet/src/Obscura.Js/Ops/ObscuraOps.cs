@@ -253,6 +253,12 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
             nids => RenderOps.OpIntersectionObserverMeasurements(Page, S(nids))));
         Bind(ops, "op_computed_style", (Func<object?, string>)(
             nid => RenderOps.OpComputedStyle(Page, S(nid))));
+
+        // Additive: op_computed_style keeps its one-argument shape and its payload, because the
+        // op protocol is a contract. getComputedStyle() only reaches for this second op when it
+        // is given a pseudo-element.
+        Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
+            (nid, pseudo) => RenderOps.OpComputedStylePseudo(Page, S(nid), S(pseudo))));
         Bind(ops, "op_layout_metrics", (Func<string>)(() => RenderOps.OpLayoutMetrics(Page)));
         Bind(ops, "op_element_scroll_metrics", (Func<object?, string>)(
             nid => RenderOps.OpElementScrollMetrics(Page, S(nid))));

@@ -8655,17 +8655,34 @@ globalThis.matchMedia = _markNative(function matchMedia(q) {
 // getComputedStyle() repeatedly on the same few roots; rebuilding and parsing
 // several hundred properties for every wrapper dominated real-page startup.
 const _computedStyleSnapshotCache = new WeakMap();
-globalThis.getComputedStyle = (el) => {
+globalThis.getComputedStyle = (el, pseudoElt) => {
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
+  // DEVIATION from crates/obscura-js: its getComputedStyle takes one argument and ignores
+  // pseudoElt, so every call answered with the originating element's own style. Chromium
+  // ignores null/undefined/'' and answers for the element, answers a recognised pseudo-element
+  // with its own style, and answers an unrecognised name with an empty declaration.
+  // Chromium parses pseudoElt as a selector: a string that is not one at all (surrounding
+  // whitespace, a functional pseudo like ::part(x) on a non-shadow host) is treated as absent
+  // and answers for the element, while a well-formed name it does not support answers with an
+  // empty declaration. The op below produces the second of those.
+  const pseudo = (typeof pseudoElt === 'string' && /^::?[a-zA-Z-][a-zA-Z0-9-]*$/.test(pseudoElt))
+    ? pseudoElt
+    : null;
   // Render builds expose one immutable snapshot from the retained final
   // cascade/layout. The native snapshot is shared per element and epoch while
   // each call still returns a distinct, live CSSStyleDeclaration proxy.
   const cacheable = (typeof el === 'object' && el !== null) || typeof el === 'function';
-  let snapshot = cacheable ? _computedStyleSnapshotCache.get(el) : null;
+  let perPseudo = cacheable ? _computedStyleSnapshotCache.get(el) : null;
+  if (!perPseudo) {
+    perPseudo = new Map();
+    if (cacheable) _computedStyleSnapshotCache.set(el, perPseudo);
+  }
+  const snapshotKey = pseudo || '';
+  let snapshot = perPseudo.get(snapshotKey);
   if (!snapshot) {
     snapshot = { rendered: null, epoch: -1, names: [] };
-    if (cacheable) _computedStyleSnapshotCache.set(el, snapshot);
+    perPseudo.set(snapshotKey, snapshot);
   }
   const refreshRendered = () => {
     const hasRunningAnimation = typeof _animationsForTarget === 'function'
@@ -8673,11 +8690,20 @@ globalThis.getComputedStyle = (el) => {
     if (snapshot.epoch === _domMutationEpoch && !hasRunningAnimation) return;
     snapshot.epoch = _domMutationEpoch;
     snapshot.rendered = null;
-    if (typeof Deno.core.ops.op_computed_style === 'function' && el?._nid != null) {
-      try {
-        const raw = Deno.core.ops.op_computed_style(String(el._nid | 0));
-        snapshot.rendered = raw ? JSON.parse(raw) : null;
-      } catch (e) {}
+    if (el?._nid != null) {
+      // op_computed_style keeps its one-argument shape; the pseudo-element snapshot is a
+      // separate op so that op's payload stays byte-identical.
+      const op = pseudo
+        ? Deno.core.ops.op_computed_style_pseudo
+        : Deno.core.ops.op_computed_style;
+      if (typeof op === 'function') {
+        try {
+          const raw = pseudo
+            ? op(String(el._nid | 0), pseudo)
+            : op(String(el._nid | 0));
+          snapshot.rendered = raw ? JSON.parse(raw) : null;
+        } catch (e) {}
+      }
     }
     snapshot.names = snapshot.rendered ? Object.keys(snapshot.rendered) : [];
   };
@@ -8746,6 +8772,10 @@ globalThis.getComputedStyle = (el) => {
     if (kebab.startsWith('webkit-')) kebab = '-' + kebab;
     if (snapshot.rendered && Object.prototype.hasOwnProperty.call(snapshot.rendered, kebab))
       return snapshot.rendered[kebab];
+    // A pseudo-element has neither an inline style nor a box of the element's to fall back on,
+    // and an unrecognised one has no snapshot at all, which is the empty declaration Chromium
+    // answers with. Falling through here would report the originating element's geometry.
+    if (pseudo) return '';
     // Non-render builds and properties outside the renderer snapshot retain
     // the lightweight inline CSSOM behavior.
     const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
@@ -13699,7 +13729,7 @@ class _IframeWindow {
     return true;
   }
 
-  getComputedStyle(el) { return globalThis.getComputedStyle(el); }
+  getComputedStyle(el, pseudoElt) { return globalThis.getComputedStyle(el, pseudoElt); }
   matchMedia(q) { return globalThis.matchMedia(q); }
   getSelection() { return globalThis.getSelection(); }
   fetch(input, init) { return globalThis.fetch(input, init); }

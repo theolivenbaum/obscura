@@ -298,19 +298,37 @@ public static class RenderOps
     /// <c>getComputedStyle()</c>. Returning all supported properties together keeps a
     /// single JS style object to one native call and one use of the retained layout.
     /// </summary>
-    public static string OpComputedStyle(ObscuraState state, string nidStr) => OpGuard.Run(
-        "op_computed_style",
+    public static string OpComputedStyle(ObscuraState state, string nidStr) =>
+        ComputedStyleSnapshot(state, nidStr, null, "op_computed_style");
+
+    /// <summary>
+    /// <c>op_computed_style_pseudo</c>. The same snapshot for one pseudo-element of a node.
+    /// Separate from <c>op_computed_style</c> so that op keeps its one-argument shape and its
+    /// payload byte for byte; an unrecognised pseudo-element name answers with the empty string,
+    /// which getComputedStyle() reports as an empty declaration the way Chromium does.
+    /// </summary>
+    public static string OpComputedStylePseudo(ObscuraState state, string nidStr, string pseudo) =>
+        ComputedStyleSnapshot(state, nidStr, pseudo, "op_computed_style_pseudo");
+
+    private static string ComputedStyleSnapshot(
+        ObscuraState state,
+        string nidStr,
+        string? pseudo,
+        string opName) => OpGuard.Run(
+        opName,
         () =>
         {
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
             RenderState.SampleLiveDocumentAnimations(state);
             if (RenderState.EnsurePreparedRender(state) is not { } prepared
-                || prepared.ComputedStyle(nid) is not { } snapshot)
+                || prepared.ComputedStyle(nid, pseudo) is not { } snapshot)
             {
                 return string.Empty;
             }
 
+            // A pseudo-element has no custom properties of its own in this snapshot; it
+            // inherits the originating element's, which is what page script reads them for.
             var custom = prepared.ComputedCustomProperties(nid);
             var sb = new StringBuilder(4096);
             sb.Append('{');

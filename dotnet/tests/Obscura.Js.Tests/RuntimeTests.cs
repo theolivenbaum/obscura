@@ -2193,6 +2193,67 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public void GetComputedStyleHonoursThePseudoElementArgument()
+    {
+        // DEVIATION from crates/obscura-js, whose getComputedStyle takes one argument: every
+        // expectation here was measured on Chromium 141 over this markup.
+        using var fixture = RuntimeFixture.Blank();
+        var rt = fixture.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml(
+            """
+            <html><head><style>
+                html,body,div { margin:0 }
+                #a { width:200px; color:rgb(10,20,30); font-size:20px }
+                #a::before { content:"BEFORE"; color:rgb(1,2,3); font-size:11px;
+                             display:block; width:33px; height:7px }
+            </style></head><body><div id="a">A</div></body></html>
+            """));
+        rt.SetViewport(400.0, 240.0);
+        rt.RunPageInit();
+
+        var result = rt.Evaluate(
+            """
+            const a = document.getElementById("a");
+            const read = (p) => {
+                const s = p === undefined ? getComputedStyle(a) : getComputedStyle(a, p);
+                return [s.color, s.fontSize, s.display, s.width, s.content, s.length > 0];
+            };
+            return [
+                read(undefined),
+                read("::before"),
+                read(":before"),
+                read(null),
+                read(""),
+                // Well formed but unsupported: an empty declaration.
+                read("::bogus-thing"),
+                // Not a selector at all, so it is ignored and the element answers.
+                read("  ::before  "),
+                read("::part(x)"),
+                // Each call still gets its own live declaration, and one does not poison the
+                // other's cache entry.
+                [getComputedStyle(a).color, getComputedStyle(a, "::before").color,
+                 getComputedStyle(a).color]
+            ];
+            """);
+
+        AssertJson(
+            """
+            [
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(1, 2, 3)","11px","block","33px","\"BEFORE\"",true],
+              ["rgb(1, 2, 3)","11px","block","33px","\"BEFORE\"",true],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["","","","","",false],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(10, 20, 30)","rgb(1, 2, 3)","rgb(10, 20, 30)"]
+            ]
+            """,
+            result);
+    }
+
+    [Fact]
     public void OrdinaryInlineKeepsComputedSizesButUsesContentGeometry()
     {
         using var fixture = RuntimeFixture.Blank();
