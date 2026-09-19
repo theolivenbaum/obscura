@@ -6728,8 +6728,15 @@ public class DomLayoutTests
     {
         // #685: an empty textarea must keep a real control box instead of
         // laying out as a plain block. Chromium lays cols=20/rows=2 out as a
-        // 182x36 border box: 20 columns of the face's average character width,
+        // 181x36 border box: 20 columns of the face's average character width,
         // the 15px scrollbar gutter, and one 15px control line per row.
+        //
+        // The fixture names no family, so the face is the UA's `monospace`, and
+        // the reference has to be measured against the one this engine embeds -
+        // Chromium picks its own from fontconfig and reports 182 with the
+        // DejaVu Sans Mono it finds on a typical Linux host. Measured on
+        // Chromium 141 with `Assets/liberation-mono.ttf` served as a web font:
+        // 181 at cols 20, and 29 / 37 / 61 / 421 at cols 1 / 2 / 5 / 50.
         DomTree tree = Parse(
             """
             <style>html, body { margin: 0 }</style>
@@ -6737,16 +6744,19 @@ public class DomLayoutTests
             <div><textarea id="rows8" rows="8"></textarea></div>
             <div><textarea id="cssheight" style="height: 36px"></textarea></div>
             <div><textarea id="invalid-rows" rows="0"></textarea></div>
+            <div><textarea id="cols1" cols="1"></textarea></div>
+            <div><textarea id="cols5" cols="5"></textarea></div>
+            <div><textarea id="cols50" cols="50"></textarea></div>
             """);
         DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
         Rect Get(string id) => laid.Rects[Id(tree, id)];
 
         Rect plain = Get("plain");
-        Assert.True(MathF.Abs(plain.Width - 182f) < 0.5f, $"{plain.Width}");
+        Assert.True(MathF.Abs(plain.Width - 181f) < 0.5f, $"{plain.Width}");
         Assert.True(MathF.Abs(plain.Height - 36f) < 0.5f, $"{plain.Height}");
 
         Rect rows8 = Get("rows8");
-        Assert.True(MathF.Abs(rows8.Width - 182f) < 0.5f);
+        Assert.True(MathF.Abs(rows8.Width - 181f) < 0.5f);
         Assert.True(MathF.Abs(rows8.Height - 126f) < 0.5f, $"{rows8.Height}");
 
         // Author height wins over the rows-derived intrinsic height, and the
@@ -6758,6 +6768,12 @@ public class DomLayoutTests
         // back to the HTML defaults (rows=2).
         Rect invalid = Get("invalid-rows");
         Assert.True(MathF.Abs(invalid.Height - 36f) < 0.5f, $"{invalid.Height}");
+
+        // Away from cols=20 the fit is per-column plus one constant gutter, so a
+        // calibrated constant and the real curve part company: 1 / 5 / 50 columns.
+        Assert.True(MathF.Abs(Get("cols1").Width - 29f) < 0.5f, $"{Get("cols1").Width}");
+        Assert.True(MathF.Abs(Get("cols5").Width - 61f) < 0.5f, $"{Get("cols5").Width}");
+        Assert.True(MathF.Abs(Get("cols50").Width - 421f) < 0.5f, $"{Get("cols50").Width}");
 
         // The control is an atomic inline-block, not a stretched block.
         LayoutStyle style = laid.Styles[Id(tree, "plain")];

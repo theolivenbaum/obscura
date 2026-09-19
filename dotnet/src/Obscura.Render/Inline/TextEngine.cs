@@ -165,7 +165,7 @@ public sealed partial class TextEngine : IDisposable
     /// </remarks>
     public (float CharWidth, float MaxCharWidth) ControlCharacterMetrics(LayoutStyle style)
     {
-        float fontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
+        float fontSize = QuantizeToFontUnits(F32.Max(style.FontSize ?? 13.333333f, 1f));
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -183,6 +183,22 @@ public sealed partial class TextEngine : IDisposable
 
         return (F32.Max(average, F32.Round(average)), F32.Round(metrics.MaxCharWidth / unitsPerEm * fontSize));
     }
+
+    /// <summary>
+    /// The used font size as the face scaler actually sees it: FreeType sets a face's size in
+    /// 26.6 fixed point, so every metric scaled out of it is scaled by the size rounded to 1/64
+    /// of a pixel, never by the CSS value.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which has no face metrics to scale - it
+    /// multiplies the CSS font size by a fixed em fraction. The rounding matters only where a
+    /// scaled metric lands within 1/64px of an integer and a `ceil` sits on top of it, which is
+    /// exactly the default control: at the UA's 13.3333px Liberation Mono averages 8.0013px
+    /// unrounded against Blink's 7.9982px, so `ceil(20 * charWidth)` came out 161 where Chromium
+    /// gives 160 and every empty textarea and unsized input was 1px too wide. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    private static float QuantizeToFontUnits(float fontSize) => F32.Round(fontSize * 64f) / 64f;
 
     public (float Ascent, float Descent) InlineFontBoxMetrics(LayoutStyle style)
     {
