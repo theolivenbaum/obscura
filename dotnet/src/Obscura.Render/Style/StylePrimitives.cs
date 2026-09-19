@@ -378,6 +378,25 @@ public static partial class ComputedStyle
     }
 
     /// <summary>
+    /// Whether a declaration has to be read again in the top-down pass, either because it
+    /// carries a font-relative length or because it names <c>currentcolor</c>.
+    /// </summary>
+    /// <remarks>
+    /// The cascade applies declarations in order, so a <c>currentcolor</c> in <c>filter</c> or
+    /// <c>box-shadow</c> resolves against whatever <c>color</c> had been reached at that point:
+    /// black when <c>color</c> is declared after it in the same rule, and black again when the
+    /// element inherits its colour rather than declaring one. Chromium resolves both against
+    /// the element's final computed <c>color</c>, so these values defer to
+    /// <see cref="ComputedStyle.ResolveFontRelativeDeclarations"/> like a font-relative one.
+    /// </remarks>
+    internal static bool NeedsLateResolution(string value) =>
+        ContainsFontRelativeUnit(value) || ContainsCurrentColor(value);
+
+    /// <summary>Whether a declaration names the <c>currentcolor</c> keyword.</summary>
+    internal static bool ContainsCurrentColor(string value) =>
+        value.Contains("currentcolor", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Whether a declaration carries a length in a unit relative to the element's own font, and
     /// so cannot be resolved until the cascade has settled that font's size.
     /// </summary>
@@ -429,9 +448,9 @@ public static partial class ComputedStyle
     /// Called from the DOM top-down pass, immediately after <c>font-size</c> settles and beside
     /// <see cref="SetGridCalcContext"/>, which does the same job for grid tracks. Only a
     /// declaration that carried a font-relative unit was kept, so this is a no-op for almost
-    /// every element. <c>currentcolor</c> in a re-read value resolves against the inherited
-    /// colour rather than whatever <c>color</c> the element had reached mid-cascade, which is
-    /// what Chromium does and a second improvement from reading these late.
+    /// every element. A declaration naming <c>currentcolor</c> is kept for the same reason
+    /// (see <see cref="NeedsLateResolution"/>): by here <c>style.Color</c> is the element's
+    /// final computed colour, declared or inherited, which is what Chromium resolves against.
     /// </remarks>
     public static void ResolveFontRelativeDeclarations(
         LayoutStyle style,

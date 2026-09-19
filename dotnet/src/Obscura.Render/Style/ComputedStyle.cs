@@ -2435,7 +2435,8 @@ public static partial class ComputedStyle
             case "vertical-align":
                 style.VerticalAlign = CssText.AsciiLower(value.Trim()) switch
                 {
-                    "top" or "baseline" or "text-top" => Obscura.Render.VerticalAlign.Top,
+                    "baseline" => Obscura.Render.VerticalAlign.Baseline,
+                    "top" or "text-top" => Obscura.Render.VerticalAlign.Top,
                     "middle" => Obscura.Render.VerticalAlign.Middle,
                     "bottom" or "text-bottom" => Obscura.Render.VerticalAlign.Bottom,
                     // sub/super/lengths are text-level; leave the cell default.
@@ -2814,7 +2815,7 @@ public static partial class ComputedStyle
             case "filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Filter, NonNoneValue(value));
                 style.Filter = ParseFilterFunctions(value, style.Color, style.ColorSchemeDark);
-                style.FilterFontRelative = ContainsFontRelativeUnit(value) ? value : null;
+                style.FilterFontRelative = NeedsLateResolution(value) ? value : null;
                 return true;
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
@@ -2869,7 +2870,7 @@ public static partial class ComputedStyle
             case "box-shadow":
             case "-webkit-box-shadow":
                 style.BoxShadow = ParseBoxShadow(value, style.Color, style.ColorSchemeDark);
-                style.BoxShadowFontRelative = ContainsFontRelativeUnit(value) ? value : null;
+                style.BoxShadowFontRelative = NeedsLateResolution(value) ? value : null;
                 return true;
 
             default:

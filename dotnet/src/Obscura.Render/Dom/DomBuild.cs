@@ -142,9 +142,16 @@ internal static partial class DomBuild
                 VerticalAlign.Middle => TaffyAlignItems.Center,
                 VerticalAlign.Bottom => TaffyAlignItems.FlexEnd,
                 VerticalAlign.Top => TaffyAlignItems.FlexStart,
+                // `baseline` is the initial value, so it takes the same path as an unset one.
                 _ => null,
             };
         }
+
+        // An atomic inline whose baseline is its bottom margin edge sits entirely above the
+        // line's baseline, so the strut's descent still has to fit below it.
+        float strutDescentBelow = style is null
+            ? 0f
+            : BottomBaselineAtomicStrutDescent(context, id, style);
 
         // DEVIATION from crates/obscura-render/src/dom.rs, which leaves every inline-level box
         // at taffy's default `flex-shrink: 1`. Our inline formatting context is a wrapping row
@@ -158,16 +165,27 @@ internal static partial class DomBuild
             && !style.IgnoresUsedBoxSizes()
             && style.Float is null
             && style.Position != TaffyPosition.Absolute
-            && (!style.Width.IsAuto || style.SizeExpressions[0] is not null);
+            && (!style.Width.IsAuto
+                || style.SizeExpressions[0] is not null
+                // A bare cyclic `width: 100%` reaches here already neutralized to `auto`, so
+                // the declaration has to be read off the neutralization record rather than off
+                // the field. This is F33's residual: the `calc()` spelling kept working only
+                // because its `SizeExpressions[0]` survives the same neutralization.
+                || style.HasDeferredCyclicInlineSize(0));
 
         bool needsOuter = style is not null
             && style.IsInlineBlock
             && style.Display is Display.Flex or Display.Grid
             && style.Width.IsAuto
-            && style.SizeExpressions[0] is null;
+            && style.SizeExpressions[0] is null
+            // Same reading of the same declaration as `pinsInlineSize` above: a definite
+            // inline size already suppresses the shrink-wrapping outer participant, and a
+            // neutralized cyclic percentage is a definite inline size that the field cannot
+            // say so on its own.
+            && !style.HasDeferredCyclicInlineSize(0);
         if (!needsOuter)
         {
-            if (inlineAlign is not null || pinsInlineSize)
+            if (inlineAlign is not null || pinsInlineSize || strutDescentBelow > 0f)
             {
                 TaffyStyle adjusted = context.TaffyTree.GetStyle(inner).Clone();
                 if (inlineAlign is { } align)
@@ -178,6 +196,11 @@ internal static partial class DomBuild
                 if (pinsInlineSize)
                 {
                     adjusted.FlexShrink = 0f;
+                }
+
+                if (strutDescentBelow > 0f)
+                {
+                    adjusted.Margin = WithStrutDescent(adjusted.Margin, strutDescentBelow);
                 }
 
                 context.TaffyTree.SetStyle(inner, adjusted);
@@ -223,8 +246,162 @@ internal static partial class DomBuild
         outerStyle.AlignSelf = inlineAlign;
         outerStyle.MinSize = new Layout.Size<TaffyDimension>(outerMinWidth, TaffyDimension.Auto);
         outerStyle.MaxSize = new Layout.Size<TaffyDimension>(outerMaxWidth, TaffyDimension.Auto);
+        if (strutDescentBelow > 0f)
+        {
+            outerStyle.Margin = WithStrutDescent(outerStyle.Margin, strutDescentBelow);
+        }
+
         TaffyNodeId outer = context.TaffyTree.NewWithChildren(outerStyle, [inner]);
         return [outer];
+    }
+
+    /// <summary>Add <paramref name="descent"/> to a box's bottom margin.</summary>
+    /// <remarks>
+    /// A percentage or <c>auto</c> bottom margin is left alone: there is nothing to add it to
+    /// without a containing block, and an atomic inline that carries one is vanishingly rare
+    /// next to the cost of getting it wrong.
+    /// </remarks>
+    private static Layout.Rect<TaffyLengthPercentageAuto> WithStrutDescent(
+        Layout.Rect<TaffyLengthPercentageAuto> margin,
+        float descent)
+    {
+        Layout.CompactLength raw = margin.Bottom.IntoRaw();
+        if (raw.Tag != Layout.CompactLength.LengthTag)
+        {
+            return margin;
+        }
+
+        margin.Bottom = TaffyLengthPercentageAuto.FromLength(raw.Value + descent);
+        return margin;
+    }
+
+    /// <summary>
+    /// The strut descent an atomic inline has to leave below itself, or <c>0</c> when the box is
+    /// not a baseline-aligned atomic inline whose baseline is its bottom margin edge.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which models a line box as a wrapping
+    /// flex row aligned to <c>flex-start</c> and so gives every participant the same top edge.
+    /// CSS 2.1 10.8 makes a line box <c>max(ascent) + max(descent)</c> over its participants
+    /// plus the strut, and CSS 2.1 10.8.1 puts an atomic inline's baseline at its bottom margin
+    /// edge when it has no in-flow line boxes or its <c>overflow</c> is not <c>visible</c>. Such
+    /// a box therefore sits wholly above the baseline and the strut's descent still has to fit
+    /// under it: a 12px empty <c>inline-block</c> in a <c>line-height: 12px</c> block is 14px
+    /// tall in Chromium, not 12. That is the 2px icon-box gap.
+    /// <para>
+    /// Expressing it as a bottom margin is what a flex row can carry. It gets the line's HEIGHT
+    /// right in every case and the atomic's position right whenever the atomic is at least as
+    /// tall as the strut's ascent, which is the case the defect is about. When the strut's
+    /// ascent is the taller of the two, Chromium pushes the atomic down by the difference and
+    /// this keeps it at the line's top; a full fix needs real baseline alignment in the line
+    /// box, which is tracked in todo.md.
+    /// </para>
+    /// </remarks>
+    internal static float BottomBaselineAtomicStrutDescent(
+        BuildContext context,
+        NodeId id,
+        LayoutStyle style)
+    {
+        if (style.VerticalAlign is not (null or VerticalAlign.Baseline)
+            || style.Float is not null
+            || style.Position == TaffyPosition.Absolute
+            || !IsBottomBaselineAtomicInline(context.Tree, id, style))
+        {
+            return 0f;
+        }
+
+        if (InlineFormattingContextStyle(context, id) is not { } block)
+        {
+            return 0f;
+        }
+
+        return StrutDescent(block);
+    }
+
+    /// <summary>
+    /// Whether the box is an atomic inline whose baseline is its bottom margin edge: an
+    /// <c>inline-block</c> (or inline-flex/inline-grid) with no in-flow line boxes or with a
+    /// clipping <c>overflow</c>, or a replaced element, which never has one.
+    /// </summary>
+    /// <remarks>
+    /// Native form controls are deliberately excluded. They are atomic and childless, but
+    /// Chromium gives an <c>&lt;input&gt;</c> or a <c>&lt;select&gt;</c> the baseline of the
+    /// text it renders itself, not its bottom edge.
+    /// </remarks>
+    private static bool IsBottomBaselineAtomicInline(DomTree tree, NodeId id, LayoutStyle style)
+    {
+        if (!LayoutStyleExtensions.IsInlineLevelBox(style))
+        {
+            return false;
+        }
+
+        // A native control is an atomic inline-block with no child boxes, so every structural
+        // test here would let it through.
+        if (DomTraversal.IsAnyLocal(
+                tree, id, "input", "select", "textarea", "button", "meter", "progress"))
+        {
+            return false;
+        }
+
+        if (!style.IsInlineBlock)
+        {
+            return style.IsReplacedBox
+                && DomTraversal.IsAnyLocal(
+                    tree, id, "img", "svg", "canvas", "video", "picture", "iframe", "embed", "object");
+        }
+
+        if (style.ClipsOverflowX() || style.ClipsOverflowY() || style.OverflowScrollContainer)
+        {
+            return true;
+        }
+
+        return style.BeforePseudo is null
+            && style.AfterPseudo is null
+            && DomTraversal.RenderedChildren(tree, id).Count == 0;
+    }
+
+    /// <summary>
+    /// The style of the block container whose font and <c>line-height</c> supply the strut of
+    /// the line box this inline participates in, or <c>null</c> when the box is a flex or grid
+    /// item rather than an inline participant.
+    /// </summary>
+    private static LayoutStyle? InlineFormattingContextStyle(BuildContext context, NodeId id)
+    {
+        NodeId? cursor = DomTraversal.RenderedParent(context.Tree, id);
+        while (cursor is { } parentId)
+        {
+            if (!context.Styles.TryGetValue(parentId, out LayoutStyle? parent))
+            {
+                return null;
+            }
+
+            // A `display: contents` wrapper and a plain inline box both leave the inline
+            // formatting context to an ancestor.
+            if (parent.DisplayContents || parent.IgnoresUsedBoxSizes())
+            {
+                cursor = DomTraversal.RenderedParent(context.Tree, parentId);
+                continue;
+            }
+
+            bool laysOutItemsNotLines = parent.Display is Display.Flex or Display.Grid
+                && !parent.InternalFlexContainer;
+            return laysOutItemsNotLines ? null : parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A line box strut's descent: the half-leading plus the grid-fitted font descent of the
+    /// block container, clamped at zero because a <c>line-height</c> shorter than the font box
+    /// puts the strut's bottom above the baseline, where it adds nothing.
+    /// </summary>
+    internal static float StrutDescent(LayoutStyle block)
+    {
+        FaceMetrics metrics = FontAssets.BundledFaceMetrics(FontAssets.ResolveFontFamily(block.FontFamily));
+        (float ascent, float descent) = FontAssets.FittedFontBoxMetrics(block.FontSize ?? 16f, metrics);
+        float halfLeading = (FontResolution.UsedLineHeightWithMetrics(block, metrics) - (ascent + descent)) / 2f;
+        return F32.Max(descent + halfLeading, 0f);
     }
 
     /// <summary>Build the direct children of a genuine flex/grid container.</summary>

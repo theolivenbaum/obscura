@@ -343,6 +343,44 @@ public class ComputedStyleSnapshotTests
                 "box")["filter"]);
     }
 
+    /// <summary>
+    /// <c>currentcolor</c> resolves against the element's FINAL computed colour, not against
+    /// whatever <c>color</c> the cascade had reached when the declaration was applied.
+    /// </summary>
+    /// <remarks>
+    /// The cascade walks declarations in order, so before the deferral both of these reported
+    /// black: the first because <c>color</c> is declared after <c>filter</c>, the second
+    /// because the element inherits its colour and never declares one. Chromium 141 reports
+    /// the element's own colour in both. <c>box-shadow</c> shared the defect and the fix.
+    /// </remarks>
+    [Fact]
+    public void CurrentColorInAFilterOrShadowResolvesAgainstTheFinalComputedColor()
+    {
+        Assert.Equal(
+            "drop-shadow(rgb(10, 20, 30) 1px 2px 3px)",
+            Computed(
+                """<div id="box" style="filter:drop-shadow(currentColor 1px 2px 3px);color:rgb(10,20,30)">x</div>""",
+                "box")["filter"]);
+
+        Assert.Equal(
+            "drop-shadow(rgb(1, 2, 3) 1px 2px 3px)",
+            Computed(
+                """<div style="color:rgb(1,2,3)"><div id="box" style="filter:drop-shadow(currentColor 1px 2px 3px)">x</div></div>""",
+                "box")["filter"]);
+
+        Assert.Equal(
+            "rgb(10, 20, 30) 1px 2px 3px 0px",
+            Computed(
+                """<div id="box" style="box-shadow:currentColor 1px 2px 3px;color:rgb(10,20,30)">x</div>""",
+                "box")["box-shadow"]);
+
+        Assert.Equal(
+            "rgb(1, 2, 3) 1px 2px 3px 0px",
+            Computed(
+                """<div style="color:rgb(1,2,3)"><div id="box" style="box-shadow:currentColor 1px 2px 3px">x</div></div>""",
+                "box")["box-shadow"]);
+    }
+
     [Fact]
     public void FontStyleAndTextDecorationAreReported()
     {

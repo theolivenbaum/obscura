@@ -159,6 +159,15 @@ public enum VerticalAlign
     Top,
     Middle,
     Bottom,
+
+    /// <summary>
+    /// The inline-level initial value, declared explicitly. A table cell treats it as
+    /// <see cref="Top"/> (every reader here tests for <see cref="Middle"/> or
+    /// <see cref="Bottom"/> and falls through otherwise), but an atomic inline has to tell it
+    /// apart from <c>top</c>: a baseline-aligned atomic sits on the line's baseline and leaves
+    /// the strut's descent below itself, where a <c>top</c>-aligned one does not.
+    /// </summary>
+    Baseline,
 }
 
 /// <summary><c>clear</c>: which floated side(s) an element moves below.</summary>
