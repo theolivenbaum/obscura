@@ -546,7 +546,27 @@ public static partial class RenderDom
                 Dimension widthStyle = deferredPercentWidths.TryGetValue(dom, out float authored)
                     ? Dimension.Percent(authored)
                     : tableStyle.Width;
-                if (widthStyle.Kind == DimensionKind.Percent)
+                // A percentage resolves against the containing block, and when that width is
+                // known here the columns can be distributed against it like any other definite
+                // width. Leaving it to taffy instead left the tracks `auto`, and the grid then
+                // filled the table by growing them *equally*: a 600px `width: 100%` table of
+                // `alpha` / `beta gamma delta` came out 261/339 where Chromium, which
+                // distributes in proportion to max-content, gives 141/459. Where the width is
+                // not reliably known (a floated, absolute or inline-block table, or a flex,
+                // grid or multicol parent) the old defer-to-taffy path still runs.
+                // Over 100% the table is meant to be wider than its containing block, and the
+                // path below floors it at the containing block; taffy resolves those correctly
+                // already, so they keep the old path.
+                float? percentAvailable = null;
+                if (widthStyle.Kind == DimensionKind.Percent && widthStyle.Value <= 1f)
+                {
+                    percentAvailable = availableWidths.TryGetValue(tnode, out float percentSnapshot)
+                        ? percentSnapshot
+                        : DomTableSupport.ReliableTableAvailableWidth(
+                            tree, dom, styles, initialCbWidth);
+                }
+
+                if (widthStyle.Kind == DimensionKind.Percent && percentAvailable is null)
                 {
                     // Deviation from crates/obscura-render/src/dom.rs, which stops here. CSS 2.1
                     // 17.5.2 makes a table's used width the greater of its specified width and
@@ -603,19 +623,26 @@ public static partial class RenderDom
                 float maxC = taffyTree.GetLayout(tnode).Size.Width;
 
                 float inlineEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
+                float availableOuter = percentAvailable
+                    ?? (availableWidths.TryGetValue(tnode, out float snapshot)
+                        ? snapshot
+                        : DomTableSupport.ReliableTableAvailableWidth(
+                            tree, dom, styles, initialCbWidth)
+                            ?? initialCbWidth);
                 float preferredOuter = widthStyle.Kind switch
                 {
                     DimensionKind.Px when tableStyle.BoxSizing == BoxSizing.ContentBox =>
                         widthStyle.Value + inlineEdges,
                     DimensionKind.Px => widthStyle.Value,
+                    DimensionKind.Percent when tableStyle.BoxSizing == BoxSizing.ContentBox =>
+                        (widthStyle.Value * availableOuter) + inlineEdges,
+                    DimensionKind.Percent => widthStyle.Value * availableOuter,
                     _ => maxC,
                 };
-                float availableOuter = availableWidths.TryGetValue(tnode, out float snapshot)
-                    ? snapshot
-                    : DomTableSupport.ReliableTableAvailableWidth(tree, dom, styles, initialCbWidth)
-                        ?? initialCbWidth;
-                float usedOuter = widthStyle.Kind == DimensionKind.Px
-                    // A definite table width is not clamped to its containing block.
+                float usedOuter = widthStyle.Kind is DimensionKind.Px or DimensionKind.Percent
+                    // A definite table width is not clamped to its containing block, and a
+                    // percentage that resolves narrower than the content overflows it rather
+                    // than wrapping every cell (CSS 2.1 17.5.2).
                     ? F32.Max(preferredOuter, minC)
                     : F32.Min(F32.Max(preferredOuter, minC), F32.Max(availableOuter, minC));
                 float usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
