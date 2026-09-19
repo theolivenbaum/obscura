@@ -538,7 +538,26 @@ public sealed partial class ObscuraJsRuntime
                 }
                 if (tick == LoopTick.Idle)
                 {
-                    break;
+                    // An idle verdict here is weaker than the policy this loop
+                    // enforces, so confirm it against the page before acting on it.
+                    // DEVIATION from crates/obscura-js: deno_core resolves an async
+                    // op's promise inside the event loop, so the loop cannot observe
+                    // itself as idle between a fetch future completing and the page's
+                    // continuation running. Here an op is a Task whose promise
+                    // ClearScript resolves from its continuation, while the only
+                    // host-side evidence of the request - ObscuraState.PageInFlight -
+                    // is already dropped in the fetch op's finally, before that Task
+                    // completes. In that window PumpTick sees no timers, no posted
+                    // tasks and no in-flight request and reports Idle although a
+                    // dynamic script is still waiting for its body. Losing that race
+                    // ended an explicit settle with most of its budget unspent and
+                    // the script never executed (the #474 regression test, only reproducible
+                    // under machine load). budget still bounds the loop.
+                    if (!HasPendingDynamicScripts())
+                    {
+                        break;
+                    }
+                    tick = LoopTick.Waiting;
                 }
                 if (tick == LoopTick.Waiting)
                 {
