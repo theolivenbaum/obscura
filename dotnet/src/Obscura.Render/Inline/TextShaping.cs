@@ -211,8 +211,32 @@ public sealed class TextShaper(FontDatabase database)
 
     public FontDatabase Database => _database;
 
+    /// <summary>
+    /// Shaped paragraphs carried over from an earlier pass built on the same font set, or null
+    /// when this shaper starts cold. See <see cref="ShapeCache"/> for why reuse is sound.
+    /// </summary>
+    internal ShapeCache? Cache { get; set; }
+
     /// <summary>Shape one paragraph into spans and words.</summary>
     public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth)
+    {
+        if (Cache is { } cache)
+        {
+            ShapeCacheKey key = new(line, attrsList, tabWidth);
+            if (cache.TryGet(key, out ShapeLine cached))
+            {
+                return cached;
+            }
+
+            ShapeLine fresh = ShapeParagraphUncached(line, attrsList, tabWidth);
+            cache.Add(key, fresh);
+            return fresh;
+        }
+
+        return ShapeParagraphUncached(line, attrsList, tabWidth);
+    }
+
+    private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth)
     {
         var result = new ShapeLine();
         List<(int Start, int End, byte Level)> runs = Bidi.LevelRuns(line, out bool rtl);

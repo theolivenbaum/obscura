@@ -27,6 +27,7 @@ public sealed partial class TextEngine : IDisposable
     private readonly List<InlineItem> _items = [];
     private readonly List<ReplacedItem> _replaced = [];
     private readonly TextShaper _shaper;
+    private readonly WebFont[] _fonts;
     private readonly GlyphRasterizer _rasterizer;
     private readonly VariableGlyphCache _variableCache;
 
@@ -105,7 +106,29 @@ public sealed partial class TextEngine : IDisposable
         _shaper = new TextShaper(_database);
         _rasterizer = new GlyphRasterizer(_database);
         _variableCache = new VariableGlyphCache(_database);
+        _fonts = [.. fonts];
     }
+
+    /// <summary>
+    /// Take over an earlier pass's shaped paragraphs, or start a cache of our own. Reuse happens
+    /// only when that pass was built from the same web-font set; otherwise its shaping could
+    /// have resolved to faces this pass does not have.
+    /// </summary>
+    internal void AdoptShapeCache(TextEngine? previous)
+    {
+        if (ShapeCache.Disabled)
+        {
+            return;
+        }
+
+        _shaper.Cache = previous?._shaper.Cache is { } inherited && inherited.MatchesFontSet(_fonts)
+            ? inherited
+            : new ShapeCache(_fonts);
+    }
+
+    /// <summary>Shaped-paragraph cache statistics, for tests and profiling.</summary>
+    internal (int Entries, int Hits, int Misses) ShapeCacheStats =>
+        _shaper.Cache is { } cache ? (cache.Count, cache.Hits, cache.Misses) : (0, 0, 0);
 
     private static List<WebFont> ToWebFonts(IReadOnlyList<byte[]> fonts)
     {

@@ -352,7 +352,8 @@ public static partial class RenderDom
             reuse,
             animationSample,
             animationTimeline,
-            reuseCandidate);
+            reuseCandidate,
+            reusableLayout);
         DomLayout laid = first.Layout;
         ContainerQueryStats query = first.QueryStats;
 
@@ -430,6 +431,8 @@ public static partial class RenderDom
         bool needsFallback = false;
         for (int pass = 2; pass <= maxPasses; pass++)
         {
+            // A container-query pass re-lays the document from scratch, so the shaping this
+            // prepare has already paid for is handed forward as well.
             var next = LayoutDomOnce(
                 tree,
                 viewport,
@@ -440,7 +443,9 @@ public static partial class RenderDom
                 snapshot,
                 null,
                 animationSample,
-                animationTimeline);
+                animationTimeline,
+                null,
+                laid);
             passes = pass;
             query = new ContainerQueryStats(
                 query.Evaluations + next.QueryStats.Evaluations,
@@ -506,7 +511,9 @@ public static partial class RenderDom
                 null,
                 null,
                 animationSample,
-                animationTimeline);
+                animationTimeline,
+                null,
+                laid);
             laid = fallback.Layout;
             passes++;
             query = new ContainerQueryStats(

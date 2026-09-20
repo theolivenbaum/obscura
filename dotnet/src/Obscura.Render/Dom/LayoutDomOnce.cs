@@ -180,7 +180,8 @@ public static partial class RenderDom
         (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? retained,
         AnimationSample animationSample,
         AnimationTimelineState animationTimeline,
-        RetainedLayoutReuseCandidate? reuseCandidate = null)
+        RetainedLayoutReuseCandidate? reuseCandidate = null,
+        DomLayout? previousLayout = null)
     {
         Matcher matcher = tree.CreateMatcher();
         Dictionary<NodeId, LayoutStyle> styles = retained?.Maps.Styles ?? [];
@@ -257,6 +258,11 @@ public static partial class RenderDom
         Dictionary<TaffyNodeId, NodeId> idMap = [];
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
         TextEngine engine = new(fonts, needsEmojiFont);
+
+        // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
+        // layout: it is a pure function of the text, its attributes and the tab width. Carry the
+        // previous pass's shaped paragraphs over when the font set is unchanged.
+        engine.AdoptShapeCache(previousLayout?.TextEngine);
         IfcRegistry ifcItems = new();
 
         // The document node itself is not an element; lay out from the first element
