@@ -1082,6 +1082,49 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### A linked stylesheet leaves no element in the DOM
+
+`crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic
+`<style data-obscura-linked>` inserted after the link, and the cascade reads it from there. That
+element is observable: `document.querySelectorAll("style")` counts it, and it shifts the sibling
+index of everything after the link.
+
+DEVIATION from crates/obscura-browser. The fetched bytes are held beside the `<link>` itself and
+the cascade reads them from there, so no element is created. Measured in Chromium 141 on a page
+with one linked sheet: `styleEls=0 linkEls=1 headKids=2`, and the rule applies
+(`color: rgb(1, 2, 3)`). This port now reports the same four values.
+
+The sheet also has to enter the cascade at the **link's own document position**, which the
+synthetic element got right by construction and a side table does not get for free. Measured both
+ways in Chromium 141: with the link before an inline `<style>` the later inline rule wins
+(`rgb(99, 99, 99)`); with the inline style first the link wins (`rgb(11, 11, 11)`); both report
+`document.styleSheets.length` 2. `ALinkedSheetCascadesAtItsOwnPositionAndAddsNoElement` pins both
+directions.
+
+The Rust-derived test that asserted the old shape (that the CSS is readable from a
+`style[data-obscura-linked]` which is the link's `nextSibling`) is re-pointed at the Chromium
+behaviour rather than weakened: it still asserts import order, both rebased `url()`s and the
+link-owned CSSOM sheet, and now also asserts that no `<style>` element exists at all.
+
+### A `br` occupies a line box and reports a client rect
+
+A `br` produced no inline item, so a block containing only `br`s collapsed to zero content height,
+a `br` reported an all-zero `getBoundingClientRect()`, and a trailing `br` added an empty line that
+Chromium does not add.
+
+DEVIATION from crates/obscura-render, which has the same defect. Measured against Chromium 141 on
+`render-repros/forced-line-breaks.html`, scored as per-element distance to Chromium over the 27
+elements both engines report: **4628.74 before, 491.60 after, with no element moving farther**. On
+`render-repros/pdf-print-media.html`, 2394.39 to 0.78 - the remainder there is sub-pixel line-height
+rounding (38.39 against 38.0). A `br` now reports the line's own height, e.g. `0,1,0,17` against
+Chromium's `0,1,0,17`, where it was `0,0,0,0`.
+
+Two residuals on that fixture are **not** this change and are tracked separately: an inline inside
+a block that also has block children reports an all-zero rect (487 of the 491 remaining distance),
+and a `br` under `line-height: 10px` reports height 20 where Chromium gives 17.
+
+`dotnet/tests/Obscura.Render.Tests/ForcedBreakLineBoxTests.cs` pins the behaviour.
+
 ### `ch` and `ex` are measured on the element's own face, not scaled from the font size
 
 CSS Values 4 defines `1ch` as the advance of U+0030 and `1ex` as the x-height, both in the

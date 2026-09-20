@@ -746,6 +746,24 @@ public static class Inline
     }
 
     /// <summary>
+    /// The characters HTML white-space collapsing may remove.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render/src/inline.rs</c>, which tests
+    /// <c>char::is_whitespace</c> - the Unicode White_Space property. That property is true for
+    /// U+00A0 and for the fixed-width spaces U+2000-U+200A, U+202F, U+205F and U+3000, so the
+    /// Rust engine collapses them away; CSS Text 3 §4.1 collapses only space, tab and the
+    /// segment-break characters, and everything else is ordinary text. Measured in Chromium 141
+    /// at 16px/20px 'Liberation Mono': <c>a&lt;br&gt;&amp;nbsp;</c> is 40 tall and
+    /// <c>a&lt;br&gt;&amp;#x2007;</c> is 40, because the no-break space is content that keeps
+    /// the last line box alive. Both were 20 once
+    /// <c>TextEngine.DropTrailingEmptyLineBox</c> started dropping that line, which is what
+    /// surfaced this. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static bool IsCollapsibleWhiteSpace(Rune rune) =>
+        rune.Value is ' ' or '\t' or '\n' or '\r' or '\f';
+
+    /// <summary>
     /// Append one text node's whitespace-collapsed, transformed runs.
     /// </summary>
     /// <remarks>
@@ -766,7 +784,7 @@ public static class Inline
         bool atWordStart = collector.LastWasSpace;
         foreach (Rune rune in raw.EnumerateRunes())
         {
-            if (Rune.IsWhiteSpace(rune))
+            if (IsCollapsibleWhiteSpace(rune))
             {
                 switch (whiteSpace)
                 {
