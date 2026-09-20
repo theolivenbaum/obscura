@@ -35,14 +35,23 @@ internal static partial class DomBuild
     /// `display: inline-block; width: 100%` table of `alpha` / `beta gamma delta` is 600 wide
     /// with 34.66 / 112.84 columns rather than 35 / 565.
     /// </remarks>
-    internal static bool WantsAnonymousTableBox(BuildContext context, NodeId id, LayoutStyle style)
+    internal static bool WantsAnonymousTableBox(BuildContext context, NodeId id, LayoutStyle style) =>
+        WantsAnonymousTableBox(context.Tree, id, style, context.Styles);
+
+    /// <summary>
+    /// The same question, for the box-tree flattening passes, which carry the tree and the
+    /// style map rather than a <see cref="BuildContext"/>.
+    /// </summary>
+    internal static bool WantsAnonymousTableBox(
+        DomTree tree,
+        NodeId id,
+        LayoutStyle style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
         if (style.IsTableBox || style.DisplayContents || style.IsTableCellBox)
         {
             return false;
         }
-
-        DomTree tree = context.Tree;
 
         // A `<table>` whose authored display cleared the UA table box. Its rows are still
         // table-internal, and BuildTable answers null when it holds no cells at all.
@@ -53,7 +62,7 @@ internal static partial class DomBuild
 
         foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
         {
-            if (context.Styles.TryGetValue(child, out LayoutStyle? childStyle)
+            if (styles.TryGetValue(child, out LayoutStyle? childStyle)
                 && childStyle.IsTableCellBox
                 && childStyle.Display != Display.None)
             {

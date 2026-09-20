@@ -548,7 +548,7 @@ internal static partial class DomBuild
             return false;
         }
 
-        return style.Display == Display.Inline
+        bool boxless = style.Display == Display.Inline
             && !style.IsInlineBlock
             && !style.IsReplacedBox
             && style.BeforePseudo is null
@@ -560,6 +560,14 @@ internal static partial class DomBuild
             && style.Position is null
             && !style.OverflowHidden
             && style.Float is null;
+
+        // DEVIATION from crates/obscura-render/src/dom.rs, which generates no anonymous table
+        // box for any `display` and so has nothing to keep here. CSS 2.1 17.2.1 makes an inline
+        // box over table-internal children the parent of an anonymous INLINE-TABLE, so the
+        // element still generates a box: splicing its rows into the ancestor block formatting
+        // context loses the table and lays each row out at the containing block's full width.
+        // See "Known deviations" in todo.md.
+        return boxless && !WantsAnonymousTableBox(tree, id, style, styles);
     }
 
     /// <summary>
@@ -981,6 +989,14 @@ internal static partial class DomBuild
             || style.Float is not null
             || style.Position == TaffyPosition.Absolute
             || (style.Position is not null && anyInset))
+        {
+            return false;
+        }
+
+        // Table-internal children are block-level, but they belong to the anonymous
+        // inline-table CSS 2.1 17.2.1 generates inside this inline box, not to the ancestor
+        // block formatting context.
+        if (WantsAnonymousTableBox(tree, id, style, styles))
         {
             return false;
         }

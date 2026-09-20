@@ -1232,6 +1232,38 @@ descendant still reports 2px when the table carries `display: flex`). `min-width
 invisible one: `auto` and `0` both serialize as `0px` outside a flex container, but `auto` is
 what gives a flex item its automatic minimum size.
 
+### `display: inline` over table-internal children generates an anonymous inline-table
+
+`crates/obscura-render/src/dom.rs` generates no anonymous table box for any display; f50a855
+added one for `block`, `inline-block`, `flex` and `grid`, and `display: inline` was the case it
+could not reach. CSS 2.1 17.2.1 wants an anonymous **inline-table** there - an atomic inline
+inside the element's own inline box.
+
+The branch was already correct and simply never reached: two box-tree passes spliced the element
+away before `Build` saw it. `IsFlattenableInline` flattened a `<table display:inline>` to its
+`tbody` because it has no background, border or position, and `InlineWrapsOnlyInFlowBlocks`
+flattened it because `tbody`/`tr` are internal flex containers and so count as in-flow
+block-level. Both now decline when the element owns an anonymous table, and the rest comes free
+from the path a non-flattenable inline box already takes: `ToTaffyStyle` maps `Display.Inline` to
+a wrapping flex row, `IgnoresUsedBoxSizes` zeroes its width so it shrink-wraps and its own
+`width` is correctly ignored, and `SynthesizeOrdinaryInlineFragments` produces the element's
+fragment.
+
+Chromium 141, `<table style="display:inline">` after the text "before": one 147.5-wide table on
+the same line with 34.66 / 112.84 columns. The port gave it no box at all and laid its row out as
+a 600-wide block on a line of its own. Twenty cases were measured, including text on either side,
+two on one line, wrapping, the element's own border and padding, two rows, and a `<div>` with
+`display: table-cell` children.
+
+**A measurement warning worth keeping**: those 147.5 figures hold only with `border-spacing: 0`.
+With the UA default 2px the same fixture is `table 0,6 153.5x17` and `tr 2,2 149.5x18` - verified
+here. A fact written from the 147.5 numbers without zeroing the spacing measures something else.
+
+Still open: an authored `display: table-row` or `table-row-group` child generates no anonymous
+table under any parent display, because `ApplyDisplay` rejects the six internal table display
+values so the child computes as plain `block` and the fixup has nothing to key off. That is the
+same `DisplayAuthored` gap the CSSOM display work hit.
+
 ### Table fixup generates an anonymous table box
 
 `crates/obscura-render/src/dom.rs` builds a table only for a computed table box, so
