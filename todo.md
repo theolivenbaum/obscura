@@ -1080,12 +1080,33 @@ of 12 full-suite runs, 2 of 7 with `-maxThreads 16`, and 0 of 10 and 0 of 5 afte
 window artificially made it deterministic before the fix and harmless after it, out to a 200ms
 gap.
 
-**The same gap is still open for a plain `fetch()` or XHR continuation**, which has no
-dynamic-script counter to report itself. Closing it generally needs the op promise resolved
-from the event loop rather than from the `Task` continuation. Related dead code:
-`ObscuraJsRuntime.TrackAsyncOp` / `_pendingAsyncOps` has no callers, so `HasPendingAsyncOps` is
-always false and contributes nothing to the idle test - either wire it up as that general
-counter or delete it.
+That gap is now closed generally, one layer down. `Obscura.Js.Ops.AsyncOpBinding` binds every
+`Task`-returning op through a JavaScript shim that increments a counter where the op is called
+and decrements it from a reaction on the op's *own* promise. A promise reaction can only run
+inside a microtask checkpoint, and the loop evaluates its idle verdict after the checkpoint it
+performs rather than during one, so the count outlives the promise resolution for exactly as
+long as deno_core's `has_pending_ops` does. The shim's reaction is registered before the page
+gets the promise, so the page's continuation runs later in the same drain and anything it
+schedules is registered before the loop asks whether it is idle. `ObscuraJsRuntime` implements
+`IAsyncOpTracker` over `_pendingAsyncOps`, which `PumpTick` already read.
+
+`TrackAsyncOp` / `AsyncOpScope` are gone. **An earlier version of this entry called them dead
+code with no callers; that was wrong.** `RealmSleepAsync` used them, and answered this same
+defect for frame timers by holding the op open for a fixed 5ms past the delay. The frame timer
+is bound through `AsyncOpBinding` like everything else now, so that timeout is gone with it.
+
+The `HasPendingDynamicScripts()` confirmation stays, for the work that is not an op at all: a
+dynamic script between its body arriving and its evaluation, and a module the loader is still
+resolving.
+
+Regression: `Obscura.Js.Tests.RuntimeTests.SettleWaitsForAnOutstandingAsyncOpContinuation`. It
+uses `op_sleep`, the plainest async op there is - no host timer, no posted task, nothing in
+flight - so the op itself is the only evidence the page is owed a continuation, and it needs no
+artificial widening. Verified by reverting rather than by reasoning: 5 of 5 runs fail with the
+tracker disabled, 5 of 5 pass with it. A `fetch()`-shaped test is deliberately not written,
+because that window is between `PageInFlight.Decrement()` and ClearScript resolving the promise
+and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
+the same binding.
 
 ### The CDP watchdog scans its slots in a separate frame
 

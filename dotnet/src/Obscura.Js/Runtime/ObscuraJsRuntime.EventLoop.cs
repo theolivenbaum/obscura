@@ -12,7 +12,7 @@ namespace Obscura.Js.Runtime;
 /// deno_core owns a Tokio-backed loop that drains timers, async ops and
 /// microtasks and reports idle. ClearScript owns none of that, so the loop is
 /// driven here: <see cref="TimerQueue"/> is the timer task source,
-/// <see cref="ObscuraJsRuntime.TrackAsyncOp"/> is the async-op counter, and V8's
+/// <see cref="Obscura.Js.Ops.AsyncOpBinding"/> is the async-op counter, and V8's
 /// automatic microtask policy performs the checkpoint at the end of every
 /// script the host runs.
 /// </para>
@@ -540,19 +540,14 @@ public sealed partial class ObscuraJsRuntime
                 {
                     // An idle verdict here is weaker than the policy this loop
                     // enforces, so confirm it against the page before acting on it.
-                    // DEVIATION from crates/obscura-js: deno_core resolves an async
-                    // op's promise inside the event loop, so the loop cannot observe
-                    // itself as idle between a fetch future completing and the page's
-                    // continuation running. Here an op is a Task whose promise
-                    // ClearScript resolves from its continuation, while the only
-                    // host-side evidence of the request - ObscuraState.PageInFlight -
-                    // is already dropped in the fetch op's finally, before that Task
-                    // completes. In that window PumpTick sees no timers, no posted
-                    // tasks and no in-flight request and reports Idle although a
-                    // dynamic script is still waiting for its body. Losing that race
-                    // ended an explicit settle with most of its budget unspent and
-                    // the script never executed (the #474 regression test, only reproducible
-                    // under machine load). budget still bounds the loop.
+                    // The general form of that gap - an op whose promise resolves
+                    // after every host-side signal of it is already released - is
+                    // closed by AsyncOpBinding, which counts the op in JavaScript
+                    // until its reaction runs; see the DEVIATION recorded there. This
+                    // check stays for the work that is not an op at all: a dynamic
+                    // script between its body arriving and its evaluation, and a
+                    // module the loader is still resolving. budget still bounds the
+                    // loop (#474).
                     if (!HasPendingDynamicScripts())
                     {
                         break;

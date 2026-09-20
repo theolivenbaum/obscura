@@ -55,6 +55,12 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
     public IPostedTaskSpawner? TaskSpawner { get; set; }
 
     /// <summary>
+    /// Set by the runtime before the ops are bound, so an async op stays counted
+    /// until its promise reaction has run. See <see cref="AsyncOpBinding"/>.
+    /// </summary>
+    public IAsyncOpTracker? AsyncOps { get; set; }
+
+    /// <summary>
     /// The document of the realm a DOM call came from, named rather than inferred.
     /// </summary>
     /// <remarks>
@@ -321,8 +327,24 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
     }
 
-    private static void Bind(ScriptObject ops, string name, object function) =>
+    private void Bind(ScriptObject ops, string name, object function)
+    {
+        // An async op is bound through the JS shim that keeps it counted until its
+        // promise reaction runs; everything else goes straight to the fast path.
+        if (AsyncOpBinding.TryBind(ops, name, function, AsyncOps))
+        {
+            return;
+        }
+
         FastOpBinding.Bind(ops, name, function);
+    }
+
+    /// <summary>
+    /// Binds one realm-local async op - the frame timer source - with the same
+    /// tracking every other async op gets.
+    /// </summary>
+    internal void BindRealmAsyncOp(ScriptObject ops, string name, object function) =>
+        Bind(ops, name, function);
 
     // -----------------------------------------------------------------------
     // Argument normalization. The shim passes JS values; deno_core coerced them

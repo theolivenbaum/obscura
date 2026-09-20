@@ -2579,6 +2579,38 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public async Task SettleWaitsForAnOutstandingAsyncOpContinuation()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        // op_sleep is the plainest async op there is: no timer in the host queue, no
+        // posted task and no in-flight request, so the only evidence that the page is
+        // still owed a continuation is the op itself. A settle that returns here
+        // returns with its budget unspent and the .then never delivered - the general
+        // form of the fetch/XHR case, which is the same op shape with an extra
+        // host-side counter that is released before the promise resolves.
+        // 300ms is chosen against both ends: page init leaves the settle busy for up
+        // to ~30ms whatever is pending, so an untracked op must not be able to ride
+        // that out, and the quiet window is another 3x above it so a loaded machine
+        // stretching the sleep still ends the settle on the continuation.
+        rt.ExecuteScript(
+            "settle-pending-async-op",
+            "globalThis.__opDelivered = false;"
+            + "Deno.core.ops.op_sleep(300).then(() => { globalThis.__opDelivered = true; });");
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        await rt.RunEventLoopUntilQuiescentAsync(5_000, 1_000);
+        var elapsed = started.Elapsed;
+
+        Assert.True(
+            rt.Evaluate("globalThis.__opDelivered === true")!.GetValue<bool>(),
+            $"settle reported idle before the op's continuation ran; elapsed={elapsed}");
+        Assert.True(
+            elapsed < TimeSpan.FromMilliseconds(1_000),
+            $"the delivered continuation should end the settle, not the quiet window: {elapsed}");
+    }
+
+    [Fact]
     public async Task QuiescentEventLoopDoesNotWaitForAnalyticsInterval()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
