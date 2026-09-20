@@ -118,6 +118,20 @@ internal sealed class BuildContext
     /// </summary>
     internal IReadOnlyDictionary<NodeId, Dimension> DeferredInlineWidths { get; init; } =
         new Dictionary<NodeId, Dimension>();
+
+    /// <summary>
+    /// Elements whose table-internal children <c>WantsAnonymousTableBox</c> asked for an
+    /// anonymous table around and <c>BuildTable</c> could not build one for, so each maximal run
+    /// of those children generates its own anonymous table instead. Written by <c>Build</c>
+    /// before it builds the element's children and read by <c>BuildAny</c> as it builds them.
+    /// </summary>
+    internal HashSet<NodeId> WholeElementAnonymousTableFailed { get; } = [];
+
+    /// <summary>
+    /// Table-internal elements already built as part of an earlier sibling's anonymous table
+    /// run, which therefore generate no box of their own when the walk reaches them.
+    /// </summary>
+    internal HashSet<NodeId> ConsumedByAnonymousTableRun { get; } = [];
 }
 
 internal static partial class DomBuild
@@ -148,6 +162,35 @@ internal static partial class DomBuild
             }
 
             return spliced;
+        }
+
+        // CSS 2.1 17.2.1: each maximal run of consecutive table-internal siblings generates one
+        // anonymous table. The whole-element case is handled in Build; this is the rest, where
+        // the run's first element builds the table and the others were built with it.
+        if (AnonymousTableRun(context, id) is { } run)
+        {
+            // Only a run that was actually built consumes its later members; when the table
+            // could not be built the whole run falls back to ordinary boxes, one each, and
+            // returning nothing here would drop everything after the first.
+            if (run.Count == 0 || run[0] != id)
+            {
+                if (context.ConsumedByAnonymousTableRun.Contains(id))
+                {
+                    return [];
+                }
+            }
+            else if (DomTraversal.RenderedParent(tree, id) is { } runParent
+                && context.Styles.TryGetValue(runParent, out LayoutStyle? runParentStyle)
+                && BuildTable(context, runParent, AnonymousTableStyle(runParentStyle), run)
+                    is { } runTable)
+            {
+                for (int index = 1; index < run.Count; index++)
+                {
+                    context.ConsumedByAnonymousTableRun.Add(run[index]);
+                }
+
+                return [runTable];
+            }
         }
 
         if (IsFlattenableInline(tree, id, context.Styles))

@@ -1191,9 +1191,11 @@ the seven values it does **not** lay out - `table-row`, `table-row-group`, `tabl
 `table-footer-group`, `table-column`, `table-column-group`, `table-caption` - recording the
 keyword and returning without touching a single layout-visible field.
 
-**Reported but not laid out, deliberately.** CSSOM asks for the resolved value, not the used one,
-and Chromium 141 reports the keyword whatever layout achieves, so the snapshot's answer is right
-on its own terms and the gap belongs to layout. 140 cells were measured: each of the seven on a
+**Reported before it was laid out, deliberately.** CSSOM asks for the resolved value, not the
+used one, and Chromium 141 reports the keyword whatever layout achieves, so the snapshot's answer
+was right on its own terms while layout still ignored it. Layout now honours it - see "An
+authored internal table `display` is laid out, except where an anonymous cell is needed" - and
+the snapshot is unchanged by that. 140 cells were measured: each of the seven on a
 `<div>`, `<table>`, `<tr>` and `<td>`, in a block parent, as a flex item, a grid item, a float
 and an absolutely positioned box. The subject's UA display makes no difference to the answer -
 `<table style="display:table-row">` reports `table-row`, verified here - which is why the record
@@ -1271,30 +1273,97 @@ first, and the `-webkit-line-clamp` adjustment has its own earlier arm - so `(Bl
 Also not parsed at all, and left: the two-value `display: inline flow-root`, which Chromium
 reports as `inline-block`.
 
-### An authored internal table `display` is reported but not laid out
+### An authored internal table `display` is laid out, except where an anonymous cell is needed
 
 `crates/obscura-render/src/style.rs` rejects `table-row`, `table-row-group`,
 `table-header-group`, `table-footer-group`, `table-column`, `table-column-group` and
-`table-caption` and keeps no record of them, so its snapshot reports whatever display the box
-kept. C# records the keyword on `LayoutStyle.AuthoredTableDisplay` and reports it, matching
-Chromium 141. **Layout still treats the box as whatever it was**, so a `display: table-row` div
-is a full-width block where Chromium generates the CSS 2.1 17.2.1 anonymous table and
-shrink-to-fits it.
+`table-caption` outright and builds a table for none of them, so such a box is whatever display
+it kept - in practice a full-width block. C# records the keyword
+(`LayoutStyle.AuthoredTableDisplay`) and now lays the box out, matching the boxes CSS 2.1 17.2.1
+asks for and Chromium 141 generates.
 
-Honouring it means re-keying the table subsystem on computed display instead of on HTML element
-names, which is a rewrite rather than a patch: rows and row groups are not taffy boxes at all -
-`BuildTable` builds a table as a grid of *cells* and `DomTableSupport.SynthesizeRowRects`
-reconstructs `tr`/`tbody` rects afterwards from the literal local names - and the CSS
-(non-`<table>`) path models exactly one anonymous row, bailing out on any child that is not a
-`table-cell`. Also involved: `CollectTableRows`, the `<col>` pre-pass and caption placement
-inside `BuildTable`, `ResolveCollapsedBorders`' non-native single-row mode, and
-`PropagateBorderSpacing`.
+All measured on Chromium 141 against a 600px block in `16px/18px "Liberation Mono"` with
+`border-spacing: 0`. **Naming the face is load-bearing**: Chromium's unqualified `monospace` is
+DejaVu Sans Mono (advance 1229/2048 against 1233/2048) where the engine picks its embedded
+Liberation Mono, which is a width difference of its own and has nothing to do with F32. With the
+face named, the residual is taffy's whole-pixel box rounding against Chromium's LayoutUnit
+sixty-fourths - about a pixel per independently-rounded box.
 
-`display: inherit` now carries the record: the `DisplayInherit` copy in `LayoutDomComputed` takes
-`AuthoredTableDisplay` with `Display`, through the pseudo-element path and the retained-style seed
-as well. A `display: inherit` child of a `display: table-row` box reports `table-row`, and a later
-`display: block` in the same block still replaces it.
+- **Rows, row groups and captions come from the computed display**
+  (`DomTableSupport.CollectCssTableStructure`), for a `display: table` box that is not a
+  `<table>` and for an anonymous table box. Nested groups, header groups hoisted and footer
+  groups pushed whatever the source order, anonymous rows around runs of loose cells, a row
+  group holding no row, `caption-side: bottom`.
+- **A row or group's own box is a band.** The grid's children are the cells, so a row is not a
+  taffy box; one empty, zero-contribution grid item per row and group, spanning every column of
+  the rows it covers, is what gives the element a rect. Chromium reports exactly that band - a
+  row whose only content is one anonymous cell in the first of two columns is the table's full
+  192.03, not the cell's 153.63 - so this is more accurate than reconstructing a union, and it
+  keeps `SynthesizeRowRects` untouched. A column and a column group get the same across the
+  other axis.
+- **A row that generated no cell of its own is its own anonymous cell.** An anonymous box takes
+  only inherited properties and `margin`/`padding`/`border` do not apply to a row, so the two
+  are indistinguishable: a `display: table-row; margin: 10px; padding: 10px; border: 3px` div
+  lays out at 105.63 x 18 at the parent's origin, exactly as it does with none of the three.
+  `width` sizes nothing (105.63, not the declared 300) and `height` is a row minimum.
+- **A column generates no box.** Outside a table, 0 x 0 with none of its content rendered;
+  inside one, its `width` sizes its track. `span` is an HTML attribute on `<col>` and Chromium
+  ignores it elsewhere, so a CSS column is always one track - verified here: three cells under
+  two `display: table-column` divs in a 600px table are 200 / 200 / 200 whatever `span` says.
+- **Blockification is honoured** for the five keywords: a floated, absolutely positioned or
+  fixed box and a flex or grid item is `block` and generates no anonymous table. `IsTableCellBox`
+  is exempt, because it is also how this engine marks a `<td>` and Bootstrap's
+  `display: table-cell; float: left` input group depends on a floated cell staying in the table
+  (`NowrapTableCellKeepsBootstrapControlsOnOneRow`).
+- **Each maximal run of table-internal siblings generates its own anonymous table**
+  (`DomBuild.AnonymousTableRun`), which is what makes a standalone row work among ordinary
+  siblings - before, one table over all of an element's children was the only shape available
+  and a mixed child list produced none at all. Verified: a block between two `display: table-row`
+  divs produces two separate anonymous tables, not one.
+- **The `<table>` path stays keyed on element names** - `CollectTableRows`, `SynthesizeRowRects`,
+  the `<col>` pre-pass, the `<caption>` scan and `PropagateBorderSpacing` - deliberately, so real
+  table layout does not move. It did not: byte-identical across every fixture measured, and a
+  real `<table>` and a `display: inline-table` div were re-checked against a build of the parent
+  commit after the change landed.
 
+Still not modelled, each falling back to ordinary boxes so nothing is lost:
+
+- **A genuine anonymous cell**, which is the one remaining root cause of the shrink-to-fit
+  failures. A row mixing `table-cell` children with anything else, and a `display: table` box
+  with a non-table-internal child, both need one around each run of the latter; `BuildTable`
+  answers `null` for both and the fallback is ordinary block layout, which is where the
+  shrink-to-fit goes too. `display: inline-table` looks right only because an inline-level
+  fallback shrink-fits anyway - the same defect seen twice, not two defects. So
+  `<div style="display:table">aa</div>` is 600 against Chromium's 19.27, and
+  `<div display:table><div display:table-cell>aa</div><div>bb</div></div>` stacks at 600 where
+  Chromium makes one 38.53 row. It wants a `BuildAnonymousCell` over a run of a parent's
+  children (`BuildMixedBlock`'s job, restricted to a subrange and with no `IdMap` entry), plus
+  `placed` widened to carry a cell that has no DOM node, and `ResolveCollapsedBorders` taught
+  that such a cell has no border.
+- **A `table-cell` parent generates no anonymous table for table-internal children.**
+  `WantsAnonymousTableBox` answers false for `IsTableCellBox` before it looks at the children,
+  so two `display: table-cell` divs inside a `display: table-cell` div stack (20 wide, 36 tall)
+  where Chromium puts them in one anonymous row (38.41 wide, 18 tall, the second at x=19.20).
+  The same two cells under a block, a row or a row group are correct, and a *row* child of a
+  cell is correct, so it is this one arm. The guard is not obviously removable: the engine
+  builds every table out of internal flex containers and marks their cells with the same flag,
+  so lifting it risks re-entering the anonymous-table machinery on generated boxes.
+- **A caption with no rows**: `placed.Count == 0` answers `null`, so a table holding only a
+  caption is not built - 600 x 18 against Chromium's 48.02 x 36, where the zero-column table
+  drops the caption to its min-content width and it wraps.
+- **`border-spacing` inherited from a grandparent** does not reach a CSS or anonymous table: the
+  engine stores the value only where it was declared and `AnonymousTableStyle` clones the
+  generating element's style. Pre-existing, and it affects `display: table` divs too; the fix
+  belongs in `DomStyleFixups.TableSpacing`, which needs tree access it does not have.
+- **`ResolveCollapsedBorders` gives a CSS row no band**, so a `border-collapse: collapse` CSS
+  table collapses cell and table borders but not row or group ones.
+
+`display: inherit` carries the record: the `DisplayInherit` copy in `LayoutDomComputed` takes
+`AuthoredTableDisplay` with `Display`, through the pseudo-element path and the retained-style
+seed as well. A `display: inherit` child of a `display: table-row` box reports `table-row`, and a
+later `display: block` in the same block still replaces it. Now that layout reads the record,
+such a child also lays out as a table part, which is Chromium's behaviour and was a geometry
+change beyond what the CSSOM fix alone did.
 ### The UA `table` rule's flex construction does not survive an authored `display`
 
 `crates/obscura-render/src/style.rs` gives `table` / `tbody` / `thead` / `tfoot` / `tr` / `td` /
@@ -1352,7 +1421,10 @@ narrower guard keyed on `height == 0` was prototyped to preserve more cache shar
 nothing measurable, so the simpler rule stands.
 
 **Fixture-corpus note**: `probes-flex/r4b.html` is non-deterministic like its `r4`, `r5` and
-`tmp-css` siblings - two runs of one binary disagree on it. Exclude all four when diffing.
+`tmp-css` siblings - two runs of one binary disagree on it. Exclude all four when diffing, and
+`test-html-files/renderlab-complex.html` with them: it was found to disagree with itself on ~200
+lines of y coordinates across consecutive runs of the same binary, the only other fixture of 109
+that does.
 
 ### `display: inline` over table-internal children generates an anonymous inline-table
 
@@ -1381,11 +1453,10 @@ two on one line, wrapping, the element's own border and padding, two rows, and a
 With the UA default 2px the same fixture is `table 0,6 153.5x17` and `tr 2,2 149.5x18` - verified
 here. A fact written from the 147.5 numbers without zeroing the spacing measures something else.
 
-Still open: an authored `display: table-row` or `table-row-group` child generates no anonymous
-table under any parent display. The `DisplayAuthored` record it was waiting on now exists
-(`LayoutStyle.AuthoredTableDisplay`) and the CSSOM snapshot reads it, but
-`WantsAnonymousTableBox` deliberately does not - see the Known deviation above for why honouring
-it is a table-subsystem rewrite.
+Closed: an authored `display: table-row` or `table-row-group` child now generates its anonymous
+table, and each maximal run of table-internal siblings generates its own. See "An authored
+internal table `display` is laid out, except where an anonymous cell is needed" above for what
+landed and for the cases that still fall back.
 
 ### Table fixup generates an anonymous table box
 

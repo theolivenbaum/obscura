@@ -11,6 +11,7 @@ using TaffyLine = Obscura.Render.Layout.Line<Obscura.Render.Layout.GridPlacement
 using TaffyMaxTrack = Obscura.Render.Layout.MaxTrackSizingFunction;
 using TaffyMinTrack = Obscura.Render.Layout.MinTrackSizingFunction;
 using TaffyNodeId = Obscura.Render.Layout.NodeId;
+using TaffyPosition = Obscura.Render.Layout.Position;
 using TaffyStyle = Obscura.Render.Layout.Style;
 using TaffyTrackSizingFunction = Obscura.Render.Layout.TrackSizingFunction;
 
@@ -60,13 +61,41 @@ internal static partial class DomBuild
             return true;
         }
 
+        // A flex or grid container blockifies its items, so an authored internal-table display
+        // on one of them is not an internal-table box and generates no anonymous table:
+        // Chromium 141 reports `block` for a `display: table-row` flex item. The cell arm below
+        // is deliberately outside that rule, because this engine builds every table out of
+        // internal flex containers and `IsTableCellBox` is how it marks their cells.
+        bool blockifiesItems = style.Display is Display.Flex or Display.Grid
+            && !style.InternalFlexContainer;
+
+        // Every table-internal child except a column generates the anonymous table: a column
+        // has nothing to size on its own, and a table holding only columns has no cells, so
+        // BuildTable would answer null and the fallback would render the columns' contents.
         foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
         {
-            if (styles.TryGetValue(child, out LayoutStyle? childStyle)
-                && childStyle.IsTableCellBox
-                && childStyle.Display != Display.None)
+            if (!styles.TryGetValue(child, out LayoutStyle? childStyle)
+                || childStyle.Display == Display.None)
             {
-                return true;
+                continue;
+            }
+
+            switch (DomTableSupport.BlockifiableRoleOf(childStyle))
+            {
+                case TableInternalRole.Cell:
+                    return true;
+
+                case TableInternalRole.Row:
+                case TableInternalRole.RowGroup:
+                case TableInternalRole.HeaderGroup:
+                case TableInternalRole.FooterGroup:
+                case TableInternalRole.Caption:
+                    if (!blockifiesItems)
+                    {
+                        return true;
+                    }
+
+                    break;
             }
         }
 
@@ -229,7 +258,12 @@ internal static partial class DomBuild
         for (int index = 0; index < colElems.Count && column < ncols; index++)
         {
             NodeId colEl = colElems[index];
-            int span = Math.Clamp(SpanAttribute(tree, colEl, "span"), 1, MaxSpan);
+
+            // `span` is an HTML attribute; a CSS column is always one track. Same rule as the
+            // column pre-pass below.
+            int span = nativeHtmlTable
+                ? Math.Clamp(SpanAttribute(tree, colEl, "span"), 1, MaxSpan)
+                : 1;
             Edges own = StyleOf(colEl)?.Border ?? default;
             NodeId? group = colGroupOf[index];
             Edges groupBorder = group is { } groupId ? StyleOf(groupId)?.Border ?? default : default;
@@ -309,10 +343,89 @@ internal static partial class DomBuild
         return 1;
     }
 
+    /// <summary>
+    /// The maximal run of consecutive table-internal siblings around <paramref name="id"/> when
+    /// its parent has to generate one anonymous table per run rather than one over all of its
+    /// children, or <c>null</c> when <paramref name="id"/> is not in such a run.
+    /// </summary>
+    /// <remarks>
+    /// CSS 2.1 17.2.1 wraps each maximal run of consecutive table-internal siblings in its own
+    /// anonymous table, and this engine generates at most one per element. That is the whole
+    /// answer when every child is table-internal, and wrong as soon as one is not: Chromium 141
+    /// shrink-wraps a `display: table-row` div to 19.27 whatever its siblings are, where an
+    /// element-wide table cannot be built at all and every row fell back to a full-width block.
+    /// <para>
+    /// A `display: table` parent is excluded on purpose: a non-table child of a table box is
+    /// wrapped in an anonymous row and cell *inside* that table, not in a table of its own, and
+    /// this engine does not generate an anonymous cell. So is a flex or grid container, whose
+    /// items are blockified.
+    /// </para>
+    /// </remarks>
+    internal static List<NodeId>? AnonymousTableRun(BuildContext context, NodeId id)
+    {
+        DomTree tree = context.Tree;
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles = context.Styles;
+        if (!styles.TryGetValue(id, out LayoutStyle? style)
+            || DomTableSupport.BlockifiableRoleOf(style) == TableInternalRole.None)
+        {
+            return null;
+        }
+
+        // A flex or grid container is excluded for a second reason beyond blockification: it
+        // builds its children in `order`, so the run's first element is not necessarily built
+        // first and could not consume the rest.
+        if (DomTraversal.RenderedParent(tree, id) is not { } parent
+            || !context.WholeElementAnonymousTableFailed.Contains(parent)
+            || !styles.TryGetValue(parent, out LayoutStyle? parentStyle)
+            || parentStyle.IsTableBox
+            || (parentStyle.Display is Display.Flex or Display.Grid
+                && !parentStyle.InternalFlexContainer))
+        {
+            return null;
+        }
+
+        List<NodeId> children = [];
+        FlattenContentsChildren(
+            tree, DomTraversal.RenderedChildren(tree, parent), styles, children);
+
+        List<NodeId> run = [];
+        bool found = false;
+        foreach (NodeId child in children)
+        {
+            bool internalBox = styles.TryGetValue(child, out LayoutStyle? childStyle)
+                && childStyle.Display != Display.None
+                && DomTableSupport.BlockifiableRoleOf(childStyle) != TableInternalRole.None;
+            if (internalBox)
+            {
+                run.Add(child);
+                found |= child == id;
+                continue;
+            }
+
+            // Source formatting between two table-internal boxes does not break the run.
+            if (run.Count != 0
+                && tree.GetNode(child) is { IsElement: false }
+                && tree.TextContent(child).Trim().Length == 0)
+            {
+                continue;
+            }
+
+            if (found)
+            {
+                return run;
+            }
+
+            run.Clear();
+        }
+
+        return found ? run : null;
+    }
+
     internal static TaffyNodeId? BuildTable(
         BuildContext context,
         NodeId id,
-        LayoutStyle? anonymousStyle = null)
+        LayoutStyle? anonymousStyle = null,
+        IReadOnlyList<NodeId>? tableChildren = null)
     {
         DomTree tree = context.Tree;
         IReadOnlyDictionary<NodeId, LayoutStyle> styles = context.Styles;
@@ -324,30 +437,17 @@ internal static partial class DomBuild
         LayoutStyle style = anonymousStyle ?? elementStyle;
 
         bool nativeHtmlTable = DomTraversal.IsLocal(tree, id, "table");
-        List<NodeId>? authoredRowChildren = null;
-        if (!nativeHtmlTable)
+
+        // A CSS table - a `display: table` box that is not a `<table>`, or an anonymous table
+        // box - takes its rows, row groups, captions and columns from the computed `display` of
+        // its descendants. A `null` structure means it holds something this engine does not
+        // model, and falling back to ordinary box construction preserves every child.
+        CssTableStructure? cssTable = nativeHtmlTable
+            ? null
+            : DomTableSupport.CollectCssTableStructure(tree, id, styles, tableChildren);
+        if (!nativeHtmlTable && cssTable is null)
         {
-            List<NodeId> flattened = [];
-            FlattenContentsChildren(
-                tree, DomTraversal.RenderedChildren(tree, id), styles, flattened);
-
-            // Full anonymous-table fixup is not represented yet. Falling back to ordinary box
-            // construction preserves every child.
-            foreach (NodeId child in flattened)
-            {
-                bool hidden = styles.TryGetValue(child, out LayoutStyle? childStyle)
-                    && childStyle.Display == Display.None;
-                bool ignorableWhitespace = tree.GetNode(child) is { IsElement: false }
-                    && tree.TextContent(child).Trim().Length == 0;
-                bool isCell = styles.TryGetValue(child, out LayoutStyle? cellStyle)
-                    && cellStyle.IsTableCellBox;
-                if (!hidden && !ignorableWhitespace && !isCell)
-                {
-                    return null;
-                }
-            }
-
-            authoredRowChildren = flattened;
+            return null;
         }
 
         List<(NodeId Row, int GroupEnd)> rows = [];
@@ -361,8 +461,17 @@ internal static partial class DomBuild
         }
         else
         {
-            // CSS table fixup inserts an anonymous row around table-cell children.
-            rows.Add((id, 1));
+            foreach (CssTableRow cssRow in cssTable!.Rows)
+            {
+                // `GroupEnd` only exists to bound `rowspan="0"`, which is an HTML attribute on
+                // a `<td>`; a CSS cell never spans, so every row is its own group here.
+                rows.Add((cssRow.Element ?? id, rows.Count + 1));
+            }
+
+            if (rows.Count == 0)
+            {
+                return null;
+            }
         }
 
         if (rows.Count > MaxRows)
@@ -381,23 +490,23 @@ internal static partial class DomBuild
         {
             (NodeId tr, int groupEnd) = rows[r];
             int c = 0;
-            List<NodeId> rowChildren = nativeHtmlTable
-                ? tree.Children(tr)
-                : authoredRowChildren ?? [];
+            List<NodeId> rowChildren;
+            if (nativeHtmlTable)
+            {
+                rowChildren = tree.Children(tr);
+            }
+            else
+            {
+                CssTableRow cssRow = cssTable!.Rows[r];
+
+                // A row that generated no cell of its own contributes one anonymous cell
+                // holding its whole content, and the row element stands in for that cell.
+                rowChildren = cssRow.WholeRowCell is { } wholeRow ? [wholeRow] : cssRow.Cells;
+            }
+
             foreach (NodeId cid in rowChildren)
             {
-                bool isCell;
-                if (nativeHtmlTable)
-                {
-                    isCell = DomTraversal.IsAnyLocal(tree, cid, "td", "th");
-                }
-                else
-                {
-                    isCell = styles.TryGetValue(cid, out LayoutStyle? cellStyle)
-                        && cellStyle.IsTableCellBox;
-                }
-
-                if (!isCell)
+                if (nativeHtmlTable && !DomTraversal.IsAnyLocal(tree, cid, "td", "th"))
                 {
                     continue;
                 }
@@ -449,26 +558,34 @@ internal static partial class DomBuild
         // needs them before the cells are built.
         List<NodeId> colElems = [];
         List<NodeId?> colGroupOf = [];
-        foreach (NodeId cid in tree.Children(id))
+        if (nativeHtmlTable)
         {
-            switch (DomTraversal.ElementLocalName(tree, cid))
+            foreach (NodeId cid in tree.Children(id))
             {
-                case "col":
-                    colElems.Add(cid);
-                    colGroupOf.Add(null);
-                    break;
-                case "colgroup":
-                    foreach (NodeId gc in tree.Children(cid))
-                    {
-                        if (DomTraversal.IsLocal(tree, gc, "col"))
+                switch (DomTraversal.ElementLocalName(tree, cid))
+                {
+                    case "col":
+                        colElems.Add(cid);
+                        colGroupOf.Add(null);
+                        break;
+                    case "colgroup":
+                        foreach (NodeId gc in tree.Children(cid))
                         {
-                            colElems.Add(gc);
-                            colGroupOf.Add(cid);
+                            if (DomTraversal.IsLocal(tree, gc, "col"))
+                            {
+                                colElems.Add(gc);
+                                colGroupOf.Add(cid);
+                            }
                         }
-                    }
 
-                    break;
+                        break;
+                }
             }
+        }
+        else
+        {
+            colElems.AddRange(cssTable!.Columns);
+            colGroupOf.AddRange(cssTable.ColumnGroups);
         }
 
         ResolveCollapsedBorders(
@@ -480,21 +597,22 @@ internal static partial class DomBuild
         // 141 reports one, the width of the table's border box, and counts its height in the
         // table's.
         List<(NodeId Node, bool Bottom)> captions = [];
-        if (nativeHtmlTable)
+        foreach (NodeId child in nativeHtmlTable ? tree.Children(id) : cssTable!.Captions)
         {
-            foreach (NodeId child in tree.Children(id))
+            if (nativeHtmlTable && !DomTraversal.IsLocal(tree, child, "caption"))
             {
-                if (!DomTraversal.IsLocal(tree, child, "caption")
-                    || !styles.TryGetValue(child, out LayoutStyle? captionStyle)
-                    || captionStyle.Display == Display.None)
-                {
-                    continue;
-                }
-
-                captions.Add((
-                    child,
-                    captionStyle.CaptionSideBottom ?? style.CaptionSideBottom ?? false));
+                continue;
             }
+
+            if (!styles.TryGetValue(child, out LayoutStyle? captionStyle)
+                || captionStyle.Display == Display.None)
+            {
+                continue;
+            }
+
+            captions.Add((
+                child,
+                captionStyle.CaptionSideBottom ?? style.CaptionSideBottom ?? false));
         }
 
         int topCaptions = 0;
@@ -508,6 +626,20 @@ internal static partial class DomBuild
 
         int bottomCaptions = captions.Count - topCaptions;
 
+        // The rows whose whole content is one anonymous cell, so the cell built out of the row
+        // element does not also claim the row's rect - the band below is what reports that.
+        HashSet<NodeId> wholeRowCells = [];
+        if (!nativeHtmlTable)
+        {
+            foreach (CssTableRow cssRow in cssTable!.Rows)
+            {
+                if (cssRow.WholeRowCell is { } wholeRow)
+                {
+                    wholeRowCells.Add(wholeRow);
+                }
+            }
+        }
+
         // Build each cell and pin it to its grid area.
         List<TaffyNodeId> children = [];
         foreach ((NodeId cid, int r, int c, int rs, int cs) in placed)
@@ -518,6 +650,20 @@ internal static partial class DomBuild
             }
 
             TaffyStyle cellStyle = context.TaffyTree.GetStyle(cellNode).Clone();
+            if (wholeRowCells.Contains(cid))
+            {
+                // The box is the row's anonymous cell, not the row. CSS 2.1 17.2.1 gives an
+                // anonymous box only inherited properties, and `margin` and `padding` do not
+                // apply to a row in the first place - Chromium 141 lays a
+                // `display: table-row; margin: 10px; padding: 10px; border: 3px` div holding
+                // `Hello world` out at 105.97 x 19 at the parent's origin, exactly as it lays
+                // out the same div with none of the three.
+                cellStyle.Margin = default;
+                cellStyle.Padding = default;
+                cellStyle.Border = default;
+                context.IdMap.Remove(cellNode);
+            }
+
             cellStyle.GridRow = new TaffyLine(
                 TaffyGridPlacement.FromLineIndex((short)(r + 1 + topCaptions)),
                 TaffyGridPlacement.FromSpan((ushort)rs));
@@ -552,6 +698,114 @@ internal static partial class DomBuild
         if (children.Count == 0)
         {
             return null;
+        }
+
+        // Rows and row groups are not boxes in this table model - the grid's children are the
+        // cells - so a CSS table adds one empty item per row and row group, spanning every
+        // column of the rows it covers, purely so the element has a box to report. An empty
+        // leaf contributes nothing to any track, and Chromium 141 reports exactly that band as
+        // the element's border box: a `display: table-row` whose only content is one anonymous
+        // cell in the first of two columns is still the full 192.66 of a 154.13 + 38.53 table,
+        // not the 154.13 of the cell.
+        if (!nativeHtmlTable)
+        {
+            List<TaffyNodeId> bands = [];
+
+            // A band carries no box of its own, but `position: relative` still offsets it -
+            // Chromium 141 puts a `display: table-row; position: relative; top: 5px` row at
+            // y=5 - so the mapped position and inset travel and nothing else does.
+            TaffyStyle BandStyle(NodeId element)
+            {
+                TaffyStyle band = TaffyStyle.Default;
+                if (styles.TryGetValue(element, out LayoutStyle? elementStyleForBand)
+                    && elementStyleForBand.Position == TaffyPosition.Relative)
+                {
+                    TaffyStyle mapped = TaffyStyleMapping.ToTaffyStyle(elementStyleForBand);
+                    band.Position = mapped.Position;
+                    band.Inset = mapped.Inset;
+                }
+
+                band.FlexGrow = 0f;
+                return band;
+            }
+
+            void AddBand(NodeId element, int firstRow, int rowSpan)
+            {
+                if (firstRow < 0 || firstRow >= nrows || rowSpan <= 0)
+                {
+                    return;
+                }
+
+                TaffyStyle bandStyle = BandStyle(element);
+                bandStyle.GridRow = new TaffyLine(
+                    TaffyGridPlacement.FromLineIndex((short)(firstRow + 1 + topCaptions)),
+                    TaffyGridPlacement.FromSpan((ushort)Math.Min(rowSpan, nrows - firstRow)));
+                bandStyle.GridColumn = new TaffyLine(
+                    TaffyGridPlacement.FromLineIndex(1),
+                    TaffyGridPlacement.FromSpan((ushort)ncols));
+                TaffyNodeId band = context.TaffyTree.NewLeaf(bandStyle);
+                context.IdMap[band] = element;
+                bands.Add(band);
+            }
+
+            for (int r = 0; r < rows.Count; r++)
+            {
+                if (cssTable!.Rows[r].Element is { } rowElement)
+                {
+                    AddBand(rowElement, r, 1);
+                }
+            }
+
+            foreach ((NodeId groupElement, int start, int end) in cssTable!.Groups)
+            {
+                AddBand(groupElement, start, end - start);
+            }
+
+            // A column and a column group get the same treatment across the other axis: every
+            // row of the table, and the columns they cover. Chromium 141 reports a
+            // `display: table-column; width: 200px` div in a two-column table as 0,0 200x19 -
+            // its track and the table's rows - not as the empty box it is outside a table.
+            void AddColumnBand(NodeId element, int firstColumn, int columnSpan)
+            {
+                if (firstColumn < 0 || firstColumn >= ncols || columnSpan <= 0)
+                {
+                    return;
+                }
+
+                TaffyStyle bandStyle = BandStyle(element);
+                bandStyle.GridRow = new TaffyLine(
+                    TaffyGridPlacement.FromLineIndex((short)(topCaptions + 1)),
+                    TaffyGridPlacement.FromSpan((ushort)nrows));
+                bandStyle.GridColumn = new TaffyLine(
+                    TaffyGridPlacement.FromLineIndex((short)(firstColumn + 1)),
+                    TaffyGridPlacement.FromSpan((ushort)Math.Min(columnSpan, ncols - firstColumn)));
+                TaffyNodeId band = context.TaffyTree.NewLeaf(bandStyle);
+                context.IdMap[band] = element;
+                bands.Add(band);
+            }
+
+            Dictionary<NodeId, (int Start, int End)> columnGroupSpans = [];
+            for (int index = 0; index < colElems.Count && index < ncols; index++)
+            {
+                AddColumnBand(colElems[index], index, 1);
+                if (colGroupOf[index] is not { } columnGroup)
+                {
+                    continue;
+                }
+
+                columnGroupSpans[columnGroup] =
+                    columnGroupSpans.TryGetValue(columnGroup, out (int Start, int End) span)
+                        ? (span.Start, index + 1)
+                        : (index, index + 1);
+            }
+
+            foreach ((NodeId columnGroup, (int start, int end)) in columnGroupSpans)
+            {
+                AddColumnBand(columnGroup, start, end - start);
+            }
+
+            // Bands come first so a row or group background paints behind its cells.
+            children.InsertRange(0, bands);
         }
 
         // Column sizing pre-pass: specified widths on <col> elements and on colspan-1 cells
@@ -651,7 +905,10 @@ internal static partial class DomBuild
         int nextCol = 0;
         foreach (NodeId colEl in colElems)
         {
-            int span = Math.Clamp(SpanAttr(colEl, "span"), 1, MaxSpan);
+            // `span` is an HTML attribute on `<col>` / `<colgroup>`, and Chromium 141 ignores it
+            // on anything else: a `display: table-column; width: 150px` div carrying `span=2` in
+            // a 600px two-column table sizes only the first column, leaving 150 / 450.
+            int span = nativeHtmlTable ? Math.Clamp(SpanAttr(colEl, "span"), 1, MaxSpan) : 1;
             (float? px, float? pct) = StyleWidth(colEl);
             (float? fixedPx, float? fixedPct) = FixedStyleWidth(colEl);
             for (int index = 0; index < span; index++)
@@ -677,6 +934,15 @@ internal static partial class DomBuild
         foreach ((NodeId cid, int _, int c, int _, int cs) in placed)
         {
             if (cs != 1 || c >= ncols)
+            {
+                continue;
+            }
+
+            // An anonymous cell carries no width of its own, so the `width` on the row element
+            // standing in for it sizes nothing. Chromium 141 leaves a
+            // `display: table-row; width: 300px` div holding `Hello world` at its 105.97
+            // shrink-to-fit width.
+            if (wholeRowCells.Contains(cid))
             {
                 continue;
             }
@@ -757,16 +1023,17 @@ internal static partial class DomBuild
             rowMin.Add(null);
         }
 
-        if (nativeHtmlTable)
+        for (int r = 0; r < rows.Count; r++)
         {
-            for (int r = 0; r < rows.Count; r++)
+            // A CSS anonymous row has no element, and `rows[r].Row` is then the table itself,
+            // whose own height is not a row minimum.
+            NodeId? rowElement = nativeHtmlTable ? rows[r].Row : cssTable!.Rows[r].Element;
+            if (rowElement is { } element
+                && styles.TryGetValue(element, out LayoutStyle? rowStyle)
+                && rowStyle.Height.Kind == DimensionKind.Px
+                && rowStyle.Height.Value > 0f)
             {
-                if (styles.TryGetValue(rows[r].Row, out LayoutStyle? rowStyle)
-                    && rowStyle.Height.Kind == DimensionKind.Px
-                    && rowStyle.Height.Value > 0f)
-                {
-                    rowMin[r] = rowStyle.Height.Value;
-                }
+                rowMin[r] = rowStyle.Height.Value;
             }
         }
 
