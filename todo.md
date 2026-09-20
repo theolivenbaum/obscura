@@ -1219,6 +1219,37 @@ started and joined an OS thread. A runaway `while (true) {}` is still interrupte
 against a 250ms budget, and `Stop()` still reports that it fired.
 `Obscura.Js.Tests.WatchdogSchedulerTests` pins all three.
 
+### What the CDP pool move did and did not change
+
+Three things were flagged when connections moved off dedicated threads. Revisited with the code
+rather than left open:
+
+**Page suspension stays.** `CdpContext.GetSessionPageMut` suspends any other page of the same
+connection that holds a live JS runtime before resuming the target. Its comment used to justify
+that with "V8 allows one entered isolate per OS thread", which is a rusty_v8 property and never
+true here; the comment is corrected. The behaviour has an independent reason and keeps it: it
+bounds a connection to one live isolate and the document behind it, and a document is hundreds of
+megabytes on a large page. Relaxing it is a memory trade needing its own measurement, not a
+comment fix.
+
+**The two `[ThreadStatic]` caches are genuinely caches.** `SelectorParser._cache` is a bounded
+256-entry selector cache, and `HtmlParsing._parser` / `_contextDocument` are an AngleSharp parser
+and the document that owns fragment context elements. `CreateContextElement` calls
+`document.CreateElement`, which does not insert, so the context document does not accumulate
+nodes across parses and nothing about correctness depends on which thread runs. Being per-pool-
+thread rather than per-connection-thread is therefore a hit-rate question only, and Cdp suite
+wall time is unchanged either side of the move.
+
+**The control plane was never exposed; the WebSocket upgrade is, slightly.** `/json/*` is served
+synchronously on the accept thread (`HandleHttpJsonBlocking`), so it stays responsive however
+busy the pool is - which is what `ControlPlaneUnblockedTests.HttpControlPlaneUnblockedDuringLongJs`
+pins. What does go through the pool is a new connection's first slice, so a pool saturated by
+synchronous V8 can delay its 101 until the runtime injects another thread. That is latency, not a
+hang. `TaskCreationOptions.LongRunning` on that one `StartNew` is the remedy if it is ever
+measured to matter; it was not taken, because the suite is too load-sensitive on this box to
+measure the difference honestly - at the time of writing, HEAD itself failed 3 of 4 full runs
+with three different tests while two other builds were running.
+
 ### Flake: the heavy-page fixture spawned an OS thread per connection
 
 `ConcurrentConnectionsHeavyPageTests.ConcurrentConnectionsHeavyPageDoNotAbortV8` is the most
