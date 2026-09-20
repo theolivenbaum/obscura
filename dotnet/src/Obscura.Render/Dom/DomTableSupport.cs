@@ -41,6 +41,29 @@ internal enum TableInternalRole : byte
     Cell,
 }
 
+/// <summary>
+/// One cell of a CSS table row: either an authored <c>table-cell</c> box, or the anonymous
+/// cell CSS 2.1 17.2.1 generates around a run of consecutive children that are not proper
+/// table children.
+/// </summary>
+internal sealed class CssTableCell
+{
+    /// <summary>The authored cell element, or <c>null</c> for an anonymous cell.</summary>
+    internal NodeId? Element { get; init; }
+
+    /// <summary>
+    /// The element whose children this cell came from - the table, row group or row box that
+    /// generated it. An anonymous cell takes its inherited properties from it.
+    /// </summary>
+    internal NodeId Owner { get; init; }
+
+    /// <summary>
+    /// The consecutive children an anonymous cell wraps, in source order. Empty for an
+    /// authored cell.
+    /// </summary>
+    internal List<NodeId> AnonymousContent { get; } = [];
+}
+
 /// <summary>One row of a CSS table, with the cells it contributes to the table grid.</summary>
 internal sealed class CssTableRow
 {
@@ -50,8 +73,8 @@ internal sealed class CssTableRow
     /// </summary>
     internal NodeId? Element { get; init; }
 
-    /// <summary>The row's <c>table-cell</c> children, in source order.</summary>
-    internal List<NodeId> Cells { get; } = [];
+    /// <summary>The cells the row contributes, in source order.</summary>
+    internal List<CssTableCell> Cells { get; } = [];
 
     /// <summary>
     /// Set when the row generated no cell of its own and its whole content is therefore one
@@ -559,22 +582,31 @@ internal static class DomTableSupport
     /// (nested, and with header groups hoisted to the front and footer groups pushed to the
     /// back), anonymous rows around loose cells, and captions.
     /// <para>
-    /// Deliberately not modelled, and the reason each answers <c>null</c> or is skipped:
-    /// a row that mixes cells with non-cell children needs a genuine anonymous cell box around
-    /// each run of the latter, which has no DOM node to hang an inline formatting context on;
-    /// and a non-table-internal child of the table box needs the same treatment one level up.
-    /// See "Known deviations" in todo.md.
+    /// A run of consecutive children that are not proper table children becomes one anonymous
+    /// cell (<c>DomBuild.BuildAnonymousCell</c>), which is a box with no DOM node. Rust
+    /// generates none, so such a table was not built at all and the caller fell back to
+    /// ordinary blocks; Chromium 141 shrink-to-fits
+    /// <c>&lt;div style="display:table"&gt;aa&lt;/div&gt;</c> to 19.2 rather than the 600 that
+    /// produced. A table box holding no cell at all - only a caption, or only columns, or only
+    /// collapsible whitespace - still answers <c>null</c>. See "Known deviations" in todo.md.
     /// </para>
     /// </remarks>
     /// <param name="tableChildren">
     /// The children the table is built from, when it is an anonymous table over one run of a
     /// parent's children rather than over an element's whole child list.
     /// </param>
+    /// <param name="genuineTableBox">
+    /// Whether <paramref name="table"/> is a table box in its own right. Only then does a
+    /// child that is not a proper table child generate an anonymous cell inside the table; a
+    /// generated anonymous table box covers only the run of table-internal children, so such a
+    /// child means the whole-element table cannot be built and the caller falls back.
+    /// </param>
     internal static CssTableStructure? CollectCssTableStructure(
         DomTree tree,
         NodeId table,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        IReadOnlyList<NodeId>? tableChildren = null)
+        IReadOnlyList<NodeId>? tableChildren = null,
+        bool genuineTableBox = true)
     {
         CssTableStructure structure = new();
 
@@ -628,10 +660,30 @@ internal static class DomTableSupport
                 }
             }
 
-            List<NodeId> pendingCells = [];
+            List<CssTableCell> pendingCells = [];
+            List<NodeId> pendingAnonymous = [];
+
+            // CSS 2.1 17.2.1 wraps each maximal run of consecutive children that are not
+            // proper table children in one anonymous cell, which then joins the anonymous row
+            // its neighbouring loose cells form. Chromium 141 lays
+            // `display: table` over `table-cell aa` + `div bb` out as one 38.41 row of two
+            // 19.2 cells, not as two stacked blocks.
+            void FlushAnonymousCell()
+            {
+                if (pendingAnonymous.Count == 0)
+                {
+                    return;
+                }
+
+                CssTableCell cell = new() { Owner = parent };
+                cell.AnonymousContent.AddRange(pendingAnonymous);
+                pendingCells.Add(cell);
+                pendingAnonymous.Clear();
+            }
 
             void FlushPendingCells()
             {
+                FlushAnonymousCell();
                 if (pendingCells.Count == 0)
                 {
                     return;
@@ -653,7 +705,8 @@ internal static class DomTableSupport
                 switch (BlockifiableRoleOf(child, styles))
                 {
                     case TableInternalRole.Cell:
-                        pendingCells.Add(child);
+                        FlushAnonymousCell();
+                        pendingCells.Add(new CssTableCell { Element = child, Owner = parent });
                         continue;
 
                     case TableInternalRole.Row:
@@ -723,7 +776,13 @@ internal static class DomTableSupport
                     }
 
                     default:
-                        return false;
+                        if (!genuineTableBox && parent == table)
+                        {
+                            return false;
+                        }
+
+                        pendingAnonymous.Add(child);
+                        continue;
                 }
             }
 
@@ -752,8 +811,8 @@ internal static class DomTableSupport
     }
 
     /// <summary>
-    /// Read one CSS table row. Answers <c>null</c> when the row mixes cells with content that
-    /// would need an anonymous cell of its own.
+    /// Read one CSS table row, wrapping each run of children that are not cells in an
+    /// anonymous cell of its own.
     /// </summary>
     private static CssTableRow? CollectCssTableRow(
         DomTree tree,
@@ -764,8 +823,23 @@ internal static class DomTableSupport
         DomBuild.FlattenContentsChildren(
             tree, DomTraversal.RenderedChildren(tree, id), styles, children);
 
-        List<NodeId> cells = [];
-        bool anythingElse = false;
+        List<CssTableCell> cells = [];
+        List<NodeId> pendingAnonymous = [];
+        bool anyAuthoredCell = false;
+
+        void FlushAnonymousCell()
+        {
+            if (pendingAnonymous.Count == 0)
+            {
+                return;
+            }
+
+            CssTableCell cell = new() { Owner = id };
+            cell.AnonymousContent.AddRange(pendingAnonymous);
+            cells.Add(cell);
+            pendingAnonymous.Clear();
+        }
+
         foreach (NodeId child in children)
         {
             if (IsIgnorableTableChild(tree, child, styles))
@@ -775,15 +849,20 @@ internal static class DomTableSupport
 
             if (BlockifiableRoleOf(child, styles) == TableInternalRole.Cell)
             {
-                cells.Add(child);
+                FlushAnonymousCell();
+                cells.Add(new CssTableCell { Element = child, Owner = id });
+                anyAuthoredCell = true;
             }
             else
             {
-                anythingElse = true;
+                // CSS 2.1 17.2.1: a run of children that are not cells becomes one anonymous
+                // cell beside the authored ones. Chromium 141 puts the `bb` of a row holding
+                // `table-cell aa` + `div bb` at x=19.2 in the same 38.41 row.
+                pendingAnonymous.Add(child);
             }
         }
 
-        if (cells.Count == 0)
+        if (!anyAuthoredCell)
         {
             // The row's whole content is one anonymous cell, which fills the row, so the row
             // element stands in for it: an anonymous box takes only inherited properties and a
@@ -792,10 +871,7 @@ internal static class DomTableSupport
             return new CssTableRow { Element = id, WholeRowCell = id };
         }
 
-        if (anythingElse)
-        {
-            return null;
-        }
+        FlushAnonymousCell();
 
         CssTableRow row = new() { Element = id };
         row.Cells.AddRange(cells);

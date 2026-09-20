@@ -1,8 +1,10 @@
 // Port of `build_table` in crates/obscura-render/src/dom.rs.
 using System.Globalization;
 using Obscura.Dom;
+using TaffyAlignItems = Obscura.Render.Layout.AlignItems;
 using TaffyDimension = Obscura.Render.Layout.Dimension;
 using TaffyDisplay = Obscura.Render.Layout.Display;
+using TaffyFlexDirection = Obscura.Render.Layout.FlexDirection;
 using TaffyGridPlacement = Obscura.Render.Layout.GridPlacement;
 using TaffyGridTemplateComponent = Obscura.Render.Layout.GridTemplateComponent;
 using TaffyLengthPercentage = Obscura.Render.Layout.LengthPercentage;
@@ -22,6 +24,207 @@ internal static partial class DomBuild
     private const int MaxSpan = 1000;
     private const int MaxCols = 1024;
     private const int MaxRows = 10000;
+
+    /// <summary>A cell placed in the table grid, with the area it occupies.</summary>
+    private readonly record struct PlacedCell(
+        CssTableCell Cell,
+        int Row,
+        int Column,
+        int RowSpan,
+        int ColSpan);
+
+    /// <summary>
+    /// Build the anonymous table cell CSS 2.1 17.2.1 generates around <paramref name="content"/>
+    /// - a run of consecutive children of <paramref name="owner"/> that are not proper table
+    /// children. The box has no DOM node, so it gets no <see cref="BuildContext.IdMap"/> entry
+    /// and nothing reports it.
+    /// </summary>
+    /// <remarks>
+    /// New behaviour, not a port: crates/obscura-render/src/dom.rs generates no anonymous cell
+    /// at all, so a table box holding anything that is not a row, group, column or cell was not
+    /// built as a table and fell back to ordinary block layout - `&lt;div style="display:table"&gt;aa&lt;/div&gt;`
+    /// came out 600 wide where Chromium 141 shrink-to-fits it to 19.2 in
+    /// `16px/18px "Liberation Mono"`, and a `table-cell` beside a plain div stacked instead of
+    /// sharing one 38.41 row.
+    /// <para>
+    /// The cell's own box is a block container: its inline runs fold through the text engine
+    /// the way <see cref="BuildMixedBlock"/> folds them, under <paramref name="owner"/>'s
+    /// inline-formatting-context key, since the anonymous box has no key of its own. An
+    /// anonymous box takes only inherited properties, so it carries no margin, padding or
+    /// border and no sizing.
+    /// </para>
+    /// </remarks>
+    private static TaffyNodeId? BuildAnonymousCell(
+        BuildContext context,
+        NodeId owner,
+        LayoutStyle ownerStyle,
+        IReadOnlyList<NodeId> content)
+    {
+        DomTree tree = context.Tree;
+
+        List<TaffyNodeId> childIds = [];
+        List<NodeId> outOfFlow = [];
+        List<NodeId> run = [];
+        bool hasBlockChild = false;
+        bool hasInlineContent = false;
+
+        void FlushRun()
+        {
+            // Collapsible source formatting at the edges of an inline run creates no line width.
+            bool IsWhitespaceText(NodeId cid) =>
+                tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).Trim().Length == 0;
+
+            while (run.Count != 0 && IsWhitespaceText(run[0]))
+            {
+                run.RemoveAt(0);
+            }
+
+            while (run.Count != 0 && IsWhitespaceText(run[^1]))
+            {
+                run.RemoveAt(run.Count - 1);
+            }
+
+            if (run.Count == 0)
+            {
+                return;
+            }
+
+            hasInlineContent = true;
+            if (context.Engine.TryBuildRun(tree, owner, run, context.Styles) is { } item)
+            {
+                TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(RunLeafStyle(), item);
+                if (!context.Ifc.Runs.TryGetValue(owner, out List<int>? items))
+                {
+                    items = [];
+                    context.Ifc.Runs[owner] = items;
+                }
+
+                items.Add(item);
+                childIds.Add(leaf);
+                run.Clear();
+                return;
+            }
+
+            bool hasTextStrut = false;
+            List<TaffyNodeId> atoms = [];
+            foreach (NodeId cid in run)
+            {
+                hasTextStrut |= DomTraversal.IsTextNode(tree, cid);
+                atoms.AddRange(BuildAny(context, cid));
+            }
+
+            run.Clear();
+            if (atoms.Count == 0)
+            {
+                return;
+            }
+
+            childIds.Add(context.TaffyTree.NewWithChildren(
+                RunWrapperStyle(ownerStyle, hasTextStrut), [.. atoms]));
+        }
+
+        foreach (NodeId cid in content)
+        {
+            if (tree.GetNode(cid) is not { } node)
+            {
+                continue;
+            }
+
+            bool isText = node.IsText;
+            if (!isText && !node.IsElement)
+            {
+                continue;
+            }
+
+            bool inlineLevel = true;
+            if (!isText)
+            {
+                if (!context.Styles.TryGetValue(cid, out LayoutStyle? childStyle))
+                {
+                    inlineLevel = false;
+                }
+                else if (childStyle.Display == Display.None)
+                {
+                    continue;
+                }
+                else if (childStyle.Position == TaffyPosition.Absolute)
+                {
+                    outOfFlow.Add(cid);
+                    continue;
+                }
+                else
+                {
+                    inlineLevel = DomTraversal.IsLocal(tree, cid, "br")
+                        || LayoutStyleExtensions.IsInlineLevelBox(childStyle);
+                }
+            }
+
+            if (inlineLevel)
+            {
+                run.Add(cid);
+                continue;
+            }
+
+            FlushRun();
+            hasBlockChild = true;
+            childIds.AddRange(BuildAny(context, cid));
+        }
+
+        FlushRun();
+        foreach (NodeId cid in outOfFlow)
+        {
+            childIds.AddRange(BuildAny(context, cid));
+        }
+
+        if (childIds.Count == 0)
+        {
+            return null;
+        }
+
+        TaffyStyle cellStyle = TaffyStyle.Default;
+        cellStyle.FlexGrow = 0f;
+        cellStyle.FlexShrink = 0f;
+        cellStyle.MinSize = new Layout.Size<TaffyDimension>(
+            TaffyDimension.FromLength(0f), TaffyDimension.Auto);
+
+        // The same three shapes an authored cell takes in `Build`: block-level children only
+        // become the column-flex stand-in this engine lays a cell's block children out with,
+        // and a cell mixing the two is real block layout. Block layout is what collapses a
+        // child's margins out through the cell, which a cell's block formatting context must
+        // not do - a `display: table` div holding one `margin: 10px` block is 38 tall in
+        // Chromium 141, and was 28 with the cell laid out as a block.
+        if (hasBlockChild && !hasInlineContent)
+        {
+            cellStyle.Display = TaffyDisplay.Flex;
+            cellStyle.FlexDirection = TaffyFlexDirection.Column;
+            cellStyle.AlignItems = TaffyAlignItems.FlexStart;
+            foreach (TaffyNodeId child in childIds)
+            {
+                bool fillsInlineAxis = context.IdMap.TryGetValue(child, out NodeId domId)
+                    && context.Styles.TryGetValue(domId, out LayoutStyle? childStyle)
+                    && childStyle.Display == Display.Block
+                    && childStyle.Width.IsAuto
+                    && childStyle.Float is null
+                    && childStyle.Position != TaffyPosition.Absolute;
+                TaffyStyle blockItem = context.TaffyTree.GetStyle(child).Clone();
+                blockItem.FlexShrink = 0f;
+                if (fillsInlineAxis)
+                {
+                    Layout.Size<TaffyDimension> size = blockItem.Size;
+                    size.Width = TaffyDimension.FromPercent(1f);
+                    blockItem.Size = size;
+                }
+
+                context.TaffyTree.SetStyle(child, blockItem);
+            }
+        }
+        else
+        {
+            cellStyle.Display = TaffyDisplay.Block;
+        }
+
+        return context.TaffyTree.NewWithChildren(cellStyle, [.. childIds]);
+    }
 
     /// <summary>
     /// Whether <paramref name="id"/> is an element with table-internal children but a
@@ -49,10 +252,21 @@ internal static partial class DomBuild
         LayoutStyle style,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
-        if (style.IsTableBox || style.DisplayContents || style.IsTableCellBox)
+        if (style.IsTableBox || style.DisplayContents)
         {
             return false;
         }
+
+        // A cell is deliberately NOT excluded here. It used to be, alongside the two above,
+        // which answered false before the child loop ran and so gave a `table-cell` parent no
+        // anonymous table for table-internal children of its own: two `display: table-cell`
+        // divs inside one stacked 20 wide and 36 tall where Chromium 141 puts them in a single
+        // 38.41 x 18 anonymous row, and the same two inside a `<td>` did too. A cell is an
+        // ordinary non-table box as far as CSS 2.1 17.2.1 is concerned, and the cells this
+        // engine generates for its own internal flex containers are the cells of a table this
+        // function is never asked about - `BuildTable` builds them from the table's structure
+        // and reaches their elements through `Build`, which asks about the element's own
+        // children, not about the generated box.
 
         // A `<table>` whose authored display cleared the UA table box. Its rows are still
         // table-internal, and BuildTable answers null when it holds no cells at all.
@@ -197,7 +411,7 @@ internal static partial class DomBuild
         LayoutStyle style,
         bool nativeHtmlTable,
         List<(NodeId Row, int GroupEnd)> rows,
-        List<(NodeId Cell, int Row, int Column, int RowSpan, int ColSpan)> placed,
+        List<PlacedCell> placed,
         int ncols,
         List<NodeId> colElems,
         List<NodeId?> colGroupOf)
@@ -211,9 +425,9 @@ internal static partial class DomBuild
         if (style.BorderCollapse != true)
         {
             style.CollapsedBorder = null;
-            foreach ((NodeId cell, int _, int _, int _, int _) in placed)
+            foreach (PlacedCell placedCell in placed)
             {
-                if (StyleOf(cell) is { } cellStyle)
+                if (placedCell.Cell.Element is { } cell && StyleOf(cell) is { } cellStyle)
                 {
                     cellStyle.CollapsedBorder = null;
                 }
@@ -280,10 +494,19 @@ internal static partial class DomBuild
         }
 
         List<DomTableCollapsedBorders.Cell> cells = new(placed.Count);
-        foreach ((NodeId cell, int r, int c, int rs, int cs) in placed)
+        foreach (PlacedCell placedCell in placed)
         {
+            // An anonymous cell has no border of its own to contribute to the collapse, and
+            // nothing to write the resolved half back to.
+            Edges border = placedCell.Cell.Element is { } cell
+                ? StyleOf(cell)?.Border ?? default
+                : default;
             cells.Add(new DomTableCollapsedBorders.Cell(
-                r, c, rs, cs, StyleOf(cell)?.Border ?? default));
+                placedCell.Row,
+                placedCell.Column,
+                placedCell.RowSpan,
+                placedCell.ColSpan,
+                border));
         }
 
         (Edges tableBorder, Edges[] cellBorders) = DomTableCollapsedBorders.Resolve(
@@ -292,7 +515,7 @@ internal static partial class DomBuild
         style.CollapsedBorder = tableBorder;
         for (int index = 0; index < placed.Count; index++)
         {
-            if (StyleOf(placed[index].Cell) is { } cellStyle)
+            if (placed[index].Cell.Element is { } cell && StyleOf(cell) is { } cellStyle)
             {
                 cellStyle.CollapsedBorder = cellBorders[index];
             }
@@ -356,9 +579,9 @@ internal static partial class DomBuild
     /// element-wide table cannot be built at all and every row fell back to a full-width block.
     /// <para>
     /// A `display: table` parent is excluded on purpose: a non-table child of a table box is
-    /// wrapped in an anonymous row and cell *inside* that table, not in a table of its own, and
-    /// this engine does not generate an anonymous cell. So is a flex or grid container, whose
-    /// items are blockified.
+    /// wrapped in an anonymous row and cell *inside* that table, not in a table of its own -
+    /// which is what `BuildAnonymousCell` now does, so such a parent never reaches here. So is
+    /// a flex or grid container, whose items are blockified.
     /// </para>
     /// </remarks>
     internal static List<NodeId>? AnonymousTableRun(BuildContext context, NodeId id)
@@ -442,9 +665,16 @@ internal static partial class DomBuild
         // box - takes its rows, row groups, captions and columns from the computed `display` of
         // its descendants. A `null` structure means it holds something this engine does not
         // model, and falling back to ordinary box construction preserves every child.
+        // Only a genuine table box wraps its own loose children in anonymous cells. An
+        // anonymous table box generated inside an element that is not a table covers just the
+        // run of table-internal children (`AnonymousTableRun`); everything else stays in the
+        // element's own formatting context, which is where Chromium 141 leaves it - the `xx`
+        // of a `table-cell` div holding `xx` plus two cells is a line of its own above a
+        // 38.41 x 18 anonymous table, not a third cell beside them.
         CssTableStructure? cssTable = nativeHtmlTable
             ? null
-            : DomTableSupport.CollectCssTableStructure(tree, id, styles, tableChildren);
+            : DomTableSupport.CollectCssTableStructure(
+                tree, id, styles, tableChildren, genuineTableBox: anonymousStyle is null);
         if (!nativeHtmlTable && cssTable is null)
         {
             return null;
@@ -484,16 +714,20 @@ internal static partial class DomBuild
         int SpanAttr(NodeId cid, string name) => SpanAttribute(tree, cid, name);
 
         HashSet<(int Row, int Column)> occupied = [];
-        List<(NodeId Cell, int Row, int Column, int RowSpan, int ColSpan)> placed = [];
+        List<PlacedCell> placed = [];
         int ncols = 0;
         for (int r = 0; r < rows.Count; r++)
         {
             (NodeId tr, int groupEnd) = rows[r];
             int c = 0;
-            List<NodeId> rowChildren;
+            List<CssTableCell> rowChildren;
             if (nativeHtmlTable)
             {
-                rowChildren = tree.Children(tr);
+                rowChildren = [];
+                foreach (NodeId cid in tree.Children(tr))
+                {
+                    rowChildren.Add(new CssTableCell { Element = cid, Owner = tr });
+                }
             }
             else
             {
@@ -501,21 +735,27 @@ internal static partial class DomBuild
 
                 // A row that generated no cell of its own contributes one anonymous cell
                 // holding its whole content, and the row element stands in for that cell.
-                rowChildren = cssRow.WholeRowCell is { } wholeRow ? [wholeRow] : cssRow.Cells;
+                rowChildren = cssRow.WholeRowCell is { } wholeRow
+                    ? [new CssTableCell { Element = wholeRow, Owner = wholeRow }]
+                    : cssRow.Cells;
             }
 
-            foreach (NodeId cid in rowChildren)
+            foreach (CssTableCell cell in rowChildren)
             {
-                if (nativeHtmlTable && !DomTraversal.IsAnyLocal(tree, cid, "td", "th"))
+                NodeId? element = cell.Element;
+                if (element is { } cid)
                 {
-                    continue;
-                }
+                    if (nativeHtmlTable && !DomTraversal.IsAnyLocal(tree, cid, "td", "th"))
+                    {
+                        continue;
+                    }
 
-                // A hidden cell is removed from the table model entirely.
-                if (styles.TryGetValue(cid, out LayoutStyle? hiddenStyle)
-                    && hiddenStyle.Display == Display.None)
-                {
-                    continue;
+                    // A hidden cell is removed from the table model entirely.
+                    if (styles.TryGetValue(cid, out LayoutStyle? hiddenStyle)
+                        && hiddenStyle.Display == Display.None)
+                    {
+                        continue;
+                    }
                 }
 
                 while (occupied.Contains((r, c)))
@@ -528,10 +768,16 @@ internal static partial class DomBuild
                     break;
                 }
 
-                int cs = nativeHtmlTable ? Math.Clamp(SpanAttr(cid, "colspan"), 1, MaxSpan) : 1;
+                // `colspan` / `rowspan` are HTML attributes on a `<td>`; a CSS cell, authored
+                // or anonymous, always occupies one slot.
+                int cs = nativeHtmlTable && element is { } spanCell
+                    ? Math.Clamp(SpanAttr(spanCell, "colspan"), 1, MaxSpan)
+                    : 1;
 
                 // rowspan=0 means "span to the end of this row group".
-                int rsRaw = nativeHtmlTable ? SpanAttr(cid, "rowspan") : 1;
+                int rsRaw = nativeHtmlTable && element is { } rowSpanCell
+                    ? SpanAttr(rowSpanCell, "rowspan")
+                    : 1;
                 int rowsLeftInGroup = Math.Max(Math.Min(groupEnd, nrows) - r, 1);
                 int rs = Math.Clamp(rsRaw == 0 ? rowsLeftInGroup : rsRaw, 1, rowsLeftInGroup);
                 for (int dr = 0; dr < rs; dr++)
@@ -542,7 +788,7 @@ internal static partial class DomBuild
                     }
                 }
 
-                placed.Add((cid, r, c, rs, cs));
+                placed.Add(new PlacedCell(cell, r, c, rs, cs));
                 c += cs;
                 ncols = Math.Min(Math.Max(ncols, c), MaxCols);
             }
@@ -642,15 +888,19 @@ internal static partial class DomBuild
 
         // Build each cell and pin it to its grid area.
         List<TaffyNodeId> children = [];
-        foreach ((NodeId cid, int r, int c, int rs, int cs) in placed)
+        foreach (PlacedCell placedCell in placed)
         {
-            if (Build(context, cid) is not { } cellNode)
+            (CssTableCell cell, int r, int c, int rs, int cs) = placedCell;
+            TaffyNodeId? built = cell.Element is { } cellElement
+                ? Build(context, cellElement)
+                : BuildAnonymousCell(context, cell.Owner, style, cell.AnonymousContent);
+            if (built is not { } cellNode)
             {
                 continue;
             }
 
             TaffyStyle cellStyle = context.TaffyTree.GetStyle(cellNode).Clone();
-            if (wholeRowCells.Contains(cid))
+            if (cell.Element is { } cid && wholeRowCells.Contains(cid))
             {
                 // The box is the row's anonymous cell, not the row. CSS 2.1 17.2.1 gives an
                 // anonymous box only inherited properties, and `margin` and `padding` do not
@@ -681,9 +931,11 @@ internal static partial class DomBuild
             size.Width = TaffyDimension.Auto;
             cellStyle.Size = size;
 
-            // Taffy's grid-item automatic minimum is an engine artifact here.
-            if (styles.TryGetValue(cid, out LayoutStyle? cellLayoutStyle)
-                && cellLayoutStyle.MinWidth.IsAuto)
+            // Taffy's grid-item automatic minimum is an engine artifact here. An anonymous
+            // cell has no `min-width` of its own, so it always takes the zero.
+            if (cell.Element is not { } minWidthCell
+                || !styles.TryGetValue(minWidthCell, out LayoutStyle? cellLayoutStyle)
+                || cellLayoutStyle.MinWidth.IsAuto)
             {
                 Layout.Size<TaffyDimension> minSize = cellStyle.MinSize;
                 minSize.Width = TaffyDimension.FromLength(0f);
@@ -931,9 +1183,12 @@ internal static partial class DomBuild
         }
 
         // colspan-1 cells override <col> (they are closer to the content).
-        foreach ((NodeId cid, int _, int c, int _, int cs) in placed)
+        foreach (PlacedCell placedCell in placed)
         {
-            if (cs != 1 || c >= ncols)
+            (CssTableCell cell, int _, int c, int _, int cs) = placedCell;
+
+            // An anonymous cell carries no declared width, so it sizes no column.
+            if (cs != 1 || c >= ncols || cell.Element is not { } cid)
             {
                 continue;
             }
@@ -976,9 +1231,10 @@ internal static partial class DomBuild
         if (fixedLayout)
         {
             (float horizontalSpacing, _) = DomStyleFixups.TableSpacing(style);
-            foreach ((NodeId cid, int row, int start, int _, int colspan) in placed)
+            foreach (PlacedCell placedCell in placed)
             {
-                if (row != 0 || start >= ncols)
+                (CssTableCell cell, int row, int start, int _, int colspan) = placedCell;
+                if (row != 0 || start >= ncols || cell.Element is not { } cid)
                 {
                     continue;
                 }
@@ -1037,9 +1293,10 @@ internal static partial class DomBuild
             }
         }
 
-        foreach ((NodeId cid, int r, int _, int rs, int _) in placed)
+        foreach (PlacedCell placedCell in placed)
         {
-            if (rs != 1)
+            (CssTableCell cell, int r, int _, int rs, int _) = placedCell;
+            if (rs != 1 || cell.Element is not { } cid)
             {
                 continue;
             }

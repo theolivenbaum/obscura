@@ -1273,7 +1273,7 @@ first, and the `-webkit-line-clamp` adjustment has its own earlier arm - so `(Bl
 Also not parsed at all, and left: the two-value `display: inline flow-root`, which Chromium
 reports as `inline-block`.
 
-### An authored internal table `display` is laid out, except where an anonymous cell is needed
+### An authored internal table `display` is laid out, anonymous cells and all
 
 `crates/obscura-render/src/style.rs` rejects `table-row`, `table-row-group`,
 `table-header-group`, `table-footer-group`, `table-column`, `table-column-group` and
@@ -1324,6 +1324,41 @@ box.
   siblings - before, one table over all of an element's children was the only shape available
   and a mixed child list produced none at all. Verified: a block between two `display: table-row`
   divs produces two separate anonymous tables, not one.
+- **A run of children that are not proper table children is one anonymous cell**
+  (`DomBuild.BuildAnonymousCell`). Rust generates none, so `BuildTable` answered `null` for any
+  such table and the fallback was ordinary block layout, which is where the shrink-to-fit went
+  too: `<div style="display:table">aa</div>` was 600 against Chromium's 19.20. The cell is a box
+  with no DOM node, so it gets no `IdMap` entry, contributes no border to the collapsing model,
+  sizes no column, takes no span and is no row minimum. Its inline runs fold through
+  `TextEngine.TryBuildRun` under the *owner's* `Ifc.Runs` key, because the anonymous box has no
+  key of its own, and its inner display is the one an authored cell takes in `Build` for the same
+  content - the column-flex stand-in for block-level children only, block layout otherwise. That
+  split is not cosmetic and it is the opposite of what the gap was first sized as: a cell
+  establishes a block formatting context and taffy's block layout collapses a child's trailing
+  margin out through it, which made a table over one `margin: 10px` block 28 tall against
+  Chromium's 38. Verified against Chromium: a table over plain text, one block, one inline, two
+  consecutive blocks (one cell, 19.20 x 36, not two columns), a cell beside a block in either
+  order (38.41 in one row), a row mixing the two, and an anonymous cell taking the column width
+  the row above negotiated.
+- **Only a genuine table box wraps its loose children that way.** An anonymous table box
+  generated inside an element that is not a table covers just the run of table-internal children
+  (`AnonymousTableRun`); everything else stays in the element's own formatting context. Chromium
+  141 leaves the `xx` of a `display: table-cell` div holding `xx` plus two cells as a line of its
+  own above a 38.41 x 18 anonymous table, not as a third cell beside them, so
+  `CollectCssTableStructure` takes a `genuineTableBox` flag and still answers `null` at the top
+  level without it. Inside a *row* the wrapping always applies, genuine table or not.
+- **A `table-cell` parent generates the anonymous table its table-internal children need.**
+  `WantsAnonymousTableBox` used to answer false for `IsTableCellBox` before it looked at the
+  children, so two `display: table-cell` divs inside a `display: table-cell` div stacked (20 wide,
+  36 tall) where Chromium puts them in one 38.41 x 18 anonymous row, and the same two inside a
+  `<td>` did too. The guard is gone rather than narrowed: a cell is an ordinary non-table box as
+  far as 17.2.1 is concerned, and the cells this engine generates for its own internal flex
+  containers are never what the function is asked about - `BuildTable` builds them from the
+  table's structure and reaches their elements through `Build`, which asks about the element's
+  own children. The `<td>` case is the proof that an authored cell need not be told from a
+  generated one here: Chromium puts two `display: table-cell` divs inside a real `<td>` side by
+  side at x=1 and x=20.2, verified directly. `NowrapTableCellKeepsBootstrapControlsOnOneRow`, a
+  cell parent with row children, and a cell parent with plain text are unmoved.
 - **The `<table>` path stays keyed on element names** - `CollectTableRows`, `SynthesizeRowRects`,
   the `<col>` pre-pass, the `<caption>` scan and `PropagateBorderSpacing` - deliberately, so real
   table layout does not move. It did not: byte-identical across every fixture measured, and a
@@ -1332,29 +1367,22 @@ box.
 
 Still not modelled, each falling back to ordinary boxes so nothing is lost:
 
-- **A genuine anonymous cell**, which is the one remaining root cause of the shrink-to-fit
-  failures. A row mixing `table-cell` children with anything else, and a `display: table` box
-  with a non-table-internal child, both need one around each run of the latter; `BuildTable`
-  answers `null` for both and the fallback is ordinary block layout, which is where the
-  shrink-to-fit goes too. `display: inline-table` looks right only because an inline-level
-  fallback shrink-fits anyway - the same defect seen twice, not two defects. So
-  `<div style="display:table">aa</div>` is 600 against Chromium's 19.20, and
-  `<div display:table><div display:table-cell>aa</div><div>bb</div></div>` stacks at 600 where
-  Chromium makes one 38.41 row. It wants a `BuildAnonymousCell` over a run of a parent's
-  children (`BuildMixedBlock`'s job, restricted to a subrange and with no `IdMap` entry), plus
-  `placed` widened to carry a cell that has no DOM node, and `ResolveCollapsedBorders` taught
-  that such a cell has no border.
-- **A `table-cell` parent generates no anonymous table for table-internal children.**
-  `WantsAnonymousTableBox` answers false for `IsTableCellBox` before it looks at the children,
-  so two `display: table-cell` divs inside a `display: table-cell` div stack (20 wide, 36 tall)
-  where Chromium puts them in one anonymous row (38.41 wide, 18 tall, the second at x=19.20).
-  The same two cells under a block, a row or a row group are correct, and a *row* child of a
-  cell is correct, so it is this one arm. The guard is not obviously removable: the engine
-  builds every table out of internal flex containers and marks their cells with the same flag,
-  so lifting it risks re-entering the anonymous-table machinery on generated boxes.
 - **A caption with no rows**: `placed.Count == 0` answers `null`, so a table holding only a
   caption is not built - 600 x 18 against Chromium's 48.02 x 36, where the zero-column table
-  drops the caption to its min-content width and it wraps.
+  drops the caption to its min-content width and it wraps. Same arm: a `display: table` box whose
+  whole content is collapsible whitespace is a 600-wide block where Chromium gives 0 x 0.
+- **A block child's margins collapse out through a cell.** A cell establishes a block formatting
+  context, so they must not: Chromium makes a cell holding one `margin: 10px` block 39.20 x 38
+  with the block 19.20 at (10, 10), and this engine gives 40 x 28 with the block filling the
+  cell. Pre-existing and not about anonymous cells - a `<td>`, a `display: table-cell` div and an
+  anonymous cell all do it, because the engine's `width: 100%` fill for a cell's block children
+  ignores their margins and taffy's block layout collapses the trailing one. The anonymous cell
+  deliberately reproduces the authored cell's behaviour rather than inventing a third.
+- **An anonymous cell's content is top-aligned, not baseline-aligned.** In a row made taller by a
+  bordered sibling cell, Chromium puts the anonymous cell's text on the row's baseline (y=12 for
+  a 3px-bordered neighbour) and the engine puts it at the top (y=9). The engine's cells are
+  `align-items: flex-start` stand-ins throughout, so this is existing cell behaviour, not new. A
+  float inside an anonymous cell likewise does not grow the row (18 against Chromium's 23).
 - **`border-spacing` inherited from a grandparent** does not reach a CSS or anonymous table: the
   engine stores the value only where it was declared and `AnonymousTableStyle` clones the
   generating element's style. Pre-existing, and it affects `display: table` divs too; the fix
