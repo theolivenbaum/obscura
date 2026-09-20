@@ -47,6 +47,9 @@ public sealed class Cache
     {
         /// <summary>The parent size with the requested-axis bits and the y-axis value masked out.</summary>
         public ulong XAxisParentSize() => ParentSize & (XAxisValueMask & NonSignBitsMask);
+
+        /// <summary>The requested-axis bits that were packed into the parent-size key.</summary>
+        public ulong AxisBits() => ParentSize & BothSignBitsMask;
     }
 
     /// <summary>Cached intermediate layout results.</summary>
@@ -172,6 +175,23 @@ public sealed class Cache
                 for (int i = 0; i < _measureEntries.Length; i++)
                 {
                     if (_measureEntries[i] is not { } measure)
+                    {
+                        continue;
+                    }
+
+                    // Deviation from taffy: taffy masks the requested-axis bits out of the key on
+                    // both sides here, so any stored measurement answers a request for either axis.
+                    // That is unsound for an entry produced by a horizontal-only run, because
+                    // BlockLayout / FlexboxLayout / GridLayout all short-circuit such a run to
+                    // `(known width, 0)` without laying the box out - its height is a placeholder,
+                    // not a measurement, and its collapsible margins are unset. taffy then reuses
+                    // that zero as the box's block-axis contribution: a grid whose row track is
+                    // sized from a lone item that was first measured horizontally (which happens as
+                    // soon as any column track is intrinsically sized, e.g. an unoccupied `1fr`)
+                    // collapses the row to 0. Chromium sizes the row to the item's content, so keep
+                    // a horizontal-only entry for horizontal-only requests. Vertical and both-axis
+                    // runs never short-circuit, so their entries stay shareable.
+                    if (measure.Key.AxisBits() == SignBit1 && key.AxisBits() != SignBit1)
                     {
                         continue;
                     }

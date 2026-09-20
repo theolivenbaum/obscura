@@ -7044,6 +7044,80 @@ public class DomLayoutTests
         Assert.True(MathF.Abs(Width("side") - 400f) < 0.01f, $"side: {Width("side")}");
         Assert.True(MathF.Abs(Width("btn") - 400f) < 0.01f, $"btn: {Width("btn")}");
     }
+
+    [Fact]
+    public void AnAutoRowIsSizedFromALoneItemWhoseWidthWasMeasuredFirst()
+    {
+        // A grid item whose width comes from stretch alignment is measured horizontally
+        // first whenever the column axis has anything intrinsic to resolve - an unoccupied
+        // `1fr` track is enough. That horizontal-only measurement short-circuits to
+        // `(known width, 0)` inside the flex/grid/table/block algorithms, and the measure
+        // cache used to hand the placeholder zero back for the following block-axis
+        // measurement, collapsing the auto row to 0. Chromium 141 sizes every one of these
+        // rows to the item's 30px content.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .g { display:grid; grid-template-columns:200px 1fr; width:600px }
+              .box { width:10px; height:30px }
+              table { border-spacing:0 }
+              td { padding:0 }
+            </style>
+            <div class="g" id="gflex"><div id="flex" style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="ggrid"><div id="grid" style="display:grid"><div class="box"></div></div></div>
+            <div class="g" id="gblock"><div id="block"><div class="box"></div></div></div>
+            <div class="g" id="gstart"><div id="start" style="display:flex; align-self:start"><div class="box"></div></div></div>
+            <div class="g" id="gtable"><table id="table"><tr><td><div class="box"></div></td></tr></table></div>
+            <div class="g" id="gsib"><div id="sibflex" style="display:flex"><div class="box"></div></div><div id="sib"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        float Height(string id) => laid.Rects[Id(tree, id)].Height;
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The row track, read off the grid container.
+        foreach (string id in new[] { "gflex", "ggrid", "gblock", "gstart", "gtable", "gsib" })
+        {
+            Assert.True(MathF.Abs(Height(id) - 30f) < 0.01f, $"{id}: {Height(id)}");
+        }
+
+        // ... and the items stretched into it.
+        foreach (string id in new[] { "flex", "grid", "block", "start", "table", "sibflex" })
+        {
+            Assert.True(MathF.Abs(Height(id) - 30f) < 0.01f, $"{id}: {Height(id)}");
+            Assert.True(MathF.Abs(Width(id) - 200f) < 0.01f, $"{id}: {Width(id)}");
+        }
+    }
+
+    [Fact]
+    public void ALoneGridItemsRowIsSizedTheSameWhateverTheSecondTrackIs()
+    {
+        // The collapse was specific to a column axis that still had work to do after
+        // initialisation: `200px 200px` skipped the inline pass entirely and came out right,
+        // while `1fr`, `minmax(0,1fr)` and a third `1fr` all collapsed. Chromium 141 gives
+        // 30 for every one of them.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .g { display:grid; width:600px }
+              .box { width:10px; height:30px }
+            </style>
+            <div class="g" id="fixed" style="grid-template-columns:200px 200px"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="fr" style="grid-template-columns:200px 1fr"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="minmax" style="grid-template-columns:200px minmax(0,1fr)"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="three" style="grid-template-columns:200px 1fr 1fr"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="rows" style="grid-template-columns:200px 1fr; grid-template-rows:auto auto"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="placed" style="grid-template-columns:200px 1fr"><div style="display:flex; grid-row:1; grid-column:1"><div class="box"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        float Height(string id) => laid.Rects[Id(tree, id)].Height;
+
+        foreach (string id in new[] { "fixed", "fr", "minmax", "three", "rows", "placed" })
+        {
+            Assert.True(MathF.Abs(Height(id) - 30f) < 0.01f, $"{id}: {Height(id)}");
+        }
+    }
 }
 
 

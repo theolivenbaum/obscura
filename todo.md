@@ -1232,6 +1232,46 @@ descendant still reports 2px when the table carries `display: flex`). `min-width
 invisible one: `auto` and `0` both serialize as `0px` outside a flex container, but `auto` is
 what gives a flex item its automatic minimum size.
 
+### A horizontal-only measurement is not reused to answer a vertical one
+
+taffy's measure cache packs the requested axis into spare sign bits of the key and masks them out
+again on lookup (`Cache::get`, `CacheKey::x_axis_parent_size`), so one stored measurement answers
+a request for either axis. That is unsound, because `compute_block_layout`,
+`compute_flexbox_layout` and `compute_grid_layout` all short-circuit a `ComputeSize` run with
+`RequestedAxis::Horizontal` and a known width to `(width, 0.0)` **without laying the box out**.
+The zero is a placeholder, not a measurement.
+
+Symptom: `display: grid; grid-template-columns: 200px 1fr` with a single `<table>`, flex
+container or nested grid as its only child came out height 0. The unoccupied `1fr` is what makes
+the column pass do work at all - with `200px 200px` every track starts with
+`base_size == growth_limit` and the pass early-returns - the item's width is known through grid
+stretch alignment, so the column pass measures it horizontally and caches `(200, 0)`, and the row
+pass then reads that 0 as its block-axis contribution. `align-items: start` splits the two:
+the item measured 22 and the row still 0.
+
+**The filed diagnosis for this was wrong**, and worth recording as such: it was reported as auto
+row-track sizing for a lone item and as table-specific, because a second grid item makes it
+disappear. It is neither. A 198-case matrix over 18 column/row/alignment variants and 11 child
+display types had 57 failures, and the affected children are every box that takes the flex, grid
+or table algorithm - `div`, `img`, `inline-block`, `inline-table` and `span` were all correct,
+which is what made it look like a table bug.
+
+DEVIATION from `vendor/taffy/src/tree/cache.rs`: the C# port transcribes it faithfully, so this
+is taffy's bug ported correctly rather than a transcription slip. `Cache.Get` now keeps a
+horizontal-only entry for horizontal-only requests (`CacheKey.AxisBits()`). Vertical and
+both-axis runs never short-circuit, so their entries stay shareable in both directions and the
+sharing taffy wanted is kept everywhere else. The fix is at the cache, so it closes the class
+rather than the one case.
+
+Measured: 59 fixtures diffed element by element between a worktree build at the parent commit and
+the same build plus this patch, **0 differences**. Perf, 5 interleaved pairs on the three
+heaviest fixtures (2693 / 2404 / 1206 elements): medians move ~1%, inside the noise floor. A
+narrower guard keyed on `height == 0` was prototyped to preserve more cache sharing and bought
+nothing measurable, so the simpler rule stands.
+
+**Fixture-corpus note**: `probes-flex/r4b.html` is non-deterministic like its `r4`, `r5` and
+`tmp-css` siblings - two runs of one binary disagree on it. Exclude all four when diffing.
+
 ### `display: inline` over table-internal children generates an anonymous inline-table
 
 `crates/obscura-render/src/dom.rs` generates no anonymous table box for any display; f50a855
