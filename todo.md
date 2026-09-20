@@ -1107,6 +1107,38 @@ because that window is between `PageInFlight.Decrement()` and ClearScript resolv
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
 
+### Flake: the heavy-page fixture spawned an OS thread per connection
+
+`ConcurrentConnectionsHeavyPageTests.ConcurrentConnectionsHeavyPageDoNotAbortV8` is the most
+frequent flake in the suite and only misbehaves under load. Traced with a heap dump taken from
+inside a live stall: every failure is the client's 30s wait for its `sessionId` expiring, because
+`Target.createTarget` awaits `NavigateAsync` before emitting `targetCreated`, and the navigation
+was parked in `HttpConnection.InitialFillAsync` waiting for a subresource head. Correlating both
+sides showed the fixture had simply not run that connection's handler for over 12 seconds, with
+both ends ESTABLISHED and both queues empty.
+
+The fixture spawned `new Thread(...)` per connection and slept on it. Under `-maxThreads 16` on
+four cores a fresh thread can wait many seconds to be scheduled, and the client's 30s budget and
+the navigation's 30s `Page.NavigationTimeout` are equal, so a late subresource fails the test
+rather than merely slowing it. That also explains why a thread-pool sampler read `busy=0 pend=0`
+through the stall: the fixture's threads are not pool items, so nothing in the process had work.
+It now pre-starts 12 serving threads over a `BlockingCollection`, reads the whole request head
+(a single `Read` could answer from a truncated request line, making the later close abortive) and
+sets socket timeouts. No assertion, timeout or tolerance was changed.
+
+**This is a partial fix and the remainder has a different cause.** Measured over 20 amplified
+full-suite runs each, alternating blocks of five: 6/20 failures before, 3/20 after - which at
+that N is not significant (Fisher exact p is about 0.45). The residual is a client-side
+`ReadAsync` that does not complete although the data is already in the receive buffer
+(`avail=102`, peer in FIN_WAIT2), i.e. .NET's `SocketAsyncEngine` not delivering a readiness
+completion under 4-16x CPU oversubscription. It reproduces with a stock `HttpClient` and a stock
+handler in the same process, so it is not engine code and there is no fix here short of waiting
+longer.
+
+Ruled out by separate measured runs: the fixture alone (3600 requests through it were clean),
+`Obscura.Net`'s custom `ConnectCallback`, the aggressive gen2 GC from 81c6ea8, V8 isolate churn,
+and the CDP accept loop.
+
 ### Shaped paragraphs are carried across render passes
 
 Shaping is a pure function of the text, its attributes and the tab width, but the cache lived on
