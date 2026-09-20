@@ -272,6 +272,10 @@ internal sealed class LayoutStyleRare
 
     public (float Horizontal, float Vertical)? BorderSpacing;
 
+    public string? BorderSpacingFontRelative;
+
+    public bool BorderSpacingInherit;
+
     public Edges? CollapsedBorder;
 
     public bool? CaptionSideBottom;
@@ -1577,6 +1581,43 @@ public sealed class LayoutStyle
             if (m_rare is not null || value is not null)
             {
                 Rare.BorderSpacing = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The declared <c>border-spacing</c> text, kept only when it carries a font-relative
+    /// length, so the top-down pass can re-read it once the element's font size exists.
+    /// </summary>
+    /// <inheritdoc cref="FilterFontRelative" path="/remarks"/>
+    internal string? BorderSpacingFontRelative
+    {
+        get => m_rare?.BorderSpacingFontRelative;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BorderSpacingFontRelative = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether <c>border-spacing</c> was declared as <c>inherit</c> or <c>unset</c>, so the
+    /// top-down pass has to copy the parent's computed value onto this element.
+    /// </summary>
+    /// <remarks>
+    /// The property is inherited but nothing carries it down the style tree - only the element
+    /// that declared it holds one - so the keyword cannot be answered where the cascade runs.
+    /// </remarks>
+    internal bool BorderSpacingInherit
+    {
+        get => m_rare?.BorderSpacingInherit ?? false;
+        set
+        {
+            if (m_rare is not null || value)
+            {
+                Rare.BorderSpacingInherit = value;
             }
         }
     }

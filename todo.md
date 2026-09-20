@@ -1224,6 +1224,53 @@ all reject; `DomCascade` accepts `cellspacing` only when every character is a di
 `-webkit-border-horizontal-spacing` / `-webkit-border-vertical-spacing` aliases Chromium reports
 have no key.
 
+### `border-spacing` is parsed as CSS defines it, and stored as whole pixels
+
+`crates/obscura-render/src/style.rs` keeps whatever lengths `px_value` can make of the
+whitespace-separated tokens and resolves `em` against a flat 16. `ComputedStyle.ApplyBorderSpacing`
+instead:
+
+- **drops an invalid declaration** the way Chromium does, rather than salvaging part of it. A
+  percentage, a third length, a negative, an `auto` or a unitless non-zero leaves the inherited or
+  initial value standing - `0px` in a plain div, the UA `2px` on a table. The port used to lay out
+  `10%` as `1px` and `1px 2px 3px` as `1px 2px`.
+- **answers the CSS-wide keywords**: `initial` is 0, `inherit`/`unset` resolve in the top-down pass
+  because nothing carries an inherited `border-spacing` down the style tree, and `revert` leaves the
+  previous winner (the UA 2px on a table, which is what Chromium reports).
+- **re-reads a font-relative value** from `ResolveFontRelativeDeclarations`, so
+  `font-size: 20px; border-spacing: 1em` is `20px` in either declaration order. It was 16px, because
+  the value went through the `PxValue(string)` overload that hard-codes `em`/`rem` at 16. That
+  overload has ten other callers, so the fix is at the call site: `border-spacing` now takes the
+  context-carrying overload, as `filter` and `box-shadow` already did.
+- **stores whole pixels**, which is what Chromium does in layout and not only in the snapshot. The
+  rule is `(int)(v + 0.01)`, Blink's `RoundForImpreciseConversion`, verified here: `1.989px` is 1
+  and `1.99px` is 2, so it is neither truncation nor ordinary rounding; `4.5px` is 4 and `4.999px`
+  is 5. The store is 16 bits and **overflows to zero rather than saturating** - `32766px` is
+  `32766px` and `32767px` is `0px`, also verified.
+
+That last one was not on the list and is load-bearing: admitting fractional `cellspacing` (below)
+would otherwise have moved `cellspacing="2.5"` from a lucky-correct 46 to a wrong 48.
+
+### `cellspacing` is mapped with HTML's rules for parsing dimension values
+
+`dom.rs` maps the attribute only when every character is a digit.
+`DomCascade.HtmlDimensionValue` skips leading ASCII whitespace, reads digits with an optional
+fraction and ignores the rest, rejecting a percentage. Measured on Chromium 141: `"3px"` is 3,
+`"3.9em"` is 3, `"12abc"` is 12, `"\t5"` is 5, `"0007"` is 7, `"8 9"` is 8, `"1/2"` is 1, while
+`"3%"`, `"-3"`, `"+7"`, `".5"`, `"abc"` and `""` are all rejected and leave the UA 2px.
+
+### Three more CSSOM snapshot keys
+
+`-webkit-border-horizontal-spacing` and `-webkit-border-vertical-spacing`, which Chromium reports
+on every element with the inherited value, and `display: flow-root`, which was reported as `block`
+on every element including a plain `<div>`. Of the five setters of `FlowRoot`, `display: table` /
+`inline-table` and the anonymous-table style all set `IsTableBox` so `TableDisplay` answers them
+first, and the `-webkit-line-clamp` adjustment has its own earlier arm - so `(Block, false)` plus
+`FlowRoot` at that point is unambiguous and needs no `IsTableBox` guard.
+
+Also not parsed at all, and left: the two-value `display: inline flow-root`, which Chromium
+reports as `inline-block`.
+
 ### An authored internal table `display` is reported but not laid out
 
 `crates/obscura-render/src/style.rs` rejects `table-row`, `table-row-group`,
@@ -1243,15 +1290,10 @@ reconstructs `tr`/`tbody` rects afterwards from the literal local names - and th
 inside `BuildTable`, `ResolveCollapsedBorders`' non-native single-row mode, and
 `PropagateBorderSpacing`.
 
-Not carried across `display: inherit`: a `display: inherit` child of a `display: table-row` box
-reports `block` where Chromium says `table-row`. About six additive lines in `LayoutDomComputed`
-and `LayoutDomOnce`'s `Inherited` struct.
-
-Also found and not fixed: **`display: flow-root` reports `block` on every element**, a plain
-`<div>` included, because the generic display serializer has no `flow-root` arm. Chromium reports
-`flow-root`, verified here. `FlowRoot` is only set by `display: flow-root`, `table`,
-`inline-table`, the webkit-clamp adjustment and the anonymous-table style, so
-`(Block, false) && FlowRoot && !IsTableBox` is an unambiguous `flow-root`.
+`display: inherit` now carries the record: the `DisplayInherit` copy in `LayoutDomComputed` takes
+`AuthoredTableDisplay` with `Display`, through the pseudo-element path and the retained-style seed
+as well. A `display: inherit` child of a `display: table-row` box reports `table-row`, and a later
+`display: block` in the same block still replaces it.
 
 ### The UA `table` rule's flex construction does not survive an authored `display`
 

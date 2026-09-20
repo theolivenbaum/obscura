@@ -58,6 +58,8 @@ public static partial class RenderDom
                     inh.FlowRoot = retainedStyle.FlowRoot;
                     inh.IsTableBox = retainedStyle.IsTableBox;
                     inh.IsTableCellBox = retainedStyle.IsTableCellBox;
+                    inh.AuthoredTableDisplay = retainedStyle.AuthoredTableDisplay;
+                    inh.BorderSpacing = retainedStyle.BorderSpacing ?? inh.BorderSpacing;
                     inh.Color = retainedStyle.Color ?? inh.Color;
                     inh.FontSize = retainedStyle.FontSize ?? inh.FontSize;
                     inh.FontWeight = ComputedStyle.UsedFontWeight(retainedStyle);
@@ -430,6 +432,12 @@ public static partial class RenderDom
             style.IsTableBox = inh.IsTableBox;
             style.IsTableCellBox = inh.IsTableCellBox;
 
+            // An internal table display is recorded rather than laid out, so it lives beside
+            // the layout display instead of in it and has to be copied with it. Measured on
+            // Chromium 141, a `display: inherit` child of a `display: table-row` box reports
+            // `table-row`; without this it reported `block`.
+            style.AuthoredTableDisplay = inh.AuthoredTableDisplay;
+
             // Reconstruct the internal cell-content wrapper only when the inherited computed
             // display is table-cell.
             style.InternalFlexContainer = style.IsTableCellBox;
@@ -458,6 +466,8 @@ public static partial class RenderDom
         inh.FlowRoot = style.FlowRoot;
         inh.IsTableBox = style.IsTableBox;
         inh.IsTableCellBox = style.IsTableCellBox;
+        inh.AuthoredTableDisplay = style.AuthoredTableDisplay;
+
         if (style.Color is { } color)
         {
             inh.Color = color;
@@ -506,6 +516,22 @@ public static partial class RenderDom
         style.SvgPaint = inh.Svg;
         ComputedStyle.SetGridCalcContext(style, emPx, rootFs, vw, vh);
         ComputedStyle.ResolveFontRelativeDeclarations(style, emPx, rootFs, vw, vh);
+
+        // `border-spacing` is inherited, and `inherit` / `unset` are the only way an element
+        // reads a value it did not declare: nothing else carries one down, so only the
+        // declaring element holds one and PreparedRender walks up to find it. This sits after
+        // the font-relative re-read so a `border-spacing: 1em` a descendant inherits is the
+        // value the element ends up with, not the one the cascade guessed at 16px.
+        if (style.BorderSpacingInherit)
+        {
+            style.BorderSpacing = inh.BorderSpacing;
+            style.BorderSpacingInherit = false;
+        }
+
+        if (style.BorderSpacing is { } declaredBorderSpacing)
+        {
+            inh.BorderSpacing = declaredBorderSpacing;
+        }
         if (style.LetterSpacingExpression is { } letterSpacingExpression)
         {
             style.LetterSpacing = ComputedStyle.ResolveContextualLength(
@@ -1323,6 +1349,7 @@ public static partial class RenderDom
         bool hostFlowRoot = style.FlowRoot;
         bool hostIsTableBox = style.IsTableBox;
         bool hostIsTableCellBox = style.IsTableCellBox;
+        TableInternalDisplay hostAuthoredTableDisplay = style.AuthoredTableDisplay;
         List<Layout.TrackSizingFunction> hostGridAutoColumns = [.. style.GridAutoColumns];
         List<Layout.TrackSizingFunction> hostGridAutoRows = [.. style.GridAutoRows];
         List<object> hostGridAutoColumnCalcs = [.. GridCalcBucket(style, 2)];
@@ -1356,6 +1383,7 @@ public static partial class RenderDom
                 pseudo.FlowRoot = hostFlowRoot;
                 pseudo.IsTableBox = hostIsTableBox;
                 pseudo.IsTableCellBox = hostIsTableCellBox;
+                pseudo.AuthoredTableDisplay = hostAuthoredTableDisplay;
                 pseudo.InternalFlexContainer = pseudo.IsTableCellBox;
                 if (pseudo.IsTableCellBox)
                 {

@@ -461,9 +461,15 @@ public static partial class ComputedStyle
     {
         if (style.FilterFontRelative is null
             && style.BackdropFilterFontRelative is null
-            && style.BoxShadowFontRelative is null)
+            && style.BoxShadowFontRelative is null
+            && style.BorderSpacingFontRelative is null)
         {
             return;
+        }
+
+        if (style.BorderSpacingFontRelative is { } borderSpacing)
+        {
+            ApplyBorderSpacing(style, borderSpacing, emPx, remPx);
         }
 
         FontLengthContext context = new(emPx, remPx, vw, vh);
@@ -481,6 +487,129 @@ public static partial class ComputedStyle
         {
             style.BoxShadow = ParseBoxShadow(boxShadow, style.Color, style.ColorSchemeDark, context);
         }
+    }
+
+    /// <summary>
+    /// <c>border-spacing: &lt;length&gt; &lt;length&gt;?</c>, with both lengths non-negative.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DEVIATION FROM RUST: <c>style.rs</c> collects whatever lengths <c>px_value</c> can make
+    /// of the whitespace-separated tokens and keeps the first two, so it accepts declarations
+    /// CSS rejects and resolves <c>em</c> against a flat 16. Measured on Chromium 141, an
+    /// invalid declaration is dropped and the property keeps its inherited or initial value:
+    /// <c>border-spacing: 10%</c>, <c>1px 2px 3px</c>, <c>-5px</c>, <c>3px -5px</c> and
+    /// <c>1px auto</c> all compute to <c>0px</c> in a plain <c>&lt;div&gt;</c>, where this
+    /// engine reported <c>1.6px</c>, <c>1px 2px</c>, <c>0px</c> (clamped in the snapshot but
+    /// negative in layout), <c>3px 0px</c> and <c>1px</c>. See "Known deviations" in todo.md.
+    /// </para>
+    /// <para>
+    /// The value is also read again from <see cref="ResolveFontRelativeDeclarations"/> when it
+    /// carries a font-relative unit: <c>font-size: 20px; border-spacing: 1em</c> is
+    /// <c>20px</c> on Chromium 141 in either declaration order, and the cascade can only know
+    /// the initial 16 while it runs.
+    /// </para>
+    /// <para>
+    /// Two gaps stay, both inherited from <see cref="PxValue(string, float, float)"/> and
+    /// shared with every other property that reads a bare length: a functional value
+    /// (<c>calc(1em + 2px)</c>, <c>18px</c> on Chromium) is dropped, and a unit
+    /// <c>px_value</c> does not know (<c>in</c>, <c>vw</c>) reads as its bare number.
+    /// </para>
+    /// </remarks>
+    internal static void ApplyBorderSpacing(LayoutStyle style, string value, float emPx, float remPx)
+    {
+        string declared = CssText.AsciiLower(value.Trim());
+        switch (declared)
+        {
+            case "initial":
+                style.BorderSpacing = (0.0f, 0.0f);
+                style.BorderSpacingFontRelative = null;
+                style.BorderSpacingInherit = false;
+                return;
+
+            case "inherit":
+            case "unset":
+                // `border-spacing` is an inherited property, so both keywords mean the
+                // parent's computed value. Nothing carries one down the style tree, so the
+                // top-down pass resolves this and the user-agent `table { border-spacing: 2px }`
+                // has to go now or it would still be standing when it does.
+                style.BorderSpacing = null;
+                style.BorderSpacingFontRelative = null;
+                style.BorderSpacingInherit = true;
+                return;
+
+            case "revert":
+            case "revert-layer":
+                // There is no per-origin cascade record to revert to, so leave the previous
+                // winner standing, which on a `<table>` is the user-agent 2px Chromium also
+                // reports here.
+                return;
+        }
+
+        List<string> tokens = SplitWhitespace(declared);
+        if (tokens.Count is 0 or > 2)
+        {
+            return;
+        }
+
+        Span<float> lengths = stackalloc float[2];
+        for (int index = 0; index < tokens.Count; index++)
+        {
+            if (BorderSpacingLength(tokens[index], emPx, remPx) is not { } length)
+            {
+                return;
+            }
+
+            lengths[index] = WholePixels(length);
+        }
+
+        style.BorderSpacing = (lengths[0], tokens.Count > 1 ? lengths[1] : lengths[0]);
+        style.BorderSpacingFontRelative = ContainsFontRelativeUnit(declared) ? declared : null;
+        style.BorderSpacingInherit = false;
+    }
+
+    /// <summary>
+    /// Chromium keeps <c>border-spacing</c> as a whole number of pixels, through the same
+    /// nearly-truncating conversion it uses for every integer-valued length.
+    /// </summary>
+    /// <remarks>
+    /// Measured on Chromium 141: <c>0.009px</c>, <c>0.01px</c>, <c>1.989px</c>, <c>3.5px</c>,
+    /// <c>4.49px</c> and <c>4.5px</c> compute to <c>0</c>, <c>0</c>, <c>1</c>, <c>3</c>,
+    /// <c>4</c> and <c>4</c>, so it is not rounding - but <c>0.99px</c>, <c>1.99px</c> and
+    /// <c>4.999px</c> compute to <c>1</c>, <c>2</c> and <c>5</c>, so it is not a plain
+    /// truncation either. Adding a hundredth of a pixel before truncating reproduces all of
+    /// them, which is Blink's <c>RoundForImpreciseConversion</c>. The store is 16 bits wide
+    /// and anything that does not fit becomes zero rather than saturating, which is the same
+    /// measurement: <c>32766px</c> computes to <c>32766px</c> and <c>32767px</c> to
+    /// <c>0px</c>.
+    /// </remarks>
+    private static float WholePixels(float value)
+    {
+        double shifted = (double)value + (value < 0.0f ? -0.01 : 0.01);
+
+        return shifted is > short.MaxValue or < short.MinValue ? 0.0f : (int)shifted;
+    }
+
+    /// <summary>
+    /// One of <c>border-spacing</c>'s two lengths, or <c>null</c> when the token is not a
+    /// non-negative length and the whole declaration has to be dropped.
+    /// </summary>
+    private static float? BorderSpacingLength(string token, float emPx, float remPx)
+    {
+        // A percentage is not a length. `px_value` would scale one by the font size, which is
+        // what made `border-spacing: 10%` read as 1.6px.
+        if (token.Length == 0 || token.Contains('%'))
+        {
+            return null;
+        }
+
+        if (PxValue(token, emPx, remPx) is not { } pixels || !float.IsFinite(pixels) || pixels < 0.0f)
+        {
+            return null;
+        }
+
+        // A unitless number is a length only when it is zero.
+        return CssText.IsAsciiAlphabetic(token[^1]) || pixels == 0.0f ? pixels : null;
     }
 
     /// <summary>Rust <c>deferred_length_expression</c>.</summary>

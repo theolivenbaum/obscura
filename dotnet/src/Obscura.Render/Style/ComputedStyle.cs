@@ -2693,23 +2693,8 @@ public static partial class ComputedStyle
                 return true;
 
             case "border-spacing":
-            {
-                List<float> dimensions = [];
-                foreach (string token in SplitWhitespace(value))
-                {
-                    if (PxValue(token) is { } pixels)
-                    {
-                        dimensions.Add(pixels);
-                    }
-                }
-
-                if (dimensions.Count > 0)
-                {
-                    style.BorderSpacing = (dimensions[0], dimensions.Count > 1 ? dimensions[1] : dimensions[0]);
-                }
-
+                ApplyBorderSpacing(style, value, 16.0f, 16.0f);
                 return true;
-            }
 
             case "border-collapse":
                 style.BorderCollapse = CssText.AsciiLower(value.Trim()) switch

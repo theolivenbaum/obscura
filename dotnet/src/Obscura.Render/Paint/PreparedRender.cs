@@ -591,6 +591,16 @@ public sealed partial class PreparedRender
                 (Display.Grid, false) => "grid",
                 (Display.Inline, true) => "inline-block",
                 (Display.Inline, false) => "inline",
+
+                // `display: flow-root` reported as `block`, which is what this switch did for
+                // every element a plain `<div>` included. Chromium 141 reports `flow-root`.
+                // Only `flow-root`, `table`, `inline-table`, the `-webkit-line-clamp`
+                // adjustment and the anonymous table box set `FlowRoot`, and the four others
+                // are all answered by an arm above this one - the two table displays and the
+                // anonymous box through `IsTableBox`, the clamp through `activeWebkitClamp` -
+                // so a block box still carrying the flag was declared `flow-root`, or
+                // inherited that declaration through `display: inherit`.
+                (Display.Block, false) when style.FlowRoot => "flow-root",
                 _ => "block",
             };
         }
@@ -609,6 +619,13 @@ public sealed partial class PreparedRender
         output["border-spacing"] = spacingX == spacingY
             ? PaintCssValues.CssPx(spacingX)
             : PaintCssValues.CssPx(spacingX) + " " + PaintCssValues.CssPx(spacingY);
+
+        // Chromium reports the two longhands `border-spacing` is a shorthand for, on every
+        // element and with the same inherited value: measured on Chromium 141, a
+        // `border-spacing: 1px 2px` box answers `1px` and `2px`. The snapshot carried neither
+        // key, so page script read the empty string through bootstrap's fallback.
+        output["-webkit-border-horizontal-spacing"] = PaintCssValues.CssPx(spacingX);
+        output["-webkit-border-vertical-spacing"] = PaintCssValues.CssPx(spacingY);
         output["float"] = style.Float switch
         {
             Obscura.Render.Float.Left => "left",
@@ -1221,7 +1238,7 @@ public sealed partial class PreparedRender
     {
         if (style.BorderSpacing is { } own)
         {
-            return TruncateBorderSpacing(own);
+            return own;
         }
 
         if (TreeValue is not { } tree)
@@ -1236,7 +1253,7 @@ public sealed partial class PreparedRender
             if (Layout.Styles.TryGetValue(ancestorId, out LayoutStyle? ancestorStyle)
                 && ancestorStyle.BorderSpacing is { } inherited)
             {
-                return TruncateBorderSpacing(inherited);
+                return inherited;
             }
 
             ancestor = DomTraversal.RenderedParent(tree, ancestorId);
@@ -1244,21 +1261,6 @@ public sealed partial class PreparedRender
 
         return (0f, 0f);
     }
-
-    /// <summary>
-    /// Chromium stores <c>border-spacing</c> as whole pixels: measured on Chromium 141,
-    /// <c>0.6px</c>, <c>1.5px</c>, <c>2.5px</c> and <c>3.75px</c> compute to <c>0px</c>,
-    /// <c>1px</c>, <c>2px</c> and <c>3px</c>, so the fraction is truncated rather than rounded.
-    /// A negative declaration is invalid there and computes to the inherited or initial value;
-    /// this engine's parser keeps it, so it is clamped here instead.
-    /// </summary>
-    /// <remarks>
-    /// Only the reported value is truncated. Layout keeps the fractional one it already used,
-    /// so the snapshot cannot move any geometry.
-    /// </remarks>
-    private static (float Horizontal, float Vertical) TruncateBorderSpacing(
-        (float Horizontal, float Vertical) spacing) =>
-        ((int)F32.Max(spacing.Horizontal, 0f), (int)F32.Max(spacing.Vertical, 0f));
 
     /// <summary>
     /// Whether an <c>auto</c> minimum size on this box means the automatic minimum size, which

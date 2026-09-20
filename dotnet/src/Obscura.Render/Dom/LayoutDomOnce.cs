@@ -38,6 +38,8 @@ public static partial class RenderDom
         internal bool FlowRoot;
         internal bool IsTableBox;
         internal bool IsTableCellBox;
+        internal TableInternalDisplay AuthoredTableDisplay;
+        internal (float Horizontal, float Vertical)? BorderSpacing;
         internal RgbaColor? Color;
         internal float? FontSize;
         internal ushort FontWeight = 400;
@@ -118,6 +120,8 @@ public static partial class RenderDom
             FlowRoot = FlowRoot,
             IsTableBox = IsTableBox,
             IsTableCellBox = IsTableCellBox,
+            AuthoredTableDisplay = AuthoredTableDisplay,
+            BorderSpacing = BorderSpacing,
             Color = Color,
             FontSize = FontSize,
             FontWeight = FontWeight,
