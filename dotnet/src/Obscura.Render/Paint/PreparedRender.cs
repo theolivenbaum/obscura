@@ -504,8 +504,8 @@ public sealed partial class PreparedRender
 
         // A classic scrollbar sits inside the padding box, so the client box excludes it.
         return (
-            F32.Max(rect.Width - style.Border.Left - style.Border.Right - style.ReservedScrollbarY, 0f),
-            F32.Max(rect.Height - style.Border.Top - style.Border.Bottom - style.ReservedScrollbarX, 0f));
+            F32.Max(rect.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.ReservedScrollbarY, 0f),
+            F32.Max(rect.Height - style.UsedBorder.Top - style.UsedBorder.Bottom - style.ReservedScrollbarX, 0f));
     }
 
     /// <summary>A compact CSSOM snapshot derived from the same cascade paint uses.</summary>
@@ -939,7 +939,11 @@ public sealed partial class PreparedRender
         output["align-self"] = style.AlignSelf is { } alignSelf
             ? PaintCssValues.AlignItemsCss(alignSelf)
             : "auto";
+        // Same implementation detail as `flex-direction` above: the stretch a table box and the
+        // flex-start a cell box are laid out with belong to the internal flex container, so the
+        // property keeps its initial `normal` unless the author set it.
         output["align-items"] = style.AlignItems is { } alignItems
+            && !(style.InternalFlexContainer && !style.AlignItemsAuthored)
             ? PaintCssValues.AlignItemsCss(alignItems)
             : "normal";
         output["justify-items"] = style.JustifyItems is { } justifyItems
@@ -1124,10 +1128,11 @@ public sealed partial class PreparedRender
                 if (!absolute || positioned)
                 {
                     Edges padding = absolute ? Edges.Zero : ancestorStyle.Padding;
-                    float left = ancestorStyle.Border.Left + padding.Left;
-                    float top = ancestorStyle.Border.Top + padding.Top;
-                    float right = ancestorStyle.Border.Right + padding.Right;
-                    float bottom = ancestorStyle.Border.Bottom + padding.Bottom;
+                    Edges ancestorBorder = ancestorStyle.UsedBorder;
+                    float left = ancestorBorder.Left + padding.Left;
+                    float top = ancestorBorder.Top + padding.Top;
+                    float right = ancestorBorder.Right + padding.Right;
+                    float bottom = ancestorBorder.Bottom + padding.Bottom;
 
                     return new Rect(
                         ancestorRect.X + left,

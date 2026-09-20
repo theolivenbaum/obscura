@@ -1330,6 +1330,7 @@ public static partial class ComputedStyle
                 style.MinWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
                 style.SetSizeExpression(2, DeferredLengthExpression(value));
                 SetSizeInherit(style, 2, value);
+                style.MinWidthAuthored = true;
                 return true;
 
             case "min-height":
@@ -1896,6 +1897,7 @@ public static partial class ComputedStyle
                 if (valid && alignment is { } parsed)
                 {
                     style.AlignItems = parsed;
+                    style.AlignItemsAuthored = true;
                 }
 
                 return true;
@@ -1919,6 +1921,7 @@ public static partial class ComputedStyle
                 {
                     style.AlignItems = parsedAlign;
                     style.JustifyItems = parsedJustify;
+                    style.AlignItemsAuthored = true;
                 }
 
                 return true;
@@ -2718,6 +2721,16 @@ public static partial class ComputedStyle
                 };
                 return true;
 
+            case "caption-side":
+                style.CaptionSideBottom = CssText.AsciiLower(value.Trim()) switch
+                {
+                    "bottom" => true,
+                    "top" or "initial" or "revert" or "revert-layer" => false,
+                    "inherit" or "unset" => null,
+                    _ => style.CaptionSideBottom,
+                };
+                return true;
+
             case "table-layout":
                 switch (CssText.AsciiLower(value.Trim()))
                 {
@@ -2919,6 +2932,33 @@ public static partial class ComputedStyle
             style.DisplayContents = false;
             style.DisplayInherit = false;
             style.WebkitBoxDisplay = null;
+
+            // DEVIATION from crates/obscura-render/src/style.rs, which clears none of this:
+            // the UA `table`/`td` arms there set `flex-direction: column`, `align-items`, and
+            // `min-width: 0` and an authored `display` left them behind, so a
+            // `<table style="display:flex">` laid out and reported as a column flex container.
+            // Those three are the internal flex/grid construction this engine approximates a
+            // table with, not style the author can see, so replacing the display pair takes
+            // them with it and the arms below re-establish whatever the new display needs.
+            // Chromium reports `row` / `normal` / `auto` on such a table and keeps only
+            // `box-sizing: border-box`, `border-spacing: 2px` and `border-collapse: separate`,
+            // which are genuine UA declarations on `table` and survive any `display`
+            // (the last two are inherited properties, so a descendant reads them too).
+            // See "Known deviations" in todo.md.
+            if (!style.FlexDirectionAuthored)
+            {
+                style.FlexDirection = null;
+            }
+
+            if (!style.AlignItemsAuthored)
+            {
+                style.AlignItems = null;
+            }
+
+            if (!style.MinWidthAuthored)
+            {
+                style.MinWidth = Dimension.Auto;
+            }
         }
 
         switch (value)

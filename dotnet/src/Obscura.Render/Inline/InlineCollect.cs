@@ -195,8 +195,9 @@ internal sealed class Collector
 
     public void BeginOwner(NodeId owner, LayoutStyle style)
     {
-        var startEdge = new InlineEdge(style.Margin.Left, style.Border.Left, style.Padding.Left);
-        var endEdge = new InlineEdge(style.Margin.Right, style.Border.Right, style.Padding.Right);
+        Edges inlineBorder = style.UsedBorder;
+        var startEdge = new InlineEdge(style.Margin.Left, inlineBorder.Left, style.Padding.Left);
+        var endEdge = new InlineEdge(style.Margin.Right, inlineBorder.Right, style.Padding.Right);
         int startEvent = BoundaryEvents.Count;
         BoundaryEvents.Add(new InlineBoundaryEvent(owner, TextLength, true, startEdge));
         Owners.Add(new ActiveInlineOwner(owner, TextLength, startEdge, endEdge, startEvent));
@@ -230,11 +231,11 @@ public static class Inline
     /// its border and padding, where inline text actually starts.
     /// </summary>
     public static (float X, float Y) ContentOrigin(Rect rect, LayoutStyle style) => (
-        rect.X + style.Border.Left + style.Padding.Left,
-        rect.Y + style.Border.Top + style.Padding.Top);
+        rect.X + style.UsedBorder.Left + style.Padding.Left,
+        rect.Y + style.UsedBorder.Top + style.Padding.Top);
 
     public static float ContentWidth(Rect rect, LayoutStyle style) => F32.Max(
-        rect.Width - style.Border.Left - style.Border.Right - style.Padding.Left - style.Padding.Right,
+        rect.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.Padding.Left - style.Padding.Right,
         0f);
 
     /// <summary>

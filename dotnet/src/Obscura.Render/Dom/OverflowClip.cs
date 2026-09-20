@@ -43,20 +43,21 @@ public sealed class OverflowClip
 
     internal static OverflowClip ForBox(in Rect rect, LayoutStyle style, float tx, float ty)
     {
-        float left = rect.X + tx + style.Border.Left;
-        float top = rect.Y + ty + style.Border.Top;
-        float right = F32.Max(rect.X + tx + rect.Width - style.Border.Right, left);
-        float bottom = F32.Max(rect.Y + ty + rect.Height - style.Border.Bottom, top);
+        Edges clipBorder = style.UsedBorder;
+        float left = rect.X + tx + clipBorder.Left;
+        float top = rect.Y + ty + clipBorder.Top;
+        float right = F32.Max(rect.X + tx + rect.Width - clipBorder.Right, left);
+        float bottom = F32.Max(rect.Y + ty + rect.Height - clipBorder.Bottom, top);
         bool clipsX = style.ClipsOverflowX();
         bool clipsY = style.ClipsOverflowY();
         Rect paddingRect = new(left, top, F32.Max(right - left, 0f), F32.Max(bottom - top, 0f));
         ResolvedBorderRadii radii = style.BorderModel.Radii
             .Resolve(rect.Width, rect.Height)
             .Inset(new Sides<float>(
-                style.Border.Top,
-                style.Border.Right,
-                style.Border.Bottom,
-                style.Border.Left));
+                clipBorder.Top,
+                clipBorder.Right,
+                clipBorder.Bottom,
+                clipBorder.Left));
 
         // A rounded corner constrains both axes. Keep the existing independent rectangular
         // representation for one-axis overflow clips; applying a closed rounded path there

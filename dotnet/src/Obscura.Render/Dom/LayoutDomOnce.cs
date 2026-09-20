@@ -1143,15 +1143,15 @@ public static partial class RenderDom
                     return (
                         F32.Max(
                             rect.Width
-                            - style.Border.Left
-                            - style.Border.Right
+                            - style.UsedBorder.Left
+                            - style.UsedBorder.Right
                             - style.Padding.Left
                             - style.Padding.Right,
                             0f),
                         F32.Max(
                             rect.Height
-                            - style.Border.Top
-                            - style.Border.Bottom
+                            - style.UsedBorder.Top
+                            - style.UsedBorder.Bottom
                             - style.Padding.Top
                             - style.Padding.Bottom,
                             0f));
@@ -1278,8 +1278,8 @@ public static partial class RenderDom
                 float contentH = rect.Height
                     - style.Padding.Top
                     - style.Padding.Bottom
-                    - style.Border.Top
-                    - style.Border.Bottom;
+                    - style.UsedBorder.Top
+                    - style.UsedBorder.Bottom;
                 float free = F32.Max(contentH - th, 0f);
                 origin.Y += style.VerticalAlign == VerticalAlign.Middle ? free / 2f : free;
             }

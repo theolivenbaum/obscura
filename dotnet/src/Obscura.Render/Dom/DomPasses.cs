@@ -786,9 +786,20 @@ internal static class DomPasses
                     + layout.Border.Top
                     + layout.Border.Bottom;
 
-                // Taffy's content_size is the furthest content/child overflow in border-box
-                // coordinates, so it is already the right natural border-box floor.
-                float natural = F32.Max(layout.ContentSize.Height, edges);
+                // Taffy reports `content_size` two ways and neither is a border-box height.
+                // A leaf measures its own content and adds its padding (`Leaf.cs`), so its
+                // border is missing from both ends; a container takes the furthest child extent
+                // from the border-box origin, so the near edges are already in it and only the
+                // far ones are missing. Deviation from crates/obscura-render/src/dom.rs, which
+                // takes `content_size` as the border-box floor outright: a cell's own border
+                // then contributed no row height at all, and Chromium 141 makes a
+                // `border: 9px` cell holding one 18px line 36 tall rather than 18.
+                bool cellIsLeaf = taffyTree.Children(cell).Count == 0;
+                float natural = F32.Max(
+                    cellIsLeaf
+                        ? layout.ContentSize.Height + layout.Border.Top + layout.Border.Bottom
+                        : layout.ContentSize.Height + layout.Padding.Bottom + layout.Border.Bottom,
+                    edges);
                 if (idMap.TryGetValue(cell, out NodeId domId)
                     && styles.TryGetValue(domId, out LayoutStyle? style)
                     && style.Height.Kind == DimensionKind.Px)
@@ -801,6 +812,13 @@ internal static class DomPasses
                             + style.Border.Bottom
                         : style.Height.Value;
                     natural = F32.Max(natural, specified);
+                }
+
+                // A caption's row is its own height plus the (mostly negative) margins that
+                // take it outside the table's border and border-spacing.
+                if (ifc.TableCaptions.TryGetValue(cell, out float captionMargins))
+                {
+                    natural += captionMargins;
                 }
 
                 cells.Add((cell, row, Math.Min(span, nrows - row), F32.Max(natural, 0f)));

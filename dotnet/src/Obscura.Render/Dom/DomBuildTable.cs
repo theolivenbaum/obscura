@@ -6,6 +6,7 @@ using TaffyDisplay = Obscura.Render.Layout.Display;
 using TaffyGridPlacement = Obscura.Render.Layout.GridPlacement;
 using TaffyGridTemplateComponent = Obscura.Render.Layout.GridTemplateComponent;
 using TaffyLengthPercentage = Obscura.Render.Layout.LengthPercentage;
+using TaffyLengthPercentageAuto = Obscura.Render.Layout.LengthPercentageAuto;
 using TaffyLine = Obscura.Render.Layout.Line<Obscura.Render.Layout.GridPlacement>;
 using TaffyMaxTrack = Obscura.Render.Layout.MaxTrackSizingFunction;
 using TaffyMinTrack = Obscura.Render.Layout.MinTrackSizingFunction;
@@ -138,6 +139,167 @@ internal static partial class DomBuild
     /// node is then registered in <see cref="IfcRegistry.AnonymousTables"/> instead of
     /// <see cref="BuildContext.IdMap"/>.
     /// </param>
+
+    /// <summary>
+    /// Resolve the collapsing border model over a built table and record each box's half of it
+    /// in <see cref="LayoutStyle.CollapsedBorder"/>, which <see cref="LayoutStyle.UsedBorder"/>
+    /// then hands to layout and paint.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from crates/obscura-render/src/dom.rs, which has no collapsing border model:
+    /// there a collapsing table reserves its whole border inside its border box and every cell
+    /// reserves its own, so a `border: 5px; border-collapse: collapse` table 600px wide laid its
+    /// cells out across 590px where Chromium 141 gives them 595 and starts the first at x=2.5.
+    /// The rows, row groups and columns of a collapsing table keep no border of their own: what
+    /// they contributed is already inside the cells, so painting it again would double it.
+    /// </remarks>
+    private static void ResolveCollapsedBorders(
+        BuildContext context,
+        NodeId id,
+        LayoutStyle style,
+        bool nativeHtmlTable,
+        List<(NodeId Row, int GroupEnd)> rows,
+        List<(NodeId Cell, int Row, int Column, int RowSpan, int ColSpan)> placed,
+        int ncols,
+        List<NodeId> colElems,
+        List<NodeId?> colGroupOf)
+    {
+        DomTree tree = context.Tree;
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles = context.Styles;
+
+        LayoutStyle? StyleOf(NodeId node) =>
+            styles.TryGetValue(node, out LayoutStyle? found) ? found : null;
+
+        if (style.BorderCollapse != true)
+        {
+            style.CollapsedBorder = null;
+            foreach ((NodeId cell, int _, int _, int _, int _) in placed)
+            {
+                if (StyleOf(cell) is { } cellStyle)
+                {
+                    cellStyle.CollapsedBorder = null;
+                }
+            }
+
+            return;
+        }
+
+        // Bands. A non-native table has one synthesized row whose "row element" is the element
+        // that generated the anonymous table box, and that element's border belongs to its own
+        // box, not to the row.
+        List<DomTableCollapsedBorders.Band> rowBands = new(rows.Count);
+        for (int index = 0; index < rows.Count; index++)
+        {
+            if (!nativeHtmlTable)
+            {
+                rowBands.Add(DomTableCollapsedBorders.Band.None);
+                continue;
+            }
+
+            NodeId row = rows[index].Row;
+            NodeId? group = DomTraversal.RenderedParent(tree, row) is { } parent
+                && DomTraversal.IsAnyLocal(tree, parent, "thead", "tbody", "tfoot")
+                    ? parent
+                    : null;
+            int groupEnd = Math.Min(rows[index].GroupEnd, rows.Count);
+            bool groupFirst = index == 0 || rows[index - 1].GroupEnd != rows[index].GroupEnd;
+            rowBands.Add(new DomTableCollapsedBorders.Band(
+                StyleOf(row)?.Border ?? default,
+                group is { } groupId ? StyleOf(groupId)?.Border ?? default : default,
+                groupFirst,
+                index + 1 >= groupEnd));
+        }
+
+        List<DomTableCollapsedBorders.Band> columnBands = new(ncols);
+        for (int index = 0; index < ncols; index++)
+        {
+            columnBands.Add(DomTableCollapsedBorders.Band.None);
+        }
+
+        int column = 0;
+        for (int index = 0; index < colElems.Count && column < ncols; index++)
+        {
+            NodeId colEl = colElems[index];
+            int span = Math.Clamp(SpanAttribute(tree, colEl, "span"), 1, MaxSpan);
+            Edges own = StyleOf(colEl)?.Border ?? default;
+            NodeId? group = colGroupOf[index];
+            Edges groupBorder = group is { } groupId ? StyleOf(groupId)?.Border ?? default : default;
+            bool groupFirst = group is null || index == 0 || colGroupOf[index - 1] != group;
+            for (int step = 0; step < span && column < ncols; step++, column++)
+            {
+                bool groupLast = group is null
+                    || step + 1 >= span
+                    || index + 1 >= colElems.Count
+                    || colGroupOf[index + 1] != group;
+                columnBands[column] = new DomTableCollapsedBorders.Band(
+                    own, groupBorder, groupFirst && step == 0, groupLast);
+            }
+        }
+
+        List<DomTableCollapsedBorders.Cell> cells = new(placed.Count);
+        foreach ((NodeId cell, int r, int c, int rs, int cs) in placed)
+        {
+            cells.Add(new DomTableCollapsedBorders.Cell(
+                r, c, rs, cs, StyleOf(cell)?.Border ?? default));
+        }
+
+        (Edges tableBorder, Edges[] cellBorders) = DomTableCollapsedBorders.Resolve(
+            style.Border, rows.Count, ncols, cells, rowBands, columnBands);
+
+        style.CollapsedBorder = tableBorder;
+        for (int index = 0; index < placed.Count; index++)
+        {
+            if (StyleOf(placed[index].Cell) is { } cellStyle)
+            {
+                cellStyle.CollapsedBorder = cellBorders[index];
+            }
+        }
+
+        if (!nativeHtmlTable)
+        {
+            return;
+        }
+
+        foreach ((NodeId row, int _) in rows)
+        {
+            if (StyleOf(row) is { } rowStyle)
+            {
+                rowStyle.CollapsedBorder = Edges.Zero;
+            }
+
+            if (DomTraversal.RenderedParent(tree, row) is { } parent
+                && DomTraversal.IsAnyLocal(tree, parent, "thead", "tbody", "tfoot")
+                && StyleOf(parent) is { } groupStyle)
+            {
+                groupStyle.CollapsedBorder = Edges.Zero;
+            }
+        }
+
+        foreach (NodeId colEl in colElems)
+        {
+            if (StyleOf(colEl) is { } colStyle)
+            {
+                colStyle.CollapsedBorder = Edges.Zero;
+            }
+        }
+    }
+
+    private static int SpanAttribute(DomTree tree, NodeId id, string name)
+    {
+        if (tree.GetNode(id)?.GetAttribute(name) is { } value
+            && int.TryParse(
+                value.Trim(),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out int parsed)
+            && parsed >= 0)
+        {
+            return parsed;
+        }
+
+        return 1;
+    }
+
     internal static TaffyNodeId? BuildTable(
         BuildContext context,
         NodeId id,
@@ -201,21 +363,7 @@ internal static partial class DomBuild
 
         int nrows = rows.Count;
 
-        int SpanAttr(NodeId cid, string name)
-        {
-            if (tree.GetNode(cid)?.GetAttribute(name) is { } value
-                && int.TryParse(
-                    value.Trim(),
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out int parsed)
-                && parsed >= 0)
-            {
-                return parsed;
-            }
-
-            return 1;
-        }
+        int SpanAttr(NodeId cid, string name) => SpanAttribute(tree, cid, name);
 
         HashSet<(int Row, int Column)> occupied = [];
         List<(NodeId Cell, int Row, int Column, int RowSpan, int ColSpan)> placed = [];
@@ -287,6 +435,70 @@ internal static partial class DomBuild
             return null;
         }
 
+        // <col> elements (direct or under <colgroup>), each spanning `span` columns. Gathered
+        // here rather than beside the column pre-pass below because the collapsing border model
+        // needs them before the cells are built.
+        List<NodeId> colElems = [];
+        List<NodeId?> colGroupOf = [];
+        foreach (NodeId cid in tree.Children(id))
+        {
+            switch (DomTraversal.ElementLocalName(tree, cid))
+            {
+                case "col":
+                    colElems.Add(cid);
+                    colGroupOf.Add(null);
+                    break;
+                case "colgroup":
+                    foreach (NodeId gc in tree.Children(cid))
+                    {
+                        if (DomTraversal.IsLocal(tree, gc, "col"))
+                        {
+                            colElems.Add(gc);
+                            colGroupOf.Add(cid);
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        ResolveCollapsedBorders(
+            context, id, style, nativeHtmlTable, rows, placed, ncols, colElems, colGroupOf);
+
+        // <caption> children, which are laid out in their own full-width rows above and below
+        // the cells rather than in the table's own formatting context. Deviation from
+        // crates/obscura-render/src/dom.rs, which builds no box for a caption at all - Chromium
+        // 141 reports one, the width of the table's border box, and counts its height in the
+        // table's.
+        List<(NodeId Node, bool Bottom)> captions = [];
+        if (nativeHtmlTable)
+        {
+            foreach (NodeId child in tree.Children(id))
+            {
+                if (!DomTraversal.IsLocal(tree, child, "caption")
+                    || !styles.TryGetValue(child, out LayoutStyle? captionStyle)
+                    || captionStyle.Display == Display.None)
+                {
+                    continue;
+                }
+
+                captions.Add((
+                    child,
+                    captionStyle.CaptionSideBottom ?? style.CaptionSideBottom ?? false));
+            }
+        }
+
+        int topCaptions = 0;
+        foreach ((NodeId _, bool bottom) in captions)
+        {
+            if (!bottom)
+            {
+                topCaptions++;
+            }
+        }
+
+        int bottomCaptions = captions.Count - topCaptions;
+
         // Build each cell and pin it to its grid area.
         List<TaffyNodeId> children = [];
         foreach ((NodeId cid, int r, int c, int rs, int cs) in placed)
@@ -298,7 +510,7 @@ internal static partial class DomBuild
 
             TaffyStyle cellStyle = context.TaffyTree.GetStyle(cellNode).Clone();
             cellStyle.GridRow = new TaffyLine(
-                TaffyGridPlacement.FromLineIndex((short)(r + 1)),
+                TaffyGridPlacement.FromLineIndex((short)(r + 1 + topCaptions)),
                 TaffyGridPlacement.FromSpan((ushort)rs));
             cellStyle.GridColumn = new TaffyLine(
                 TaffyGridPlacement.FromLineIndex((short)(c + 1)),
@@ -427,29 +639,7 @@ internal static partial class DomBuild
             return AttrWidth(cid);
         }
 
-        // <col> elements (direct or under <colgroup>), each spanning `span` columns.
         int nextCol = 0;
-        List<NodeId> colElems = [];
-        foreach (NodeId cid in tree.Children(id))
-        {
-            switch (DomTraversal.ElementLocalName(tree, cid))
-            {
-                case "col":
-                    colElems.Add(cid);
-                    break;
-                case "colgroup":
-                    foreach (NodeId gc in tree.Children(cid))
-                    {
-                        if (DomTraversal.IsLocal(tree, gc, "col"))
-                        {
-                            colElems.Add(gc);
-                        }
-                    }
-
-                    break;
-            }
-        }
-
         foreach (NodeId colEl in colElems)
         {
             int span = Math.Clamp(SpanAttr(colEl, "span"), 1, MaxSpan);
@@ -605,22 +795,80 @@ internal static partial class DomBuild
                 TaffyTrackSizingFunction.MinMax(TaffyMinTrack.MinContent, max));
         }
 
+        // In the separate-border model, border-spacing also exists between the table edge and
+        // the first/last row and column. Grid `gap` only covers interior tracks.
+        (float horizontalGap, float verticalGap) = DomStyleFixups.TableSpacing(style);
+
+        // CSS 2.1 17.6.2: the collapsing border model ignores the table's own padding.
+        Edges tablePadding = DomStyleFixups.TableUsedPadding(style);
+
+        // A caption is a full-width row of its own, but it sits *outside* everything between
+        // the table's border box and its first row - the border, the padding and the leading
+        // border-spacing. Negative margins of exactly that inset are what take it back out,
+        // and the one on the side facing the cells is added back so the grid's own row gap
+        // does not double it. Chromium 141 on a `border: 5px` separate table with a caption:
+        // the caption is the table's full 600 at y=0, the first row is at y=25 (18 caption +
+        // 5 border + 2 spacing), and the table is 50 tall.
+        Edges captionInset = new(
+            style.UsedBorder.Top + tablePadding.Top + verticalGap,
+            style.UsedBorder.Right + tablePadding.Right + horizontalGap,
+            style.UsedBorder.Bottom + tablePadding.Bottom + verticalGap,
+            style.UsedBorder.Left + tablePadding.Left + horizontalGap);
+        List<float?> captionRowMin = [];
+        int nextTopCaption = 0;
+        int nextBottomCaption = 0;
+        foreach ((NodeId captionId, bool bottom) in captions)
+        {
+            if (Build(context, captionId) is not { } captionNode)
+            {
+                continue;
+            }
+
+            int index = bottom ? nextBottomCaption++ : nextTopCaption++;
+            int count = bottom ? bottomCaptions : topCaptions;
+            float outer = bottom ? captionInset.Bottom : captionInset.Top;
+            float marginTop = bottom
+                ? (index == 0 ? outer - verticalGap : -verticalGap)
+                : (index == 0 ? -outer : -verticalGap);
+            float marginBottom = bottom
+                ? (index + 1 == count ? -outer : 0f)
+                : (index + 1 == count ? outer - verticalGap : 0f);
+
+            int row = bottom ? topCaptions + nrows + index : index;
+            TaffyStyle captionTaffy = context.TaffyTree.GetStyle(captionNode).Clone();
+            captionTaffy.GridRow = new TaffyLine(
+                TaffyGridPlacement.FromLineIndex((short)(row + 1)),
+                TaffyGridPlacement.FromSpan(1));
+            captionTaffy.GridColumn = new TaffyLine(
+                TaffyGridPlacement.FromLineIndex(1),
+                TaffyGridPlacement.FromSpan((ushort)ncols));
+            captionTaffy.FlexGrow = 0f;
+            Layout.Rect<TaffyLengthPercentageAuto> captionMargin = captionTaffy.Margin;
+            captionMargin.Top = TaffyLengthPercentageAuto.FromLength(marginTop);
+            captionMargin.Bottom = TaffyLengthPercentageAuto.FromLength(marginBottom);
+            captionMargin.Left = TaffyLengthPercentageAuto.FromLength(-captionInset.Left);
+            captionMargin.Right = TaffyLengthPercentageAuto.FromLength(-captionInset.Right);
+            captionTaffy.Margin = captionMargin;
+            context.TaffyTree.SetStyle(captionNode, captionTaffy);
+            context.Ifc.TableCaptions[captionNode] = marginTop + marginBottom;
+            children.Add(captionNode);
+            captionRowMin.Add(null);
+        }
+
+        int captionRows = captionRowMin.Count;
+        int ntracks = nrows + captionRows;
+
         TaffyGridTemplateComponent RowTrack(int r)
         {
-            TaffyMinTrack min = rowMin[r] is { } height
+            int source = r - nextTopCaption;
+            TaffyMinTrack min = source >= 0 && source < nrows && rowMin[source] is { } height
                 ? TaffyMinTrack.FromLength(height)
                 : TaffyMinTrack.Auto;
             return TaffyGridTemplateComponent.FromSingle(
                 TaffyTrackSizingFunction.MinMax(min, TaffyMaxTrack.Auto));
         }
 
-        // In the separate-border model, border-spacing also exists between the table edge and
-        // the first/last row and column. Grid `gap` only covers interior tracks.
-        (float horizontalGap, float verticalGap) = DomStyleFixups.TableSpacing(style);
         LayoutStyle gridStyle = style.Clone();
-
-        // CSS 2.1 17.6.2: the collapsing border model ignores the table's own padding.
-        Edges tablePadding = DomStyleFixups.TableUsedPadding(style);
         gridStyle.Padding = new Edges(
             tablePadding.Top + verticalGap,
             tablePadding.Right + horizontalGap,
@@ -644,8 +892,8 @@ internal static partial class DomBuild
             columnTracks.Add(Col(index));
         }
 
-        List<TaffyGridTemplateComponent> rowTracks = new(nrows);
-        for (int index = 0; index < nrows; index++)
+        List<TaffyGridTemplateComponent> rowTracks = new(ntracks);
+        for (int index = 0; index < ntracks; index++)
         {
             rowTracks.Add(RowTrack(index));
         }
@@ -666,7 +914,15 @@ internal static partial class DomBuild
             context.Ifc.AnonymousTables[tableNode] = (id, anonymousStyle);
         }
 
-        context.Ifc.TableRows[tableNode] = rowMin;
+        // The row-height pass indexes by grid row, so the caption rows are part of the list.
+        List<float?> trackMin = new(ntracks);
+        for (int index = 0; index < ntracks; index++)
+        {
+            int source = index - nextTopCaption;
+            trackMin.Add(source >= 0 && source < nrows ? rowMin[source] : null);
+        }
+
+        context.Ifc.TableRows[tableNode] = trackMin;
         if (fixedLayout)
         {
             context.Ifc.FixedTableCols[tableNode] = fixedColumns;

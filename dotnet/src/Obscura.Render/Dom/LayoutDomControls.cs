@@ -498,7 +498,8 @@ public static partial class RenderDom
                 {
                     if (TableStyleOf(tnode, dom) is { } style && WantsSnapshot(tnode, dom, style))
                     {
-                        availableWidths[tnode] = F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f);
+                        availableWidths[tnode] =
+                            F32.Max(taffyTree.GetUnroundedLayout(tnode).Size.Width, 0f);
                     }
                 }
             }
@@ -637,7 +638,7 @@ public static partial class RenderDom
                             TaffyAvailableSpace.MaxContent),
                         measure);
                     float percentMin = F32.Max(
-                        F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f),
+                        F32.Max(taffyTree.GetUnroundedLayout(tnode).Size.Width, 0f),
                         DomTableSupport.MaxDefiniteTableContentWidth(tree, dom, styles) ?? 0f);
                     if (tableStyle.BoxSizing == BoxSizing.ContentBox)
                     {
@@ -658,13 +659,24 @@ public static partial class RenderDom
                     continue;
                 }
 
+                // A caption spans every column, so taffy would grow the tracks to its
+                // max-content. Chromium 141 does the opposite - it wraps a caption three times
+                // the table's width rather than widening the table - and floors the table only
+                // by the caption's *min-content*. Taking the captions out of track sizing for
+                // the two intrinsic measurements is what separates the two.
+                List<TaffyNodeId> measuredCaptions = SuspendCaptions(taffyTree, ifcItems, tnode);
                 taffyTree.ComputeLayoutWithMeasure(
                     tnode,
                     new Layout.Size<TaffyAvailableSpace>(
                         TaffyAvailableSpace.MinContent,
                         TaffyAvailableSpace.MaxContent),
                     measure);
-                float minC = taffyTree.GetLayout(tnode).Size.Width;
+                // Intrinsic widths are read unrounded. Taffy rounds a final layout to whole
+                // pixels, and a collapsing border puts half a pixel on a cell edge, so the
+                // rounded table total and the rounded per-cell totals disagreed by up to a
+                // pixel - which read as the columns not fitting their own max-content, and a
+                // `border: 5px; border-collapse: collapse` auto table wrapped every cell.
+                float minC = taffyTree.GetUnroundedLayout(tnode).Size.Width;
 
                 // A table can never be narrower than an unshrinkable fixed-width descendant.
                 minC = F32.Max(
@@ -677,7 +689,19 @@ public static partial class RenderDom
                         TaffyAvailableSpace.MaxContent,
                         TaffyAvailableSpace.MaxContent),
                     measure);
-                float maxC = taffyTree.GetLayout(tnode).Size.Width;
+                float maxC = taffyTree.GetUnroundedLayout(tnode).Size.Width;
+                foreach (TaffyNodeId caption in measuredCaptions)
+                {
+                    taffyTree.ComputeLayoutWithMeasure(
+                        caption,
+                        new Layout.Size<TaffyAvailableSpace>(
+                            TaffyAvailableSpace.MinContent,
+                            TaffyAvailableSpace.MaxContent),
+                        measure);
+                    minC = F32.Max(minC, taffyTree.GetUnroundedLayout(caption).Size.Width);
+                }
+
+                RestoreCaptions(taffyTree, measuredCaptions);
 
                 float inlineEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
                 float declarationEdges = DomStyleFixups.TableWidthDeclarationEdges(tableStyle);
@@ -700,12 +724,24 @@ public static partial class RenderDom
                     DimensionKind.Percent => percentOuter,
                     _ => maxC,
                 };
+                // A table box is a grid or flex item like any other, so an `auto` width that its
+                // parent stretches fills the item area instead of shrinking to fit: Chromium 141
+                // makes an auto table in a 600px `display: grid` block 600 wide where this used
+                // to leave it at its 147.5 max-content.
+                bool stretchesToItemArea =
+                    !ifcItems.AnonymousTables.ContainsKey(tnode)
+                    && widthStyle.IsAuto
+                    && DomStyleFixups.StretchesInlineToItsItemArea(tree, dom, tableStyle, styles);
                 float usedOuter = widthStyle.Kind is DimensionKind.Px or DimensionKind.Percent
                     // A definite table width is not clamped to its containing block, and a
                     // percentage that resolves narrower than the content overflows it rather
                     // than wrapping every cell (CSS 2.1 17.5.2).
                     ? F32.Max(preferredOuter, minC)
-                    : F32.Min(F32.Max(preferredOuter, minC), F32.Max(availableOuter, minC));
+                    : stretchesToItemArea
+                        ? F32.Max(
+                            ClampToInlineSizeLimits(tableStyle, availableOuter, availableOuter),
+                            minC)
+                        : F32.Min(F32.Max(preferredOuter, minC), F32.Max(availableOuter, minC));
                 float usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
                     ? F32.Max(usedOuter - inlineEdges, 0f)
                     : usedOuter;
@@ -715,6 +751,14 @@ public static partial class RenderDom
                 List<(TaffyNodeId Cell, int Column, int Span)> cells = [];
                 foreach (TaffyNodeId cell in taffyTree.Children(tnode))
                 {
+                    // A caption spans every column but sizes none of them: Chromium 141 leaves
+                    // an auto table at its cells' 67.31 and wraps a caption whose max-content is
+                    // three times that.
+                    if (ifcItems.TableCaptions.ContainsKey(cell))
+                    {
+                        continue;
+                    }
+
                     TaffyStyle cellStyle = taffyTree.GetStyle(cell);
                     if (cellStyle.GridColumn.Start.Kind != TaffyGridPlacementKind.Line)
                     {
@@ -742,14 +786,14 @@ public static partial class RenderDom
                                 TaffyAvailableSpace.MinContent,
                                 TaffyAvailableSpace.MaxContent),
                             measure);
-                        float cmin = taffyTree.GetLayout(cell).Size.Width;
+                        float cmin = taffyTree.GetUnroundedLayout(cell).Size.Width;
                         taffyTree.ComputeLayoutWithMeasure(
                             cell,
                             new Layout.Size<TaffyAvailableSpace>(
                                 TaffyAvailableSpace.MaxContent,
                                 TaffyAvailableSpace.MaxContent),
                             measure);
-                        float cmax = taffyTree.GetLayout(cell).Size.Width;
+                        float cmax = taffyTree.GetUnroundedLayout(cell).Size.Width;
                         measured.Add((col, span, cmin, F32.Max(cmax, cmin)));
                     }
 
@@ -859,6 +903,37 @@ public static partial class RenderDom
                             : usedOuter;
                     }
 
+                    // CSS 2.1 17.5.2.2: an `auto` table is only as wide as it needs to be, but
+                    // it does have to be wide enough that each percentage column's share covers
+                    // that column's *max-content*. Chromium 141 makes an auto table holding a
+                    // `width: 30%` cell 161.2 of columns (48.36 / 112.84), because the auto
+                    // column's 112.84 has to fit in the 70% it is left with; the min-content
+                    // floor above only asked for 47.09 there, so the table stayed at its
+                    // max-content 147.5 and the percentage took 30% of that. A definite width is
+                    // not widened this way - Chromium keeps a `width: 120px` table holding a 30%
+                    // cell at 120 - so this arm is `auto` only.
+                    bool anyPercentageColumn = false;
+                    foreach (float? declared in percentages)
+                    {
+                        if (declared is not null)
+                        {
+                            anyPercentageColumn = true;
+                            break;
+                        }
+                    }
+
+                    if (anyPercentageColumn && widthStyle.IsAuto)
+                    {
+                        float preferredFloor =
+                            DomTableSupport.AutoTablePercentageIntrinsicFloor(colMax, percentages);
+                        usedOuter = F32.Min(
+                            F32.Max(usedOuter, preferredFloor + inlineEdges + interiorSpacing),
+                            F32.Max(availableOuter, minC));
+                        usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
+                            ? F32.Max(usedOuter - inlineEdges, 0f)
+                            : usedOuter;
+                    }
+
                     float target = F32.Max(usedOuter - inlineEdges - interiorSpacing, 0f);
                     List<float> widths = DomTableSupport.DistributeAutoTableColumns(
                         target, colMin, colMax, fixedWidths, percentages);
@@ -882,5 +957,74 @@ public static partial class RenderDom
             DomSubgridPasses.ExitTypedPercentageScope(taffyTree, typedPercentages);
             tableIndex = groupEnd;
         }
+    }
+
+    /// <summary>
+    /// Take a table's captions out of its grid's track sizing by positioning them absolutely,
+    /// and answer the ones that were moved so <see cref="RestoreCaptions"/> can put them back.
+    /// </summary>
+    private static List<TaffyNodeId> SuspendCaptions(
+        TaffyTree taffyTree,
+        IfcRegistry ifcItems,
+        TaffyNodeId tableNode)
+    {
+        List<TaffyNodeId> suspended = [];
+        if (ifcItems.TableCaptions.Count == 0)
+        {
+            return suspended;
+        }
+
+        foreach (TaffyNodeId child in taffyTree.Children(tableNode))
+        {
+            if (!ifcItems.TableCaptions.ContainsKey(child))
+            {
+                continue;
+            }
+
+            TaffyStyle captionStyle = taffyTree.GetStyle(child).Clone();
+            captionStyle.Position = Layout.Position.Absolute;
+            taffyTree.SetStyle(child, captionStyle);
+            suspended.Add(child);
+        }
+
+        return suspended;
+    }
+
+    private static void RestoreCaptions(TaffyTree taffyTree, IReadOnlyList<TaffyNodeId> suspended)
+    {
+        foreach (TaffyNodeId caption in suspended)
+        {
+            TaffyStyle captionStyle = taffyTree.GetStyle(caption).Clone();
+            captionStyle.Position = Layout.Position.Relative;
+            taffyTree.SetStyle(caption, captionStyle);
+        }
+    }
+
+    /// <summary>
+    /// Clamp a stretched inline size by the box's own <c>min-width</c> / <c>max-width</c>.
+    /// A stretch is a used size, so unlike a shrink-to-fit it is not already inside them:
+    /// Chromium 141 gives a `max-width: 200px` table in a 600px grid 200, not 600.
+    /// </summary>
+    private static float ClampToInlineSizeLimits(LayoutStyle style, float value, float percentBase)
+    {
+        static float? Resolve(Dimension dimension, float percentBase) => dimension.Kind switch
+        {
+            DimensionKind.Px => dimension.Value,
+            DimensionKind.Percent => dimension.Value * percentBase,
+            _ => null,
+        };
+
+        float clamped = value;
+        if (Resolve(style.MaxWidth, percentBase) is { } maximum && maximum >= 0f)
+        {
+            clamped = F32.Min(clamped, maximum);
+        }
+
+        if (Resolve(style.MinWidth, percentBase) is { } minimum && minimum >= 0f)
+        {
+            clamped = F32.Max(clamped, minimum);
+        }
+
+        return clamped;
     }
 }

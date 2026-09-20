@@ -274,7 +274,8 @@ internal static class TaffyStyleMapping
                 gutterY > 0f ? TaffyOverflow.Scroll : s.Overflow.Y);
         }
 
-        s.Border = RectLp(style.Border);
+        // The collapsing table model gives a box half of each edge it shares (CSS 2.1 17.6.2).
+        s.Border = RectLp(style.UsedBorder);
         if (style.IgnoresUsedBoxSizes())
         {
             // Block-axis margins on an ordinary non-replaced inline neither move nor size its

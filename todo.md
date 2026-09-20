@@ -1107,6 +1107,86 @@ because that window is between `PageInFlight.Decrement()` and ClearScript resolv
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
 
+### Collapsing table borders are resolved per edge and split between the two boxes
+
+`crates/obscura-render` has no collapsing model: it gives the table its whole border and each
+cell its own. `DomTableCollapsedBorders` resolves one border per edge segment as the max over
+cell, adjacent cell, row, row group, column, column group and table (CSS 2.1 17.6.2), and hands
+each of the two boxes that meet there half of it. Only the **width** half of the conflict
+resolution is modelled: `hidden` suppression and the cell > row > row group > column > column
+group > table order between equal widths decide which border is *painted*, not how wide the edge
+is, so neither moves a box.
+
+Chromium 141, 600px block: `border: 5px; border-collapse: collapse` runs its cells from 2.5 to
+597.5, and a 5px table holding 9px cells is 609 wide at `box-sizing: content-box; width: 600px`.
+Six independent fixtures, each of which the width-max model predicts exactly, are pinned.
+
+`CollapsedBorder` sits beside `Border` rather than replacing it, because a `LayoutStyle` survives
+a pass whose node's cascade did not change and a pass rewriting `Border` in place would halve it
+again. `UsedBorder` (`CollapsedBorder ?? Border`) is what layout, inline and paint read;
+`getComputedStyle` deliberately still reports the **specified** width, which is what Chromium
+does, while `clientWidth`/`clientHeight` use the halves.
+
+Three things had to move with it, each a Chromium-verified fix in its own right:
+
+- **A cell's own border contributed no row height at all**, in both border models and
+  independently of collapsing. Taffy reports `content_size` two ways - a leaf adds its padding
+  and neither border, a container measures from the border-box origin - and the table pass took
+  it as a border-box height outright. `border-collapse: separate; td { border: 9px }` around one
+  18px line was 18 tall against Chromium's 36.
+- **Intrinsic table widths were read from taffy's rounded layout.** With a half-pixel on a cell
+  edge the rounded table total and the rounded per-cell totals disagree by up to a pixel, which
+  read as the columns not fitting their own max-content and wrapped every cell.
+- **`UsedBorder` had to reach the inline layer and paint**, or a cell's text sat at the table's
+  content edge and `vertical-align: middle` centred against a box that still subtracted the
+  specified border.
+
+### An auto-width table widens for a percentage column, and stretches to a grid area
+
+`AutoTablePercentageIntrinsicFloor` was fed min-content. CSS 2.1 17.5.2.2 and Chromium use
+**max-content**: the table grows until each percentage column's share covers that column's
+max-content. Chromium 141 makes an auto table holding a `width: 30%` cell 161.2 wide (48.36 /
+112.84); it used to stay at its 147.5 max-content and take 30% of that. The existing min-content
+floor is untouched, because that is what makes a `width: 10%` table stop at 81.8. A definite
+width is not widened this way, which is Chromium's rule too: a `width: 120px` table with a 30%
+cell stays 120.
+
+Separately, `DomStyleFixups.StretchesInlineToItsItemArea`: an `auto` table stretches to the item
+area a grid parent, or a column-flex parent, gives it, clamped by its own min/max-width. Chromium
+141 gives 600 in a 600px `display: grid` block and 200 in a 200px track, while `justify-self:
+start`, an auto inline margin, a float and a flex row all keep the shrink-to-fit.
+
+### `<caption>` is laid out
+
+`crates/obscura-render` builds no box for a caption at all - no rect, no height. It is now a
+full-width row of the table grid, above or below the rows per `caption-side` (which had to be
+parsed; it was not), with margins of exactly the inset between the table's border box and its
+first row so it sits outside the border, padding and leading border-spacing.
+
+A caption spans every column but **sizes none of them**: Chromium wraps a caption three times the
+table's width rather than widening the table, and floors the table only by the caption's own
+min-content. The captions are therefore positioned absolutely for the two intrinsic measurements.
+Without that a long-caption table was 196 wide against Chromium's 67.31; it is 68.
+
+### The UA `table` rule's flex construction does not survive an authored `display`
+
+`crates/obscura-render/src/style.rs` gives `table` / `tbody` / `thead` / `tfoot` / `tr` / `td` /
+`th` a `flex-direction: column`, an `align-items` and a `min-width: 0` that approximate table
+layout with an internal flex container, and its display handling clears only the display pair -
+so a `<table style="display:flex">` both laid out and reported as a *column* flex container.
+`ComputedStyle.ApplyDisplay` now drops all three with the display pair unless the author set
+them, and `PreparedRender` masks `align-items` on an internal flex container the way it already
+masked `flex-direction`.
+
+Chromium 141 reports `row` / `normal` / `auto` on such a table, and identically to a `<div>` of
+the same display - it never uses flex to build a table, so those are initial values everywhere.
+The genuine UA declarations survive every display: `box-sizing: border-box`, and
+`border-spacing: 2px` / `border-collapse: separate`, the last two being **inherited** properties
+a descendant reads (a `<div>` inside a `<table>` reports 2px, `body` reports 0px, and the
+descendant still reports 2px when the table carries `display: flex`). `min-width` is the
+invisible one: `auto` and `0` both serialize as `0px` outside a flex container, but `auto` is
+what gives a flex item its automatic minimum size.
+
 ### Table fixup generates an anonymous table box
 
 `crates/obscura-render/src/dom.rs` builds a table only for a computed table box, so

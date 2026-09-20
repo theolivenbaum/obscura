@@ -57,6 +57,14 @@ internal sealed class IfcRegistry
     /// <summary>Column constraints for the fixed table-layout algorithm.</summary>
     internal Dictionary<TaffyNodeId, List<FixedTableColumn>> FixedTableCols { get; } = [];
 
+    /// <summary>
+    /// <c>&lt;caption&gt;</c> boxes pinned into a table grid, and the block-axis margin each
+    /// carries. A caption is laid out in its own full-width grid row but sits outside the
+    /// table's border and border-spacing, which those (mostly negative) margins are what
+    /// produce - so its row track has to count them, and the column pass has to skip it.
+    /// </summary>
+    internal Dictionary<TaffyNodeId, float> TableCaptions { get; } = [];
+
     /// <summary>Minimum row heights per table grid node, one entry per source row.</summary>
     internal Dictionary<TaffyNodeId, List<float?>> TableRows { get; } = [];
 

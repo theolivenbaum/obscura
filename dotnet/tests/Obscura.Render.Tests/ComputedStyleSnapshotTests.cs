@@ -897,4 +897,118 @@ public class ComputedStyleSnapshotTests
         Assert.Equal("solid", computed["border-top-style"]);
         Assert.Equal("rgb(118, 118, 118)", computed["border-top-color"]);
     }
+
+    /// <summary>
+    /// An authored <c>display</c> on a <c>&lt;table&gt;</c> leaves nothing of the UA rule's
+    /// internal flex construction behind.
+    /// </summary>
+    /// <remarks>
+    /// The UA <c>table</c> arm approximates table layout with a column flex container -
+    /// <c>flex-direction: column</c>, <c>align-items: stretch</c>, <c>min-width: 0</c> - and an
+    /// authored <c>display</c> used to keep those, so a <c>&lt;table style="display:flex"&gt;</c>
+    /// reported <c>flex-direction: column</c>. Chromium 141 reports the initial <c>row</c> and
+    /// <c>normal</c> for every one of these displays, exactly as it does for a <c>&lt;div&gt;</c>.
+    /// </remarks>
+    [Theory]
+    [InlineData("flex")]
+    [InlineData("block")]
+    [InlineData("inline-block")]
+    [InlineData("grid")]
+    [InlineData("inline-flex")]
+    [InlineData("inline")]
+    [InlineData("table")]
+    [InlineData("inline-table")]
+    [InlineData("table-cell")]
+    public void AnAuthoredDisplayDropsTheUserAgentTableFlexConstruction(string display)
+    {
+        Dictionary<string, string> table = Computed(
+            $"""<table id="box" style="display:{display}"><tr><td>d</td></tr></table>""",
+            "box");
+
+        Assert.Equal("row", table["flex-direction"]);
+        Assert.Equal("normal", table["align-items"]);
+        Assert.Equal("0px", table["min-width"]);
+
+        // The same authored display on a plain box, which never had the construction: the two
+        // agree on everything but `box-sizing`, which is a real UA declaration on `table`.
+        Dictionary<string, string> div = Computed(
+            $"""<div id="box" style="display:{display}">d</div>""",
+            "box");
+
+        Assert.Equal(div["flex-direction"], table["flex-direction"]);
+        Assert.Equal(div["align-items"], table["align-items"]);
+        Assert.Equal(div["min-width"], table["min-width"]);
+    }
+
+    /// <summary>
+    /// <c>box-sizing: border-box</c> is a genuine UA declaration on <c>table</c>, not part of
+    /// the flex construction, so it survives an authored <c>display</c> - Chromium 141 reports
+    /// it on a <c>&lt;table&gt;</c> under every display, and <c>content-box</c> on a
+    /// <c>&lt;div&gt;</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("flex")]
+    [InlineData("block")]
+    [InlineData("inline-block")]
+    [InlineData("grid")]
+    [InlineData("inline-flex")]
+    [InlineData("inline")]
+    public void TheUserAgentTableBoxSizingSurvivesAnAuthoredDisplay(string display)
+    {
+        string style = display.Length == 0 ? string.Empty : $""" style="display:{display}" """;
+
+        Assert.Equal(
+            "border-box",
+            Computed($"""<table id="box"{style}><tr><td>d</td></tr></table>""", "box")["box-sizing"]);
+        Assert.Equal(
+            "content-box",
+            Computed($"""<div id="box"{style}>d</div>""", "box")["box-sizing"]);
+    }
+
+    /// <summary>
+    /// The construction does not reach the reported style of a table that kept its UA display
+    /// either: Chromium 141 reports <c>row</c> / <c>normal</c> on a <c>&lt;table&gt;</c>, its
+    /// row groups, and its cells.
+    /// </summary>
+    [Theory]
+    [InlineData("<table id=\"box\"><tr><td>d</td></tr></table>")]
+    [InlineData("<table><thead id=\"box\"><tr><th>h</th></tr></thead></table>")]
+    [InlineData("<table><tbody id=\"box\"><tr><td>d</td></tr></tbody></table>")]
+    [InlineData("<table><tr id=\"box\"><td>d</td></tr></table>")]
+    [InlineData("<table><tr><th id=\"box\">h</th></tr></table>")]
+    [InlineData("<table><tr><td id=\"box\">d</td></tr></table>")]
+    public void TableBoxesReportTheInitialAlignItems(string html)
+    {
+        Assert.Equal("normal", Computed(html, "box")["align-items"]);
+    }
+
+    /// <summary>
+    /// An authored value of one of the three wins wherever it sits relative to the
+    /// <c>display</c> declaration, which is what separates the construction from real style.
+    /// Every expectation is Chromium 141's on the same markup.
+    /// </summary>
+    [Theory]
+    [InlineData("flex-direction:column;display:flex", "column", "normal", "0px")]
+    [InlineData("display:flex;flex-direction:column", "column", "normal", "0px")]
+    [InlineData("align-items:center;display:flex", "row", "center", "0px")]
+    [InlineData("display:flex;align-items:center", "row", "center", "0px")]
+    [InlineData("align-items:stretch;display:flex", "row", "stretch", "0px")]
+    [InlineData("place-items:center;display:flex", "row", "center", "0px")]
+    [InlineData("min-width:50px;display:flex", "row", "normal", "50px")]
+    [InlineData("display:flex;min-width:50px", "row", "normal", "50px")]
+    public void AnAuthoredValueSurvivesTheDisplayThatDropsTheConstruction(
+        string inline,
+        string flexDirection,
+        string alignItems,
+        string minWidth)
+    {
+        Dictionary<string, string> computed = Computed(
+            $"""<table id="box" style="{inline}"><tr><td>d</td></tr></table>""",
+            "box");
+
+        Assert.Equal(flexDirection, computed["flex-direction"]);
+        Assert.Equal(alignItems, computed["align-items"]);
+        Assert.Equal(minWidth, computed["min-width"]);
+    }
 }

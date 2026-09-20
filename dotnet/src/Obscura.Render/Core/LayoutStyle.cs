@@ -236,6 +236,10 @@ internal sealed class LayoutStyleRare
 
     public (float Horizontal, float Vertical)? BorderSpacing;
 
+    public Edges? CollapsedBorder;
+
+    public bool? CaptionSideBottom;
+
     public ObjectPosition ObjectPosition = Obscura.Render.ObjectPosition.Default;
 
     public (float X, float Y)? IndividualScale;
@@ -1314,6 +1318,19 @@ public sealed class LayoutStyle
     /// </summary>
     internal bool FlexDirectionAuthored;
 
+    /// <summary>
+    /// Whether <c>align-items</c> (or <c>place-items</c>) was authored, as opposed to
+    /// <see cref="AlignItems"/> carrying the internal table approximation's stretch (a table
+    /// box) or flex-start (a cell box).
+    /// </summary>
+    internal bool AlignItemsAuthored;
+
+    /// <summary>
+    /// Whether <c>min-width</c> (or <c>min-inline-size</c>) was authored, as opposed to
+    /// <see cref="MinWidth"/> carrying the internal table approximation's zero.
+    /// </summary>
+    internal bool MinWidthAuthored;
+
     // CSS Grid. Tracks are stored as taffy sizing functions; GridAreas is the parsed
     // `grid-template-areas` matrix (one list per row, "." for a null cell), resolved to line
     // placements on children in a later pass.
@@ -1496,6 +1513,51 @@ public sealed class LayoutStyle
     /// border-spacing to their geometry.
     /// </remarks>
     public bool? BorderCollapse;
+
+    /// <summary>
+    /// Computed <c>caption-side</c>: <c>true</c> for <c>bottom</c>. The property is inherited,
+    /// so <c>null</c> means nothing has been specified on this node yet.
+    /// </summary>
+    public bool? CaptionSideBottom
+    {
+        get => m_rare?.CaptionSideBottom;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.CaptionSideBottom = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The used border of a box in the collapsing border model (CSS 2.1 17.6.2): half the
+    /// border resolved for each of its four edges, which is the half that lies inside this box.
+    /// <c>null</c> on every box that is not part of a collapsing table.
+    /// </summary>
+    /// <remarks>
+    /// Kept beside <see cref="Border"/> rather than replacing it because a style object
+    /// survives a layout pass when its node's cascade did not change, so a pass that rewrote
+    /// <see cref="Border"/> in place would halve it again on the next one. Read it through
+    /// <see cref="UsedBorder"/>.
+    /// </remarks>
+    public Edges? CollapsedBorder
+    {
+        get => m_rare?.CollapsedBorder;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.CollapsedBorder = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The border widths that size and position this box: <see cref="CollapsedBorder"/> where
+    /// the collapsing table model resolved one, and <see cref="Border"/> otherwise.
+    /// </summary>
+    public Edges UsedBorder => m_rare?.CollapsedBorder ?? Border;
 
     // Positioning. `position: absolute|fixed` takes the box out of normal flow.
     public Layout.Position? Position;

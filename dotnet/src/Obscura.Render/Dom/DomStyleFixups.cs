@@ -1177,6 +1177,72 @@ internal static class DomStyleFixups
         }
     }
 
+    /// <summary>
+    /// Whether an <c>auto</c> inline size on <paramref name="id"/> is stretched to the item area
+    /// its parent gives it, rather than shrink-to-fit.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from crates/obscura-render/src/dom.rs, which shrink-to-fits every auto-width
+    /// table. A table box is a grid or flex item like any other: Chromium 141 makes an auto
+    /// `&lt;table&gt;` in a 600px `display: grid` block 600 wide (and 200 wide in a 200px track),
+    /// and the same in a `flex-direction: column` row, because a stretch alignment is what the
+    /// initial `normal` resolves to there. `justify-self: start`, an auto inline margin, a float
+    /// and a flex *row* all keep the shrink-to-fit, and Chromium agrees on each.
+    /// </remarks>
+    internal static bool StretchesInlineToItsItemArea(
+        DomTree tree,
+        NodeId id,
+        LayoutStyle style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        if (!style.Width.IsAuto
+            || style.Position == TaffyPosition.Absolute
+            || style.Float is not null
+            || HasDeferredOrAutoMargin(style))
+        {
+            return false;
+        }
+
+        NodeId? parent = DomTraversal.RenderedParent(tree, id);
+        while (true)
+        {
+            if (parent is not { } parentId
+                || !styles.TryGetValue(parentId, out LayoutStyle? parentStyle))
+            {
+                return false;
+            }
+
+            if (parentStyle.DisplayContents)
+            {
+                parent = DomTraversal.RenderedParent(tree, parentId);
+                continue;
+            }
+
+            // `normal` is what a grid item and a flex item's cross axis resolve to stretch.
+            static bool IsStretch(Layout.AlignItems? alignment) =>
+                alignment is not { } value
+                || value.Keyword is Layout.AlignItemsKeyword.Normal
+                    or Layout.AlignItemsKeyword.Stretch;
+
+            if (parentStyle.Display == Display.Grid)
+            {
+                return IsStretch(style.JustifySelf ?? parentStyle.JustifyItems);
+            }
+
+            // Only the cross axis stretches, and the cross axis is the inline one only when the
+            // flex container lays its items out in a column.
+            if (parentStyle.Display == Display.Flex
+                && !parentStyle.InternalFlexContainer
+                && parentStyle.FlexDirection
+                    is Layout.FlexDirection.Column or Layout.FlexDirection.ColumnReverse)
+            {
+                return IsStretch(style.AlignSelf ?? parentStyle.AlignItems);
+            }
+
+            return false;
+        }
+    }
+
     internal static bool EstablishesBlockFormattingContext(LayoutStyle style) =>
         style.Display is Display.Flex or Display.Grid
         || EffectiveContainerType(style) != ContainerType.Normal
@@ -1244,8 +1310,9 @@ internal static class DomStyleFixups
     {
         (float spacing, _) = TableSpacing(style);
         Edges padding = TableUsedPadding(style);
-        return style.Border.Left
-            + style.Border.Right
+        Edges border = style.UsedBorder;
+        return border.Left
+            + border.Right
             + padding.Left
             + padding.Right
             + (spacing * 2f);
@@ -1274,7 +1341,12 @@ internal static class DomStyleFixups
     {
         if (style.BorderCollapse == true)
         {
-            return (style.Border.Left + style.Border.Right) * 0.5f;
+            // `UsedBorder` is already half of the border resolved for each edge, and that
+            // resolution can be wider than the table's own declaration: Chromium 141 makes a
+            // `box-sizing: content-box; width: 600px; border: 5px` table holding 9px cells 609
+            // wide, not 605.
+            Edges collapsed = style.UsedBorder;
+            return collapsed.Left + collapsed.Right;
         }
 
         return style.Border.Left + style.Border.Right + style.Padding.Left + style.Padding.Right;
