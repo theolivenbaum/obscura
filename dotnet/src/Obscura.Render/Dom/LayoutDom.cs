@@ -261,7 +261,17 @@ public static partial class RenderDom
     {
         ArgumentNullException.ThrowIfNull(tree);
 
-        // Collect the text of every <style> block in document order.
+        // Collect every author sheet in document order: the text of each <style>, plus the
+        // fetched CSS an element contributes ahead of its own text.
+        //
+        // DEVIATION from crates/obscura-render, which only ever sees <style> elements because
+        // the Rust browser materializes a fetched <link> sheet as a real one next to the link
+        // (crates/obscura-browser/src/page.rs, the data-obscura-external-stylesheets script).
+        // Chromium 141 creates no element for a <link> or an @import: on repro/a.html it
+        // reports head children META,LINK and head.querySelectorAll('style').length 0 while
+        // document.styleSheets.length is still 1. The bytes therefore arrive beside the node,
+        // through DomTree.ExternalStylesheetCss, and the node keeps its authored position so
+        // the cascade order is unchanged. See "Known deviations" in todo.md.
         List<string> cssSources = [];
         foreach (NodeId nid in tree.Descendants(tree.Document))
         {
@@ -270,15 +280,28 @@ public static partial class RenderDom
                 continue;
             }
 
-            if (!string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
+            bool isStyle = string.Equals(element.Name.Local, "style", StringComparison.Ordinal);
+            string? external = tree.ExternalStylesheetCss(nid);
+            if (!isStyle && external is null)
             {
                 continue;
             }
 
             string? media = node.GetAttribute("media");
-            if (media is null
-                || media.Trim().Length == 0
-                || CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
+            if (media is not null
+                && media.Trim().Length != 0
+                && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
+            {
+                continue;
+            }
+
+            // An @import's rules precede the importing sheet's own rules.
+            if (external is not null)
+            {
+                cssSources.Add(external);
+            }
+
+            if (isStyle)
             {
                 cssSources.Add(tree.TextContent(nid));
             }

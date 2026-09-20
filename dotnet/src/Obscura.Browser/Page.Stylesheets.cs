@@ -15,14 +15,14 @@ internal static partial class PageHelpers
     /// do not suppress its fetch or <c>load</c> event. The index counts all
     /// stylesheet links so the materialization script addresses the same node.
     /// </remarks>
-    internal static List<(int LinkIndex, string Href)> LinkedStylesheetRequests(DomTree dom)
+    internal static List<(int LinkIndex, NodeId Node, string Href)> LinkedStylesheetRequests(DomTree dom)
     {
         ArgumentNullException.ThrowIfNull(dom);
         List<NodeId> linkIds = dom.TryQuerySelectorAll(
             "link[rel~=\"stylesheet\"]",
             out List<NodeId> found,
             out _) ? found : [];
-        List<(int, string)> links = [];
+        List<(int, NodeId, string)> links = [];
         for (int linkIndex = 0; linkIndex < linkIds.Count; linkIndex++)
         {
             Node? node = dom.GetNode(linkIds[linkIndex]);
@@ -38,7 +38,7 @@ internal static partial class PageHelpers
             }
             if (node.GetAttribute("href") is { } href)
             {
-                links.Add((linkIndex, href));
+                links.Add((linkIndex, linkIds[linkIndex], href));
             }
         }
         return links;
@@ -48,33 +48,29 @@ internal static partial class PageHelpers
     /// Discover fetchable <c>@import</c> rules in inline author sheets.
     /// </summary>
     /// <remarks>
-    /// The source index excludes Obscura's own materialized sheets so it stays stable
-    /// while imports are inserted before their source nodes.
+    /// DEVIATION from crates/obscura-browser, which returns an index into the author
+    /// <c>&lt;style&gt;</c> elements because the imported CSS is inserted as another
+    /// <c>&lt;style&gt;</c> before the source. Chromium 141 creates no element for an
+    /// <c>@import</c>, so the CSS is recorded against the source node and the index-keeping
+    /// (and the filter that skipped Obscura's own synthetic sheets, which no longer exist)
+    /// is gone. See "Known deviations" in todo.md.
     /// </remarks>
-    internal static List<(int StyleIndex, StylesheetImport Import)> InlineStylesheetImportRequests(DomTree dom)
+    internal static List<(NodeId Node, StylesheetImport Import)> InlineStylesheetImportRequests(DomTree dom)
     {
         ArgumentNullException.ThrowIfNull(dom);
         List<NodeId> styleIds = dom.TryQuerySelectorAll("style", out List<NodeId> found, out _) ? found : [];
-        List<(int, StylesheetImport)> imports = [];
-        int authorIndex = 0;
+        List<(NodeId, StylesheetImport)> imports = [];
         foreach (NodeId styleId in styleIds)
         {
-            Node? node = dom.GetNode(styleId);
-            if (node is null)
-            {
-                continue;
-            }
-            if (node.GetAttribute("data-obscura-external-stylesheets") is not null
-                || node.GetAttribute("data-obscura-inline-import") is not null)
+            if (dom.GetNode(styleId) is null)
             {
                 continue;
             }
             (List<StylesheetImport> styleImports, _) = SplitCssImports(dom.TextContent(styleId));
             foreach (StylesheetImport import in styleImports)
             {
-                imports.Add((authorIndex, import));
+                imports.Add((styleId, import));
             }
-            authorIndex += 1;
         }
         return imports;
     }
@@ -92,8 +88,8 @@ public sealed partial class Page
         var discovered = js.WithDom(dom => (
             Links: PageHelpers.LinkedStylesheetRequests(dom),
             Imports: PageHelpers.InlineStylesheetImportRequests(dom)));
-        List<(int LinkIndex, string Href)> allLinks = discovered.Links ?? [];
-        List<(int StyleIndex, StylesheetImport Import)> inlineImports = discovered.Imports ?? [];
+        List<(int LinkIndex, NodeId Node, string Href)> allLinks = discovered.Links ?? [];
+        List<(NodeId Node, StylesheetImport Import)> inlineImports = discovered.Imports ?? [];
 
         if (Url is not { } documentUrl)
         {
@@ -105,7 +101,7 @@ public sealed partial class Page
         HashSet<string> scheduled = new(StringComparer.Ordinal);
         List<(string Key, UrlRecord Url, byte Depth)> pending = [];
 
-        foreach ((int linkIndex, string href) in allLinks)
+        foreach ((int linkIndex, NodeId linkNode, string href) in allLinks)
         {
             if (PageUrl.TryJoin(documentBase, href) is not { } joined)
             {
@@ -120,14 +116,14 @@ public sealed partial class Page
             {
                 continue;
             }
-            roots.Add((new AuthorStylesheetTarget.Linked(linkIndex), key, null));
+            roots.Add((new AuthorStylesheetTarget.Linked(linkIndex, linkNode), key, null));
             if (scheduled.Add(key) && scheduled.Count <= PageHelpers.MaxStylesheetResources)
             {
                 pending.Add((key, resolved, 0));
             }
         }
 
-        foreach ((int styleIndex, StylesheetImport import) in inlineImports)
+        foreach ((NodeId styleNode, StylesheetImport import) in inlineImports)
         {
             if (PageUrl.TryJoin(documentBase, import.Url) is not { } joined)
             {
@@ -139,7 +135,7 @@ public sealed partial class Page
             {
                 continue;
             }
-            roots.Add((new AuthorStylesheetTarget.InlineImport(styleIndex), key, import.Media));
+            roots.Add((new AuthorStylesheetTarget.InlineImport(styleNode), key, import.Media));
             if (scheduled.Add(key) && scheduled.Count <= PageHelpers.MaxStylesheetResources)
             {
                 pending.Add((key, resolved, 1));

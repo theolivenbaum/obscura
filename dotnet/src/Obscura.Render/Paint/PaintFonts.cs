@@ -35,13 +35,31 @@ internal static class PaintFonts
 
         foreach (NodeId nid in DomTraversal.RenderedDescendants(tree, tree.Document))
         {
-            if (tree.GetNode(nid)?.AsElement() is not { } element
-                || !string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
+            if (tree.GetNode(nid)?.AsElement() is not { } element)
             {
                 continue;
             }
 
-            string css = tree.TextContent(nid);
+            // A @font-face reaches here from a <style>'s own text, or from the CSS an element
+            // contributes ahead of it - a fetched <link> sheet or an @import. DEVIATION from
+            // crates/obscura-render, which reads only <style> text because the Rust browser
+            // materializes a fetched <link> sheet as a <style> element; Chromium 141 creates no
+            // element for one. Without this arm every @font-face in a linked sheet disappears
+            // and the face silently falls back. See "Known deviations" in todo.md.
+            bool isStyle = string.Equals(element.Name.Local, "style", StringComparison.Ordinal);
+            string? external = tree.ExternalStylesheetCss(nid);
+            if (!isStyle && external is null)
+            {
+                continue;
+            }
+
+            string css = external ?? string.Empty;
+            if (isStyle)
+            {
+                string own = tree.TextContent(nid);
+                css = css.Length == 0 ? own : css + "\n" + own;
+            }
+
             foreach (string face in FontFaceBlocks(css))
             {
                 if (!FontFaceCoversAscii(face))

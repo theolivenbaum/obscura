@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Obscura.Dom;
 using Obscura.Js.Url;
 using Obscura.Net;
 
@@ -11,16 +12,26 @@ internal sealed record StylesheetImport(string Url, string? Media);
 /// <summary>A fetched stylesheet plus the imports it declares.</summary>
 internal sealed record LoadedStylesheet(UrlRecord ResponseUrl, IReadOnlyList<StylesheetImport> Imports, string Rules);
 
-/// <summary>Where a materialized author sheet is inserted.</summary>
+/// <summary>
+/// Which element a fetched author sheet belongs to.
+/// </summary>
+/// <remarks>
+/// DEVIATION from crates/obscura-browser, where this named an insertion point for a
+/// synthetic <c>&lt;style&gt;</c>. Chromium 141 creates no element for a <c>&lt;link&gt;</c>
+/// or an <c>@import</c> - repro/a.html reports head children META,LINK and
+/// <c>head.querySelectorAll('style').length</c> 0 with <c>document.styleSheets.length</c>
+/// still 1 - so the bytes are recorded against the node instead. <c>LinkIndex</c> survives
+/// only so the load-event script can address the same link from page JS.
+/// </remarks>
 internal abstract record AuthorStylesheetTarget
 {
     private AuthorStylesheetTarget()
     {
     }
 
-    internal sealed record Linked(int LinkIndex) : AuthorStylesheetTarget;
+    internal sealed record Linked(int LinkIndex, NodeId Node) : AuthorStylesheetTarget;
 
-    internal sealed record InlineImport(int StyleIndex) : AuthorStylesheetTarget;
+    internal sealed record InlineImport(NodeId Node) : AuthorStylesheetTarget;
 }
 
 /// <summary>
@@ -965,98 +976,46 @@ internal static partial class PageHelpers
     }
 
     /// <summary>
-    /// Materialize a fetched linked sheet immediately after its source
-    /// <c>&lt;link&gt;</c>.
+    /// Bind a fetched linked sheet to its <c>&lt;link&gt;</c> and fire the element's
+    /// <c>load</c> event.
     /// </summary>
     /// <remarks>
-    /// Keeping each sheet at its document position matters when linked and inline
-    /// author sheets are interleaved. Appending one aggregate <c>&lt;style&gt;</c> to
-    /// <c>&lt;head&gt;</c> makes every external rule later than every inline rule,
-    /// which changes the cascade even when the fetches complete in order. The
-    /// synthetic style retains the link's effective media query so the same bytes can
-    /// enter print layout without leaking into screen layout.
+    /// DEVIATION from crates/obscura-browser's <c>materialize_linked_stylesheet_script</c>,
+    /// which creates a <c>&lt;style data-obscura-external-stylesheets&gt;</c> holding the CSS
+    /// and inserts it after the link. Chromium 141 creates no element, so the bytes were
+    /// already written beside the node and this script only has to attach the CSSOM sheet,
+    /// run the element's load handler, and re-apply what that handler changed. See
+    /// "Known deviations" in todo.md.
+    ///
+    /// A non-matching sheet still loads and fires its event, which is what the common
+    /// <c>media="print" onload="this.media='all'"</c> async-CSS pattern relies on. The
+    /// renderer reads the link's <c>media</c> content attribute, so the handler's assignment
+    /// is written through to it - Chromium reflects <c>HTMLLinkElement.media</c>, and on
+    /// repro/ord/o5.html reports <c>getAttribute('media') === 'all'</c> afterwards, where
+    /// Obscura reported <c>print</c>.
     /// </remarks>
-    internal static string MaterializeLinkedStylesheetScript(int linkIndex, string css)
+    internal static string LinkedStylesheetLoadScript(int linkIndex)
     {
-        string escapedCss = EscapeForJsTemplateLiteral(css);
         return $$"""
             (function() {
                         var links = document.querySelectorAll('link[rel~="stylesheet"]');
                         var link = links[{{linkIndex.ToString(CultureInfo.InvariantCulture)}}];
-                        if (!link || !link.parentNode) return;
-                        var style = null;
-                        function effectiveMedia() {
-                            // Until the generic Element shim reflects HTMLLinkElement.media,
-                            // `this.media = "all"` creates an own property while the parsed
-                            // media="print" attribute remains unchanged.
-                            if (Object.prototype.hasOwnProperty.call(link, 'media')) {
-                                return String(link.media || '');
-                            }
-                            return link.getAttribute('media') || '';
-                        }
+                        if (!link) return;
+                        globalThis.__obscura_registerLinkedStylesheet(link, link);
+                        var css = globalThis.__obscura_linkedStylesheetCss(link);
                         function syncSheet() {
-                            if (!style) {
-                                style = document.createElement('style');
-                                style.setAttribute('data-obscura-external-stylesheets', '');
-                                style.textContent = `{{escapedCss}}`;
-                                globalThis.__obscura_registerLinkedStylesheet(link, style);
+                            if (Object.prototype.hasOwnProperty.call(link, 'media')) {
+                                var wanted = String(link.media || '').trim();
+                                if (wanted) link.setAttribute('media', wanted);
+                                else link.removeAttribute('media');
                             }
-                            var enabled = link.parentNode
-                                && !link.disabled
-                                && !link.hasAttribute('disabled');
-                            if (!enabled) {
-                                if (style && style.parentNode) style.parentNode.removeChild(style);
-                                return;
-                            }
-                            var media = effectiveMedia().trim();
-                            if (media) style.setAttribute('media', media);
-                            else style.removeAttribute('media');
-                            if (!style.parentNode) {
-                                link.parentNode.insertBefore(style, link.nextSibling);
-                            }
+                            var enabled = !link.disabled && !link.hasAttribute('disabled');
+                            globalThis.__obscura_setLinkedStylesheetCss(link, enabled ? css : '');
                         }
 
-                        // A non-matching sheet still loads and fires its event. Its handler
-                        // may then make the sheet applicable (the common
-                        // media=print/onload="this.media='all'" async-CSS pattern).
                         syncSheet();
                         try { link.dispatchEvent(new Event('load')); }
                         finally { syncSheet(); }
-                    })()
-            """;
-    }
-
-    /// <summary>
-    /// Materialize one fetched <c>@import</c> immediately before its source inline
-    /// <c>&lt;style&gt;</c>.
-    /// </summary>
-    /// <remarks>
-    /// Imported rules precede the importing sheet in the author cascade, and inherit
-    /// the source sheet's own media condition in addition to the import rule's media
-    /// wrapper.
-    /// </remarks>
-    internal static string MaterializeInlineImportScript(int styleIndex, string css)
-    {
-        string escapedCss = EscapeForJsTemplateLiteral(css);
-        return $$"""
-            (function() {
-                        var styles = document.querySelectorAll('style');
-                        var source = null;
-                        var authorIndex = -1;
-                        for (var i = 0; i < styles.length; i++) {
-                            var candidate = styles[i];
-                            if (candidate.hasAttribute('data-obscura-external-stylesheets')
-                                || candidate.hasAttribute('data-obscura-inline-import')) continue;
-                            authorIndex++;
-                            if (authorIndex === {{styleIndex.ToString(CultureInfo.InvariantCulture)}}) { source = candidate; break; }
-                        }
-                        if (!source || !source.parentNode) return;
-                        var imported = document.createElement('style');
-                        imported.setAttribute('data-obscura-inline-import', '');
-                        var media = source.getAttribute('media') || '';
-                        if (media.trim()) imported.setAttribute('media', media);
-                        imported.textContent = `{{escapedCss}}`;
-                        source.parentNode.insertBefore(imported, source);
                     })()
             """;
     }

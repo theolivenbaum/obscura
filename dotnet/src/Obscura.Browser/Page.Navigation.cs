@@ -335,17 +335,54 @@ public sealed partial class Page
             // template literal and run arbitrary JS in the page's realm.
             string escaped = PageHelpers.EscapeForJsTemplateLiteral(combinedCss);
             TryExecute(cssJs, "<css>", $"globalThis.__obscura_css = `{escaped}`;");
+
+            // DEVIATION from crates/obscura-browser, which runs one script per sheet to insert
+            // a synthetic <style>. Chromium 141 inserts no element, so the bytes are recorded
+            // against the <link> (or, for an @import, against the importing <style>) and the
+            // renderer reads them from there. Several @import rules in one <style> contribute
+            // in source order, so they are joined before the single write per node. See
+            // "Known deviations" in todo.md.
+            Dictionary<NodeId, string> perNode = [];
+            List<int> linkedIndexes = [];
             foreach ((AuthorStylesheetTarget target, string css) in authorStylesheets)
             {
-                string code = target switch
+                NodeId node;
+                switch (target)
                 {
-                    AuthorStylesheetTarget.Linked linked =>
-                        PageHelpers.MaterializeLinkedStylesheetScript(linked.LinkIndex, css),
-                    AuthorStylesheetTarget.InlineImport inline =>
-                        PageHelpers.MaterializeInlineImportScript(inline.StyleIndex, css),
-                    _ => string.Empty,
-                };
-                TryExecute(cssJs, "<fetch_stylesheets>", code);
+                    case AuthorStylesheetTarget.Linked linked:
+                        node = linked.Node;
+                        linkedIndexes.Add(linked.LinkIndex);
+                        break;
+                    case AuthorStylesheetTarget.InlineImport inline:
+                        node = inline.Node;
+                        break;
+                    default:
+                        continue;
+                }
+
+                perNode[node] = perNode.TryGetValue(node, out string? earlier)
+                    ? earlier + "\n" + css
+                    : css;
+            }
+
+            cssJs.WithDom(dom =>
+            {
+                foreach ((NodeId node, string css) in perNode)
+                {
+                    dom.SetExternalStylesheetCss(node, css);
+                }
+
+                return 0;
+            });
+
+            // An @import needs no script: it owns no CSSOM sheet and fires no event. A <link>
+            // does both, and its load handler may still change what applies.
+            foreach (int linkIndex in linkedIndexes)
+            {
+                TryExecute(
+                    cssJs,
+                    "<fetch_stylesheets>",
+                    PageHelpers.LinkedStylesheetLoadScript(linkIndex));
             }
         }
 

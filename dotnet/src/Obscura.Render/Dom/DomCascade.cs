@@ -1162,15 +1162,32 @@ internal static class DomCascade
                     continue;
                 }
 
-                if (!string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
+                // Same two sources as the document sheet in LayoutDom: a <style>'s own text,
+                // and the fetched CSS an element contributes ahead of it. DEVIATION from
+                // crates/obscura-render, which sees only <style> because the Rust browser
+                // materializes a fetched <link> sheet as one; Chromium 141 creates no element
+                // for a <link> or an @import. See "Known deviations" in todo.md.
+                bool isStyle = string.Equals(element.Name.Local, "style", StringComparison.Ordinal);
+                string? external = tree.ExternalStylesheetCss(nodeId);
+                if (!isStyle && external is null)
                 {
                     continue;
                 }
 
                 string? media = node.GetAttribute("media");
-                if (media is null
-                    || media.Trim().Length == 0
-                    || CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
+                if (media is not null
+                    && media.Trim().Length != 0
+                    && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
+                {
+                    continue;
+                }
+
+                if (external is not null)
+                {
+                    sources.Add(external);
+                }
+
+                if (isStyle)
                 {
                     sources.Add(tree.TextContent(nodeId));
                 }

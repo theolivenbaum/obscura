@@ -15216,9 +15216,14 @@ public sealed class RuntimeTests
                     });
                     document.head.appendChild(link);
                     await loaded;
-                    const style = document.querySelector("style[data-obscura-linked]");
-                    const css = style.textContent;
-                    const afterLink = link.nextSibling === style;
+                    // DEVIATION from the Rust body above, which reads the CSS out of a
+                    // <style data-obscura-linked> inserted after the link and checks it is the
+                    // link's nextSibling. Chromium 141 creates no element for a dynamically
+                    // inserted stylesheet link, so the bytes are held beside the link and there
+                    // is nothing to be anyone's sibling. Everything else - import order, both
+                    // rebased url()s, the link-owned CSSOM sheet - is asserted unchanged.
+                    const css = globalThis.__obscura_linkedStylesheetCss(link);
+                    const noElement = document.querySelectorAll("style").length === 0;
                     const list = document.styleSheets;
                     const sheet = link.sheet;
                     const rules = sheet.cssRules;
@@ -15231,7 +15236,7 @@ public sealed class RuntimeTests
                     };
                     link.remove();
                     return {
-                        afterLink,
+                        noElement,
                         importedBeforeRoute:
                             css.indexOf("color:red") < css.indexOf("display:grid"),
                         importedUrl:
@@ -15239,7 +15244,7 @@ public sealed class RuntimeTests
                         routeUrl:
                             css.includes("http://example.com/img/card.png"),
                         removedWithLink:
-                            !document.querySelector("style[data-obscura-linked]"),
+                            !link.isConnected && document.querySelectorAll("style").length === 0,
                         cssom,
                         detachedCssom: sheet.ownerNode === null
                             && link.sheet === null
@@ -15258,7 +15263,7 @@ public sealed class RuntimeTests
         AssertJsonEquals(
             """
             {
-                "afterLink": true,
+                "noElement": true,
                 "importedBeforeRoute": true,
                 "importedUrl": true,
                 "routeUrl": true,
