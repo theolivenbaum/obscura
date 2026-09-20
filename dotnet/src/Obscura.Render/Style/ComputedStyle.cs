@@ -985,7 +985,11 @@ public static partial class ComputedStyle
         }
     }
 
-    private static readonly string[] GapUnits = ["rem", "em", "ex", "vw", "vh", "vmin", "vmax"];
+    // `ch` sits in this list beside `ex` because both are measured on the element's own face
+    // (FontUnits), so a gap naming either has to be re-read in the top-down pass rather than
+    // resolved at parse time against the initial 16px. It was absent, which made `gap: 2ch` at
+    // font-size 40px in Liberation Mono 18px where Chromium 141 gives 48px.
+    private static readonly string[] GapUnits = ["rem", "em", "ex", "ch", "vw", "vh", "vmin", "vmax"];
 
     /// <summary>Rust <c>apply_font_shorthand</c>.</summary>
     internal static void ApplyFontShorthand(LayoutStyle style, string value)
@@ -2893,8 +2897,11 @@ public static partial class ComputedStyle
         return false;
     }
 
+    // See GapUnits: `ch` belongs beside `ex` wherever a unit list decides what gets re-read once
+    // the element's font is known. `line-height: 3ch` fell out of this one and reverted to
+    // `normal` - 45px against Chromium's 72.016px on Liberation Mono at font-size 40px.
     private static readonly string[] RelativeLineHeightUnits =
-        ["rem", "em", "ex", "vw", "vh", "vmin", "vmax"];
+        ["rem", "em", "ex", "ch", "vw", "vh", "vmin", "vmax"];
 
     private static string FirstAnimationValue(string value)
     {

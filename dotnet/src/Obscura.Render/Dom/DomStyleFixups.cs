@@ -81,6 +81,13 @@ internal static class DomStyleFixups
     internal static string NormalizeControlLabel(string text) =>
         string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
+    /// <remarks>
+    /// The relative arms are an unreached net, not a resolution path: this pass runs after the
+    /// top-down one, which has already turned every <c>em</c> / <c>ch</c> / <c>ex</c> width into
+    /// <see cref="DimensionKind.Px"/> against the element's measured face
+    /// (<see cref="FontUnits"/>). They keep Liberation Sans' fractions because a value that
+    /// reaches here unresolved has no face to be measured on either.
+    /// </remarks>
     private static float? DefiniteInlineSize(Dimension dimension, float fontSize)
     {
         float? value = dimension.Kind switch

@@ -318,6 +318,10 @@ public static partial class RenderDom
 
             // Computed definiteness after walking the real containing-block chain.
             HashSet<NodeId> definiteHeightNodes = [];
+            // `ch` and `ex` are measured on the face the text engine selects, so the resolver
+            // reads the same font database layout will shape with. One per pass: it memoizes the
+            // face decision, which every element asks for.
+            FontUnitResolver fontUnits = new(engine);
             ResolveComputedValues(
                 tree,
                 rootId,
@@ -325,6 +329,7 @@ public static partial class RenderDom
                 freshStyles,
                 definiteHeightNodes,
                 rootInherited,
+                fontUnits,
                 rootFs,
                 vw,
                 vh,

@@ -337,7 +337,10 @@ internal static class TaffyStyleMapping
         DimensionKind.Percent => TaffyDimension.FromPercent(value.Value),
         DimensionKind.Auto => TaffyDimension.Auto,
         // Relative units are resolved to Px before layout; if one slips through unresolved,
-        // fall back to its raw magnitude (em/rem ~16px) rather than panicking.
+        // fall back to its raw magnitude (em/rem ~16px) rather than panicking. This is an
+        // unreached net, not a resolution path - `ch` and `ex` are measured on the element's own
+        // face in the top-down pass (`FontUnits`), and a value arriving here has neither a font
+        // size nor a face to be measured against.
         DimensionKind.Em or DimensionKind.Rem => TaffyDimension.FromLength(value.Value * 16f),
         DimensionKind.Ex => TaffyDimension.FromLength(value.Value * 16f * Dimension.ExPerEm),
         DimensionKind.Ch => TaffyDimension.FromLength(value.Value * 16f * Dimension.ChPerEm),

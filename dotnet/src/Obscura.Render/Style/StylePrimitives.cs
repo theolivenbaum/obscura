@@ -21,8 +21,11 @@ namespace Obscura.Render;
 /// <see cref="ComputedStyle.ResolveFontRelativeDeclarations"/> during the top-down pass, which
 /// is where these are known.
 /// </remarks>
-internal readonly record struct FontLengthContext(float Em, float Rem, float Vw, float Vh)
+internal readonly record struct FontLengthContext(FontUnits Font, float Rem, float Vw, float Vh)
 {
+    /// <summary>The element's font size, which is what a percentage in these properties means.</summary>
+    internal float Em => Font.EmPx;
+
     /// <summary>
     /// What a length read before layout resolves against: CSS's initial 16px font size, and a
     /// viewport of zero so a viewport unit reads as it did before this context existed.
@@ -271,9 +274,10 @@ public static partial class ComputedStyle
     /// reports 13px, and <c>1ch</c> lost its unit and read as the bare number. See "Known
     /// deviations" in todo.md.
     /// </remarks>
-    internal static float? PxValue(string token, float emPx, float remPx)
+    internal static float? PxValue(string token, FontUnits font, float remPx)
     {
         string number = token;
+        float emPx = font.EmPx;
         float scale = 1.0f;
 
         if (number.EndsWith("px", StringComparison.Ordinal))
@@ -297,13 +301,17 @@ public static partial class ComputedStyle
         }
         else if (number.EndsWith("ex", StringComparison.Ordinal))
         {
+            // DEVIATION FROM RUST: style.rs scales the font size by a fixed fraction, giving
+            // every face Liberation Sans' x-height and digit advance. Both units are defined
+            // against the element's own first available font, and Chromium measures the face.
+            // See Dimension.ChPerEm.
             number = TrimEndAsciiAlphabetic(number);
-            scale = emPx * Dimension.ExPerEm;
+            scale = font.ExPx;
         }
         else if (number.EndsWith("ch", StringComparison.Ordinal))
         {
             number = TrimEndAsciiAlphabetic(number);
-            scale = emPx * Dimension.ChPerEm;
+            scale = font.ChPx;
         }
         else if (number.EndsWith('%'))
         {
@@ -371,10 +379,10 @@ public static partial class ComputedStyle
         if (trimmed.Contains('('))
         {
             return CssLength.ResolveContextual(
-                trimmed, context.Em, context.Rem, context.Vw, context.Vh, context.Em);
+                trimmed, context.Font, context.Rem, context.Vw, context.Vh, context.Em);
         }
 
-        return Token(value) is { } token ? PxValue(token, context.Em, context.Rem) : null;
+        return Token(value) is { } token ? PxValue(token, context.Font, context.Rem) : null;
     }
 
     /// <summary>
@@ -454,7 +462,7 @@ public static partial class ComputedStyle
     /// </remarks>
     public static void ResolveFontRelativeDeclarations(
         LayoutStyle style,
-        float emPx,
+        FontUnits font,
         float remPx,
         float vw,
         float vh)
@@ -469,10 +477,10 @@ public static partial class ComputedStyle
 
         if (style.BorderSpacingFontRelative is { } borderSpacing)
         {
-            ApplyBorderSpacing(style, borderSpacing, emPx, remPx);
+            ApplyBorderSpacing(style, borderSpacing, font, remPx);
         }
 
-        FontLengthContext context = new(emPx, remPx, vw, vh);
+        FontLengthContext context = new(font, remPx, vw, vh);
         if (style.FilterFontRelative is { } filter)
         {
             style.Filter = ParseFilterFunctions(filter, style.Color, style.ColorSchemeDark, context);
@@ -510,13 +518,13 @@ public static partial class ComputedStyle
     /// the initial 16 while it runs.
     /// </para>
     /// <para>
-    /// Two gaps stay, both inherited from <see cref="PxValue(string, float, float)"/> and
+    /// Two gaps stay, both inherited from <see cref="PxValue(string, FontUnits, float)"/> and
     /// shared with every other property that reads a bare length: a functional value
     /// (<c>calc(1em + 2px)</c>, <c>18px</c> on Chromium) is dropped, and a unit
     /// <c>px_value</c> does not know (<c>in</c>, <c>vw</c>) reads as its bare number.
     /// </para>
     /// </remarks>
-    internal static void ApplyBorderSpacing(LayoutStyle style, string value, float emPx, float remPx)
+    internal static void ApplyBorderSpacing(LayoutStyle style, string value, FontUnits font, float remPx)
     {
         string declared = CssText.AsciiLower(value.Trim());
         switch (declared)
@@ -555,7 +563,7 @@ public static partial class ComputedStyle
         Span<float> lengths = stackalloc float[2];
         for (int index = 0; index < tokens.Count; index++)
         {
-            if (BorderSpacingLength(tokens[index], emPx, remPx) is not { } length)
+            if (BorderSpacingLength(tokens[index], font, remPx) is not { } length)
             {
                 return;
             }
@@ -594,7 +602,7 @@ public static partial class ComputedStyle
     /// One of <c>border-spacing</c>'s two lengths, or <c>null</c> when the token is not a
     /// non-negative length and the whole declaration has to be dropped.
     /// </summary>
-    private static float? BorderSpacingLength(string token, float emPx, float remPx)
+    private static float? BorderSpacingLength(string token, FontUnits font, float remPx)
     {
         // A percentage is not a length. `px_value` would scale one by the font size, which is
         // what made `border-spacing: 10%` read as 1.6px.
@@ -603,7 +611,7 @@ public static partial class ComputedStyle
             return null;
         }
 
-        if (PxValue(token, emPx, remPx) is not { } pixels || !float.IsFinite(pixels) || pixels < 0.0f)
+        if (PxValue(token, font, remPx) is not { } pixels || !float.IsFinite(pixels) || pixels < 0.0f)
         {
             return null;
         }
@@ -645,12 +653,12 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>resolve_contextual_length</c>. Delegates to the shared CSS port.</summary>
     public static float? ResolveContextualLength(
         string value,
-        float emPx,
+        FontUnits font,
         float remPx,
         float vw,
         float vh,
         float percentBase) =>
-        CssLength.ResolveContextual(value, emPx, remPx, vw, vh, percentBase);
+        CssLength.ResolveContextual(value, font, remPx, vw, vh, percentBase);
 
     /// <summary>Rust <c>functional_percentage_factor</c>.</summary>
     internal static float? FunctionalPercentageFactor(string value)

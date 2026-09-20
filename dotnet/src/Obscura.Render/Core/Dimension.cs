@@ -25,9 +25,9 @@ public enum DimensionKind : byte
     /// <remarks>
     /// DEVIATION FROM RUST: <c>crates/obscura-render</c> has no <c>ch</c> unit at all, so
     /// <c>1ch</c> either fell through to <c>auto</c> or, inside <c>px_value</c>, had its unit
-    /// stripped and was read as the bare number - <c>1ch</c> meant 1px. Approximated here by
-    /// <see cref="Dimension.ChPerEm"/> rather than measured per face; see "Known deviations"
-    /// in todo.md. Appended last so no persisted or interop ordinal moves.
+    /// stripped and was read as the bare number - <c>1ch</c> meant 1px. Resolved here from the
+    /// selected face's own advance for <c>0</c> (<see cref="FontUnits.ChPx"/>); see "Known
+    /// deviations" in todo.md. Appended last so no persisted or interop ordinal moves.
     /// </remarks>
     Ch,
 }
@@ -80,19 +80,22 @@ public readonly record struct Dimension(DimensionKind Kind, float Value)
     public float? AsPercent => Kind == DimensionKind.Percent ? Value : null;
 
     /// <summary>
-    /// Resolve font/viewport-relative units to <see cref="DimensionKind.Px"/>. <paramref name="emPx"/>
-    /// is the element's own font-size, <paramref name="remPx"/> the root's, and <paramref name="vw"/>
-    /// / <paramref name="vh"/> are one hundredth of the viewport width/height. Px, Percent, and Auto
-    /// pass through (Percent stays for taffy to resolve against the containing block).
+    /// Resolve font/viewport-relative units to <see cref="DimensionKind.Px"/>. <paramref name="font"/>
+    /// carries the element's own <c>em</c>, <c>ch</c> and <c>ex</c> sizes, <paramref name="remPx"/>
+    /// is the root font-size, and <paramref name="vw"/> / <paramref name="vh"/> are one hundredth of
+    /// the viewport width/height. Px, Percent, and Auto pass through (Percent stays for taffy to
+    /// resolve against the containing block).
+    /// <para>
+    /// A caller with no font in hand can pass a bare font size: <see cref="FontUnits"/> converts
+    /// implicitly and falls back to Liberation Sans' ratios, which is what every site here did
+    /// before the element's face was reachable.
+    /// </para>
     /// </summary>
-    public Dimension Resolve(float emPx, float remPx, float vw, float vh) => Kind switch
+    public Dimension Resolve(FontUnits font, float remPx, float vw, float vh) => Kind switch
     {
-        DimensionKind.Em => Px(Value * emPx),
-        // Liberation Sans is the deterministic generic sans face used by the renderer. This is
-        // its x-height as a fraction of the em, matching Chromium's generic sans face on the
-        // capture host.
-        DimensionKind.Ex => Px(Value * emPx * ExPerEm),
-        DimensionKind.Ch => Px(Value * emPx * ChPerEm),
+        DimensionKind.Em => Px(Value * font.EmPx),
+        DimensionKind.Ex => Px(Value * font.ExPx),
+        DimensionKind.Ch => Px(Value * font.ChPx),
         DimensionKind.Rem => Px(Value * remPx),
         DimensionKind.Vw => Px(Value * vw),
         DimensionKind.Vh => Px(Value * vh),
@@ -101,20 +104,33 @@ public readonly record struct Dimension(DimensionKind Kind, float Value)
         _ => this,
     };
 
-    /// <summary>Liberation Sans x-height as a fraction of the em (Rust <c>0.528_320_3</c>).</summary>
+    /// <summary>
+    /// Liberation Sans' x-height as a fraction of the em, used only where no face is in hand.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render/src/style.rs</c> multiplies the font size by
+    /// this fraction for <em>every</em> element, so <c>ex</c> is Liberation Sans' x-height whatever
+    /// the page's font is. CSS Values 4 says <c>1ex</c> is the x-height of the element's own first
+    /// available font, which is what <see cref="FontUnits.ExPx"/> now carries; this constant is the
+    /// fallback for the readers that run before a font is selected (media queries,
+    /// <c>@supports</c> validation, the grid-track context). See "Known deviations" in todo.md.
+    /// </remarks>
     public const float ExPerEm = 0.528_320_3f;
 
     /// <summary>
-    /// Liberation Sans' advance for <c>0</c> as a fraction of the em, which is what CSS says
-    /// <c>1ch</c> is.
+    /// Liberation Sans' advance for <c>0</c> as a fraction of the em, used only where no face is
+    /// in hand.
     /// </summary>
     /// <remarks>
-    /// 1139/2048 units, read out of <c>crates/obscura-render/assets/liberation-sans.ttf</c> -
-    /// the deterministic generic sans face the renderer rasterizes with, chosen for the same
-    /// reason <see cref="ExPerEm"/> is that face's x-height. It is a constant, not a per-face
-    /// measurement: a page setting a monospace or serif family gets a <c>ch</c> a little wide
-    /// or narrow (Liberation Mono is 0.6001 em, Liberation Serif 0.5). Chromium measures the
-    /// real glyph. See "Known deviations" in todo.md.
+    /// 1139/2048 units, read out of <c>Assets/liberation-sans.ttf</c>.
+    /// <para>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render</c> has no <c>ch</c> unit at all, and this
+    /// port used to apply this one constant to every element, so a monospace or webfont page got
+    /// Liberation Sans' <c>ch</c>. Measured on Chromium 141 over HTTP at <c>font-size: 100px</c>,
+    /// <c>width: 10ch</c> is 572.98px in Archivo, 556.14px in Liberation Sans and 600.09px in
+    /// Liberation Mono, where this engine answered 556 for all three. <see cref="FontUnits.ChPx"/>
+    /// now carries the selected face's real advance. See "Known deviations" in todo.md.
+    /// </para>
     /// </remarks>
     public const float ChPerEm = 0.556_152_3f;
 }

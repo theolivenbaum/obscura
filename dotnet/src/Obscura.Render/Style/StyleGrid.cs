@@ -24,7 +24,7 @@ public sealed class GridCalcExpression
     private static nuint _nextHandle = 8;
 
     private string _expression = string.Empty;
-    private float _emPx = 16f;
+    private FontUnits _font = FontUnits.FromEm(16f);
     private float _remPx = 16f;
     private float _vw;
     private float _vh;
@@ -152,7 +152,7 @@ public sealed class GridCalcExpression
     };
 
     /// <summary>Rust <c>GridCalcExpression::set_context</c>.</summary>
-    internal void SetContext(float emPx, float remPx, float vw, float vh)
+    internal void SetContext(FontUnits font, float remPx, float vw, float vh)
     {
         // Viewport units are used values and must follow every new layout viewport.
         _vw = vw;
@@ -164,7 +164,7 @@ public sealed class GridCalcExpression
             return;
         }
 
-        _emPx = emPx;
+        _font = font;
         _remPx = remPx;
         _contextInitialized = true;
     }
@@ -172,7 +172,7 @@ public sealed class GridCalcExpression
     /// <summary>Resolve this expression against a grid-axis basis.</summary>
     internal float Resolve(float basis)
     {
-        float? resolved = ComputedStyle.ResolveContextualLength(_expression, _emPx, _remPx, _vw, _vh, basis);
+        float? resolved = ComputedStyle.ResolveContextualLength(_expression, _font, _remPx, _vw, _vh, basis);
         float value = resolved is { } candidate && float.IsFinite(candidate) ? candidate : 0f;
         return _allowNegative ? value : F32.Max(value, 0f);
     }
@@ -192,11 +192,11 @@ public static partial class ComputedStyle
         style.GridCalcExpressions ??= [[], [], [], []];
 
     /// <summary>Rust <c>set_grid_calc_context</c>.</summary>
-    public static void SetGridCalcContext(LayoutStyle style, float emPx, float remPx, float vw, float vh)
+    public static void SetGridCalcContext(LayoutStyle style, FontUnits font, float remPx, float vw, float vh)
     {
         // A percentage-dependent `flex-basis` is the same kind of late-resolved expression and
         // reaches taffy through the same handle, so it takes its context from here too.
-        style.FlexBasisCalc?.SetContext(emPx, remPx, vw, vh);
+        style.FlexBasisCalc?.SetContext(font, remPx, vw, vh);
 
         if (style.GridCalcExpressions is not { } buckets)
         {
@@ -207,7 +207,7 @@ public static partial class ComputedStyle
         {
             foreach (object entry in bucket)
             {
-                ((GridCalcExpression)entry).SetContext(emPx, remPx, vw, vh);
+                ((GridCalcExpression)entry).SetContext(font, remPx, vw, vh);
             }
         }
     }

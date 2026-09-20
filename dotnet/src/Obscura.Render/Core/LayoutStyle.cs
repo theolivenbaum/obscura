@@ -1200,6 +1200,26 @@ public sealed class LayoutStyle
     public float? FontSize;
 
     /// <summary>
+    /// The pixel size of <c>1ch</c> for this element - the advance of <c>0</c> in the face the
+    /// text engine selects - or <c>0</c> when no face has been measured yet.
+    /// </summary>
+    /// <remarks>
+    /// Stored beside <see cref="FontSize"/>, and assigned in exactly one place with it
+    /// (<c>LayoutDomComputed</c>'s top-down pass, through <see cref="FontUnits.StoreOn"/>), so the
+    /// three font-relative unit sizes cannot drift apart. <c>em</c> is not stored: it is
+    /// <see cref="FontSize"/>, and <see cref="FontUnits.ForStyle"/> reassembles all three.
+    /// <para>
+    /// This exists because <c>transform: translate()</c> is resolved at paint time, long after the
+    /// pass that can pick a face. Two <c>float</c>s rather than a <see cref="FontUnits"/> keep it
+    /// to 8 bytes on a type whose retained size is load-bearing.
+    /// </para>
+    /// </remarks>
+    public float FontChPx;
+
+    /// <summary>The pixel size of <c>1ex</c> - the selected face's x-height. See <see cref="FontChPx"/>.</summary>
+    public float FontExPx;
+
+    /// <summary>
     /// <c>font-size</c> given in a font/viewport-relative unit, resolved to
     /// <see cref="FontSize"/> (px) during the inheritance pass against the parent and root
     /// font-sizes. <c>null</c> when font-size was absolute or unset.

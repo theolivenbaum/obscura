@@ -1082,6 +1082,95 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### `ch` and `ex` are measured on the element's own face, not scaled from the font size
+
+CSS Values 4 defines `1ch` as the advance of U+0030 and `1ex` as the x-height, both in the
+element's *first available font*. `crates/obscura-render/src/style.rs` has no notion of a face when
+it resolves a length: it scales the font size by one fixed fraction per unit, and it has no `ch`
+unit at all. This port inherited that and added `ch` as a second constant, `1139/2048` - Liberation
+Sans' digit advance - so every page got Liberation Sans' `ch` whatever it asked for.
+
+DEVIATION from crates/obscura-render/src/style.rs. `Obscura.Render.FontUnits` carries the pixel
+size of `em`, `ch` and `ex` together, and `FontUnitResolver` measures the latter two on the face
+`FontResolution.ResolveLoadedFont` selects - the same decision the text engine shapes with. The `0`
+advance is read through HarfBuzz at the face's design em; the x-height is `OS/2.sxHeight` via
+`FontAssets.XHeight`. One resolver per layout pass, memoized on the font decision rather than on the
+element.
+
+**The variable-weight axis is the part that is easy to get wrong.** `ch` is not a per-family
+constant: Archivo's digit is 0.573em at `wght` 400 and 0.625em at 800, so an implementation that
+reads the base face is wrong on exactly the pages that use a variable webfont. The tuple is built
+the way `TextShaper.ShapingVariations` builds it - automatic `wght` and `opsz`, synthesized italic,
+authored `font-variation-settings` last. That duplication is deliberate (measuring a CSS unit must
+not have to build the inline layer's `TextAttrs`) and
+`FontRelativeUnitTests.TheMeasuringAxisTupleMatchesTheShapingAxisTuple` is what keeps the two from
+drifting.
+
+Measured on Chromium 141 over HTTP - a webfont does not load over `file://`, where every face
+silently falls back to Liberation Sans and all of them measure identically. `width: 1ch` / `1ex` at
+`font-size: 1024px` (chromium / obscura, obscura rounds a used width to whole pixels):
+
+| | `ch` | `ex` |
+|---|---|---|
+| Liberation Sans | 569.5 / 570 | 541 / 541 |
+| Liberation Mono | 614.5 / 615 | 541 / 541 |
+| Liberation Serif | 512 / 512 | 470 / 470 |
+| Archivo wght 400 | 586.75 / 587 | 538.609 / 539 |
+| Archivo wght 800 | 639.984 / 640 | 538.609 / 539 |
+
+End to end, `h2` in the closing section of a 67-page mirrored marketing site carries
+`max-width: 18ch` at `font-size: 69.12px` and `font-weight: 800` in Archivo: 777.481px in Chromium,
+691.942px before, 777.6px now, and the section it is in comes back from 642px tall to 578px against
+Chromium's 578.547px. Scored as per-element distance to Chromium across all 67 pages, 5863 elements
+moved closer and 0 moved farther. The 64-fixture repo corpus is byte-identical before and after,
+because one fixture uses `ex` and none uses `ch` - that corpus cannot detect this bug at all, which
+is why the site sweep is the only corpus evidence.
+
+**`transform: translate()` was worse than the unit bug.** It is resolved at paint time and used a
+hard-coded 16px em for *every* font-relative unit, so `translateX(2em)` at `font-size: 100px` was
+32px where Chromium gives 200px - a 6.25x error independent of `ch`. `LayoutStyle.FontChPx` /
+`FontExPx` carry the measured sizes forward for it (`em` is not stored a second time - it is
+`FontSize`, and `FontUnits.ForStyle` reassembles all three, so the three cannot drift). Costs 8
+bytes on `LayoutStyle`: 1256.04 -> 1264.00 bytes retained per instance, 0.64%, and 804.8 -> 805.0 MB
+live on a 20,004-element page.
+
+**`ch` was missing from the unit whitelists that already list `ex`**, in six independent places,
+which is how `ch` behaves worse than `ex` rather than merely differently - a declaration in an
+unlisted unit is either dropped or frozen at parse time against the initial 16px. Fixed in
+`ComputedStyle.GapUnits` (`gap: 2ch` at `font-size: 40px` in Liberation Mono was 18px against
+Chromium's 48px) and `ComputedStyle.RelativeLineHeightUnits` (`line-height: 3ch` reverted to
+`normal`). **When you add a unit to this engine, check all of them.** Still open, each with its own
+reason:
+
+- `StyleBorder.StrictBorderUnits`. A border width is never re-read once the font is known, so
+  listing `ch` turns a dropped declaration (0px) into a confidently wrong one (17.797px against
+  Chromium's 48px). Tried, measured, reverted. `ex` has the identical defect there today.
+- `StyleGrid.GridTrackUnits` and `StyleGrid.AllowedWords` (the `calc()` word filter). Blocked behind
+  a separate bug: a grid track resolves *every* font-relative unit against a hard-coded 16px, so
+  `grid-template-columns: 2em` at `font-size: 40px` is 32px against Chromium's 80px. Adding `ch`
+  there would move a track from one wrong number to a different wrong number.
+- `StyleBackground.GradientPositionUnits`. Unmeasured.
+
+`StylePrimitives.FontSizeUnits` and `LineHeightUnits` are deliberately untouched on a positive
+result rather than an absence of evidence: `font-size: 4ch` inside a Liberation Mono 40px parent is
+96.0156px in both engines.
+
+Two readers keep Liberation Sans' fractions on purpose, as an unreached net rather than a resolution
+path: `DomStyleFixups.DefiniteInlineSize` and `TaffyStyleMapping.ToDimension` both read a
+`Dimension` the top-down pass has already turned into `Px`, and a value arriving there unresolved
+has no face to be measured on either.
+
+One ordering subtlety for the next reader: the face has to be picked *before* `font-family` is
+inherited. `ResolveOneComputedStyle` resolves every length about 200 lines above the block that
+inherits `font-family` / `font-weight` / `font-style`, so the resolver reads those three the way
+that block will (`style.X ?? inh.X`) rather than the pass being reordered. `font-size: 2ch`
+correctly uses the *parent's* face.
+
+`dotnet/tests/Obscura.Render.Tests/FontRelativeUnitTests.cs` pins the behaviour (11 facts, 8 of
+which fail at the parent commit; of the other three one does not compile there because
+`FontUnitResolver` does not exist, one is vacuous while every unit is a single constant, and one is
+the em/rem/viewport regression fence that correctly passes both sides).
+
 ### A retained restyle that changes nothing layout can see keeps its layout
 
 `crates/obscura-render` re-lays the whole document on every retained restyle, and at the Rust
