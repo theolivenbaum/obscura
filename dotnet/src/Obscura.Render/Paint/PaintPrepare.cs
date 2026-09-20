@@ -398,7 +398,7 @@ internal sealed class PrintEconomyStyleSnapshot
     private (float Angle, List<GradientStop> Stops)? _backgroundGradient;
     private ((float X, float Y) Center, List<GradientStop> Stops)? _backgroundRadialGradient;
     private (float Angle, (float X, float Y) Center, List<GradientStop> Stops)? _backgroundConicGradient;
-    private List<BackgroundGradientLayer> _backgroundGradientLayers = [];
+    private IReadOnlyList<BackgroundGradientLayer> _backgroundGradientLayers = [];
     private string? _backgroundImage;
     private RgbaColor? _color;
     private PrintEconomyStyleSnapshot? _beforePseudo;

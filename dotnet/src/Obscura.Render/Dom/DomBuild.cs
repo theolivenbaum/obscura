@@ -47,11 +47,28 @@ internal sealed class IfcRegistry
     /// <summary>Specified column widths per table grid node: (px, percent) per column index.</summary>
     internal Dictionary<TaffyNodeId, (List<float?> Px, List<float?> Percent)> TableCols { get; } = [];
 
+    /// <summary>
+    /// Cells pinned into a table grid's areas. Their own declared inline size sizes their
+    /// column, never their box, so a pass that puts a neutralized percentage back onto a node's
+    /// taffy style has to leave these alone.
+    /// </summary>
+    internal HashSet<TaffyNodeId> TableGridCells { get; } = [];
+
     /// <summary>Column constraints for the fixed table-layout algorithm.</summary>
     internal Dictionary<TaffyNodeId, List<FixedTableColumn>> FixedTableCols { get; } = [];
 
     /// <summary>Minimum row heights per table grid node, one entry per source row.</summary>
     internal Dictionary<TaffyNodeId, List<float?>> TableRows { get; } = [];
+
+    /// <summary>
+    /// Anonymous table boxes generated around the table-internal children of an element whose
+    /// own <c>display</c> is not a table type. The key is the generated grid node; the value is
+    /// the element that generated it (for tree-relative queries) and the anonymous box's own
+    /// style, which carries only the inherited properties plus <c>width: auto</c>. The node is
+    /// deliberately absent from <see cref="BuildContext.IdMap"/> - an anonymous box has no DOM
+    /// node, and mapping it to the generating element would overwrite that element's own rect.
+    /// </summary>
+    internal Dictionary<TaffyNodeId, (NodeId Owner, LayoutStyle Style)> AnonymousTables { get; } = [];
 
     /// <summary>Floats whose exclusion can continue through later descendant blocks.</summary>
     internal List<FloatContinuation> FloatContinuations { get; } = [];
@@ -84,6 +101,15 @@ internal sealed class BuildContext
     internal required IfcRegistry Ifc { get; init; }
 
     internal required IReadOnlyDictionary<NodeId, LayoutStyle> Styles { get; init; }
+
+    /// <summary>
+    /// The authored inline sizes that <c>DeferCyclicFlexInlineSizes</c> neutralized before this
+    /// build, keyed by node for the <c>width</c> slot. A table cell's width sizes its column
+    /// rather than its own box, so the column pass has to read what was written, not the
+    /// definite stand-in that was put in its place.
+    /// </summary>
+    internal IReadOnlyDictionary<NodeId, Dimension> DeferredInlineWidths { get; init; } =
+        new Dictionary<NodeId, Dimension>();
 }
 
 internal static partial class DomBuild

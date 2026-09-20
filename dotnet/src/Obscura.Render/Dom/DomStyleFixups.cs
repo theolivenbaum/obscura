@@ -1232,16 +1232,52 @@ internal static class DomStyleFixups
         style.BorderCollapse == true ? (0f, 0f) : style.BorderSpacing ?? (0f, 0f);
 
     /// <summary>
+    /// A table's own padding, which the collapsing border model discards (CSS 2.1 17.6.2).
+    /// </summary>
+    internal static Edges TableUsedPadding(LayoutStyle style) =>
+        style.BorderCollapse == true ? default : style.Padding;
+
+    /// <summary>
     /// Horizontal non-track area in the table's border box, excluding the gaps between columns.
     /// </summary>
     internal static float TableInlineOuterEdges(LayoutStyle style)
     {
         (float spacing, _) = TableSpacing(style);
+        Edges padding = TableUsedPadding(style);
         return style.Border.Left
             + style.Border.Right
-            + style.Padding.Left
-            + style.Padding.Right
+            + padding.Left
+            + padding.Right
             + (spacing * 2f);
+    }
+
+    /// <summary>
+    /// The inline edges that a <c>box-sizing: content-box</c> <c>width</c> on a table does not
+    /// account for - what has to be added to the declaration to get the table's border box.
+    /// </summary>
+    /// <remarks>
+    /// Two places where a table is not an ordinary box, both measured on Chromium 141 against a
+    /// 600px `width` in a 600px block:
+    /// <list type="bullet">
+    /// <item>A collapsed border is centred on the table's edge, so only its outer half is
+    /// outside the declaration: `border: 5px; border-collapse: collapse` is 605 wide, not 610,
+    /// and 620 at `border: 20px`. The table's padding is ignored entirely in that model.</item>
+    /// <item>In the separate model `border-spacing` lives inside the content box, so it is
+    /// already part of the declaration: `border: 5px` with the UA's 2px spacing is 610, not
+    /// 614.</item>
+    /// </list>
+    /// Deviation from crates/obscura-render/src/dom.rs, which adds the full
+    /// <see cref="TableInlineOuterEdges"/> in both models. The fixed-layout arm there had
+    /// already subtracted the spacing back out by hand; this makes the two arms agree.
+    /// </remarks>
+    internal static float TableWidthDeclarationEdges(LayoutStyle style)
+    {
+        if (style.BorderCollapse == true)
+        {
+            return (style.Border.Left + style.Border.Right) * 0.5f;
+        }
+
+        return style.Border.Left + style.Border.Right + style.Padding.Left + style.Padding.Right;
     }
 
     internal static ContainerSnapshot ContainerSnapshotOf(DomTree tree, DomLayout layout)

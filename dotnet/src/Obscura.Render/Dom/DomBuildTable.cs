@@ -22,17 +22,135 @@ internal static partial class DomBuild
     private const int MaxRows = 10000;
 
     /// <summary>
+    /// Whether <paramref name="id"/> is an element with table-internal children but a
+    /// <c>display</c> that is not a table type, so CSS table fixup has to generate an anonymous
+    /// table box around them.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from crates/obscura-render/src/dom.rs, which builds a table only for a computed
+    /// table box and lays the rows out in the element's own formatting context otherwise.
+    /// Chromium generates the anonymous table required by CSS 2.1 17.2.1: the element keeps its
+    /// declared width and the anonymous table inside is <c>width: auto</c>, so a 600px
+    /// `display: inline-block; width: 100%` table of `alpha` / `beta gamma delta` is 600 wide
+    /// with 34.66 / 112.84 columns rather than 35 / 565.
+    /// </remarks>
+    internal static bool WantsAnonymousTableBox(BuildContext context, NodeId id, LayoutStyle style)
+    {
+        if (style.IsTableBox || style.DisplayContents || style.IsTableCellBox)
+        {
+            return false;
+        }
+
+        DomTree tree = context.Tree;
+
+        // A `<table>` whose authored display cleared the UA table box. Its rows are still
+        // table-internal, and BuildTable answers null when it holds no cells at all.
+        if (DomTraversal.IsLocal(tree, id, "table"))
+        {
+            return true;
+        }
+
+        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+        {
+            if (context.Styles.TryGetValue(child, out LayoutStyle? childStyle)
+                && childStyle.IsTableCellBox
+                && childStyle.Display != Display.None)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The style of the anonymous table box generated inside <paramref name="style"/>'s element.
+    /// </summary>
+    /// <remarks>
+    /// CSS 2.1 17.2.1: an anonymous box takes only the inherited properties of the element that
+    /// generated it. `border-collapse` and `border-spacing` inherit and so travel - Chromium
+    /// puts the first cell of a `border-spacing: 8px` table at x=8 inside a `display: block`
+    /// table - while the element's own box decorations, sizing, and flex/grid item properties
+    /// stay on the element.
+    /// </remarks>
+    internal static LayoutStyle AnonymousTableStyle(LayoutStyle style)
+    {
+        LayoutStyle anonymous = style.Clone();
+        anonymous.Display = Display.Block;
+        anonymous.FlowRoot = true;
+        anonymous.IsTableBox = true;
+        anonymous.IsTableCellBox = false;
+        anonymous.IsInlineBlock = false;
+        anonymous.InternalFlexContainer = false;
+        anonymous.DisplayContents = false;
+        anonymous.DisplayInherit = false;
+        anonymous.WebkitBoxDisplay = null;
+        anonymous.BoxSizing = BoxSizing.BorderBox;
+
+        // `table-layout` does not inherit, so it stays on the element that declared it.
+        anonymous.TableLayoutFixed = false;
+
+        anonymous.Width = Dimension.Auto;
+        anonymous.Height = Dimension.Auto;
+        anonymous.MinWidth = Dimension.Auto;
+        anonymous.MinHeight = Dimension.Auto;
+        anonymous.MaxWidth = Dimension.Auto;
+        anonymous.MaxHeight = Dimension.Auto;
+        anonymous.ClearSizeExpressions();
+        anonymous.SizeCalc = null;
+        anonymous.AspectRatio = null;
+
+        anonymous.Margin = default;
+        anonymous.ClearMarginAuto();
+        anonymous.Padding = default;
+        anonymous.ClearPaddingPercent();
+        anonymous.Border = default;
+
+        anonymous.Position = null;
+        anonymous.ClearInset();
+        anonymous.ClearInsetExpressions();
+        anonymous.InsetCalc = null;
+        anonymous.Float = null;
+
+        anonymous.FlexGrow = null;
+        anonymous.FlexShrink = null;
+        anonymous.FlexBasis = Dimension.Auto;
+        anonymous.FlexBasisCalc = null;
+        anonymous.FlexBasisSpecified = null;
+        anonymous.AlignSelf = null;
+        anonymous.JustifySelf = null;
+        anonymous.Order = 0;
+        anonymous.GridColumn = null;
+        anonymous.GridRow = null;
+        anonymous.GridColumnRaw = null;
+        anonymous.GridRowRaw = null;
+
+        return anonymous;
+    }
+
+    /// <summary>
     /// Build a table box as a CSS grid so columns negotiate a shared width across every row.
     /// Returns <c>null</c> (falling back to the generic path) when the table has no cells.
     /// </summary>
-    internal static TaffyNodeId? BuildTable(BuildContext context, NodeId id)
+    /// <param name="anonymousStyle">
+    /// When set, the grid is an anonymous table box generated inside <paramref name="id"/>
+    /// rather than <paramref name="id"/>'s own box, and this is the anonymous box's style. The
+    /// node is then registered in <see cref="IfcRegistry.AnonymousTables"/> instead of
+    /// <see cref="BuildContext.IdMap"/>.
+    /// </param>
+    internal static TaffyNodeId? BuildTable(
+        BuildContext context,
+        NodeId id,
+        LayoutStyle? anonymousStyle = null)
     {
         DomTree tree = context.Tree;
         IReadOnlyDictionary<NodeId, LayoutStyle> styles = context.Styles;
-        if (!styles.TryGetValue(id, out LayoutStyle? style))
+        if (!styles.TryGetValue(id, out LayoutStyle? elementStyle))
         {
             return null;
         }
+
+        LayoutStyle style = anonymousStyle ?? elementStyle;
 
         bool nativeHtmlTable = DomTraversal.IsLocal(tree, id, "table");
         List<NodeId>? authoredRowChildren = null;
@@ -206,6 +324,7 @@ internal static partial class DomBuild
             }
 
             context.TaffyTree.SetStyle(cellNode, cellStyle);
+            context.Ifc.TableGridCells.Add(cellNode);
             children.Add(cellNode);
         }
 
@@ -260,18 +379,29 @@ internal static partial class DomBuild
                 : (null, null);
         }
 
+        // `DeferCyclicFlexInlineSizes` neutralizes a percentage inline size under an indefinite
+        // flex item to a definite `0px` before this box tree is built. A cell's own box never
+        // uses its declared width - it always fills its grid area - but its COLUMN does, so the
+        // authored percentage has to be read back here or the column loses it: a `width: 30%`
+        // cell in a table inside a flex row came out 43/458 where Chromium gives 180/420.
+        Dimension DeclaredWidth(NodeId cid, LayoutStyle cellStyle) =>
+            context.DeferredInlineWidths.TryGetValue(cid, out Dimension authored)
+                ? authored
+                : cellStyle.Width;
+
         (float? Px, float? Percent) StyleWidth(NodeId cid)
         {
             if (styles.TryGetValue(cid, out LayoutStyle? cellStyle))
             {
-                if (cellStyle.Width.Kind == DimensionKind.Px && cellStyle.Width.Value > 0f)
+                Dimension width = DeclaredWidth(cid, cellStyle);
+                if (width.Kind == DimensionKind.Px && width.Value > 0f)
                 {
-                    return (cellStyle.Width.Value, null);
+                    return (width.Value, null);
                 }
 
-                if (cellStyle.Width.Kind == DimensionKind.Percent && cellStyle.Width.Value > 0f)
+                if (width.Kind == DimensionKind.Percent && width.Value > 0f)
                 {
-                    return (null, cellStyle.Width.Value);
+                    return (null, width.Value);
                 }
             }
 
@@ -282,14 +412,15 @@ internal static partial class DomBuild
         {
             if (styles.TryGetValue(cid, out LayoutStyle? cellStyle))
             {
-                if (cellStyle.Width.Kind == DimensionKind.Px && cellStyle.Width.Value >= 0f)
+                Dimension width = DeclaredWidth(cid, cellStyle);
+                if (width.Kind == DimensionKind.Px && width.Value >= 0f)
                 {
-                    return (cellStyle.Width.Value, null);
+                    return (width.Value, null);
                 }
 
-                if (cellStyle.Width.Kind == DimensionKind.Percent && cellStyle.Width.Value >= 0f)
+                if (width.Kind == DimensionKind.Percent && width.Value >= 0f)
                 {
-                    return (null, cellStyle.Width.Value);
+                    return (null, width.Value);
                 }
             }
 
@@ -487,11 +618,14 @@ internal static partial class DomBuild
         // the first/last row and column. Grid `gap` only covers interior tracks.
         (float horizontalGap, float verticalGap) = DomStyleFixups.TableSpacing(style);
         LayoutStyle gridStyle = style.Clone();
+
+        // CSS 2.1 17.6.2: the collapsing border model ignores the table's own padding.
+        Edges tablePadding = DomStyleFixups.TableUsedPadding(style);
         gridStyle.Padding = new Edges(
-            gridStyle.Padding.Top + verticalGap,
-            gridStyle.Padding.Right + horizontalGap,
-            gridStyle.Padding.Bottom + verticalGap,
-            gridStyle.Padding.Left + horizontalGap);
+            tablePadding.Top + verticalGap,
+            tablePadding.Right + horizontalGap,
+            tablePadding.Bottom + verticalGap,
+            tablePadding.Left + horizontalGap);
         TaffyStyle tstyle = TaffyStyleMapping.ToTaffyStyle(gridStyle);
         tstyle.Display = TaffyDisplay.Grid;
 
@@ -523,7 +657,15 @@ internal static partial class DomBuild
             TaffyLengthPercentage.FromLength(verticalGap));
 
         TaffyNodeId tableNode = context.TaffyTree.NewWithChildren(tstyle, [.. children]);
-        context.IdMap[tableNode] = id;
+        if (anonymousStyle is null)
+        {
+            context.IdMap[tableNode] = id;
+        }
+        else
+        {
+            context.Ifc.AnonymousTables[tableNode] = (id, anonymousStyle);
+        }
+
         context.Ifc.TableRows[tableNode] = rowMin;
         if (fixedLayout)
         {

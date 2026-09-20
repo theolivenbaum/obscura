@@ -617,7 +617,7 @@ public static partial class RenderDom
                     continue;
                 }
 
-                style.SizeExpressions[index] = sizeInheritFrom.SizeExpressions[index];
+                style.SetSizeExpression(index, sizeInheritFrom.SizeExpressions[index]);
                 style.SetSizeIntrinsicKeyword(index, sizeInheritFrom.SizeIntrinsicKeyword(index));
                 switch (index)
                 {
@@ -861,7 +861,7 @@ public static partial class RenderDom
 
             if (percentBearing && blockAxisInset && !lateResolvedInsets && !inh.CbHeightKnown)
             {
-                style.Inset[index] = null;
+                style.SetInset(index, null);
                 continue;
             }
 
@@ -873,14 +873,14 @@ public static partial class RenderDom
                 : cbW;
             float? resolved = ComputedStyle.ResolveContextualLength(
                 expression, emPx, rootFs, vw, vh, percentBase);
-            style.Inset[index] = resolved is { } value ? Dimension.Px(value) : null;
+            style.SetInset(index, resolved is { } value ? Dimension.Px(value) : null);
         }
 
         for (int index = 0; index < 4; index++)
         {
             if (style.Inset[index] is { } inset)
             {
-                style.Inset[index] = inset.Resolve(emPx, rootFs, vw, vh);
+                style.SetInset(index, inset.Resolve(emPx, rootFs, vw, vh));
             }
         }
 
@@ -1479,7 +1479,7 @@ public static partial class RenderDom
 
                 if (pseudo.Inset[index] is { } inset)
                 {
-                    pseudo.Inset[index] = inset.Resolve(pseudoEm, rootFs, vw, vh);
+                    pseudo.SetInset(index, inset.Resolve(pseudoEm, rootFs, vw, vh));
                 }
             }
 

@@ -397,6 +397,20 @@ public static partial class RenderDom
             }
         }
 
+        // An anonymous table box has no DOM node of its own, so its style comes from the
+        // registry rather than from `styles`, and every query below that is about the box
+        // (its width, its box-sizing, its border-spacing) has to read that one instead.
+        HashSet<NodeId> anonymousOwners = [];
+        foreach ((_, (NodeId owner, _)) in ifcItems.AnonymousTables)
+        {
+            anonymousOwners.Add(owner);
+        }
+
+        LayoutStyle? TableStyleOf(TaffyNodeId node, NodeId dom) =>
+            ifcItems.AnonymousTables.TryGetValue(node, out (NodeId Owner, LayoutStyle Style) anon)
+                ? anon.Style
+                : styles.TryGetValue(dom, out LayoutStyle? declared) ? declared : null;
+
         Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
         List<(TaffyNodeId Taffy, NodeId Dom, int Depth)> tables = [];
         HashSet<TaffyNodeId> tableNodes = [];
@@ -405,9 +419,26 @@ public static partial class RenderDom
             taffyByDom[domId] = taffyId;
             if (ifcItems.TableRows.ContainsKey(taffyId))
             {
-                tables.Add((taffyId, domId, DomTableSupport.TableAncestorDepth(tree, domId, styles)));
+                tables.Add((
+                    taffyId,
+                    domId,
+                    DomTableSupport.TableAncestorDepth(tree, domId, styles, anonymousOwners)));
                 tableNodes.Add(taffyId);
             }
+        }
+
+        foreach ((TaffyNodeId taffyId, (NodeId owner, _)) in ifcItems.AnonymousTables)
+        {
+            if (!ifcItems.TableRows.ContainsKey(taffyId))
+            {
+                continue;
+            }
+
+            tables.Add((
+                taffyId,
+                owner,
+                DomTableSupport.TableAncestorDepth(tree, owner, styles, anonymousOwners)));
+            tableNodes.Add(taffyId);
         }
 
         if (tables.Count == 0)
@@ -436,8 +467,12 @@ public static partial class RenderDom
             // parent, where the base is the container but flex-shrink then has its say; an
             // absolutely positioned table; a wrapper that is itself a float or an inline-block -
             // is left for taffy to resolve, and the snapshot reports what it made of it.
-            bool WantsSnapshot(NodeId dom, LayoutStyle style) =>
-                (style.Width.IsAuto
+            // An anonymous table's containing block is the element that generated it, not that
+            // element's own containing block, so the style chain cannot report the space it has;
+            // it always takes the snapshot.
+            bool WantsSnapshot(TaffyNodeId node, NodeId dom, LayoutStyle style) =>
+                ifcItems.AnonymousTables.ContainsKey(node)
+                || (style.Width.IsAuto
                     && (depth > 0
                         || DomTableSupport.ReliableTableAvailableWidth(
                             tree, dom, styles, initialCbWidth) is null))
@@ -445,9 +480,9 @@ public static partial class RenderDom
                     && DomTableSupport.ReliableTablePercentageBase(
                         tree, dom, styles, initialCbWidth) is null);
 
-            foreach ((_, NodeId dom, _) in group)
+            foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
             {
-                if (styles.TryGetValue(dom, out LayoutStyle? style) && WantsSnapshot(dom, style))
+                if (TableStyleOf(tnode, dom) is { } style && WantsSnapshot(tnode, dom, style))
                 {
                     needsLayoutSnapshot = true;
                     break;
@@ -461,7 +496,7 @@ public static partial class RenderDom
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, measure);
                 foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
                 {
-                    if (styles.TryGetValue(dom, out LayoutStyle? style) && WantsSnapshot(dom, style))
+                    if (TableStyleOf(tnode, dom) is { } style && WantsSnapshot(tnode, dom, style))
                     {
                         availableWidths[tnode] = F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f);
                     }
@@ -480,7 +515,7 @@ public static partial class RenderDom
 
             foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
             {
-                if (!styles.TryGetValue(dom, out LayoutStyle? tableStyle))
+                if (TableStyleOf(tnode, dom) is not { } tableStyle)
                 {
                     continue;
                 }
@@ -494,14 +529,17 @@ public static partial class RenderDom
                     }
 
                     float inlineOuterEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
+                    float declarationEdgesFixed =
+                        DomStyleFixups.TableWidthDeclarationEdges(tableStyle);
                     (float horizontalSpacing, _) = DomStyleFixups.TableSpacing(tableStyle);
                     float usedOuterFixed;
                     switch (tableStyle.Width.Kind)
                     {
                         case DimensionKind.Px when tableStyle.BoxSizing == BoxSizing.ContentBox:
-                            // Border spacing lives inside a CSS table's content box.
+                            // Border spacing lives inside a CSS table's content box, and only the
+                            // outer half of a collapsed border is outside it.
                             usedOuterFixed = F32.Max(tableStyle.Width.Value, 0f)
-                                + F32.Max(inlineOuterEdges - (horizontalSpacing * 2f), 0f);
+                                + declarationEdgesFixed;
                             break;
                         case DimensionKind.Px:
                             usedOuterFixed = F32.Max(tableStyle.Width.Value, 0f);
@@ -513,8 +551,7 @@ public static partial class RenderDom
                             // shrank to, so a floated `table-layout: fixed; width: 100%` came out
                             // at 0. Resolve it against the containing block where that is known.
                             usedOuterFixed = tableStyle.BoxSizing == BoxSizing.ContentBox
-                                ? (percentBasis * tableStyle.Width.Value)
-                                    + F32.Max(inlineOuterEdges - (horizontalSpacing * 2f), 0f)
+                                ? (percentBasis * tableStyle.Width.Value) + declarationEdgesFixed
                                 : percentBasis * tableStyle.Width.Value;
                             break;
                         case DimensionKind.Percent:
@@ -553,9 +590,11 @@ public static partial class RenderDom
 
                 // A percentage-width table resolves against its container, so leave taffy's
                 // percentage handling in place.
-                Dimension widthStyle = deferredPercentWidths.TryGetValue(dom, out float authored)
-                    ? Dimension.Percent(authored)
-                    : tableStyle.Width;
+                Dimension widthStyle =
+                    !ifcItems.AnonymousTables.ContainsKey(tnode)
+                    && deferredPercentWidths.TryGetValue(dom, out float authored)
+                        ? Dimension.Percent(authored)
+                        : tableStyle.Width;
                 // A percentage table needs a definite used width here, or the tracks stay `auto`
                 // and the grid fills the table by growing them *equally*: a 600px `width: 100%`
                 // table of `alpha` / `beta gamma delta` came out 261/339 where Chromium, which
@@ -641,6 +680,7 @@ public static partial class RenderDom
                 float maxC = taffyTree.GetLayout(tnode).Size.Width;
 
                 float inlineEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
+                float declarationEdges = DomStyleFixups.TableWidthDeclarationEdges(tableStyle);
                 float availableOuter = percentBase
                     ?? (availableWidths.TryGetValue(tnode, out float snapshot)
                         ? snapshot
@@ -651,11 +691,11 @@ public static partial class RenderDom
                 // A snapshot is already a used border-box width, so no box-sizing arithmetic.
                 float percentOuter = percentUsedOuter
                     ?? ((widthStyle.Value * (percentBase ?? 0f))
-                        + (tableStyle.BoxSizing == BoxSizing.ContentBox ? inlineEdges : 0f));
+                        + (tableStyle.BoxSizing == BoxSizing.ContentBox ? declarationEdges : 0f));
                 float preferredOuter = widthStyle.Kind switch
                 {
                     DimensionKind.Px when tableStyle.BoxSizing == BoxSizing.ContentBox =>
-                        widthStyle.Value + inlineEdges,
+                        widthStyle.Value + declarationEdges,
                     DimensionKind.Px => widthStyle.Value,
                     DimensionKind.Percent => percentOuter,
                     _ => maxC,

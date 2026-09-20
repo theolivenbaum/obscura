@@ -118,8 +118,8 @@ public static partial class ComputedStyle
         }
         else if (tag is "p" or "dl" or "ul" or "ol" or "menu" or "dir")
         {
-            style.MarginRelative[0] = Dimension.Em(1.0f);
-            style.MarginRelative[2] = Dimension.Em(1.0f);
+            style.SetMarginRelative(0, Dimension.Em(1.0f));
+            style.SetMarginRelative(2, Dimension.Em(1.0f));
             if (tag is "ul" or "menu" or "dir")
             {
                 style.ListStyle = Obscura.Render.ListStyle.Disc;
@@ -361,8 +361,8 @@ public static partial class ComputedStyle
             style.FontSize = null;
             style.FontSizeRaw = Dimension.Em(fontSizeEm);
             style.FontWeight = "bold";
-            style.MarginRelative[0] = Dimension.Em(marginEm);
-            style.MarginRelative[2] = Dimension.Em(marginEm);
+            style.SetMarginRelative(0, Dimension.Em(marginEm));
+            style.SetMarginRelative(2, Dimension.Em(marginEm));
         }
     }
 
@@ -663,18 +663,20 @@ public static partial class ComputedStyle
         string trimmed = value.Trim();
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
-            style.Inset[index] = null;
-            style.InsetExpressions[index] = expression;
+            style.SetInset(index, null);
+            style.SetInsetExpression(index, expression);
             return;
         }
 
         Dimension? inset = InsetDim(trimmed);
-        style.Inset[index] = inset;
-        style.InsetExpressions[index] = inset is { } dimension
-            && dimension.Kind is DimensionKind.Vw or DimensionKind.Vh
-                or DimensionKind.Vmin or DimensionKind.Vmax
-            ? trimmed
-            : null;
+        style.SetInset(index, inset);
+        style.SetInsetExpression(
+            index,
+            inset is { } dimension
+                && dimension.Kind is DimensionKind.Vw or DimensionKind.Vh
+                    or DimensionKind.Vmin or DimensionKind.Vmax
+                ? trimmed
+                : null);
     }
 
     private static Edges SetEdge(Edges edges, int index, float value) => index switch
@@ -693,21 +695,21 @@ public static partial class ComputedStyle
         bool isAuto = CssText.EqualsAscii(trimmed, "auto");
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
-            style.MarginExpressions[index] = expression;
-            style.MarginPercent[index] = null;
-            style.MarginRelative[index] = null;
-            style.MarginAuto[index] = false;
+            style.SetMarginExpression(index, expression);
+            style.SetMarginPercent(index, null);
+            style.SetMarginRelative(index, null);
+            style.SetMarginAuto(index, false);
             style.Margin = SetEdge(style.Margin, index, 0f);
             return;
         }
 
-        style.MarginExpressions[index] = null;
+        style.SetMarginExpression(index, null);
         if (PercentFraction(trimmed) is { } fraction)
         {
-            style.MarginPercent[index] = fraction;
-            style.MarginRelative[index] = null;
+            style.SetMarginPercent(index, fraction);
+            style.SetMarginRelative(index, null);
             style.Margin = SetEdge(style.Margin, index, 0f);
-            style.MarginAuto[index] = false;
+            style.SetMarginAuto(index, false);
             return;
         }
 
@@ -716,7 +718,7 @@ public static partial class ComputedStyle
         {
             case DimensionKind.Px:
                 style.Margin = SetEdge(style.Margin, index, dimension.Value);
-                style.MarginRelative[index] = null;
+                style.SetMarginRelative(index, null);
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
@@ -727,16 +729,16 @@ public static partial class ComputedStyle
             case DimensionKind.Vmin:
             case DimensionKind.Vmax:
                 style.Margin = SetEdge(style.Margin, index, 0f);
-                style.MarginRelative[index] = dimension;
+                style.SetMarginRelative(index, dimension);
                 break;
             default:
                 style.Margin = SetEdge(style.Margin, index, 0f);
-                style.MarginRelative[index] = null;
+                style.SetMarginRelative(index, null);
                 break;
         }
 
-        style.MarginAuto[index] = isAuto;
-        style.MarginPercent[index] = null;
+        style.SetMarginAuto(index, isAuto);
+        style.SetMarginPercent(index, null);
     }
 
     /// <summary>Rust <c>set_padding_side</c>.</summary>
@@ -745,18 +747,18 @@ public static partial class ComputedStyle
         string trimmed = value.Trim();
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
-            style.PaddingExpressions[index] = expression;
-            style.PaddingPercent[index] = null;
-            style.PaddingRelative[index] = null;
+            style.SetPaddingExpression(index, expression);
+            style.SetPaddingPercent(index, null);
+            style.SetPaddingRelative(index, null);
             style.Padding = SetEdge(style.Padding, index, 0f);
             return;
         }
 
-        style.PaddingExpressions[index] = null;
+        style.SetPaddingExpression(index, null);
         if (PercentFraction(trimmed) is { } fraction)
         {
-            style.PaddingPercent[index] = fraction;
-            style.PaddingRelative[index] = null;
+            style.SetPaddingPercent(index, fraction);
+            style.SetPaddingRelative(index, null);
             style.Padding = SetEdge(style.Padding, index, 0f);
             return;
         }
@@ -766,8 +768,8 @@ public static partial class ComputedStyle
         {
             case DimensionKind.Px:
                 style.Padding = SetEdge(style.Padding, index, dimension.Value);
-                style.PaddingRelative[index] = null;
-                style.PaddingPercent[index] = null;
+                style.SetPaddingRelative(index, null);
+                style.SetPaddingPercent(index, null);
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
@@ -778,8 +780,8 @@ public static partial class ComputedStyle
             case DimensionKind.Vmin:
             case DimensionKind.Vmax:
                 style.Padding = SetEdge(style.Padding, index, 0f);
-                style.PaddingRelative[index] = dimension;
-                style.PaddingPercent[index] = null;
+                style.SetPaddingRelative(index, dimension);
+                style.SetPaddingPercent(index, null);
                 break;
         }
     }
@@ -1250,7 +1252,7 @@ public static partial class ComputedStyle
             case "container-name":
                 if (CssText.EqualsAscii(value, "inherit"))
                 {
-                    style.ContainerNames.Clear();
+                    style.ClearContainerNames();
                     style.ContainerNamesInherit = true;
                 }
                 else if (ParseContainerNames(value) is { } names)
@@ -1264,7 +1266,7 @@ public static partial class ComputedStyle
             case "container":
                 if (CssText.EqualsAscii(value, "inherit"))
                 {
-                    style.ContainerNames.Clear();
+                    style.ClearContainerNames();
                     style.ContainerType = ContainerType.Normal;
                     style.ContainerNamesInherit = true;
                     style.ContainerTypeInherit = true;
@@ -1285,7 +1287,7 @@ public static partial class ComputedStyle
             case "inline-size":
                 style.Width = DimensionValue(value);
                 style.WidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[0] = DeferredLengthExpression(value);
+                style.SetSizeExpression(0, DeferredLengthExpression(value));
                 SetSizeInherit(style, 0, value);
                 style.WidthSet = true;
                 return true;
@@ -1294,7 +1296,7 @@ public static partial class ComputedStyle
             case "block-size":
                 style.Height = DimensionValue(value);
                 style.HeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[1] = DeferredLengthExpression(value);
+                style.SetSizeExpression(1, DeferredLengthExpression(value));
                 SetSizeInherit(style, 1, value);
                 style.HeightSet = true;
                 return true;
@@ -1326,7 +1328,7 @@ public static partial class ComputedStyle
             case "min-inline-size":
                 style.MinWidth = DimensionValue(value);
                 style.MinWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[2] = DeferredLengthExpression(value);
+                style.SetSizeExpression(2, DeferredLengthExpression(value));
                 SetSizeInherit(style, 2, value);
                 return true;
 
@@ -1334,7 +1336,7 @@ public static partial class ComputedStyle
             case "min-block-size":
                 style.MinHeight = DimensionValue(value);
                 style.MinHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[3] = DeferredLengthExpression(value);
+                style.SetSizeExpression(3, DeferredLengthExpression(value));
                 SetSizeInherit(style, 3, value);
                 return true;
 
@@ -1342,7 +1344,7 @@ public static partial class ComputedStyle
             case "max-inline-size":
                 style.MaxWidth = DimensionValue(value);
                 style.MaxWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[4] = DeferredLengthExpression(value);
+                style.SetSizeExpression(4, DeferredLengthExpression(value));
                 SetSizeInherit(style, 4, value);
                 return true;
 
@@ -1350,7 +1352,7 @@ public static partial class ComputedStyle
             case "max-block-size":
                 style.MaxHeight = DimensionValue(value);
                 style.MaxHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[5] = DeferredLengthExpression(value);
+                style.SetSizeExpression(5, DeferredLengthExpression(value));
                 SetSizeInherit(style, 5, value);
                 return true;
 

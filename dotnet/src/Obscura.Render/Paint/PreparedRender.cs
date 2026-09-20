@@ -1446,7 +1446,7 @@ public sealed partial class PreparedRender
                 && !style.HeightFitContent
                 && !style.HasInlineIntrinsicKeyword
                 && !style.HasBlockMinMaxIntrinsicKeyword
-                && style.SizeExpressions.All(expression => expression is null);
+                && NoSizeExpressions(style);
             if (!fixedBox)
             {
                 return true;
@@ -1474,4 +1474,19 @@ public sealed partial class PreparedRender
 
         return false;
     }
+
+    /// <summary>Whether no box-size slot carries a deferred CSS math expression.</summary>
+    private static bool NoSizeExpressions(LayoutStyle style)
+    {
+        foreach (string? expression in style.SizeExpressions)
+        {
+            if (expression is not null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 }

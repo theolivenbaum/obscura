@@ -480,6 +480,22 @@ public static partial class RenderDom
             List<DeferredCyclicInlineSize> deferredCyclicInlineSizes =
                 DomSubgridPasses.DeferCyclicFlexInlineSizes(tree, styles, rootFs, vw, vh);
 
+            Dictionary<NodeId, Dimension> deferredInlineWidths = [];
+            foreach (DeferredCyclicInlineSize entry in deferredCyclicInlineSizes)
+            {
+                if (entry.Slot != 0)
+                {
+                    continue;
+                }
+
+                // Only a plain percentage can be handed back as a typed width; a functional
+                // expression has no Dimension spelling and stays neutralized.
+                if (entry.SourceKind == DeferredCyclicInlineSourceKind.Percent)
+                {
+                    deferredInlineWidths[entry.Node] = Dimension.Percent(entry.Percent);
+                }
+            }
+
             BuildContext buildContext = new()
             {
                 Tree = tree,
@@ -489,6 +505,7 @@ public static partial class RenderDom
                 Engine = engine,
                 Ifc = ifcItems,
                 Styles = styles,
+                DeferredInlineWidths = deferredInlineWidths,
             };
 
             if (DomBuild.Build(buildContext, rootId) is { } taffyRoot)
@@ -652,6 +669,7 @@ public static partial class RenderDom
                     vw,
                     vh,
                     pinnedFlexItems,
+                    ifcItems.TableGridCells,
                     (t, resolvedStyles, phase) =>
                     {
                         if (phase == DeferredFlexReflowPhase.Layout)
@@ -758,6 +776,7 @@ public static partial class RenderDom
                         rootFs,
                         vw,
                         vh,
+                        ifcItems.TableGridCells,
                         (t, _, phase) =>
                         {
                             if (phase == DeferredFlexReflowPhase.Layout)

@@ -817,8 +817,14 @@ internal static class DomPasses
 
             float rowGap = 0f;
             bool tableHasHeight = false;
-            if (idMap.TryGetValue(tableNode, out NodeId tableDom)
-                && styles.TryGetValue(tableDom, out LayoutStyle? tableStyle))
+            LayoutStyle? tableStyle =
+                ifc.AnonymousTables.TryGetValue(tableNode, out (NodeId Owner, LayoutStyle Style) anon)
+                    ? anon.Style
+                    : idMap.TryGetValue(tableNode, out NodeId tableDom)
+                        && styles.TryGetValue(tableDom, out LayoutStyle? declared)
+                            ? declared
+                            : null;
+            if (tableStyle is not null)
             {
                 rowGap = DomStyleFixups.TableSpacing(tableStyle).Vertical;
                 tableHasHeight = tableStyle.Height.Kind == DimensionKind.Px;

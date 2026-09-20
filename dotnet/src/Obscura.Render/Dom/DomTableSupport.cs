@@ -13,13 +13,17 @@ internal static class DomTableSupport
     internal static int TableAncestorDepth(
         DomTree tree,
         NodeId id,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        IReadOnlySet<NodeId>? anonymousTableOwners = null)
     {
         int depth = 0;
         NodeId current = id;
         while (DomTraversal.RenderedParent(tree, current) is { } parent)
         {
-            if (styles.TryGetValue(parent, out LayoutStyle? style) && style.IsTableBox)
+            // An element that generated an anonymous table box is not itself a table box, but
+            // everything below it is nested one table deeper all the same.
+            if ((styles.TryGetValue(parent, out LayoutStyle? style) && style.IsTableBox)
+                || anonymousTableOwners?.Contains(parent) == true)
             {
                 depth++;
             }

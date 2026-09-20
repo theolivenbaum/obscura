@@ -515,7 +515,7 @@ internal static class PaintGradients
         Mask? clip,
         float rasterScale)
     {
-        List<BackgroundGradientLayer> layers = style.BackgroundGradientLayers;
+        IReadOnlyList<BackgroundGradientLayer> layers = style.BackgroundGradientLayers;
         float em = style.FontSize ?? 16f;
         (float Width, float Height) tileSize =
             BackgroundGradientTileSize(style, originRect, em, rootFontSize, viewport);

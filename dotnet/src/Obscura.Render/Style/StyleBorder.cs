@@ -214,7 +214,7 @@ public static partial class ComputedStyle
             return;
         }
 
-        style.BorderCascadeOps.Add(
+        style.EnsureBorderCascadeOps().Add(
             new BorderCascadeOp(side, width, lineStyle, color is not null, color?.Value));
     }
 
@@ -227,7 +227,7 @@ public static partial class ComputedStyle
         OptionalColor? color)
     {
         style.BorderCascadeBase ??= style.BorderModel;
-        style.BorderCascadeOps.Add(
+        style.EnsureBorderCascadeOps().Add(
             new BorderCascadeOp(side, width, lineStyle, color is not null, color?.Value));
     }
 

@@ -438,7 +438,7 @@ public static partial class ComputedStyle
 
         if (CssText.AsciiLower(trimmed) is "none" or "initial" or "unset" or "revert" or "revert-layer")
         {
-            style.TransformOps.Clear();
+            style.ClearTransformOps();
             SetContainingBlockTrigger(style, ContainingBlockTrigger.Transform, false);
             return;
         }
@@ -567,8 +567,8 @@ public static partial class ComputedStyle
         if (CssText.AsciiLower(trimmed) is "none" or "initial" or "unset" or "revert" or "revert-layer")
         {
             style.IndividualTranslate = null;
-            style.IndividualTranslateExpressions[0] = null;
-            style.IndividualTranslateExpressions[1] = null;
+            style.SetIndividualTranslateExpression(0, null);
+            style.SetIndividualTranslateExpression(1, null);
             SetContainingBlockTrigger(style, ContainingBlockTrigger.Translate, false);
             return;
         }
@@ -603,8 +603,8 @@ public static partial class ComputedStyle
         }
 
         style.IndividualTranslate = (first.Value, second.Value);
-        style.IndividualTranslateExpressions[0] = first.Expression;
-        style.IndividualTranslateExpressions[1] = second.Expression;
+        style.SetIndividualTranslateExpression(0, first.Expression);
+        style.SetIndividualTranslateExpression(1, second.Expression);
         SetContainingBlockTrigger(style, ContainingBlockTrigger.Translate, true);
 
         static (Dimension Value, string? Expression)? Component(string token)

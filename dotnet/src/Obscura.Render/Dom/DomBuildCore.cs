@@ -46,6 +46,17 @@ internal static partial class DomBuild
         DomStyleFixups.ApplyContainerSizeContainment(tree, id, style, context.Styles, taffyStyle);
         DomStyleFixups.ApplyFitContentBlockSize(tree, id, style, context.Styles, taffyStyle);
 
+        // Table fixup: table-internal children under a non-table `display` still generate an
+        // anonymous table box, inside this element's own box rather than in place of it. See
+        // WantsAnonymousTableBox for what Rust does instead.
+        if (WantsAnonymousTableBox(context, id, style)
+            && BuildTable(context, id, AnonymousTableStyle(style)) is { } anonymousTable)
+        {
+            TaffyNodeId wrapper = context.TaffyTree.NewWithChildren(taffyStyle, [anonymousTable]);
+            context.IdMap[wrapper] = id;
+            return wrapper;
+        }
+
         // A non-stretched flex item in a column flex container uses fit-content for its auto
         // inline size. Taffy has no fit-content box-size value; a synthetic percentage max has
         // the same final effect.

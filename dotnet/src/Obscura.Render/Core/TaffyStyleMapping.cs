@@ -349,7 +349,7 @@ internal static class TaffyStyleMapping
         TaffyLengthPercentage.FromLength(e.Top),
         TaffyLengthPercentage.FromLength(e.Bottom));
 
-    private static Layout.Rect<TaffyLengthPercentage> RectLpPercent(Edges e, float?[] percent)
+    private static Layout.Rect<TaffyLengthPercentage> RectLpPercent(Edges e, ReadOnlySpan<float?> percent)
     {
         static TaffyLengthPercentage Side(float value, float? percent) => percent is { } fraction
             ? TaffyLengthPercentage.FromPercent(fraction)
@@ -362,7 +362,7 @@ internal static class TaffyStyleMapping
             Side(e.Bottom, percent[2]));
     }
 
-    private static Layout.Rect<TaffyLengthPercentageAuto> RectAuto(Edges e, bool[] auto)
+    private static Layout.Rect<TaffyLengthPercentageAuto> RectAuto(Edges e, ReadOnlySpan<bool> auto)
     {
         static TaffyLengthPercentageAuto Side(float value, bool isAuto) => isAuto
             ? TaffyLengthPercentageAuto.Auto

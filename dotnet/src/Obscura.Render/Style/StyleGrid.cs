@@ -733,7 +733,7 @@ public static partial class ComputedStyle
         string columns = value[(slash + 1)..].Trim();
         if (CssText.AsciiLower(rows).Contains("auto-flow", StringComparison.Ordinal))
         {
-            style.GridTemplateRows.Clear();
+            style.ClearGridTemplateRows();
             GridCalcBuckets(style)[1].Clear();
             (List<Layout.GridTemplateComponent> tracks,
                 List<(string Name, short Line)> names,
@@ -748,7 +748,7 @@ public static partial class ComputedStyle
         }
         else if (CssText.AsciiLower(columns).Contains("auto-flow", StringComparison.Ordinal))
         {
-            style.GridTemplateColumns.Clear();
+            style.ClearGridTemplateColumns();
             GridCalcBuckets(style)[0].Clear();
             style.GridTemplateColumnsSubgrid = false;
             (List<Layout.GridTemplateComponent> tracks,

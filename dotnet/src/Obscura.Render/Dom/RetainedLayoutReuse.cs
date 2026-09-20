@@ -99,7 +99,23 @@ internal static class RetainedLayoutReuse
         "EffectivelyInvisible",  // An output of LayoutDomComputed, read only by Paint/.
     ];
 
-    private static readonly (FieldInfo Field, bool PaintOnly)[] Members = BuildMembers();
+    private static readonly (FieldInfo Field, bool PaintOnly)[] Members = BuildMembers(typeof(LayoutStyle));
+
+    /// <summary>
+    /// The same table for the rarely-set members that <see cref="LayoutStyleRare"/> holds apart
+    /// from the style object. They are compared exactly as if they were still declared on
+    /// <see cref="LayoutStyle"/>, including the paint-only classification above, so splitting
+    /// them out changed nothing about what counts as a layout-affecting restyle.
+    /// </summary>
+    private static readonly (FieldInfo Field, bool PaintOnly)[] RareMembers = BuildMembers(typeof(LayoutStyleRare));
+
+    /// <summary>Stands in for an absent rare store, whose members are all still at their defaults.</summary>
+    private static readonly LayoutStyleRare AbsentRare = new();
+
+    private static readonly FieldInfo RareField = typeof(LayoutStyle).GetField(
+        "m_rare",
+        BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("LayoutStyle.m_rare is gone");
 
     private static readonly bool Disabled =
         Environment.GetEnvironmentVariable("OBSCURA_DISABLE_RETAINED_LAYOUT_REUSE") == "1";
@@ -107,9 +123,9 @@ internal static class RetainedLayoutReuse
     /// <summary>Whether the gate is available at all. The environment switch is for A/B runs.</summary>
     internal static bool Enabled => !Disabled;
 
-    private static (FieldInfo, bool)[] BuildMembers()
+    private static (FieldInfo, bool)[] BuildMembers(Type owner)
     {
-        FieldInfo[] fields = typeof(LayoutStyle).GetFields(
+        FieldInfo[] fields = owner.GetFields(
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         var members = new (FieldInfo, bool)[fields.Length];
         for (int i = 0; i < fields.Length; i++)
@@ -152,6 +168,25 @@ internal static class RetainedLayoutReuse
         {
             object? left = field.GetValue(before);
             object? right = field.GetValue(after);
+            if (ReferenceEquals(field, RareField))
+            {
+                RetainedRestyleImpact rare = ClassifyRare(
+                    left as LayoutStyleRare,
+                    right as LayoutStyleRare,
+                    depth + 1);
+                if (rare == RetainedRestyleImpact.Layout)
+                {
+                    return RetainedRestyleImpact.Layout;
+                }
+
+                if (rare > impact)
+                {
+                    impact = rare;
+                }
+
+                continue;
+            }
+
             if (left is LayoutStyle nestedLeft && right is LayoutStyle nestedRight)
             {
                 RetainedRestyleImpact nested = Classify(nestedLeft, nestedRight, depth + 1);
@@ -169,6 +204,38 @@ internal static class RetainedLayoutReuse
             }
 
             if (ValuesEqual(left, right, depth + 1))
+            {
+                continue;
+            }
+
+            if (!paintOnly)
+            {
+                return RetainedRestyleImpact.Layout;
+            }
+
+            impact = RetainedRestyleImpact.PaintOnly;
+        }
+
+        return impact;
+    }
+
+    /// <summary>Classify the rarely-set members, treating an absent store as all-default.</summary>
+    private static RetainedRestyleImpact ClassifyRare(
+        LayoutStyleRare? before,
+        LayoutStyleRare? after,
+        int depth)
+    {
+        if (ReferenceEquals(before, after))
+        {
+            return RetainedRestyleImpact.Unchanged;
+        }
+
+        LayoutStyleRare left = before ?? AbsentRare;
+        LayoutStyleRare right = after ?? AbsentRare;
+        RetainedRestyleImpact impact = RetainedRestyleImpact.Unchanged;
+        foreach ((FieldInfo field, bool paintOnly) in RareMembers)
+        {
+            if (ValuesEqual(field.GetValue(left), field.GetValue(right), depth))
             {
                 continue;
             }

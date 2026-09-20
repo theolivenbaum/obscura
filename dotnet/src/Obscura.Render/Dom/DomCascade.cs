@@ -441,8 +441,8 @@ internal static class DomCascade
                 if (hasListOrDefinitionAncestor)
                 {
                     style.Margin = style.Margin with { Top = 0f, Bottom = 0f };
-                    style.MarginRelative[0] = null;
-                    style.MarginRelative[2] = null;
+                    style.SetMarginRelative(0, null);
+                    style.SetMarginRelative(2, null);
                 }
 
                 if (local is "dir" or "menu" or "ul")
@@ -464,7 +464,7 @@ internal static class DomCascade
             if (context.QuirksMode && string.Equals(local, "form", StringComparison.Ordinal))
             {
                 // Legacy HTML/quirks rendering keeps one em after forms.
-                style.MarginRelative[2] = Dimension.Em(1f);
+                style.SetMarginRelative(2, Dimension.Em(1f));
             }
 
             // Chromium's UA sheet gives `a:any-link` a pointer cursor, which needs the

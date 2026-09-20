@@ -1107,6 +1107,88 @@ because that window is between `PageInFlight.Decrement()` and ClearScript resolv
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
 
+### Table fixup generates an anonymous table box
+
+`crates/obscura-render/src/dom.rs` builds a table only for a computed table box, so
+table-internal children under a non-table `display` laid out in the element's own formatting
+context. `ApplyDisplay` clears `IsTableBox` for any authored display and `DomBuildCore` only
+calls `BuildTable` when it is set.
+
+DEVIATION: C# generates the anonymous table CSS 2.1 17.2.1 requires, *inside* the element's box.
+The element keeps its declared width and the anonymous table is `width: auto` and shrink-to-fits.
+It is registered in `IfcRegistry.AnonymousTables` rather than `BuildContext.IdMap`, because an
+anonymous box has no DOM node and mapping it to the element would overwrite the element's rect.
+Chromium 141 on a 600px `display: inline-block; width: 100%` table of `alpha` /
+`beta gamma delta` gives 600 wide with 34.66 / 112.84 columns; before, 35 / 565. The same for
+`block`, `flex`, `grid`, `inline-flex`, and for authored `display: table-cell` children under any
+of them. `DomBuild.WantsAnonymousTableBox` / `AnonymousTableStyle`.
+
+### A table cell's declared inline size is spent once, on its column
+
+Two separate losses of the same value. `DeferCyclicFlexInlineSizes` neutralizes a cyclic
+percentage to a definite `0px` before the box tree is built, so `DomBuildTable.StyleWidth` saw no
+percentage and the column vanished (43 / 458 against Chromium's 180 / 420, and it reproduces with
+a px-width table, so it is not the percentage path). `RestoreTypedPercentages` then put the
+percentage back on the *cell's own* taffy node, undoing `BuildTable`'s deliberate
+`Size.Width = Auto`, so the cell resolved 30% a second time against its own 180px track and came
+out 54px - which is what the presentational `<td width="30%">` spelling was hitting. One root
+cause, two symptoms, one fix: `BuildContext.DeferredInlineWidths` hands the authored percentage
+back to the column pass, and `IfcRegistry.TableGridCells` keeps the restore passes off the cell
+box.
+
+### A collapsed border is half inside the table's content box, and a collapsing table has no padding
+
+Chromium 141: `box-sizing: content-box; width: 600px; border: Npx; border-collapse: collapse` is
+`600 + N` wide - 601 / 605 / 611 / 620 at N = 1 / 5 / 11 / 20 - because only the outer half of a
+collapsed border is outside the declaration, and `padding` is ignored entirely (CSS 2.1 17.6.2).
+In the *separate* model `border-spacing` lives inside the content box, so it is already part of a
+content-box `width`: `border: 5px` with the UA's 2px spacing is 610, not 614. Rust adds the full
+border, the full padding and the spacing in both models.
+`DomStyleFixups.TableWidthDeclarationEdges` / `TableUsedPadding`. After the fix every table
+border-box width in a 24-case matrix (border model x padding x border x width, plus colspan,
+rowspan, `<colgroup>`, nested tables, `thead`/`tbody` and fixed layout) matches Chromium exactly;
+before, 10 of them disagreed.
+
+### LayoutStyle allocates its collections lazily and keeps its cold fields in a side object
+
+`crates/obscura-render` stores both inline in its style struct, which is affordable for a struct
+laid out by value. Here every `LayoutStyle` is a heap object, and on a 60k-element page it was
+2,872 bytes retained per element.
+
+Two changes, both measured before being taken. **23 per-side and per-slot collections**
+(`MarginAuto`, the three margin, three padding and two inset companions, `SizeExpressions`,
+`IndividualTranslateExpressions`, `ContainerNames`, `BorderCascadeOps`,
+`BackgroundGradientLayers` and its radial geometries, the four grid track lists, the three
+counter lists, `TransformOps`) are now allocated on first non-default write. Reads of the unset
+state come from one shared all-default instance, so the read accessors are `ReadOnlySpan<T>` /
+`IReadOnlyList<T>` - the span is what makes writing through the shared instance a compile error.
+Measured across both synthetic pages and all 26 fixtures (70,973 styles), **every one of them was
+empty on every element**: 58.6 MB of live heap holding nothing.
+
+**23 rarely-set members** (~600 bytes: `BorderCascadeBase`, grid placement, the gradient, mask,
+background-size and position tuples, `BoxShadow`, `Outline`, `AnimationTiming`, the individual
+transform properties, `TransformOrigin`, `ReplacedIntrinsic`, `IntrinsicSize`,
+`NativeControlContent`, `BorderSpacing`, `ObjectPosition`, `FontSizeRaw`, `LetterSpacingRaw`)
+moved into a `LayoutStyleRare` allocated on first non-default write; fewer than one element in a
+thousand sets any of them. Each is still reached through a property of the same name and type, so
+no read site changed. `BorderModel` (116 B) was deliberately left inline: it is read whole on
+paint paths and a property getter would copy it per read.
+
+`RetainedLayoutReuse` reflects over `LayoutStyle`'s fields, so it now walks `LayoutStyleRare`'s
+too with the same paint-only name table, substituting a shared all-default instance for an absent
+store; restyle classification is bit-for-bit unchanged.
+
+`LayoutStyle` 1,848 -> 1,240 bytes; retained per style 2,872 -> 1,240. On a 60k-element page live
+heap 219.8 -> 126.4 MB (-42.5%) and allocation 750.2 -> 657.7 MB. Timing over 10 interleaved runs
+per binary: medians -1.0% and -0.9%, mins within 0.1%.
+
+**Still 56% of the live set on that page** (71 of 126 MB). About 100 of the remaining 8-byte
+reference fields are also almost always null (SVG paint, mask, grid line names, the font,
+letter-spacing and gap expressions); a second rare tier would take it under ~900 B. And
+`LayoutDomComputed` assigns `style.FontVariationSettings = [.. inh.FontVariationSettings]` for
+every element, allocating an empty list per style (1.83 MB per 60k), which leaving null when the
+inherited list is empty would remove.
+
 ### One watchdog thread services every arm, instead of one thread per arm
 
 `Watchdog.Spawn` used to `new Thread(...)` for every armed watchdog and `Stop()` used to

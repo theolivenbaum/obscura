@@ -862,6 +862,7 @@ internal static class DomSubgridPasses
         float vw,
         float vh,
         List<PinnedFlexItem> pinned,
+        IReadOnlySet<TaffyNodeId> tableGridCells,
         Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
     {
         if (deferred.Count == 0)
@@ -946,7 +947,8 @@ internal static class DomSubgridPasses
             }
 
             PinFlexItems(tree, taffyTree, taffyByDom, styles, deferred, level, pinned);
-            RestoreTypedPercentages(taffyTree, taffyByDom, styles, deferred, level);
+            RestoreTypedPercentages(
+                taffyTree, taffyByDom, styles, deferred, level, tableGridCells);
             relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
             levelStart = levelEnd;
         }
@@ -956,7 +958,7 @@ internal static class DomSubgridPasses
         relayout(taffyTree, styles, DeferredFlexReflowPhase.FitContent);
 
         return ResolveFunctionalInlineSizes(
-            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, tableGridCells, relayout);
     }
 
     /// <summary>
@@ -1183,7 +1185,8 @@ internal static class DomSubgridPasses
         Dictionary<NodeId, TaffyNodeId> taffyByDom,
         Dictionary<NodeId, LayoutStyle> styles,
         IReadOnlyList<DeferredCyclicInlineSize> deferred,
-        HashSet<NodeId> level)
+        HashSet<NodeId> level,
+        IReadOnlySet<TaffyNodeId> tableGridCells)
     {
         foreach (DeferredCyclicInlineSize entry in deferred)
         {
@@ -1227,12 +1230,25 @@ internal static class DomSubgridPasses
                 continue;
             }
 
+            // A cell pinned into a table grid takes its box width from its track, never from
+            // its own declaration - DomBuild.BuildTable forced it to `auto` for exactly that
+            // reason, and the declaration was already spent on sizing the column. Putting the
+            // percentage back here resolved it a second time, against the track: a `width: 30%`
+            // cell of a 600px table in a flex row rendered 54px inside its correct 180px
+            // column. (Chromium: 180.) The same restore is right for every other node.
+            bool cellInTableGrid = tableGridCells.Contains(nodeId);
+
             TaffyStyle restored = taffyTree.GetStyle(nodeId).Clone();
             TaffyDimension percentValue = TaffyDimension.FromPercent(entry.Percent);
             switch (entry.Slot)
             {
                 case 0:
                 {
+                    if (cellInTableGrid)
+                    {
+                        break;
+                    }
+
                     Layout.Size<TaffyDimension> size = restored.Size;
                     size.Width = percentValue;
                     restored.Size = size;
@@ -1287,6 +1303,7 @@ internal static class DomSubgridPasses
         float rootFs,
         float vw,
         float vh,
+        IReadOnlySet<TaffyNodeId> tableGridCells,
         Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
     {
         if (deferred.Count == 0)
@@ -1301,7 +1318,7 @@ internal static class DomSubgridPasses
         }
 
         return ResolveFunctionalInlineSizes(
-            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, tableGridCells, relayout);
     }
 
     /// <summary>
@@ -1317,6 +1334,7 @@ internal static class DomSubgridPasses
         float rootFs,
         float vw,
         float vh,
+        IReadOnlySet<TaffyNodeId> tableGridCells,
         Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
     {
         HashSet<NodeId> functionalNodes = [];
@@ -1462,6 +1480,13 @@ internal static class DomSubgridPasses
                 {
                     case 0:
                     {
+                        // As in RestoreTypedPercentages: a cell's inline size sized its column,
+                        // and its box fills the track it was given.
+                        if (tableGridCells.Contains(nodeId))
+                        {
+                            break;
+                        }
+
                         Layout.Size<TaffyDimension> size = resolvedStyle.Size;
                         size.Width = length;
                         resolvedStyle.Size = size;

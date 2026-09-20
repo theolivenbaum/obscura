@@ -256,15 +256,22 @@ public class RetainedLayoutReuseTests
     }
 
     /// <summary>
-    /// The paint-only list is matched against <see cref="LayoutStyle"/> by field name, and a
-    /// name that matches nothing would silently do nothing. Every other member - including one
-    /// added later - is layout-affecting by omission, which is the safe direction.
+    /// The paint-only list is matched by field name against the two types the comparison walks -
+    /// <see cref="LayoutStyle"/> and the rarely-set members it holds apart in
+    /// <c>LayoutStyleRare</c> - and a name that matches neither would silently do nothing. Every
+    /// other member - including one added later - is layout-affecting by omission, which is the
+    /// safe direction.
     /// </summary>
     [Fact]
     public void EveryPaintOnlyMemberNamesARealLayoutStyleField()
     {
-        FieldInfo[] declared = typeof(LayoutStyle).GetFields(
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Type rare = typeof(LayoutStyle).Assembly.GetType("Obscura.Render.LayoutStyleRare")
+            ?? throw new InvalidOperationException("LayoutStyleRare is gone");
+        FieldInfo[] declared =
+        [
+            .. typeof(LayoutStyle).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
+            .. rare.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
+        ];
         HashSet<string> names = [.. declared.Select(static field => field.Name)];
         FieldInfo listed = typeof(RetainedLayoutReuse).GetField(
             "PaintOnlyMembers",
