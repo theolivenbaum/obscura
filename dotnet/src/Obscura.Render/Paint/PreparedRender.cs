@@ -1052,18 +1052,48 @@ public sealed partial class PreparedRender
     /// deviations" in todo.md.
     /// </para>
     /// <para>
-    /// Two cases stay unreconstructible and keep reporting the approximation, because nothing
-    /// records them. An authored <c>display: table-row</c> (and the other five internal
-    /// values) is rejected by <c>ApplyDisplay</c>, which knows only <c>table</c>,
-    /// <c>inline-table</c> and <c>table-cell</c>, so the element keeps its previous display and
-    /// reports that. And a <c>&lt;caption&gt;</c> / <c>&lt;col&gt;</c> / <c>&lt;colgroup&gt;</c>
-    /// has no user-agent flag to test - only a default <c>display: block</c> - so an authored
-    /// <c>display: block</c> on one is indistinguishable from the user-agent value and reports
-    /// the table display. Both need a record of what the author wrote.
+    /// The two cases that need a record of what the author wrote read
+    /// <see cref="LayoutStyle.AuthoredTableDisplay"/> and
+    /// <see cref="LayoutStyle.DisplayAuthored"/>, which <c>ApplyDisplay</c> sets.
+    /// </para>
+    /// <para>
+    /// REPORTED BUT NOT LAID OUT. The seven internal displays are recorded and reported; layout
+    /// still treats the box as whatever it was before the declaration, so a
+    /// <c>display: table-row</c> div is a block. CSSOM asks for the resolved value rather than
+    /// the used one and Chromium 141 reports the keyword whatever layout achieves, so this is
+    /// the right answer here and the gap belongs to layout. Closing it means keying the table
+    /// builder on the computed display instead of on the HTML element names: CSS 2.1 17.2.1
+    /// anonymous table generation in <c>DomBuild.WantsAnonymousTableBox</c> and
+    /// <c>DomBuild.BuildTable</c> (whose non-native path models exactly one anonymous row of
+    /// cells), row collection in <c>DomTableSupport.CollectTableRows</c>, row and section
+    /// geometry in <c>DomTableSupport.SynthesizeRowRects</c>, the <c>&lt;col&gt;</c> pre-pass
+    /// and caption placement in <c>BuildTable</c>, the collapsing border bands in
+    /// <c>ResolveCollapsedBorders</c>, and the border-spacing propagation in
+    /// <c>DomStyleFixups</c> - all of which test element names today.
     /// </para>
     /// </remarks>
     private string? TableDisplay(NodeId id, LayoutStyle style, bool isPseudo)
     {
+        // An authored internal display is the most recent thing the cascade said about this
+        // box, and it does not clear the user-agent table flags (it changes nothing in
+        // layout), so it has to be read before them: Chromium 141 reports `table-row` for
+        // `<table style="display:table-row">`, not `table`.
+        if (style.AuthoredTableDisplay is not TableInternalDisplay.None)
+        {
+            return IsBlockifiedBox(id, style, isPseudo)
+                ? "block"
+                : style.AuthoredTableDisplay switch
+                {
+                    TableInternalDisplay.Row => "table-row",
+                    TableInternalDisplay.RowGroup => "table-row-group",
+                    TableInternalDisplay.HeaderGroup => "table-header-group",
+                    TableInternalDisplay.FooterGroup => "table-footer-group",
+                    TableInternalDisplay.Column => "table-column",
+                    TableInternalDisplay.ColumnGroup => "table-column-group",
+                    _ => "table-caption",
+                };
+        }
+
         if (style.IsTableBox)
         {
             // Blockification maps `inline-table` to `table`, and the layout pass has already
@@ -1104,11 +1134,18 @@ public sealed partial class PreparedRender
 
     /// <summary>
     /// Whether this box still carries the plain <c>display: block</c> every element starts
-    /// from, which for the three table elements with no user-agent arm is the only evidence
-    /// their display was not authored.
+    /// from and no declaration replaced it, which for the three table elements with no
+    /// user-agent arm is the only evidence their display is the user-agent one.
     /// </summary>
+    /// <remarks>
+    /// <see cref="LayoutStyle.DisplayAuthored"/> is what makes an authored <c>display: block</c>
+    /// on a <c>&lt;caption&gt;</c> distinguishable from the user-agent value; the structural
+    /// tests stay because a later pass can move <c>display</c> without going through the
+    /// cascade, and answering <c>null</c> here falls through to serializing the taffy display.
+    /// </remarks>
     private static bool UntouchedBlockDisplay(LayoutStyle style) =>
-        style.Display == Display.Block
+        !style.DisplayAuthored
+        && style.Display == Display.Block
         && !style.IsInlineBlock
         && !style.FlowRoot
         && !style.InternalFlexContainer

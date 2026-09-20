@@ -1183,11 +1183,22 @@ grid item, float, absolutely positioned box and the root report `block`, while `
 reports `table`. That `ApplyDisplay` clears the flags for any valid authored display is what
 makes a surviving flag mean the UA value, so `<tr style="display:flex">` still reports `flex`.
 
-Two cases stay unreconstructible because nothing records the authored display: `display:table-row`
-and its five internal siblings are rejected by `ApplyDisplay`'s validity list, so the element
-keeps its previous display; and `<caption>` / `<col>` / `<colgroup>` have no UA flag, so an
-authored `display:block` on one is indistinguishable from the UA value. Both want a
-`DisplayAuthored` bit on `LayoutStyle`.
+Both cases are now recorded. `ApplyDisplay` sets `LayoutStyle.DisplayAuthored` for every valid
+authored value, which is what distinguishes an authored `display: block` on a `<caption>` /
+`<col>` / `<colgroup>` from those elements' UA value (they have no UA arm, only the plain
+`display: block` every element starts from). And it sets `LayoutStyle.AuthoredTableDisplay` for
+the seven values it does **not** lay out - `table-row`, `table-row-group`, `table-header-group`,
+`table-footer-group`, `table-column`, `table-column-group`, `table-caption` - recording the
+keyword and returning without touching a single layout-visible field.
+
+**Reported but not laid out, deliberately.** CSSOM asks for the resolved value, not the used one,
+and Chromium 141 reports the keyword whatever layout achieves, so the snapshot's answer is right
+on its own terms and the gap belongs to layout. 140 cells were measured: each of the seven on a
+`<div>`, `<table>`, `<tr>` and `<td>`, in a block parent, as a flex item, a grid item, a float
+and an absolutely positioned box. The subject's UA display makes no difference to the answer -
+`<table style="display:table-row">` reports `table-row`, verified here - which is why the record
+is read *before* `IsTableBox`; all seven blockify to `block` in the four blockifying contexts,
+which reuses `IsBlockifiedBox`.
 
 **`border-spacing` and `border-collapse` now have keys**, where before page script read the empty
 string through bootstrap's inline fallback. Both inherit, which the measurements settle: Chromium
@@ -1212,6 +1223,35 @@ all reject; `DomCascade` accepts `cellspacing` only when every character is a di
 `cellspacing="3px"` falls back to the UA 2px where Chromium reports 3px; and the
 `-webkit-border-horizontal-spacing` / `-webkit-border-vertical-spacing` aliases Chromium reports
 have no key.
+
+### An authored internal table `display` is reported but not laid out
+
+`crates/obscura-render/src/style.rs` rejects `table-row`, `table-row-group`,
+`table-header-group`, `table-footer-group`, `table-column`, `table-column-group` and
+`table-caption` and keeps no record of them, so its snapshot reports whatever display the box
+kept. C# records the keyword on `LayoutStyle.AuthoredTableDisplay` and reports it, matching
+Chromium 141. **Layout still treats the box as whatever it was**, so a `display: table-row` div
+is a full-width block where Chromium generates the CSS 2.1 17.2.1 anonymous table and
+shrink-to-fits it.
+
+Honouring it means re-keying the table subsystem on computed display instead of on HTML element
+names, which is a rewrite rather than a patch: rows and row groups are not taffy boxes at all -
+`BuildTable` builds a table as a grid of *cells* and `DomTableSupport.SynthesizeRowRects`
+reconstructs `tr`/`tbody` rects afterwards from the literal local names - and the CSS
+(non-`<table>`) path models exactly one anonymous row, bailing out on any child that is not a
+`table-cell`. Also involved: `CollectTableRows`, the `<col>` pre-pass and caption placement
+inside `BuildTable`, `ResolveCollapsedBorders`' non-native single-row mode, and
+`PropagateBorderSpacing`.
+
+Not carried across `display: inherit`: a `display: inherit` child of a `display: table-row` box
+reports `block` where Chromium says `table-row`. About six additive lines in `LayoutDomComputed`
+and `LayoutDomOnce`'s `Inherited` struct.
+
+Also found and not fixed: **`display: flow-root` reports `block` on every element**, a plain
+`<div>` included, because the generic display serializer has no `flow-root` arm. Chromium reports
+`flow-root`, verified here. `FlowRoot` is only set by `display: flow-root`, `table`,
+`inline-table`, the webkit-clamp adjustment and the anonymous-table style, so
+`(Block, false) && FlowRoot && !IsTableBox` is an unambiguous `flow-root`.
 
 ### The UA `table` rule's flex construction does not survive an authored `display`
 
@@ -1300,9 +1340,10 @@ With the UA default 2px the same fixture is `table 0,6 153.5x17` and `tr 2,2 149
 here. A fact written from the 147.5 numbers without zeroing the spacing measures something else.
 
 Still open: an authored `display: table-row` or `table-row-group` child generates no anonymous
-table under any parent display, because `ApplyDisplay` rejects the six internal table display
-values so the child computes as plain `block` and the fixup has nothing to key off. That is the
-same `DisplayAuthored` gap the CSSOM display work hit.
+table under any parent display. The `DisplayAuthored` record it was waiting on now exists
+(`LayoutStyle.AuthoredTableDisplay`) and the CSSOM snapshot reads it, but
+`WantsAnonymousTableBox` deliberately does not - see the Known deviation above for why honouring
+it is a table-subsystem rewrite.
 
 ### Table fixup generates an anonymous table box
 

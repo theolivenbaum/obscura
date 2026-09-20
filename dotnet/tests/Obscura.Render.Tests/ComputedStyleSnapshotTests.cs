@@ -1056,6 +1056,154 @@ public class ComputedStyleSnapshotTests
     }
 
     /// <summary>
+    /// The six table-internal displays and <c>table-caption</c> are recorded and reported even
+    /// though this engine does not lay them out: CSSOM asks for the resolved value, not the
+    /// used one. Chromium 141 on the same markup reports the authored keyword on a
+    /// <c>&lt;div&gt;</c> and on a <c>&lt;table&gt;</c> / <c>&lt;tr&gt;</c> / <c>&lt;td&gt;</c>
+    /// alike - the element's user-agent display makes no difference to the answer.
+    /// </summary>
+    [Theory]
+    [InlineData("div", "table-row")]
+    [InlineData("div", "table-row-group")]
+    [InlineData("div", "table-header-group")]
+    [InlineData("div", "table-footer-group")]
+    [InlineData("div", "table-column")]
+    [InlineData("div", "table-column-group")]
+    [InlineData("div", "table-caption")]
+    [InlineData("span", "table-row")]
+    [InlineData("span", "table-caption")]
+    public void AnAuthoredInternalTableDisplayIsReported(string tag, string display)
+    {
+        Assert.Equal(
+            display,
+            Computed($"""<{tag} id="box" style="display:{display}">d</{tag}>""", "box")["display"]);
+    }
+
+    /// <summary>
+    /// The same on the elements whose user-agent display is already a table one. Measured on
+    /// Chromium 141: <c>&lt;table style="display:table-row"&gt;</c> reports <c>table-row</c>,
+    /// and so do a <c>&lt;tbody&gt;</c>, a <c>&lt;tr&gt;</c> and a <c>&lt;td&gt;</c> carrying
+    /// the same declaration. The keyword is read before the user-agent table flags because
+    /// recording it changes nothing in layout and so cannot clear them.
+    /// </summary>
+    [Theory]
+    [InlineData("<table id=\"box\" style=\"display:table-row\"><tr><td>d</td></tr></table>", "table-row")]
+    [InlineData("<table id=\"box\" style=\"display:table-caption\"><tr><td>d</td></tr></table>", "table-caption")]
+    [InlineData("<table><tbody id=\"box\" style=\"display:table-row\"><tr><td>d</td></tr></tbody></table>", "table-row")]
+    [InlineData("<table><tr id=\"box\" style=\"display:table-row\"><td>d</td></tr></table>", "table-row")]
+    [InlineData("<table><tr><td id=\"box\" style=\"display:table-row\">d</td></tr></table>", "table-row")]
+    [InlineData("<table><caption id=\"box\" style=\"display:table-caption\">c</caption><tr><td>d</td></tr></table>", "table-caption")]
+    [InlineData("<table><colgroup><col id=\"box\" style=\"display:table-column\"></colgroup><tr><td>d</td></tr></table>", "table-column")]
+    public void AnAuthoredInternalTableDisplayReplacesTheUserAgentTableOne(string html, string display)
+    {
+        Assert.Equal(display, Computed(html, "box")["display"]);
+    }
+
+    /// <summary>
+    /// An internal table display recorded by one declaration is dropped by the next, in either
+    /// order, and the keyword is matched case-insensitively. Chromium 141 on the same markup.
+    /// </summary>
+    [Theory]
+    [InlineData("display:table-row;display:block", "block")]
+    [InlineData("display:block;display:table-row", "table-row")]
+    [InlineData("display:table-row;display:table", "table")]
+    [InlineData("display:table;display:table-row", "table-row")]
+    [InlineData("display:table-row;display:table-caption", "table-caption")]
+    [InlineData("display:TABLE-ROW", "table-row")]
+    [InlineData("display:table-row;display:none", "none")]
+    [InlineData("display:table-row;display:contents", "contents")]
+    public void TheLastDisplayDeclarationWinsOverAnInternalTableOne(string inline, string display)
+    {
+        Assert.Equal(display, Computed($"""<div id="box" style="{inline}">d</div>""", "box")["display"]);
+    }
+
+    /// <summary>
+    /// Blockification applies to the seven recorded displays exactly as it does to
+    /// <c>table-cell</c>. Measured on Chromium 141: each of the seven reports <c>block</c> as a
+    /// flex item, a grid item, a float and an absolutely positioned box, and keeps its keyword
+    /// inside an <c>inline-block</c>, which is not a flex or grid container.
+    /// </summary>
+    [Theory]
+    [InlineData("<div style=\"display:flex\"><div id=\"box\" style=\"display:table-row\">d</div></div>", "block")]
+    [InlineData("<div style=\"display:flex\"><div id=\"box\" style=\"display:table-caption\">d</div></div>", "block")]
+    [InlineData("<div style=\"display:grid\"><div id=\"box\" style=\"display:table-row-group\">d</div></div>", "block")]
+    [InlineData("<div style=\"display:grid\"><div id=\"box\" style=\"display:table-column\">d</div></div>", "block")]
+    [InlineData("<div id=\"box\" style=\"display:table-row;float:left\">d</div>", "block")]
+    [InlineData("<div id=\"box\" style=\"display:table-column-group;float:left\">d</div>", "block")]
+    [InlineData("<div id=\"box\" style=\"display:table-header-group;position:absolute\">d</div>", "block")]
+    [InlineData("<div id=\"box\" style=\"display:table-footer-group;position:absolute\">d</div>", "block")]
+    [InlineData("<div style=\"display:inline-block\"><div id=\"box\" style=\"display:table-row\">d</div></div>", "table-row")]
+    public void BlockificationIsReportedOnTheRecordedInternalTableDisplays(string html, string display)
+    {
+        Assert.Equal(display, Computed(html, "box")["display"]);
+    }
+
+    /// <summary>
+    /// A <c>&lt;caption&gt;</c>, <c>&lt;col&gt;</c> or <c>&lt;colgroup&gt;</c> has no
+    /// user-agent arm - it gets the plain <c>display: block</c> every element starts from - so
+    /// an authored <c>display: block</c> on one used to be indistinguishable from the
+    /// user-agent value and reported the table display. Chromium 141 reports the authored
+    /// value: <c>block</c>, <c>contents</c> and <c>inline</c> for <c>display: initial</c>,
+    /// whose initial value is <c>inline</c>.
+    /// <para>
+    /// <c>display: flow-root</c> is left out: the snapshot reports <c>block</c> for it on every
+    /// element, a <c>&lt;div&gt;</c> included, because the generic serializer has no
+    /// <c>flow-root</c> arm. That gap is not a table one and is not fixed here.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData("caption", "block", "block")]
+    [InlineData("caption", "contents", "contents")]
+    [InlineData("caption", "initial", "inline")]
+    [InlineData("colgroup", "block", "block")]
+    [InlineData("colgroup", "initial", "inline")]
+    [InlineData("col", "block", "block")]
+    [InlineData("col", "contents", "contents")]
+    public void AnAuthoredDisplayOnACaptionOrColumnIsReportedOverTheUserAgentTableOne(
+        string tag,
+        string authored,
+        string display)
+    {
+        string inner = tag switch
+        {
+            "caption" => $"""<caption id="box" style="display:{authored}">c</caption>""",
+            "colgroup" => $"""<colgroup id="box" style="display:{authored}"><col></colgroup>""",
+            _ => $"""<colgroup><col id="box" style="display:{authored}"></colgroup>""",
+        };
+
+        Assert.Equal(
+            display,
+            Computed($"<table>{inner}<tr><td>d</td></tr></table>", "box")["display"]);
+    }
+
+    /// <summary>
+    /// A pseudo-element carries a recorded internal table display the same way, and is
+    /// blockified by the element it is generated inside. Chromium 141 on the same markup.
+    /// </summary>
+    [Theory]
+    [InlineData("display:table-row", "", "table-row")]
+    [InlineData("display:table-caption", "", "table-caption")]
+    [InlineData("display:table-column", "", "table-column")]
+    [InlineData("display:table-row", "display:flex", "block")]
+    public void AGeneratedBoxReportsItsRecordedInternalTableDisplay(
+        string pseudo,
+        string host,
+        string display)
+    {
+        DomTree tree = HtmlParsing.ParseHtml(
+            "<style>#box::before{content:\"x\";" + pseudo + "}</style>"
+            + "<div id=\"box\" style=\"" + host + "\">d</div>");
+        NodeId node = tree.GetElementById("box") ?? throw new InvalidOperationException("no #box");
+        RenderResourceCache resources = new();
+        PreparedRender prepared = RenderPaint.PrepareDom(tree, (1280f, 720f), null, resources)
+            ?? throw new InvalidOperationException("layout did not prepare");
+        Dictionary<string, string> computed = prepared.ComputedStyle(node, "::before")
+            ?? throw new InvalidOperationException("no computed style");
+
+        Assert.Equal(display, computed["display"]);
+    }
+
+    /// <summary>
     /// CSS Display blockification turns an internal table display into <c>block</c> while
     /// <c>inline-table</c> becomes <c>table</c>. Measured on Chromium 141: a
     /// <c>display: table-cell</c> flex item, grid item, float and absolutely positioned box all

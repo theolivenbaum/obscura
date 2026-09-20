@@ -2915,15 +2915,61 @@ public static partial class ComputedStyle
         return (layers.Count > 0 ? layers[0] : string.Empty).Trim();
     }
 
+    /// <summary>
+    /// The <see cref="TableInternalDisplay"/> a display keyword names, or
+    /// <see cref="TableInternalDisplay.None"/> when it names something else.
+    /// </summary>
+    private static TableInternalDisplay InternalTableDisplayOf(string value) => value switch
+    {
+        "table-row" => TableInternalDisplay.Row,
+        "table-row-group" => TableInternalDisplay.RowGroup,
+        "table-header-group" => TableInternalDisplay.HeaderGroup,
+        "table-footer-group" => TableInternalDisplay.FooterGroup,
+        "table-column" => TableInternalDisplay.Column,
+        "table-column-group" => TableInternalDisplay.ColumnGroup,
+        "table-caption" => TableInternalDisplay.Caption,
+        _ => TableInternalDisplay.None,
+    };
+
     private static void ApplyDisplay(LayoutStyle style, string rawValue)
     {
         string value = CssText.AsciiLower(rawValue.Trim());
+
+        // The seven displays this engine records but does not lay out. Measured on Chromium
+        // 141, each one generates the anonymous table CSS 2.1 17.2.1 asks for - a
+        // `display: table-row` div holding `Hello world` in 16px monospace is 105.97 wide, the
+        // shrink-to-fit width of the anonymous table around it, not the 600 of its block
+        // parent - and this engine's table builder is keyed on the HTML element names
+        // (`tr`, `tbody`, `col`, `caption`, ...), not on the computed display, so it has
+        // nowhere to put such a box.
+        //
+        // Recording the keyword without honouring it is deliberate and not half a fix: CSSOM
+        // defines the computed value as the resolved value, not the used one, and Chromium
+        // reports `table-row` whatever layout achieves, so reporting it is the correct answer
+        // to `getComputedStyle` on its own terms and it is what makes the layout gap visible
+        // instead of silent. Returning here leaves every layout-visible field exactly as the
+        // previous winner left it, which is what this engine already did with these values.
+        //
+        // DEVIATION from crates/obscura-render/src/style.rs, which also rejects all seven and
+        // has no record of them either, so its snapshot reports the display the box kept. See
+        // "Known deviations" in todo.md.
+        TableInternalDisplay internalTable = InternalTableDisplayOf(value);
+        if (internalTable != TableInternalDisplay.None)
+        {
+            style.DisplayAuthored = true;
+            style.AuthoredTableDisplay = internalTable;
+            return;
+        }
+
         if (value is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
             or "inline-grid" or "block" or "flow-root" or "table" or "inline-table" or "table-cell"
             or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset")
         {
             // Every valid authored display value replaces the complete outer/inner
-            // display pair, including the UA table/control approximation.
+            // display pair, including the UA table/control approximation and any
+            // internal-table keyword an earlier declaration recorded.
+            style.DisplayAuthored = true;
+            style.AuthoredTableDisplay = TableInternalDisplay.None;
             style.InternalFlexContainer = false;
             style.IsTableBox = false;
             style.IsTableCellBox = false;

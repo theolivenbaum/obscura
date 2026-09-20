@@ -67,6 +67,42 @@ internal sealed class WaapiSampleState
     };
 }
 
+/// <summary>
+/// An authored internal-table <c>display</c>: one of the six table-internal values plus
+/// <c>table-caption</c>, none of which this engine lays out.
+/// </summary>
+/// <remarks>
+/// <c>ApplyDisplay</c> records the keyword and leaves the box's layout style untouched, so
+/// the CSSOM snapshot can report the computed value while layout keeps treating the element
+/// as whatever it was. See <see cref="LayoutStyle.AuthoredTableDisplay"/>.
+/// </remarks>
+internal enum TableInternalDisplay : byte
+{
+    /// <summary>No internal-table display was authored.</summary>
+    None,
+
+    /// <summary><c>display: table-row</c>.</summary>
+    Row,
+
+    /// <summary><c>display: table-row-group</c>.</summary>
+    RowGroup,
+
+    /// <summary><c>display: table-header-group</c>.</summary>
+    HeaderGroup,
+
+    /// <summary><c>display: table-footer-group</c>.</summary>
+    FooterGroup,
+
+    /// <summary><c>display: table-column</c>.</summary>
+    Column,
+
+    /// <summary><c>display: table-column-group</c>.</summary>
+    ColumnGroup,
+
+    /// <summary><c>display: table-caption</c>.</summary>
+    Caption,
+}
+
 internal enum BorderCascadeSide
 {
     Top,
@@ -313,6 +349,46 @@ public sealed class LayoutStyle
     /// provenance and then clears this marker.
     /// </remarks>
     internal bool DisplayInherit;
+
+    /// <summary>The cascade's winning <c>display</c> came from a declaration, not the UA arm.</summary>
+    /// <remarks>
+    /// <c>&lt;caption&gt;</c>, <c>&lt;col&gt;</c> and <c>&lt;colgroup&gt;</c> have no user-agent
+    /// arm in <see cref="ComputedStyle.UaStyle"/> - they get the plain <c>display: block</c>
+    /// every element starts from - so their computed CSS display is only reconstructible from
+    /// whether a declaration replaced it. Chromium 141 reports <c>table-caption</c> /
+    /// <c>table-column</c> / <c>table-column-group</c> for the three untouched and the authored
+    /// value otherwise, including <c>block</c> and <c>contents</c>.
+    /// <para>
+    /// Only <see cref="PreparedRender"/> reads this; nothing in layout does.
+    /// </para>
+    /// </remarks>
+    internal bool DisplayAuthored;
+
+    /// <summary>
+    /// The authored internal-table <c>display</c>, which this engine records and reports but
+    /// does not lay out.
+    /// </summary>
+    /// <remarks>
+    /// Taffy has no table formatting mode and this engine's table builder is keyed on the HTML
+    /// element names (<c>tr</c>, <c>tbody</c>, <c>col</c>, <c>caption</c>, ...) rather than on
+    /// the computed display, so a <c>display: table-row</c> box is laid out as whatever it was
+    /// before the declaration. CSSOM defines the computed value as the resolved value rather
+    /// than the used one, and Chromium reports it whatever layout does with the box, so the
+    /// snapshot reports the authored keyword and the gap is layout's.
+    /// <para>
+    /// Only <see cref="PreparedRender"/> reads this; nothing in layout does. Adding a layout
+    /// consumer means implementing CSS 2.1 17.2.1 anonymous table boxes for these values
+    /// first - see the remarks on <c>PreparedRender.TableDisplay</c>.
+    /// </para>
+    /// <para>
+    /// Not carried across <c>display: inherit</c>: the DOM top-down pass copies the parent's
+    /// computed outer/inner display through <c>LayoutDomComputed</c>'s inherited context, which
+    /// does not carry this keyword, so a <c>display: inherit</c> child of a
+    /// <c>display: table-row</c> box reports <c>block</c> where Chromium 141 reports
+    /// <c>table-row</c>.
+    /// </para>
+    /// </remarks>
+    internal TableInternalDisplay AuthoredTableDisplay;
 
     /// <summary>Original legacy flexbox display provenance.</summary>
     /// <remarks>
