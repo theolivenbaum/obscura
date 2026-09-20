@@ -208,12 +208,11 @@ The largest component. Split into stages; each stage is independently testable.
   *how much*.
 
   What is left needs retained layout, not a better gate. One full prepare of a
-  ~2000-node page costs 77ms and of the Tesserae SPA 130-460ms, and almost none
-  of it is avoidable per-write today: it is ~40% HarfBuzz shaping (every text
-  node is reshaped from scratch - the shaping cache is per-pass, and shaping is
-  a pure function of text plus attributes, so a cross-pass cache is the obvious
-  next step), ~12% building the taffy tree, ~13% taffy itself and ~14%
-  `DerivedLayoutState`. The real fix is the proposal on file - retain the box
+  ~2000-node page costs 77ms and of the Tesserae SPA 130-460ms, and it was
+  ~40% HarfBuzz shaping, ~12% building the taffy tree, ~13% taffy itself and
+  ~14% `DerivedLayoutState`. **The shaping share is now paid once** - see the
+  cross-pass shape cache below - which roughly halves a layout-affecting
+  write+read pair. The rest still wants the proposal on file: retain the box
   tree so a restyled out-of-flow box re-runs layout for its formatting context
   rather than the document. Raising the watchdog budget only moves the
   threshold.
@@ -1107,6 +1106,35 @@ tracker disabled, 5 of 5 pass with it. A `fetch()`-shaped test is deliberately n
 because that window is between `PageInFlight.Decrement()` and ClearScript resolving the promise
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
+
+### Shaped paragraphs are carried across render passes
+
+Shaping is a pure function of the text, its attributes and the tab width, but the cache lived on
+the per-pass `TextEngine`, so every text node was reshaped from scratch on every prepare - about
+40% of a prepare on a text-heavy page. The retained-layout gate above cannot help here by
+construction: it answers *whether* to lay out and declines a write that changes a box, and those
+are exactly the passes that pay for shaping. A container-query prepare re-lays the document
+several times inside one prepare and paid for it each time.
+
+DEVIATION from `crates/obscura-render`, which builds its `TextEngine` per pass too and can
+afford to reshape; HarfBuzz through P/Invoke cannot. `Obscura.Render.ShapeCache` holds shaped
+paragraphs and `TextEngine.AdoptShapeCache` takes over the previous pass's cache - but only when
+both passes were built from the same web-font set, so a face arriving later discards it
+wholesale. The key covers every input the shaper reads, `TextAttrs.FontId` included, which pins
+the exact `@font-face` resource. Reuse is sound because a `ShapeLine` is never mutated after
+`ShapeParagraph` returns it: `TextLayout` and `Bidi` only read, and nothing outside
+`TextShaping.cs` assigns to a `ShapeWord`, `ShapeSpan` or `ShapeGlyph`.
+
+Measured on a 1200-paragraph page (215 KB), 10 layout-affecting write+read pairs, medians of
+three: `left`/`top` 5474ms -> 3049ms, `transform` 5121ms -> 2278ms.
+
+**It is also a memory win, which was not the point of it.** Peak RSS on the same run falls from
+951 MB to 550 MB, because without it every pass allocated a fresh set of `ShapeGlyph` arrays for
+all 1200 paragraphs. That is most of the "transient churn while laying out" recorded as open
+work below; the live set is untouched.
+
+Correctness: 40 fixture pages dumped every element's `getBoundingClientRect` with the cache on
+and off, all 40 byte-identical. `OBSCURA_DISABLE_SHAPE_CACHE=1` is the switch that A/B ran on.
 
 ### The CDP watchdog scans its slots in a separate frame
 
