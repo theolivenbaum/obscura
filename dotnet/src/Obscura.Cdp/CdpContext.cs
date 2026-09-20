@@ -63,9 +63,10 @@ public sealed record ExecutionContextRecord(
 /// </summary>
 /// <remarks>
 /// One instance per WebSocket. The server hands each connection an isolated
-/// <see cref="BrowserContext"/> (its own cookie jar and HTTP client) and runs
-/// its processor on a dedicated OS thread, so a page's V8 isolate is confined to
-/// one thread and two connections' isolates can never collide.
+/// <see cref="BrowserContext"/> (its own cookie jar and HTTP client) and its own
+/// processor, pages and isolates, so two connections can never reach the same
+/// isolate. Within one connection <see cref="V8Lock"/> is what keeps two of its
+/// own pages from running at once.
 /// </remarks>
 public sealed class CdpContext
 {
@@ -178,13 +179,12 @@ public sealed class CdpContext
     public IoStreamStore IoStreams { get; } = new();
 
     /// <summary>
-    /// Serializes V8 work within THIS connection. With the thread-per-connection
-    /// server (#430) each connection runs on its own OS thread, so isolates never
-    /// collide across connections; this per-connection lock keeps a connection's
-    /// own navigation task and command dispatch from interleaving two of its
-    /// pages' isolates on that one thread. It is deliberately per-connection, not
-    /// process-wide, so connections run in parallel (measured ~2x at concurrency
-    /// 2, ~3x at 4) instead of serializing all V8 on one mutex.
+    /// Serializes V8 work within THIS connection. Each connection owns its own
+    /// pages, so isolates never collide across connections; this lock keeps a
+    /// connection's own navigation task and command dispatch from driving two of
+    /// its pages at once. It is deliberately per-connection, not process-wide, so
+    /// connections run in parallel (measured ~2x at concurrency 2, ~3x at 4)
+    /// instead of serializing all V8 on one mutex.
     /// </summary>
     public SemaphoreSlim V8Lock { get; } = new(1, 1);
 
@@ -708,10 +708,12 @@ public sealed class CdpContext
     /// The page behind a session, made ready to run JS.
     /// </summary>
     /// <remarks>
-    /// V8 allows one entered isolate per OS thread, so before the target page is
-    /// resumed any other page holding a live runtime is suspended. Handlers that
-    /// only read Rust-side fields should use <see cref="GetSessionPage"/>, which
-    /// does not disturb any isolate.
+    /// Only one of a connection's pages holds a live JS runtime at a time, so
+    /// before the target page is resumed any other page holding one is suspended.
+    /// The Rust engine has no choice - rusty_v8 allows one entered isolate per OS
+    /// thread - while here it is what keeps a connection to one live isolate and
+    /// the memory behind it. Handlers that only read host-side fields should use
+    /// <see cref="GetSessionPage"/>, which does not disturb any runtime.
     /// </remarks>
     public Page? GetSessionPageMut(string? sessionId)
     {

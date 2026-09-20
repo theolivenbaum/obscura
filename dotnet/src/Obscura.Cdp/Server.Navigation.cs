@@ -69,13 +69,15 @@ public static partial class CdpServer
         var page = ctx.Pages[pageIndex];
         ctx.Pages.RemoveAt(pageIndex);
 
-        // Issue #19 follow-up: V8 only allows ONE entered isolate per OS thread.
-        // The regular dispatch path enforces this via GetSessionPageMut, which
-        // suspends every other page before letting the target page run JS. This
-        // path bypasses that - it removes the target page and spawns a navigation
-        // task - so the same invariant has to be enforced explicitly. Otherwise
-        // the second navigation's runtime is constructed while the first page's is
-        // still alive in ctx.Pages, and the next scope unwind aborts the process.
+        // Issue #19 follow-up: only one of a connection's pages holds a live JS
+        // runtime at a time. The regular dispatch path enforces this via
+        // GetSessionPageMut, which suspends every other page before letting the
+        // target page run JS. This path bypasses that - it removes the target page
+        // and spawns a navigation task - so the same invariant has to be enforced
+        // explicitly. Otherwise the second navigation's runtime is constructed
+        // while the first page's is still alive in ctx.Pages, which in the Rust
+        // engine aborts the process on the next scope unwind (one entered isolate
+        // per OS thread) and here leaves a connection holding two live isolates.
         foreach (var other in ctx.Pages)
         {
             if (other.HasJs)
@@ -320,8 +322,8 @@ public static partial class CdpServer
     /// <remarks>
     /// Issue #19: this task runs while the connection's processor keeps pumping
     /// other CDP messages (which take the same per-connection lock), so both sides
-    /// coordinate on one page's isolate at a time on this thread. The lock is
-    /// per-connection, so other connections are unaffected (#430).
+    /// coordinate on one page's isolate at a time. The lock is per-connection, so
+    /// other connections are unaffected (#430).
     /// </remarks>
     private static async Task<string?> NavigateTaskAsync(
         CdpContext ctx,

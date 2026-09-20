@@ -15,15 +15,23 @@ public static partial class CdpServer
     /// connection's processor.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The reference server disables the WebSocket write buffer: CDP traffic is
     /// many small (~100-byte) frames, and buffering adds latency per frame. .NET's
     /// <see cref="WebSocket"/> writes straight through to the stream it is given,
     /// so pairing it with an unbuffered <c>NetworkStream</c> and
     /// <c>NoDelay</c> gets the same per-frame latency.
+    /// </para>
+    /// <para>
+    /// <paramref name="processorStopped"/> trips when this connection's processor
+    /// has stopped, which is the only thing that ever answers the <c>__init</c>
+    /// handshake below.
+    /// </para>
     /// </remarks>
     internal static async Task HandleConnectionWsAsync(
         Stream stream,
-        ChannelWriter<ServerMessage> msgTx)
+        ChannelWriter<ServerMessage> msgTx,
+        CancellationToken processorStopped)
     {
         var key = await ReadHandshakeAsync(stream).ConfigureAwait(false);
         var accept = ComputeWebSocketAccept(key);
@@ -44,10 +52,22 @@ public static partial class CdpServer
             new UnboundedChannelOptions { SingleReader = true });
 
         msgTx.TryWrite(new ServerMessage.NewConnection(replies.Writer));
-        if (await replies.Reader.WaitToReadAsync().ConfigureAwait(false) &&
-            replies.Reader.TryRead(out var init))
+        try
         {
-            CdpLog.Debug($"Connection init: {ServerSupport.Utf8Preview(init, 100)}");
+            if (await replies.Reader.WaitToReadAsync(processorStopped).ConfigureAwait(false) &&
+                replies.Reader.TryRead(out var init))
+            {
+                CdpLog.Debug($"Connection init: {ServerSupport.Utf8Preview(init, 100)}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The processor stopped before it could answer, so no `__init` is
+            // ever coming and this connection cannot serve anything. Waiting
+            // without a token stranded it for the life of the process whenever
+            // shutdown was already signalled as the socket was handed off.
+            CdpLog.Info("WS closed: the connection's processor stopped before the init handshake");
+            return;
         }
 
         using var sendStop = new CancellationTokenSource();
@@ -141,14 +161,26 @@ public static partial class CdpServer
         }
     }
 
+    /// <summary>
+    /// Let the send loop drain what is already queued before the socket goes
+    /// away, and give up after a short grace period.
+    /// </summary>
+    /// <remarks>
+    /// Completing the writer is what ends <see cref="SendLoopAsync"/>: its
+    /// <c>WaitToReadAsync</c> answers false once the queue is empty, so the last
+    /// response still goes out and the loop then returns on its own. Polling
+    /// <c>Reader.Count</c> instead threw <see cref="NotSupportedException"/> on
+    /// every single connection - a single-reader unbounded channel does not
+    /// count - which aborted the whole teardown below, so the send loop was
+    /// never stopped and the flush this method exists for never happened. All
+    /// writers use <c>TryWrite</c>, which answers false on a completed channel
+    /// rather than throwing, so a processor still finishing a command is
+    /// unaffected.
+    /// </remarks>
     private static async Task FlushRepliesAsync(Channel<string> replies, Task sendTask)
     {
-        var deadline = Environment.TickCount64 + 250;
-        while (replies.Reader.Count > 0 && !sendTask.IsCompleted &&
-               Environment.TickCount64 < deadline)
-        {
-            await Task.Delay(1).ConfigureAwait(false);
-        }
+        replies.Writer.TryComplete();
+        await Task.WhenAny(sendTask, Task.Delay(250)).ConfigureAwait(false);
     }
 
     private static async Task SendLoopAsync(

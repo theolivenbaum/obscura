@@ -98,18 +98,17 @@ public static class Dispatcher
             return await DispatchSendMessageToTargetAsync(req, ctx).ConfigureAwait(false);
         }
 
-        // Issue #430: keep this connection's V8 work serialized on its own thread.
+        // Issue #430: keep this connection's V8 work serialized.
         //
         // Every CDP handler below may call into a per-Page JS runtime (each
-        // owning its own V8 isolate). With the thread-per-connection server each
-        // connection runs on its own OS thread, so isolates never collide across
-        // connections. Within one connection, though, a navigation task spawned
-        // by the server runs while this processor keeps pumping other CDP
-        // messages, so two of this connection's pages could still interleave V8
-        // work on that one thread. The per-connection lock keeps each handler
-        // contiguous: V8 fully exits one isolate before the next of this
-        // connection's pages is allowed in. It is per-connection, not
-        // process-wide, so other connections run in parallel.
+        // owning its own V8 isolate). Connections never share pages, so their
+        // isolates never collide. Within one connection, though, a navigation
+        // task spawned by the server runs while this processor keeps pumping
+        // other CDP messages, so two of this connection's pages could still be
+        // driven at once. The per-connection lock keeps each handler contiguous:
+        // one of this connection's pages is finished with before the next is
+        // allowed in. It is per-connection, not process-wide, so other
+        // connections run in parallel.
         //
         // Optimization: methods that demonstrably never touch V8 bypass the lock
         // (Puppeteer's newPage() setup issues ~8 such calls). Each listed method

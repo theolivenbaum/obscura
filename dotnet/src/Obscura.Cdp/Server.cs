@@ -16,18 +16,19 @@ namespace Obscura.Cdp;
 public static partial class CdpServer
 {
     /// <summary>
-    /// Cap on <em>live</em> CDP connections, each of which costs one OS thread
-    /// and its own V8 isolates.
+    /// Cap on <em>live</em> CDP connections, each of which owns its own V8
+    /// isolates.
     /// </summary>
     /// <remarks>
     /// <see cref="MaxPendingWsHandoffs"/> bounds only the handoff queue;
     /// connections that have already been handed off are unbounded without this.
     /// 128 matches that bound and is well above any real client fan-out
-    /// (Playwright and Puppeteer use one connection per browser). Threads are
-    /// what this actually bounds: 128 idle connections cost 146 threads, 33.2 GiB
-    /// of reserved address space and 51 MiB resident, and nearly all of that
-    /// 33.2 GiB is V8's process-wide sandbox, which is there at zero connections.
-    /// Override with <c>--max-connections</c>.
+    /// (Playwright and Puppeteer use one connection per browser). What it bounds
+    /// is isolates and the memory behind them; the figure measured when each
+    /// connection still owned a dedicated OS thread was 128 idle connections at
+    /// 146 threads, 33.2 GiB of reserved address space and 51 MiB resident, and
+    /// nearly all of that 33.2 GiB is V8's process-wide sandbox, which is there
+    /// at zero connections. Override with <c>--max-connections</c>.
     /// </remarks>
     public const int DefaultMaxConnections = 128;
 
@@ -50,7 +51,7 @@ public static partial class CdpServer
     private const int MaxPendingWsHandoffs = 128;
 
     /// <summary>
-    /// How long shutdown waits for connection threads to finish before persisting
+    /// How long shutdown waits for live connections to finish before persisting
     /// the cookie jar. Well under the 10s <c>docker stop</c> gives us before
     /// SIGKILL.
     /// </summary>
@@ -173,8 +174,8 @@ public static partial class CdpServer
 
     /// <summary>
     /// As <see cref="StartWithFullServeOptionsAsync"/>, with an explicit cap on
-    /// live CDP connections. Each connection owns an OS thread and its pages' V8
-    /// isolates, so this is what bounds the server's thread and memory footprint.
+    /// live CDP connections. Each connection owns its pages' V8 isolates, so this
+    /// is what bounds the server's memory footprint.
     /// </summary>
     public static async Task StartWithServeOptionsAndLimitAsync(
         int port,
@@ -195,12 +196,13 @@ public static partial class CdpServer
         }
 
         // Issue #62: the HTTP control plane (/json/version, /json) must remain
-        // reachable even while V8 JS evaluation blocks a connection's thread.
+        // reachable even while V8 JS evaluation blocks whichever thread a
+        // connection is running on.
         //
         // We use a dedicated OS thread with a blocking listener so the kernel's
         // accept backlog is always drained promptly. HTTP endpoints are served
         // directly with blocking I/O; WebSocket connections are forwarded to
-        // their own connection thread for CDP processing.
+        // their own connection task for CDP processing.
         Socket listener = new(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         try
         {
@@ -242,8 +244,8 @@ public static partial class CdpServer
 
         // This context is a configuration and persistence template. Each
         // WebSocket gets an isolated copy with its own cookie jar and HTTP client
-        // (#449), while the thread-per-connection layout from #430 still confines
-        // that connection's V8 isolates to one OS thread.
+        // (#449); its pages' isolates belong to that copy alone and are never
+        // shared with another connection.
         var template = BrowserContext.WithStorageAndNetwork(
             "default", proxy, stealth, userAgent, storageDir, allowPrivateNetwork);
         template.AllowFileAccess = allowFileAccess;
@@ -255,22 +257,22 @@ public static partial class CdpServer
         var persistence = template.IsolatedCopy("persistence", true);
         var persistenceLock = new object();
 
-        // Force V8 and its process-global tables to initialize once on this
-        // thread before any connection thread creates an isolate. Creating the
-        // very first isolate off the main thread is what #430 traced its abort
-        // to; building and dropping one runtime here does that setup singly.
+        // Force V8 and its process-global tables to initialize once, here, before
+        // any connection can create an isolate. Building and dropping one runtime
+        // does that setup singly rather than leaving several arriving connections
+        // to race it, and keeps its cost off the first connection.
         using (var warmup = new ObscuraJsRuntime())
         {
             _ = warmup;
         }
 
         // Live CDP connections, incremented on accept and decremented when a
-        // connection thread exits.
+        // connection ends.
         var liveConnections = new ConnectionSlots();
         CdpLog.Info($"Connection limit: {maxConnections}");
 
-        // Accept loop: hand each WebSocket connection to its own OS thread so its
-        // pages' isolates live on a dedicated thread.
+        // Accept loop: give each WebSocket connection its own processor, context
+        // and pages, so its isolates are never shared with another connection.
         try
         {
             while (true)
@@ -289,7 +291,7 @@ public static partial class CdpServer
                     break;
                 }
 
-                // Nagle off before the socket moves to the connection thread. CDP
+                // Nagle off before the socket is handed to its connection. CDP
                 // exchanges many small (~100-byte) frames during newPage() and
                 // navigate; with Nagle on, each small write waits on an ACK or the
                 // 40ms delayed-ACK timer (~90ms on newPage, ~30ms on goto).
@@ -329,11 +331,22 @@ public static partial class CdpServer
         finally
         {
             listener.Dispose();
+
+            // Sockets the accept thread queued but the loop above never picked
+            // up. Nothing else owns them, so without this their file descriptors
+            // sit until the finalizer runs. Completing the writer first closes
+            // the race with the accept thread: a `TryWrite` that loses it returns
+            // false, and `AcceptDispatch` closes that socket itself.
+            handoff.Writer.TryComplete();
+            while (handoff.Reader.TryRead(out var queued))
+            {
+                queued.Dispose();
+            }
         }
 
-        // Server is shutting down. Connection threads are detached, so saving the
-        // jar right here would race them: a connection still writing a Set-Cookie
-        // loses it, and the process then exits and kills the thread mid-flight.
+        // Server is shutting down. Connections run detached, so saving the jar
+        // right here would race them: a connection still writing a Set-Cookie
+        // loses it, and the process then exits mid-flight.
         // Draining here restores the ordering the single processor used to have.
         // Every processor has already been woken, so this is bounded in practice;
         // the deadline only covers a connection wedged in V8, where its own
@@ -657,7 +670,7 @@ public static partial class CdpServer
     /// and is passed in as <paramref name="head"/>:
     /// HTTP (<c>GET /json/*</c>) is served synchronously with blocking I/O so the
     /// response is never stalled by a busy connection; a WebSocket is forwarded
-    /// to its own connection thread. False means the socket must be closed.
+    /// to its own connection task. False means the socket must be closed.
     /// </remarks>
     private static bool AcceptDispatch(
         Socket socket,
@@ -719,8 +732,11 @@ public static partial class CdpServer
             return true;
         }
 
+        // Full, or closed because the server is shutting down. Either way the
+        // socket is not going to be served.
         CdpLog.Warn(
-            $"WS handoff channel full ({MaxPendingWsHandoffs}); dropping new WebSocket connection");
+            $"WS handoff channel unavailable (capacity {MaxPendingWsHandoffs}); " +
+            "dropping new WebSocket connection");
         return false;
     }
 
@@ -835,14 +851,29 @@ public static partial class CdpServer
     }
 
     /// <summary>
-    /// Run one WebSocket connection on its own OS thread: a single-threaded
-    /// scheduler hosting this connection's processor (with its own
-    /// <see cref="CdpContext"/> and pages) and its frame reader.
+    /// Run one WebSocket connection: its own <see cref="CdpContext"/> and pages,
+    /// its processor, and its frame reader.
     /// </summary>
     /// <remarks>
-    /// Confining a connection's pages to one thread is what removes the #430
-    /// abort; the interception handshake and the navigation task all stay on this
-    /// one thread, so no cross-thread V8 plumbing is needed.
+    /// <para>
+    /// Deviation from <c>crates/obscura-cdp/src/server.rs</c>: the Rust server
+    /// gives each connection a dedicated OS thread because rusty_v8 leaves an
+    /// isolate entered for the life of the thread that created it, so two
+    /// connections sharing a thread tripped V8's per-thread isolate check and
+    /// aborted the process (#430). ClearScript has no such rule - it holds many
+    /// isolates per process and does not tie one to the thread that created it -
+    /// so the port runs a connection as an ordinary task and lets the pool place
+    /// its continuations. The port could not have honoured the Rust rule anyway:
+    /// the V8 calls are down in <c>Obscura.Js</c> and <c>Obscura.Browser</c>,
+    /// which <c>ConfigureAwait(false)</c> nearly every await, so a connection's
+    /// script work has always resumed wherever the pool put it.
+    /// </para>
+    /// <para>
+    /// What still has to hold is that a connection never drives two of its own
+    /// pages at once, since its navigation task runs while its processor keeps
+    /// pumping. That is <see cref="CdpContext.V8Lock"/>, which is a real mutual
+    /// exclusion rather than a thread-affinity side effect, and it is unchanged.
+    /// </para>
     /// </remarks>
     private static void RunConnection(
         Socket socket,
@@ -852,68 +883,87 @@ public static partial class CdpServer
         CancellationToken shutdown,
         ConnectionSlots slots)
     {
-        var thread = new Thread(() =>
+        // Releases the slot reserved by the accept loop however the connection
+        // ends: clean close, error, or fault. A plain decrement at the end would
+        // leak slots on the early returns below until the cap wedged the server
+        // shut.
+        _ = Task.Run(async () =>
         {
-            // Releases the slot reserved by the accept loop however this thread
-            // exits: clean close, error, or fault. A plain decrement at the end
-            // would leak slots on the early returns below until the cap wedged
-            // the server shut.
             try
             {
-                ConnectionBody(socket, template, persistence, persistenceLock, shutdown);
+                await ConnectionBodyAsync(socket, template, persistence, persistenceLock, shutdown)
+                    .ConfigureAwait(false);
             }
             catch (Exception e)
             {
-                CdpLog.Error($"connection thread failed: {e.Message}");
+                CdpLog.Error($"connection failed: {e.Message}");
             }
             finally
             {
                 slots.Release();
             }
-        })
-        {
-            IsBackground = true,
-            Name = "obscura-cdp-conn",
-        };
-
-        try
-        {
-            thread.Start();
-        }
-        catch (Exception e)
-        {
-            // The closure never ran, so its slot release never happened: release
-            // here or the cap drifts down on every failed spawn.
-            CdpLog.Error($"connection thread spawn failed: {e.Message}");
-            slots.Release();
-            socket.Dispose();
-        }
+        });
     }
 
-    private static void ConnectionBody(
+    private static async Task ConnectionBodyAsync(
         Socket socket,
         BrowserContext template,
         BrowserContext persistence,
         object persistenceLock,
         CancellationToken shutdown)
     {
-        var defaultContext = template.IsolatedCopy("default", true);
-        var initialCookies = defaultContext.CookieJar.GetAllCookies();
-
+        NetworkStream stream;
         try
         {
-            SingleThreadedSynchronizationContext.Run(async () =>
+            // Takes ownership of the socket, so every exit path below closes it.
+            stream = new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+
+        using (stream)
+        {
+            var defaultContext = template.IsolatedCopy("default", true);
+            var initialCookies = defaultContext.CookieJar.GetAllCookies();
+
+            try
             {
-                using var stream = new NetworkStream(socket, ownsSocket: true);
                 var messages = Channel.CreateUnbounded<ServerMessage>(
                     new UnboundedChannelOptions { SingleReader = true });
                 using var processorStop = new CancellationTokenSource();
 
-                var processor = CdpProcessorAsync(
-                    messages.Reader, defaultContext, shutdown, processorStop.Token);
+                // Tripped when the processor stops, whether or not it ever
+                // answered the `__init` handshake. Without it a processor that
+                // exits first - which it does when shutdown is already signalled
+                // as the socket is handed off - leaves the handshake below waiting
+                // on an `__init` nothing will ever write, for the life of the
+                // process.
+                using var processorGone = new CancellationTokenSource();
+
+                async Task RunProcessorAsync()
+                {
+                    try
+                    {
+                        await CdpProcessorAsync(
+                                messages.Reader, defaultContext, shutdown, processorStop.Token)
+                            .ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        await processorGone.CancelAsync().ConfigureAwait(false);
+                    }
+                }
+
+                // Started before the handshake, and always awaited in the finally
+                // below, so `processorGone` is only disposed once this has run.
+                var processor = RunProcessorAsync();
                 try
                 {
-                    await HandleConnectionWsAsync(stream, messages.Writer).ConfigureAwait(false);
+                    await HandleConnectionWsAsync(stream, messages.Writer, processorGone.Token)
+                        .ConfigureAwait(false);
                 }
                 catch (Exception e) when (e is IOException or SocketException or WebSocketExceptionShim)
                 {
@@ -922,7 +972,7 @@ public static partial class CdpServer
                 finally
                 {
                     // Connection closed (or shutting down): stop this connection's
-                    // processor so the thread can exit.
+                    // processor so it can exit.
                     messages.Writer.TryComplete();
                     await processorStop.CancelAsync().ConfigureAwait(false);
                     try
@@ -933,22 +983,22 @@ public static partial class CdpServer
                     {
                     }
                 }
-            });
-        }
-        finally
-        {
-            // Apply only this connection's cookie changes to the persistence
-            // template. Unchanged cookies cannot overwrite another connection's
-            // updates, while explicit deletes and replacements still persist.
-            if (persistence.StorageDir is not null)
+            }
+            finally
             {
-                lock (persistenceLock)
+                // Apply only this connection's cookie changes to the persistence
+                // template. Unchanged cookies cannot overwrite another connection's
+                // updates, while explicit deletes and replacements still persist.
+                if (persistence.StorageDir is not null)
                 {
-                    ServerSupport.MergeCookieDelta(
-                        persistence.CookieJar,
-                        initialCookies,
-                        defaultContext.CookieJar.GetAllCookies());
-                    persistence.SaveCookies();
+                    lock (persistenceLock)
+                    {
+                        ServerSupport.MergeCookieDelta(
+                            persistence.CookieJar,
+                            initialCookies,
+                            defaultContext.CookieJar.GetAllCookies());
+                        persistence.SaveCookies();
+                    }
                 }
             }
         }

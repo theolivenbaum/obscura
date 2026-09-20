@@ -183,8 +183,8 @@ internal static class CdpTestClient
 /// <remarks>
 /// The Rust tests <c>spawn_local</c> the server and let the LocalSet die with the
 /// test. xUnit shares one process across the whole assembly, so a leaked accept
-/// thread and its connection threads would outlive their test; this disposes the
-/// server instead.
+/// thread and the connections it spawned would outlive their test; this disposes
+/// the server instead.
 /// </remarks>
 internal sealed class CdpServerHandle : IAsyncDisposable
 {

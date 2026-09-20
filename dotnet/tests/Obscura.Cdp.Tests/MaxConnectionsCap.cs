@@ -6,12 +6,12 @@ namespace Obscura.Cdp.Tests;
 
 /// <summary>
 /// The xUnit port of <c>crates/obscura-cdp/tests/max_connections_cap.rs</c>:
-/// <c>--max-connections</c> bounds the thread-per-connection server.
+/// <c>--max-connections</c> bounds the server's live connections.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Each CDP connection owns an OS thread and its pages' V8 isolates, so without a
-/// cap a client can grow the server's thread count and memory without limit. The
+/// Each CDP connection owns its pages' V8 isolates, so without a cap a client can
+/// grow the server's memory without limit. The
 /// cap must do three things, and this test pins all three: connections up to the
 /// limit are accepted and usable; the one past the limit is refused with an
 /// explicit 503 carrying <c>X-Obscura-Reason: max-connections</c>, not dropped
@@ -71,8 +71,8 @@ public sealed class MaxConnectionsCapTests
             Assert.Contains("X-Obscura-Reason: max-connections", refused, StringComparison.Ordinal);
 
             // 3. Free one slot and confirm the server accepts again. Closing is
-            //    asynchronous (the connection thread unwinds and releases its
-            //    slot), so poll rather than assume an instant handover.
+            //    asynchronous (the connection unwinds and releases its slot), so
+            //    poll rather than assume an instant handover.
             var freed = held[^1];
             held.RemoveAt(held.Count - 1);
             try

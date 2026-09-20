@@ -25,9 +25,11 @@ namespace Obscura.Cdp.Tests;
 /// pumping, then drives it from several independent connections at once.
 /// </para>
 /// <para>
-/// On the single-scheduler server this aborted deterministically. The
-/// thread-per-connection server confines each connection's isolates to their own
-/// OS thread, so the abort cannot happen and all clients complete.
+/// On the single-scheduler Rust server this aborted deterministically, which is
+/// why that engine gives every connection its own OS thread. ClearScript has no
+/// per-thread isolate rule, so what the port relies on is that connections never
+/// share pages and that <c>CdpContext.V8Lock</c> keeps one connection from
+/// driving two of its own at once; all clients must complete.
 /// </para>
 /// </remarks>
 public sealed class ConcurrentConnectionsHeavyPageTests
