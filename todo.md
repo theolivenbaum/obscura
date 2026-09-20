@@ -695,8 +695,9 @@ DEVIATION comment at the C# code that differs.
   Not closed: `both-edges` reserves the right total (270px of 300) but taffy
   insets from the end only, so the content does not shift by the leading gutter
   the way Chromium's does.
-- **DEVIATION - an atomic inline whose baseline is its bottom margin edge did not
-  extend the line box by the strut's descent.** CSS 2.1 10.8 makes a line box
+- **DEVIATION - an ATOMIC inline whose baseline is its bottom margin edge did not
+  extend the line box by the strut's descent.** (The non-atomic half of the same defect
+  is the next bullet; this one is only about the taffy flex-row stand-in.) CSS 2.1 10.8 makes a line box
   `max(ascent) + max(descent)` over everything on it *plus the strut*, and 10.8.1
   puts an atomic inline's baseline at its bottom margin edge when it has no in-flow
   line boxes or its `overflow` is not `visible`. Such a box is wholly above the
@@ -736,39 +737,130 @@ DEVIATION comment at the C# code that differs.
   and it is not this change: its `tss-pivot-line` tab underline lays out 0px wide in both
   builds, and the after capture happened to have four of them on screen instead of two.
 
-  **Still open, and it is what the product's icon-box gap actually needs.** An atomic
-  inline that *does* have a line box is still aligned to the line's top rather than to
-  its own baseline, so it neither extends the line nor moves within it. The
-  `<i class="fi-rr-*">` icon is one of those, and the earlier note here calling it
-  "exactly this shape" was wrong: its `::before` is an `inline-block` carrying an icon
-  glyph, so it has a line box, and its baseline is that glyph's - which lands on the
-  box's bottom edge only because the icon face's ascent is the whole em and its descent
-  is zero. Chromium 20.19 for a 13px/18.2px icon row, port 18.00; 14 against 12 at
-  12px/12px. The same gap covers an atomic inline shorter than the strut's ascent
-  (Chromium pushes it down by the difference, the margin cannot), an inline-block whose
-  only child generates no line box (Chromium 14, port 12), and
-  `vertical-align: text-top` (Chromium 13, port 12).
+  **Still open, and it is only about boxes the flex-row stand-in lays out.** A block whose
+  inline content is all text folds to one shaped buffer and never reaches taffy
+  (`TextEngine.TryBuild` / `TryBuildRun`); the CSS 2.1 10.8.1 model for those landed in the
+  next bullet. What is left here is the blocks that do NOT fold - the ones carrying an atomic
+  inline, a float or a block-level child - and inside them:
 
-  What closing it needs, read off the vendored taffy:
-  - `FlexboxLayout.CalculateCrossSize` already sizes a baseline-aligned line as
+  - An atomic inline that *does* have a line box is still aligned to the line's top rather
+    than to its own baseline, so it neither extends the line nor moves within it. The
+    `<i class="fi-rr-*">` icon is one of those: its `::before` is an `inline-block` carrying
+    an icon glyph, so it has a line box, and its baseline is that glyph's - which lands on the
+    box's bottom edge only because the icon face's ascent is the whole em and its descent is
+    zero. Chromium 20.19 for a 13px/18.2px icon row, port 18.00; 14 against 12 at 12px/12px.
+    The same gap covers an atomic inline shorter than the strut's ascent (Chromium pushes it
+    down by the difference, the margin cannot) and an inline-block whose only child generates
+    no line box (Chromium 14, port 12).
+  - The strut is still absent from a line box that carries no text at all
+    (`RunWrapperStyle`'s `hasTextStrut`, and the block-as-flex-row stand-in has none at any
+    time), so a 12px icon on a `line-height: 20px` line is 12 here against Chromium's 20. That
+    half is independent of baselines and could land first.
+
+  The plan below was read off the vendored taffy and re-checked while the non-atomic half
+  landed. It is accurate, and it is still what this half needs:
+
+  - `FlexboxLayout.CalculateCrossSize` sizes a baseline-aligned line as
     `max(baseline) - baseline_i + outerHeight_i`, which *is* the CSS formula, and
-    `CalculateChildrenBaseLine` already skips any line with fewer than two
-    baseline-aligned children - which is why turning `AlignItems.Baseline` on by itself
-    changed nothing.
-  - The strut itself needs no new plumbing. A zero-width leaf of height `A` with a
-    bottom margin of `max(D, 0)` and `AlignSelf = Baseline` models it exactly, because
-    a leaf reports no baseline and taffy falls back to its height.
-  - Every *other* participant does. A text leaf's baseline is `A`, not its height
-    `A + D`, and an inline-block's is its first line's - and `Leaf.ComputeLeafLayout`
-    and `BlockLayout` both report `FirstBaselines = None`, so taffy takes the height for
-    both. So: let a measure function report a baseline beside its size, and have
-    `BlockLayout` propagate its first in-flow child's. That is the restructure, it moves
-    the vertical position of everything inside every line box, and it wants its own
-    before/after survey.
-  - The strut is also still absent from a line box that carries no text at all
-    (`RunWrapperStyle`'s `hasTextStrut`, and the block-as-flex-row stand-in has none at
-    any time), so a 12px icon on a `line-height: 20px` line is 12 here against
-    Chromium's 20. That half is independent of baselines and could land first.
+    `CalculateChildrenBaseLines` skips any line with fewer than two baseline-aligned children -
+    which is why turning `AlignItems.Baseline` on by itself changed nothing.
+  - The strut itself needs no new plumbing. A zero-width leaf of height `A` with a bottom
+    margin of `max(D, 0)` and `AlignSelf = Baseline` models it exactly, because a leaf reports
+    no baseline and taffy falls back to its height.
+  - Every *other* participant does. A text leaf's baseline is `A`, not its height `A + D`, and
+    an inline-block's is its first line's - and `Leaf.ComputeLeafLayout` and `BlockLayout` both
+    report `FirstBaselines = None`, so taffy takes the height for both. So: let a measure
+    function report a baseline beside its size, and have `BlockLayout` propagate its first
+    in-flow child's. That is the restructure, it moves the vertical position of everything
+    inside every line box, and it wants its own before/after survey.
+
+  `FontAssets.LineBoxHalves` (next bullet) is now the one place that says what a box's two
+  halves are, so the taffy work should call it rather than re-deriving the leading split.
+- **DEVIATION - a line box did not grow to contain an inline box whose font, line-height or
+  vertical-align differed from the block's.** CSS 2.1 10.8.1 makes a line box
+  `max(above the baseline) + max(below it)` over every inline box on it plus the strut, where a
+  box contributes `A + L/2` above and `D + L/2` below with `L = line-height - (A + D)`.
+  `crates/obscura-render/src/inline.rs` has no such notion: a folded inline formatting context
+  gets one `line_height` (the largest on the line) and every span hangs from the line's top, so
+  a 32px span in a `16px/18px` block was 18px tall in both engines and 22px in Chromium 141. A
+  54-case matrix measured against Chromium with the faces named explicitly had 26 wrong; the
+  font-size row was wrong at every size but one, and the same-size/different-family row - the
+  common case on a real page - was wrong by 1px every time.
+
+  **The quantization was measured, not derived, because the obvious reading of 10.8.1 does not
+  reproduce Chromium.** Blink floors the ascent to whole pixels once the half-leading is in and
+  then takes the descent as `line-height - ascent`, so the two halves are asymmetric and the
+  descent carries the remainder and can go negative. Splitting the leading symmetrically
+  computes 19.5 for both the 20px and the 8px span in a `16px/18px` block, where Chromium
+  reports 19 for one and 20 for the other; the floor-then-subtract rule reproduces all 54.
+  `FontAssets.LineBoxHalves` is that rule, and `FontAssets.QuantizedLineHeight` is the other
+  half of it - the used line-height is a 1/64px `LayoutUnit` before the leading is split, which
+  is why `16px/25.7px` with a 32px span is 30.703125 in Chromium and not the 30.6875 a
+  truncation gives.
+
+  `vertical-align` came with it, because a box that is not on the line's baseline cannot be
+  sized against it. Measured over 120 more cases:
+
+  - `super` raises the baseline by the PARENT's font size / 3 + 1 and `sub` lowers it by the
+    parent's / 5 + 1, both truncated to a `LayoutUnit` - the KHTML rule Blink still carries.
+    Neither depends on the aligned box's own size.
+  - a `<percentage>` is of the box's OWN used line-height, not the parent's.
+  - `middle` puts the box's leaded midpoint at half the parent's x-height, which is why
+    `FaceMetrics` now carries `XHeight`, read from `OS/2.sxHeight`.
+  - `text-top` and `text-bottom` align the box's LEADED height against the parent's RAW font
+    box - a `16px/40px` block with a `text-top` span is 51px tall, not 40. Verified here
+    directly against Chromium 141, along with the span's own position inside it.
+  - `top` and `bottom` leave the baseline set entirely and can only make the line taller: a
+    48px span in a `16px/18px` block is 27px baseline-aligned and 18px `top`-aligned.
+
+  Shifts accumulate down the inline tree, and each is relative to the immediate inline parent,
+  not to the block.
+
+  It lands in the folded text path, not in taffy: `TextBuffer.LayoutRuns` composes the line
+  from the strut (`TextBuffer.Metrics`) and the per-box halves each glyph carries
+  (`TextMetrics.Above`/`Below`/`Align`/`Shift`, filled in `Inline.LineBoxExtent` while spans
+  are collected). `TextLayout.PlaceGlyphsOnBaselines` moves each glyph off the line's baseline
+  by its own box's shift, and `TextEngine.OwnerBaselineY` does the same for an inline box's
+  client rect. This is also why the plan in the bullet above, though accurate about taffy, was
+  the wrong place to look for these cases.
+
+  Known short: for a face with no declared `OS/2.sxHeight` (DejaVu Sans is the only bundled
+  one), Chromium re-measures the 'x' outline grid-fitted at the used size - 6px at 10px, 9px at
+  16px, 14px at 24px, which is not one em fraction at all. The port reads one fraction at the
+  em, which costs `vertical-align: middle` up to half a pixel on that face and nothing on the
+  three Liberation faces.
+
+  Also still short, and separate: the HTML UA stylesheet's `sub { vertical-align: sub }` /
+  `sup { vertical-align: super }` (plus `font-size: smaller`) are not in the port's UA sheet,
+  so a bare `<sup>` still sits on the baseline. The machinery it needs now exists, but
+  `font-size: smaller` has to be measured first.
+
+  A third, unchased: Blink accumulates fallback-font metrics into a `line-height: normal` line
+  where the port uses the span's primary font only. Nothing in the corpus moved on it, so it is
+  recorded rather than fixed.
+
+  Covered by `LineBoxFontMetricsTests` (11 facts, 10 of which fail at the parent commit -
+  verified here by reverting the sources; the eleventh is the control that must not move).
+
+  Swept over 314 local HTML fixtures, every element's rect, before and after, same binary
+  configuration, viewport (1280x720) and settle policy, scored as distance to Chromium 141 per
+  component rather than as "did it change": of 46,752 components, **1,220 moved closer to
+  Chromium, 17 moved farther and 45,515 did not move**. Every one of the 17 is a sub-pixel
+  artefact of the engine's whole-pixel layout rounding: the exact height is now right
+  (`vertical-align: middle` at 18.234, a 1.3 line-height at 35.188) and rounds to the far side
+  of the value the old model happened to land on. Two files were left out because Chromium and
+  the port build a different node count on them, before and after alike. Checked separately
+  here: the 64 fixtures under `test-html-files/` and `render-repros/` are byte-identical before
+  and after, because none of them carries mixed-font inline content.
+
+  On the 54-case matrix that found this, the mean height error against Chromium falls from
+  **2.528px to 0.044px** (26 cases wrong by more than half a pixel, down to 2, both of them the
+  rounding artefact above) and the inline box's own client-rect top from 0.694px to 0.000. Over
+  a further 114 vertical-align and fractional-line-height cases, 4.720 -> 0.120 and 3.799 ->
+  0.000. On the settings-list page the note was written against - a 20-row list of an 18px icon
+  glyph, a 14px label, a 10px superscript badge and an 11px hint in a 14px/20px block - every
+  row was 3.66px short and the page carried 73.13px of accumulated drift by its last element;
+  it is now 0.13px.
 - **PARTLY FIXED - a cyclic percentage under a content-sized flex item is now
   neutralized to `auto`.** A content-sized item is measured from exactly the
   content the neutralization touches, so zeroing it is self-defeating; an item

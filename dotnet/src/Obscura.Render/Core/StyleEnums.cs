@@ -170,6 +170,35 @@ public enum VerticalAlign
     Baseline,
 }
 
+/// <summary>The <c>vertical-align</c> values an inline box can take, keyword by keyword.</summary>
+/// <remarks>
+/// <see cref="VerticalAlign"/> is the table-cell reading of the same property and folds
+/// <c>text-top</c> into <c>top</c> and <c>text-bottom</c> into <c>bottom</c>, which an inline
+/// box cannot do: the two pairs align against different boxes. This enum is the inline one, and
+/// the two live side by side on <c>LayoutStyle</c>.
+/// </remarks>
+public enum InlineVerticalAlignKind
+{
+    Baseline,
+    Sub,
+    Super,
+    TextTop,
+    TextBottom,
+    Middle,
+
+    /// <summary>Aligned to the line box rather than to a baseline.</summary>
+    Top,
+
+    /// <summary>Aligned to the line box rather than to a baseline.</summary>
+    Bottom,
+
+    /// <summary>A length or a percentage of the box's own <c>line-height</c>.</summary>
+    Offset,
+}
+
+/// <summary>One computed <c>vertical-align</c> on an inline box.</summary>
+public readonly record struct InlineVerticalAlign(InlineVerticalAlignKind Kind, Dimension Offset);
+
 /// <summary><c>clear</c>: which floated side(s) an element moves below.</summary>
 public enum Clear
 {

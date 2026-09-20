@@ -286,10 +286,10 @@ public sealed partial class TextEngine : IDisposable
             style.FontStyleItalic ?? false,
             _loadedFamilies);
         SpanCtx context = BaseSpanCtx(style, font, collector);
-        float lineHeight = context.LineHeight;
         List<(string Text, SpanAttrs Attrs)> spans = [];
+
         CollectSpans(tree, id, styles, context, spans, collector);
-        return PushShapedItem(style, lineHeight, spans, collector);
+        return PushShapedItem(style, context, spans, collector);
     }
 
     /// <summary>
@@ -333,14 +333,14 @@ public sealed partial class TextEngine : IDisposable
             style.FontStyleItalic ?? false,
             _loadedFamilies);
         SpanCtx context = BaseSpanCtx(style, font, collector);
-        float lineHeight = context.LineHeight;
         List<(string Text, SpanAttrs Attrs)> spans = [];
+
         foreach (NodeId cid in run)
         {
             CollectNodeSpans(tree, cid, styles, context, spans, collector);
         }
 
-        return PushShapedItem(style, lineHeight, spans, collector);
+        return PushShapedItem(style, context, spans, collector);
     }
 
     /// <summary>
@@ -360,11 +360,11 @@ public sealed partial class TextEngine : IDisposable
             style.FontStyleItalic ?? false,
             _loadedFamilies);
         SpanCtx context = BaseSpanCtx(style, font, collector);
-        float lineHeight = context.LineHeight;
         SpanAttrs attrs = context.ToSpanAttrs();
         List<(string Text, SpanAttrs Attrs)> spans = [];
+
         Inline.PushText(text, context.Transform, context.WhiteSpace, attrs, spans, collector);
-        return PushShapedItem(style, lineHeight, spans, collector);
+        return PushShapedItem(style, context, spans, collector);
     }
 
     /// <summary>
@@ -373,10 +373,11 @@ public sealed partial class TextEngine : IDisposable
     /// </summary>
     private int? PushShapedItem(
         LayoutStyle baseStyle,
-        float lineHeight,
+        SpanCtx strut,
         List<(string Text, SpanAttrs Attrs)> spans,
         Collector collector)
     {
+        float lineHeight = strut.LineHeight;
         List<ClipTextFill> clipFills = collector.ClipFills;
         List<OwnerTextRange> ownerRanges = collector.OwnerRanges;
         List<InlineOwnerBox> ownerBoxes = collector.OwnerBoxes;
@@ -510,7 +511,11 @@ public sealed partial class TextEngine : IDisposable
         // (an uncatchable process abort) when either is zero, and `font-size:0` is a common
         // whitespace-collapse trick. Keep the floor: it is observable geometry, not a guard.
         float shapedSize = F32.Max(baseSize, 1f);
-        var metrics = new TextMetrics(shapedSize, F32.Max(lineHeight, 1f));
+        var metrics = new TextMetrics(
+            shapedSize,
+            F32.Max(lineHeight, 1f),
+            strut.Above,
+            strut.Below);
         var buffer = new TextBuffer(metrics);
         buffer.SetWrap(layoutWrap);
 
@@ -957,6 +962,23 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>
+    /// Where one inline box's own baseline sits inside a line box it has a fragment on.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which puts every fragment on the
+    /// line's single baseline. An inline box with a <c>vertical-align</c> has a baseline of its
+    /// own, and its client rect follows it: Chromium 141 reports a <c>vertical-align: 50%</c>
+    /// 16px span in a <c>16px/18px 'Liberation Mono'</c> block 4px above the block's top, not
+    /// on the line's baseline.
+    /// </remarks>
+    private static float OwnerBaselineY(LayoutRun run, InlineBoxExtent extent) => extent.Align switch
+    {
+        LineBoxAlign.LineTop => run.LineTop + extent.Above,
+        LineBoxAlign.LineBottom => run.LineTop + run.LineHeight - extent.Below,
+        _ => run.LineY - extent.Shift,
+    };
+
+    /// <summary>
     /// Derive ordinary inline continuation extents from finalized shaping.
     /// </summary>
     /// <remarks>
@@ -1014,7 +1036,7 @@ public sealed partial class TextEngine : IDisposable
                         : run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
-                    float baselineY = item.Origin.Y + run.LineY;
+                    float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
 
                     int existing = -1;
                     for (int i = 0; i < output.Count; i++)
@@ -1355,10 +1377,18 @@ public sealed partial class TextEngine : IDisposable
 
         FontVariations? variations = Inline.ResolvedFontVariations(baseStyle);
         float lineHeight = FontResolution.UsedLineHeightForFont(baseStyle, font);
+        float baseSize = baseStyle.FontSize ?? 16f;
+
+        // The block container's own box is the line box's strut: it participates in every line
+        // box the block generates, and its `vertical-align` (if any) is not its own business.
+        (float strutAbove, float strutBelow) =
+            FontAssets.LineBoxHalves(baseSize, lineHeight, font.Metrics);
         return new SpanCtx
         {
-            FontSize = baseStyle.FontSize ?? 16f,
+            FontSize = baseSize,
             LineHeight = lineHeight,
+            Above = strutAbove,
+            Below = strutBelow,
             LetterSpacing = baseStyle.LetterSpacing ?? 0f,
             LetterSpacingNonNormal = baseStyle.LetterSpacingNonNormal ?? false,
             Color = baseStyle.Color ?? new RgbaColor(0, 0, 0, 255),
@@ -1474,12 +1504,28 @@ public sealed partial class TextEngine : IDisposable
             ? Inline.ResolvedFontVariations(style)
             : context.Variations;
 
+        float childFontSize = style?.FontSize ?? context.FontSize;
+        float childLineHeight = style is not null
+            ? FontResolution.UsedLineHeightForFont(style, font)
+            : context.LineHeight;
+        InlineBoxExtent extent = Inline.LineBoxExtent(
+            style?.InlineVerticalAlign,
+            childFontSize,
+            childLineHeight,
+            font.Metrics,
+            context.FontSize,
+            context.FontMetrics,
+            context.BaselineShift,
+            context.Align);
+
         var child = new SpanCtx
         {
-            FontSize = style?.FontSize ?? context.FontSize,
-            LineHeight = style is not null
-                ? FontResolution.UsedLineHeightForFont(style, font)
-                : context.LineHeight,
+            FontSize = childFontSize,
+            LineHeight = childLineHeight,
+            Above = extent.Above,
+            Below = extent.Below,
+            Align = extent.Align,
+            BaselineShift = extent.Shift,
             LetterSpacing = style?.LetterSpacing ?? context.LetterSpacing,
             LetterSpacingNonNormal = style?.LetterSpacingNonNormal ?? context.LetterSpacingNonNormal,
             Color = color,
@@ -1504,7 +1550,7 @@ public sealed partial class TextEngine : IDisposable
         CollectSpans(tree, cid, styles, child, output, collector);
         if (ownsInlineFragment)
         {
-            collector.EndOwner(cid);
+            collector.EndOwner(cid, extent);
         }
     }
 

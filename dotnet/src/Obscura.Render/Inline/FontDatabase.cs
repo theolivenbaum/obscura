@@ -32,7 +32,8 @@ public readonly record struct FaceMetrics(
     float LineGap,
     float UnitsPerEm,
     float AverageCharWidth = 0f,
-    float MaxCharWidth = 0f);
+    float MaxCharWidth = 0f,
+    float XHeight = 0f);
 
 /// <summary>One OpenType variation axis and the range it accepts.</summary>
 public readonly record struct FontAxis(VariationTag Tag, float Min, float Default, float Max);

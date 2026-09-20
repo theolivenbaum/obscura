@@ -315,8 +315,10 @@ internal static class TextLayout
             var glyphs = new List<LayoutGlyph>(1);
             float x = startX;
             float y = 0f;
-            float maxAscent = 0f;
-            float maxDescent = 0f;
+            float maxAbove = float.NegativeInfinity;
+            float maxBelow = float.NegativeInfinity;
+            float relativeAbove = float.NegativeInfinity;
+            float relativeBelow = float.NegativeInfinity;
             float correction = (align, shape.Rtl) switch
             {
                 (Align.Left, true) => lineWidth - visual.W,
@@ -369,7 +371,7 @@ internal static class TextLayout
                                 Start = glyph.Start,
                                 End = glyph.End,
                                 FontSize = glyphFontSize,
-                                LineHeight = glyph.Metrics?.LineHeight,
+                                BoxMetrics = glyph.Metrics,
                                 FontId = glyph.FontId,
                                 GlyphId = glyph.GlyphId,
                                 FontIsVariable = glyph.FontIsVariable,
@@ -392,8 +394,22 @@ internal static class TextLayout
                             }
 
                             y += yAdvance;
-                            maxAscent = F32.Max(maxAscent, glyphFontSize * glyph.Ascent);
-                            maxDescent = F32.Max(maxDescent, glyphFontSize * glyph.Descent);
+                            if (glyph.Metrics is { } box)
+                            {
+                                if (box.LineRelative)
+                                {
+                                    if (box.Above + box.Below > relativeAbove + relativeBelow)
+                                    {
+                                        relativeAbove = box.Above;
+                                        relativeBelow = box.Below;
+                                    }
+                                }
+                                else
+                                {
+                                    maxAbove = F32.Max(maxAbove, box.Above);
+                                    maxBelow = F32.Max(maxBelow, box.Below);
+                                }
+                            }
                         }
                     }
                 }
@@ -414,21 +430,15 @@ internal static class TextLayout
                 }
             }
 
-            float? lineHeight = null;
-            foreach (LayoutGlyph glyph in glyphs)
-            {
-                if (glyph.LineHeight is { } height)
-                {
-                    lineHeight = lineHeight is { } current2 ? F32.Max(current2, height) : height;
-                }
-            }
+            PlaceGlyphsOnBaselines(glyphs, shape.Metrics, maxAbove, maxBelow, relativeAbove, relativeBelow);
 
             layoutLines.Add(new LayoutLine
             {
                 W = align != Align.Justified ? visual.W : (shape.Rtl ? startX - x : x),
-                MaxAscent = maxAscent,
-                MaxDescent = maxDescent,
-                LineHeight = lineHeight,
+                MaxAbove = maxAbove,
+                MaxBelow = maxBelow,
+                LineRelativeAbove = relativeAbove,
+                LineRelativeBelow = relativeBelow,
                 Glyphs = glyphs,
             });
         }
@@ -439,13 +449,70 @@ internal static class TextLayout
             layoutLines.Add(new LayoutLine
             {
                 W = 0f,
-                MaxAscent = 0f,
-                MaxDescent = 0f,
-                LineHeight = shape.Metrics?.LineHeight,
                 Glyphs = [],
             });
         }
 
         return layoutLines;
+    }
+
+    /// <summary>
+    /// Move each glyph off the line's baseline by however far its own inline box sits from it.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, where every glyph on a line shares
+    /// one baseline because nothing can shift an inline box off it. The line extent here is
+    /// recomputed exactly as <see cref="TextBuffer.LayoutRuns"/> computes it, because a
+    /// <c>vertical-align: top</c> or <c>bottom</c> box is placed against the finished line box
+    /// rather than against a baseline, and the line box is not known until every box on it is.
+    /// Measured on Chromium 141: a 32px <c>line-height: 10px</c> span in a
+    /// <c>16px/40px 'Liberation Mono'</c> block sits 14px above the line's top when it is
+    /// <c>vertical-align: top</c> and 16px below it when it is <c>bottom</c>.
+    /// </remarks>
+    private static void PlaceGlyphsOnBaselines(
+        List<LayoutGlyph> glyphs,
+        TextMetrics? strut,
+        float maxAbove,
+        float maxBelow,
+        float relativeAbove,
+        float relativeBelow)
+    {
+        float above = F32.Max(strut?.Above ?? float.NegativeInfinity, maxAbove);
+        float below = F32.Max(strut?.Below ?? float.NegativeInfinity, maxBelow);
+        float height = above + below;
+        float relative = relativeAbove + relativeBelow;
+        if (float.IsFinite(relative) && relative > height)
+        {
+            above = F32.Max(above, relativeAbove);
+            height = relative;
+        }
+
+        if (!float.IsFinite(above))
+        {
+            return;
+        }
+
+        for (int index = 0; index < glyphs.Count; index++)
+        {
+            if (glyphs[index].BoxMetrics is not { } box)
+            {
+                continue;
+            }
+
+            float delta = box.Align switch
+            {
+                LineBoxAlign.LineTop => box.Above - above,
+                LineBoxAlign.LineBottom => height - box.Below - above,
+                _ => -box.Shift,
+            };
+            if (delta == 0f)
+            {
+                continue;
+            }
+
+            LayoutGlyph shifted = glyphs[index];
+            shifted.Y += delta;
+            glyphs[index] = shifted;
+        }
     }
 }

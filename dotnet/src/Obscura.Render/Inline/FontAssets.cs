@@ -237,15 +237,25 @@ public static class FontAssets
     /// </remarks>
     public static FaceMetrics BundledFaceMetrics(string family)
     {
-        (float ascent, float descent, float lineGap) = family switch
+        // The x-height is `OS/2.sxHeight` where the face ships one (the three Liberation
+        // faces, OS/2 version 3) and Skia's measurement of the 'x' glyph where it does not
+        // (DejaVu Sans, OS/2 version 1) - the same split `FontTables.ReadFaceMetrics` makes.
+        // `vertical-align: middle` is what reads it.
+        //
+        // The DejaVu number is where this port cannot match Chromium exactly: with no declared
+        // x-height, Chromium re-measures the 'x' outline GRID-FITTED AT THE USED SIZE, so its
+        // x-height is 6px at 10px, 9px at 16px and 14px at 24px - not one em fraction at all.
+        // Measured here at the em, which costs `vertical-align: middle` up to half a pixel on
+        // that face and nothing on the Liberation ones.
+        (float ascent, float descent, float lineGap, float xHeight) = family switch
         {
-            SerifFamily => (1825f, 443f, 87f),
-            MonoFamily => (1705f, 615f, 0f),
-            SystemFamily => (1901f, 483f, 0f),
-            _ => (1854f, 434f, 67f),
+            SerifFamily => (1825f, 443f, 87f, 940f),
+            MonoFamily => (1705f, 615f, 0f, 1082f),
+            SystemFamily => (1901f, 483f, 0f, 1120f),
+            _ => (1854f, 434f, 67f, 1082f),
         };
 
-        return new FaceMetrics(ascent, descent, lineGap, 2048f);
+        return new FaceMetrics(ascent, descent, lineGap, 2048f, XHeight: xHeight);
     }
 
     public static float NormalLineHeight(float fontSize, FaceMetrics metrics)
@@ -271,6 +281,55 @@ public static class FontAssets
         float scale = fontSize / F32.Max(metrics.UnitsPerEm, 1f);
         return (F32.Round(metrics.Ascent * scale), F32.Round(metrics.Descent * scale));
     }
+
+    /// <summary>
+    /// The used <c>line-height</c> as Blink stores it: a <c>LayoutUnit</c>, which is 1/64px.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which keeps the CSS value as an f32.
+    /// It is observable once the leading is split around the font box: Chromium 141 lays out
+    /// <c>16px/25.7px 'Liberation Mono'</c> with a 32px span at 30.703125px, which is the
+    /// 1/64-rounded 25.703125 and not the 25.6875 a truncation would give.
+    /// </remarks>
+    public static float QuantizedLineHeight(float lineHeight) => RoundedToLayoutUnit(lineHeight);
+
+    /// <summary>A value rounded to the nearest 1/64px, as <c>LayoutUnit::FromFloatRound</c>.</summary>
+    public static float RoundedToLayoutUnit(float value) => F32.Round(value * 64f) / 64f;
+
+    /// <summary>A value as Blink's <c>LayoutUnit(float)</c> stores it: 1/64px, toward zero.</summary>
+    public static float TruncatedToLayoutUnit(float value) => MathF.Truncate(value * 64f) / 64f;
+
+    /// <summary>
+    /// The half of the line box an inline box occupies above and below its own baseline: the
+    /// grid-fitted font box with half the leading added to each side (CSS 2.1 10.8.1).
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which has no such split - it gives
+    /// a line the largest <c>line-height</c> on it and aligns every span to the line's top.
+    /// The halves are not symmetric in Chromium: Blink floors the ascent to whole pixels and
+    /// then takes the descent as <c>line-height - ascent</c>, so the descent carries the
+    /// fractional remainder and can go negative. Measured on Chromium 141: a 20px span in an
+    /// <c>16px/18px 'Liberation Mono'</c> block makes the line 19px (ascent
+    /// <c>floor(17 + (18-23)/2) = 14</c>, descent <c>18-14 = 4</c>, against the strut's 13/5),
+    /// and a 48px span makes it 27px (ascent 22, descent -4). Rounding the pair symmetrically
+    /// instead gives 19.5 and 27 - right for one and wrong for the other. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    public static (float Above, float Below) LineBoxHalves(
+        float fontSize,
+        float lineHeight,
+        FaceMetrics metrics)
+    {
+        (float ascent, float descent) = FittedFontBoxMetrics(fontSize, metrics);
+        float used = QuantizedLineHeight(lineHeight);
+        float above = MathF.Floor(ascent + ((used - (ascent + descent)) / 2f));
+
+        return (above, used - above);
+    }
+
+    /// <summary>The face's x-height at <paramref name="fontSize"/>, in CSS pixels.</summary>
+    public static float XHeight(float fontSize, FaceMetrics metrics) =>
+        metrics.XHeight * fontSize / F32.Max(metrics.UnitsPerEm, 1f);
 
     /// <summary>
     /// CSS Fonts' asymmetric missing-weight search. In particular, 600 selects 700 (not 400)

@@ -24,7 +24,8 @@ internal readonly record struct InlineOwnerBox(
     InlineEdge StartEdge,
     InlineEdge EndEdge,
     int StartEvent,
-    int EndEvent);
+    int EndEvent,
+    InlineBoxExtent Extent);
 
 internal readonly record struct InlineBoundaryEvent(
     NodeId Owner,

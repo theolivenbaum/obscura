@@ -35,8 +35,49 @@ public enum Align
     End,
 }
 
-/// <summary>Font size and line height, in pixels.</summary>
-public readonly record struct TextMetrics(float FontSize, float LineHeight);
+/// <summary>What an inline box's <c>vertical-align</c> aligns it to.</summary>
+public enum LineBoxAlign : byte
+{
+    /// <summary>Aligned to a baseline, possibly shifted from the parent's.</summary>
+    Baseline,
+
+    /// <summary><c>vertical-align: top</c>.</summary>
+    LineTop,
+
+    /// <summary><c>vertical-align: bottom</c>.</summary>
+    LineBottom,
+}
+
+/// <summary>
+/// What one inline box contributes vertically to the line box it sits on, plus the font size
+/// its glyphs shape at.
+/// </summary>
+/// <remarks>
+/// DEVIATION from crates/obscura-render/src/inline.rs, whose metrics are the pair
+/// <c>(font_size, line_height)</c> and whose line box is <c>max(line_height)</c> over the
+/// spans on it. CSS 2.1 10.8.1 makes the line box <c>max(above the baseline) +
+/// max(below the baseline)</c>, where each inline box contributes its own grid-fitted ascent
+/// and descent with half the leading added to each, so two boxes with the same
+/// <c>line-height</c> and different fonts still grow the line. Chromium 141 on
+/// <c>16px/18px 'Liberation Mono'</c> containing a 32px span is 22px tall where
+/// <c>max(line_height)</c> gives 18; a 48px span is 27px. <see cref="Above"/> and
+/// <see cref="Below"/> are those two contributions, already carrying the box's
+/// <c>vertical-align</c> shift. See "Known deviations" in todo.md.
+/// </remarks>
+public readonly record struct TextMetrics(
+    float FontSize,
+    float LineHeight,
+    float Above = 0f,
+    float Below = 0f,
+    LineBoxAlign Align = LineBoxAlign.Baseline,
+    float Shift = 0f)
+{
+    /// <summary>
+    /// Aligned to the line box rather than to a baseline, so the box is out of the
+    /// max(above)/max(below) set and can only make the line taller.
+    /// </summary>
+    public bool LineRelative => Align != LineBoxAlign.Baseline;
+}
 
 /// <summary>Binning of a subpixel position, for glyph cache identity.</summary>
 public enum SubpixelBin
@@ -151,7 +192,9 @@ public struct LayoutGlyph
     public int Start;
     public int End;
     public float FontSize;
-    public float? LineHeight;
+
+    /// <summary>The line-box extent of the inline box this glyph belongs to.</summary>
+    public TextMetrics? BoxMetrics;
     public FontId FontId;
     public ushort GlyphId;
     public bool FontIsVariable;
@@ -188,9 +231,21 @@ public struct LayoutGlyph
 public sealed class LayoutLine
 {
     public float W;
-    public float MaxAscent;
-    public float MaxDescent;
-    public float? LineHeight;
+
+    /// <summary>
+    /// The CSS 2.1 10.8.1 half-line extents of every baseline-aligned box on the line.
+    /// Negative infinity when the line carries no such box, so the strut alone decides.
+    /// </summary>
+    public float MaxAbove = float.NegativeInfinity;
+    public float MaxBelow = float.NegativeInfinity;
+
+    /// <summary>
+    /// The tallest box on the line that is aligned to the line box itself rather than to a
+    /// baseline (<c>vertical-align: top | bottom</c>), as its own (above, below) pair, or
+    /// negative infinity when the line carries none.
+    /// </summary>
+    public float LineRelativeAbove = float.NegativeInfinity;
+    public float LineRelativeBelow = float.NegativeInfinity;
     public List<LayoutGlyph> Glyphs = [];
 }
 
@@ -472,10 +527,23 @@ public sealed class TextBuffer
 
             foreach (LayoutLine layoutLine in layout)
             {
-                float lineHeight = layoutLine.LineHeight ?? Metrics.LineHeight;
-                float glyphHeight = layoutLine.MaxAscent + layoutLine.MaxDescent;
-                float centeringOffset = (lineHeight - glyphHeight) / 2f;
-                float lineY = lineTop + centeringOffset + layoutLine.MaxAscent;
+                // CSS 2.1 10.8.1: the line box is max(above) + max(below) over every inline
+                // box on it plus the block's strut, and the baseline sits at max(above).
+                // `Metrics` is the strut, which participates in every line box.
+                float above = F32.Max(Metrics.Above, layoutLine.MaxAbove);
+                float below = F32.Max(Metrics.Below, layoutLine.MaxBelow);
+                float lineHeight = above + below;
+                float relative = layoutLine.LineRelativeAbove + layoutLine.LineRelativeBelow;
+                if (float.IsFinite(relative) && relative > lineHeight)
+                {
+                    // A `vertical-align: top`/`bottom` box is out of the baseline set, so it
+                    // only ever grows the line - and when it does, Chromium puts the baseline
+                    // where that box's own ascent asks for it.
+                    above = F32.Max(above, layoutLine.LineRelativeAbove);
+                    lineHeight = relative;
+                }
+
+                float lineY = lineTop + above;
                 if (HeightOpt is { } height && lineY > height)
                 {
                     yield break;

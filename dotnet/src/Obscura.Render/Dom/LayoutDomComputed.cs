@@ -749,6 +749,14 @@ public static partial class RenderDom
         style.MaxWidth = style.MaxWidth.Resolve(emPx, rootFs, vw, vh);
         style.MaxHeight = style.MaxHeight.Resolve(emPx, rootFs, vw, vh);
         style.FlexBasis = style.FlexBasis.Resolve(emPx, rootFs, vw, vh);
+        if (style.InlineVerticalAlign is { Kind: InlineVerticalAlignKind.Offset } inlineAlign)
+        {
+            style.InlineVerticalAlign = inlineAlign with
+            {
+                Offset = inlineAlign.Offset.Resolve(emPx, rootFs, vw, vh),
+            };
+        }
+
         // DEVIATION from crates/obscura-render/src/dom.rs, which drops a block-axis
         // percentage whenever the parent box has no definite height. A grid item's
         // containing block is its GRID AREA, not the grid container's content box, so the

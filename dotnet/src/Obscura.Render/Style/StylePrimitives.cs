@@ -984,6 +984,32 @@ public static partial class ComputedStyle
         return IntrinsicSizeKeyword.None;
     }
 
+    /// <summary>
+    /// <c>vertical-align</c> as an inline box reads it, or <c>null</c> for a value that is not
+    /// one (which leaves whatever the cascade already put on the style).
+    /// </summary>
+    internal static InlineVerticalAlign? InlineVerticalAlignValue(string token)
+    {
+        string value = token.Trim();
+        switch (CssText.AsciiLower(value))
+        {
+            case "baseline": return new InlineVerticalAlign(InlineVerticalAlignKind.Baseline, Dimension.Px(0f));
+            case "sub": return new InlineVerticalAlign(InlineVerticalAlignKind.Sub, Dimension.Px(0f));
+            case "super": return new InlineVerticalAlign(InlineVerticalAlignKind.Super, Dimension.Px(0f));
+            case "text-top": return new InlineVerticalAlign(InlineVerticalAlignKind.TextTop, Dimension.Px(0f));
+            case "text-bottom": return new InlineVerticalAlign(InlineVerticalAlignKind.TextBottom, Dimension.Px(0f));
+            case "middle": return new InlineVerticalAlign(InlineVerticalAlignKind.Middle, Dimension.Px(0f));
+            case "top": return new InlineVerticalAlign(InlineVerticalAlignKind.Top, Dimension.Px(0f));
+            case "bottom": return new InlineVerticalAlign(InlineVerticalAlignKind.Bottom, Dimension.Px(0f));
+            case "inherit" or "initial" or "unset" or "revert" or "": return null;
+            default: break;
+        }
+
+        Dimension offset = DimensionValue(value);
+
+        return offset.IsAuto ? null : new InlineVerticalAlign(InlineVerticalAlignKind.Offset, offset);
+    }
+
     internal static Dimension DimensionValue(string token)
     {
         string value = token.Trim();

@@ -20,8 +20,6 @@ public struct ShapeGlyph
     public float YAdvance;
     public float XOffset;
     public float YOffset;
-    public float Ascent;
-    public float Descent;
     public FontId FontId;
     public ushort GlyphId;
     public bool FontIsVariable;
@@ -31,7 +29,7 @@ public struct ShapeGlyph
     public RgbaColor? Color;
     public ulong Metadata;
     public bool FakeItalic;
-    public (float FontSize, float LineHeight)? Metrics;
+    public TextMetrics? Metrics;
 
     /// <summary>Width at the given font size, honoring a per-span metrics override.</summary>
     public readonly float Width(float fontSize) => (Metrics?.FontSize ?? fontSize) * XAdvance;
@@ -190,7 +188,7 @@ public sealed class ShapeLine
 {
     public bool Rtl;
     public List<ShapeSpan> Spans = [];
-    public (float FontSize, float LineHeight)? Metrics;
+    public TextMetrics? Metrics;
 }
 
 /// <summary>
@@ -651,8 +649,6 @@ public sealed class TextShaper(FontDatabase database)
         HbFont hbFont = font.HarfBuzzFontFor(shapingVariations);
 
         float fontScale = font.UnitsPerEm;
-        float ascent = font.Metrics.Ascent / fontScale;
-        float descent = font.Metrics.Descent / fontScale;
 
         using var buffer = new HbBuffer();
         buffer.Direction = spanRtl ? Direction.RightToLeft : Direction.LeftToRight;
@@ -702,8 +698,6 @@ public sealed class TextShaper(FontDatabase database)
                 YAdvance = position.YAdvance / fontScale,
                 XOffset = position.XOffset / fontScale,
                 YOffset = position.YOffset / fontScale,
-                Ascent = ascent,
-                Descent = descent,
                 FontId = font.Id,
                 GlyphId = (ushort)info.Codepoint,
                 FontIsVariable = font.IsVariable,

@@ -2447,6 +2447,8 @@ public static partial class ComputedStyle
                     // sub/super/lengths are text-level; leave the cell default.
                     _ => style.VerticalAlign,
                 };
+                style.InlineVerticalAlign = InlineVerticalAlignValue(value.Trim())
+                    ?? style.InlineVerticalAlign;
                 return true;
 
             case "list-style-type":

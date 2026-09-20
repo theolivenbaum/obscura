@@ -78,6 +78,7 @@ internal static class FontTables
         }
 
         short averageCharWidth = 0;
+        float xHeight = 0f;
         byte[]? os2 = TryGetTable(typeface, Os2Tag);
         if (os2 is { Length: >= 78 })
         {
@@ -90,6 +91,22 @@ internal static class FontTables
                 descender = BinaryPrimitives.ReadInt16BigEndian(os2.AsSpan(70));
                 lineGap = BinaryPrimitives.ReadInt16BigEndian(os2.AsSpan(72));
             }
+
+            // `vertical-align: middle` aligns against half the parent's x-height, so the face
+            // has to carry it. Skia reads `OS/2.sxHeight` from version 2 onwards and otherwise
+            // measures the 'x' glyph, which is why the fallback below asks Skia rather than
+            // assuming a fraction of the em: DejaVu Sans ships OS/2 version 1 and Chromium uses
+            // 9px at 16px, not the 8.45px a Liberation-derived constant would give.
+            if (version >= 2 && os2.Length >= 88)
+            {
+                xHeight = BinaryPrimitives.ReadInt16BigEndian(os2.AsSpan(86));
+            }
+        }
+
+        if (xHeight <= 0f)
+        {
+            using var sized = new SKFont(typeface, unitsPerEm);
+            xHeight = F32.Max(sized.Metrics.XHeight, 0f);
         }
 
         // Skia reports `SkFontMetrics::fMaxCharWidth` as the head bounding box's width, not the
@@ -108,7 +125,8 @@ internal static class FontTables
             Math.Max(lineGap, (short)0),
             unitsPerEm,
             Math.Max(averageCharWidth, (short)0),
-            maxCharWidth);
+            maxCharWidth,
+            xHeight);
     }
 
     /// <summary>The face's variation axes, straight from <c>fvar</c>.</summary>

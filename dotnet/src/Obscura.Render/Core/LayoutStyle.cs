@@ -2032,6 +2032,14 @@ public sealed class LayoutStyle
     /// </remarks>
     public VerticalAlign? VerticalAlign;
 
+    /// <summary><c>vertical-align</c> as an inline box reads it.</summary>
+    /// <remarks>
+    /// Kept apart from <see cref="VerticalAlign"/>, which is the table-cell reading and cannot
+    /// tell <c>top</c> from <c>text-top</c>. <c>null</c> means the property was never declared,
+    /// which is the initial <c>baseline</c>.
+    /// </remarks>
+    public InlineVerticalAlign? InlineVerticalAlign;
+
     /// <summary><c>z-index</c> on a positioned element.</summary>
     /// <remarks>
     /// <c>null</c> is <c>auto</c> (tree order). A non-zero value lifts the element's whole
