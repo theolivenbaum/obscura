@@ -1168,6 +1168,51 @@ table's width rather than widening the table, and floors the table only by the c
 min-content. The captions are therefore positioned absolutely for the two intrinsic measurements.
 Without that a long-caption table was 196 wide against Chromium's 67.31; it is 68.
 
+### The CSSOM snapshot reports a table box's computed CSS `display`, and carries border-spacing
+
+`crates/obscura-render/src/paint.rs` serializes the **taffy** display, so a `<table>` reported
+`block`, `display:inline-table` reported `inline-block` and `display:table-cell` reported
+`block`. Chromium 141 reports `table` / `inline-table` / `table-cell`, and `table-row` /
+`table-row-group` / `table-header-group` / `table-footer-group` / `table-caption` /
+`table-column` / `table-column-group` for the UA displays of `<tr>`, `<tbody>`, `<thead>`,
+`<tfoot>`, `<caption>`, `<col>` and `<colgroup>` - every one of which answered `block`.
+
+`PreparedRender.TableDisplay` reconstructs them from `IsTableBox` / `IsTableCellBox` /
+`IsInlineBlock` and the element's tag, and re-derives CSS Display blockification: a flex item,
+grid item, float, absolutely positioned box and the root report `block`, while `inline-table`
+reports `table`. That `ApplyDisplay` clears the flags for any valid authored display is what
+makes a surviving flag mean the UA value, so `<tr style="display:flex">` still reports `flex`.
+
+Two cases stay unreconstructible because nothing records the authored display: `display:table-row`
+and its five internal siblings are rejected by `ApplyDisplay`'s validity list, so the element
+keeps its previous display; and `<caption>` / `<col>` / `<colgroup>` have no UA flag, so an
+authored `display:block` on one is indistinguishable from the UA value. Both want a
+`DisplayAuthored` bit on `LayoutStyle`.
+
+**`border-spacing` and `border-collapse` now have keys**, where before page script read the empty
+string through bootstrap's inline fallback. Both inherit, which the measurements settle: Chromium
+141 reports `2px` / `separate` on a `<table>` and on every descendant of one - a `<div>` in a cell
+included, and still when the table carries `display:flex` - and `0px` / `separate` elsewhere.
+
+`DomStyleFixups.PropagateBorderSpacing` turned out **not** to be an inheritance pass: it converts
+a table's spacing into taffy row/column gaps and stores no CSS value anywhere, so
+`PreparedRender.InheritedBorderSpacing` walks to the nearest ancestor that declared one.
+`border-collapse` is genuinely inherited onto every node already and reads straight off the style.
+
+The reported value is truncated to whole pixels, which is what Chromium stores - verified
+directly: `1.5px` and `2.5px` both report `1px` and `2px`, so it truncates rather than rounds,
+and `3.75px 7.25px` is `3px 7px`. It serializes as one value when the axes match. Layout keeps
+the fractional value it already used, so no geometry moves.
+
+Four parser gaps surfaced by adding the key, none fixed here because all four move geometry:
+`border-spacing` is parsed through the `PxValue` overload that hard-codes `em`/`rem` at 16px, so
+`font-size: 20px; border-spacing: 1em` is 16px here against Chromium's 20px in either
+declaration order; the parser accepts `10%`, a three-value form and a negative, which Chromium
+all reject; `DomCascade` accepts `cellspacing` only when every character is a digit, so
+`cellspacing="3px"` falls back to the UA 2px where Chromium reports 3px; and the
+`-webkit-border-horizontal-spacing` / `-webkit-border-vertical-spacing` aliases Chromium reports
+have no key.
+
 ### The UA `table` rule's flex construction does not survive an authored `display`
 
 `crates/obscura-render/src/style.rs` gives `table` / `tbody` / `thead` / `tfoot` / `tr` / `td` /

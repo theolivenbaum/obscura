@@ -1011,4 +1011,184 @@ public class ComputedStyleSnapshotTests
         Assert.Equal(alignItems, computed["align-items"]);
         Assert.Equal(minWidth, computed["min-width"]);
     }
+
+    /// <summary>
+    /// The snapshot used to serialize the taffy display rather than the computed CSS one, so a
+    /// table reported the block/flex approximation it is laid out as. Chromium 141 on the same
+    /// markup reports the CSS value.
+    /// </summary>
+    [Theory]
+    [InlineData("<table id=\"box\"><tr><td>d</td></tr></table>", "table")]
+    [InlineData("<div id=\"box\" style=\"display:table\">d</div>", "table")]
+    [InlineData("<div id=\"box\" style=\"display:inline-table\">d</div>", "inline-table")]
+    [InlineData("<div id=\"box\" style=\"display:table-cell\">d</div>", "table-cell")]
+    [InlineData("<table><caption id=\"box\">c</caption><tr><td>d</td></tr></table>", "table-caption")]
+    [InlineData("<table><colgroup id=\"box\"><col></colgroup><tr><td>d</td></tr></table>", "table-column-group")]
+    [InlineData("<table><colgroup><col id=\"box\"></colgroup><tr><td>d</td></tr></table>", "table-column")]
+    [InlineData("<table><thead id=\"box\"><tr><th>h</th></tr></thead></table>", "table-header-group")]
+    [InlineData("<table><tbody id=\"box\"><tr><td>d</td></tr></tbody></table>", "table-row-group")]
+    [InlineData("<table><tfoot id=\"box\"><tr><td>d</td></tr></tfoot></table>", "table-footer-group")]
+    [InlineData("<table><tr id=\"box\"><td>d</td></tr></table>", "table-row")]
+    [InlineData("<table><tr><th id=\"box\">h</th></tr></table>", "table-cell")]
+    [InlineData("<table><tr><td id=\"box\">d</td></tr></table>", "table-cell")]
+    public void TableBoxesReportTheComputedCssDisplay(string html, string display)
+    {
+        Assert.Equal(display, Computed(html, "box")["display"]);
+    }
+
+    /// <summary>
+    /// An authored <c>display</c> replaces the whole outer/inner pair, so it is reported
+    /// instead of the table one - including on an element whose user-agent display is a table
+    /// display. Chromium 141's values on the same markup.
+    /// </summary>
+    [Theory]
+    [InlineData("<table id=\"box\" style=\"display:flex\"><tr><td>d</td></tr></table>", "flex")]
+    [InlineData("<table id=\"box\" style=\"display:block\"><tr><td>d</td></tr></table>", "block")]
+    [InlineData("<table><tr id=\"box\" style=\"display:block\"><td>d</td></tr></table>", "block")]
+    [InlineData("<table><tbody id=\"box\" style=\"display:flex\"><tr><td>d</td></tr></tbody></table>", "flex")]
+    [InlineData("<table><tr><td id=\"box\" style=\"display:block\">d</td></tr></table>", "block")]
+    [InlineData("<table><tr><td id=\"box\" style=\"display:flex\">d</td></tr></table>", "flex")]
+    [InlineData("<table><caption id=\"box\" style=\"display:flex\">c</caption><tr><td>d</td></tr></table>", "flex")]
+    [InlineData("<div id=\"box\" style=\"display:table;display:block\">d</div>", "block")]
+    public void AnAuthoredDisplayReplacesTheTableOne(string html, string display)
+    {
+        Assert.Equal(display, Computed(html, "box")["display"]);
+    }
+
+    /// <summary>
+    /// CSS Display blockification turns an internal table display into <c>block</c> while
+    /// <c>inline-table</c> becomes <c>table</c>. Measured on Chromium 141: a
+    /// <c>display: table-cell</c> flex item, grid item, float and absolutely positioned box all
+    /// report <c>block</c>, and <c>display: inline-table</c> reports <c>table</c> in all four.
+    /// A row group inside a <c>&lt;table style="display:flex"&gt;</c> is a real flex item and
+    /// reports <c>block</c>, while its rows and cells keep their table displays.
+    /// </summary>
+    [Theory]
+    [InlineData("<div style=\"display:flex\"><div id=\"box\" style=\"display:table-cell\">d</div></div>", "block")]
+    [InlineData("<div style=\"display:flex\"><div id=\"box\" style=\"display:inline-table\">d</div></div>", "table")]
+    [InlineData("<div style=\"display:grid\"><div id=\"box\" style=\"display:table-cell\">d</div></div>", "block")]
+    [InlineData("<div style=\"display:grid\"><div id=\"box\" style=\"display:inline-table\">d</div></div>", "table")]
+    [InlineData("<div id=\"box\" style=\"display:table-cell;float:left\">d</div>", "block")]
+    [InlineData("<div id=\"box\" style=\"display:inline-table;float:left\">d</div>", "table")]
+    [InlineData("<div id=\"box\" style=\"display:table-cell;position:absolute\">d</div>", "block")]
+    [InlineData("<div id=\"box\" style=\"display:inline-table;position:absolute\">d</div>", "table")]
+    [InlineData("<table style=\"display:flex\"><tbody id=\"box\"><tr><td>d</td></tr></tbody></table>", "block")]
+    [InlineData("<table style=\"display:flex\"><tbody><tr id=\"box\"><td>d</td></tr></tbody></table>", "table-row")]
+    [InlineData("<table style=\"display:flex\"><tbody><tr><td id=\"box\">d</td></tr></tbody></table>", "table-cell")]
+    [InlineData("<div style=\"display:flex\"><table id=\"box\"><tr><td>d</td></tr></table></div>", "table")]
+    public void BlockificationIsReportedOnTableDisplays(string html, string display)
+    {
+        Assert.Equal(display, Computed(html, "box")["display"]);
+    }
+
+    /// <summary>
+    /// A generated box carries the table display it was given, and is blockified by the
+    /// element it is generated inside rather than by that element's parent. Chromium 141 on
+    /// the same markup reports <c>table</c> / <c>inline-table</c> / <c>table-cell</c> for a
+    /// <c>::before</c> in a block, and <c>block</c> for a <c>table-cell</c> one in a flex
+    /// container.
+    /// </summary>
+    [Theory]
+    [InlineData("display:table", "", "table")]
+    [InlineData("display:inline-table", "", "inline-table")]
+    [InlineData("display:table-cell", "", "table-cell")]
+    [InlineData("display:table-cell", "display:flex", "block")]
+    [InlineData("display:inline-table", "display:flex", "table")]
+    public void AGeneratedBoxReportsItsOwnTableDisplay(string pseudo, string host, string display)
+    {
+        DomTree tree = HtmlParsing.ParseHtml(
+            "<style>#box::before{content:\"x\";" + pseudo + "}</style>"
+            + "<div id=\"box\" style=\"" + host + "\">d</div>");
+        NodeId node = tree.GetElementById("box") ?? throw new InvalidOperationException("no #box");
+        RenderResourceCache resources = new();
+        PreparedRender prepared = RenderPaint.PrepareDom(tree, (1280f, 720f), null, resources)
+            ?? throw new InvalidOperationException("layout did not prepare");
+        Dictionary<string, string> computed = prepared.ComputedStyle(node, "::before")
+            ?? throw new InvalidOperationException("no computed style");
+
+        Assert.Equal(display, computed["display"]);
+    }
+
+    /// <summary>
+    /// <c>border-spacing</c> and <c>border-collapse</c> had no key in the snapshot, so page
+    /// script read the empty string through bootstrap's inline-declaration fallback. Both are
+    /// inherited, which measurement on Chromium 141 confirms: a <c>&lt;div&gt;</c> inside a
+    /// table reports <c>2px</c> from the user-agent <c>table { border-spacing: 2px }</c> rule,
+    /// a box outside one reports <c>0px</c>, and a descendant still reports <c>2px</c> when the
+    /// table itself carries <c>display: flex</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("<table id=\"box\"><tr><td>d</td></tr></table>", "2px", "separate")]
+    [InlineData("<table><tr><td id=\"box\">d</td></tr></table>", "2px", "separate")]
+    [InlineData("<table><tr><td><div id=\"box\">d</div></td></tr></table>", "2px", "separate")]
+    [InlineData("<table style=\"display:flex\"><tr><td><span id=\"box\">d</span></td></tr></table>", "2px", "separate")]
+    [InlineData("<div id=\"box\">d</div>", "0px", "separate")]
+    [InlineData("<div id=\"box\" style=\"display:table\">d</div>", "0px", "separate")]
+    [InlineData("<table style=\"border-collapse:collapse\"><tr><td id=\"box\">d</td></tr></table>", "2px", "collapse")]
+    [InlineData("<table style=\"border-collapse:collapse\"><tr><td><div id=\"box\">d</div></td></tr></table>", "2px", "collapse")]
+    [InlineData("<div style=\"border-spacing:9px\"><table id=\"box\"><tr><td>d</td></tr></table></div>", "2px", "separate")]
+    [InlineData("<div style=\"border-spacing:9px\"><span id=\"box\">d</span></div>", "9px", "separate")]
+    public void BorderSpacingAndBorderCollapseAreInherited(
+        string html,
+        string borderSpacing,
+        string borderCollapse)
+    {
+        Dictionary<string, string> computed = Computed(html, "box");
+
+        Assert.Equal(borderSpacing, computed["border-spacing"]);
+        Assert.Equal(borderCollapse, computed["border-collapse"]);
+    }
+
+    /// <summary>
+    /// <c>border-spacing</c> serializes as one value when the two axes match and as two when
+    /// they differ, and Chromium stores it as whole pixels - measured on Chromium 141,
+    /// <c>0.6px</c>, <c>1.5px</c>, <c>2.5px</c> and <c>3.75px 7.25px</c> compute to
+    /// <c>0px</c>, <c>1px</c>, <c>2px</c> and <c>3px 7px</c>.
+    /// </summary>
+    /// <remarks>
+    /// A font-relative <c>border-spacing</c> is not asserted: it is parsed through the
+    /// <c>PxValue</c> overload that hard-codes <c>em</c> and <c>rem</c> at 16px, so
+    /// <c>font-size: 13.3px; border-spacing: 1em</c> computes to <c>16px</c> here and to
+    /// <c>13px</c> on Chromium 141 (<c>20px</c> at a 20px font size), in either declaration
+    /// order. That is a length-resolution gap in the cascade, not in the snapshot - it moves
+    /// the geometry too - so it is named here rather than asserted.
+    /// </remarks>
+    [Theory]
+    [InlineData("border-spacing:3px 7px", "3px 7px")]
+    [InlineData("border-spacing:5px", "5px")]
+    [InlineData("border-spacing:3px 3px", "3px")]
+    [InlineData("border-spacing:100px 0", "100px 0px")]
+    [InlineData("border-spacing:0.6px", "0px")]
+    [InlineData("border-spacing:1.5px", "1px")]
+    [InlineData("border-spacing:2.5px", "2px")]
+    [InlineData("border-spacing:3.75px 7.25px", "3px 7px")]
+    public void BorderSpacingSerializesBothAxesInWholePixels(string inline, string expected)
+    {
+        Dictionary<string, string> computed = Computed(
+            $"""<div id="box" style="{inline}"><span id="kid">k</span></div>""",
+            "box");
+
+        Assert.Equal(expected, computed["border-spacing"]);
+        Assert.Equal(
+            expected,
+            Computed(
+                $"""<div style="{inline}"><span id="box">k</span></div>""",
+                "box")["border-spacing"]);
+    }
+
+    /// <summary>
+    /// The <c>cellspacing</c> attribute is the table's <c>border-spacing</c> and inherits the
+    /// same way: Chromium 141 reports <c>7px</c> on a <c>cellspacing="7"</c> table and on its
+    /// cells.
+    /// </summary>
+    [Fact]
+    public void CellSpacingIsReportedAsBorderSpacing()
+    {
+        Assert.Equal(
+            "7px",
+            Computed("<table id=\"box\" cellspacing=\"7\"><tr><td>d</td></tr></table>", "box")["border-spacing"]);
+        Assert.Equal(
+            "7px",
+            Computed("<table cellspacing=\"7\"><tr><td id=\"box\">d</td></tr></table>", "box")["border-spacing"]);
+    }
 }
