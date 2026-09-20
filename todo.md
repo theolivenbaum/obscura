@@ -1284,10 +1284,14 @@ asks for and Chromium 141 generates.
 
 All measured on Chromium 141 against a 600px block in `16px/18px "Liberation Mono"` with
 `border-spacing: 0`. **Naming the face is load-bearing**: Chromium's unqualified `monospace` is
-DejaVu Sans Mono (advance 1229/2048 against 1233/2048) where the engine picks its embedded
-Liberation Mono, which is a width difference of its own and has nothing to do with F32. With the
-face named, the residual is taffy's whole-pixel box rounding against Chromium's LayoutUnit
-sixty-fourths - about a pixel per independently-rounded box.
+DejaVu Sans Mono where the engine picks its embedded Liberation Mono, which is a width difference
+of its own and has nothing to do with F32. Read off the two `head`/`hmtx` tables, DejaVu Sans
+Mono is 1233/2048 and Liberation Mono 1229/2048, so `aa` at 16px is 19.27 unnamed and 19.20 with
+the face named, and `Hello world` is 105.97 against 105.63. An earlier revision of this paragraph
+had the two advances the wrong way round; figures of 19.27 / 38.53 / 105.97 anywhere in these
+notes are the unnamed DejaVu ones. What is left once the face is named is taffy's whole-pixel box
+rounding against Chromium's LayoutUnit sixty-fourths - about a pixel per independently-rounded
+box.
 
 - **Rows, row groups and captions come from the computed display**
   (`DomTableSupport.CollectCssTableStructure`), for a `display: table` box that is not a
@@ -1334,9 +1338,9 @@ Still not modelled, each falling back to ordinary boxes so nothing is lost:
   answers `null` for both and the fallback is ordinary block layout, which is where the
   shrink-to-fit goes too. `display: inline-table` looks right only because an inline-level
   fallback shrink-fits anyway - the same defect seen twice, not two defects. So
-  `<div style="display:table">aa</div>` is 600 against Chromium's 19.27, and
+  `<div style="display:table">aa</div>` is 600 against Chromium's 19.20, and
   `<div display:table><div display:table-cell>aa</div><div>bb</div></div>` stacks at 600 where
-  Chromium makes one 38.53 row. It wants a `BuildAnonymousCell` over a run of a parent's
+  Chromium makes one 38.41 row. It wants a `BuildAnonymousCell` over a run of a parent's
   children (`BuildMixedBlock`'s job, restricted to a subrange and with no `IdMap` entry), plus
   `placed` widened to carry a cell that has no DOM node, and `ResolveCollapsedBorders` taught
   that such a cell has no border.
