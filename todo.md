@@ -1107,6 +1107,36 @@ because that window is between `PageInFlight.Decrement()` and ClearScript resolv
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
 
+### One watchdog thread services every arm, instead of one thread per arm
+
+`Watchdog.Spawn` used to `new Thread(...)` for every armed watchdog and `Stop()` used to
+`Thread.Join()` it. `ObscuraJsRuntime.RunEventLoopBoundedAsync` arms one **per event-loop tick**
+and every CDP command arms one, so the cost was unbounded in the number of ticks. On a small box
+running the suite at high parallelism it aborted the process outright:
+`Fatal error. ResumeThread failed with error 6` out of `Thread.StartCore` <- `Watchdog.Spawn` <-
+`ArmWatchdog` <- `RunEventLoopBoundedAsync`. That is the most likely explanation for a
+12-minute no-progress hang seen in a full-suite run.
+
+DEVIATION from `crates/obscura-js`, which arms a tokio timer against an `IsolateHandle` and needs
+no thread of its own. `WatchdogScheduler` keeps one dedicated background thread that holds every
+armed deadline and parks on `Monitor.Wait` between them.
+
+**A `Timer` would also have removed the churn and is the wrong tool**: its callback runs on the
+thread pool, and the situation this exists for - a page pinning threads inside V8 - is exactly
+when a pool callback is late. A dedicated thread keeps the backstop independent of the pool,
+which is what the Rust engine gets for free.
+
+The `Thread.Join()` in `Stop()` was load-bearing: it guaranteed that once `Stop()` returned, the
+watchdog could no longer interrupt an engine that had moved on to another task. `Cancel` keeps
+that guarantee by waiting out a firing already in progress, and the scan runs in a non-inlined
+frame for the reason `CdpWatchdogCore` documents - an `Entry` left in the parked frame's stack
+slots would pin its `V8ScriptEngine`, and through it a whole document.
+
+Measured: 2000 arm+stop pairs add **0** threads and take **7ms** in total, where before each one
+started and joined an OS thread. A runaway `while (true) {}` is still interrupted at 256ms
+against a 250ms budget, and `Stop()` still reports that it fired.
+`Obscura.Js.Tests.WatchdogSchedulerTests` pins all three.
+
 ### Flake: the heavy-page fixture spawned an OS thread per connection
 
 `ConcurrentConnectionsHeavyPageTests.ConcurrentConnectionsHeavyPageDoNotAbortV8` is the most
