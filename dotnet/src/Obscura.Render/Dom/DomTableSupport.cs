@@ -289,20 +289,52 @@ internal static class DomTableSupport
             0f);
     }
 
+    /// <summary>
+    /// Width a normal-flow table has available to fill, when the whole containing-block chain
+    /// is ordinary block flow.
+    /// </summary>
     internal static float? ReliableTableAvailableWidth(
         DomTree tree,
         NodeId id,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        float initialCbWidth)
+        float initialCbWidth) =>
+        TableContainingBlockWidth(tree, id, styles, initialCbWidth, forPercentage: false);
+
+    /// <summary>
+    /// Containing-block width a table's percentage width resolves against, when it can be
+    /// established without running layout.
+    /// </summary>
+    internal static float? ReliableTablePercentageBase(
+        DomTree tree,
+        NodeId id,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        float initialCbWidth) =>
+        TableContainingBlockWidth(tree, id, styles, initialCbWidth, forPercentage: true);
+
+    private static float? TableContainingBlockWidth(
+        DomTree tree,
+        NodeId id,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        float initialCbWidth,
+        bool forPercentage)
     {
         if (!styles.TryGetValue(id, out LayoutStyle? tableStyle))
         {
             return null;
         }
 
-        if (tableStyle.Float is not null
-            || tableStyle.Position == TaffyPosition.Absolute
-            || tableStyle.IsInlineBlock)
+        if (tableStyle.Position == TaffyPosition.Absolute)
+        {
+            return null;
+        }
+
+        // How much room a box has to fill and what its percentage width resolves against are two
+        // different questions, and they part company exactly here. A float or an inline-block
+        // shrinks to fit the room left on its line, which sibling floats take away, so the first
+        // question cannot be answered from style alone. The second can: a percentage width
+        // resolves against the containing block whatever the box's own float or inline-block-ness
+        // (CSS 2.1 10.2), which is why a floated `width: 100%` table is as wide as its container.
+        if (!forPercentage && (tableStyle.Float is not null || tableStyle.IsInlineBlock))
         {
             return null;
         }
@@ -338,7 +370,12 @@ internal static class DomTableSupport
             containingWidth = initialCbWidth;
         }
 
-        return F32.Max(containingWidth - tableStyle.Margin.Left - tableStyle.Margin.Right, 0f);
+        // The table's own margins come off the room it has to fill, but not off the base its
+        // percentage resolves against: Chromium 141 gives `width: 100%; margin: 0 50px` in a
+        // 600px block a 600px table, which overflows, rather than a 500px one.
+        return forPercentage
+            ? F32.Max(containingWidth, 0f)
+            : F32.Max(containingWidth - tableStyle.Margin.Left - tableStyle.Margin.Right, 0f);
     }
 
     /// <summary>

@@ -431,20 +431,23 @@ public static partial class RenderDom
                 tables.GetRange(tableIndex, groupEnd - tableIndex);
             Dictionary<TaffyNodeId, float> availableWidths = [];
             bool needsLayoutSnapshot = false;
-            foreach ((_, NodeId dom, _) in group)
-            {
-                if (!styles.TryGetValue(dom, out LayoutStyle? style))
-                {
-                    continue;
-                }
 
-                bool autoNeedsLayout = style.Width.IsAuto
+            // A percentage whose base cannot be established from style alone - a flex or grid
+            // parent, where the base is the container but flex-shrink then has its say; an
+            // absolutely positioned table; a wrapper that is itself a float or an inline-block -
+            // is left for taffy to resolve, and the snapshot reports what it made of it.
+            bool WantsSnapshot(NodeId dom, LayoutStyle style) =>
+                (style.Width.IsAuto
                     && (depth > 0
                         || DomTableSupport.ReliableTableAvailableWidth(
-                            tree, dom, styles, initialCbWidth) is null);
-                bool fixedPercentNeedsLayout = style.TableLayoutFixed
-                    && style.Width.Kind == DimensionKind.Percent;
-                if (autoNeedsLayout || fixedPercentNeedsLayout)
+                            tree, dom, styles, initialCbWidth) is null))
+                || (style.Width.Kind == DimensionKind.Percent
+                    && DomTableSupport.ReliableTablePercentageBase(
+                        tree, dom, styles, initialCbWidth) is null);
+
+            foreach ((_, NodeId dom, _) in group)
+            {
+                if (styles.TryGetValue(dom, out LayoutStyle? style) && WantsSnapshot(dom, style))
                 {
                     needsLayoutSnapshot = true;
                     break;
@@ -458,10 +461,7 @@ public static partial class RenderDom
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, measure);
                 foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
                 {
-                    if (styles.TryGetValue(dom, out LayoutStyle? style)
-                        && (style.Width.IsAuto
-                            || (style.TableLayoutFixed
-                                && style.Width.Kind == DimensionKind.Percent)))
+                    if (styles.TryGetValue(dom, out LayoutStyle? style) && WantsSnapshot(dom, style))
                     {
                         availableWidths[tnode] = F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f);
                     }
@@ -506,11 +506,21 @@ public static partial class RenderDom
                         case DimensionKind.Px:
                             usedOuterFixed = F32.Max(tableStyle.Width.Value, 0f);
                             break;
+                        case DimensionKind.Percent
+                            when DomTableSupport.ReliableTablePercentageBase(
+                                tree, dom, styles, initialCbWidth) is { } percentBasis:
+                            // Taffy resolves a float's percentage against the width the float
+                            // shrank to, so a floated `table-layout: fixed; width: 100%` came out
+                            // at 0. Resolve it against the containing block where that is known.
+                            usedOuterFixed = tableStyle.BoxSizing == BoxSizing.ContentBox
+                                ? (percentBasis * tableStyle.Width.Value)
+                                    + F32.Max(inlineOuterEdges - (horizontalSpacing * 2f), 0f)
+                                : percentBasis * tableStyle.Width.Value;
+                            break;
                         case DimensionKind.Percent:
                             usedOuterFixed = availableWidths.TryGetValue(tnode, out float measured)
                                 ? measured
-                                : DomTableSupport.ReliableTableAvailableWidth(
-                                    tree, dom, styles, initialCbWidth) ?? initialCbWidth;
+                                : initialCbWidth;
                             break;
                         default:
                             continue;
@@ -546,27 +556,35 @@ public static partial class RenderDom
                 Dimension widthStyle = deferredPercentWidths.TryGetValue(dom, out float authored)
                     ? Dimension.Percent(authored)
                     : tableStyle.Width;
-                // A percentage resolves against the containing block, and when that width is
-                // known here the columns can be distributed against it like any other definite
-                // width. Leaving it to taffy instead left the tracks `auto`, and the grid then
-                // filled the table by growing them *equally*: a 600px `width: 100%` table of
-                // `alpha` / `beta gamma delta` came out 261/339 where Chromium, which
-                // distributes in proportion to max-content, gives 141/459. Where the width is
-                // not reliably known (a floated, absolute or inline-block table, or a flex,
-                // grid or multicol parent) the old defer-to-taffy path still runs.
-                // Over 100% the table is meant to be wider than its containing block, and the
-                // path below floors it at the containing block; taffy resolves those correctly
-                // already, so they keep the old path.
-                float? percentAvailable = null;
-                if (widthStyle.Kind == DimensionKind.Percent && widthStyle.Value <= 1f)
+                // A percentage table needs a definite used width here, or the tracks stay `auto`
+                // and the grid fills the table by growing them *equally*: a 600px `width: 100%`
+                // table of `alpha` / `beta gamma delta` came out 261/339 where Chromium, which
+                // distributes what a column does not claim in proportion to max-content, gives
+                // 141/459. Two ways to get one, in this order:
+                //  - the base the percentage resolves against, when style alone establishes it
+                //    (`ReliableTablePercentageBase`); this also covers a float and an
+                //    inline-block, whose percentage taffy otherwise resolves against the width
+                //    they shrank to - a floated `width: 100%` table came out at max-content;
+                //  - otherwise the width taffy already resolved for the table, from the layout
+                //    snapshot above. That is the used width, not the base, and it is what a flex
+                //    or grid parent needs: `width: 150%` in a 600px flex row is 600 in Chromium,
+                //    not 900, because the item is flex-shrunk back.
+                float? percentBase = null;
+                float? percentUsedOuter = null;
+                if (widthStyle.Kind == DimensionKind.Percent)
                 {
-                    percentAvailable = availableWidths.TryGetValue(tnode, out float percentSnapshot)
-                        ? percentSnapshot
-                        : DomTableSupport.ReliableTableAvailableWidth(
-                            tree, dom, styles, initialCbWidth);
+                    percentBase = DomTableSupport.ReliableTablePercentageBase(
+                        tree, dom, styles, initialCbWidth);
+                    if (percentBase is null
+                        && availableWidths.TryGetValue(tnode, out float percentSnapshot))
+                    {
+                        percentUsedOuter = percentSnapshot;
+                    }
                 }
 
-                if (widthStyle.Kind == DimensionKind.Percent && percentAvailable is null)
+                if (widthStyle.Kind == DimensionKind.Percent
+                    && percentBase is null
+                    && percentUsedOuter is null)
                 {
                     // Deviation from crates/obscura-render/src/dom.rs, which stops here. CSS 2.1
                     // 17.5.2 makes a table's used width the greater of its specified width and
@@ -623,20 +641,23 @@ public static partial class RenderDom
                 float maxC = taffyTree.GetLayout(tnode).Size.Width;
 
                 float inlineEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
-                float availableOuter = percentAvailable
+                float availableOuter = percentBase
                     ?? (availableWidths.TryGetValue(tnode, out float snapshot)
                         ? snapshot
                         : DomTableSupport.ReliableTableAvailableWidth(
                             tree, dom, styles, initialCbWidth)
                             ?? initialCbWidth);
+
+                // A snapshot is already a used border-box width, so no box-sizing arithmetic.
+                float percentOuter = percentUsedOuter
+                    ?? ((widthStyle.Value * (percentBase ?? 0f))
+                        + (tableStyle.BoxSizing == BoxSizing.ContentBox ? inlineEdges : 0f));
                 float preferredOuter = widthStyle.Kind switch
                 {
                     DimensionKind.Px when tableStyle.BoxSizing == BoxSizing.ContentBox =>
                         widthStyle.Value + inlineEdges,
                     DimensionKind.Px => widthStyle.Value,
-                    DimensionKind.Percent when tableStyle.BoxSizing == BoxSizing.ContentBox =>
-                        (widthStyle.Value * availableOuter) + inlineEdges,
-                    DimensionKind.Percent => widthStyle.Value * availableOuter,
+                    DimensionKind.Percent => percentOuter,
                     _ => maxC,
                 };
                 float usedOuter = widthStyle.Kind is DimensionKind.Px or DimensionKind.Percent
@@ -786,9 +807,13 @@ public static partial class RenderDom
                         float percentageFloor = DomTableSupport.AutoTablePercentageIntrinsicFloor(
                             colMin, percentages);
                         float percentageOuter = percentageFloor + inlineEdges + interiorSpacing;
+
+                        // The clamp is the shrink-to-fit limit of an `auto` table, so it must not
+                        // pull a percentage table back to its containing block: Chromium 141
+                        // gives `width: 150%` in a 600px block a 900px table, not a 600px one.
                         usedOuter = F32.Min(
                             F32.Max(usedOuter, percentageOuter),
-                            F32.Max(availableOuter, minC));
+                            F32.Max(F32.Max(availableOuter, minC), usedOuter));
                         usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
                             ? F32.Max(usedOuter - inlineEdges, 0f)
                             : usedOuter;
