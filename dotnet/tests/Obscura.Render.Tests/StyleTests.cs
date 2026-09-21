@@ -1200,7 +1200,7 @@ public class ComputedStyleTests
         LayoutStyle cleared = Compute("div", "counter-reset:line 4;counter-reset:none");
         Assert.Empty(cleared.CounterReset);
 
-        static List<(string, int)> Pairs(List<CounterDirective> directives)
+        static List<(string, int)> Pairs(IReadOnlyList<CounterDirective> directives)
         {
             List<(string, int)> result = [];
             foreach (CounterDirective directive in directives)

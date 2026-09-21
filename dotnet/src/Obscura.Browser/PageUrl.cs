@@ -20,6 +20,26 @@ internal static class PageUrl
     internal static UrlRecord? TryParse(string? value) =>
         value is null ? null : UrlRecord.Parse(value);
 
+    /// <summary>
+    /// <see cref="TryParse(string?)"/>, also reporting why the URL was rejected.
+    /// </summary>
+    /// <remarks>
+    /// <c>page.rs</c> reports a rejected navigation as
+    /// <c>PageError::InvalidUrl(e.to_string())</c>, so the reason is observable and the
+    /// caller needs the <c>Err</c> half the Rust parser returns. A null input is not a
+    /// parse failure at all, so it takes the reason <c>Url::parse("")</c> gives.
+    /// </remarks>
+    internal static UrlRecord? TryParse(string? value, out UrlParseError error)
+    {
+        if (value is null)
+        {
+            error = UrlParseError.RelativeUrlWithoutBase;
+            return null;
+        }
+
+        return UrlRecord.Parse(value, out error);
+    }
+
     /// <summary>Rust's <c>Url::join</c>.</summary>
     internal static UrlRecord? TryJoin(UrlRecord baseUrl, string relative) =>
         baseUrl.Join(relative);

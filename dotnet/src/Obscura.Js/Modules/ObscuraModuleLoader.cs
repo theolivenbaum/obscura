@@ -227,13 +227,14 @@ public sealed class ObscuraModuleLoader : DocumentLoader, IDisposable
                 ? BaseUrl
                 : referrer;
 
-        var baseRecord = UrlRecord.Parse(baseHref);
+        var baseRecord = UrlRecord.Parse(baseHref, out var baseError);
         if (baseRecord is null)
         {
             error = string.Format(
                 CultureInfo.InvariantCulture,
-                "Invalid module referrer {0}: relative URL without a base",
-                baseHref);
+                "Invalid module referrer {0}: {1}",
+                baseHref,
+                baseError.Message());
             return false;
         }
 
@@ -353,13 +354,14 @@ public sealed class ObscuraModuleLoader : DocumentLoader, IDisposable
                 response.Status));
         }
 
-        var found = UrlRecord.Parse(response.Url.AbsoluteUri);
+        var found = UrlRecord.Parse(response.Url.AbsoluteUri, out var foundError);
         if (found is null)
         {
             throw new ModuleLoadException(string.Format(
                 CultureInfo.InvariantCulture,
-                "Invalid final module URL {0}: relative URL without a base",
-                response.Url));
+                "Invalid final module URL {0}: {1}",
+                response.Url,
+                foundError.Message()));
         }
 
         if (!string.Equals(found.Href, url, StringComparison.Ordinal))
@@ -450,13 +452,14 @@ public sealed class ObscuraModuleLoader : DocumentLoader, IDisposable
             return false;
         }
 
-        var baseRecord = UrlRecord.Parse(baseHref);
+        var baseRecord = UrlRecord.Parse(baseHref, out var baseError);
         if (baseRecord is null)
         {
             error = string.Format(
                 CultureInfo.InvariantCulture,
-                "Invalid module referrer {0}: relative URL without a base",
-                baseHref);
+                "Invalid module referrer {0}: {1}",
+                baseHref,
+                baseError.Message());
             return false;
         }
 

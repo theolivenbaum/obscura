@@ -46,7 +46,7 @@ public sealed record TextAttrs
     public bool FakeItalic { get; init; }
 
     /// <summary>Per-span metrics override; inline descendants keep their own computed size.</summary>
-    public (float FontSize, float LineHeight)? Metrics { get; init; }
+    public TextMetrics? Metrics { get; init; }
 
     /// <summary>Letter spacing (tracking) in em.</summary>
     public float? LetterSpacingEm { get; init; }

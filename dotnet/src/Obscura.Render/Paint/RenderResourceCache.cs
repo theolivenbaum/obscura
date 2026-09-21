@@ -105,6 +105,19 @@ public sealed class RenderResourceCache
     internal const string ImageAccept =
         "image/webp,image/apng,image/svg+xml,image/png,image/jpeg,image/gif,image/bmp,image/x-icon,image/vnd.microsoft.icon";
 
+    /// <summary>
+    /// Serializes the retained byte cache.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: <c>obscura-render</c> reaches this cache from one thread, because
+    /// the JS runtime that owns it is single-threaded and its async op reactions resume on
+    /// that same thread. In the port an image request completes on a thread-pool thread, so
+    /// several page-transport seeds and the renderer's own reads run at once. Without this
+    /// gate concurrent seeds lost entries outright: a request whose bytes had just been
+    /// seeded read back as unknown, and the image shim reported a load error for an image it
+    /// had successfully fetched.
+    /// </remarks>
+    private readonly object _gate = new();
     private readonly Dictionary<string, CachedResource> _entries = new(StringComparer.Ordinal);
     private readonly List<string> _order = [];
     private readonly Dictionary<NodeId, RememberedContentImageIntrinsic> _contentImageIntrinsics = [];
@@ -206,31 +219,56 @@ public sealed class RenderResourceCache
     /// </summary>
     public bool SetSyncLoadingEnabled(bool enabled)
     {
-        bool previous = _syncLoadingEnabled;
-        _syncLoadingEnabled = enabled;
-        return previous;
+        lock (_gate)
+        {
+            bool previous = _syncLoadingEnabled;
+            _syncLoadingEnabled = enabled;
+            return previous;
+        }
     }
 
-    public int RetainedEntryCount() => _entries.Count;
-
-    public long RetainedByteLen() => _retainedBytes;
-
-    public bool HasLiveOutcome(string url) =>
-        _entries.TryGetValue(NetworkResourceUrl(url), out CachedResource? entry)
-        && entry switch
+    public int RetainedEntryCount()
+    {
+        lock (_gate)
         {
-            CachedResource.Bytes => true,
-            CachedResource.Missing missing => Elapsed(missing.At) < MissingResourceRetryAfter,
-            _ => false,
-        };
+            return _entries.Count;
+        }
+    }
+
+    public long RetainedByteLen()
+    {
+        lock (_gate)
+        {
+            return _retainedBytes;
+        }
+    }
+
+    public bool HasLiveOutcome(string url)
+    {
+        lock (_gate)
+        {
+            return _entries.TryGetValue(NetworkResourceUrl(url), out CachedResource? entry)
+                && entry switch
+                {
+                    CachedResource.Bytes => true,
+                    CachedResource.Missing missing => Elapsed(missing.At) < MissingResourceRetryAfter,
+                    _ => false,
+                };
+        }
+    }
 
     /// <summary>
     /// Whether this URL currently retains usable bytes (as opposed to a short-lived
     /// negative-cache entry).
     /// </summary>
-    public bool HasCachedBytes(string url) =>
-        _entries.TryGetValue(NetworkResourceUrl(url), out CachedResource? entry)
-        && entry is CachedResource.Bytes;
+    public bool HasCachedBytes(string url)
+    {
+        lock (_gate)
+        {
+            return _entries.TryGetValue(NetworkResourceUrl(url), out CachedResource? entry)
+                && entry is CachedResource.Bytes;
+        }
+    }
 
     public bool HasLiveImageOutcome(string url, ImageRequestProfile profile) =>
         HasLiveOutcome(ImageResourceKey(url, profile));
@@ -245,16 +283,22 @@ public sealed class RenderResourceCache
     public void Seed(string url, byte[] bytes)
     {
         string key = NetworkResourceUrl(url);
-        Remove(key);
-        InsertBytes(key, bytes);
+        lock (_gate)
+        {
+            Remove(key);
+            InsertBytes(key, bytes);
+        }
     }
 
     /// <summary>Retain a page-transport failure so capture does not repeat the request.</summary>
     public void SeedMissing(string url)
     {
         string key = NetworkResourceUrl(url);
-        Remove(key);
-        InsertMissing(key);
+        lock (_gate)
+        {
+            Remove(key);
+            InsertMissing(key);
+        }
     }
 
     /// <summary>Resolve, fetch, and inspect one image through the byte cache paint uses.</summary>
@@ -295,9 +339,13 @@ public sealed class RenderResourceCache
             return new CachedImageOutcome(size is { } value ? (resolved, value.Width, value.Height) : null);
         }
 
-        if (!_entries.TryGetValue(NetworkResourceUrl(resolved), out CachedResource? entry))
+        CachedResource? entry;
+        lock (_gate)
         {
-            return null;
+            if (!_entries.TryGetValue(NetworkResourceUrl(resolved), out entry))
+            {
+                return null;
+            }
         }
 
         switch (entry)
@@ -332,9 +380,13 @@ public sealed class RenderResourceCache
         }
 
         string key = ImageResourceKey(resolved, profile);
-        if (!_entries.TryGetValue(key, out CachedResource? entry))
+        CachedResource? entry;
+        lock (_gate)
         {
-            return null;
+            if (!_entries.TryGetValue(key, out entry))
+            {
+                return null;
+            }
         }
 
         switch (entry)
@@ -441,68 +493,77 @@ public sealed class RenderResourceCache
         return (resolved, profile, true, value is { } size ? (size.Width, size.Height) : null);
     }
 
+    // The compatibility loader runs under the gate: it is only reachable from the
+    // synchronous render path, and letting a seed interleave with the remove/insert pair
+    // around it is what the gate exists to prevent.
     internal byte[]? GetOrLoad(string url)
     {
         string key = NetworkResourceUrl(url);
-        if (_entries.TryGetValue(key, out CachedResource? entry))
+        lock (_gate)
         {
-            switch (entry)
+            if (_entries.TryGetValue(key, out CachedResource? entry))
             {
-                case CachedResource.Bytes bytes:
-                    return bytes.Value;
-                case CachedResource.Missing missing when Elapsed(missing.At) < MissingResourceRetryAfter:
-                    return null;
+                switch (entry)
+                {
+                    case CachedResource.Bytes bytes:
+                        return bytes.Value;
+                    case CachedResource.Missing missing when Elapsed(missing.At) < MissingResourceRetryAfter:
+                        return null;
+                }
             }
-        }
 
-        if (!_syncLoadingEnabled)
-        {
-            return null;
-        }
+            if (!_syncLoadingEnabled)
+            {
+                return null;
+            }
 
-        Remove(key);
-        byte[]? loaded = LoadSafely(key);
-        if (loaded is null)
-        {
-            InsertMissing(key);
-            return null;
-        }
+            Remove(key);
+            byte[]? loaded = LoadSafely(key);
+            if (loaded is null)
+            {
+                InsertMissing(key);
+                return null;
+            }
 
-        InsertBytes(key, loaded);
-        return loaded;
+            InsertBytes(key, loaded);
+            return loaded;
+        }
     }
 
     internal byte[]? GetOrLoadImage(string url, ImageRequestProfile profile)
     {
         string key = ImageResourceKey(url, profile);
-        if (_entries.TryGetValue(key, out CachedResource? entry))
+        lock (_gate)
         {
-            switch (entry)
+            if (_entries.TryGetValue(key, out CachedResource? entry))
             {
-                case CachedResource.Bytes bytes:
-                    return bytes.Value;
-                case CachedResource.Missing missing when Elapsed(missing.At) < MissingResourceRetryAfter:
-                    return null;
+                switch (entry)
+                {
+                    case CachedResource.Bytes bytes:
+                        return bytes.Value;
+                    case CachedResource.Missing missing when Elapsed(missing.At) < MissingResourceRetryAfter:
+                        return null;
+                }
             }
+
+            if (!_syncLoadingEnabled)
+            {
+                return null;
+            }
+
+            Remove(key);
+
+            // The private profile key is cache identity only and must never escape into a loader.
+            byte[]? loaded = LoadSafely(NetworkResourceUrl(url));
+            if (loaded is null)
+            {
+                InsertMissing(key);
+                return null;
+            }
+
+            InsertBytes(key, loaded);
+            return loaded;
         }
-
-        if (!_syncLoadingEnabled)
-        {
-            return null;
-        }
-
-        Remove(key);
-
-        // The private profile key is cache identity only and must never escape into a loader.
-        byte[]? loaded = LoadSafely(NetworkResourceUrl(url));
-        if (loaded is null)
-        {
-            InsertMissing(key);
-            return null;
-        }
-
-        InsertBytes(key, loaded);
-        return loaded;
     }
 
     // A caller-supplied loader owns its own failure policy: the Rust trait method is

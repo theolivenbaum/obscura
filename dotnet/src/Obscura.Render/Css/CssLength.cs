@@ -12,16 +12,19 @@ namespace Obscura.Render.Css;
 /// </remarks>
 public static class CssLength
 {
-    private readonly record struct Context(float EmPx, float RemPx, float Vw, float Vh, float PercentBase);
+    private readonly record struct Context(FontUnits Font, float RemPx, float Vw, float Vh, float PercentBase)
+    {
+        internal float EmPx => Font.EmPx;
+    }
 
     public static float? ResolveContextual(
         string value,
-        float emPx,
+        FontUnits font,
         float remPx,
         float vw,
         float vh,
         float percentBase) =>
-        Resolve(value, new Context(emPx, remPx, vw, vh, percentBase));
+        Resolve(value, new Context(font, remPx, vw, vh, percentBase));
 
     private static float? Resolve(string value, in Context context)
     {
@@ -175,14 +178,21 @@ public static class CssLength
             return em * context.EmPx;
         }
 
+        // DEVIATION FROM RUST: `resolve_contextual_length` in crates/obscura-render/src/style.rs
+        // scales the font size by one fixed fraction per unit (0.528_320_3 for `ex`,
+        // and it has no `ch` at all), so every face gets Liberation Sans' numbers. CSS Values 4
+        // defines both against the element's first available font, and Chromium 141 measures it:
+        // over HTTP at font-size 100px, `width: 10ch` is 572.98px in Archivo and 600.09px in
+        // Liberation Mono, not the 556.14px Liberation Sans gives. The face's own advance and
+        // x-height arrive on `context.Font`.
         if (Suffix(lower, "ex") is { } ex)
         {
-            return ex * context.EmPx * 0.528_320_3f;
+            return ex * context.Font.ExPx;
         }
 
         if (Suffix(lower, "ch") is { } ch)
         {
-            return ch * context.EmPx * 0.556_152_3f;
+            return ch * context.Font.ChPx;
         }
 
         if (Suffix(lower, "vmin") is { } vmin)

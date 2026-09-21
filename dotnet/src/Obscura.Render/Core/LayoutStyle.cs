@@ -67,6 +67,42 @@ internal sealed class WaapiSampleState
     };
 }
 
+/// <summary>
+/// An authored internal-table <c>display</c>: one of the six table-internal values plus
+/// <c>table-caption</c>, none of which this engine lays out.
+/// </summary>
+/// <remarks>
+/// <c>ApplyDisplay</c> records the keyword and leaves the box's layout style untouched, so
+/// the CSSOM snapshot can report the computed value while layout keeps treating the element
+/// as whatever it was. See <see cref="LayoutStyle.AuthoredTableDisplay"/>.
+/// </remarks>
+internal enum TableInternalDisplay : byte
+{
+    /// <summary>No internal-table display was authored.</summary>
+    None,
+
+    /// <summary><c>display: table-row</c>.</summary>
+    Row,
+
+    /// <summary><c>display: table-row-group</c>.</summary>
+    RowGroup,
+
+    /// <summary><c>display: table-header-group</c>.</summary>
+    HeaderGroup,
+
+    /// <summary><c>display: table-footer-group</c>.</summary>
+    FooterGroup,
+
+    /// <summary><c>display: table-column</c>.</summary>
+    Column,
+
+    /// <summary><c>display: table-column-group</c>.</summary>
+    ColumnGroup,
+
+    /// <summary><c>display: table-caption</c>.</summary>
+    Caption,
+}
+
 internal enum BorderCascadeSide
 {
     Top,
@@ -185,8 +221,123 @@ public readonly record struct FilterFunction(
 /// <see cref="AnimationTiming"/>) have non-zero Rust defaults and must be seeded from their
 /// <c>Default</c> static rather than left as <c>default</c>.
 /// </remarks>
+/// <summary>
+/// The parts of a computed style that almost no element sets, held apart from
+/// <see cref="LayoutStyle"/> and allocated on the first write of any of them.
+/// </summary>
+/// <remarks>
+/// DEVIATION FROM RUST: crates/obscura-render keeps every one of these inline in its style
+/// struct. They are ~600 bytes of the C# object, and measured over the layout fixtures fewer
+/// than one element in a thousand sets any of them, so on a 60k-element page they were ~34 MB
+/// of live heap holding nothing but defaults. Splitting them out is a memory layout decision
+/// only: every member is still reached through a property of the same name on
+/// <see cref="LayoutStyle"/>, with the same value it had before, and a write of the default
+/// value does not allocate this object. See "Known deviations" in todo.md.
+/// </remarks>
+internal sealed class LayoutStyleRare
+{
+    public BorderModel? BorderCascadeBase;
+
+    public Layout.Line<Layout.GridPlacement>? GridColumn;
+
+    public Layout.Line<Layout.GridPlacement>? GridRow;
+
+    public (float Angle, (float X, float Y) Center, List<GradientStop> Stops)? BackgroundConicGradient;
+
+    public ReplacedIntrinsic? ReplacedIntrinsic;
+
+    public RadialGradientGeometry? BackgroundRadialGradientGeometry;
+
+    public BoxShadow? BoxShadow;
+
+    public (float Angle, List<GradientStop> Stops)? BackgroundGradient;
+
+    public ((float X, float Y) Center, List<GradientStop> Stops)? BackgroundRadialGradient;
+
+    public AnimationTiming AnimationTiming = Obscura.Render.AnimationTiming.Default;
+
+    public (Dimension X, Dimension Y)? IndividualTranslate;
+
+    public (Dimension X, Dimension Y)? TransformOrigin;
+
+    public OutlineModel Outline = OutlineModel.Default;
+
+    public (float Width, float Height)? IntrinsicSize;
+
+    public (float Width, float Height)? NativeControlContent;
+
+    public (float Width, float Height)? BackgroundSize;
+
+    public (float Width, float Height)? MaskSize;
+
+    public (float Horizontal, float Vertical)? BorderSpacing;
+
+    public string? BorderSpacingFontRelative;
+
+    public bool BorderSpacingInherit;
+
+    public Edges? CollapsedBorder;
+
+    public bool? CaptionSideBottom;
+
+    public ObjectPosition ObjectPosition = Obscura.Render.ObjectPosition.Default;
+
+    public (float X, float Y)? IndividualScale;
+
+    public BackgroundPosition BackgroundPosition = default;
+
+    public Dimension? FontSizeRaw;
+
+    public Dimension? LetterSpacingRaw;
+
+    /// <summary>A shallow copy; <see cref="LayoutStyle.Clone"/> deep-copies what needs it.</summary>
+    public LayoutStyleRare Clone() => (LayoutStyleRare)MemberwiseClone();
+}
+
 public sealed class LayoutStyle
 {
+    /// <summary>Rarely-set members, absent until one of them is written.</summary>
+    private LayoutStyleRare? m_rare;
+
+    /// <summary>The rare-member store, allocated on first write.</summary>
+    private LayoutStyleRare Rare => m_rare ??= new LayoutStyleRare();
+
+    // Lazily allocated per-side/per-slot state.
+    //
+    // DEVIATION FROM RUST: crates/obscura-render stores these inline in the style struct
+    // ([Option<Dimension>; 4], SmallVec, ...), which costs nothing when unused. A C# array or
+    // List is a separate heap object, and on a 60k-element page 23 always-allocated empty ones
+    // per computed style were ~58 MB of live heap that no element read anything out of. The
+    // fields below hold null until something is actually written; reads of the unwritten state
+    // come from one shared all-default array, which is why the read accessors are
+    // ReadOnlySpan/IReadOnlyList - the shared instance must never be written through.
+    // See "Known deviations" in todo.md.
+    private static readonly bool[] s_noBools4 = new bool[4];
+    private static readonly float?[] s_noFloats4 = new float?[4];
+    private static readonly Dimension?[] s_noDimensions4 = new Dimension?[4];
+    private static readonly string?[] s_noStrings2 = new string?[2];
+    private static readonly string?[] s_noStrings4 = new string?[4];
+    private static readonly string?[] s_noStrings6 = new string?[6];
+
+    /// <summary>
+    /// Write one slot of a lazily allocated fixed-length array, leaving it unallocated while
+    /// every slot would still hold the default.
+    /// </summary>
+    private static void SetSlot<T>(ref T[]? slots, int length, int index, T value)
+    {
+        if (slots is null)
+        {
+            if (EqualityComparer<T>.Default.Equals(value, default!))
+            {
+                return;
+            }
+
+            slots = new T[length];
+        }
+
+        slots[index] = value;
+    }
+
     public Display Display;
 
     /// <summary>
@@ -202,6 +353,46 @@ public sealed class LayoutStyle
     /// provenance and then clears this marker.
     /// </remarks>
     internal bool DisplayInherit;
+
+    /// <summary>The cascade's winning <c>display</c> came from a declaration, not the UA arm.</summary>
+    /// <remarks>
+    /// <c>&lt;caption&gt;</c>, <c>&lt;col&gt;</c> and <c>&lt;colgroup&gt;</c> have no user-agent
+    /// arm in <see cref="ComputedStyle.UaStyle"/> - they get the plain <c>display: block</c>
+    /// every element starts from - so their computed CSS display is only reconstructible from
+    /// whether a declaration replaced it. Chromium 141 reports <c>table-caption</c> /
+    /// <c>table-column</c> / <c>table-column-group</c> for the three untouched and the authored
+    /// value otherwise, including <c>block</c> and <c>contents</c>.
+    /// <para>
+    /// Only <see cref="PreparedRender"/> reads this; nothing in layout does.
+    /// </para>
+    /// </remarks>
+    internal bool DisplayAuthored;
+
+    /// <summary>
+    /// The authored internal-table <c>display</c>, which this engine records and reports but
+    /// does not lay out.
+    /// </summary>
+    /// <remarks>
+    /// Taffy has no table formatting mode and this engine's table builder is keyed on the HTML
+    /// element names (<c>tr</c>, <c>tbody</c>, <c>col</c>, <c>caption</c>, ...) rather than on
+    /// the computed display, so a <c>display: table-row</c> box is laid out as whatever it was
+    /// before the declaration. CSSOM defines the computed value as the resolved value rather
+    /// than the used one, and Chromium reports it whatever layout does with the box, so the
+    /// snapshot reports the authored keyword and the gap is layout's.
+    /// <para>
+    /// Only <see cref="PreparedRender"/> reads this; nothing in layout does. Adding a layout
+    /// consumer means implementing CSS 2.1 17.2.1 anonymous table boxes for these values
+    /// first - see the remarks on <c>PreparedRender.TableDisplay</c>.
+    /// </para>
+    /// <para>
+    /// Not carried across <c>display: inherit</c>: the DOM top-down pass copies the parent's
+    /// computed outer/inner display through <c>LayoutDomComputed</c>'s inherited context, which
+    /// does not carry this keyword, so a <c>display: inherit</c> child of a
+    /// <c>display: table-row</c> box reports <c>block</c> where Chromium 141 reports
+    /// <c>table-row</c>.
+    /// </para>
+    /// </remarks>
+    internal TableInternalDisplay AuthoredTableDisplay;
 
     /// <summary>Original legacy flexbox display provenance.</summary>
     /// <remarks>
@@ -228,7 +419,19 @@ public sealed class LayoutStyle
     internal bool ContainerTypeInherit;
 
     /// <summary>Computed CSS <c>container-name</c>; empty represents <c>none</c> (not inherited).</summary>
-    public List<string> ContainerNames = [];
+    public IReadOnlyList<string> ContainerNames
+    {
+        get => m_containerNames ?? (IReadOnlyList<string>)Array.Empty<string>();
+        set => m_containerNames = value as List<string> ?? [.. value];
+    }
+
+    /// <summary>The backing list of <see cref="ContainerNames"/>, allocated on first call.</summary>
+    public List<string> EnsureContainerNames() => m_containerNames ??= [];
+
+    /// <summary>Reset <see cref="ContainerNames"/> to empty, releasing its list.</summary>
+    public void ClearContainerNames() => m_containerNames = null;
+
+    private List<string>? m_containerNames;
 
     /// <summary>The specified <c>container-name</c> value was CSS-wide <c>inherit</c>.</summary>
     internal bool ContainerNamesInherit;
@@ -427,7 +630,15 @@ public sealed class LayoutStyle
     /// Functional lengths can depend on the actual viewport, containing block, or computed font
     /// size and cannot be safely collapsed to pixels during stylesheet parsing.
     /// </remarks>
-    public string?[] SizeExpressions = new string?[6];
+    public ReadOnlySpan<string?> SizeExpressions => m_sizeExpressions ?? s_noStrings6;
+
+    /// <summary>Write one slot of <see cref="SizeExpressions"/>, allocating only for a non-default value.</summary>
+    public void SetSizeExpression(int index, string? value) => SetSlot(ref m_sizeExpressions, 6, index, value);
+
+    /// <summary>Reset <see cref="SizeExpressions"/> to all-default, releasing its array.</summary>
+    public void ClearSizeExpressions() => m_sizeExpressions = null;
+
+    private string?[]? m_sizeExpressions;
 
     /// <summary>
     /// Bitmask over the six <see cref="SizeExpressions"/> slots marking the ones declared as
@@ -441,6 +652,21 @@ public sealed class LayoutStyle
     /// textarea with <c>min-height: inherit</c>. See "Known deviations" in todo.md.
     /// </remarks>
     public byte SizeInherit;
+
+    /// <summary>
+    /// Bitmask over the inline-size slots (<c>0</c> width, <c>2</c> min-width, <c>4</c>
+    /// max-width) whose declared value is a cyclic percentage that
+    /// <c>DomSubgridPasses.DeferCyclicFlexInlineSizes</c> has neutralized for the intrinsic
+    /// pass. The size field itself holds the neutral value; this records that the declaration
+    /// is still a definite percentage, for the consumers that ask about definiteness rather
+    /// than about the value.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION: no counterpart in crates/obscura-render, which only rewrites the size field
+    /// and so cannot tell a neutralized declaration from an authored <c>auto</c>. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    public byte DeferredCyclicInlineSlots;
 
     /// <summary>
     /// <c>aspect-ratio</c> as width/height, or an image's intrinsic ratio resolved at layout.
@@ -471,14 +697,34 @@ public sealed class LayoutStyle
     /// min/max-content size when percentage dimensions are resolved through an auto-sized
     /// wrapper (<c>img { width:100%; height:auto }</c>).
     /// </remarks>
-    public (float Width, float Height)? IntrinsicSize;
+    public (float Width, float Height)? IntrinsicSize
+    {
+        get => m_rare?.IntrinsicSize;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.IntrinsicSize = value;
+            }
+        }
+    }
 
     /// <summary>Per-axis decoded intrinsic metadata used by the replaced sizing path.</summary>
     /// <remarks>
     /// SVG can expose only one dimension or a <c>viewBox</c> ratio, distinctions that the
     /// stable public <see cref="IntrinsicSize"/> tuple cannot represent.
     /// </remarks>
-    internal ReplacedIntrinsic? ReplacedIntrinsic;
+    internal ReplacedIntrinsic? ReplacedIntrinsic
+    {
+        get => m_rare?.ReplacedIntrinsic;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.ReplacedIntrinsic = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Definite content-box width available to an auto/auto ratio-only replaced element in
@@ -521,7 +767,17 @@ public sealed class LayoutStyle
     /// there is nothing left to size it from and it collapses to its padding; this is what the
     /// leaf measure hands back instead.
     /// </summary>
-    internal (float Width, float Height)? NativeControlContent;
+    internal (float Width, float Height)? NativeControlContent
+    {
+        get => m_rare?.NativeControlContent;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.NativeControlContent = value;
+            }
+        }
+    }
 
     public Edges Margin;
 
@@ -531,7 +787,15 @@ public sealed class LayoutStyle
     /// which the float <see cref="Margin"/> cannot express; this flag drives it at taffy
     /// mapping.
     /// </remarks>
-    public bool[] MarginAuto = new bool[4];
+    public ReadOnlySpan<bool> MarginAuto => m_marginAuto ?? s_noBools4;
+
+    /// <summary>Write one slot of <see cref="MarginAuto"/>, allocating only for a non-default value.</summary>
+    public void SetMarginAuto(int index, bool value) => SetSlot(ref m_marginAuto, 4, index, value);
+
+    /// <summary>Reset <see cref="MarginAuto"/> to all-default, releasing its array.</summary>
+    public void ClearMarginAuto() => m_marginAuto = null;
+
+    private bool[]? m_marginAuto;
 
     /// <summary>
     /// Percentage margin per side (top, right, bottom, left) as a 0..1 fraction, <c>null</c>
@@ -542,17 +806,32 @@ public sealed class LayoutStyle
     /// <see cref="Margin"/> cannot carry a percentage, so this is resolved to px during the DOM
     /// layout top-down pass once the containing-block width is known.
     /// </remarks>
-    public float?[] MarginPercent = new float?[4];
+    public ReadOnlySpan<float?> MarginPercent => m_marginPercent ?? s_noFloats4;
+
+    /// <summary>Write one slot of <see cref="MarginPercent"/>, allocating only for a non-default value.</summary>
+    public void SetMarginPercent(int index, float? value) => SetSlot(ref m_marginPercent, 4, index, value);
+
+    private float?[]? m_marginPercent;
 
     /// <summary>
     /// Font- and viewport-relative margin lengths (top, right, bottom, left). These retain
     /// their unit until the top-down pass knows the element font size, root font size, and
     /// viewport dimensions.
     /// </summary>
-    public Dimension?[] MarginRelative = new Dimension?[4];
+    public ReadOnlySpan<Dimension?> MarginRelative => m_marginRelative ?? s_noDimensions4;
+
+    /// <summary>Write one slot of <see cref="MarginRelative"/>, allocating only for a non-default value.</summary>
+    public void SetMarginRelative(int index, Dimension? value) => SetSlot(ref m_marginRelative, 4, index, value);
+
+    private Dimension?[]? m_marginRelative;
 
     /// <summary>Deferred <c>calc()</c>/<c>min()</c>/<c>max()</c>/<c>clamp()</c> margin expressions.</summary>
-    public string?[] MarginExpressions = new string?[4];
+    public ReadOnlySpan<string?> MarginExpressions => m_marginExpressions ?? s_noStrings4;
+
+    /// <summary>Write one slot of <see cref="MarginExpressions"/>, allocating only for a non-default value.</summary>
+    public void SetMarginExpression(int index, string? value) => SetSlot(ref m_marginExpressions, 4, index, value);
+
+    private string?[]? m_marginExpressions;
 
     public Edges Padding;
 
@@ -568,16 +847,34 @@ public sealed class LayoutStyle
     /// first. The DOM layout pass writes Taffy's resolved used pixels back into
     /// <see cref="Padding"/> before paint and geometry consumers inspect the computed layout.
     /// </remarks>
-    public float?[] PaddingPercent = new float?[4];
+    public ReadOnlySpan<float?> PaddingPercent => m_paddingPercent ?? s_noFloats4;
+
+    /// <summary>Write one slot of <see cref="PaddingPercent"/>, allocating only for a non-default value.</summary>
+    public void SetPaddingPercent(int index, float? value) => SetSlot(ref m_paddingPercent, 4, index, value);
+
+    /// <summary>Reset <see cref="PaddingPercent"/> to all-default, releasing its array.</summary>
+    public void ClearPaddingPercent() => m_paddingPercent = null;
+
+    private float?[]? m_paddingPercent;
 
     /// <summary>
     /// Font- and viewport-relative padding lengths (top, right, bottom, left), resolved
     /// alongside <see cref="MarginRelative"/> during the top-down pass.
     /// </summary>
-    public Dimension?[] PaddingRelative = new Dimension?[4];
+    public ReadOnlySpan<Dimension?> PaddingRelative => m_paddingRelative ?? s_noDimensions4;
+
+    /// <summary>Write one slot of <see cref="PaddingRelative"/>, allocating only for a non-default value.</summary>
+    public void SetPaddingRelative(int index, Dimension? value) => SetSlot(ref m_paddingRelative, 4, index, value);
+
+    private Dimension?[]? m_paddingRelative;
 
     /// <summary>Deferred <c>calc()</c>/<c>min()</c>/<c>max()</c>/<c>clamp()</c> padding expressions.</summary>
-    public string?[] PaddingExpressions = new string?[4];
+    public ReadOnlySpan<string?> PaddingExpressions => m_paddingExpressions ?? s_noStrings4;
+
+    /// <summary>Write one slot of <see cref="PaddingExpressions"/>, allocating only for a non-default value.</summary>
+    public void SetPaddingExpression(int index, string? value) => SetSlot(ref m_paddingExpressions, 4, index, value);
+
+    private string?[]? m_paddingExpressions;
 
     public Edges Border;
 
@@ -594,15 +891,44 @@ public sealed class LayoutStyle
     /// sides cannot be mapped until inherited direction is known, so the top-down pass replays
     /// <see cref="BorderCascadeOps"/> over this snapshot in exact cascade order.
     /// </summary>
-    internal BorderModel? BorderCascadeBase;
+    internal BorderModel? BorderCascadeBase
+    {
+        get => m_rare?.BorderCascadeBase;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BorderCascadeBase = value;
+            }
+        }
+    }
 
-    internal List<BorderCascadeOp> BorderCascadeOps = [];
+    internal IReadOnlyList<BorderCascadeOp> BorderCascadeOps
+    {
+        get => m_borderCascadeOps ?? (IReadOnlyList<BorderCascadeOp>)Array.Empty<BorderCascadeOp>();
+        set => m_borderCascadeOps = value as List<BorderCascadeOp> ?? [.. value];
+    }
+
+    /// <summary>The backing list of <see cref="BorderCascadeOps"/>, allocated on first call.</summary>
+    internal List<BorderCascadeOp> EnsureBorderCascadeOps() => m_borderCascadeOps ??= [];
+
+    private List<BorderCascadeOp>? m_borderCascadeOps;
 
     /// <summary>
     /// Outline paint state. It deliberately has no counterpart in Taffy: outlines never
     /// contribute to box geometry.
     /// </summary>
-    public OutlineModel Outline = OutlineModel.Default;
+    public OutlineModel Outline
+    {
+        get => m_rare is null ? OutlineModel.Default : m_rare.Outline;
+        set
+        {
+            if (m_rare is not null || value != OutlineModel.Default)
+            {
+                Rare.Outline = value;
+            }
+        }
+    }
 
     /// <summary>
     /// <c>clip-path: polygon(...)</c>, resolved against the final border box at paint time.
@@ -620,20 +946,50 @@ public sealed class LayoutStyle
     /// <remarks>
     /// Modern hero sections use gradients heavily; without this they paint white.
     /// </remarks>
-    public (float Angle, List<GradientStop> Stops)? BackgroundGradient;
+    public (float Angle, List<GradientStop> Stops)? BackgroundGradient
+    {
+        get => m_rare?.BackgroundGradient;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BackgroundGradient = value;
+            }
+        }
+    }
 
     /// <summary>
     /// First <c>radial-gradient(...)</c> layer: center in box-relative fractions and color
     /// stops. It is painted below the first linear layer, matching the common
     /// <c>linear-gradient(...), radial-gradient(...)</c> hero pattern.
     /// </summary>
-    public ((float X, float Y) Center, List<GradientStop> Stops)? BackgroundRadialGradient;
+    public ((float X, float Y) Center, List<GradientStop> Stops)? BackgroundRadialGradient
+    {
+        get => m_rare?.BackgroundRadialGradient;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BackgroundRadialGradient = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Geometry paired with <see cref="BackgroundRadialGradient"/>. The legacy public tuple
     /// above remains unchanged for API compatibility.
     /// </summary>
-    internal RadialGradientGeometry? BackgroundRadialGradientGeometry;
+    internal RadialGradientGeometry? BackgroundRadialGradientGeometry
+    {
+        get => m_rare?.BackgroundRadialGradientGeometry;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BackgroundRadialGradientGeometry = value;
+            }
+        }
+    }
 
     /// <summary><c>conic-gradient(...)</c> background.</summary>
     /// <remarks>
@@ -641,19 +997,41 @@ public sealed class LayoutStyle
     /// stops are normalized during paint. Conic gradients commonly provide the color source for
     /// a repeated SVG mask in modern hero artwork.
     /// </remarks>
-    public (float Angle, (float X, float Y) Center, List<GradientStop> Stops)? BackgroundConicGradient;
+    public (float Angle, (float X, float Y) Center, List<GradientStop> Stops)? BackgroundConicGradient
+    {
+        get => m_rare?.BackgroundConicGradient;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BackgroundConicGradient = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Every parsed gradient in authored background-layer order. The legacy single-kind fields
     /// above remain populated for mask/text fast paths.
     /// </summary>
-    public List<BackgroundGradientLayer> BackgroundGradientLayers = [];
+    public IReadOnlyList<BackgroundGradientLayer> BackgroundGradientLayers
+    {
+        get => m_backgroundGradientLayers ?? (IReadOnlyList<BackgroundGradientLayer>)Array.Empty<BackgroundGradientLayer>();
+        set => m_backgroundGradientLayers = value as List<BackgroundGradientLayer> ?? [.. value];
+    }
+
+    private List<BackgroundGradientLayer>? m_backgroundGradientLayers;
 
     /// <summary>
     /// One entry per <see cref="BackgroundGradientLayers"/> item. Radial entries carry their
     /// authored ending shape; non-radial entries are <c>null</c>.
     /// </summary>
-    internal List<RadialGradientGeometry?> BackgroundGradientLayerRadialGeometries = [];
+    internal IReadOnlyList<RadialGradientGeometry?> BackgroundGradientLayerRadialGeometries
+    {
+        get => m_backgroundGradientLayerRadialGeometries ?? (IReadOnlyList<RadialGradientGeometry?>)Array.Empty<RadialGradientGeometry?>();
+        set => m_backgroundGradientLayerRadialGeometries = value as List<RadialGradientGeometry?> ?? [.. value];
+    }
+
+    private List<RadialGradientGeometry?>? m_backgroundGradientLayerRadialGeometries;
 
     /// <summary>
     /// The first <c>url(...)</c> reference from <c>background</c>/<c>background-image</c>
@@ -666,7 +1044,17 @@ public sealed class LayoutStyle
     /// <c>background-size</c>, in px, when given as explicit length(s) (a bare <c>10px</c>
     /// applies to both axes, matching how small square icons are almost always sized).
     /// </summary>
-    public (float Width, float Height)? BackgroundSize;
+    public (float Width, float Height)? BackgroundSize
+    {
+        get => m_rare?.BackgroundSize;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BackgroundSize = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Raw one/two-axis <c>background-size</c> expression, retained for paint-time resolution
@@ -684,7 +1072,17 @@ public sealed class LayoutStyle
     /// <c>background-position</c>, retained as a length-plus-percentage per axis. Percentages
     /// apply to the leftover space after resolving explicit, intrinsic, cover, or contain size.
     /// </summary>
-    public BackgroundPosition BackgroundPosition;
+    public BackgroundPosition BackgroundPosition
+    {
+        get => m_rare is null ? default : m_rare.BackgroundPosition;
+        set
+        {
+            if (m_rare is not null || value != default)
+            {
+                Rare.BackgroundPosition = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Explicit <c>(repeat-x, repeat-y)</c> choice. <c>null</c> is the CSS initial
@@ -723,7 +1121,17 @@ public sealed class LayoutStyle
     public string? MaskImage;
 
     /// <summary>Explicit <c>mask-size</c> / <c>-webkit-mask-size</c> in CSS px.</summary>
-    public (float Width, float Height)? MaskSize;
+    public (float Width, float Height)? MaskSize
+    {
+        get => m_rare?.MaskSize;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.MaskSize = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Explicit <c>(repeat-x, repeat-y)</c> choice. <c>null</c> retains the CSS default
@@ -792,11 +1200,41 @@ public sealed class LayoutStyle
     public float? FontSize;
 
     /// <summary>
+    /// The pixel size of <c>1ch</c> for this element - the advance of <c>0</c> in the face the
+    /// text engine selects - or <c>0</c> when no face has been measured yet.
+    /// </summary>
+    /// <remarks>
+    /// Stored beside <see cref="FontSize"/>, and assigned in exactly one place with it
+    /// (<c>LayoutDomComputed</c>'s top-down pass, through <see cref="FontUnits.StoreOn"/>), so the
+    /// three font-relative unit sizes cannot drift apart. <c>em</c> is not stored: it is
+    /// <see cref="FontSize"/>, and <see cref="FontUnits.ForStyle"/> reassembles all three.
+    /// <para>
+    /// This exists because <c>transform: translate()</c> is resolved at paint time, long after the
+    /// pass that can pick a face. Two <c>float</c>s rather than a <see cref="FontUnits"/> keep it
+    /// to 8 bytes on a type whose retained size is load-bearing.
+    /// </para>
+    /// </remarks>
+    public float FontChPx;
+
+    /// <summary>The pixel size of <c>1ex</c> - the selected face's x-height. See <see cref="FontChPx"/>.</summary>
+    public float FontExPx;
+
+    /// <summary>
     /// <c>font-size</c> given in a font/viewport-relative unit, resolved to
     /// <see cref="FontSize"/> (px) during the inheritance pass against the parent and root
     /// font-sizes. <c>null</c> when font-size was absolute or unset.
     /// </summary>
-    public Dimension? FontSizeRaw;
+    public Dimension? FontSizeRaw
+    {
+        get => m_rare?.FontSizeRaw;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.FontSizeRaw = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Deferred functional <c>font-size</c> (<c>clamp()</c>, <c>min()</c>, <c>max()</c>,
@@ -817,7 +1255,17 @@ public sealed class LayoutStyle
     public float? LetterSpacing;
 
     /// <summary>Non-pixel <c>letter-spacing</c> retained until the inheritance pass.</summary>
-    public Dimension? LetterSpacingRaw;
+    public Dimension? LetterSpacingRaw
+    {
+        get => m_rare?.LetterSpacingRaw;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.LetterSpacingRaw = value;
+            }
+        }
+    }
 
     /// <summary>Deferred functional <c>letter-spacing</c> (<c>calc()</c>, <c>min()</c>, <c>clamp()</c>).</summary>
     public string? LetterSpacingExpression;
@@ -970,12 +1418,43 @@ public sealed class LayoutStyle
     /// </summary>
     internal bool FlexDirectionAuthored;
 
+    /// <summary>
+    /// Whether <c>align-items</c> (or <c>place-items</c>) was authored, as opposed to
+    /// <see cref="AlignItems"/> carrying the internal table approximation's stretch (a table
+    /// box) or flex-start (a cell box).
+    /// </summary>
+    internal bool AlignItemsAuthored;
+
+    /// <summary>
+    /// Whether <c>min-width</c> (or <c>min-inline-size</c>) was authored, as opposed to
+    /// <see cref="MinWidth"/> carrying the internal table approximation's zero.
+    /// </summary>
+    internal bool MinWidthAuthored;
+
     // CSS Grid. Tracks are stored as taffy sizing functions; GridAreas is the parsed
     // `grid-template-areas` matrix (one list per row, "." for a null cell), resolved to line
     // placements on children in a later pass.
-    public List<Layout.GridTemplateComponent> GridTemplateColumns = [];
+    public IReadOnlyList<Layout.GridTemplateComponent> GridTemplateColumns
+    {
+        get => m_gridTemplateColumns ?? (IReadOnlyList<Layout.GridTemplateComponent>)Array.Empty<Layout.GridTemplateComponent>();
+        set => m_gridTemplateColumns = value as List<Layout.GridTemplateComponent> ?? [.. value];
+    }
 
-    public List<Layout.GridTemplateComponent> GridTemplateRows = [];
+    /// <summary>Reset <see cref="GridTemplateColumns"/> to empty, releasing its list.</summary>
+    public void ClearGridTemplateColumns() => m_gridTemplateColumns = null;
+
+    private List<Layout.GridTemplateComponent>? m_gridTemplateColumns;
+
+    public IReadOnlyList<Layout.GridTemplateComponent> GridTemplateRows
+    {
+        get => m_gridTemplateRows ?? (IReadOnlyList<Layout.GridTemplateComponent>)Array.Empty<Layout.GridTemplateComponent>();
+        set => m_gridTemplateRows = value as List<Layout.GridTemplateComponent> ?? [.. value];
+    }
+
+    /// <summary>Reset <see cref="GridTemplateRows"/> to empty, releasing its list.</summary>
+    public void ClearGridTemplateRows() => m_gridTemplateRows = null;
+
+    private List<Layout.GridTemplateComponent>? m_gridTemplateRows;
 
     /// <summary>
     /// Rust keeps the opaque <c>calc()</c> handles embedded in grid track sizing functions
@@ -990,10 +1469,22 @@ public sealed class LayoutStyle
     /// the CSS initial <c>auto</c> value: taffy supplies one automatic implicit track and
     /// cycles a non-empty authored list.
     /// </summary>
-    public List<Layout.TrackSizingFunction> GridAutoColumns = [];
+    public IReadOnlyList<Layout.TrackSizingFunction> GridAutoColumns
+    {
+        get => m_gridAutoColumns ?? (IReadOnlyList<Layout.TrackSizingFunction>)Array.Empty<Layout.TrackSizingFunction>();
+        set => m_gridAutoColumns = value as List<Layout.TrackSizingFunction> ?? [.. value];
+    }
+
+    private List<Layout.TrackSizingFunction>? m_gridAutoColumns;
 
     /// <summary>Track sizing functions for rows created outside the explicit grid.</summary>
-    public List<Layout.TrackSizingFunction> GridAutoRows = [];
+    public IReadOnlyList<Layout.TrackSizingFunction> GridAutoRows
+    {
+        get => m_gridAutoRows ?? (IReadOnlyList<Layout.TrackSizingFunction>)Array.Empty<Layout.TrackSizingFunction>();
+        set => m_gridAutoRows = value as List<Layout.TrackSizingFunction> ?? [.. value];
+    }
+
+    private List<Layout.TrackSizingFunction>? m_gridAutoRows;
 
     /// <summary>
     /// Explicit CSS-wide <c>inherit</c> markers. The properties are normally non-inherited, so
@@ -1016,9 +1507,29 @@ public sealed class LayoutStyle
 
     public string? GridAreaName;
 
-    public Layout.Line<Layout.GridPlacement>? GridColumn;
+    public Layout.Line<Layout.GridPlacement>? GridColumn
+    {
+        get => m_rare?.GridColumn;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.GridColumn = value;
+            }
+        }
+    }
 
-    public Layout.Line<Layout.GridPlacement>? GridRow;
+    public Layout.Line<Layout.GridPlacement>? GridRow
+    {
+        get => m_rare?.GridRow;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.GridRow = value;
+            }
+        }
+    }
 
     /// <summary>
     /// <c>[line-name]</c> to 1-based grid line number, parsed from
@@ -1082,7 +1593,54 @@ public sealed class LayoutStyle
     /// the DOM border-spacing propagation distributes this down as the table's own row gap and
     /// each descendant <c>&lt;tr&gt;</c>'s column gap.
     /// </remarks>
-    public (float Horizontal, float Vertical)? BorderSpacing;
+    public (float Horizontal, float Vertical)? BorderSpacing
+    {
+        get => m_rare?.BorderSpacing;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BorderSpacing = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The declared <c>border-spacing</c> text, kept only when it carries a font-relative
+    /// length, so the top-down pass can re-read it once the element's font size exists.
+    /// </summary>
+    /// <inheritdoc cref="FilterFontRelative" path="/remarks"/>
+    internal string? BorderSpacingFontRelative
+    {
+        get => m_rare?.BorderSpacingFontRelative;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BorderSpacingFontRelative = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether <c>border-spacing</c> was declared as <c>inherit</c> or <c>unset</c>, so the
+    /// top-down pass has to copy the parent's computed value onto this element.
+    /// </summary>
+    /// <remarks>
+    /// The property is inherited but nothing carries it down the style tree - only the element
+    /// that declared it holds one - so the keyword cannot be answered where the cascade runs.
+    /// </remarks>
+    internal bool BorderSpacingInherit
+    {
+        get => m_rare?.BorderSpacingInherit ?? false;
+        set
+        {
+            if (m_rare is not null || value)
+            {
+                Rare.BorderSpacingInherit = value;
+            }
+        }
+    }
 
     /// <summary>Computed <c>border-collapse</c>.</summary>
     /// <remarks>
@@ -1092,6 +1650,51 @@ public sealed class LayoutStyle
     /// border-spacing to their geometry.
     /// </remarks>
     public bool? BorderCollapse;
+
+    /// <summary>
+    /// Computed <c>caption-side</c>: <c>true</c> for <c>bottom</c>. The property is inherited,
+    /// so <c>null</c> means nothing has been specified on this node yet.
+    /// </summary>
+    public bool? CaptionSideBottom
+    {
+        get => m_rare?.CaptionSideBottom;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.CaptionSideBottom = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The used border of a box in the collapsing border model (CSS 2.1 17.6.2): half the
+    /// border resolved for each of its four edges, which is the half that lies inside this box.
+    /// <c>null</c> on every box that is not part of a collapsing table.
+    /// </summary>
+    /// <remarks>
+    /// Kept beside <see cref="Border"/> rather than replacing it because a style object
+    /// survives a layout pass when its node's cascade did not change, so a pass that rewrote
+    /// <see cref="Border"/> in place would halve it again on the next one. Read it through
+    /// <see cref="UsedBorder"/>.
+    /// </remarks>
+    public Edges? CollapsedBorder
+    {
+        get => m_rare?.CollapsedBorder;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.CollapsedBorder = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The border widths that size and position this box: <see cref="CollapsedBorder"/> where
+    /// the collapsing table model resolved one, and <see cref="Border"/> otherwise.
+    /// </summary>
+    public Edges UsedBorder => m_rare?.CollapsedBorder ?? Border;
 
     // Positioning. `position: absolute|fixed` takes the box out of normal flow.
     public Layout.Position? Position;
@@ -1110,10 +1713,26 @@ public sealed class LayoutStyle
     public bool PositionSticky;
 
     /// <summary>Top, right, bottom, left.</summary>
-    public Dimension?[] Inset = new Dimension?[4];
+    public ReadOnlySpan<Dimension?> Inset => m_inset ?? s_noDimensions4;
+
+    /// <summary>Write one slot of <see cref="Inset"/>, allocating only for a non-default value.</summary>
+    public void SetInset(int index, Dimension? value) => SetSlot(ref m_inset, 4, index, value);
+
+    /// <summary>Reset <see cref="Inset"/> to all-default, releasing its array.</summary>
+    public void ClearInset() => m_inset = null;
+
+    private Dimension?[]? m_inset;
 
     /// <summary>Deferred functional inset expressions in top/right/bottom/left order.</summary>
-    public string?[] InsetExpressions = new string?[4];
+    public ReadOnlySpan<string?> InsetExpressions => m_insetExpressions ?? s_noStrings4;
+
+    /// <summary>Write one slot of <see cref="InsetExpressions"/>, allocating only for a non-default value.</summary>
+    public void SetInsetExpression(int index, string? value) => SetSlot(ref m_insetExpressions, 4, index, value);
+
+    /// <summary>Reset <see cref="InsetExpressions"/> to all-default, releasing its array.</summary>
+    public void ClearInsetExpressions() => m_insetExpressions = null;
+
+    private string?[]? m_insetExpressions;
 
     /// <summary>
     /// The late-resolved form of a percentage-bearing <see cref="InsetExpressions"/> entry,
@@ -1359,8 +1978,9 @@ public sealed class LayoutStyle
 
     /// <summary>
     /// The <c>filter</c> declaration as written, kept only while it carries an <c>em</c>,
-    /// <c>rem</c>, <c>ex</c> or <c>ch</c> length, so the top-down pass can re-read it once the
-    /// element's font size exists. <c>null</c> for every other value.
+    /// <c>rem</c>, <c>ex</c> or <c>ch</c> length or names <c>currentcolor</c>, so the top-down
+    /// pass can re-read it once the element's font size and computed colour exist.
+    /// <c>null</c> for every other value.
     /// </summary>
     /// <remarks>
     /// These three are the properties whose lengths the cascade resolves on the spot, where
@@ -1396,7 +2016,17 @@ public sealed class LayoutStyle
     /// </remarks>
     public string? AnimationName;
 
-    public AnimationTiming AnimationTiming = Obscura.Render.AnimationTiming.Default;
+    public AnimationTiming AnimationTiming
+    {
+        get => m_rare is null ? Obscura.Render.AnimationTiming.Default : m_rare.AnimationTiming;
+        set
+        {
+            if (m_rare is not null || value != Obscura.Render.AnimationTiming.Default)
+            {
+                Rare.AnimationTiming = value;
+            }
+        }
+    }
 
     /// <summary>
     /// True when the selected keyframes contain at least one property this renderer can sample.
@@ -1422,6 +2052,14 @@ public sealed class LayoutStyle
     /// </remarks>
     public VerticalAlign? VerticalAlign;
 
+    /// <summary><c>vertical-align</c> as an inline box reads it.</summary>
+    /// <remarks>
+    /// Kept apart from <see cref="VerticalAlign"/>, which is the table-cell reading and cannot
+    /// tell <c>top</c> from <c>text-top</c>. <c>null</c> means the property was never declared,
+    /// which is the initial <c>baseline</c>.
+    /// </remarks>
+    public InlineVerticalAlign? InlineVerticalAlign;
+
     /// <summary><c>z-index</c> on a positioned element.</summary>
     /// <remarks>
     /// <c>null</c> is <c>auto</c> (tree order). A non-zero value lifts the element's whole
@@ -1440,11 +2078,32 @@ public sealed class LayoutStyle
     /// Non-inherited CSS counter operations in computed declaration order. Reset operations run
     /// before increments on the same element.
     /// </summary>
-    public List<CounterDirective> CounterReset = [];
+    public IReadOnlyList<CounterDirective> CounterReset
+    {
+        get => m_counterReset ?? (IReadOnlyList<CounterDirective>)Array.Empty<CounterDirective>();
+        set => m_counterReset = value as List<CounterDirective> ?? [.. value];
+    }
 
-    public List<CounterDirective> CounterIncrement = [];
+    /// <summary>Reset <see cref="CounterReset"/> to empty, releasing its list.</summary>
+    public void ClearCounterReset() => m_counterReset = null;
 
-    public List<CounterDirective> CounterSet = [];
+    private List<CounterDirective>? m_counterReset;
+
+    public IReadOnlyList<CounterDirective> CounterIncrement
+    {
+        get => m_counterIncrement ?? (IReadOnlyList<CounterDirective>)Array.Empty<CounterDirective>();
+        set => m_counterIncrement = value as List<CounterDirective> ?? [.. value];
+    }
+
+    private List<CounterDirective>? m_counterIncrement;
+
+    public IReadOnlyList<CounterDirective> CounterSet
+    {
+        get => m_counterSet ?? (IReadOnlyList<CounterDirective>)Array.Empty<CounterDirective>();
+        set => m_counterSet = value as List<CounterDirective> ?? [.. value];
+    }
+
+    private List<CounterDirective>? m_counterSet;
 
     /// <summary>
     /// Resolved during the inheritance pass: true when this element should not be painted at
@@ -1632,13 +2291,32 @@ public sealed class LayoutStyle
     /// Percentages resolve against the leftover space after <c>object-fit</c>; the CSS initial
     /// value is centered on both axes.
     /// </remarks>
-    public ObjectPosition ObjectPosition = Obscura.Render.ObjectPosition.Default;
+    public ObjectPosition ObjectPosition
+    {
+        get => m_rare is null ? Obscura.Render.ObjectPosition.Default : m_rare.ObjectPosition;
+        set
+        {
+            if (m_rare is not null || value != Obscura.Render.ObjectPosition.Default)
+            {
+                Rare.ObjectPosition = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Ordered operations in the non-inherited <c>transform</c> property. Length percentages
     /// remain unresolved until the final border box is known.
     /// </summary>
-    public List<TransformOp> TransformOps = [];
+    public IReadOnlyList<TransformOp> TransformOps
+    {
+        get => m_transformOps ?? (IReadOnlyList<TransformOp>)Array.Empty<TransformOp>();
+        set => m_transformOps = value as List<TransformOp> ?? [.. value];
+    }
+
+    /// <summary>Reset <see cref="TransformOps"/> to empty, releasing its list.</summary>
+    public void ClearTransformOps() => m_transformOps = null;
+
+    private List<TransformOp>? m_transformOps;
 
     /// <summary>Transform value immediately below the Web Animations cascade origin.</summary>
     /// <remarks>
@@ -1653,9 +2331,24 @@ public sealed class LayoutStyle
     /// <c>transform:none</c> must not clear it. Functional values are retained separately until
     /// the final border box is known because percentages resolve against that box's own axes.
     /// </remarks>
-    public (Dimension X, Dimension Y)? IndividualTranslate;
+    public (Dimension X, Dimension Y)? IndividualTranslate
+    {
+        get => m_rare?.IndividualTranslate;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.IndividualTranslate = value;
+            }
+        }
+    }
 
-    public string?[] IndividualTranslateExpressions = new string?[2];
+    public ReadOnlySpan<string?> IndividualTranslateExpressions => m_individualTranslateExpressions ?? s_noStrings2;
+
+    /// <summary>Write one slot of <see cref="IndividualTranslateExpressions"/>, allocating only for a non-default value.</summary>
+    public void SetIndividualTranslateExpression(int index, string? value) => SetSlot(ref m_individualTranslateExpressions, 2, index, value);
+
+    private string?[]? m_individualTranslateExpressions;
 
     /// <summary>
     /// Individual CSS <c>rotate</c> property, in degrees. It composes after individual
@@ -1667,7 +2360,17 @@ public sealed class LayoutStyle
     /// Individual CSS <c>scale</c> property. Kept separate from <c>transform</c> so declaration
     /// order cannot accidentally overwrite either property.
     /// </summary>
-    public (float X, float Y)? IndividualScale;
+    public (float X, float Y)? IndividualScale
+    {
+        get => m_rare?.IndividualScale;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.IndividualScale = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Independent CSS-property triggers that establish containing blocks for absolute and
@@ -1680,7 +2383,17 @@ public sealed class LayoutStyle
     /// Authored <c>transform-origin</c>, unresolved so percentages use the final border-box
     /// dimensions. <c>null</c> is the CSS initial value, 50% 50%.
     /// </summary>
-    public (Dimension X, Dimension Y)? TransformOrigin;
+    public (Dimension X, Dimension Y)? TransformOrigin
+    {
+        get => m_rare?.TransformOrigin;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.TransformOrigin = value;
+            }
+        }
+    }
 
     /// <summary><c>box-shadow</c> (first layer only).</summary>
     /// <remarks>
@@ -1688,7 +2401,17 @@ public sealed class LayoutStyle
     /// modals across the modern web rely on it for depth, and without it those elements paint
     /// flat.
     /// </remarks>
-    public BoxShadow? BoxShadow;
+    public BoxShadow? BoxShadow
+    {
+        get => m_rare?.BoxShadow;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.BoxShadow = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Whether CSS box sizes compute normally but do not apply to this box's used geometry. The
@@ -1697,6 +2420,17 @@ public sealed class LayoutStyle
     /// </summary>
     internal bool IgnoresUsedBoxSizes() =>
         Display == Obscura.Render.Display.Inline && !IsInlineBlock && !IsReplacedBox;
+
+    /// <summary>
+    /// Whether the inline-size <paramref name="slot"/> (<c>0</c> width, <c>2</c> min-width,
+    /// <c>4</c> max-width) currently holds a neutralized cyclic percentage.
+    /// </summary>
+    internal bool HasDeferredCyclicInlineSize(int slot) =>
+        (DeferredCyclicInlineSlots & (1 << (slot >> 1))) != 0;
+
+    /// <summary>Record that the inline-size <paramref name="slot"/> was neutralized.</summary>
+    internal void MarkDeferredCyclicInlineSize(int slot) =>
+        DeferredCyclicInlineSlots |= (byte)(1 << (slot >> 1));
 
     internal bool EstablishesPositioningContainingBlock() => ContainingBlockTriggers != 0;
 
@@ -1719,16 +2453,17 @@ public sealed class LayoutStyle
     public LayoutStyle Clone()
     {
         LayoutStyle copy = (LayoutStyle)MemberwiseClone();
-        copy.ContainerNames = [.. ContainerNames];
-        copy.SizeExpressions = (string?[])SizeExpressions.Clone();
-        copy.MarginAuto = (bool[])MarginAuto.Clone();
-        copy.MarginPercent = (float?[])MarginPercent.Clone();
-        copy.MarginRelative = (Dimension?[])MarginRelative.Clone();
-        copy.MarginExpressions = (string?[])MarginExpressions.Clone();
-        copy.PaddingPercent = (float?[])PaddingPercent.Clone();
-        copy.PaddingRelative = (Dimension?[])PaddingRelative.Clone();
-        copy.PaddingExpressions = (string?[])PaddingExpressions.Clone();
-        copy.BorderCascadeOps = [.. BorderCascadeOps];
+        copy.m_rare = m_rare?.Clone();
+        copy.m_containerNames = m_containerNames is null ? null : [.. m_containerNames];
+        copy.m_sizeExpressions = (string?[]?)m_sizeExpressions?.Clone();
+        copy.m_marginAuto = (bool[]?)m_marginAuto?.Clone();
+        copy.m_marginPercent = (float?[]?)m_marginPercent?.Clone();
+        copy.m_marginRelative = (Dimension?[]?)m_marginRelative?.Clone();
+        copy.m_marginExpressions = (string?[]?)m_marginExpressions?.Clone();
+        copy.m_paddingPercent = (float?[]?)m_paddingPercent?.Clone();
+        copy.m_paddingRelative = (Dimension?[]?)m_paddingRelative?.Clone();
+        copy.m_paddingExpressions = (string?[]?)m_paddingExpressions?.Clone();
+        copy.m_borderCascadeOps = m_borderCascadeOps is null ? null : [.. m_borderCascadeOps];
         copy.ClipPath = ClipPath?.Clone();
 
         // Null-guarded rather than unconditional: almost nothing carries a filter, and this
@@ -1747,16 +2482,24 @@ public sealed class LayoutStyle
         copy.BackgroundConicGradient = BackgroundConicGradient is { } conic
             ? (conic.Angle, conic.Center, [.. conic.Stops])
             : null;
-        copy.BackgroundGradientLayers = [.. BackgroundGradientLayers.Select(static l => l.DeepClone())];
-        copy.BackgroundGradientLayerRadialGeometries = [.. BackgroundGradientLayerRadialGeometries];
+        copy.m_backgroundGradientLayers = m_backgroundGradientLayers is null
+            ? null
+            : [.. m_backgroundGradientLayers.Select(static l => l.DeepClone())];
+        copy.m_backgroundGradientLayerRadialGeometries = m_backgroundGradientLayerRadialGeometries is null
+            ? null
+            : [.. m_backgroundGradientLayerRadialGeometries];
         copy.FontVariationSettings = FontVariationSettings is null ? null : [.. FontVariationSettings];
-        copy.GridTemplateColumns = [.. GridTemplateColumns.Select(static c => c.Clone())];
-        copy.GridTemplateRows = [.. GridTemplateRows.Select(static c => c.Clone())];
+        copy.m_gridTemplateColumns = m_gridTemplateColumns is null
+            ? null
+            : [.. m_gridTemplateColumns.Select(static c => c.Clone())];
+        copy.m_gridTemplateRows = m_gridTemplateRows is null
+            ? null
+            : [.. m_gridTemplateRows.Select(static c => c.Clone())];
         copy.GridCalcExpressions = GridCalcExpressions is null
             ? null
             : [.. GridCalcExpressions.Select(static bucket => new List<object>(bucket))];
-        copy.GridAutoColumns = [.. GridAutoColumns];
-        copy.GridAutoRows = [.. GridAutoRows];
+        copy.m_gridAutoColumns = m_gridAutoColumns is null ? null : [.. m_gridAutoColumns];
+        copy.m_gridAutoRows = m_gridAutoRows is null ? null : [.. m_gridAutoRows];
         copy.GridAreas = GridAreas is null ? null : [.. GridAreas.Select(static row => new List<string>(row))];
         copy.GridColLineNames = GridColLineNames is null
             ? null
@@ -1764,21 +2507,21 @@ public sealed class LayoutStyle
         copy.GridRowLineNames = GridRowLineNames is null
             ? null
             : new Dictionary<string, short>(GridRowLineNames, StringComparer.Ordinal);
-        copy.Inset = (Dimension?[])Inset.Clone();
-        copy.InsetExpressions = (string?[])InsetExpressions.Clone();
+        copy.m_inset = (Dimension?[]?)m_inset?.Clone();
+        copy.m_insetExpressions = (string?[]?)m_insetExpressions?.Clone();
         copy.InsetCalc = InsetCalc is null ? null : (GridCalcExpression?[])InsetCalc.Clone();
         copy.SizeCalc = SizeCalc is null ? null : (GridCalcExpression?[])SizeCalc.Clone();
-        copy.CounterReset = [.. CounterReset];
-        copy.CounterIncrement = [.. CounterIncrement];
-        copy.CounterSet = [.. CounterSet];
+        copy.m_counterReset = m_counterReset is null ? null : [.. m_counterReset];
+        copy.m_counterIncrement = m_counterIncrement is null ? null : [.. m_counterIncrement];
+        copy.m_counterSet = m_counterSet is null ? null : [.. m_counterSet];
         copy.GeneratedContent = GeneratedContent is null ? null : [.. GeneratedContent];
         copy.BeforePseudo = BeforePseudo?.Clone();
         copy.AfterPseudo = AfterPseudo?.Clone();
         copy.PlaceholderPseudo = PlaceholderPseudo?.Clone();
         copy.SliderThumbPseudo = SliderThumbPseudo?.Clone();
-        copy.TransformOps = [.. TransformOps];
+        copy.m_transformOps = m_transformOps is null ? null : [.. m_transformOps];
         copy.WaapiSampleState = WaapiSampleState?.Clone();
-        copy.IndividualTranslateExpressions = (string?[])IndividualTranslateExpressions.Clone();
+        copy.m_individualTranslateExpressions = (string?[]?)m_individualTranslateExpressions?.Clone();
         return copy;
     }
 }

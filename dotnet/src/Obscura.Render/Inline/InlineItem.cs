@@ -24,7 +24,8 @@ internal readonly record struct InlineOwnerBox(
     InlineEdge StartEdge,
     InlineEdge EndEdge,
     int StartEvent,
-    int EndEvent);
+    int EndEvent,
+    InlineBoxExtent Extent);
 
 internal readonly record struct InlineBoundaryEvent(
     NodeId Owner,
@@ -312,13 +313,21 @@ internal static class InlineGeometry
     {
         List<int> starts = new(buffer.Lines.Count);
         int offset = 0;
+        bool afterBreak = false;
         foreach (BufferLine line in buffer.Lines)
         {
-            while (offset < source.Length && source[offset] == '\n')
+            // Exactly one newline separates two buffer lines, and none precedes the first.
+            // DEVIATION from crates/obscura-render/src/inline.rs, which had no equivalent
+            // mapping at all; the C# version skipped a *run* of newlines before *every* line,
+            // so `<div><br>x</div>` put line 0 at offset 1 instead of 0 and `a\n\nb` put the
+            // empty line at 3 instead of 2. Nothing read those offsets until `<br>` started
+            // reporting a rect, which is what exposed it.
+            if (afterBreak && offset < source.Length && source[offset] == '\n')
             {
                 offset++;
             }
 
+            afterBreak = true;
             string text = line.Text;
             int start;
             if (offset <= source.Length && source.AsSpan(offset).StartsWith(text, StringComparison.Ordinal))

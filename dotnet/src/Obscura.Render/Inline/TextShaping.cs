@@ -20,8 +20,6 @@ public struct ShapeGlyph
     public float YAdvance;
     public float XOffset;
     public float YOffset;
-    public float Ascent;
-    public float Descent;
     public FontId FontId;
     public ushort GlyphId;
     public bool FontIsVariable;
@@ -31,7 +29,7 @@ public struct ShapeGlyph
     public RgbaColor? Color;
     public ulong Metadata;
     public bool FakeItalic;
-    public (float FontSize, float LineHeight)? Metrics;
+    public TextMetrics? Metrics;
 
     /// <summary>Width at the given font size, honoring a per-span metrics override.</summary>
     public readonly float Width(float fontSize) => (Metrics?.FontSize ?? fontSize) * XAdvance;
@@ -190,7 +188,7 @@ public sealed class ShapeLine
 {
     public bool Rtl;
     public List<ShapeSpan> Spans = [];
-    public (float FontSize, float LineHeight)? Metrics;
+    public TextMetrics? Metrics;
 }
 
 /// <summary>
@@ -211,8 +209,32 @@ public sealed class TextShaper(FontDatabase database)
 
     public FontDatabase Database => _database;
 
+    /// <summary>
+    /// Shaped paragraphs carried over from an earlier pass built on the same font set, or null
+    /// when this shaper starts cold. See <see cref="ShapeCache"/> for why reuse is sound.
+    /// </summary>
+    internal ShapeCache? Cache { get; set; }
+
     /// <summary>Shape one paragraph into spans and words.</summary>
     public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth)
+    {
+        if (Cache is { } cache)
+        {
+            ShapeCacheKey key = new(line, attrsList, tabWidth);
+            if (cache.TryGet(key, out ShapeLine cached))
+            {
+                return cached;
+            }
+
+            ShapeLine fresh = ShapeParagraphUncached(line, attrsList, tabWidth);
+            cache.Add(key, fresh);
+            return fresh;
+        }
+
+        return ShapeParagraphUncached(line, attrsList, tabWidth);
+    }
+
+    private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth)
     {
         var result = new ShapeLine();
         List<(int Start, int End, byte Level)> runs = Bidi.LevelRuns(line, out bool rtl);
@@ -627,8 +649,6 @@ public sealed class TextShaper(FontDatabase database)
         HbFont hbFont = font.HarfBuzzFontFor(shapingVariations);
 
         float fontScale = font.UnitsPerEm;
-        float ascent = font.Metrics.Ascent / fontScale;
-        float descent = font.Metrics.Descent / fontScale;
 
         using var buffer = new HbBuffer();
         buffer.Direction = spanRtl ? Direction.RightToLeft : Direction.LeftToRight;
@@ -678,8 +698,6 @@ public sealed class TextShaper(FontDatabase database)
                 YAdvance = position.YAdvance / fontScale,
                 XOffset = position.XOffset / fontScale,
                 YOffset = position.YOffset / fontScale,
-                Ascent = ascent,
-                Descent = descent,
                 FontId = font.Id,
                 GlyphId = (ushort)info.Codepoint,
                 FontIsVariable = font.IsVariable,

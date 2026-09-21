@@ -397,6 +397,20 @@ public static partial class RenderDom
             }
         }
 
+        // An anonymous table box has no DOM node of its own, so its style comes from the
+        // registry rather than from `styles`, and every query below that is about the box
+        // (its width, its box-sizing, its border-spacing) has to read that one instead.
+        HashSet<NodeId> anonymousOwners = [];
+        foreach ((_, (NodeId owner, _)) in ifcItems.AnonymousTables)
+        {
+            anonymousOwners.Add(owner);
+        }
+
+        LayoutStyle? TableStyleOf(TaffyNodeId node, NodeId dom) =>
+            ifcItems.AnonymousTables.TryGetValue(node, out (NodeId Owner, LayoutStyle Style) anon)
+                ? anon.Style
+                : styles.TryGetValue(dom, out LayoutStyle? declared) ? declared : null;
+
         Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
         List<(TaffyNodeId Taffy, NodeId Dom, int Depth)> tables = [];
         HashSet<TaffyNodeId> tableNodes = [];
@@ -405,9 +419,26 @@ public static partial class RenderDom
             taffyByDom[domId] = taffyId;
             if (ifcItems.TableRows.ContainsKey(taffyId))
             {
-                tables.Add((taffyId, domId, DomTableSupport.TableAncestorDepth(tree, domId, styles)));
+                tables.Add((
+                    taffyId,
+                    domId,
+                    DomTableSupport.TableAncestorDepth(tree, domId, styles, anonymousOwners)));
                 tableNodes.Add(taffyId);
             }
+        }
+
+        foreach ((TaffyNodeId taffyId, (NodeId owner, _)) in ifcItems.AnonymousTables)
+        {
+            if (!ifcItems.TableRows.ContainsKey(taffyId))
+            {
+                continue;
+            }
+
+            tables.Add((
+                taffyId,
+                owner,
+                DomTableSupport.TableAncestorDepth(tree, owner, styles, anonymousOwners)));
+            tableNodes.Add(taffyId);
         }
 
         if (tables.Count == 0)
@@ -431,20 +462,27 @@ public static partial class RenderDom
                 tables.GetRange(tableIndex, groupEnd - tableIndex);
             Dictionary<TaffyNodeId, float> availableWidths = [];
             bool needsLayoutSnapshot = false;
-            foreach ((_, NodeId dom, _) in group)
-            {
-                if (!styles.TryGetValue(dom, out LayoutStyle? style))
-                {
-                    continue;
-                }
 
-                bool autoNeedsLayout = style.Width.IsAuto
+            // A percentage whose base cannot be established from style alone - a flex or grid
+            // parent, where the base is the container but flex-shrink then has its say; an
+            // absolutely positioned table; a wrapper that is itself a float or an inline-block -
+            // is left for taffy to resolve, and the snapshot reports what it made of it.
+            // An anonymous table's containing block is the element that generated it, not that
+            // element's own containing block, so the style chain cannot report the space it has;
+            // it always takes the snapshot.
+            bool WantsSnapshot(TaffyNodeId node, NodeId dom, LayoutStyle style) =>
+                ifcItems.AnonymousTables.ContainsKey(node)
+                || (style.Width.IsAuto
                     && (depth > 0
                         || DomTableSupport.ReliableTableAvailableWidth(
-                            tree, dom, styles, initialCbWidth) is null);
-                bool fixedPercentNeedsLayout = style.TableLayoutFixed
-                    && style.Width.Kind == DimensionKind.Percent;
-                if (autoNeedsLayout || fixedPercentNeedsLayout)
+                            tree, dom, styles, initialCbWidth) is null))
+                || (style.Width.Kind == DimensionKind.Percent
+                    && DomTableSupport.ReliableTablePercentageBase(
+                        tree, dom, styles, initialCbWidth) is null);
+
+            foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
+            {
+                if (TableStyleOf(tnode, dom) is { } style && WantsSnapshot(tnode, dom, style))
                 {
                     needsLayoutSnapshot = true;
                     break;
@@ -458,12 +496,10 @@ public static partial class RenderDom
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, measure);
                 foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
                 {
-                    if (styles.TryGetValue(dom, out LayoutStyle? style)
-                        && (style.Width.IsAuto
-                            || (style.TableLayoutFixed
-                                && style.Width.Kind == DimensionKind.Percent)))
+                    if (TableStyleOf(tnode, dom) is { } style && WantsSnapshot(tnode, dom, style))
                     {
-                        availableWidths[tnode] = F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f);
+                        availableWidths[tnode] =
+                            F32.Max(taffyTree.GetUnroundedLayout(tnode).Size.Width, 0f);
                     }
                 }
             }
@@ -480,7 +516,7 @@ public static partial class RenderDom
 
             foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
             {
-                if (!styles.TryGetValue(dom, out LayoutStyle? tableStyle))
+                if (TableStyleOf(tnode, dom) is not { } tableStyle)
                 {
                     continue;
                 }
@@ -494,23 +530,35 @@ public static partial class RenderDom
                     }
 
                     float inlineOuterEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
+                    float declarationEdgesFixed =
+                        DomStyleFixups.TableWidthDeclarationEdges(tableStyle);
                     (float horizontalSpacing, _) = DomStyleFixups.TableSpacing(tableStyle);
                     float usedOuterFixed;
                     switch (tableStyle.Width.Kind)
                     {
                         case DimensionKind.Px when tableStyle.BoxSizing == BoxSizing.ContentBox:
-                            // Border spacing lives inside a CSS table's content box.
+                            // Border spacing lives inside a CSS table's content box, and only the
+                            // outer half of a collapsed border is outside it.
                             usedOuterFixed = F32.Max(tableStyle.Width.Value, 0f)
-                                + F32.Max(inlineOuterEdges - (horizontalSpacing * 2f), 0f);
+                                + declarationEdgesFixed;
                             break;
                         case DimensionKind.Px:
                             usedOuterFixed = F32.Max(tableStyle.Width.Value, 0f);
                             break;
+                        case DimensionKind.Percent
+                            when DomTableSupport.ReliableTablePercentageBase(
+                                tree, dom, styles, initialCbWidth) is { } percentBasis:
+                            // Taffy resolves a float's percentage against the width the float
+                            // shrank to, so a floated `table-layout: fixed; width: 100%` came out
+                            // at 0. Resolve it against the containing block where that is known.
+                            usedOuterFixed = tableStyle.BoxSizing == BoxSizing.ContentBox
+                                ? (percentBasis * tableStyle.Width.Value) + declarationEdgesFixed
+                                : percentBasis * tableStyle.Width.Value;
+                            break;
                         case DimensionKind.Percent:
                             usedOuterFixed = availableWidths.TryGetValue(tnode, out float measured)
                                 ? measured
-                                : DomTableSupport.ReliableTableAvailableWidth(
-                                    tree, dom, styles, initialCbWidth) ?? initialCbWidth;
+                                : initialCbWidth;
                             break;
                         default:
                             continue;
@@ -543,10 +591,40 @@ public static partial class RenderDom
 
                 // A percentage-width table resolves against its container, so leave taffy's
                 // percentage handling in place.
-                Dimension widthStyle = deferredPercentWidths.TryGetValue(dom, out float authored)
-                    ? Dimension.Percent(authored)
-                    : tableStyle.Width;
+                Dimension widthStyle =
+                    !ifcItems.AnonymousTables.ContainsKey(tnode)
+                    && deferredPercentWidths.TryGetValue(dom, out float authored)
+                        ? Dimension.Percent(authored)
+                        : tableStyle.Width;
+                // A percentage table needs a definite used width here, or the tracks stay `auto`
+                // and the grid fills the table by growing them *equally*: a 600px `width: 100%`
+                // table of `alpha` / `beta gamma delta` came out 261/339 where Chromium, which
+                // distributes what a column does not claim in proportion to max-content, gives
+                // 141/459. Two ways to get one, in this order:
+                //  - the base the percentage resolves against, when style alone establishes it
+                //    (`ReliableTablePercentageBase`); this also covers a float and an
+                //    inline-block, whose percentage taffy otherwise resolves against the width
+                //    they shrank to - a floated `width: 100%` table came out at max-content;
+                //  - otherwise the width taffy already resolved for the table, from the layout
+                //    snapshot above. That is the used width, not the base, and it is what a flex
+                //    or grid parent needs: `width: 150%` in a 600px flex row is 600 in Chromium,
+                //    not 900, because the item is flex-shrunk back.
+                float? percentBase = null;
+                float? percentUsedOuter = null;
                 if (widthStyle.Kind == DimensionKind.Percent)
+                {
+                    percentBase = DomTableSupport.ReliableTablePercentageBase(
+                        tree, dom, styles, initialCbWidth);
+                    if (percentBase is null
+                        && availableWidths.TryGetValue(tnode, out float percentSnapshot))
+                    {
+                        percentUsedOuter = percentSnapshot;
+                    }
+                }
+
+                if (widthStyle.Kind == DimensionKind.Percent
+                    && percentBase is null
+                    && percentUsedOuter is null)
                 {
                     // Deviation from crates/obscura-render/src/dom.rs, which stops here. CSS 2.1
                     // 17.5.2 makes a table's used width the greater of its specified width and
@@ -560,7 +638,7 @@ public static partial class RenderDom
                             TaffyAvailableSpace.MaxContent),
                         measure);
                     float percentMin = F32.Max(
-                        F32.Max(taffyTree.GetLayout(tnode).Size.Width, 0f),
+                        F32.Max(taffyTree.GetUnroundedLayout(tnode).Size.Width, 0f),
                         DomTableSupport.MaxDefiniteTableContentWidth(tree, dom, styles) ?? 0f);
                     if (tableStyle.BoxSizing == BoxSizing.ContentBox)
                     {
@@ -581,13 +659,24 @@ public static partial class RenderDom
                     continue;
                 }
 
+                // A caption spans every column, so taffy would grow the tracks to its
+                // max-content. Chromium 141 does the opposite - it wraps a caption three times
+                // the table's width rather than widening the table - and floors the table only
+                // by the caption's *min-content*. Taking the captions out of track sizing for
+                // the two intrinsic measurements is what separates the two.
+                List<TaffyNodeId> measuredCaptions = SuspendCaptions(taffyTree, ifcItems, tnode);
                 taffyTree.ComputeLayoutWithMeasure(
                     tnode,
                     new Layout.Size<TaffyAvailableSpace>(
                         TaffyAvailableSpace.MinContent,
                         TaffyAvailableSpace.MaxContent),
                     measure);
-                float minC = taffyTree.GetLayout(tnode).Size.Width;
+                // Intrinsic widths are read unrounded. Taffy rounds a final layout to whole
+                // pixels, and a collapsing border puts half a pixel on a cell edge, so the
+                // rounded table total and the rounded per-cell totals disagreed by up to a
+                // pixel - which read as the columns not fitting their own max-content, and a
+                // `border: 5px; border-collapse: collapse` auto table wrapped every cell.
+                float minC = taffyTree.GetUnroundedLayout(tnode).Size.Width;
 
                 // A table can never be narrower than an unshrinkable fixed-width descendant.
                 minC = F32.Max(
@@ -600,24 +689,59 @@ public static partial class RenderDom
                         TaffyAvailableSpace.MaxContent,
                         TaffyAvailableSpace.MaxContent),
                     measure);
-                float maxC = taffyTree.GetLayout(tnode).Size.Width;
+                float maxC = taffyTree.GetUnroundedLayout(tnode).Size.Width;
+                foreach (TaffyNodeId caption in measuredCaptions)
+                {
+                    taffyTree.ComputeLayoutWithMeasure(
+                        caption,
+                        new Layout.Size<TaffyAvailableSpace>(
+                            TaffyAvailableSpace.MinContent,
+                            TaffyAvailableSpace.MaxContent),
+                        measure);
+                    minC = F32.Max(minC, taffyTree.GetUnroundedLayout(caption).Size.Width);
+                }
+
+                RestoreCaptions(taffyTree, measuredCaptions);
 
                 float inlineEdges = DomStyleFixups.TableInlineOuterEdges(tableStyle);
+                float declarationEdges = DomStyleFixups.TableWidthDeclarationEdges(tableStyle);
+                float availableOuter = percentBase
+                    ?? (availableWidths.TryGetValue(tnode, out float snapshot)
+                        ? snapshot
+                        : DomTableSupport.ReliableTableAvailableWidth(
+                            tree, dom, styles, initialCbWidth)
+                            ?? initialCbWidth);
+
+                // A snapshot is already a used border-box width, so no box-sizing arithmetic.
+                float percentOuter = percentUsedOuter
+                    ?? ((widthStyle.Value * (percentBase ?? 0f))
+                        + (tableStyle.BoxSizing == BoxSizing.ContentBox ? declarationEdges : 0f));
                 float preferredOuter = widthStyle.Kind switch
                 {
                     DimensionKind.Px when tableStyle.BoxSizing == BoxSizing.ContentBox =>
-                        widthStyle.Value + inlineEdges,
+                        widthStyle.Value + declarationEdges,
                     DimensionKind.Px => widthStyle.Value,
+                    DimensionKind.Percent => percentOuter,
                     _ => maxC,
                 };
-                float availableOuter = availableWidths.TryGetValue(tnode, out float snapshot)
-                    ? snapshot
-                    : DomTableSupport.ReliableTableAvailableWidth(tree, dom, styles, initialCbWidth)
-                        ?? initialCbWidth;
-                float usedOuter = widthStyle.Kind == DimensionKind.Px
-                    // A definite table width is not clamped to its containing block.
+                // A table box is a grid or flex item like any other, so an `auto` width that its
+                // parent stretches fills the item area instead of shrinking to fit: Chromium 141
+                // makes an auto table in a 600px `display: grid` block 600 wide where this used
+                // to leave it at its 147.5 max-content.
+                bool stretchesToItemArea =
+                    !ifcItems.AnonymousTables.ContainsKey(tnode)
+                    && widthStyle.IsAuto
+                    && DomStyleFixups.StretchesInlineToItsItemArea(tree, dom, tableStyle, styles);
+                float usedOuter = widthStyle.Kind is DimensionKind.Px or DimensionKind.Percent
+                    // A definite table width is not clamped to its containing block, and a
+                    // percentage that resolves narrower than the content overflows it rather
+                    // than wrapping every cell (CSS 2.1 17.5.2).
                     ? F32.Max(preferredOuter, minC)
-                    : F32.Min(F32.Max(preferredOuter, minC), F32.Max(availableOuter, minC));
+                    : stretchesToItemArea
+                        ? F32.Max(
+                            ClampToInlineSizeLimits(tableStyle, availableOuter, availableOuter),
+                            minC)
+                        : F32.Min(F32.Max(preferredOuter, minC), F32.Max(availableOuter, minC));
                 float usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
                     ? F32.Max(usedOuter - inlineEdges, 0f)
                     : usedOuter;
@@ -627,6 +751,14 @@ public static partial class RenderDom
                 List<(TaffyNodeId Cell, int Column, int Span)> cells = [];
                 foreach (TaffyNodeId cell in taffyTree.Children(tnode))
                 {
+                    // A caption spans every column but sizes none of them: Chromium 141 leaves
+                    // an auto table at its cells' 67.31 and wraps a caption whose max-content is
+                    // three times that.
+                    if (ifcItems.TableCaptions.ContainsKey(cell))
+                    {
+                        continue;
+                    }
+
                     TaffyStyle cellStyle = taffyTree.GetStyle(cell);
                     if (cellStyle.GridColumn.Start.Kind != TaffyGridPlacementKind.Line)
                     {
@@ -654,14 +786,14 @@ public static partial class RenderDom
                                 TaffyAvailableSpace.MinContent,
                                 TaffyAvailableSpace.MaxContent),
                             measure);
-                        float cmin = taffyTree.GetLayout(cell).Size.Width;
+                        float cmin = taffyTree.GetUnroundedLayout(cell).Size.Width;
                         taffyTree.ComputeLayoutWithMeasure(
                             cell,
                             new Layout.Size<TaffyAvailableSpace>(
                                 TaffyAvailableSpace.MaxContent,
                                 TaffyAvailableSpace.MaxContent),
                             measure);
-                        float cmax = taffyTree.GetLayout(cell).Size.Width;
+                        float cmax = taffyTree.GetUnroundedLayout(cell).Size.Width;
                         measured.Add((col, span, cmin, F32.Max(cmax, cmin)));
                     }
 
@@ -759,8 +891,43 @@ public static partial class RenderDom
                         float percentageFloor = DomTableSupport.AutoTablePercentageIntrinsicFloor(
                             colMin, percentages);
                         float percentageOuter = percentageFloor + inlineEdges + interiorSpacing;
+
+                        // The clamp is the shrink-to-fit limit of an `auto` table, so it must not
+                        // pull a percentage table back to its containing block: Chromium 141
+                        // gives `width: 150%` in a 600px block a 900px table, not a 600px one.
                         usedOuter = F32.Min(
                             F32.Max(usedOuter, percentageOuter),
+                            F32.Max(F32.Max(availableOuter, minC), usedOuter));
+                        usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
+                            ? F32.Max(usedOuter - inlineEdges, 0f)
+                            : usedOuter;
+                    }
+
+                    // CSS 2.1 17.5.2.2: an `auto` table is only as wide as it needs to be, but
+                    // it does have to be wide enough that each percentage column's share covers
+                    // that column's *max-content*. Chromium 141 makes an auto table holding a
+                    // `width: 30%` cell 161.2 of columns (48.36 / 112.84), because the auto
+                    // column's 112.84 has to fit in the 70% it is left with; the min-content
+                    // floor above only asked for 47.09 there, so the table stayed at its
+                    // max-content 147.5 and the percentage took 30% of that. A definite width is
+                    // not widened this way - Chromium keeps a `width: 120px` table holding a 30%
+                    // cell at 120 - so this arm is `auto` only.
+                    bool anyPercentageColumn = false;
+                    foreach (float? declared in percentages)
+                    {
+                        if (declared is not null)
+                        {
+                            anyPercentageColumn = true;
+                            break;
+                        }
+                    }
+
+                    if (anyPercentageColumn && widthStyle.IsAuto)
+                    {
+                        float preferredFloor =
+                            DomTableSupport.AutoTablePercentageIntrinsicFloor(colMax, percentages);
+                        usedOuter = F32.Min(
+                            F32.Max(usedOuter, preferredFloor + inlineEdges + interiorSpacing),
                             F32.Max(availableOuter, minC));
                         usedDeclaration = tableStyle.BoxSizing == BoxSizing.ContentBox
                             ? F32.Max(usedOuter - inlineEdges, 0f)
@@ -790,5 +957,74 @@ public static partial class RenderDom
             DomSubgridPasses.ExitTypedPercentageScope(taffyTree, typedPercentages);
             tableIndex = groupEnd;
         }
+    }
+
+    /// <summary>
+    /// Take a table's captions out of its grid's track sizing by positioning them absolutely,
+    /// and answer the ones that were moved so <see cref="RestoreCaptions"/> can put them back.
+    /// </summary>
+    private static List<TaffyNodeId> SuspendCaptions(
+        TaffyTree taffyTree,
+        IfcRegistry ifcItems,
+        TaffyNodeId tableNode)
+    {
+        List<TaffyNodeId> suspended = [];
+        if (ifcItems.TableCaptions.Count == 0)
+        {
+            return suspended;
+        }
+
+        foreach (TaffyNodeId child in taffyTree.Children(tableNode))
+        {
+            if (!ifcItems.TableCaptions.ContainsKey(child))
+            {
+                continue;
+            }
+
+            TaffyStyle captionStyle = taffyTree.GetStyle(child).Clone();
+            captionStyle.Position = Layout.Position.Absolute;
+            taffyTree.SetStyle(child, captionStyle);
+            suspended.Add(child);
+        }
+
+        return suspended;
+    }
+
+    private static void RestoreCaptions(TaffyTree taffyTree, IReadOnlyList<TaffyNodeId> suspended)
+    {
+        foreach (TaffyNodeId caption in suspended)
+        {
+            TaffyStyle captionStyle = taffyTree.GetStyle(caption).Clone();
+            captionStyle.Position = Layout.Position.Relative;
+            taffyTree.SetStyle(caption, captionStyle);
+        }
+    }
+
+    /// <summary>
+    /// Clamp a stretched inline size by the box's own <c>min-width</c> / <c>max-width</c>.
+    /// A stretch is a used size, so unlike a shrink-to-fit it is not already inside them:
+    /// Chromium 141 gives a `max-width: 200px` table in a 600px grid 200, not 600.
+    /// </summary>
+    private static float ClampToInlineSizeLimits(LayoutStyle style, float value, float percentBase)
+    {
+        static float? Resolve(Dimension dimension, float percentBase) => dimension.Kind switch
+        {
+            DimensionKind.Px => dimension.Value,
+            DimensionKind.Percent => dimension.Value * percentBase,
+            _ => null,
+        };
+
+        float clamped = value;
+        if (Resolve(style.MaxWidth, percentBase) is { } maximum && maximum >= 0f)
+        {
+            clamped = F32.Min(clamped, maximum);
+        }
+
+        if (Resolve(style.MinWidth, percentBase) is { } minimum && minimum >= 0f)
+        {
+            clamped = F32.Max(clamped, minimum);
+        }
+
+        return clamped;
     }
 }

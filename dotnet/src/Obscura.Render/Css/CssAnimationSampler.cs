@@ -60,7 +60,7 @@ internal enum AnimationPhase
 /// </summary>
 public sealed class ResampledVisualWaapi
 {
-    public required List<TransformOp> TransformOps { get; init; }
+    public required IReadOnlyList<TransformOp> TransformOps { get; init; }
 
     public required float? Opacity { get; init; }
 
@@ -318,8 +318,8 @@ public static class CssAnimationSampler
                 break;
             case AnimatedProperty.Translate when value is AnimationValue.Translate translate:
                 style.IndividualTranslate = (translate.X.Value, translate.Y.Value);
-                style.IndividualTranslateExpressions[0] = translate.X.Expression;
-                style.IndividualTranslateExpressions[1] = translate.Y.Expression;
+                style.SetIndividualTranslateExpression(0, translate.X.Expression);
+                style.SetIndividualTranslateExpression(1, translate.Y.Expression);
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Translate, true);
                 break;
             case AnimatedProperty.Rotate when value is AnimationValue.Rotate rotate:
@@ -545,7 +545,7 @@ public static class CssAnimationSampler
             AnimatedLength.ExpressionLength text => (Dimension.Auto, text.Value),
             _ => (Dimension.Auto, null),
         };
-        style.SizeExpressions[index] = expression;
+        style.SetSizeExpression(index, expression);
         switch (property)
         {
             case AnimatedProperty.Width:
@@ -582,55 +582,55 @@ public static class CssAnimationSampler
         switch (value)
         {
             case AnimatedLength.AutoLength:
-                style.Inset[index] = null;
-                style.InsetExpressions[index] = null;
+                style.SetInset(index, null);
+                style.SetInsetExpression(index, null);
                 break;
             case AnimatedLength.DimensionLength dimension:
-                style.Inset[index] = dimension.Value;
-                style.InsetExpressions[index] = null;
+                style.SetInset(index, dimension.Value);
+                style.SetInsetExpression(index, null);
                 break;
             case AnimatedLength.ExpressionLength expression:
-                style.Inset[index] = null;
-                style.InsetExpressions[index] = expression.Value;
+                style.SetInset(index, null);
+                style.SetInsetExpression(index, expression.Value);
                 break;
         }
     }
 
     private static void SetMarginAnimationValue(LayoutStyle style, int index, AnimatedLength value)
     {
-        style.MarginAuto[index] = false;
-        style.MarginPercent[index] = null;
-        style.MarginRelative[index] = null;
-        style.MarginExpressions[index] = null;
+        style.SetMarginAuto(index, false);
+        style.SetMarginPercent(index, null);
+        style.SetMarginRelative(index, null);
+        style.SetMarginExpression(index, null);
         style.Margin = SetEdge(style.Margin, index, 0f);
         switch (value)
         {
             case AnimatedLength.AutoLength:
-                style.MarginAuto[index] = true;
+                style.SetMarginAuto(index, true);
                 break;
             case AnimatedLength.DimensionLength { Value.Kind: DimensionKind.Px } pixels:
                 style.Margin = SetEdge(style.Margin, index, pixels.Value.Value);
                 break;
             case AnimatedLength.DimensionLength { Value.Kind: DimensionKind.Percent } percent:
-                style.MarginPercent[index] = percent.Value.Value;
+                style.SetMarginPercent(index, percent.Value.Value);
                 break;
             case AnimatedLength.DimensionLength { Value.Kind: DimensionKind.Auto }:
-                style.MarginAuto[index] = true;
+                style.SetMarginAuto(index, true);
                 break;
             case AnimatedLength.DimensionLength relative:
-                style.MarginRelative[index] = relative.Value;
+                style.SetMarginRelative(index, relative.Value);
                 break;
             case AnimatedLength.ExpressionLength expression:
-                style.MarginExpressions[index] = expression.Value;
+                style.SetMarginExpression(index, expression.Value);
                 break;
         }
     }
 
     private static void SetPaddingAnimationValue(LayoutStyle style, int index, AnimatedLength value)
     {
-        style.PaddingPercent[index] = null;
-        style.PaddingRelative[index] = null;
-        style.PaddingExpressions[index] = null;
+        style.SetPaddingPercent(index, null);
+        style.SetPaddingRelative(index, null);
+        style.SetPaddingExpression(index, null);
         style.Padding = SetEdge(style.Padding, index, 0f);
         switch (value)
         {
@@ -641,13 +641,13 @@ public static class CssAnimationSampler
                 style.Padding = SetEdge(style.Padding, index, pixels.Value.Value);
                 break;
             case AnimatedLength.DimensionLength { Value.Kind: DimensionKind.Percent } percent:
-                style.PaddingPercent[index] = percent.Value.Value;
+                style.SetPaddingPercent(index, percent.Value.Value);
                 break;
             case AnimatedLength.DimensionLength relative:
-                style.PaddingRelative[index] = relative.Value;
+                style.SetPaddingRelative(index, relative.Value);
                 break;
             case AnimatedLength.ExpressionLength expression:
-                style.PaddingExpressions[index] = expression.Value;
+                style.SetPaddingExpression(index, expression.Value);
                 break;
         }
     }
@@ -1091,7 +1091,7 @@ public static class CssAnimationSampler
 
                 var endpoint = underlying.Clone();
                 ComputedStyle.ApplyAnimationPropertyValue(endpoint, "transform", text);
-                transformTrack.Add((frame.Offset, endpoint.TransformOps));
+                transformTrack.Add((frame.Offset, [.. endpoint.TransformOps]));
             }
 
             if (CssKeyframes.TrySampleWaapiTrack(

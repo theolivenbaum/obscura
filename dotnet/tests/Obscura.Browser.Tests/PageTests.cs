@@ -19,6 +19,54 @@ public sealed class PageTests
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// Bounds a wait that is expected to finish in milliseconds. It is a hang guard,
+    /// never the thing under test: a case that depends on how long something takes
+    /// waits for the state it needs through <see cref="PumpUntilAsync"/> instead.
+    /// </summary>
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Runs the page's event loop until <paramref name="ready"/> holds, and reports
+    /// whether it did.
+    /// </summary>
+    /// <remarks>
+    /// One pass of <c>RunEventLoopAsync</c> is not a signal that a frame's document has
+    /// arrived. The pump reports idle at any moment with nothing queued - including
+    /// between a frame's two fetches - so a case that pumps once and then inspects the
+    /// frame set is asserting on how the host happened to schedule it, and fails under
+    /// the CPU contention of a full parallel run. Wait for the state the next step needs
+    /// instead, and let the guard bound only a genuine hang.
+    /// </remarks>
+    private static async Task<bool> PumpUntilAsync(Page page, Func<bool> ready, TimeSpan guard)
+    {
+        DateTime deadline = DateTime.UtcNow.Add(guard);
+        while (!ready())
+        {
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return ready();
+            }
+            try
+            {
+                await page.Js!.RunEventLoopAsync().WaitAsync(remaining);
+            }
+            catch (TimeoutException)
+            {
+                return ready();
+            }
+            if (!ready())
+            {
+                // The loop reported idle with the work still outstanding: it is waiting
+                // on a response. Yield rather than spinning on the pump.
+                await Task.Delay(5);
+            }
+        }
+
+        return true;
+    }
+
     [Fact]
     public void NavigationTimeoutEnvironmentDefaultRemainsThirtySeconds()
     {
@@ -389,10 +437,16 @@ public sealed class PageTests
             3,
             page.NetworkEvents.Count(e => string.Equals(e.ResourceType, "Stylesheet", StringComparison.Ordinal)));
 
+        // The fetched bytes are held beside each <link> now, not in a synthetic <style>, so
+        // this reads what the renderer reads. Chromium 141 creates no element for a linked
+        // sheet: on repro/a.html head.querySelectorAll('style').length is 0.
         List<string> sheets = page.Js!.WithDom(dom =>
-            dom.QuerySelectorAll("style[data-obscura-external-stylesheets]")
-                .Select(dom.TextContent)
+            dom.QuerySelectorAll("link[rel~=\"stylesheet\"]")
+                .Select(dom.ExternalStylesheetCss)
+                .Where(css => css is not null)
+                .Select(css => css!)
                 .ToList())!;
+        Assert.Empty(page.Js!.WithDom(dom => dom.QuerySelectorAll("style"))!);
         Assert.Equal(3, sheets.Count);
         Assert.Equal(sheets[0], sheets[1]);
         Assert.True(
@@ -406,6 +460,112 @@ public sealed class PageTests
         int second = sheets[2].IndexOf(".second", StringComparison.Ordinal);
         Assert.True(root < shared && shared < second, "cycle is cut without reordering rules");
         Assert.Contains($"url(\"{server.Origin}/theme/img/second.png\")", sheets[2], StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A linked sheet enters the cascade at the <c>&lt;link&gt;</c>'s own document position,
+    /// and leaves no element behind.
+    /// </summary>
+    /// <remarks>
+    /// Measured in Chromium 141 on repro/ord/o1.html and o2.html: with the link first the
+    /// later inline rule wins (rgb(99, 99, 99)); with the inline style first the link wins
+    /// (rgb(11, 11, 11)). Both report head.querySelectorAll('style').length 1 - the authored
+    /// one - and document.styleSheets.length 2.
+    ///
+    /// DEVIATION from crates/obscura-browser, which reaches the same cascade by inserting a
+    /// synthetic <c>&lt;style&gt;</c> after the link; that element is observable and shifts
+    /// every following sibling index. See "Known deviations" in todo.md.
+    /// </remarks>
+    [Theory]
+    [InlineData(true, "rgb(99, 99, 99)", "LINK,STYLE")]
+    [InlineData(false, "rgb(11, 11, 11)", "STYLE,LINK")]
+    public async Task ALinkedSheetCascadesAtItsOwnPositionAndAddsNoElement(
+        bool linkFirst,
+        string expectedColor,
+        string expectedHeadChildren)
+    {
+        string head = linkFirst
+            ? """<link rel="stylesheet" href="/sheet.css"><style>p { color: rgb(99, 99, 99) }</style>"""
+            : """<style>p { color: rgb(99, 99, 99) }</style><link rel="stylesheet" href="/sheet.css">""";
+        using TestHttpServer server = TestHttpServer.Start(request => request.Path switch
+        {
+            "/sheet.css" => TestResponse.Css("p { color: rgb(11, 11, 11) }"),
+            _ => TestResponse.Html($"<!doctype html><html><head>{head}</head><body><p id=\"p\">x</p></body></html>"),
+        });
+        using Page page = PageFixtures.NewPage("linked-sheet-order");
+
+        await page.NavigateAsync($"{server.Origin}/");
+
+        PageFixtures.AssertJson(
+            $$"""
+            {
+                "color": "{{expectedColor}}",
+                "headKids": "{{expectedHeadChildren}}",
+                "styles": 1,
+                "sheets": 2
+            }
+            """,
+            page.Evaluate(
+                """
+                (() => ({
+                    color: getComputedStyle(document.getElementById('p')).color,
+                    headKids: [...document.head.children].map(e => e.tagName).join(','),
+                    styles: document.head.querySelectorAll('style').length,
+                    sheets: document.styleSheets.length,
+                }))()
+                """));
+    }
+
+    /// <summary>
+    /// A stylesheet link inserted by script after load applies, and removing it revokes the
+    /// rules again.
+    /// </summary>
+    /// <remarks>
+    /// This is what says the retained-style planner does not need to know about the side
+    /// table: a write to it changes the collected source list, which misses
+    /// <c>StylesheetCache</c>, and a stylesheet cache miss already forces the full style
+    /// recompute (LayoutDom's <c>if (!stylesheetCacheHit) return null;</c>). Chromium 141
+    /// applies and revokes the same way.
+    /// </remarks>
+    [Fact]
+    public async Task AScriptInsertedStylesheetLinkAppliesAndItsRemovalRevokesTheRules()
+    {
+        using TestHttpServer server = TestHttpServer.Start(request => request.Path switch
+        {
+            "/late.css" => TestResponse.Css("p { color: rgb(7, 8, 9) }"),
+            _ => TestResponse.Html("<!doctype html><html><head></head><body><p id=\"p\">x</p></body></html>"),
+        });
+        using Page page = PageFixtures.NewPage("late-linked-sheet");
+
+        await page.NavigateAsync($"{server.Origin}/");
+
+        string before = page.Evaluate("getComputedStyle(document.getElementById('p')).color")!
+            .ToString();
+        page.Evaluate(
+            """
+            (() => {
+                const link = document.createElement('link');
+                link.id = 'late';
+                link.setAttribute('rel', 'stylesheet');
+                link.setAttribute('href', '/late.css');
+                document.head.appendChild(link);
+            })()
+            """);
+        await page.SettleAsync(5000);
+        string applied = page.Evaluate("getComputedStyle(document.getElementById('p')).color")!
+            .ToString();
+        int stylesWhileApplied =
+            (int)(PageFixtures.AsDouble(page.Evaluate("document.querySelectorAll('style').length")) ?? -1);
+        page.Evaluate("document.getElementById('late').remove()");
+        string revoked = page.Evaluate("getComputedStyle(document.getElementById('p')).color")!
+            .ToString();
+
+        Assert.Equal("rgb(0, 0, 0)", before);
+        Assert.Equal("rgb(7, 8, 9)", applied);
+        Assert.Equal("rgb(0, 0, 0)", revoked);
+        // DEVIATION from crates/obscura-js, which inserts a <style data-obscura-linked> next to
+        // the new link. Chromium 141 creates no element for one.
+        Assert.Equal(0, stylesWhileApplied);
     }
 
     [Fact]
@@ -443,28 +603,36 @@ public sealed class PageTests
             }
         }
 
-        List<(bool IsImport, string? Media, string Text)> styles = page.Js!.WithDom(dom =>
+        // DEVIATION from crates/obscura-browser, which inserts one <style
+        // data-obscura-inline-import> per @import before the importing <style>. Chromium 141
+        // creates no element for an @import: the importing <style> stays the only one, and
+        // the imported bytes are held beside it, ahead of its own text - which is the order
+        // @import already has. Still the cascade assertions: both imports, in source order,
+        // each keeping its media wrapper, before the importing sheet's own rules, and under
+        // that sheet's own media condition.
+        var styles = page.Js!.WithDom(dom =>
             dom.QuerySelectorAll("style")
                 .Select(nid =>
                 {
                     Node node = dom.GetNode(nid)!;
                     return (
-                        node.GetAttribute("data-obscura-inline-import") is not null,
-                        node.GetAttribute("media"),
-                        dom.TextContent(nid));
+                        Imported: dom.ExternalStylesheetCss(nid),
+                        Media: node.GetAttribute("media"),
+                        Text: dom.TextContent(nid));
                 })
                 .ToList())!;
-        Assert.Equal(3, styles.Count);
-        Assert.True(styles[0].IsImport);
-        Assert.Contains(".imported-a", styles[0].Text, StringComparison.Ordinal);
-        Assert.True(styles[1].IsImport);
-        Assert.Contains(".imported-b", styles[1].Text, StringComparison.Ordinal);
-        Assert.False(styles[2].IsImport);
-        Assert.Contains(".local", styles[2].Text, StringComparison.Ordinal);
+        Assert.Single(styles);
+        string imported = styles[0].Imported!;
+        int importedA = imported.IndexOf(".imported-a", StringComparison.Ordinal);
+        int importedB = imported.IndexOf(".imported-b", StringComparison.Ordinal);
+        Assert.True(importedA >= 0 && importedA < importedB, "imports keep their source order");
+        Assert.Contains(".local", styles[0].Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(".imported-a", styles[0].Text, StringComparison.Ordinal);
         Assert.Equal("screen, print", styles[0].Media);
-        Assert.Equal("screen, print", styles[1].Media);
-        Assert.StartsWith("@media print {\n", styles[0].Text, StringComparison.Ordinal);
-        Assert.StartsWith("@media print {\n", styles[1].Text, StringComparison.Ordinal);
+        Assert.StartsWith("@media print {\n", imported, StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            imported.Split("@media print {\n", StringSplitOptions.None).Length - 1);
 
         byte[] pdf = page.RasterPdf(new RasterPdfOptions
         {
@@ -622,11 +790,7 @@ public sealed class PageTests
         // Rust runs the event loop to full idle once. The port's pump can return at
         // an idle-looking moment between the two frame fetches, so wait for the
         // documents themselves rather than for one pass of the loop.
-        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
-        while (page.Js!.State.PendingFrames.Count < frameCount && DateTime.UtcNow < deadline)
-        {
-            await page.Js!.RunEventLoopAsync().WaitAsync(TimeSpan.FromSeconds(2));
-        }
+        await PumpUntilAsync(page, () => page.Js!.State.PendingFrames.Count >= frameCount, HangGuard);
         Assert.Equal(frameCount, page.Js!.State.PendingFrames.Count);
         return (server, page, requests, slowSeen);
     }
@@ -775,7 +939,9 @@ public sealed class PageTests
             page.AddPreloadScript("globalThis.__order = ['preload'];");
             using var cancel = new CancellationTokenSource();
             Task advance = page.AdvanceFramesAsync(cancel.Token);
-            Task completed = await Task.WhenAny(advance, slowSeen.Task, Task.Delay(2_000));
+            Task completed = await Task.WhenAny(advance, slowSeen.Task, Task.Delay(HangGuard));
+            // The assertion is that the slow script's request arrived before the batch
+            // finished, not that it arrived inside any particular wall-clock window.
             Assert.Same(slowSeen.Task, completed);
             cancel.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => advance);
@@ -784,10 +950,14 @@ public sealed class PageTests
             page.Js!.Evaluate(
                 "(function(){ const next = document.createElement('iframe'); next.src = '/child.html';"
                 + " document.body.appendChild(next); return 1; })()");
-            await page.Js!.RunEventLoopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            // The replacement frame's document has to have arrived before its element is
+            // removed, or the batch this case is about never exists.
+            Assert.True(
+                await PumpUntilAsync(page, () => page.Js!.State.PendingFrames.Count >= 1, HangGuard),
+                "the replacement frame's document never arrived");
             page.Js!.Evaluate("(document.querySelector('iframe').remove(), 1)");
 
-            await page.AdvanceFramesAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await page.AdvanceFramesAsync().WaitAsync(HangGuard);
             Assert.Single(page.Frames);
             Assert.Empty(page._pendingFrameWork);
             PageFixtures.AssertJson("true", page.EvaluateInFrame(0, "globalThis.__childReady"));
@@ -1046,11 +1216,29 @@ public sealed class PageTests
     [Fact]
     public async Task ModuleGraphAndEvaluationShareOneActiveBudget()
     {
-        // Spend part of the module's allowance loading its graph. The synchronous
-        // top-level work then fits in a freshly reset budget, but cannot fit in the
-        // shared active load+evaluation budget.
+        // Spend part of the module's allowance on its graph. The synchronous top-level
+        // work then fits in a freshly reset budget, but cannot fit in the shared active
+        // load+evaluation budget.
+        //
+        // The imported module spends its share by busy-waiting rather than by being
+        // served slowly. Both are wall-clock spends against the same budget, but a
+        // `while (Date.now() < until) {}` spends exactly what it says whatever else the
+        // host is running, while a delayed response is a network round trip whose
+        // client half runs on the thread pool: under the contention of a full parallel
+        // test run that arrived hundreds of milliseconds late, the whole 350ms budget
+        // went to the fetch, the module never began evaluating, and the test read
+        // [false, false].
+        //
+        // What each assertion needs, against the 1200ms budget:
+        //   started   the 400ms import plus the fetch of two small files - about
+        //             750ms of room, and the only load-sensitive term left
+        //   completed 400 + 1000 > 1200, both deterministic wall-clock spends
+        //   and it still discriminates: 1000 < 1200, so a module handed a freshly
+        //   reset budget after its graph loaded would run to completion.
         using TestHttpServer server = TestHttpServer.Start(_ =>
-            TestResponse.JavaScript("export const delayed = true;") with { DelayMs = 100 });
+            TestResponse.JavaScript(
+                "const until = Date.now() + 400; while (Date.now() < until) {}"
+                + " export const delayed = true;"));
 
         using Page page = PageFixtures.ImportMapTestPage(
             "shared-module-budget",
@@ -1059,12 +1247,12 @@ public sealed class PageTests
             <html><head><script type="module">
                 import "./delayed.js";
                 globalThis.__shared_deadline_started = true;
-                const until = Date.now() + 300;
+                const until = Date.now() + 1000;
                 while (Date.now() < until) {}
                 globalThis.__shared_deadline_completed = true;
             </script></head><body></body></html>
             """);
-        await page.ExecuteScriptsWithModuleBudgetAsync(350, CancellationToken.None);
+        await page.ExecuteScriptsWithModuleBudgetAsync(1200, CancellationToken.None);
 
         Assert.Equal("/app/delayed.js", server.NextPath(RequestTimeout));
         PageFixtures.AssertJson(
@@ -1937,7 +2125,7 @@ public sealed class PageTests
 
         Assert.Equal<(int, string)>(
             [(0, "screen.css"), (1, "async.css"), (2, "dark.css")],
-            PageHelpers.LinkedStylesheetRequests(dom));
+            [.. PageHelpers.LinkedStylesheetRequests(dom).Select(link => (link.LinkIndex, link.Href))]);
     }
 
     [Fact]
@@ -1952,21 +2140,32 @@ public sealed class PageTests
             </head><body></body></html>
             """));
         runtime.RunPageInit();
-        runtime.ExecuteScript(
-            "<async-sheet>",
-            PageHelpers.MaterializeLinkedStylesheetScript(0, ".target{color:red}"));
+        // The sheet's bytes are recorded against the link before the load script runs, which
+        // is what the navigation path does now that no <style> element is created.
+        runtime.WithDom(dom =>
+        {
+            dom.SetExternalStylesheetCss(dom.QuerySelector("#async")!.Value, ".target{color:red}");
+            return 0;
+        });
+        runtime.ExecuteScript("<async-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
 
         var state = runtime.WithDom(dom =>
         {
             NodeId link = dom.QuerySelector("#async")!.Value;
-            List<NodeId> styles = dom.QuerySelectorAll("style[data-obscura-external-stylesheets]");
             return (
                 dom.GetNode(link)?.GetAttribute("data-loaded"),
-                styles.Count == 0 ? null : dom.TextContent(styles[0]));
+                dom.ExternalStylesheetCss(link),
+                dom.GetNode(link)?.GetAttribute("media"),
+                dom.QuerySelectorAll("style").Count);
         });
 
         Assert.Equal("yes", state.Item1);
+        // Still the cascade assertion: the handler's this.media='all' has to leave the sheet
+        // applying on screen. The renderer reads the link's media attribute, and Chromium 141
+        // reflects the assignment onto it (repro/ord/o5.html: getAttribute('media') is 'all').
         Assert.Equal(".target{color:red}", state.Item2);
+        Assert.Equal("all", state.Item3);
+        Assert.Equal(0, state.Item4);
     }
 
     [Fact]
@@ -1981,21 +2180,29 @@ public sealed class PageTests
             </head><body></body></html>
             """));
         runtime.RunPageInit();
-        runtime.ExecuteScript(
-            "<print-sheet>",
-            PageHelpers.MaterializeLinkedStylesheetScript(0, "body{display:none}"));
+        runtime.WithDom(dom =>
+        {
+            dom.SetExternalStylesheetCss(dom.QuerySelector("#print")!.Value, "body{display:none}");
+            return 0;
+        });
+        runtime.ExecuteScript("<print-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
 
         var state = runtime.WithDom(dom =>
         {
             NodeId link = dom.QuerySelector("#print")!.Value;
-            NodeId? style = dom.QuerySelector("style[data-obscura-external-stylesheets]");
             return (
                 dom.GetNode(link)?.GetAttribute("data-loaded"),
-                style is { } id ? dom.GetNode(id)?.GetAttribute("media") : null);
+                dom.GetNode(link)?.GetAttribute("media"),
+                dom.ExternalStylesheetCss(link),
+                dom.QuerySelectorAll("style").Count);
         });
 
         Assert.Equal("yes", state.Item1);
+        // Still the cascade assertion: loaded, but gated to print. The gate is now the link's
+        // own media attribute, which is what the renderer reads.
         Assert.Equal("print", state.Item2);
+        Assert.Equal("body{display:none}", state.Item3);
+        Assert.Equal(0, state.Item4);
     }
 
     [Fact]
@@ -2012,12 +2219,18 @@ public sealed class PageTests
             """));
         runtime.SetUrl("https://example.test/products/widget");
         runtime.RunPageInit();
-        runtime.ExecuteScript(
-            "<same-origin-sheet>",
-            PageHelpers.MaterializeLinkedStylesheetScript(0, ".app { color: red } .wide { width: 20px }"));
-        runtime.ExecuteScript(
-            "<cross-origin-sheet>",
-            PageHelpers.MaterializeLinkedStylesheetScript(1, ".secret { color: purple }"));
+        runtime.WithDom(dom =>
+        {
+            dom.SetExternalStylesheetCss(
+                dom.QuerySelector("#same")!.Value,
+                ".app { color: red } .wide { width: 20px }");
+            dom.SetExternalStylesheetCss(
+                dom.QuerySelector("#cross")!.Value,
+                ".secret { color: purple }");
+            return 0;
+        });
+        runtime.ExecuteScript("<same-origin-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
+        runtime.ExecuteScript("<cross-origin-sheet>", PageHelpers.LinkedStylesheetLoadScript(1));
 
         JsonNode? result = runtime.Evaluate(
             """
@@ -2041,9 +2254,10 @@ public sealed class PageTests
                     catch (error) { security.push(error && error.name); }
                 }
                 sameSheet.insertRule('.added { height: 9px }', sameRules.length);
-                const source = document.querySelector(
-                    'style[data-obscura-external-stylesheets]'
-                );
+                // insertRule used to rewrite the phantom <style>'s textContent, which is how
+                // the rule reached the renderer. It now writes the bytes held beside the link,
+                // which is the same cascade input with no element in the DOM.
+                const source = globalThis.__obscura_linkedStylesheetCss(same);
                 return {
                     stableList: list === document.styleSheets,
                     length: list.length,
@@ -2055,11 +2269,14 @@ public sealed class PageTests
                     title: sameSheet.title,
                     rulesIdentity: sameSheet.cssRules === sameRules,
                     rules: Array.from(sameRules, rule => rule.selectorText),
-                    sourceUpdated: source.textContent.includes('.added'),
+                    sourceUpdated: source.includes('.added'),
                     crossOwner: crossSheet.ownerNode === cross,
                     crossHref: crossSheet.href,
-                    bridgeSheetsHidden: same.nextSibling.sheet === null
-                        && cross.nextSibling.sheet === null,
+                    // Chromium 141 creates no element for either link: on repro/a.html
+                    // head.querySelectorAll('style').length is 0 with styleSheets.length 1.
+                    // The only <style> here is the one the document authored.
+                    bridgeSheetsHidden: document.querySelectorAll('style').length === 1
+                        && document.querySelectorAll('style')[0] === inline,
                     security,
                 };
             })()
@@ -2101,18 +2318,47 @@ public sealed class PageTests
             </head><body></body></html>
             """));
         runtime.RunPageInit();
-        runtime.ExecuteScript(
-            "<first-sheet>",
-            PageHelpers.MaterializeLinkedStylesheetScript(0, ".target{height:10px}"));
-        runtime.ExecuteScript(
-            "<second-sheet>",
-            PageHelpers.MaterializeLinkedStylesheetScript(1, ".target{height:30px}"));
+        runtime.WithDom(dom =>
+        {
+            List<NodeId> links = dom.QuerySelectorAll("""link[rel~="stylesheet"]""");
+            dom.SetExternalStylesheetCss(links[0], ".target{height:10px}");
+            dom.SetExternalStylesheetCss(links[1], ".target{height:30px}");
+            return 0;
+        });
+        runtime.ExecuteScript("<first-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
+        runtime.ExecuteScript("<second-sheet>", PageHelpers.LinkedStylesheetLoadScript(1));
 
+        // The author sheets in the order the renderer collects them: the bytes held beside an
+        // element, then that element's own text if it is a <style>, at each element's document
+        // position. Reading them back through the same walk is the cascade order, and no
+        // element had to be added to the DOM to get it.
         List<string> sheetText = runtime.WithDom(dom =>
-            dom.QuerySelectorAll("style").Select(dom.TextContent).ToList())!;
+        {
+            List<string> collected = [];
+            foreach (NodeId nid in dom.Descendants(dom.Document))
+            {
+                if (dom.GetNode(nid)?.AsElement() is not { } element)
+                {
+                    continue;
+                }
+
+                if (dom.ExternalStylesheetCss(nid) is { } external)
+                {
+                    collected.Add(external);
+                }
+
+                if (string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
+                {
+                    collected.Add(dom.TextContent(nid));
+                }
+            }
+
+            return collected;
+        })!;
         Assert.Equal<string>(
             [".target{height:10px}", ".target{height:20px}", ".target{height:30px}"],
             sheetText);
+        Assert.Equal(1, runtime.WithDom(dom => dom.QuerySelectorAll("style").Count));
     }
 
     /// <summary>Rust's `client_replacement_page`.</summary>

@@ -431,6 +431,12 @@ public sealed partial class Page : IDisposable
             // the outgoing document must go before the runtime does.
             Frames.Clear();
             Js = null;
+
+            // The outgoing document's DOM, computed styles, layout and shaped text
+            // all became garbage on the line above, and this is the low point of the
+            // navigation: the new document is parsed but not yet laid out. Releasing
+            // here reclaims the most for the least compaction work.
+            PageHelpers.ReleaseReplacedDocumentMemory();
         }
 
         // Thread the BrowserContext's proxy through to the ES-module loader and
@@ -644,5 +650,9 @@ public sealed partial class Page : IDisposable
         _pendingFrameWork.Clear();
         Frames.Clear();
         Js = null;
+
+        // A closed target is the other point a document dies wholesale; a CDP client
+        // that opens a tab per route would otherwise keep every one of them committed.
+        PageHelpers.ReleaseReplacedDocumentMemory();
     }
 }

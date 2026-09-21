@@ -2193,6 +2193,67 @@ public sealed class RuntimeTests
     }
 
     [Fact]
+    public void GetComputedStyleHonoursThePseudoElementArgument()
+    {
+        // DEVIATION from crates/obscura-js, whose getComputedStyle takes one argument: every
+        // expectation here was measured on Chromium 141 over this markup.
+        using var fixture = RuntimeFixture.Blank();
+        var rt = fixture.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml(
+            """
+            <html><head><style>
+                html,body,div { margin:0 }
+                #a { width:200px; color:rgb(10,20,30); font-size:20px }
+                #a::before { content:"BEFORE"; color:rgb(1,2,3); font-size:11px;
+                             display:block; width:33px; height:7px }
+            </style></head><body><div id="a">A</div></body></html>
+            """));
+        rt.SetViewport(400.0, 240.0);
+        rt.RunPageInit();
+
+        var result = rt.Evaluate(
+            """
+            const a = document.getElementById("a");
+            const read = (p) => {
+                const s = p === undefined ? getComputedStyle(a) : getComputedStyle(a, p);
+                return [s.color, s.fontSize, s.display, s.width, s.content, s.length > 0];
+            };
+            return [
+                read(undefined),
+                read("::before"),
+                read(":before"),
+                read(null),
+                read(""),
+                // Well formed but unsupported: an empty declaration.
+                read("::bogus-thing"),
+                // Not a selector at all, so it is ignored and the element answers.
+                read("  ::before  "),
+                read("::part(x)"),
+                // Each call still gets its own live declaration, and one does not poison the
+                // other's cache entry.
+                [getComputedStyle(a).color, getComputedStyle(a, "::before").color,
+                 getComputedStyle(a).color]
+            ];
+            """);
+
+        AssertJson(
+            """
+            [
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(1, 2, 3)","11px","block","33px","\"BEFORE\"",true],
+              ["rgb(1, 2, 3)","11px","block","33px","\"BEFORE\"",true],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["","","","","",false],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(10, 20, 30)","20px","block","200px","normal",true],
+              ["rgb(10, 20, 30)","rgb(1, 2, 3)","rgb(10, 20, 30)"]
+            ]
+            """,
+            result);
+    }
+
+    [Fact]
     public void OrdinaryInlineKeepsComputedSizesButUsesContentGeometry()
     {
         using var fixture = RuntimeFixture.Blank();
@@ -2515,6 +2576,38 @@ public sealed class RuntimeTests
         Assert.Equal(
             "ready",
             rt.Evaluate("document.getElementById('state').textContent")!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task SettleWaitsForAnOutstandingAsyncOpContinuation()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        // op_sleep is the plainest async op there is: no timer in the host queue, no
+        // posted task and no in-flight request, so the only evidence that the page is
+        // still owed a continuation is the op itself. A settle that returns here
+        // returns with its budget unspent and the .then never delivered - the general
+        // form of the fetch/XHR case, which is the same op shape with an extra
+        // host-side counter that is released before the promise resolves.
+        // 300ms is chosen against both ends: page init leaves the settle busy for up
+        // to ~30ms whatever is pending, so an untracked op must not be able to ride
+        // that out, and the quiet window is another 3x above it so a loaded machine
+        // stretching the sleep still ends the settle on the continuation.
+        rt.ExecuteScript(
+            "settle-pending-async-op",
+            "globalThis.__opDelivered = false;"
+            + "Deno.core.ops.op_sleep(300).then(() => { globalThis.__opDelivered = true; });");
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        await rt.RunEventLoopUntilQuiescentAsync(5_000, 1_000);
+        var elapsed = started.Elapsed;
+
+        Assert.True(
+            rt.Evaluate("globalThis.__opDelivered === true")!.GetValue<bool>(),
+            $"settle reported idle before the op's continuation ran; elapsed={elapsed}");
+        Assert.True(
+            elapsed < TimeSpan.FromMilliseconds(1_000),
+            $"the delivered continuation should end the settle, not the quiet window: {elapsed}");
     }
 
     [Fact]
@@ -9672,6 +9765,34 @@ public sealed class RuntimeTests
         Assert.Equal(0, rt.State.PageInFlight.Value);
     }
 
+    /// <summary>
+    /// Pumps the runtime until <c>__profileEvents</c> holds <paramref name="count"/>
+    /// entries, or the guard expires.
+    /// </summary>
+    /// <remarks>
+    /// A fixed pump budget is a guess about how long a request takes. Reading the
+    /// counter costs nothing the test is measuring - unlike <c>image.complete</c>,
+    /// which is itself a cache read that can complete the element - so the guard only
+    /// bounds a genuine hang and the assertion that follows is unchanged.
+    /// </remarks>
+    private static async Task PumpUntilProfileEventsAsync(ObscuraJsRuntime rt, int count)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (true)
+        {
+            await rt.RunEventLoopBoundedAsync(50);
+            var seen = rt.Evaluate("__profileEvents.length");
+            if (seen is not null && seen.GetValue<double>() >= count)
+            {
+                return;
+            }
+            if (DateTime.UtcNow >= deadline)
+            {
+                return;
+            }
+        }
+    }
+
     [Fact]
     public async Task ImageLifecycleCacheIsSeparatedByCorsCredentialsProfile()
     {
@@ -9862,22 +9983,26 @@ public sealed class RuntimeTests
             image.addEventListener("error", () => __profileEvents.push("error"));
             void image.complete;
             """);
-        // The reference pumps 100ms per step. The port's first request to a fresh
-        // origin spends longer than that inside SocketsHttpHandler, so the pump
-        // budget is widened; every assertion below is the reference's, unchanged.
-        await rt.RunEventLoopBoundedAsync(1_000);
+        // The reference pumps 100ms per step and reads the result. The port cannot:
+        // its image request finishes on a thread-pool thread, so between the bytes
+        // reaching the cache and the shim's promise reaction dispatching the event
+        // there is a window in which reading `image.complete` completes the element
+        // from cache with no event at all - and the assertion below read
+        // [true, 2, []] in about a quarter of runs. Waiting for the event the step
+        // is about removes the window; every assertion is the reference's, unchanged.
+        await PumpUntilProfileEventsAsync(rt, 1);
         AssertJsonEquals(
             """[true, 2, ["load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("require-anonymous-cors", """image.crossOrigin = "anonymous";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 2);
         AssertJsonEquals(
             """[true, 0, ["load", "error"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("restore-no-cors", "image.removeAttribute('crossorigin');");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 3);
         AssertJsonEquals(
             """[true, 2, ["load", "error", "load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
@@ -9885,19 +10010,19 @@ public sealed class RuntimeTests
         rt.ExecuteScript(
             "load-anonymous-cors",
             $"""image.crossOrigin = "anonymous"; image.src = "{server.Origin}/cors.png";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 4);
         AssertJsonEquals(
             """[true, 2, ["load", "error", "load", "load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("require-credentialed-cors", """image.crossOrigin = "use-credentials";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 5);
         AssertJsonEquals(
             """[true, 0, ["load", "error", "load", "load", "error"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
 
         rt.ExecuteScript("restore-anonymous-cors", """image.crossOrigin = "anonymous";""");
-        await rt.RunEventLoopBoundedAsync(1_000);
+        await PumpUntilProfileEventsAsync(rt, 6);
         AssertJsonEquals(
             """[true, 2, ["load", "error", "load", "load", "error", "load"]]""",
             rt.Evaluate("[image.complete, image.naturalWidth, __profileEvents]"));
@@ -15091,9 +15216,14 @@ public sealed class RuntimeTests
                     });
                     document.head.appendChild(link);
                     await loaded;
-                    const style = document.querySelector("style[data-obscura-linked]");
-                    const css = style.textContent;
-                    const afterLink = link.nextSibling === style;
+                    // DEVIATION from the Rust body above, which reads the CSS out of a
+                    // <style data-obscura-linked> inserted after the link and checks it is the
+                    // link's nextSibling. Chromium 141 creates no element for a dynamically
+                    // inserted stylesheet link, so the bytes are held beside the link and there
+                    // is nothing to be anyone's sibling. Everything else - import order, both
+                    // rebased url()s, the link-owned CSSOM sheet - is asserted unchanged.
+                    const css = globalThis.__obscura_linkedStylesheetCss(link);
+                    const noElement = document.querySelectorAll("style").length === 0;
                     const list = document.styleSheets;
                     const sheet = link.sheet;
                     const rules = sheet.cssRules;
@@ -15106,7 +15236,7 @@ public sealed class RuntimeTests
                     };
                     link.remove();
                     return {
-                        afterLink,
+                        noElement,
                         importedBeforeRoute:
                             css.indexOf("color:red") < css.indexOf("display:grid"),
                         importedUrl:
@@ -15114,7 +15244,7 @@ public sealed class RuntimeTests
                         routeUrl:
                             css.includes("http://example.com/img/card.png"),
                         removedWithLink:
-                            !document.querySelector("style[data-obscura-linked]"),
+                            !link.isConnected && document.querySelectorAll("style").length === 0,
                         cssom,
                         detachedCssom: sheet.ownerNode === null
                             && link.sheet === null
@@ -15133,7 +15263,7 @@ public sealed class RuntimeTests
         AssertJsonEquals(
             """
             {
-                "afterLink": true,
+                "noElement": true,
                 "importedBeforeRoute": true,
                 "importedUrl": true,
                 "routeUrl": true,

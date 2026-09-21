@@ -20,10 +20,11 @@ internal static class PaintBorders
 
         // Preserve the public LayoutStyle contract for embedding code and older renderer tests
         // that construct used `border` edges directly.
-        BorderStyle top = style.Border.Top > 0f && !styles.Top.IsVisible() ? BorderStyle.Solid : styles.Top;
-        BorderStyle right = style.Border.Right > 0f && !styles.Right.IsVisible() ? BorderStyle.Solid : styles.Right;
-        BorderStyle bottom = style.Border.Bottom > 0f && !styles.Bottom.IsVisible() ? BorderStyle.Solid : styles.Bottom;
-        BorderStyle left = style.Border.Left > 0f && !styles.Left.IsVisible() ? BorderStyle.Solid : styles.Left;
+        Edges used = style.UsedBorder;
+        BorderStyle top = used.Top > 0f && !styles.Top.IsVisible() ? BorderStyle.Solid : styles.Top;
+        BorderStyle right = used.Right > 0f && !styles.Right.IsVisible() ? BorderStyle.Solid : styles.Right;
+        BorderStyle bottom = used.Bottom > 0f && !styles.Bottom.IsVisible() ? BorderStyle.Solid : styles.Bottom;
+        BorderStyle left = used.Left > 0f && !styles.Left.IsVisible() ? BorderStyle.Solid : styles.Left;
         return new Sides<BorderStyle>(top, right, bottom, left);
     }
 
@@ -34,11 +35,9 @@ internal static class PaintBorders
         Mask? mask,
         float rasterScale)
     {
-        Sides<float> widths = new(
-            style.Border.Top,
-            style.Border.Right,
-            style.Border.Bottom,
-            style.Border.Left);
+        // The collapsing table model paints each box its own half of a shared edge.
+        Edges used = style.UsedBorder;
+        Sides<float> widths = new(used.Top, used.Right, used.Bottom, used.Left);
         if (widths.Top <= 0f && widths.Right <= 0f && widths.Bottom <= 0f && widths.Left <= 0f)
         {
             return;

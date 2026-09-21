@@ -145,18 +145,35 @@ public readonly struct ParsedHost
 public static class HostParser
 {
     /// <summary><see href="https://url.spec.whatwg.org/#concept-host-parser"/> for special schemes.</summary>
-    public static bool TryParse(string input, out ParsedHost host)
+    public static bool TryParse(string input, out ParsedHost host) =>
+        TryParse(input, out host, out _);
+
+    /// <summary>
+    /// <see cref="TryParse(string, out ParsedHost)"/>, also reporting why the host was
+    /// rejected.
+    /// </summary>
+    /// <remarks>
+    /// The reason reaches a client verbatim through <c>PageError::InvalidUrl</c>, so each
+    /// arm reports what <c>Host::parse</c> returns for it: an unterminated or malformed
+    /// bracketed host is <c>InvalidIpv6Address</c>, a domain IDNA rejects is
+    /// <c>IdnaError</c>, one that normalizes away to nothing is <c>EmptyHost</c>, and a
+    /// host ending in a number that is not an address is <c>InvalidIpv4Address</c>.
+    /// </remarks>
+    public static bool TryParse(string input, out ParsedHost host, out UrlParseError error)
     {
         host = default;
+        error = UrlParseError.EmptyHost;
         if (input.StartsWith('['))
         {
             if (!input.EndsWith(']'))
             {
+                error = UrlParseError.InvalidIpv6Address;
                 return false;
             }
 
             if (!TryParseIpv6(input.AsSpan(1, input.Length - 2), out var pieces))
             {
+                error = UrlParseError.InvalidIpv6Address;
                 return false;
             }
 
@@ -165,8 +182,15 @@ public static class HostParser
         }
 
         var decoded = PercentEncoding.Decode(input);
-        if (!Idna.DomainToAscii(decoded, out var domain) || domain.Length == 0)
+        if (!Idna.DomainToAscii(decoded, out var domain))
         {
+            error = UrlParseError.IdnaError;
+            return false;
+        }
+
+        if (domain.Length == 0)
+        {
+            error = UrlParseError.EmptyHost;
             return false;
         }
 
@@ -174,6 +198,7 @@ public static class HostParser
         {
             if (!TryParseIpv4(domain, out var address))
             {
+                error = UrlParseError.InvalidIpv4Address;
                 return false;
             }
 
@@ -186,18 +211,28 @@ public static class HostParser
     }
 
     /// <summary><see href="https://url.spec.whatwg.org/#concept-opaque-host-parser"/>.</summary>
-    public static bool TryParseOpaque(string input, out ParsedHost host)
+    public static bool TryParseOpaque(string input, out ParsedHost host) =>
+        TryParseOpaque(input, out host, out _);
+
+    /// <summary>
+    /// <see cref="TryParseOpaque(string, out ParsedHost)"/>, also reporting why the host
+    /// was rejected.
+    /// </summary>
+    public static bool TryParseOpaque(string input, out ParsedHost host, out UrlParseError error)
     {
         host = default;
+        error = UrlParseError.EmptyHost;
         if (input.StartsWith('['))
         {
             if (!input.EndsWith(']'))
             {
+                error = UrlParseError.InvalidIpv6Address;
                 return false;
             }
 
             if (!TryParseIpv6(input.AsSpan(1, input.Length - 2), out var pieces))
             {
+                error = UrlParseError.InvalidIpv6Address;
                 return false;
             }
 
@@ -209,6 +244,7 @@ public static class HostParser
         {
             if (IsForbiddenHostCodePoint(c))
             {
+                error = UrlParseError.InvalidDomainCharacter;
                 return false;
             }
         }

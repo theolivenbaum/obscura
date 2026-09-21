@@ -114,6 +114,12 @@ public static partial class ComputedStyle
         return Px(trimmed);
     }
 
+    // `ch` is deliberately ABSENT, unlike `ex`. A border width is resolved at parse time and never
+    // re-read once the element's font is known, so listing `ch` here turns `border-left: 2ch` from
+    // a dropped declaration (0px) into a confidently wrong one (17.797px - two Liberation Sans
+    // digits at the initial 16px) where Chromium 141 gives 48px on Liberation Mono at font-size
+    // 40px. `ex` has the same defect and predates this. Fixing it means giving border widths the
+    // late re-read that gaps and line-height have; tracked separately.
     private static readonly string[] StrictBorderUnits = ["rem", "px", "pt", "em", "ex"];
 
     /// <summary>Rust <c>border_color</c>.</summary>
@@ -214,7 +220,7 @@ public static partial class ComputedStyle
             return;
         }
 
-        style.BorderCascadeOps.Add(
+        style.EnsureBorderCascadeOps().Add(
             new BorderCascadeOp(side, width, lineStyle, color is not null, color?.Value));
     }
 
@@ -227,7 +233,7 @@ public static partial class ComputedStyle
         OptionalColor? color)
     {
         style.BorderCascadeBase ??= style.BorderModel;
-        style.BorderCascadeOps.Add(
+        style.EnsureBorderCascadeOps().Add(
             new BorderCascadeOp(side, width, lineStyle, color is not null, color?.Value));
     }
 

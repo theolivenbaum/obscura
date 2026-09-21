@@ -21,8 +21,11 @@ namespace Obscura.Render;
 /// <see cref="ComputedStyle.ResolveFontRelativeDeclarations"/> during the top-down pass, which
 /// is where these are known.
 /// </remarks>
-internal readonly record struct FontLengthContext(float Em, float Rem, float Vw, float Vh)
+internal readonly record struct FontLengthContext(FontUnits Font, float Rem, float Vw, float Vh)
 {
+    /// <summary>The element's font size, which is what a percentage in these properties means.</summary>
+    internal float Em => Font.EmPx;
+
     /// <summary>
     /// What a length read before layout resolves against: CSS's initial 16px font size, and a
     /// viewport of zero so a viewport unit reads as it did before this context existed.
@@ -271,9 +274,10 @@ public static partial class ComputedStyle
     /// reports 13px, and <c>1ch</c> lost its unit and read as the bare number. See "Known
     /// deviations" in todo.md.
     /// </remarks>
-    internal static float? PxValue(string token, float emPx, float remPx)
+    internal static float? PxValue(string token, FontUnits font, float remPx)
     {
         string number = token;
+        float emPx = font.EmPx;
         float scale = 1.0f;
 
         if (number.EndsWith("px", StringComparison.Ordinal))
@@ -297,13 +301,17 @@ public static partial class ComputedStyle
         }
         else if (number.EndsWith("ex", StringComparison.Ordinal))
         {
+            // DEVIATION FROM RUST: style.rs scales the font size by a fixed fraction, giving
+            // every face Liberation Sans' x-height and digit advance. Both units are defined
+            // against the element's own first available font, and Chromium measures the face.
+            // See Dimension.ChPerEm.
             number = TrimEndAsciiAlphabetic(number);
-            scale = emPx * Dimension.ExPerEm;
+            scale = font.ExPx;
         }
         else if (number.EndsWith("ch", StringComparison.Ordinal))
         {
             number = TrimEndAsciiAlphabetic(number);
-            scale = emPx * Dimension.ChPerEm;
+            scale = font.ChPx;
         }
         else if (number.EndsWith('%'))
         {
@@ -371,11 +379,30 @@ public static partial class ComputedStyle
         if (trimmed.Contains('('))
         {
             return CssLength.ResolveContextual(
-                trimmed, context.Em, context.Rem, context.Vw, context.Vh, context.Em);
+                trimmed, context.Font, context.Rem, context.Vw, context.Vh, context.Em);
         }
 
-        return Token(value) is { } token ? PxValue(token, context.Em, context.Rem) : null;
+        return Token(value) is { } token ? PxValue(token, context.Font, context.Rem) : null;
     }
+
+    /// <summary>
+    /// Whether a declaration has to be read again in the top-down pass, either because it
+    /// carries a font-relative length or because it names <c>currentcolor</c>.
+    /// </summary>
+    /// <remarks>
+    /// The cascade applies declarations in order, so a <c>currentcolor</c> in <c>filter</c> or
+    /// <c>box-shadow</c> resolves against whatever <c>color</c> had been reached at that point:
+    /// black when <c>color</c> is declared after it in the same rule, and black again when the
+    /// element inherits its colour rather than declaring one. Chromium resolves both against
+    /// the element's final computed <c>color</c>, so these values defer to
+    /// <see cref="ComputedStyle.ResolveFontRelativeDeclarations"/> like a font-relative one.
+    /// </remarks>
+    internal static bool NeedsLateResolution(string value) =>
+        ContainsFontRelativeUnit(value) || ContainsCurrentColor(value);
+
+    /// <summary>Whether a declaration names the <c>currentcolor</c> keyword.</summary>
+    internal static bool ContainsCurrentColor(string value) =>
+        value.Contains("currentcolor", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether a declaration carries a length in a unit relative to the element's own font, and
@@ -429,25 +456,31 @@ public static partial class ComputedStyle
     /// Called from the DOM top-down pass, immediately after <c>font-size</c> settles and beside
     /// <see cref="SetGridCalcContext"/>, which does the same job for grid tracks. Only a
     /// declaration that carried a font-relative unit was kept, so this is a no-op for almost
-    /// every element. <c>currentcolor</c> in a re-read value resolves against the inherited
-    /// colour rather than whatever <c>color</c> the element had reached mid-cascade, which is
-    /// what Chromium does and a second improvement from reading these late.
+    /// every element. A declaration naming <c>currentcolor</c> is kept for the same reason
+    /// (see <see cref="NeedsLateResolution"/>): by here <c>style.Color</c> is the element's
+    /// final computed colour, declared or inherited, which is what Chromium resolves against.
     /// </remarks>
     public static void ResolveFontRelativeDeclarations(
         LayoutStyle style,
-        float emPx,
+        FontUnits font,
         float remPx,
         float vw,
         float vh)
     {
         if (style.FilterFontRelative is null
             && style.BackdropFilterFontRelative is null
-            && style.BoxShadowFontRelative is null)
+            && style.BoxShadowFontRelative is null
+            && style.BorderSpacingFontRelative is null)
         {
             return;
         }
 
-        FontLengthContext context = new(emPx, remPx, vw, vh);
+        if (style.BorderSpacingFontRelative is { } borderSpacing)
+        {
+            ApplyBorderSpacing(style, borderSpacing, font, remPx);
+        }
+
+        FontLengthContext context = new(font, remPx, vw, vh);
         if (style.FilterFontRelative is { } filter)
         {
             style.Filter = ParseFilterFunctions(filter, style.Color, style.ColorSchemeDark, context);
@@ -462,6 +495,129 @@ public static partial class ComputedStyle
         {
             style.BoxShadow = ParseBoxShadow(boxShadow, style.Color, style.ColorSchemeDark, context);
         }
+    }
+
+    /// <summary>
+    /// <c>border-spacing: &lt;length&gt; &lt;length&gt;?</c>, with both lengths non-negative.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// DEVIATION FROM RUST: <c>style.rs</c> collects whatever lengths <c>px_value</c> can make
+    /// of the whitespace-separated tokens and keeps the first two, so it accepts declarations
+    /// CSS rejects and resolves <c>em</c> against a flat 16. Measured on Chromium 141, an
+    /// invalid declaration is dropped and the property keeps its inherited or initial value:
+    /// <c>border-spacing: 10%</c>, <c>1px 2px 3px</c>, <c>-5px</c>, <c>3px -5px</c> and
+    /// <c>1px auto</c> all compute to <c>0px</c> in a plain <c>&lt;div&gt;</c>, where this
+    /// engine reported <c>1.6px</c>, <c>1px 2px</c>, <c>0px</c> (clamped in the snapshot but
+    /// negative in layout), <c>3px 0px</c> and <c>1px</c>. See "Known deviations" in todo.md.
+    /// </para>
+    /// <para>
+    /// The value is also read again from <see cref="ResolveFontRelativeDeclarations"/> when it
+    /// carries a font-relative unit: <c>font-size: 20px; border-spacing: 1em</c> is
+    /// <c>20px</c> on Chromium 141 in either declaration order, and the cascade can only know
+    /// the initial 16 while it runs.
+    /// </para>
+    /// <para>
+    /// Two gaps stay, both inherited from <see cref="PxValue(string, FontUnits, float)"/> and
+    /// shared with every other property that reads a bare length: a functional value
+    /// (<c>calc(1em + 2px)</c>, <c>18px</c> on Chromium) is dropped, and a unit
+    /// <c>px_value</c> does not know (<c>in</c>, <c>vw</c>) reads as its bare number.
+    /// </para>
+    /// </remarks>
+    internal static void ApplyBorderSpacing(LayoutStyle style, string value, FontUnits font, float remPx)
+    {
+        string declared = CssText.AsciiLower(value.Trim());
+        switch (declared)
+        {
+            case "initial":
+                style.BorderSpacing = (0.0f, 0.0f);
+                style.BorderSpacingFontRelative = null;
+                style.BorderSpacingInherit = false;
+                return;
+
+            case "inherit":
+            case "unset":
+                // `border-spacing` is an inherited property, so both keywords mean the
+                // parent's computed value. Nothing carries one down the style tree, so the
+                // top-down pass resolves this and the user-agent `table { border-spacing: 2px }`
+                // has to go now or it would still be standing when it does.
+                style.BorderSpacing = null;
+                style.BorderSpacingFontRelative = null;
+                style.BorderSpacingInherit = true;
+                return;
+
+            case "revert":
+            case "revert-layer":
+                // There is no per-origin cascade record to revert to, so leave the previous
+                // winner standing, which on a `<table>` is the user-agent 2px Chromium also
+                // reports here.
+                return;
+        }
+
+        List<string> tokens = SplitWhitespace(declared);
+        if (tokens.Count is 0 or > 2)
+        {
+            return;
+        }
+
+        Span<float> lengths = stackalloc float[2];
+        for (int index = 0; index < tokens.Count; index++)
+        {
+            if (BorderSpacingLength(tokens[index], font, remPx) is not { } length)
+            {
+                return;
+            }
+
+            lengths[index] = WholePixels(length);
+        }
+
+        style.BorderSpacing = (lengths[0], tokens.Count > 1 ? lengths[1] : lengths[0]);
+        style.BorderSpacingFontRelative = ContainsFontRelativeUnit(declared) ? declared : null;
+        style.BorderSpacingInherit = false;
+    }
+
+    /// <summary>
+    /// Chromium keeps <c>border-spacing</c> as a whole number of pixels, through the same
+    /// nearly-truncating conversion it uses for every integer-valued length.
+    /// </summary>
+    /// <remarks>
+    /// Measured on Chromium 141: <c>0.009px</c>, <c>0.01px</c>, <c>1.989px</c>, <c>3.5px</c>,
+    /// <c>4.49px</c> and <c>4.5px</c> compute to <c>0</c>, <c>0</c>, <c>1</c>, <c>3</c>,
+    /// <c>4</c> and <c>4</c>, so it is not rounding - but <c>0.99px</c>, <c>1.99px</c> and
+    /// <c>4.999px</c> compute to <c>1</c>, <c>2</c> and <c>5</c>, so it is not a plain
+    /// truncation either. Adding a hundredth of a pixel before truncating reproduces all of
+    /// them, which is Blink's <c>RoundForImpreciseConversion</c>. The store is 16 bits wide
+    /// and anything that does not fit becomes zero rather than saturating, which is the same
+    /// measurement: <c>32766px</c> computes to <c>32766px</c> and <c>32767px</c> to
+    /// <c>0px</c>.
+    /// </remarks>
+    private static float WholePixels(float value)
+    {
+        double shifted = (double)value + (value < 0.0f ? -0.01 : 0.01);
+
+        return shifted is > short.MaxValue or < short.MinValue ? 0.0f : (int)shifted;
+    }
+
+    /// <summary>
+    /// One of <c>border-spacing</c>'s two lengths, or <c>null</c> when the token is not a
+    /// non-negative length and the whole declaration has to be dropped.
+    /// </summary>
+    private static float? BorderSpacingLength(string token, FontUnits font, float remPx)
+    {
+        // A percentage is not a length. `px_value` would scale one by the font size, which is
+        // what made `border-spacing: 10%` read as 1.6px.
+        if (token.Length == 0 || token.Contains('%'))
+        {
+            return null;
+        }
+
+        if (PxValue(token, font, remPx) is not { } pixels || !float.IsFinite(pixels) || pixels < 0.0f)
+        {
+            return null;
+        }
+
+        // A unitless number is a length only when it is zero.
+        return CssText.IsAsciiAlphabetic(token[^1]) || pixels == 0.0f ? pixels : null;
     }
 
     /// <summary>Rust <c>deferred_length_expression</c>.</summary>
@@ -497,12 +653,12 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>resolve_contextual_length</c>. Delegates to the shared CSS port.</summary>
     public static float? ResolveContextualLength(
         string value,
-        float emPx,
+        FontUnits font,
         float remPx,
         float vw,
         float vh,
         float percentBase) =>
-        CssLength.ResolveContextual(value, emPx, remPx, vw, vh, percentBase);
+        CssLength.ResolveContextual(value, font, remPx, vw, vh, percentBase);
 
     /// <summary>Rust <c>functional_percentage_factor</c>.</summary>
     internal static float? FunctionalPercentageFactor(string value)
@@ -834,6 +990,32 @@ public static partial class ComputedStyle
         if (CssText.EqualsAscii(value, "min-content")) return IntrinsicSizeKeyword.MinContent;
 
         return IntrinsicSizeKeyword.None;
+    }
+
+    /// <summary>
+    /// <c>vertical-align</c> as an inline box reads it, or <c>null</c> for a value that is not
+    /// one (which leaves whatever the cascade already put on the style).
+    /// </summary>
+    internal static InlineVerticalAlign? InlineVerticalAlignValue(string token)
+    {
+        string value = token.Trim();
+        switch (CssText.AsciiLower(value))
+        {
+            case "baseline": return new InlineVerticalAlign(InlineVerticalAlignKind.Baseline, Dimension.Px(0f));
+            case "sub": return new InlineVerticalAlign(InlineVerticalAlignKind.Sub, Dimension.Px(0f));
+            case "super": return new InlineVerticalAlign(InlineVerticalAlignKind.Super, Dimension.Px(0f));
+            case "text-top": return new InlineVerticalAlign(InlineVerticalAlignKind.TextTop, Dimension.Px(0f));
+            case "text-bottom": return new InlineVerticalAlign(InlineVerticalAlignKind.TextBottom, Dimension.Px(0f));
+            case "middle": return new InlineVerticalAlign(InlineVerticalAlignKind.Middle, Dimension.Px(0f));
+            case "top": return new InlineVerticalAlign(InlineVerticalAlignKind.Top, Dimension.Px(0f));
+            case "bottom": return new InlineVerticalAlign(InlineVerticalAlignKind.Bottom, Dimension.Px(0f));
+            case "inherit" or "initial" or "unset" or "revert" or "": return null;
+            default: break;
+        }
+
+        Dimension offset = DimensionValue(value);
+
+        return offset.IsAuto ? null : new InlineVerticalAlign(InlineVerticalAlignKind.Offset, offset);
     }
 
     internal static Dimension DimensionValue(string token)

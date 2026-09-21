@@ -38,6 +38,8 @@ public static partial class RenderDom
         internal bool FlowRoot;
         internal bool IsTableBox;
         internal bool IsTableCellBox;
+        internal TableInternalDisplay AuthoredTableDisplay;
+        internal (float Horizontal, float Vertical)? BorderSpacing;
         internal RgbaColor? Color;
         internal float? FontSize;
         internal ushort FontWeight = 400;
@@ -118,6 +120,8 @@ public static partial class RenderDom
             FlowRoot = FlowRoot,
             IsTableBox = IsTableBox,
             IsTableCellBox = IsTableCellBox,
+            AuthoredTableDisplay = AuthoredTableDisplay,
+            BorderSpacing = BorderSpacing,
             Color = Color,
             FontSize = FontSize,
             FontWeight = FontWeight,
@@ -179,7 +183,9 @@ public static partial class RenderDom
         ContainerSnapshot? snapshot,
         (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? retained,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline)
+        AnimationTimelineState animationTimeline,
+        RetainedLayoutReuseCandidate? reuseCandidate = null,
+        DomLayout? previousLayout = null)
     {
         Matcher matcher = tree.CreateMatcher();
         Dictionary<NodeId, LayoutStyle> styles = retained?.Maps.Styles ?? [];
@@ -256,6 +262,11 @@ public static partial class RenderDom
         Dictionary<TaffyNodeId, NodeId> idMap = [];
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
         TextEngine engine = new(fonts, needsEmojiFont);
+
+        // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
+        // layout: it is a pure function of the text, its attributes and the tab width. Carry the
+        // previous pass's shaped paragraphs over when the font set is unchanged.
+        engine.AdoptShapeCache(previousLayout?.TextEngine);
         IfcRegistry ifcItems = new();
 
         // The document node itself is not an element; lay out from the first element
@@ -307,6 +318,10 @@ public static partial class RenderDom
 
             // Computed definiteness after walking the real containing-block chain.
             HashSet<NodeId> definiteHeightNodes = [];
+            // `ch` and `ex` are measured on the face the text engine selects, so the resolver
+            // reads the same font database layout will shape with. One per pass: it memoizes the
+            // face decision, which every element asks for.
+            FontUnitResolver fontUnits = new(engine);
             ResolveComputedValues(
                 tree,
                 rootId,
@@ -314,6 +329,7 @@ public static partial class RenderDom
                 freshStyles,
                 definiteHeightNodes,
                 rootInherited,
+                fontUnits,
                 rootFs,
                 vw,
                 vh,
@@ -448,12 +464,46 @@ public static partial class RenderDom
                 }
             }
 
+            // The last point at which this pass's style objects are comparable to the ones the
+            // offered layout was produced from: the cascade, the top-down pass and the style
+            // fixups have all run, and nothing below reads a style without also writing layout
+            // output back into it. If no element the cascade recomputed differs in any member a
+            // later pass reads, that layout is still exact and none of the work below is worth
+            // doing. See RetainedLayoutReuse for why this fails closed.
+            if (reuseCandidate is { } candidate
+                && RetainedLayoutReuse.ClassifyAll(candidate.Before, styles)
+                    != RetainedRestyleImpact.Layout)
+            {
+                // The throwaway TextEngine this pass built is left to the GC, exactly as the
+                // engine of every superseded layout already is; nothing in the engine disposes
+                // one, and the faces it loaded are its own.
+                candidate.Previous.Styles = styles;
+                candidate.Previous.CustomProperties = customProperties;
+                return (candidate.Previous, signature, queryStats);
+            }
+
             // A retained style survives into the next layout, and whether its box still shows a
             // scrollbar is a property of that layout, not of the style.
             DomScrollbarPasses.ResetScrollbarGutters(styles);
 
             List<DeferredCyclicInlineSize> deferredCyclicInlineSizes =
                 DomSubgridPasses.DeferCyclicFlexInlineSizes(tree, styles, rootFs, vw, vh);
+
+            Dictionary<NodeId, Dimension> deferredInlineWidths = [];
+            foreach (DeferredCyclicInlineSize entry in deferredCyclicInlineSizes)
+            {
+                if (entry.Slot != 0)
+                {
+                    continue;
+                }
+
+                // Only a plain percentage can be handed back as a typed width; a functional
+                // expression has no Dimension spelling and stays neutralized.
+                if (entry.SourceKind == DeferredCyclicInlineSourceKind.Percent)
+                {
+                    deferredInlineWidths[entry.Node] = Dimension.Percent(entry.Percent);
+                }
+            }
 
             BuildContext buildContext = new()
             {
@@ -464,6 +514,7 @@ public static partial class RenderDom
                 Engine = engine,
                 Ifc = ifcItems,
                 Styles = styles,
+                DeferredInlineWidths = deferredInlineWidths,
             };
 
             if (DomBuild.Build(buildContext, rootId) is { } taffyRoot)
@@ -616,6 +667,7 @@ public static partial class RenderDom
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
 
+                List<PinnedFlexItem> pinnedFlexItems = [];
                 DomSubgridPasses.ResolveDeferredFlexInlineSizes(
                     tree,
                     taffyTree,
@@ -625,6 +677,8 @@ public static partial class RenderDom
                     rootFs,
                     vw,
                     vh,
+                    pinnedFlexItems,
+                    ifcItems.TableGridCells,
                     (t, resolvedStyles, phase) =>
                     {
                         if (phase == DeferredFlexReflowPhase.Layout)
@@ -701,6 +755,22 @@ public static partial class RenderDom
 
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
 
+                    // A cyclic flex item was pinned to the width the flex algorithm chose for
+                    // it before any of that width was taken away, and its flex factors were
+                    // frozen with it, so nothing re-derives the pin. Carry it onto the narrowed
+                    // container before the expressions below are resolved against it. Outermost
+                    // first, one round per level: scaling an outer item is what gives the
+                    // container of the next level down its new width.
+                    for (int repin = 0; repin < 3; repin++)
+                    {
+                        if (!DomSubgridPasses.RescalePinnedFlexItems(taffyTree, pinnedFlexItems))
+                        {
+                            break;
+                        }
+
+                        taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+                    }
+
                     // A calc() inline size under a cyclic flex item was flattened to a px length
                     // against the containing block as it stood before the gutter was taken out of
                     // it, and unlike a bare percentage - which reaches taffy typed and re-resolves
@@ -715,6 +785,7 @@ public static partial class RenderDom
                         rootFs,
                         vw,
                         vh,
+                        ifcItems.TableGridCells,
                         (t, _, phase) =>
                         {
                             if (phase == DeferredFlexReflowPhase.Layout)
@@ -1081,15 +1152,15 @@ public static partial class RenderDom
                     return (
                         F32.Max(
                             rect.Width
-                            - style.Border.Left
-                            - style.Border.Right
+                            - style.UsedBorder.Left
+                            - style.UsedBorder.Right
                             - style.Padding.Left
                             - style.Padding.Right,
                             0f),
                         F32.Max(
                             rect.Height
-                            - style.Border.Top
-                            - style.Border.Bottom
+                            - style.UsedBorder.Top
+                            - style.UsedBorder.Bottom
                             - style.Padding.Top
                             - style.Padding.Bottom,
                             0f));
@@ -1216,8 +1287,8 @@ public static partial class RenderDom
                 float contentH = rect.Height
                     - style.Padding.Top
                     - style.Padding.Bottom
-                    - style.Border.Top
-                    - style.Border.Bottom;
+                    - style.UsedBorder.Top
+                    - style.UsedBorder.Bottom;
                 float free = F32.Max(contentH - th, 0f);
                 origin.Y += style.VerticalAlign == VerticalAlign.Middle ? free / 2f : free;
             }

@@ -60,6 +60,18 @@ internal enum DeferredFlexReflowPhase : byte
     FitContent,
 }
 
+/// <summary>
+/// One flex item frozen by <c>PinFlexItems</c>, with the flex-container geometry the pin was
+/// taken against, so a later pass that narrows that container can carry the pin with it.
+/// </summary>
+internal record struct PinnedFlexItem(
+    TaffyNodeId Item,
+    TaffyNodeId Container,
+    float ContainerInnerWidth,
+    float UsedInlineSize,
+    float HorizontalEdges,
+    bool IsContentBox);
+
 internal static class DomSubgridPasses
 {
     /// <summary>
@@ -447,6 +459,9 @@ internal static class DomSubgridPasses
             candidates = [];
         foreach ((NodeId id, LayoutStyle style) in styles)
         {
+            // A retained style survives into the next layout; which of its slots are
+            // neutralized is a property of this one.
+            style.DeferredCyclicInlineSlots = 0;
             if (style.IgnoresUsedBoxSizes())
             {
                 continue;
@@ -598,6 +613,13 @@ internal static class DomSubgridPasses
                         style.MaxWidth = Dimension.Auto;
                         break;
                 }
+
+                // The declaration is still definite even where the neutral value is not.
+                // `DomBuild` builds the box off these fields, so without this a box that
+                // reads `auto` here is built as one that shrink-wraps - which is the whole
+                // difference between an atomic inline that overflows its line box and one
+                // that is squeezed into it (F33).
+                style.MarkDeferredCyclicInlineSize(slot);
             }
 
             deferred.Add(new DeferredCyclicInlineSize(
@@ -839,6 +861,8 @@ internal static class DomSubgridPasses
         float rootFs,
         float vw,
         float vh,
+        List<PinnedFlexItem> pinned,
+        IReadOnlySet<TaffyNodeId> tableGridCells,
         Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
     {
         if (deferred.Count == 0)
@@ -922,8 +946,9 @@ internal static class DomSubgridPasses
                 level.Add(orderedFlexItems[index]);
             }
 
-            PinFlexItems(tree, taffyTree, taffyByDom, styles, deferred, level);
-            RestoreTypedPercentages(taffyTree, taffyByDom, styles, deferred, level);
+            PinFlexItems(tree, taffyTree, taffyByDom, styles, deferred, level, pinned);
+            RestoreTypedPercentages(
+                taffyTree, taffyByDom, styles, deferred, level, tableGridCells);
             relayout(taffyTree, styles, DeferredFlexReflowPhase.Layout);
             levelStart = levelEnd;
         }
@@ -933,7 +958,7 @@ internal static class DomSubgridPasses
         relayout(taffyTree, styles, DeferredFlexReflowPhase.FitContent);
 
         return ResolveFunctionalInlineSizes(
-            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, tableGridCells, relayout);
     }
 
     /// <summary>
@@ -946,7 +971,8 @@ internal static class DomSubgridPasses
         Dictionary<NodeId, TaffyNodeId> taffyByDom,
         Dictionary<NodeId, LayoutStyle> styles,
         IReadOnlyList<DeferredCyclicInlineSize> deferred,
-        HashSet<NodeId> level)
+        HashSet<NodeId> level,
+        List<PinnedFlexItem> pinned)
     {
         foreach (NodeId flexItem in level)
         {
@@ -968,6 +994,7 @@ internal static class DomSubgridPasses
             float usedDeclaration = style.BoxSizing == BoxSizing.ContentBox
                 ? F32.Max(layout.Size.Width - horizontalEdges, 0f)
                 : layout.Size.Width;
+            bool liftedToNaturalWidth = false;
 
             // A content-sized flex item whose only definite inline content was a cyclic
             // percentage image measured 0 during the intrinsic pass: lift it to its deferred
@@ -1002,13 +1029,34 @@ internal static class DomSubgridPasses
                     }
                 }
 
-                usedDeclaration = F32.Max(usedDeclaration, naturalFloor);
+                float floored = F32.Max(usedDeclaration, naturalFloor);
+                liftedToNaturalWidth = floored > usedDeclaration;
+                usedDeclaration = floored;
             }
 
-            TaffyStyle pinned = taffyTree.GetStyle(taffyId).Clone();
-            Layout.Size<TaffyDimension> pinnedSize = pinned.Size;
+            // Remember what the pin was taken against. The width written here is an output of
+            // the flex algorithm, and a pass that runs after this one can still narrow the
+            // container it came out of - the scrollbar gutter does exactly that - which leaves
+            // the frozen length describing a row that no longer exists.
+            if (!liftedToNaturalWidth && taffyTree.Parent(taffyId) is { } container)
+            {
+                float containerInner = InnerContentWidth(taffyTree.GetLayout(container));
+                if (containerInner > 0f)
+                {
+                    pinned.Add(new PinnedFlexItem(
+                        taffyId,
+                        container,
+                        containerInner,
+                        usedDeclaration,
+                        horizontalEdges,
+                        style.BoxSizing == BoxSizing.ContentBox));
+                }
+            }
+
+            TaffyStyle pinnedStyle = taffyTree.GetStyle(taffyId).Clone();
+            Layout.Size<TaffyDimension> pinnedSize = pinnedStyle.Size;
             pinnedSize.Width = TaffyDimension.FromLength(usedDeclaration);
-            pinned.Size = pinnedSize;
+            pinnedStyle.Size = pinnedSize;
 
             // DEVIATION from crates/obscura-render/src/dom.rs
             // `resolve_deferred_flex_inline_sizes`, which writes only `size.width` here. The
@@ -1022,11 +1070,82 @@ internal static class DomSubgridPasses
             // size, so pinning the width is only a pin once the item can no longer flex.
             // Freeze the factors and the basis alongside it. See "Known deviations" in
             // todo.md.
-            pinned.FlexGrow = 0f;
-            pinned.FlexShrink = 0f;
-            pinned.FlexBasis = TaffyDimension.FromLength(usedDeclaration);
-            taffyTree.SetStyle(taffyId, pinned);
+            pinnedStyle.FlexGrow = 0f;
+            pinnedStyle.FlexShrink = 0f;
+            pinnedStyle.FlexBasis = TaffyDimension.FromLength(usedDeclaration);
+            taffyTree.SetStyle(taffyId, pinnedStyle);
         }
+    }
+
+    /// <summary>The content-box inline size a settled layout gives a box.</summary>
+    private static float InnerContentWidth(Layout.Layout layout) =>
+        layout.Size.Width
+        - layout.Border.Left
+        - layout.Border.Right
+        - layout.Padding.Left
+        - layout.Padding.Right
+        - layout.ScrollbarSize.Width;
+
+    /// <summary>
+    /// Carry every pin taken by <see cref="PinFlexItems"/> onto the flex container's current
+    /// width, and report whether any of them moved.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which has no counterpart. A pin is the
+    /// item's *used* main size written back as a definite length, which is only true of the
+    /// layout it was measured in. The scrollbar-gutter pass runs afterwards and takes width out
+    /// of a scroll container; where the row flex container sits inside that scroll container
+    /// rather than above it, every pinned item under it kept its pre-gutter width and so did
+    /// everything below (F35's residual: a `flex: 1 1 auto` item 400 against Chromium's 391,
+    /// and the `calc(100% - 4px)` card under it 392 against 383).
+    ///
+    /// The item can no longer flex - <see cref="PinFlexItems"/> froze its factors on purpose,
+    /// because re-running the flex algorithm off an already-flexed size flexes it twice - so
+    /// the pin is carried by scaling it with the container instead of by re-deriving it. That
+    /// is exact for the one-item and equal-factor rows this reaches (`free space` moves with
+    /// the container and is redistributed in the same proportion) and an approximation for a
+    /// row of items with unequal bases, which is what re-running the whole deferred resolution
+    /// after the gutter would cost more to get exactly right. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static bool RescalePinnedFlexItems(TaffyTree taffyTree, List<PinnedFlexItem> pinned)
+    {
+        bool changed = false;
+        for (int index = 0; index < pinned.Count; index++)
+        {
+            PinnedFlexItem entry = pinned[index];
+            float inner = InnerContentWidth(taffyTree.GetLayout(entry.Container));
+            if (!float.IsFinite(inner)
+                || inner <= 0f
+                || MathF.Abs(inner - entry.ContainerInnerWidth) <= 0.01f)
+            {
+                continue;
+            }
+
+            float ratio = inner / entry.ContainerInnerWidth;
+            float borderBox = entry.IsContentBox
+                ? entry.UsedInlineSize + entry.HorizontalEdges
+                : entry.UsedInlineSize;
+            float scaled = borderBox * ratio;
+            float used = entry.IsContentBox
+                ? F32.Max(scaled - entry.HorizontalEdges, 0f)
+                : F32.Max(scaled, 0f);
+            if (MathF.Abs(used - entry.UsedInlineSize) <= 0.01f)
+            {
+                pinned[index] = entry with { ContainerInnerWidth = inner };
+                continue;
+            }
+
+            TaffyStyle style = taffyTree.GetStyle(entry.Item).Clone();
+            Layout.Size<TaffyDimension> size = style.Size;
+            size.Width = TaffyDimension.FromLength(used);
+            style.Size = size;
+            style.FlexBasis = TaffyDimension.FromLength(used);
+            taffyTree.SetStyle(entry.Item, style);
+            pinned[index] = entry with { ContainerInnerWidth = inner, UsedInlineSize = used };
+            changed = true;
+        }
+
+        return changed;
     }
 
     /// <summary>
@@ -1066,7 +1185,8 @@ internal static class DomSubgridPasses
         Dictionary<NodeId, TaffyNodeId> taffyByDom,
         Dictionary<NodeId, LayoutStyle> styles,
         IReadOnlyList<DeferredCyclicInlineSize> deferred,
-        HashSet<NodeId> level)
+        HashSet<NodeId> level,
+        IReadOnlySet<TaffyNodeId> tableGridCells)
     {
         foreach (DeferredCyclicInlineSize entry in deferred)
         {
@@ -1110,12 +1230,25 @@ internal static class DomSubgridPasses
                 continue;
             }
 
+            // A cell pinned into a table grid takes its box width from its track, never from
+            // its own declaration - DomBuild.BuildTable forced it to `auto` for exactly that
+            // reason, and the declaration was already spent on sizing the column. Putting the
+            // percentage back here resolved it a second time, against the track: a `width: 30%`
+            // cell of a 600px table in a flex row rendered 54px inside its correct 180px
+            // column. (Chromium: 180.) The same restore is right for every other node.
+            bool cellInTableGrid = tableGridCells.Contains(nodeId);
+
             TaffyStyle restored = taffyTree.GetStyle(nodeId).Clone();
             TaffyDimension percentValue = TaffyDimension.FromPercent(entry.Percent);
             switch (entry.Slot)
             {
                 case 0:
                 {
+                    if (cellInTableGrid)
+                    {
+                        break;
+                    }
+
                     Layout.Size<TaffyDimension> size = restored.Size;
                     size.Width = percentValue;
                     restored.Size = size;
@@ -1170,6 +1303,7 @@ internal static class DomSubgridPasses
         float rootFs,
         float vw,
         float vh,
+        IReadOnlySet<TaffyNodeId> tableGridCells,
         Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
     {
         if (deferred.Count == 0)
@@ -1184,7 +1318,7 @@ internal static class DomSubgridPasses
         }
 
         return ResolveFunctionalInlineSizes(
-            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, relayout);
+            tree, taffyTree, taffyByDom, styles, deferred, rootFs, vw, vh, tableGridCells, relayout);
     }
 
     /// <summary>
@@ -1200,6 +1334,7 @@ internal static class DomSubgridPasses
         float rootFs,
         float vw,
         float vh,
+        IReadOnlySet<TaffyNodeId> tableGridCells,
         Action<TaffyTree, Dictionary<NodeId, LayoutStyle>, DeferredFlexReflowPhase> relayout)
     {
         HashSet<NodeId> functionalNodes = [];
@@ -1345,6 +1480,13 @@ internal static class DomSubgridPasses
                 {
                     case 0:
                     {
+                        // As in RestoreTypedPercentages: a cell's inline size sized its column,
+                        // and its box fills the track it was given.
+                        if (tableGridCells.Contains(nodeId))
+                        {
+                            break;
+                        }
+
                         Layout.Size<TaffyDimension> size = resolvedStyle.Size;
                         size.Width = length;
                         resolvedStyle.Size = size;

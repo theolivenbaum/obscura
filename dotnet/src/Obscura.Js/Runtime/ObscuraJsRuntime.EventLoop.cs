@@ -12,7 +12,7 @@ namespace Obscura.Js.Runtime;
 /// deno_core owns a Tokio-backed loop that drains timers, async ops and
 /// microtasks and reports idle. ClearScript owns none of that, so the loop is
 /// driven here: <see cref="TimerQueue"/> is the timer task source,
-/// <see cref="ObscuraJsRuntime.TrackAsyncOp"/> is the async-op counter, and V8's
+/// <see cref="Obscura.Js.Ops.AsyncOpBinding"/> is the async-op counter, and V8's
 /// automatic microtask policy performs the checkpoint at the end of every
 /// script the host runs.
 /// </para>
@@ -538,7 +538,21 @@ public sealed partial class ObscuraJsRuntime
                 }
                 if (tick == LoopTick.Idle)
                 {
-                    break;
+                    // An idle verdict here is weaker than the policy this loop
+                    // enforces, so confirm it against the page before acting on it.
+                    // The general form of that gap - an op whose promise resolves
+                    // after every host-side signal of it is already released - is
+                    // closed by AsyncOpBinding, which counts the op in JavaScript
+                    // until its reaction runs; see the DEVIATION recorded there. This
+                    // check stays for the work that is not an op at all: a dynamic
+                    // script between its body arriving and its evaluation, and a
+                    // module the loader is still resolving. budget still bounds the
+                    // loop (#474).
+                    if (!HasPendingDynamicScripts())
+                    {
+                        break;
+                    }
+                    tick = LoopTick.Waiting;
                 }
                 if (tick == LoopTick.Waiting)
                 {

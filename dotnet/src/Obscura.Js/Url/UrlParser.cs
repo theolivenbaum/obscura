@@ -114,6 +114,20 @@ internal sealed class UrlParser
     private readonly UrlRecord? _base;
     private readonly ParseContext _context;
 
+    /// <summary>
+    /// Why the parse failed, valid only once a parse method has returned null.
+    /// </summary>
+    /// <remarks>
+    /// The Rust parser threads this out as the <c>Err</c> half of a <c>ParseResult</c>
+    /// on every fallible method. Carrying it on the parser instead keeps the ~30 failure
+    /// returns from each having to restate it, and the field is written immediately
+    /// before the return that reads it. It defaults to
+    /// <see cref="UrlParseError.RelativeUrlWithoutBase"/> because that is the outcome for
+    /// input that is not a URL at all, which is the one failure reachable before any
+    /// component has been parsed.
+    /// </remarks>
+    private UrlParseError _error = UrlParseError.RelativeUrlWithoutBase;
+
     private UrlParser(StringBuilder serialization, UrlRecord? baseUrl, ParseContext context)
     {
         _ser = serialization;
@@ -123,8 +137,26 @@ internal sealed class UrlParser
 
     /// <summary>Parses <paramref name="input"/>, optionally against <paramref name="baseUrl"/>.</summary>
     public static UrlRecord? Parse(string input, UrlRecord? baseUrl) =>
-        new UrlParser(new StringBuilder(input.Length + 16), baseUrl, ParseContext.UrlParser)
-            .ParseUrl(input);
+        Parse(input, baseUrl, out _);
+
+    /// <summary>
+    /// <see cref="Parse(string, UrlRecord?)"/>, also reporting why a rejected URL was
+    /// rejected.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="error"/> is the port of the <c>Err</c> half of the Rust crate's
+    /// <c>Url::parse</c>, and is meaningful only when the result is null. It exists
+    /// because the reason is observable: a failed navigation reports
+    /// <c>Invalid URL: {reason}</c>, so collapsing every rejection into one reason is a
+    /// wire difference, not just a worse diagnostic.
+    /// </remarks>
+    public static UrlRecord? Parse(string input, UrlRecord? baseUrl, out UrlParseError error)
+    {
+        var parser = new UrlParser(new StringBuilder(input.Length + 16), baseUrl, ParseContext.UrlParser);
+        var parsed = parser.ParseUrl(input);
+        error = parser._error;
+        return parsed;
+    }
 
     /// <summary>Parses a scheme for the <c>protocol</c> setter (setter context).</summary>
     public static bool TryParseSetterScheme(string scheme, out string parsed, out bool remainingEmpty)
@@ -165,6 +197,7 @@ internal sealed class UrlParser
 
         if (_base is null)
         {
+            _error = UrlParseError.RelativeUrlWithoutBase;
             return null;
         }
 
@@ -175,6 +208,7 @@ internal sealed class UrlParser
 
         if (_base.CannotBeABase)
         {
+            _error = UrlParseError.RelativeUrlWithCannotBeABaseBase;
             return null;
         }
 
@@ -538,6 +572,7 @@ internal sealed class UrlParser
 
         if ((host.Kind == HostKind.None || host.IsEmptyDomain) && hasAuthority)
         {
+            _error = UrlParseError.EmptyHost;
             return null;
         }
 
@@ -584,7 +619,8 @@ internal sealed class UrlParser
             if (lastAtRemaining.First is char next
                 && (next is '/' or '?' or '#' || (schemeType.IsSpecial() && next == '\\')))
             {
-                return false;   // empty host
+                _error = UrlParseError.EmptyHost;
+                return false;
             }
 
             usernameEnd = Len;
@@ -652,7 +688,7 @@ internal sealed class UrlParser
     {
         hostEnd = 0;
         port = null;
-        if (!ParseHost(input, schemeType, out host, out remaining))
+        if (!ParseHost(input, schemeType, out host, out remaining, out _error))
         {
             return false;
         }
@@ -661,13 +697,14 @@ internal sealed class UrlParser
         hostEnd = Len;
         if (host.IsEmptyDomain && (remaining.StartsWith(':') || schemeType.IsSpecial()))
         {
+            _error = UrlParseError.EmptyHost;
             return false;
         }
 
         if (remaining.SplitPrefix(':') is Input afterColon)
         {
             var defaultPort = SchemeTypes.DefaultPort(Slice(0, schemeEnd));
-            if (!ParsePort(afterColon, defaultPort, _context, out port, out remaining))
+            if (!ParsePort(afterColon, defaultPort, _context, out port, out remaining, out _error))
             {
                 return false;
             }
@@ -681,14 +718,20 @@ internal sealed class UrlParser
         return true;
     }
 
-    private static bool ParseHost(Input input, SchemeType schemeType, out ParsedHost host, out Input remaining)
+    private static bool ParseHost(
+        Input input,
+        SchemeType schemeType,
+        out ParsedHost host,
+        out Input remaining,
+        out UrlParseError error)
     {
         if (schemeType.IsFile())
         {
-            return GetFileHost(input, out host, out remaining);
+            return GetFileHost(input, out host, out remaining, out error);
         }
 
         host = default;
+        error = UrlParseError.EmptyHost;
         var text = input.S;
         var insideBrackets = false;
         var i = input.Pos;
@@ -724,22 +767,27 @@ internal sealed class UrlParser
         remaining = new Input(text, i);
         if (schemeType == SchemeType.SpecialNotFile && hostStr.Length == 0)
         {
+            error = UrlParseError.EmptyHost;
             return false;
         }
 
         if (schemeType.IsSpecial())
         {
-            return HostParser.TryParse(hostStr, out host);
+            return HostParser.TryParse(hostStr, out host, out error);
         }
 
-        return HostParser.TryParseOpaque(hostStr, out host);
+        return HostParser.TryParseOpaque(hostStr, out host, out error);
     }
 
-    private static bool GetFileHost(Input input, out ParsedHost host, out Input remaining)
+    private static bool GetFileHost(
+        Input input,
+        out ParsedHost host,
+        out Input remaining,
+        out UrlParseError error)
     {
         host = default;
         FileHost(input, out var hostStr, out remaining);
-        if (!HostParser.TryParse(hostStr, out var parsed))
+        if (!HostParser.TryParse(hostStr, out var parsed, out error))
         {
             return false;
         }
@@ -760,7 +808,7 @@ internal sealed class UrlParser
             return true;
         }
 
-        if (!HostParser.TryParse(hostStr, out var parsed))
+        if (!HostParser.TryParse(hostStr, out var parsed, out _error))
         {
             return false;
         }
@@ -797,10 +845,16 @@ internal sealed class UrlParser
     }
 
     private static bool ParsePort(
-        Input input, int? defaultPort, ParseContext context, out int? port, out Input remaining)
+        Input input,
+        int? defaultPort,
+        ParseContext context,
+        out int? port,
+        out Input remaining,
+        out UrlParseError error)
     {
         port = null;
         remaining = input;
+        error = UrlParseError.InvalidPort;
         var value = 0;
         var hasAnyDigit = false;
         while (remaining.First is char c)

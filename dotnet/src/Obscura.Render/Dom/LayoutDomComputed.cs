@@ -23,6 +23,7 @@ public static partial class RenderDom
         HashSet<NodeId>? freshStyles,
         HashSet<NodeId> definiteHeightNodes,
         Inherited rootInherited,
+        FontUnitResolver fontUnits,
         float rootFs,
         float vw,
         float vh,
@@ -48,9 +49,11 @@ public static partial class RenderDom
                 if (styles.TryGetValue(id, out LayoutStyle? retainedStyle))
                 {
                     float retainedEm = retainedStyle.FontSize ?? inh.FontSize ?? 16f;
-                    ComputedStyle.SetGridCalcContext(retainedStyle, retainedEm, rootFs, vw, vh);
-                    SetLateCalcContext(retainedStyle.InsetCalc, retainedEm, rootFs, vw, vh);
-                    SetLateCalcContext(retainedStyle.SizeCalc, retainedEm, rootFs, vw, vh);
+                    FontUnits retainedUnits = fontUnits.For(retainedStyle, retainedEm);
+                    retainedUnits.StoreOn(retainedStyle);
+                    ComputedStyle.SetGridCalcContext(retainedStyle, retainedUnits, rootFs, vw, vh);
+                    SetLateCalcContext(retainedStyle.InsetCalc, retainedUnits, rootFs, vw, vh);
+                    SetLateCalcContext(retainedStyle.SizeCalc, retainedUnits, rootFs, vw, vh);
                     inh.Display = retainedStyle.Display;
                     inh.Direction = retainedStyle.Direction ?? inh.Direction;
                     inh.DisplayContents = retainedStyle.DisplayContents;
@@ -58,6 +61,8 @@ public static partial class RenderDom
                     inh.FlowRoot = retainedStyle.FlowRoot;
                     inh.IsTableBox = retainedStyle.IsTableBox;
                     inh.IsTableCellBox = retainedStyle.IsTableCellBox;
+                    inh.AuthoredTableDisplay = retainedStyle.AuthoredTableDisplay;
+                    inh.BorderSpacing = retainedStyle.BorderSpacing ?? inh.BorderSpacing;
                     inh.Color = retainedStyle.Color ?? inh.Color;
                     inh.FontSize = retainedStyle.FontSize ?? inh.FontSize;
                     inh.FontWeight = ComputedStyle.UsedFontWeight(retainedStyle);
@@ -247,6 +252,7 @@ public static partial class RenderDom
                     inh,
                     inheritedGridAutoTracks,
                     definiteHeightNodes,
+                    fontUnits,
                     rootFs,
                     vw,
                     vh,
@@ -282,7 +288,7 @@ public static partial class RenderDom
     private static SvgPaintValues ResolveSvgPaint(
         LayoutStyle    style,
         SvgPaintValues inherited,
-        float          emPx,
+        FontUnits      font,
         float          rootFs,
         float          vw,
         float          vh)
@@ -302,7 +308,7 @@ public static partial class RenderDom
             ? SvgPaintCss(specifiedStroke, style, inherited.Stroke)
             : inherited.Stroke;
         string strokeWidth = style.SvgStrokeWidth is { } specifiedWidth
-            ? SvgStrokeWidthCss(specifiedWidth, emPx, rootFs, vw, vh, inherited.StrokeWidth)
+            ? SvgStrokeWidthCss(specifiedWidth, font, rootFs, vw, vh, inherited.StrokeWidth)
             : inherited.StrokeWidth;
         string textAnchor = style.SvgTextAnchor switch
         {
@@ -352,12 +358,12 @@ public static partial class RenderDom
 
     /// <summary>Serialize one specified <c>stroke-width</c> value.</summary>
     private static string SvgStrokeWidthCss(
-        string specified,
-        float  emPx,
-        float  rootFs,
-        float  vw,
-        float  vh,
-        string inherited)
+        string    specified,
+        FontUnits font,
+        float     rootFs,
+        float     vw,
+        float     vh,
+        string    inherited)
     {
         string value = specified.Trim();
         string lower = CssText.AsciiLower(value);
@@ -377,7 +383,7 @@ public static partial class RenderDom
             return PaintCssValues.CssNumber(dimension.Value * 100f) + "%";
         }
 
-        Dimension resolved = dimension.Resolve(emPx, rootFs, vw, vh);
+        Dimension resolved = dimension.Resolve(font, rootFs, vw, vh);
 
         return resolved is { Kind: DimensionKind.Px } px && float.IsFinite(px.Value)
             ? PaintCssValues.CssPx(px.Value)
@@ -395,6 +401,7 @@ public static partial class RenderDom
             List<object> ColumnCalcs,
             List<object> RowCalcs)? inheritedGridAutoTracks,
         HashSet<NodeId> definiteHeightNodes,
+        FontUnitResolver fontUnits,
         float rootFs,
         float vw,
         float vh,
@@ -430,6 +437,12 @@ public static partial class RenderDom
             style.IsTableBox = inh.IsTableBox;
             style.IsTableCellBox = inh.IsTableCellBox;
 
+            // An internal table display is recorded rather than laid out, so it lives beside
+            // the layout display instead of in it and has to be copied with it. Measured on
+            // Chromium 141, a `display: inherit` child of a `display: table-row` box reports
+            // `table-row`; without this it reported `block`.
+            style.AuthoredTableDisplay = inh.AuthoredTableDisplay;
+
             // Reconstruct the internal cell-content wrapper only when the inherited computed
             // display is table-cell.
             style.InternalFlexContainer = style.IsTableCellBox;
@@ -458,6 +471,8 @@ public static partial class RenderDom
         inh.FlowRoot = style.FlowRoot;
         inh.IsTableBox = style.IsTableBox;
         inh.IsTableCellBox = style.IsTableCellBox;
+        inh.AuthoredTableDisplay = style.AuthoredTableDisplay;
+
         if (style.Color is { } color)
         {
             inh.Color = color;
@@ -470,10 +485,22 @@ public static partial class RenderDom
         // Resolve a relative font-size against the PARENT (em/%) or ROOT (rem) font-size
         // before inheriting it downward.
         float parentFs = inh.FontSize ?? 16f;
+
+        // `ch` and `ex` in `font-size` are defined against the PARENT's first available font,
+        // the same font the parent's own em refers to. `inh` still holds the parent's font
+        // properties here, which is exactly that face.
+        FontUnits parentUnits = fontUnits.For(
+            parentFs,
+            inh.FontFamily,
+            inh.FontWeight,
+            inh.Italic,
+            inh.FontOpticalSizing,
+            inh.FontVariationSettings);
+
         if (style.FontSizeExpression is { } fontSizeExpression)
         {
             style.FontSize = ComputedStyle.ResolveContextualLength(
-                fontSizeExpression, parentFs, rootFs, vw, vh, parentFs);
+                fontSizeExpression, parentUnits, rootFs, vw, vh, parentFs);
         }
         else if (style.FontSizeRaw is { } raw)
         {
@@ -481,7 +508,7 @@ public static partial class RenderDom
             {
                 DimensionKind.Percent => parentFs * raw.Value,
                 DimensionKind.Em => parentFs * raw.Value,
-                _ => raw.Resolve(parentFs, rootFs, vw, vh) is { Kind: DimensionKind.Px } px
+                _ => raw.Resolve(parentUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } px
                     ? px.Value
                     : parentFs,
             };
@@ -500,20 +527,50 @@ public static partial class RenderDom
         // em in non-font-size properties is relative to this element's OWN computed font-size.
         float emPx = style.FontSize ?? parentFs;
 
+        // ...and so are `ch` and `ex`, but against the element's own first available FONT rather
+        // than a fixed fraction of its size. The face has to be picked here because every length
+        // below is resolved before `font-family` / `font-weight` / `font-style` are inherited
+        // onto the style further down; reading the three the way that block will is a read, not
+        // a second cascade.
+        FontUnits ownUnits = fontUnits.For(
+            emPx,
+            style.FontFamily ?? inh.FontFamily,
+            ComputedStyle.ComputedFontWeight(style.FontWeight, inh.FontWeight),
+            style.FontStyleItalic ?? inh.Italic,
+            style.FontOpticalSizing ?? inh.FontOpticalSizing,
+            style.FontVariationSettings ?? inh.FontVariationSettings);
+        ownUnits.StoreOn(style);
+
         // `fill` / `stroke` / `stroke-width` / `text-anchor` all inherit, and all four need the
         // element's own computed colour and font-size to serialize, so they resolve here.
-        inh.Svg = ResolveSvgPaint(style, inh.Svg, emPx, rootFs, vw, vh);
+        inh.Svg = ResolveSvgPaint(style, inh.Svg, ownUnits, rootFs, vw, vh);
         style.SvgPaint = inh.Svg;
-        ComputedStyle.SetGridCalcContext(style, emPx, rootFs, vw, vh);
-        ComputedStyle.ResolveFontRelativeDeclarations(style, emPx, rootFs, vw, vh);
+        ComputedStyle.SetGridCalcContext(style, ownUnits, rootFs, vw, vh);
+        ComputedStyle.ResolveFontRelativeDeclarations(style, ownUnits, rootFs, vw, vh);
+
+        // `border-spacing` is inherited, and `inherit` / `unset` are the only way an element
+        // reads a value it did not declare: nothing else carries one down, so only the
+        // declaring element holds one and PreparedRender walks up to find it. This sits after
+        // the font-relative re-read so a `border-spacing: 1em` a descendant inherits is the
+        // value the element ends up with, not the one the cascade guessed at 16px.
+        if (style.BorderSpacingInherit)
+        {
+            style.BorderSpacing = inh.BorderSpacing;
+            style.BorderSpacingInherit = false;
+        }
+
+        if (style.BorderSpacing is { } declaredBorderSpacing)
+        {
+            inh.BorderSpacing = declaredBorderSpacing;
+        }
         if (style.LetterSpacingExpression is { } letterSpacingExpression)
         {
             style.LetterSpacing = ComputedStyle.ResolveContextualLength(
-                letterSpacingExpression, emPx, rootFs, vw, vh, emPx);
+                letterSpacingExpression, ownUnits, rootFs, vw, vh, emPx);
         }
         else if (style.LetterSpacingRaw is { } letterSpacingRaw)
         {
-            Dimension resolved = letterSpacingRaw.Resolve(emPx, rootFs, vw, vh);
+            Dimension resolved = letterSpacingRaw.Resolve(ownUnits, rootFs, vw, vh);
             style.LetterSpacing = resolved.Kind == DimensionKind.Px && float.IsFinite(resolved.Value)
                 ? resolved.Value
                 : null;
@@ -567,19 +624,19 @@ public static partial class RenderDom
         if (style.RowGapExpression is { } rowGapExpression)
         {
             style.RowGap = ComputedStyle.ResolveContextualLength(
-                rowGapExpression, emPx, rootFs, vw, vh, inh.CbWidth);
+                rowGapExpression, ownUnits, rootFs, vw, vh, inh.CbWidth);
         }
 
         if (style.ColumnGapExpression is { } columnGapExpression)
         {
             style.ColumnGap = ComputedStyle.ResolveContextualLength(
-                columnGapExpression, emPx, rootFs, vw, vh, inh.CbWidth);
+                columnGapExpression, ownUnits, rootFs, vw, vh, inh.CbWidth);
         }
 
         if (style.LineHeightExpression is { } lineHeightExpression)
         {
             if (ComputedStyle.ResolveContextualLength(
-                    lineHeightExpression, emPx, rootFs, vw, vh, emPx) is { } resolvedLineHeight)
+                    lineHeightExpression, ownUnits, rootFs, vw, vh, emPx) is { } resolvedLineHeight)
             {
                 style.LineHeight = ComputedStyle.LineHeightExpressionIsLength(lineHeightExpression)
                     ? LineHeight.Px(resolvedLineHeight)
@@ -591,7 +648,7 @@ public static partial class RenderDom
             Dimension relative = relativeLineHeight.Length;
             float pixels = relative.Kind == DimensionKind.Percent
                 ? emPx * relative.Value
-                : relative.Resolve(emPx, rootFs, vw, vh) is { Kind: DimensionKind.Px } resolvedPx
+                : relative.Resolve(ownUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } resolvedPx
                     ? resolvedPx.Value
                     : emPx;
             style.LineHeight = LineHeight.Px(pixels);
@@ -617,7 +674,7 @@ public static partial class RenderDom
                     continue;
                 }
 
-                style.SizeExpressions[index] = sizeInheritFrom.SizeExpressions[index];
+                style.SetSizeExpression(index, sizeInheritFrom.SizeExpressions[index]);
                 style.SetSizeIntrinsicKeyword(index, sizeInheritFrom.SizeIntrinsicKeyword(index));
                 switch (index)
                 {
@@ -693,13 +750,13 @@ public static partial class RenderDom
                 && expression.Contains('%', StringComparison.Ordinal)
                 && GridCalcExpression.Parse(expression) is { } lateSize)
             {
-                lateSize.SetContext(emPx, rootFs, vw, vh);
+                lateSize.SetContext(ownUnits, rootFs, vw, vh);
                 (style.SizeCalc ??= new GridCalcExpression?[6])[index] = lateSize;
             }
 
             float percentBase = blockAxis ? inh.CbHeight : cbW;
             if (ComputedStyle.ResolveContextualLength(
-                    expression, emPx, rootFs, vw, vh, percentBase) is not { } px)
+                    expression, ownUnits, rootFs, vw, vh, percentBase) is not { } px)
             {
                 continue;
             }
@@ -716,13 +773,21 @@ public static partial class RenderDom
             }
         }
 
-        style.Width = style.Width.Resolve(emPx, rootFs, vw, vh);
-        style.Height = style.Height.Resolve(emPx, rootFs, vw, vh);
-        style.MinWidth = style.MinWidth.Resolve(emPx, rootFs, vw, vh);
-        style.MinHeight = style.MinHeight.Resolve(emPx, rootFs, vw, vh);
-        style.MaxWidth = style.MaxWidth.Resolve(emPx, rootFs, vw, vh);
-        style.MaxHeight = style.MaxHeight.Resolve(emPx, rootFs, vw, vh);
-        style.FlexBasis = style.FlexBasis.Resolve(emPx, rootFs, vw, vh);
+        style.Width = style.Width.Resolve(ownUnits, rootFs, vw, vh);
+        style.Height = style.Height.Resolve(ownUnits, rootFs, vw, vh);
+        style.MinWidth = style.MinWidth.Resolve(ownUnits, rootFs, vw, vh);
+        style.MinHeight = style.MinHeight.Resolve(ownUnits, rootFs, vw, vh);
+        style.MaxWidth = style.MaxWidth.Resolve(ownUnits, rootFs, vw, vh);
+        style.MaxHeight = style.MaxHeight.Resolve(ownUnits, rootFs, vw, vh);
+        style.FlexBasis = style.FlexBasis.Resolve(ownUnits, rootFs, vw, vh);
+        if (style.InlineVerticalAlign is { Kind: InlineVerticalAlignKind.Offset } inlineAlign)
+        {
+            style.InlineVerticalAlign = inlineAlign with
+            {
+                Offset = inlineAlign.Offset.Resolve(ownUnits, rootFs, vw, vh),
+            };
+        }
+
         // DEVIATION from crates/obscura-render/src/dom.rs, which drops a block-axis
         // percentage whenever the parent box has no definite height. A grid item's
         // containing block is its GRID AREA, not the grid container's content box, so the
@@ -856,12 +921,12 @@ public static partial class RenderDom
             GridCalcExpression? late = percentBearing && (lateResolvedInsets || !blockAxisInset)
                 ? GridCalcExpression.Parse(expression, allowNegative: true)
                 : null;
-            late?.SetContext(emPx, rootFs, vw, vh);
+            late?.SetContext(ownUnits, rootFs, vw, vh);
             (style.InsetCalc ??= new GridCalcExpression?[4])[index] = late;
 
             if (percentBearing && blockAxisInset && !lateResolvedInsets && !inh.CbHeightKnown)
             {
-                style.Inset[index] = null;
+                style.SetInset(index, null);
                 continue;
             }
 
@@ -872,15 +937,15 @@ public static partial class RenderDom
                 ? (inh.CbHeightKnown ? inh.CbHeight : viewport.Height)
                 : cbW;
             float? resolved = ComputedStyle.ResolveContextualLength(
-                expression, emPx, rootFs, vw, vh, percentBase);
-            style.Inset[index] = resolved is { } value ? Dimension.Px(value) : null;
+                expression, ownUnits, rootFs, vw, vh, percentBase);
+            style.SetInset(index, resolved is { } value ? Dimension.Px(value) : null);
         }
 
         for (int index = 0; index < 4; index++)
         {
             if (style.Inset[index] is { } inset)
             {
-                style.Inset[index] = inset.Resolve(emPx, rootFs, vw, vh);
+                style.SetInset(index, inset.Resolve(ownUnits, rootFs, vw, vh));
             }
         }
 
@@ -980,7 +1045,7 @@ public static partial class RenderDom
 
         if (style.TextIndent is { } textIndent)
         {
-            Dimension indent = textIndent.Resolve(emPx, rootFs, vw, vh);
+            Dimension indent = textIndent.Resolve(ownUnits, rootFs, vw, vh);
             style.TextIndent = indent;
             inh.TextIndent = indent;
         }
@@ -1098,26 +1163,26 @@ public static partial class RenderDom
         {
             if (style.PaddingExpressions[i] is { } paddingExpression
                 && ComputedStyle.ResolveContextualLength(
-                    paddingExpression, emPx, rootFs, vw, vh, cbW) is { } paddingPx)
+                    paddingExpression, ownUnits, rootFs, vw, vh, cbW) is { } paddingPx)
             {
                 padding = SetEdge(padding, i, F32.Max(paddingPx, 0f));
             }
 
             if (style.MarginExpressions[i] is { } marginExpression
                 && ComputedStyle.ResolveContextualLength(
-                    marginExpression, emPx, rootFs, vw, vh, cbW) is { } marginPx)
+                    marginExpression, ownUnits, rootFs, vw, vh, cbW) is { } marginPx)
             {
                 margin = SetEdge(margin, i, marginPx);
             }
 
             if (style.PaddingRelative[i] is { } paddingRelative
-                && paddingRelative.Resolve(emPx, rootFs, vw, vh) is { Kind: DimensionKind.Px } rp)
+                && paddingRelative.Resolve(ownUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } rp)
             {
                 padding = SetEdge(padding, i, F32.Max(rp.Value, 0f));
             }
 
             if (style.MarginRelative[i] is { } marginRelative
-                && marginRelative.Resolve(emPx, rootFs, vw, vh) is { Kind: DimensionKind.Px } rm)
+                && marginRelative.Resolve(ownUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } rm)
             {
                 margin = SetEdge(margin, i, rm.Value);
             }
@@ -1131,7 +1196,7 @@ public static partial class RenderDom
         style.Padding = padding;
         style.Margin = margin;
 
-        SettlePseudos(style, inh, emPx, parentFs, rootFs, vw, vh, viewport, cbW);
+        SettlePseudos(style, inh, fontUnits, emPx, parentFs, rootFs, vw, vh, viewport, cbW);
 
         // Containing-block width handed to this element's children is its own content-box
         // width.
@@ -1254,7 +1319,7 @@ public static partial class RenderDom
     /// </summary>
     private static void SetLateCalcContext(
         GridCalcExpression?[]? expressions,
-        float emPx,
+        FontUnits font,
         float remPx,
         float vw,
         float vh)
@@ -1266,7 +1331,7 @@ public static partial class RenderDom
 
         foreach (GridCalcExpression? expression in expressions)
         {
-            expression?.SetContext(emPx, remPx, vw, vh);
+            expression?.SetContext(font, remPx, vw, vh);
         }
     }
 
@@ -1286,6 +1351,7 @@ public static partial class RenderDom
     private static void SettlePseudos(
         LayoutStyle style,
         Inherited inh,
+        FontUnitResolver fontUnits,
         float emPx,
         float parentFs,
         float rootFs,
@@ -1306,6 +1372,9 @@ public static partial class RenderDom
         string? hostPointerEvents = style.PointerEvents;
         FontOpticalSizing? hostOpticalSizing = style.FontOpticalSizing;
         List<FontVariationSetting>? hostVariationSettings = style.FontVariationSettings;
+
+        // The host's own font is final by here, so this is the face a pseudo-element inherits.
+        FontUnits hostUnits = fontUnits.For(style, hostFontSize);
         LineHeight? hostLineHeight = style.LineHeight;
         WhiteSpace? hostWhiteSpace = style.WhiteSpace;
         OverflowWrap? hostOverflowWrap = style.OverflowWrap;
@@ -1323,6 +1392,7 @@ public static partial class RenderDom
         bool hostFlowRoot = style.FlowRoot;
         bool hostIsTableBox = style.IsTableBox;
         bool hostIsTableCellBox = style.IsTableCellBox;
+        TableInternalDisplay hostAuthoredTableDisplay = style.AuthoredTableDisplay;
         List<Layout.TrackSizingFunction> hostGridAutoColumns = [.. style.GridAutoColumns];
         List<Layout.TrackSizingFunction> hostGridAutoRows = [.. style.GridAutoRows];
         List<object> hostGridAutoColumnCalcs = [.. GridCalcBucket(style, 2)];
@@ -1356,6 +1426,7 @@ public static partial class RenderDom
                 pseudo.FlowRoot = hostFlowRoot;
                 pseudo.IsTableBox = hostIsTableBox;
                 pseudo.IsTableCellBox = hostIsTableCellBox;
+                pseudo.AuthoredTableDisplay = hostAuthoredTableDisplay;
                 pseudo.InternalFlexContainer = pseudo.IsTableCellBox;
                 if (pseudo.IsTableCellBox)
                 {
@@ -1382,7 +1453,7 @@ public static partial class RenderDom
             if (pseudo.FontSizeExpression is { } fontSizeExpression)
             {
                 pseudo.FontSize = ComputedStyle.ResolveContextualLength(
-                    fontSizeExpression, hostFontSize, rootFs, vw, vh, hostFontSize);
+                    fontSizeExpression, hostUnits, rootFs, vw, vh, hostFontSize);
             }
             else if (pseudo.FontSizeRaw is { } raw)
             {
@@ -1390,7 +1461,7 @@ public static partial class RenderDom
                 {
                     DimensionKind.Percent => hostFontSize * raw.Value,
                     DimensionKind.Em => hostFontSize * raw.Value,
-                    _ => raw.Resolve(hostFontSize, rootFs, vw, vh) is { Kind: DimensionKind.Px } px
+                    _ => raw.Resolve(hostUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } px
                         ? px.Value
                         : hostFontSize,
                 };
@@ -1401,16 +1472,27 @@ public static partial class RenderDom
             }
 
             float pseudoEm = pseudo.FontSize ?? hostFontSize;
-            ComputedStyle.SetGridCalcContext(pseudo, pseudoEm, rootFs, vw, vh);
-            ComputedStyle.ResolveFontRelativeDeclarations(pseudo, pseudoEm, rootFs, vw, vh);
+
+            // A pseudo-element inherits the host's font unless it declares its own, so its
+            // `ch` / `ex` are measured on the face it will actually render with.
+            FontUnits pseudoUnits = fontUnits.For(
+                pseudoEm,
+                pseudo.FontFamily ?? hostFamily,
+                ComputedStyle.ComputedFontWeight(pseudo.FontWeight, hostWeight),
+                pseudo.FontStyleItalic ?? style.FontStyleItalic ?? false,
+                pseudo.FontOpticalSizing ?? hostOpticalSizing ?? FontOpticalSizing.Auto,
+                pseudo.FontVariationSettings ?? hostVariationSettings);
+            pseudoUnits.StoreOn(pseudo);
+            ComputedStyle.SetGridCalcContext(pseudo, pseudoUnits, rootFs, vw, vh);
+            ComputedStyle.ResolveFontRelativeDeclarations(pseudo, pseudoUnits, rootFs, vw, vh);
             if (pseudo.LetterSpacingExpression is { } letterSpacingExpression)
             {
                 pseudo.LetterSpacing = ComputedStyle.ResolveContextualLength(
-                    letterSpacingExpression, pseudoEm, rootFs, vw, vh, pseudoEm);
+                    letterSpacingExpression, pseudoUnits, rootFs, vw, vh, pseudoEm);
             }
             else if (pseudo.LetterSpacingRaw is { } letterSpacingRaw)
             {
-                Dimension resolved = letterSpacingRaw.Resolve(pseudoEm, rootFs, vw, vh);
+                Dimension resolved = letterSpacingRaw.Resolve(pseudoUnits, rootFs, vw, vh);
                 pseudo.LetterSpacing =
                     resolved.Kind == DimensionKind.Px && float.IsFinite(resolved.Value)
                         ? resolved.Value
@@ -1432,7 +1514,7 @@ public static partial class RenderDom
 
                 float percentBase = index is 1 or 3 or 5 ? viewport.Height : cbW;
                 if (ComputedStyle.ResolveContextualLength(
-                        expression, pseudoEm, rootFs, vw, vh, percentBase) is not { } px)
+                        expression, pseudoUnits, rootFs, vw, vh, percentBase) is not { } px)
                 {
                     continue;
                 }
@@ -1449,25 +1531,25 @@ public static partial class RenderDom
                 }
             }
 
-            pseudo.Width = pseudo.Width.Resolve(pseudoEm, rootFs, vw, vh);
-            pseudo.Height = pseudo.Height.Resolve(pseudoEm, rootFs, vw, vh);
-            pseudo.MinWidth = pseudo.MinWidth.Resolve(pseudoEm, rootFs, vw, vh);
-            pseudo.MinHeight = pseudo.MinHeight.Resolve(pseudoEm, rootFs, vw, vh);
-            pseudo.MaxWidth = pseudo.MaxWidth.Resolve(pseudoEm, rootFs, vw, vh);
-            pseudo.MaxHeight = pseudo.MaxHeight.Resolve(pseudoEm, rootFs, vw, vh);
+            pseudo.Width = pseudo.Width.Resolve(pseudoUnits, rootFs, vw, vh);
+            pseudo.Height = pseudo.Height.Resolve(pseudoUnits, rootFs, vw, vh);
+            pseudo.MinWidth = pseudo.MinWidth.Resolve(pseudoUnits, rootFs, vw, vh);
+            pseudo.MinHeight = pseudo.MinHeight.Resolve(pseudoUnits, rootFs, vw, vh);
+            pseudo.MaxWidth = pseudo.MaxWidth.Resolve(pseudoUnits, rootFs, vw, vh);
+            pseudo.MaxHeight = pseudo.MaxHeight.Resolve(pseudoUnits, rootFs, vw, vh);
 
             Edges pseudoPadding = pseudo.Padding;
             Edges pseudoMargin = pseudo.Margin;
             for (int index = 0; index < 4; index++)
             {
                 if (pseudo.PaddingRelative[index] is { } paddingRelative
-                    && paddingRelative.Resolve(pseudoEm, rootFs, vw, vh) is { Kind: DimensionKind.Px } rp)
+                    && paddingRelative.Resolve(pseudoUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } rp)
                 {
                     pseudoPadding = SetEdge(pseudoPadding, index, F32.Max(rp.Value, 0f));
                 }
 
                 if (pseudo.MarginRelative[index] is { } marginRelative
-                    && marginRelative.Resolve(pseudoEm, rootFs, vw, vh) is { Kind: DimensionKind.Px } rm)
+                    && marginRelative.Resolve(pseudoUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } rm)
                 {
                     pseudoMargin = SetEdge(pseudoMargin, index, rm.Value);
                 }
@@ -1479,7 +1561,7 @@ public static partial class RenderDom
 
                 if (pseudo.Inset[index] is { } inset)
                 {
-                    pseudo.Inset[index] = inset.Resolve(pseudoEm, rootFs, vw, vh);
+                    pseudo.SetInset(index, inset.Resolve(pseudoUnits, rootFs, vw, vh));
                 }
             }
 
@@ -1503,7 +1585,7 @@ public static partial class RenderDom
             if (pseudo.LineHeightExpression is { } lineHeightExpression)
             {
                 if (ComputedStyle.ResolveContextualLength(
-                        lineHeightExpression, pseudoEm, rootFs, vw, vh, pseudoEm) is { } resolved)
+                        lineHeightExpression, pseudoUnits, rootFs, vw, vh, pseudoEm) is { } resolved)
                 {
                     pseudo.LineHeight =
                         ComputedStyle.LineHeightExpressionIsLength(lineHeightExpression)
@@ -1516,7 +1598,7 @@ public static partial class RenderDom
                 Dimension relative = relativeLineHeight.Length;
                 float pixels = relative.Kind == DimensionKind.Percent
                     ? pseudoEm * relative.Value
-                    : relative.Resolve(pseudoEm, rootFs, vw, vh) is { Kind: DimensionKind.Px } px
+                    : relative.Resolve(pseudoUnits, rootFs, vw, vh) is { Kind: DimensionKind.Px } px
                         ? px.Value
                         : pseudoEm;
                 pseudo.LineHeight = LineHeight.Px(pixels);
@@ -1536,7 +1618,7 @@ public static partial class RenderDom
             pseudo.TextAlign ??= hostTextAlign;
             if (pseudo.TextIndent is { } indent)
             {
-                pseudo.TextIndent = indent.Resolve(pseudoEm, rootFs, vw, vh);
+                pseudo.TextIndent = indent.Resolve(pseudoUnits, rootFs, vw, vh);
             }
             else
             {

@@ -86,7 +86,7 @@ public sealed class ResolvedScrollState
 /// A final image/font-aware document layout retained across viewport paints. The DOM must not
 /// be mutated while this value is reused.
 /// </summary>
-public sealed class PreparedRender
+public sealed partial class PreparedRender
 {
     internal (float Width, float Height) ViewportSize { get; set; }
 
@@ -504,12 +504,23 @@ public sealed class PreparedRender
 
         // A classic scrollbar sits inside the padding box, so the client box excludes it.
         return (
-            F32.Max(rect.Width - style.Border.Left - style.Border.Right - style.ReservedScrollbarY, 0f),
-            F32.Max(rect.Height - style.Border.Top - style.Border.Bottom - style.ReservedScrollbarX, 0f));
+            F32.Max(rect.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.ReservedScrollbarY, 0f),
+            F32.Max(rect.Height - style.UsedBorder.Top - style.UsedBorder.Bottom - style.ReservedScrollbarX, 0f));
     }
 
     /// <summary>A compact CSSOM snapshot derived from the same cascade paint uses.</summary>
-    public Dictionary<string, string>? ComputedStyle(NodeId id)
+    public Dictionary<string, string>? ComputedStyle(NodeId id) => ComputedStyle(id, null);
+
+    /// <summary>
+    /// A compact CSSOM snapshot for an element, or for one of its pseudo-elements.
+    /// </summary>
+    /// <param name="id">The originating element.</param>
+    /// <param name="pseudoElement">
+    /// A pseudo-element selector such as <c>::before</c>, or null for the element itself. An
+    /// unrecognised name returns null, which is what <c>getComputedStyle()</c> answers with an
+    /// empty declaration.
+    /// </param>
+    public Dictionary<string, string>? ComputedStyle(NodeId id, string? pseudoElement)
     {
         if (!Layout.Styles.TryGetValue(id, out LayoutStyle? style))
         {
@@ -517,6 +528,24 @@ public sealed class PreparedRender
         }
 
         Rect? rect = Layout.Rects.TryGetValue(id, out Rect found) ? found : null;
+
+        // The originating element's own style, kept across the pseudo-element substitution
+        // below so an inherited property a pseudo does not declare still resolves.
+        LayoutStyle ownerStyle = style;
+        bool isPseudo = false;
+        bool generatedContentPseudo = false;
+        if (!string.IsNullOrEmpty(pseudoElement))
+        {
+            if (ResolvePseudoElement(id, style, pseudoElement) is not { } resolved)
+            {
+                return null;
+            }
+
+            style = resolved.Style;
+            rect = resolved.Rect;
+            isPseudo = true;
+            generatedContentPseudo = resolved.GeneratesContent;
+        }
         Dictionary<string, string> output = new(StringComparer.Ordinal);
 
         bool activeWebkitClamp = style.WebkitBoxDisplay is not null
@@ -543,6 +572,10 @@ public sealed class PreparedRender
         {
             display = "-webkit-inline-box";
         }
+        else if (TableDisplay(id, style, isPseudo) is { } tableDisplay)
+        {
+            display = tableDisplay;
+        }
         else if (style.InternalFlexContainer)
         {
             display = "block";
@@ -558,11 +591,41 @@ public sealed class PreparedRender
                 (Display.Grid, false) => "grid",
                 (Display.Inline, true) => "inline-block",
                 (Display.Inline, false) => "inline",
+
+                // `display: flow-root` reported as `block`, which is what this switch did for
+                // every element a plain `<div>` included. Chromium 141 reports `flow-root`.
+                // Only `flow-root`, `table`, `inline-table`, the `-webkit-line-clamp`
+                // adjustment and the anonymous table box set `FlowRoot`, and the four others
+                // are all answered by an arm above this one - the two table displays and the
+                // anonymous box through `IsTableBox`, the clamp through `activeWebkitClamp` -
+                // so a block box still carrying the flag was declared `flow-root`, or
+                // inherited that declaration through `display: inherit`.
+                (Display.Block, false) when style.FlowRoot => "flow-root",
                 _ => "block",
             };
         }
 
         output["display"] = display;
+
+        // `border-collapse` and `border-spacing` are inherited, so every element answers them
+        // and not only a table: Chromium 141 reports `2px` / `separate` on a `<table>` and on
+        // every descendant of one - a `<div>` inside a cell included - and `0px` / `separate`
+        // on `document.body`. The snapshot used to carry neither key, so page script read the
+        // empty string through bootstrap's inline-declaration fallback.
+        output["border-collapse"] = (style.BorderCollapse ?? ownerStyle.BorderCollapse) == true
+            ? "collapse"
+            : "separate";
+        (float spacingX, float spacingY) = InheritedBorderSpacing(id, style, isPseudo);
+        output["border-spacing"] = spacingX == spacingY
+            ? PaintCssValues.CssPx(spacingX)
+            : PaintCssValues.CssPx(spacingX) + " " + PaintCssValues.CssPx(spacingY);
+
+        // Chromium reports the two longhands `border-spacing` is a shorthand for, on every
+        // element and with the same inherited value: measured on Chromium 141, a
+        // `border-spacing: 1px 2px` box answers `1px` and `2px`. The snapshot carried neither
+        // key, so page script read the empty string through bootstrap's fallback.
+        output["-webkit-border-horizontal-spacing"] = PaintCssValues.CssPx(spacingX);
+        output["-webkit-border-vertical-spacing"] = PaintCssValues.CssPx(spacingY);
         output["float"] = style.Float switch
         {
             Obscura.Render.Float.Left => "left",
@@ -702,7 +765,7 @@ public sealed class PreparedRender
         // CSS Sizing: the initial `auto` minimum computes to `0px` everywhere except on a flex
         // or grid item, where it stays `auto` and means the automatic minimum size. Reporting
         // `auto` unconditionally is what page script sees as a min-height it never set.
-        bool automaticMinimumSize = HasAutomaticMinimumSize(id, style);
+        bool automaticMinimumSize = !isPseudo && HasAutomaticMinimumSize(id, style);
         // An intrinsic sizing keyword is the computed value of these four properties, so it is
         // what getComputedStyle reports - unlike `width`/`height`, which report a used length.
         output["min-width"] = IntrinsicSizeKeywordCss(style.MinWidthIntrinsicKeyword)
@@ -731,7 +794,7 @@ public sealed class PreparedRender
         // `top: 50%` box in a 34px containing block is `top: 17px` / `bottom: 7px` and a
         // `position: relative` box that specified nothing is `0px` on all four sides.
         string[] insetNames = ["top", "right", "bottom", "left"];
-        float[]? usedInsets = UsedInsets(id, style, rect);
+        float[]? usedInsets = isPseudo ? null : UsedInsets(id, style, rect);
         for (int side = 0; side < insetNames.Length; side++)
         {
             output[insetNames[side]] = usedInsets is { } used
@@ -914,7 +977,11 @@ public sealed class PreparedRender
         output["align-self"] = style.AlignSelf is { } alignSelf
             ? PaintCssValues.AlignItemsCss(alignSelf)
             : "auto";
+        // Same implementation detail as `flex-direction` above: the stretch a table box and the
+        // flex-start a cell box are laid out with belong to the internal flex container, so the
+        // property keeps its initial `normal` unless the author set it.
         output["align-items"] = style.AlignItems is { } alignItems
+            && !(style.InternalFlexContainer && !style.AlignItemsAuthored)
             ? PaintCssValues.AlignItemsCss(alignItems)
             : "normal";
         output["justify-items"] = style.JustifyItems is { } justifyItems
@@ -956,6 +1023,13 @@ public sealed class PreparedRender
         output["scale"] = style.IndividualScale is { } scale
             ? PaintCssValues.CssNumber(scale.X) + " " + PaintCssValues.CssNumber(scale.Y)
             : "none";
+
+        // CSS Content 3: `content` is initially `normal`, and `normal` computes to `none` on
+        // ::before and ::after alone. Page script reads this to tell a realized ::before from an
+        // absent one, so the three answers have to stay distinct.
+        output["content"] = !isPseudo
+            ? "normal"
+            : PseudoContentCss(style, generatedContentPseudo);
         return output;
     }
 
@@ -975,6 +1049,218 @@ public sealed class PreparedRender
         value.IsAuto
             ? automaticMinimumSize ? "auto" : "0px"
             : PaintCssValues.DimensionCss(value, "auto");
+
+    /// <summary>
+    /// The computed CSS <c>display</c> of a table box, or <c>null</c> when this box is not one.
+    /// </summary>
+    /// <remarks>
+    /// Taffy has no table formatting mode, so every table display is stored as a block or
+    /// internal-flex approximation plus a provenance flag, and the snapshot used to serialize
+    /// the approximation: Chromium 141 reports <c>table</c> / <c>inline-table</c> /
+    /// <c>table-cell</c> where the snapshot answered <c>block</c> / <c>inline-block</c> /
+    /// <c>block</c>, and <c>table-row</c>, <c>table-row-group</c>, <c>table-header-group</c>,
+    /// <c>table-footer-group</c>, <c>table-caption</c>, <c>table-column</c> and
+    /// <c>table-column-group</c> for the user-agent displays of <c>&lt;tr&gt;</c>,
+    /// <c>&lt;tbody&gt;</c>, <c>&lt;thead&gt;</c>, <c>&lt;tfoot&gt;</c>, <c>&lt;caption&gt;</c>,
+    /// <c>&lt;col&gt;</c> and <c>&lt;colgroup&gt;</c>, all of which answered <c>block</c>.
+    /// <para>
+    /// DEVIATION FROM RUST: <c>crates/obscura-render/src/paint.rs</c> serializes the taffy
+    /// display for all of these, so its snapshot reports the approximation. See "Known
+    /// deviations" in todo.md.
+    /// </para>
+    /// <para>
+    /// The two cases that need a record of what the author wrote read
+    /// <see cref="LayoutStyle.AuthoredTableDisplay"/> and
+    /// <see cref="LayoutStyle.DisplayAuthored"/>, which <c>ApplyDisplay</c> sets.
+    /// </para>
+    /// <para>
+    /// REPORTED BUT NOT LAID OUT. The seven internal displays are recorded and reported; layout
+    /// still treats the box as whatever it was before the declaration, so a
+    /// <c>display: table-row</c> div is a block. CSSOM asks for the resolved value rather than
+    /// the used one and Chromium 141 reports the keyword whatever layout achieves, so this is
+    /// the right answer here and the gap belongs to layout. Closing it means keying the table
+    /// builder on the computed display instead of on the HTML element names: CSS 2.1 17.2.1
+    /// anonymous table generation in <c>DomBuild.WantsAnonymousTableBox</c> and
+    /// <c>DomBuild.BuildTable</c> (whose non-native path models exactly one anonymous row of
+    /// cells), row collection in <c>DomTableSupport.CollectTableRows</c>, row and section
+    /// geometry in <c>DomTableSupport.SynthesizeRowRects</c>, the <c>&lt;col&gt;</c> pre-pass
+    /// and caption placement in <c>BuildTable</c>, the collapsing border bands in
+    /// <c>ResolveCollapsedBorders</c>, and the border-spacing propagation in
+    /// <c>DomStyleFixups</c> - all of which test element names today.
+    /// </para>
+    /// </remarks>
+    private string? TableDisplay(NodeId id, LayoutStyle style, bool isPseudo)
+    {
+        // An authored internal display is the most recent thing the cascade said about this
+        // box, and it does not clear the user-agent table flags (it changes nothing in
+        // layout), so it has to be read before them: Chromium 141 reports `table-row` for
+        // `<table style="display:table-row">`, not `table`.
+        if (style.AuthoredTableDisplay is not TableInternalDisplay.None)
+        {
+            return IsBlockifiedBox(id, style, isPseudo)
+                ? "block"
+                : style.AuthoredTableDisplay switch
+                {
+                    TableInternalDisplay.Row => "table-row",
+                    TableInternalDisplay.RowGroup => "table-row-group",
+                    TableInternalDisplay.HeaderGroup => "table-header-group",
+                    TableInternalDisplay.FooterGroup => "table-footer-group",
+                    TableInternalDisplay.Column => "table-column",
+                    TableInternalDisplay.ColumnGroup => "table-column-group",
+                    _ => "table-caption",
+                };
+        }
+
+        if (style.IsTableBox)
+        {
+            // Blockification maps `inline-table` to `table`, and the layout pass has already
+            // cleared `IsInlineBlock` everywhere that applies.
+            return style.IsInlineBlock ? "inline-table" : "table";
+        }
+
+        if (style.IsTableCellBox)
+        {
+            return IsBlockifiedBox(id, style, isPseudo) ? "block" : "table-cell";
+        }
+
+        if (isPseudo || TreeValue is not { } tree)
+        {
+            return null;
+        }
+
+        // An authored display replaces the whole outer/inner pair and clears the user-agent
+        // table approximation with it, so a flag still standing is the user-agent value.
+        string? ua = DomTraversal.ElementLocalName(tree, id) switch
+        {
+            "tr" when style.InternalFlexContainer => "table-row",
+            "tbody" when style.InternalFlexContainer => "table-row-group",
+            "thead" when style.InternalFlexContainer => "table-header-group",
+            "tfoot" when style.InternalFlexContainer => "table-footer-group",
+            "caption" when UntouchedBlockDisplay(style) => "table-caption",
+            "col" when UntouchedBlockDisplay(style) => "table-column",
+            "colgroup" when UntouchedBlockDisplay(style) => "table-column-group",
+            _ => null,
+        };
+        if (ua is null)
+        {
+            return null;
+        }
+
+        return IsBlockifiedBox(id, style, isPseudo) ? "block" : ua;
+    }
+
+    /// <summary>
+    /// Whether this box still carries the plain <c>display: block</c> every element starts
+    /// from and no declaration replaced it, which for the three table elements with no
+    /// user-agent arm is the only evidence their display is the user-agent one.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="LayoutStyle.DisplayAuthored"/> is what makes an authored <c>display: block</c>
+    /// on a <c>&lt;caption&gt;</c> distinguishable from the user-agent value; the structural
+    /// tests stay because a later pass can move <c>display</c> without going through the
+    /// cascade, and answering <c>null</c> here falls through to serializing the taffy display.
+    /// </remarks>
+    private static bool UntouchedBlockDisplay(LayoutStyle style) =>
+        !style.DisplayAuthored
+        && style.Display == Display.Block
+        && !style.IsInlineBlock
+        && !style.FlowRoot
+        && !style.InternalFlexContainer
+        && style.WebkitBoxDisplay is null;
+
+    /// <summary>
+    /// Whether CSS Display blockification applies to this box, which turns an internal table
+    /// display into <c>block</c>. Measured on Chromium 141: <c>display: table-cell</c> reports
+    /// <c>block</c> as a flex item, a grid item, a float and an absolutely positioned box,
+    /// while <c>display: inline-table</c> reports <c>table</c> in all four.
+    /// </summary>
+    private bool IsBlockifiedBox(NodeId id, LayoutStyle style, bool isPseudo)
+    {
+        if (style.Position == TaffyPosition.Absolute
+            || style.PositionFixed
+            || style.Float is not null)
+        {
+            return true;
+        }
+
+        if (TreeValue is not { } tree)
+        {
+            return false;
+        }
+
+        // A generated box lives inside its originating element, so that element is the one
+        // that can make it a flex or grid item.
+        NodeId? parent = isPseudo ? id : DomTraversal.RenderedParent(tree, id);
+        while (parent is { } parentId)
+        {
+            if (!Layout.Styles.TryGetValue(parentId, out LayoutStyle? parentStyle))
+            {
+                // The document node, so this is the root element and its outer display is
+                // blockified.
+                return true;
+            }
+
+            if (parentStyle.DisplayContents)
+            {
+                parent = DomTraversal.RenderedParent(tree, parentId);
+                continue;
+            }
+
+            // The internal flex containers this engine builds tables out of are not CSS flex
+            // containers, so their children are not flex items and are not blockified.
+            return parentStyle.Display == Display.Grid
+                || (parentStyle.Display == Display.Flex && !parentStyle.InternalFlexContainer);
+        }
+
+        // No rendered parent: the root element, whose outer display is always blockified. An
+        // unslotted light child has none either, but it generates no box, so which answer it
+        // gets is unobservable.
+        return true;
+    }
+
+    /// <summary>
+    /// The inherited <c>border-spacing</c> in px, which is what Chromium reports on every
+    /// element and not only on a table.
+    /// </summary>
+    /// <remarks>
+    /// <c>DomStyleFixups.PropagateBorderSpacing</c> is not an inheritance pass: it reads the
+    /// value off each <c>&lt;table&gt;</c> and writes it out as that table's row gap and every
+    /// descendant <c>&lt;tr&gt;</c>'s column gap, which is the geometry taffy needs and not the
+    /// CSS value. Nothing else stores the property, so it is only ever set where it was
+    /// declared - the user-agent <c>table { border-spacing: 2px }</c> arm, an authored
+    /// declaration, or the <c>cellspacing</c> attribute - and an inheriting element has to walk
+    /// up to the nearest ancestor that has one.
+    /// </remarks>
+    private (float Horizontal, float Vertical) InheritedBorderSpacing(
+        NodeId id,
+        LayoutStyle style,
+        bool isPseudo)
+    {
+        if (style.BorderSpacing is { } own)
+        {
+            return own;
+        }
+
+        if (TreeValue is not { } tree)
+        {
+            return (0f, 0f);
+        }
+
+        // A pseudo-element inherits from its originating element, so its walk starts there.
+        NodeId? ancestor = isPseudo ? id : DomTraversal.RenderedParent(tree, id);
+        while (ancestor is { } ancestorId)
+        {
+            if (Layout.Styles.TryGetValue(ancestorId, out LayoutStyle? ancestorStyle)
+                && ancestorStyle.BorderSpacing is { } inherited)
+            {
+                return inherited;
+            }
+
+            ancestor = DomTraversal.RenderedParent(tree, ancestorId);
+        }
+
+        return (0f, 0f);
+    }
 
     /// <summary>
     /// Whether an <c>auto</c> minimum size on this box means the automatic minimum size, which
@@ -1092,10 +1378,11 @@ public sealed class PreparedRender
                 if (!absolute || positioned)
                 {
                     Edges padding = absolute ? Edges.Zero : ancestorStyle.Padding;
-                    float left = ancestorStyle.Border.Left + padding.Left;
-                    float top = ancestorStyle.Border.Top + padding.Top;
-                    float right = ancestorStyle.Border.Right + padding.Right;
-                    float bottom = ancestorStyle.Border.Bottom + padding.Bottom;
+                    Edges ancestorBorder = ancestorStyle.UsedBorder;
+                    float left = ancestorBorder.Left + padding.Left;
+                    float top = ancestorBorder.Top + padding.Top;
+                    float right = ancestorBorder.Right + padding.Right;
+                    float bottom = ancestorBorder.Bottom + padding.Bottom;
 
                     return new Rect(
                         ancestorRect.X + left,
@@ -1414,7 +1701,7 @@ public sealed class PreparedRender
                 && !style.HeightFitContent
                 && !style.HasInlineIntrinsicKeyword
                 && !style.HasBlockMinMaxIntrinsicKeyword
-                && style.SizeExpressions.All(expression => expression is null);
+                && NoSizeExpressions(style);
             if (!fixedBox)
             {
                 return true;
@@ -1442,4 +1729,19 @@ public sealed class PreparedRender
 
         return false;
     }
+
+    /// <summary>Whether no box-size slot carries a deferred CSS math expression.</summary>
+    private static bool NoSizeExpressions(LayoutStyle style)
+    {
+        foreach (string? expression in style.SizeExpressions)
+        {
+            if (expression is not null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 }

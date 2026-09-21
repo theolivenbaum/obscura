@@ -67,6 +67,15 @@ public sealed partial class Page
                 {
                     sources.Add(dom.TextContent(id));
                 }
+                // A fetched <link> sheet and an @import are held beside their node rather than
+                // in a synthetic <style> (see DomTree.ExternalStylesheetCss). Without this the
+                // url() references in every linked sheet - backgrounds, masks, @font-face src -
+                // would stop being prefetched. DEVIATION from crates/obscura-browser, where the
+                // <style> walk above reaches them.
+                if (dom.ExternalStylesheetCss(id) is { } externalCss)
+                {
+                    sources.Add(externalCss);
+                }
                 if (node.GetAttribute("style") is { } style)
                 {
                     sources.Add(style);

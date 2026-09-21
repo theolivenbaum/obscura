@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.CompilerServices;
 
 using Microsoft.ClearScript;
 using Microsoft.ClearScript.JavaScript;
@@ -896,6 +897,60 @@ public sealed class CdpWatchdogTests
         {
             Assert.True(CdpWatchdog.Disarm(armed));
         }
+    }
+
+    [Fact]
+    public void ADisarmedHandleIsNotKeptAliveByTheParkedWorker()
+    {
+        // The worker parks on Monitor.Wait for as long as nothing is armed, so a
+        // Slot left in one of its stack slots is a GC root for that whole time. In
+        // the server that handle is a V8IsolateHandle, and through ClearScript it
+        // reaches the page's entire DOM, styles and layout: every navigation built
+        // its new document with the previous one still resident, about 440 MB on a
+        // 60k-node page.
+        //
+        // This pins the property, and it does NOT reproduce the bug: whether a dead
+        // local is still reported live across the wait is the JIT's choice, and with
+        // the scan written inline this test passed 5 of 5 anyway. What established
+        // the retention was `gcroot` on a server heap naming
+        // `WatchdogLoop() -> Slot -> V8IsolateHandle -> ... -> PreparedRender`, and
+        // the RSS curve.
+        //
+        // The result is expected to differ between runs and machines. WatchdogLoop is
+        // entered once and never returns, so call counting never promotes it and it
+        // leaves tier-0 only by on-stack replacement of its loop - and tier-0 reports
+        // untracked locals live for the whole frame, where optimised code need not.
+        // So a pass here says which tier that thread happened to be in, not that an
+        // inline scan is safe. That is why the fix is structural (a popped frame plus
+        // NoInlining) rather than a reliance on liveness reporting. Treat a failure
+        // here as real; do not read a pass as licence to move the scan back inline.
+        var core = new CdpWatchdogCore("watchdog-release-test");
+        var handle = ArmAndDisarm(core);
+
+        Assert.True(
+            SpinUntil(
+                () =>
+                {
+                    GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+                    GC.WaitForPendingFinalizers();
+                    return !handle.IsAlive;
+                },
+                TimeSpan.FromSeconds(10)),
+            "the watchdog worker is still holding the disarmed handle");
+    }
+
+    /// <summary>
+    /// Arm and disarm in a frame of its own so the caller's stack cannot be what
+    /// keeps the handle alive - the point of the test is what the worker holds.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ArmAndDisarm(CdpWatchdogCore core)
+    {
+        var handle = new RecordingHandle();
+        var armed = core.Arm(handle, TimeSpan.FromMinutes(10));
+        Assert.False(core.Disarm(armed));
+        Assert.Equal(0, core.ArmedCount);
+        return new WeakReference(handle);
     }
 
     private static bool SpinUntil(Func<bool> condition, TimeSpan timeout)

@@ -155,11 +155,23 @@ public sealed class CookieStore
     private static Uri ParseUrl(string url)
     {
         // The WHATWG parser is the port of the `url` crate this API parses with,
-        // so an input the reference accepts is accepted here too.
-        if (UrlRecord.Parse(url) is not { } record || !Uri.TryCreate(record.Href, UriKind.Absolute, out var uri))
+        // so an input the reference accepts is accepted here too. Rust wraps the
+        // crate's ParseError, so the reason names the component that was wrong.
+        if (UrlRecord.Parse(url, out UrlParseError error) is not { } record)
         {
-            throw ObscuraException.Internal(new UriFormatException($"relative URL without a base: {url}"));
+            throw ObscuraException.Internal(new UriFormatException($"{error.Message()}: {url}"));
         }
+
+        // Port-only arm: Rust hands the `url` crate's Url straight to the jar, while the
+        // port's jar still takes a System.Uri, which rejects a few hosts the WHATWG parser
+        // accepts (`http://a..b/`). Say so rather than borrowing a ParseError string the
+        // reference would never produce here. Goes away with the System.Uri boundary.
+        if (!Uri.TryCreate(record.Href, UriKind.Absolute, out var uri))
+        {
+            throw ObscuraException.Internal(
+                new UriFormatException($"host not representable as a System.Uri: {url}"));
+        }
+
         return uri;
     }
 }

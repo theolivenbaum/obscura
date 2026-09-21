@@ -27,6 +27,7 @@ public sealed partial class TextEngine : IDisposable
     private readonly List<InlineItem> _items = [];
     private readonly List<ReplacedItem> _replaced = [];
     private readonly TextShaper _shaper;
+    private readonly WebFont[] _fonts;
     private readonly GlyphRasterizer _rasterizer;
     private readonly VariableGlyphCache _variableCache;
 
@@ -105,7 +106,29 @@ public sealed partial class TextEngine : IDisposable
         _shaper = new TextShaper(_database);
         _rasterizer = new GlyphRasterizer(_database);
         _variableCache = new VariableGlyphCache(_database);
+        _fonts = [.. fonts];
     }
+
+    /// <summary>
+    /// Take over an earlier pass's shaped paragraphs, or start a cache of our own. Reuse happens
+    /// only when that pass was built from the same web-font set; otherwise its shaping could
+    /// have resolved to faces this pass does not have.
+    /// </summary>
+    internal void AdoptShapeCache(TextEngine? previous)
+    {
+        if (ShapeCache.Disabled)
+        {
+            return;
+        }
+
+        _shaper.Cache = previous?._shaper.Cache is { } inherited && inherited.MatchesFontSet(_fonts)
+            ? inherited
+            : new ShapeCache(_fonts);
+    }
+
+    /// <summary>Shaped-paragraph cache statistics, for tests and profiling.</summary>
+    internal (int Entries, int Hits, int Misses) ShapeCacheStats =>
+        _shaper.Cache is { } cache ? (cache.Count, cache.Hits, cache.Misses) : (0, 0, 0);
 
     private static List<WebFont> ToWebFonts(IReadOnlyList<byte[]> fonts)
     {
@@ -165,7 +188,7 @@ public sealed partial class TextEngine : IDisposable
     /// </remarks>
     public (float CharWidth, float MaxCharWidth) ControlCharacterMetrics(LayoutStyle style)
     {
-        float fontSize = F32.Max(style.FontSize ?? 13.333333f, 1f);
+        float fontSize = QuantizeToFontUnits(F32.Max(style.FontSize ?? 13.333333f, 1f));
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -183,6 +206,22 @@ public sealed partial class TextEngine : IDisposable
 
         return (F32.Max(average, F32.Round(average)), F32.Round(metrics.MaxCharWidth / unitsPerEm * fontSize));
     }
+
+    /// <summary>
+    /// The used font size as the face scaler actually sees it: FreeType sets a face's size in
+    /// 26.6 fixed point, so every metric scaled out of it is scaled by the size rounded to 1/64
+    /// of a pixel, never by the CSS value.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which has no face metrics to scale - it
+    /// multiplies the CSS font size by a fixed em fraction. The rounding matters only where a
+    /// scaled metric lands within 1/64px of an integer and a `ceil` sits on top of it, which is
+    /// exactly the default control: at the UA's 13.3333px Liberation Mono averages 8.0013px
+    /// unrounded against Blink's 7.9982px, so `ceil(20 * charWidth)` came out 161 where Chromium
+    /// gives 160 and every empty textarea and unsized input was 1px too wide. See "Known
+    /// deviations" in todo.md.
+    /// </remarks>
+    private static float QuantizeToFontUnits(float fontSize) => F32.Round(fontSize * 64f) / 64f;
 
     public (float Ascent, float Descent) InlineFontBoxMetrics(LayoutStyle style)
     {
@@ -247,10 +286,10 @@ public sealed partial class TextEngine : IDisposable
             style.FontStyleItalic ?? false,
             _loadedFamilies);
         SpanCtx context = BaseSpanCtx(style, font, collector);
-        float lineHeight = context.LineHeight;
         List<(string Text, SpanAttrs Attrs)> spans = [];
+
         CollectSpans(tree, id, styles, context, spans, collector);
-        return PushShapedItem(style, lineHeight, spans, collector);
+        return PushShapedItem(style, context, spans, collector);
     }
 
     /// <summary>
@@ -294,14 +333,14 @@ public sealed partial class TextEngine : IDisposable
             style.FontStyleItalic ?? false,
             _loadedFamilies);
         SpanCtx context = BaseSpanCtx(style, font, collector);
-        float lineHeight = context.LineHeight;
         List<(string Text, SpanAttrs Attrs)> spans = [];
+
         foreach (NodeId cid in run)
         {
             CollectNodeSpans(tree, cid, styles, context, spans, collector);
         }
 
-        return PushShapedItem(style, lineHeight, spans, collector);
+        return PushShapedItem(style, context, spans, collector);
     }
 
     /// <summary>
@@ -321,11 +360,11 @@ public sealed partial class TextEngine : IDisposable
             style.FontStyleItalic ?? false,
             _loadedFamilies);
         SpanCtx context = BaseSpanCtx(style, font, collector);
-        float lineHeight = context.LineHeight;
         SpanAttrs attrs = context.ToSpanAttrs();
         List<(string Text, SpanAttrs Attrs)> spans = [];
+
         Inline.PushText(text, context.Transform, context.WhiteSpace, attrs, spans, collector);
-        return PushShapedItem(style, lineHeight, spans, collector);
+        return PushShapedItem(style, context, spans, collector);
     }
 
     /// <summary>
@@ -334,10 +373,11 @@ public sealed partial class TextEngine : IDisposable
     /// </summary>
     private int? PushShapedItem(
         LayoutStyle baseStyle,
-        float lineHeight,
+        SpanCtx strut,
         List<(string Text, SpanAttrs Attrs)> spans,
         Collector collector)
     {
+        float lineHeight = strut.LineHeight;
         List<ClipTextFill> clipFills = collector.ClipFills;
         List<OwnerTextRange> ownerRanges = collector.OwnerRanges;
         List<InlineOwnerBox> ownerBoxes = collector.OwnerBoxes;
@@ -471,7 +511,11 @@ public sealed partial class TextEngine : IDisposable
         // (an uncatchable process abort) when either is zero, and `font-size:0` is a common
         // whitespace-collapse trick. Keep the floor: it is observable geometry, not a guard.
         float shapedSize = F32.Max(baseSize, 1f);
-        var metrics = new TextMetrics(shapedSize, F32.Max(lineHeight, 1f));
+        var metrics = new TextMetrics(
+            shapedSize,
+            F32.Max(lineHeight, 1f),
+            strut.Above,
+            strut.Below);
         var buffer = new TextBuffer(metrics);
         buffer.SetWrap(layoutWrap);
 
@@ -530,6 +574,7 @@ public sealed partial class TextEngine : IDisposable
 
         var defaults = new TextAttrs { Family = FontAssets.SansFamily };
         buffer.SetRichText(rich, defaults);
+        DropTrailingEmptyLineBox(buffer, ownerBoxes, textLength);
 
         TextBuffer? markerBuffer = null;
         if (markerAttrs is { } marker)
@@ -601,6 +646,54 @@ public sealed partial class TextEngine : IDisposable
             RelativeOwnerRanges = [],
         });
         return index;
+    }
+
+    /// <summary>
+    /// CSS 2.1 9.4.2: a line box holding no text, no preserved white space and no inline box
+    /// with a non-zero margin, border or padding "must be treated as not existing". The only
+    /// one an inline formatting context can produce is the line after a forced break that ends
+    /// the context - a trailing <c>&lt;br&gt;</c>, or a preserved newline at the end of a
+    /// <c>white-space: pre</c> block.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render/src/inline.rs</c>, which feeds the collapsed
+    /// text straight into cosmic-text and keeps every buffer line the newline split produces,
+    /// so a trailing forced break adds a whole empty line box. Chromium 141 at 16px/20px
+    /// 'Liberation Mono' in a 600px block: <c>&lt;div&gt;&lt;br&gt;&lt;/div&gt;</c> is 20 tall
+    /// (Rust/C# gave 40), <c>a&lt;br&gt;</c> 20 (40), <c>&lt;br&gt;&lt;br&gt;</c> 40 (60), and
+    /// <c>&lt;pre&gt;a\n&lt;/pre&gt;</c> 20 (40); the lines that carry content are unchanged -
+    /// <c>a&lt;br&gt;b</c> stays 40 and <c>&lt;pre&gt;a\n\n&lt;/pre&gt;</c> stays 40.
+    /// Only the last line is dropped, and only one of them, which is what Chromium does for a
+    /// run of trailing breaks.
+    ///
+    /// An inline box that merely *ends* on the trailing line does not keep it alive, but one
+    /// that *starts* there does. Measured in Chromium 141:
+    /// <c>&lt;span style="border:1px solid"&gt;a&lt;br&gt;&lt;/span&gt;</c> is 20 (the span's
+    /// closing edge is not content) while <c>a&lt;br&gt;&lt;span style="border:1px solid"&gt;
+    /// &lt;/span&gt;</c> is 40, and an edgeless <c>a&lt;br&gt;&lt;span&gt;&lt;/span&gt;</c> is
+    /// 20. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static void DropTrailingEmptyLineBox(
+        TextBuffer buffer,
+        IReadOnlyList<InlineOwnerBox> ownerBoxes,
+        int textLength)
+    {
+        if (buffer.Lines.Count < 2 || buffer.Lines[^1].Text.Length != 0)
+        {
+            return;
+        }
+
+        foreach (InlineOwnerBox owner in ownerBoxes)
+        {
+            // Clamped to `textLength` above, so a box opening on the trailing line starts there.
+            if (owner.Start == textLength
+                && (owner.StartEdge.Advance != 0f || owner.EndEdge.Advance != 0f))
+            {
+                return;
+            }
+        }
+
+        buffer.Lines.RemoveAt(buffer.Lines.Count - 1);
     }
 
     /// <summary>
@@ -918,6 +1011,23 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>
+    /// Where one inline box's own baseline sits inside a line box it has a fragment on.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which puts every fragment on the
+    /// line's single baseline. An inline box with a <c>vertical-align</c> has a baseline of its
+    /// own, and its client rect follows it: Chromium 141 reports a <c>vertical-align: 50%</c>
+    /// 16px span in a <c>16px/18px 'Liberation Mono'</c> block 4px above the block's top, not
+    /// on the line's baseline.
+    /// </remarks>
+    private static float OwnerBaselineY(LayoutRun run, InlineBoxExtent extent) => extent.Align switch
+    {
+        LineBoxAlign.LineTop => run.LineTop + extent.Above,
+        LineBoxAlign.LineBottom => run.LineTop + run.LineHeight - extent.Below,
+        _ => run.LineY - extent.Shift,
+    };
+
+    /// <summary>
     /// Derive ordinary inline continuation extents from finalized shaping.
     /// </summary>
     /// <remarks>
@@ -936,9 +1046,11 @@ public sealed partial class TextEngine : IDisposable
             }
 
             List<int> lineStarts = InlineGeometry.SourceLineStarts(item.Buffer, source);
+            List<LayoutRun> runs = [.. item.Buffer.LayoutRuns()];
             int lineIndex = 0;
-            foreach (LayoutRun run in item.Buffer.LayoutRuns())
+            for (int runIndex = 0; runIndex < runs.Count; runIndex++)
             {
+                LayoutRun run = runs[runIndex];
                 if (run.LineIndex >= lineStarts.Count)
                 {
                     lineIndex++;
@@ -947,6 +1059,12 @@ public sealed partial class TextEngine : IDisposable
 
                 int lineStart = lineStarts[run.LineIndex];
                 int lineEnd = lineStart + run.Text.Length;
+
+                // A buffer line soft-wraps into several runs that all report the whole line's
+                // text, so an empty owner sitting at the line's end would otherwise land on
+                // every one of them. It belongs to the run the text actually ends on.
+                bool lastRunOfLine = runIndex + 1 == runs.Count
+                    || runs[runIndex + 1].LineIndex != run.LineIndex;
                 float firstLineOffset = lineIndex == 0 ? item.FirstLineOffset : 0f;
                 float alignmentShift = InlineGeometry.LineEdgeAlignmentShift(item, lineStart, lineEnd);
                 foreach (InlineOwnerBox owner in item.OwnerBoxes)
@@ -954,7 +1072,7 @@ public sealed partial class TextEngine : IDisposable
                     bool empty = owner.Start == owner.End;
                     bool intersects = empty
                         ? (owner.Start >= lineStart && owner.Start < lineEnd)
-                            || (lineEnd == source.Length && owner.Start == lineEnd)
+                            || (lastRunOfLine && owner.Start == lineEnd)
                         : owner.Start < lineEnd && owner.End > lineStart;
                     if (!intersects)
                     {
@@ -975,7 +1093,7 @@ public sealed partial class TextEngine : IDisposable
                         : run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
-                    float baselineY = item.Origin.Y + run.LineY;
+                    float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
 
                     int existing = -1;
                     for (int i = 0; i < output.Count; i++)
@@ -1316,10 +1434,18 @@ public sealed partial class TextEngine : IDisposable
 
         FontVariations? variations = Inline.ResolvedFontVariations(baseStyle);
         float lineHeight = FontResolution.UsedLineHeightForFont(baseStyle, font);
+        float baseSize = baseStyle.FontSize ?? 16f;
+
+        // The block container's own box is the line box's strut: it participates in every line
+        // box the block generates, and its `vertical-align` (if any) is not its own business.
+        (float strutAbove, float strutBelow) =
+            FontAssets.LineBoxHalves(baseSize, lineHeight, font.Metrics);
         return new SpanCtx
         {
-            FontSize = baseStyle.FontSize ?? 16f,
+            FontSize = baseSize,
             LineHeight = lineHeight,
+            Above = strutAbove,
+            Below = strutBelow,
             LetterSpacing = baseStyle.LetterSpacing ?? 0f,
             LetterSpacingNonNormal = baseStyle.LetterSpacingNonNormal ?? false,
             Color = baseStyle.Color ?? new RgbaColor(0, 0, 0, 255),
@@ -1391,6 +1517,24 @@ public sealed partial class TextEngine : IDisposable
 
         if (string.Equals(element.Name.Local, "br", StringComparison.Ordinal))
         {
+            // DEVIATION from crates/obscura-render/src/inline.rs, which turns a <br> into a
+            // newline and nothing else, so the element owns no shaped range and
+            // getBoundingClientRect() reports 0,0,0,0 for it. Chromium gives a <br> a real
+            // zero-width box on the line it ends, as tall as its font box: measured at
+            // 16px/20px 'Liberation Mono' in a 600px block, `alpha<br>beta` reports the break
+            // at 48.02,1.00,0.00,18.00 - x at the end of the line's content, y at the font-box
+            // top (the baseline less the ascent), not the line-box top. Registering it as an
+            // empty inline owner at the pre-newline offset routes it through the same
+            // machinery an empty <span> uses, which already matched Chromium wherever it
+            // produced a fragment at all.
+            if (style is not null)
+            {
+                collector.BeginOwner(cid, style);
+                collector.EndOwner(
+                    cid,
+                    new InlineBoxExtent(context.Above, context.Below, context.Align, context.BaselineShift));
+            }
+
             output.Add(("\n", context.ToSpanAttrs()));
             collector.TextLength += 1;
             collector.LastWasSpace = true;
@@ -1435,12 +1579,28 @@ public sealed partial class TextEngine : IDisposable
             ? Inline.ResolvedFontVariations(style)
             : context.Variations;
 
+        float childFontSize = style?.FontSize ?? context.FontSize;
+        float childLineHeight = style is not null
+            ? FontResolution.UsedLineHeightForFont(style, font)
+            : context.LineHeight;
+        InlineBoxExtent extent = Inline.LineBoxExtent(
+            style?.InlineVerticalAlign,
+            childFontSize,
+            childLineHeight,
+            font.Metrics,
+            context.FontSize,
+            context.FontMetrics,
+            context.BaselineShift,
+            context.Align);
+
         var child = new SpanCtx
         {
-            FontSize = style?.FontSize ?? context.FontSize,
-            LineHeight = style is not null
-                ? FontResolution.UsedLineHeightForFont(style, font)
-                : context.LineHeight,
+            FontSize = childFontSize,
+            LineHeight = childLineHeight,
+            Above = extent.Above,
+            Below = extent.Below,
+            Align = extent.Align,
+            BaselineShift = extent.Shift,
             LetterSpacing = style?.LetterSpacing ?? context.LetterSpacing,
             LetterSpacingNonNormal = style?.LetterSpacingNonNormal ?? context.LetterSpacingNonNormal,
             Color = color,
@@ -1465,7 +1625,7 @@ public sealed partial class TextEngine : IDisposable
         CollectSpans(tree, cid, styles, child, output, collector);
         if (ownsInlineFragment)
         {
-            collector.EndOwner(cid);
+            collector.EndOwner(cid, extent);
         }
     }
 

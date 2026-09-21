@@ -25,7 +25,8 @@ internal static class PaintApi
         IReadOnlyList<RetainedStyleMutation>? mutations,
         CssMediaType mediaType,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline)
+        AnimationTimelineState animationTimeline,
+        PreparedRender? reusable = null)
     {
         if (!float.IsFinite(viewport.Width) || !float.IsFinite(viewport.Height)
             || viewport.Width <= 0f || viewport.Height <= 0f)
@@ -74,7 +75,8 @@ internal static class PaintApi
                 retained,
                 mutations ?? [],
                 animationSample,
-                animationTimeline)
+                animationTimeline,
+                reusable?.Layout)
             : RenderDom.LayoutDomWithWebFontsAndStylesheetCacheForMediaWithAnimationState(
                 tree,
                 viewport,
@@ -110,7 +112,19 @@ internal static class PaintApi
                 animationTimeline);
         }
 
-        DerivedLayoutState derived = laid.DerivedLayoutState(tree, viewport);
+        // The gate kept the offered layout, so every geometry-derived value on the render it
+        // came from still describes it. Recomputing them is the single most expensive thing
+        // left on this path.
+        bool keptPreviousLayout = reusable is { } kept && ReferenceEquals(laid, kept.Layout);
+        DerivedLayoutState derived = keptPreviousLayout
+            ? new DerivedLayoutState
+            {
+                ContentSize = reusable!.ContentSizeValue,
+                ViewportFixed = reusable.ViewportFixed,
+                Sticky = reusable.Sticky,
+                ScrollTree = reusable.ScrollTree,
+            }
+            : laid.DerivedLayoutState(tree, viewport);
         float rootFontSize = 16f;
         if (tree.QuerySelector("html") is { } root
             && laid.Styles.TryGetValue(root, out LayoutStyle? rootStyle)
@@ -384,7 +398,7 @@ internal sealed class PrintEconomyStyleSnapshot
     private (float Angle, List<GradientStop> Stops)? _backgroundGradient;
     private ((float X, float Y) Center, List<GradientStop> Stops)? _backgroundRadialGradient;
     private (float Angle, (float X, float Y) Center, List<GradientStop> Stops)? _backgroundConicGradient;
-    private List<BackgroundGradientLayer> _backgroundGradientLayers = [];
+    private IReadOnlyList<BackgroundGradientLayer> _backgroundGradientLayers = [];
     private string? _backgroundImage;
     private RgbaColor? _color;
     private PrintEconomyStyleSnapshot? _beforePseudo;

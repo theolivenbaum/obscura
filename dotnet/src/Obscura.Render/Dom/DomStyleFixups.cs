@@ -81,6 +81,13 @@ internal static class DomStyleFixups
     internal static string NormalizeControlLabel(string text) =>
         string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
+    /// <remarks>
+    /// The relative arms are an unreached net, not a resolution path: this pass runs after the
+    /// top-down one, which has already turned every <c>em</c> / <c>ch</c> / <c>ex</c> width into
+    /// <see cref="DimensionKind.Px"/> against the element's measured face
+    /// (<see cref="FontUnits"/>). They keep Liberation Sans' fractions because a value that
+    /// reaches here unresolved has no face to be measured on either.
+    /// </remarks>
     private static float? DefiniteInlineSize(Dimension dimension, float fontSize)
     {
         float? value = dimension.Kind switch
@@ -1177,6 +1184,72 @@ internal static class DomStyleFixups
         }
     }
 
+    /// <summary>
+    /// Whether an <c>auto</c> inline size on <paramref name="id"/> is stretched to the item area
+    /// its parent gives it, rather than shrink-to-fit.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from crates/obscura-render/src/dom.rs, which shrink-to-fits every auto-width
+    /// table. A table box is a grid or flex item like any other: Chromium 141 makes an auto
+    /// `&lt;table&gt;` in a 600px `display: grid` block 600 wide (and 200 wide in a 200px track),
+    /// and the same in a `flex-direction: column` row, because a stretch alignment is what the
+    /// initial `normal` resolves to there. `justify-self: start`, an auto inline margin, a float
+    /// and a flex *row* all keep the shrink-to-fit, and Chromium agrees on each.
+    /// </remarks>
+    internal static bool StretchesInlineToItsItemArea(
+        DomTree tree,
+        NodeId id,
+        LayoutStyle style,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        if (!style.Width.IsAuto
+            || style.Position == TaffyPosition.Absolute
+            || style.Float is not null
+            || HasDeferredOrAutoMargin(style))
+        {
+            return false;
+        }
+
+        NodeId? parent = DomTraversal.RenderedParent(tree, id);
+        while (true)
+        {
+            if (parent is not { } parentId
+                || !styles.TryGetValue(parentId, out LayoutStyle? parentStyle))
+            {
+                return false;
+            }
+
+            if (parentStyle.DisplayContents)
+            {
+                parent = DomTraversal.RenderedParent(tree, parentId);
+                continue;
+            }
+
+            // `normal` is what a grid item and a flex item's cross axis resolve to stretch.
+            static bool IsStretch(Layout.AlignItems? alignment) =>
+                alignment is not { } value
+                || value.Keyword is Layout.AlignItemsKeyword.Normal
+                    or Layout.AlignItemsKeyword.Stretch;
+
+            if (parentStyle.Display == Display.Grid)
+            {
+                return IsStretch(style.JustifySelf ?? parentStyle.JustifyItems);
+            }
+
+            // Only the cross axis stretches, and the cross axis is the inline one only when the
+            // flex container lays its items out in a column.
+            if (parentStyle.Display == Display.Flex
+                && !parentStyle.InternalFlexContainer
+                && parentStyle.FlexDirection
+                    is Layout.FlexDirection.Column or Layout.FlexDirection.ColumnReverse)
+            {
+                return IsStretch(style.AlignSelf ?? parentStyle.AlignItems);
+            }
+
+            return false;
+        }
+    }
+
     internal static bool EstablishesBlockFormattingContext(LayoutStyle style) =>
         style.Display is Display.Flex or Display.Grid
         || EffectiveContainerType(style) != ContainerType.Normal
@@ -1232,16 +1305,58 @@ internal static class DomStyleFixups
         style.BorderCollapse == true ? (0f, 0f) : style.BorderSpacing ?? (0f, 0f);
 
     /// <summary>
+    /// A table's own padding, which the collapsing border model discards (CSS 2.1 17.6.2).
+    /// </summary>
+    internal static Edges TableUsedPadding(LayoutStyle style) =>
+        style.BorderCollapse == true ? default : style.Padding;
+
+    /// <summary>
     /// Horizontal non-track area in the table's border box, excluding the gaps between columns.
     /// </summary>
     internal static float TableInlineOuterEdges(LayoutStyle style)
     {
         (float spacing, _) = TableSpacing(style);
-        return style.Border.Left
-            + style.Border.Right
-            + style.Padding.Left
-            + style.Padding.Right
+        Edges padding = TableUsedPadding(style);
+        Edges border = style.UsedBorder;
+        return border.Left
+            + border.Right
+            + padding.Left
+            + padding.Right
             + (spacing * 2f);
+    }
+
+    /// <summary>
+    /// The inline edges that a <c>box-sizing: content-box</c> <c>width</c> on a table does not
+    /// account for - what has to be added to the declaration to get the table's border box.
+    /// </summary>
+    /// <remarks>
+    /// Two places where a table is not an ordinary box, both measured on Chromium 141 against a
+    /// 600px `width` in a 600px block:
+    /// <list type="bullet">
+    /// <item>A collapsed border is centred on the table's edge, so only its outer half is
+    /// outside the declaration: `border: 5px; border-collapse: collapse` is 605 wide, not 610,
+    /// and 620 at `border: 20px`. The table's padding is ignored entirely in that model.</item>
+    /// <item>In the separate model `border-spacing` lives inside the content box, so it is
+    /// already part of the declaration: `border: 5px` with the UA's 2px spacing is 610, not
+    /// 614.</item>
+    /// </list>
+    /// Deviation from crates/obscura-render/src/dom.rs, which adds the full
+    /// <see cref="TableInlineOuterEdges"/> in both models. The fixed-layout arm there had
+    /// already subtracted the spacing back out by hand; this makes the two arms agree.
+    /// </remarks>
+    internal static float TableWidthDeclarationEdges(LayoutStyle style)
+    {
+        if (style.BorderCollapse == true)
+        {
+            // `UsedBorder` is already half of the border resolved for each edge, and that
+            // resolution can be wider than the table's own declaration: Chromium 141 makes a
+            // `box-sizing: content-box; width: 600px; border: 5px` table holding 9px cells 609
+            // wide, not 605.
+            Edges collapsed = style.UsedBorder;
+            return collapsed.Left + collapsed.Right;
+        }
+
+        return style.Border.Left + style.Border.Right + style.Padding.Left + style.Padding.Right;
     }
 
     internal static ContainerSnapshot ContainerSnapshotOf(DomTree tree, DomLayout layout)

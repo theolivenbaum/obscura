@@ -25,99 +25,96 @@ public sealed class ServerTests
     };
 
     [Fact]
-    public void PageRuntimeAdvancesWhileCdpClientIsSilent()
+    public async Task PageRuntimeAdvancesWhileCdpClientIsSilent()
     {
-        SingleThreadedSynchronizationContext.Run(async () =>
+        var server = Channel.CreateUnbounded<ServerMessage>();
+        var replies = Channel.CreateUnbounded<string>();
+        using var shutdown = new CancellationTokenSource();
+        using var stop = new CancellationTokenSource();
+        var defaultContext = CdpContext.New().DefaultContext;
+        var processor = CdpServer.CdpProcessorAsync(
+            server.Reader, defaultContext, shutdown.Token, stop.Token);
+
+        Assert.True(server.Writer.TryWrite(new ServerMessage.NewConnection(replies.Writer)));
+        var init = await Receive(replies.Reader, TimeSpan.FromSeconds(2), "processor init");
+        Assert.Contains("__init", init, StringComparison.Ordinal);
+
+        void Send(JsonNode value) =>
+            Assert.True(server.Writer.TryWrite(
+                new ServerMessage.Cdp(CdpJson.Serialize(value), replies.Writer)));
+
+        Send(new JsonObject
         {
-            var server = Channel.CreateUnbounded<ServerMessage>();
-            var replies = Channel.CreateUnbounded<string>();
-            using var shutdown = new CancellationTokenSource();
-            using var stop = new CancellationTokenSource();
-            var defaultContext = CdpContext.New().DefaultContext;
-            var processor = CdpServer.CdpProcessorAsync(
-                server.Reader, defaultContext, shutdown.Token, stop.Token);
-
-            Assert.True(server.Writer.TryWrite(new ServerMessage.NewConnection(replies.Writer)));
-            var init = await Receive(replies.Reader, TimeSpan.FromSeconds(2), "processor init");
-            Assert.Contains("__init", init, StringComparison.Ordinal);
-
-            void Send(JsonNode value) =>
-                Assert.True(server.Writer.TryWrite(
-                    new ServerMessage.Cdp(CdpJson.Serialize(value), replies.Writer)));
-
-            Send(new JsonObject
-            {
-                ["id"] = 1,
-                ["method"] = "Target.createTarget",
-                ["params"] = new JsonObject { ["url"] = "about:blank" },
-            });
-
-            string? sessionId = null;
-            while (true)
-            {
-                var value = CdpJson.Parse(
-                    await Receive(replies.Reader, TimeSpan.FromSeconds(5), "create target response"));
-                sessionId ??= value.Get("params").Get("sessionId").AsString();
-                if (value.Get("id").AsU64() == 1)
-                {
-                    break;
-                }
-            }
-
-            Assert.NotNull(sessionId);
-
-            Send(new JsonObject
-            {
-                ["id"] = 2,
-                ["method"] = "Runtime.evaluate",
-                ["sessionId"] = sessionId,
-                ["params"] = new JsonObject
-                {
-                    ["expression"] =
-                        "(() => { setTimeout(() => globalThis.__autonomousDone = 'yes', 40); return 'armed'; })()",
-                    ["returnByValue"] = true,
-                },
-            });
-            while (true)
-            {
-                var value = CdpJson.Parse(
-                    await Receive(replies.Reader, TimeSpan.FromSeconds(5), "timer arm response"));
-                if (value.Get("id").AsU64() == 2)
-                {
-                    break;
-                }
-            }
-
-            // This is deliberately host/client time. No CDP message is sent while
-            // the timeout becomes due; Chrome's renderer still runs, and
-            // Obscura's connection-owned page pump must do the same.
-            await Task.Delay(120);
-
-            Send(new JsonObject
-            {
-                ["id"] = 3,
-                ["method"] = "Runtime.evaluate",
-                ["sessionId"] = sessionId,
-                ["params"] = new JsonObject
-                {
-                    ["expression"] = "globalThis.__autonomousDone || 'missing'",
-                    ["returnByValue"] = true,
-                },
-            });
-            while (true)
-            {
-                var value = CdpJson.Parse(
-                    await Receive(replies.Reader, TimeSpan.FromSeconds(5), "timer observation response"));
-                if (value.Get("id").AsU64() == 3)
-                {
-                    Assert.Equal("yes", value.Get("result").Get("result").Get("value").AsString());
-                    break;
-                }
-            }
-
-            server.Writer.TryComplete();
-            await processor.WaitAsync(TimeSpan.FromSeconds(5));
+            ["id"] = 1,
+            ["method"] = "Target.createTarget",
+            ["params"] = new JsonObject { ["url"] = "about:blank" },
         });
+
+        string? sessionId = null;
+        while (true)
+        {
+            var value = CdpJson.Parse(
+                await Receive(replies.Reader, TimeSpan.FromSeconds(5), "create target response"));
+            sessionId ??= value.Get("params").Get("sessionId").AsString();
+            if (value.Get("id").AsU64() == 1)
+            {
+                break;
+            }
+        }
+
+        Assert.NotNull(sessionId);
+
+        Send(new JsonObject
+        {
+            ["id"] = 2,
+            ["method"] = "Runtime.evaluate",
+            ["sessionId"] = sessionId,
+            ["params"] = new JsonObject
+            {
+                ["expression"] =
+                    "(() => { setTimeout(() => globalThis.__autonomousDone = 'yes', 40); return 'armed'; })()",
+                ["returnByValue"] = true,
+            },
+        });
+        while (true)
+        {
+            var value = CdpJson.Parse(
+                await Receive(replies.Reader, TimeSpan.FromSeconds(5), "timer arm response"));
+            if (value.Get("id").AsU64() == 2)
+            {
+                break;
+            }
+        }
+
+        // This is deliberately host/client time. No CDP message is sent while
+        // the timeout becomes due; Chrome's renderer still runs, and
+        // Obscura's connection-owned page pump must do the same.
+        await Task.Delay(120);
+
+        Send(new JsonObject
+        {
+            ["id"] = 3,
+            ["method"] = "Runtime.evaluate",
+            ["sessionId"] = sessionId,
+            ["params"] = new JsonObject
+            {
+                ["expression"] = "globalThis.__autonomousDone || 'missing'",
+                ["returnByValue"] = true,
+            },
+        });
+        while (true)
+        {
+            var value = CdpJson.Parse(
+                await Receive(replies.Reader, TimeSpan.FromSeconds(5), "timer observation response"));
+            if (value.Get("id").AsU64() == 3)
+            {
+                Assert.Equal("yes", value.Get("result").Get("result").Get("value").AsString());
+                break;
+            }
+        }
+
+        server.Writer.TryComplete();
+        await processor.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]
@@ -268,90 +265,87 @@ public sealed class ServerTests
     /// are produced by the server rather than by the Page domain handler.
     /// </summary>
     [Fact]
-    public void PageNavigateTakesTheSpawnAndDeferPathAndStillAnswers()
+    public async Task PageNavigateTakesTheSpawnAndDeferPathAndStillAnswers()
     {
-        SingleThreadedSynchronizationContext.Run(async () =>
+        var server = Channel.CreateUnbounded<ServerMessage>();
+        var replies = Channel.CreateUnbounded<string>();
+        using var shutdown = new CancellationTokenSource();
+        using var stop = new CancellationTokenSource();
+        var processor = CdpServer.CdpProcessorAsync(
+            server.Reader, CdpContext.New().DefaultContext, shutdown.Token, stop.Token);
+
+        server.Writer.TryWrite(new ServerMessage.NewConnection(replies.Writer));
+        await Receive(replies.Reader, TimeSpan.FromSeconds(2), "processor init");
+
+        void Send(JsonNode value) =>
+            server.Writer.TryWrite(
+                new ServerMessage.Cdp(CdpJson.Serialize(value), replies.Writer));
+
+        Send(new JsonObject
         {
-            var server = Channel.CreateUnbounded<ServerMessage>();
-            var replies = Channel.CreateUnbounded<string>();
-            using var shutdown = new CancellationTokenSource();
-            using var stop = new CancellationTokenSource();
-            var processor = CdpServer.CdpProcessorAsync(
-                server.Reader, CdpContext.New().DefaultContext, shutdown.Token, stop.Token);
-
-            server.Writer.TryWrite(new ServerMessage.NewConnection(replies.Writer));
-            await Receive(replies.Reader, TimeSpan.FromSeconds(2), "processor init");
-
-            void Send(JsonNode value) =>
-                server.Writer.TryWrite(
-                    new ServerMessage.Cdp(CdpJson.Serialize(value), replies.Writer));
-
-            Send(new JsonObject
-            {
-                ["id"] = 1,
-                ["method"] = "Target.createTarget",
-                ["params"] = new JsonObject { ["url"] = "about:blank" },
-            });
-
-            string? sessionId = null;
-            while (true)
-            {
-                var value = CdpJson.Parse(
-                    await Receive(replies.Reader, TimeSpan.FromSeconds(10), "create target"));
-                sessionId ??= value.Get("params").Get("sessionId").AsString();
-                if (value.Get("id").AsU64() == 1)
-                {
-                    break;
-                }
-            }
-
-            Assert.NotNull(sessionId);
-
-            Send(new JsonObject
-            {
-                ["id"] = 4,
-                ["method"] = "Page.navigate",
-                ["sessionId"] = sessionId,
-                ["params"] = new JsonObject
-                {
-                    ["url"] = "data:text/html,<html><body><p id=ok>hi</p></body></html>",
-                    ["waitUntil"] = "load",
-                },
-            });
-
-            // On this path the command response goes out BEFORE the navigation
-            // events, which is the reverse of the plain dispatch path, so read
-            // past the response rather than stopping at it.
-            var sawResponse = false;
-            var sawFrameNavigated = false;
-            while (!sawResponse || !sawFrameNavigated)
-            {
-                var value = CdpJson.Parse(
-                    await Receive(replies.Reader, TimeSpan.FromSeconds(20), "navigate"));
-                if (string.Equals(
-                        value.Get("method").AsString(), "Page.frameNavigated", StringComparison.Ordinal))
-                {
-                    sawFrameNavigated = true;
-                }
-
-                if (value.Get("id").AsU64() == 4)
-                {
-                    Assert.Null(value.Get("error"));
-                    Assert.NotNull(value.Get("result").Get("frameId").AsString());
-                    Assert.StartsWith(
-                        "loader-",
-                        value.Get("result").Get("loaderId").AsStringOr(string.Empty),
-                        StringComparison.Ordinal);
-                    Assert.False(
-                        sawFrameNavigated,
-                        "the spawn-and-defer path answers the command before its events");
-                    sawResponse = true;
-                }
-            }
-
-            server.Writer.TryComplete();
-            await processor.WaitAsync(TimeSpan.FromSeconds(10));
+            ["id"] = 1,
+            ["method"] = "Target.createTarget",
+            ["params"] = new JsonObject { ["url"] = "about:blank" },
         });
+
+        string? sessionId = null;
+        while (true)
+        {
+            var value = CdpJson.Parse(
+                await Receive(replies.Reader, TimeSpan.FromSeconds(10), "create target"));
+            sessionId ??= value.Get("params").Get("sessionId").AsString();
+            if (value.Get("id").AsU64() == 1)
+            {
+                break;
+            }
+        }
+
+        Assert.NotNull(sessionId);
+
+        Send(new JsonObject
+        {
+            ["id"] = 4,
+            ["method"] = "Page.navigate",
+            ["sessionId"] = sessionId,
+            ["params"] = new JsonObject
+            {
+                ["url"] = "data:text/html,<html><body><p id=ok>hi</p></body></html>",
+                ["waitUntil"] = "load",
+            },
+        });
+
+        // On this path the command response goes out BEFORE the navigation
+        // events, which is the reverse of the plain dispatch path, so read
+        // past the response rather than stopping at it.
+        var sawResponse = false;
+        var sawFrameNavigated = false;
+        while (!sawResponse || !sawFrameNavigated)
+        {
+            var value = CdpJson.Parse(
+                await Receive(replies.Reader, TimeSpan.FromSeconds(20), "navigate"));
+            if (string.Equals(
+                    value.Get("method").AsString(), "Page.frameNavigated", StringComparison.Ordinal))
+            {
+                sawFrameNavigated = true;
+            }
+
+            if (value.Get("id").AsU64() == 4)
+            {
+                Assert.Null(value.Get("error"));
+                Assert.NotNull(value.Get("result").Get("frameId").AsString());
+                Assert.StartsWith(
+                    "loader-",
+                    value.Get("result").Get("loaderId").AsStringOr(string.Empty),
+                    StringComparison.Ordinal);
+                Assert.False(
+                    sawFrameNavigated,
+                    "the spawn-and-defer path answers the command before its events");
+                sawResponse = true;
+            }
+        }
+
+        server.Writer.TryComplete();
+        await processor.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     /// <summary>

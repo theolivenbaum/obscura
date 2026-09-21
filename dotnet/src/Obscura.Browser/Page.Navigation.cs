@@ -170,10 +170,13 @@ public sealed partial class Page
         string referrer,
         CancellationToken cancellationToken)
     {
-        UrlRecord? parsed = PageUrl.TryParse(urlString);
+        UrlRecord? parsed = PageUrl.TryParse(urlString, out UrlParseError parseError);
         if (parsed is null)
         {
-            throw PageException.InvalidUrl("relative URL without a base");
+            // Rust reports `e.to_string()` of the url crate's ParseError, so every reason
+            // is distinct: "empty host", "invalid port number", "invalid IPv6 address".
+            // The port used to hardcode the relative-reference reason for all of them.
+            throw PageException.InvalidUrl(parseError.Message());
         }
         UrlRecord url = parsed;
 
@@ -181,6 +184,17 @@ public sealed partial class Page
         Referrer = referrer;
         Url = url;
         NetworkEvents.Clear();
+
+        // The request ids of the outgoing document go with the events that named
+        // them, so a body still held for one can never be asked for again. Chromium
+        // discards them when the navigation commits for the same reason.
+        //
+        // Deviation from crates/obscura-browser/src/page.rs, which clears
+        // `response_bodies` only from Network.clearBrowserCache: there the buffer
+        // grows by a document's worth of bodies on every navigation until it hits
+        // its 128-entry cap, which on a script-heavy site is hundreds of megabytes
+        // of dead response text per page.
+        ClearResponseBodies();
 
         if (Context.ObeyRobots && url.Scheme is "http" or "https")
         {
@@ -321,17 +335,54 @@ public sealed partial class Page
             // template literal and run arbitrary JS in the page's realm.
             string escaped = PageHelpers.EscapeForJsTemplateLiteral(combinedCss);
             TryExecute(cssJs, "<css>", $"globalThis.__obscura_css = `{escaped}`;");
+
+            // DEVIATION from crates/obscura-browser, which runs one script per sheet to insert
+            // a synthetic <style>. Chromium 141 inserts no element, so the bytes are recorded
+            // against the <link> (or, for an @import, against the importing <style>) and the
+            // renderer reads them from there. Several @import rules in one <style> contribute
+            // in source order, so they are joined before the single write per node. See
+            // "Known deviations" in todo.md.
+            Dictionary<NodeId, string> perNode = [];
+            List<int> linkedIndexes = [];
             foreach ((AuthorStylesheetTarget target, string css) in authorStylesheets)
             {
-                string code = target switch
+                NodeId node;
+                switch (target)
                 {
-                    AuthorStylesheetTarget.Linked linked =>
-                        PageHelpers.MaterializeLinkedStylesheetScript(linked.LinkIndex, css),
-                    AuthorStylesheetTarget.InlineImport inline =>
-                        PageHelpers.MaterializeInlineImportScript(inline.StyleIndex, css),
-                    _ => string.Empty,
-                };
-                TryExecute(cssJs, "<fetch_stylesheets>", code);
+                    case AuthorStylesheetTarget.Linked linked:
+                        node = linked.Node;
+                        linkedIndexes.Add(linked.LinkIndex);
+                        break;
+                    case AuthorStylesheetTarget.InlineImport inline:
+                        node = inline.Node;
+                        break;
+                    default:
+                        continue;
+                }
+
+                perNode[node] = perNode.TryGetValue(node, out string? earlier)
+                    ? earlier + "\n" + css
+                    : css;
+            }
+
+            cssJs.WithDom(dom =>
+            {
+                foreach ((NodeId node, string css) in perNode)
+                {
+                    dom.SetExternalStylesheetCss(node, css);
+                }
+
+                return 0;
+            });
+
+            // An @import needs no script: it owns no CSSOM sheet and fires no event. A <link>
+            // does both, and its load handler may still change what applies.
+            foreach (int linkIndex in linkedIndexes)
+            {
+                TryExecute(
+                    cssJs,
+                    "<fetch_stylesheets>",
+                    PageHelpers.LinkedStylesheetLoadScript(linkIndex));
             }
         }
 

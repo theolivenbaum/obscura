@@ -274,7 +274,8 @@ internal static class TaffyStyleMapping
                 gutterY > 0f ? TaffyOverflow.Scroll : s.Overflow.Y);
         }
 
-        s.Border = RectLp(style.Border);
+        // The collapsing table model gives a box half of each edge it shares (CSS 2.1 17.6.2).
+        s.Border = RectLp(style.UsedBorder);
         if (style.IgnoresUsedBoxSizes())
         {
             // Block-axis margins on an ordinary non-replaced inline neither move nor size its
@@ -336,7 +337,10 @@ internal static class TaffyStyleMapping
         DimensionKind.Percent => TaffyDimension.FromPercent(value.Value),
         DimensionKind.Auto => TaffyDimension.Auto,
         // Relative units are resolved to Px before layout; if one slips through unresolved,
-        // fall back to its raw magnitude (em/rem ~16px) rather than panicking.
+        // fall back to its raw magnitude (em/rem ~16px) rather than panicking. This is an
+        // unreached net, not a resolution path - `ch` and `ex` are measured on the element's own
+        // face in the top-down pass (`FontUnits`), and a value arriving here has neither a font
+        // size nor a face to be measured against.
         DimensionKind.Em or DimensionKind.Rem => TaffyDimension.FromLength(value.Value * 16f),
         DimensionKind.Ex => TaffyDimension.FromLength(value.Value * 16f * Dimension.ExPerEm),
         DimensionKind.Ch => TaffyDimension.FromLength(value.Value * 16f * Dimension.ChPerEm),
@@ -349,7 +353,7 @@ internal static class TaffyStyleMapping
         TaffyLengthPercentage.FromLength(e.Top),
         TaffyLengthPercentage.FromLength(e.Bottom));
 
-    private static Layout.Rect<TaffyLengthPercentage> RectLpPercent(Edges e, float?[] percent)
+    private static Layout.Rect<TaffyLengthPercentage> RectLpPercent(Edges e, ReadOnlySpan<float?> percent)
     {
         static TaffyLengthPercentage Side(float value, float? percent) => percent is { } fraction
             ? TaffyLengthPercentage.FromPercent(fraction)
@@ -362,7 +366,7 @@ internal static class TaffyStyleMapping
             Side(e.Bottom, percent[2]));
     }
 
-    private static Layout.Rect<TaffyLengthPercentageAuto> RectAuto(Edges e, bool[] auto)
+    private static Layout.Rect<TaffyLengthPercentageAuto> RectAuto(Edges e, ReadOnlySpan<bool> auto)
     {
         static TaffyLengthPercentageAuto Side(float value, bool isAuto) => isAuto
             ? TaffyLengthPercentageAuto.Auto

@@ -372,10 +372,10 @@ public sealed class DomLayout
             Rect paddingRect = style is null
                 ? rect
                 : new Rect(
-                    rect.X + style.Border.Left,
-                    rect.Y + style.Border.Top,
-                    F32.Max(rect.Width - style.Border.Left - style.Border.Right, 0f),
-                    F32.Max(rect.Height - style.Border.Top - style.Border.Bottom, 0f));
+                    rect.X + style.UsedBorder.Left,
+                    rect.Y + style.UsedBorder.Top,
+                    F32.Max(rect.Width - style.UsedBorder.Left - style.UsedBorder.Right, 0f),
+                    F32.Max(rect.Height - style.UsedBorder.Top - style.UsedBorder.Bottom, 0f));
             Rect visualPadding = Transforms.TryGetValue(id, out Affine2 ownTransform)
                 ? ownTransform.MapRect(paddingRect)
                 : paddingRect;
@@ -506,8 +506,8 @@ public sealed class DomLayout
         if (establishes && style is not null && rect is { } box)
         {
             (float Width, float Height) client = (
-                F32.Max(box.Width - style.Border.Left - style.Border.Right - style.ReservedScrollbarY, 0f),
-                F32.Max(box.Height - style.Border.Top - style.Border.Bottom - style.ReservedScrollbarX, 0f));
+                F32.Max(box.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.ReservedScrollbarY, 0f),
+                F32.Max(box.Height - style.UsedBorder.Top - style.UsedBorder.Bottom - style.ReservedScrollbarX, 0f));
             ScrollId sid = new((uint)containers.Count);
             containers.Add(new ScrollContainer
             {

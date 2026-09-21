@@ -35,6 +35,32 @@ internal static partial class DomBuild
 
         string local = element.Name.Local;
 
+        // A column box lays nothing out: CSS 2.1 17.2 gives it no content of its own, and its
+        // width sizes a track of the table it belongs to. When it does belong to one, BuildTable
+        // reads it out of the table's structure and it never reaches here; otherwise Chromium
+        // 141 reports an empty 0 x 0 box at the parent's origin and renders none of its
+        // content, which is what an empty leaf gives.
+        //
+        // New behaviour, not a port: crates/obscura-render/src/dom.rs rejects the keyword in
+        // ApplyDisplay, so such an element keeps whatever display it had and lays its contents
+        // out as an ordinary box.
+        //
+        // `<col>` and `<colgroup>` are excluded: the `<table>` path reads those by name and has
+        // always given them an ordinary box, and moving that is out of scope here.
+        if (style.AuthoredTableDisplay
+                is TableInternalDisplay.Column or TableInternalDisplay.ColumnGroup
+            && local is not ("col" or "colgroup"))
+        {
+            TaffyStyle columnStyle = TaffyStyle.Default;
+            columnStyle.Size = new Layout.Size<TaffyDimension>(
+                TaffyDimension.FromLength(0f), TaffyDimension.FromLength(0f));
+            columnStyle.FlexGrow = 0f;
+            columnStyle.FlexShrink = 0f;
+            TaffyNodeId columnLeaf = context.TaffyTree.NewLeaf(columnStyle);
+            context.IdMap[columnLeaf] = id;
+            return columnLeaf;
+        }
+
         // Real table layout: every computed table box becomes a CSS grid so columns negotiate
         // across rows and colspan/rowspan map to grid spans.
         if (style.IsTableBox && BuildTable(context, id) is { } tableNode)
@@ -45,6 +71,25 @@ internal static partial class DomBuild
         TaffyStyle taffyStyle = TaffyStyleMapping.ToTaffyStyle(style);
         DomStyleFixups.ApplyContainerSizeContainment(tree, id, style, context.Styles, taffyStyle);
         DomStyleFixups.ApplyFitContentBlockSize(tree, id, style, context.Styles, taffyStyle);
+
+        // Table fixup: table-internal children under a non-table `display` still generate an
+        // anonymous table box, inside this element's own box rather than in place of it. See
+        // WantsAnonymousTableBox for what Rust does instead.
+        if (WantsAnonymousTableBox(context, id, style))
+        {
+            if (BuildTable(context, id, AnonymousTableStyle(style)) is { } anonymousTable)
+            {
+                TaffyNodeId wrapper = context.TaffyTree.NewWithChildren(taffyStyle, [anonymousTable]);
+                context.IdMap[wrapper] = id;
+                return wrapper;
+            }
+
+            // One table over every child is not what CSS 2.1 17.2.1 asks for when the children
+            // are a mix: each maximal *run* of table-internal siblings gets its own anonymous
+            // table. Record the failure so BuildAny generates those per-run tables as it walks
+            // the children below, rather than laying each row out as a full-width block.
+            context.WholeElementAnonymousTableFailed.Add(id);
+        }
 
         // A non-stretched flex item in a column flex container uses fit-content for its auto
         // inline size. Taffy has no fit-content box-size value; a synthetic percentage max has

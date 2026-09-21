@@ -358,7 +358,8 @@ public static partial class RenderPaint
             effective,
             CssMediaType.Screen,
             animationSample,
-            animationTimeline);
+            animationTimeline,
+            previous);
     }
 
     /// <summary>Paint one root-scroll position from an already prepared layout.</summary>

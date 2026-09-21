@@ -44,6 +44,20 @@ public sealed record SpanAttrs
 
     public required WordBreak WordBreak { get; init; }
 
+    /// <summary>
+    /// How much of the line box this span's inline box claims above and below the line's
+    /// baseline, its own <c>vertical-align</c> shift already applied (CSS 2.1 10.8.1).
+    /// </summary>
+    public float Above { get; init; }
+
+    public float Below { get; init; }
+
+    /// <summary>What this box's <c>vertical-align</c> aligns it to.</summary>
+    public LineBoxAlign Align { get; init; }
+
+    /// <summary>How far its baseline sits above the line's, when it has one.</summary>
+    public float Shift { get; init; }
+
     public bool WrappingEnabled => WhiteSpace is not (WhiteSpace.NoWrap or WhiteSpace.Pre);
 
     public bool HasLayoutEmergencyBreaks =>
@@ -87,7 +101,13 @@ public sealed record SpanAttrs
             // Inline descendants keep their own computed font metrics inside the enclosing line
             // box. Without per-span metrics, an <a>/<span> with a relative font-size shapes at
             // the block container's size even though cascade resolved the descendant correctly.
-            Metrics = (F32.Max(FontSize, 1f), F32.Max(LineHeight, 1f)),
+            Metrics = new TextMetrics(
+                F32.Max(FontSize, 1f),
+                F32.Max(LineHeight, 1f),
+                Above,
+                Below,
+                Align,
+                Shift),
             Weight = Weight,
             FontWeightAxis = Weight,
             FontOpticalSize = OpticalSizing == FontOpticalSizing.Auto ? FontSize : null,
@@ -150,6 +170,20 @@ internal sealed record SpanCtx
 
     public int? ClipFill { get; init; }
 
+    /// <summary>The line-box halves of this inline box, with its accumulated shift applied.</summary>
+    public float Above { get; init; }
+
+    public float Below { get; init; }
+
+    public LineBoxAlign Align { get; init; }
+
+    /// <summary>
+    /// How far this inline box's baseline sits above its containing block's, summed down the
+    /// inline tree: <c>vertical-align</c> is relative to the parent inline box, so a shifted
+    /// box inside a shifted box carries both.
+    /// </summary>
+    public float BaselineShift { get; init; }
+
     public SpanAttrs ToSpanAttrs() => new()
     {
         FontSize = FontSize,
@@ -169,8 +203,23 @@ internal sealed record SpanCtx
         WhiteSpace = WhiteSpace,
         OverflowWrap = OverflowWrap,
         WordBreak = WordBreak,
+        Above = Above,
+        Below = Below,
+        Align = Align,
+        Shift = BaselineShift,
     };
 }
+
+/// <summary>
+/// The line-box contribution of one inline box: how much of the line it claims above and below
+/// the line's baseline, whether it is aligned to the line box instead of to a baseline, and how
+/// far its own baseline was shifted from its parent's.
+/// </summary>
+internal readonly record struct InlineBoxExtent(
+    float Above,
+    float Below,
+    LineBoxAlign Align,
+    float Shift);
 
 /// <summary>Accumulates the collapsed text, owner provenance, and clip fills of one IFC.</summary>
 internal sealed class Collector
@@ -195,14 +244,15 @@ internal sealed class Collector
 
     public void BeginOwner(NodeId owner, LayoutStyle style)
     {
-        var startEdge = new InlineEdge(style.Margin.Left, style.Border.Left, style.Padding.Left);
-        var endEdge = new InlineEdge(style.Margin.Right, style.Border.Right, style.Padding.Right);
+        Edges inlineBorder = style.UsedBorder;
+        var startEdge = new InlineEdge(style.Margin.Left, inlineBorder.Left, style.Padding.Left);
+        var endEdge = new InlineEdge(style.Margin.Right, inlineBorder.Right, style.Padding.Right);
         int startEvent = BoundaryEvents.Count;
         BoundaryEvents.Add(new InlineBoundaryEvent(owner, TextLength, true, startEdge));
         Owners.Add(new ActiveInlineOwner(owner, TextLength, startEdge, endEdge, startEvent));
     }
 
-    public void EndOwner(NodeId owner)
+    public void EndOwner(NodeId owner, InlineBoxExtent extent)
     {
         ActiveInlineOwner active = Owners[^1];
         Owners.RemoveAt(Owners.Count - 1);
@@ -215,7 +265,8 @@ internal sealed class Collector
             active.StartEdge,
             active.EndEdge,
             active.StartEvent,
-            endEvent));
+            endEvent,
+            extent));
     }
 }
 
@@ -230,12 +281,98 @@ public static class Inline
     /// its border and padding, where inline text actually starts.
     /// </summary>
     public static (float X, float Y) ContentOrigin(Rect rect, LayoutStyle style) => (
-        rect.X + style.Border.Left + style.Padding.Left,
-        rect.Y + style.Border.Top + style.Padding.Top);
+        rect.X + style.UsedBorder.Left + style.Padding.Left,
+        rect.Y + style.UsedBorder.Top + style.Padding.Top);
 
     public static float ContentWidth(Rect rect, LayoutStyle style) => F32.Max(
-        rect.Width - style.Border.Left - style.Border.Right - style.Padding.Left - style.Padding.Right,
+        rect.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.Padding.Left - style.Padding.Right,
         0f);
+
+    /// <summary>
+    /// What one inline box contributes to the line box it sits on (CSS 2.1 10.8.1), including
+    /// the baseline shift its <c>vertical-align</c> asks for relative to its parent inline box.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which has no notion of a per-box
+    /// line contribution at all - a line is the largest <c>line-height</c> on it and every span
+    /// hangs from the line's top, so a span with a different font or a <c>vertical-align</c>
+    /// cannot change the line's height. Every number below was measured against Chromium 141
+    /// with the faces named explicitly (scratchpad matrix of 54 + 120 cases):
+    /// <list type="bullet">
+    /// <item><c>super</c> raises the baseline by the PARENT font size / 3 + 1 and <c>sub</c>
+    /// lowers it by the parent font size / 5 + 1, both stored as a <c>LayoutUnit</c> - the old
+    /// KHTML rule Blink still carries. A 32px <c>super</c> span in a 16px/40px block is 50.33px
+    /// tall, which is 6.328125 (= 16/3+1 in 1/64) above the 32px span's own 44px.</item>
+    /// <item><c>middle</c> puts the box's own leaded midpoint at half the parent's x-height,
+    /// which is why the face has to carry <see cref="FaceMetrics.XHeight"/>: the same markup
+    /// is 40.23px in Liberation Mono, 40.77px in Liberation Sans and 40.50px in DejaVu
+    /// Sans.</item>
+    /// <item><c>text-top</c> aligns the top of the box's LEADED height with the top of the
+    /// parent's raw FONT BOX, not with the parent's leaded top - a 16px/40px block with a
+    /// text-top span is 51px tall, not 40.</item>
+    /// <item><c>top</c> and <c>bottom</c> leave the baseline set entirely: a 48px span in an
+    /// 16px/18px block is 27px tall baseline-aligned and 18px tall <c>vertical-align:
+    /// top</c>.</item>
+    /// </list>
+    /// See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static InlineBoxExtent LineBoxExtent(
+        InlineVerticalAlign? align,
+        float fontSize,
+        float lineHeight,
+        FaceMetrics metrics,
+        float parentFontSize,
+        FaceMetrics parentMetrics,
+        float parentShift,
+        LineBoxAlign parentAlign)
+    {
+        (float above, float below) = FontAssets.LineBoxHalves(fontSize, lineHeight, metrics);
+        InlineVerticalAlignKind kind = align?.Kind ?? InlineVerticalAlignKind.Baseline;
+        if (parentAlign != LineBoxAlign.Baseline)
+        {
+            // CSS 2.1 10.8.1 moves the whole "aligned subtree" together, so a descendant of a
+            // line-aligned box keeps its parent's alignment rather than starting a new one.
+            return new InlineBoxExtent(above, below, parentAlign, parentShift);
+        }
+
+        if (kind is InlineVerticalAlignKind.Top or InlineVerticalAlignKind.Bottom)
+        {
+            return new InlineBoxExtent(
+                above,
+                below,
+                kind == InlineVerticalAlignKind.Top ? LineBoxAlign.LineTop : LineBoxAlign.LineBottom,
+                parentShift);
+        }
+
+        float shift = kind switch
+        {
+            InlineVerticalAlignKind.Sub => -FontAssets.TruncatedToLayoutUnit((parentFontSize / 5f) + 1f),
+            InlineVerticalAlignKind.Super => FontAssets.TruncatedToLayoutUnit((parentFontSize / 3f) + 1f),
+            InlineVerticalAlignKind.Middle =>
+                FontAssets.RoundedToLayoutUnit(FontAssets.XHeight(parentFontSize, parentMetrics) / 2f)
+                - ((above - below) / 2f),
+            InlineVerticalAlignKind.TextTop =>
+                FontAssets.FittedFontBoxMetrics(parentFontSize, parentMetrics).Ascent - above,
+            InlineVerticalAlignKind.TextBottom =>
+                below - FontAssets.FittedFontBoxMetrics(parentFontSize, parentMetrics).Descent,
+            InlineVerticalAlignKind.Offset => OffsetShift(align!.Value.Offset, lineHeight),
+            _ => 0f,
+        };
+
+        float total = parentShift + shift;
+
+        return new InlineBoxExtent(above + total, below - total, LineBoxAlign.Baseline, total);
+    }
+
+    private static float OffsetShift(Dimension offset, float lineHeight) => offset.Kind switch
+    {
+        // A percentage is of the box's OWN used line-height, not the parent's: a 16px span with
+        // `line-height: 10px; vertical-align: 50%` in an 16px/18px block is 19px in Chromium
+        // (5px up), where the parent's 18px would give 23px.
+        DimensionKind.Percent => offset.Value * FontAssets.QuantizedLineHeight(lineHeight),
+        DimensionKind.Px => offset.Value,
+        _ => 0f,
+    };
 
     /// <summary>
     /// Replaced / atomic-inline tags: their box does not contain text, so folding one into a
@@ -609,6 +746,24 @@ public static class Inline
     }
 
     /// <summary>
+    /// The characters HTML white-space collapsing may remove.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-render/src/inline.rs</c>, which tests
+    /// <c>char::is_whitespace</c> - the Unicode White_Space property. That property is true for
+    /// U+00A0 and for the fixed-width spaces U+2000-U+200A, U+202F, U+205F and U+3000, so the
+    /// Rust engine collapses them away; CSS Text 3 §4.1 collapses only space, tab and the
+    /// segment-break characters, and everything else is ordinary text. Measured in Chromium 141
+    /// at 16px/20px 'Liberation Mono': <c>a&lt;br&gt;&amp;nbsp;</c> is 40 tall and
+    /// <c>a&lt;br&gt;&amp;#x2007;</c> is 40, because the no-break space is content that keeps
+    /// the last line box alive. Both were 20 once
+    /// <c>TextEngine.DropTrailingEmptyLineBox</c> started dropping that line, which is what
+    /// surfaced this. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static bool IsCollapsibleWhiteSpace(Rune rune) =>
+        rune.Value is ' ' or '\t' or '\n' or '\r' or '\f';
+
+    /// <summary>
     /// Append one text node's whitespace-collapsed, transformed runs.
     /// </summary>
     /// <remarks>
@@ -629,7 +784,7 @@ public static class Inline
         bool atWordStart = collector.LastWasSpace;
         foreach (Rune rune in raw.EnumerateRunes())
         {
-            if (Rune.IsWhiteSpace(rune))
+            if (IsCollapsibleWhiteSpace(rune))
             {
                 switch (whiteSpace)
                 {

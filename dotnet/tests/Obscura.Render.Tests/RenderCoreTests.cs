@@ -134,16 +134,17 @@ public class RenderCoreTests
             Display = Display.Block,
             Width = Dimension.Px(300f),
             Height = Dimension.Px(40f),
-            MarginAuto = [false, true, false, true],
         };
+        centered.SetMarginAuto(1, true);
+        centered.SetMarginAuto(3, true);
         LayoutStyle pushedEnd = new()
         {
             Display = Display.Block,
             Width = Dimension.Px(200f),
             Height = Dimension.Px(40f),
             Margin = new Edges(0f, 50f, 0f, 0f),
-            MarginAuto = [false, false, false, true],
         };
+        pushedEnd.SetMarginAuto(3, true);
         LayoutNode root = new(
             MakeBox(Display.Block, 900f, 200f),
             null,
@@ -551,9 +552,9 @@ public class RenderCoreTests
         Assert.False(style.WidthFitContent);
 
         Assert.Equal(6, style.SizeExpressions.Length);
-        Assert.All(style.SizeExpressions, static value => Assert.Null(value));
+        Assert.All(style.SizeExpressions.ToArray(), static value => Assert.Null(value));
         Assert.Equal(4, style.MarginAuto.Length);
-        Assert.DoesNotContain(true, style.MarginAuto);
+        Assert.DoesNotContain(true, style.MarginAuto.ToArray());
         Assert.Equal(4, style.MarginPercent.Length);
         Assert.Equal(4, style.MarginRelative.Length);
         Assert.Equal(4, style.MarginExpressions.Length);
@@ -674,20 +675,20 @@ public class RenderCoreTests
                     ["50%"]),
             ],
         };
-        style.SizeExpressions[0] = "calc(100% - 1rem)";
-        style.MarginPercent[3] = 0.25f;
+        style.SetSizeExpression(0, "calc(100% - 1rem)");
+        style.SetMarginPercent(3, 0.25f);
 
         LayoutStyle copy = style.Clone();
         Assert.Equal(Dimension.Px(10f), copy.Width);
         Assert.Equal("calc(100% - 1rem)", copy.SizeExpressions[0]);
         Assert.Equal(0.25f, copy.MarginPercent[3]!.Value);
 
-        copy.ContainerNames.Add("panel");
-        copy.TransformOps.Clear();
-        copy.CounterReset.Clear();
+        copy.EnsureContainerNames().Add("panel");
+        copy.ClearTransformOps();
+        copy.ClearCounterReset();
         copy.GridAreas![0].Add("c");
-        copy.SizeExpressions[0] = null;
-        copy.MarginPercent[3] = null;
+        copy.SetSizeExpression(0, null);
+        copy.SetMarginPercent(3, null);
         copy.BeforePseudo!.Width = Dimension.Px(99f);
         ((BackgroundGradientLayer.Radial)copy.BackgroundGradientLayers[0]).Stops.Clear();
 

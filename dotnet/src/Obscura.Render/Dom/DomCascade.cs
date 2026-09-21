@@ -51,9 +51,12 @@ internal static class DomCascade
             ComputedStyle.ApplyInline(style, $"vertical-align: {valign}");
         }
 
-        if (node.GetAttribute("cellspacing") is { } cellspacing && AllAsciiDigits(cellspacing))
+        if (node.GetAttribute("cellspacing") is { } cellspacing
+            && HtmlDimensionValue(cellspacing) is { } spacing)
         {
-            ComputedStyle.ApplyInline(style, $"border-spacing: {cellspacing}px");
+            ComputedStyle.ApplyInline(
+                style,
+                $"border-spacing: {spacing.ToString(CultureInfo.InvariantCulture)}px");
         }
 
         if (node.GetAttribute("height") is { } height)
@@ -173,6 +176,55 @@ internal static class DomCascade
 
             ComputedStyle.ApplyInline(style, $"{name}: {value}");
         }
+    }
+
+    /// <summary>
+    /// HTML's rules for parsing dimension values, without the percentage case: skip leading
+    /// ASCII whitespace, then read a run of ASCII digits with an optional fraction, ignoring
+    /// whatever follows.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION FROM RUST: <c>dom.rs</c> maps <c>cellspacing</c> only when every character is
+    /// a digit. Measured on Chromium 141, <c>cellspacing="3px"</c>, <c>"3.9em"</c>,
+    /// <c>"12abc"</c>, <c>"&#9;5"</c>, <c>"0007"</c> and <c>"8 9"</c> all map (to 3, 3, 12, 5,
+    /// 7 and 8), while <c>"3%"</c>, <c>"-3"</c>, <c>"+7"</c>, <c>".5"</c> and <c>"abc"</c> do
+    /// not and the table keeps the user-agent 2px. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static float? HtmlDimensionValue(string value)
+    {
+        int index = 0;
+        while (index < value.Length && value[index] is ' ' or '\t' or '\n' or '\f' or '\r')
+        {
+            index++;
+        }
+
+        int start = index;
+        while (index < value.Length && value[index] is >= '0' and <= '9')
+        {
+            index++;
+        }
+
+        if (index == start)
+        {
+            return null;
+        }
+
+        if (index < value.Length && value[index] == '.')
+        {
+            index++;
+            while (index < value.Length && value[index] is >= '0' and <= '9')
+            {
+                index++;
+            }
+        }
+
+        // A percentage is a different kind of value, and `border-spacing` takes no percentage.
+        if (index < value.Length && value[index] == '%')
+        {
+            return null;
+        }
+
+        return ParseFloat(value[start..index]);
     }
 
     private static bool AllAsciiDigits(string value)
@@ -441,8 +493,8 @@ internal static class DomCascade
                 if (hasListOrDefinitionAncestor)
                 {
                     style.Margin = style.Margin with { Top = 0f, Bottom = 0f };
-                    style.MarginRelative[0] = null;
-                    style.MarginRelative[2] = null;
+                    style.SetMarginRelative(0, null);
+                    style.SetMarginRelative(2, null);
                 }
 
                 if (local is "dir" or "menu" or "ul")
@@ -464,7 +516,7 @@ internal static class DomCascade
             if (context.QuirksMode && string.Equals(local, "form", StringComparison.Ordinal))
             {
                 // Legacy HTML/quirks rendering keeps one em after forms.
-                style.MarginRelative[2] = Dimension.Em(1f);
+                style.SetMarginRelative(2, Dimension.Em(1f));
             }
 
             // Chromium's UA sheet gives `a:any-link` a pointer cursor, which needs the
@@ -1110,15 +1162,32 @@ internal static class DomCascade
                     continue;
                 }
 
-                if (!string.Equals(element.Name.Local, "style", StringComparison.Ordinal))
+                // Same two sources as the document sheet in LayoutDom: a <style>'s own text,
+                // and the fetched CSS an element contributes ahead of it. DEVIATION from
+                // crates/obscura-render, which sees only <style> because the Rust browser
+                // materializes a fetched <link> sheet as one; Chromium 141 creates no element
+                // for a <link> or an @import. See "Known deviations" in todo.md.
+                bool isStyle = string.Equals(element.Name.Local, "style", StringComparison.Ordinal);
+                string? external = tree.ExternalStylesheetCss(nodeId);
+                if (!isStyle && external is null)
                 {
                     continue;
                 }
 
                 string? media = node.GetAttribute("media");
-                if (media is null
-                    || media.Trim().Length == 0
-                    || CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
+                if (media is not null
+                    && media.Trim().Length != 0
+                    && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
+                {
+                    continue;
+                }
+
+                if (external is not null)
+                {
+                    sources.Add(external);
+                }
+
+                if (isStyle)
                 {
                     sources.Add(tree.TextContent(nodeId));
                 }

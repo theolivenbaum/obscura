@@ -37,7 +37,8 @@ namespace Obscura.Js.Runtime;
 /// mandatory: a leaked <see cref="V8ScriptEngine"/> wedges the host.
 /// </para>
 /// </remarks>
-public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPostedTaskSpawner
+public sealed partial class ObscuraJsRuntime
+    : IDisposable, Obscura.Js.Ops.IPostedTaskSpawner, Obscura.Js.Ops.IAsyncOpTracker
 {
     private const ulong DefaultCdpAwaitTimeoutMs = 30_000;
 
@@ -100,6 +101,7 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
         // The ops layer supplies the op table; a build without it still boots
         // bootstrap.js, which is what makes the runtime testable on its own.
         _ops.TaskSpawner = this;
+        _ops.AsyncOps = this;
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
         InitializeObjectStore(_engine);
     }
@@ -574,30 +576,16 @@ public sealed partial class ObscuraJsRuntime : IDisposable, Obscura.Js.Ops.IPost
     // -------------------------------------------------------- async op tracking
 
     /// <summary>
-    /// Records that a host async op is in flight, so the event loop knows the
-    /// page is not idle. deno_core tracks this itself; here the ops layer
-    /// reports it.
+    /// An async op was called. Counted from the op binding's JavaScript shim, not
+    /// from the op body: see <see cref="Obscura.Js.Ops.AsyncOpBinding"/> for why the
+    /// host cannot see the moment that matters.
     /// </summary>
-    public IDisposable TrackAsyncOp()
-    {
-        Interlocked.Increment(ref _pendingAsyncOps);
-        return new AsyncOpScope(this);
-    }
+    void Obscura.Js.Ops.IAsyncOpTracker.OpStarted() => Interlocked.Increment(ref _pendingAsyncOps);
+
+    /// <summary>The op's promise settled and its reactions are running.</summary>
+    void Obscura.Js.Ops.IAsyncOpTracker.OpSettled() => Interlocked.Decrement(ref _pendingAsyncOps);
 
     private bool HasPendingAsyncOps => Volatile.Read(ref _pendingAsyncOps) > 0;
-
-    private sealed class AsyncOpScope(ObscuraJsRuntime runtime) : IDisposable
-    {
-        private int _done;
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _done, 1) == 0)
-            {
-                Interlocked.Decrement(ref runtime._pendingAsyncOps);
-            }
-        }
-    }
 
     // ------------------------------------------------------------------ dispose
 

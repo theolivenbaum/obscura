@@ -34,6 +34,23 @@ public sealed partial class DomTree
     private Dictionary<NodeId, bool>? _dirtyFormChecked;
 
     /// <summary>
+    /// CSS that an element contributes to the cascade without being the text of a
+    /// <c>&lt;style&gt;</c> element: the bytes fetched for a <c>&lt;link rel=stylesheet&gt;</c>, and the
+    /// bytes fetched for the <c>@import</c> rules of an inline <c>&lt;style&gt;</c>. It is ordered
+    /// before that element's own text, which is where an <c>@import</c>'s rules belong.
+    ///
+    /// DEVIATION from crates/obscura-browser, which materializes the same bytes as a real
+    /// <c>&lt;style&gt;</c> element inserted next to the <c>&lt;link&gt;</c> (page.rs, the
+    /// <c>data-obscura-external-stylesheets</c> script). Chromium 141 creates no element for
+    /// either: on repro/a.html it reports head children META,LINK and
+    /// <c>head.querySelectorAll('style').length === 0</c> while
+    /// <c>document.styleSheets.length</c> is still 1, where Obscura reported META,LINK,STYLE
+    /// and 1. Holding the bytes beside the node instead of in the tree keeps the cascade
+    /// position and leaves the DOM as authored. See "Known deviations" in todo.md.
+    /// </summary>
+    private Dictionary<NodeId, string>? _externalStylesheetCss;
+
+    /// <summary>
     /// Full-document HTML parsing enables declarative shadow roots. Fragment parsing (including
     /// innerHTML) deliberately leaves this false.
     /// </summary>
@@ -91,6 +108,30 @@ public sealed partial class DomTree
         state = false;
         return false;
     }
+
+    /// <summary>
+    /// Record the CSS an element contributes to the cascade ahead of its own text, or clear it
+    /// with <see langword="null"/>. Written for a <c>&lt;link rel=stylesheet&gt;</c> once its sheet
+    /// is fetched, and for a <c>&lt;style&gt;</c> whose <c>@import</c> rules were fetched.
+    /// </summary>
+    public void SetExternalStylesheetCss(NodeId id, string? css)
+    {
+        if (css is null)
+        {
+            _externalStylesheetCss?.Remove(id);
+            return;
+        }
+
+        _externalStylesheetCss ??= [];
+        _externalStylesheetCss[id] = css;
+    }
+
+    /// <summary>
+    /// The CSS this element contributes to the cascade ahead of its own text, or
+    /// <see langword="null"/> when it contributes none.
+    /// </summary>
+    public string? ExternalStylesheetCss(NodeId id) =>
+        _externalStylesheetCss is { } css && css.TryGetValue(id, out string? text) ? text : null;
 
     private void ForgetDirtyFormState(NodeId id)
     {
@@ -690,6 +731,10 @@ public sealed partial class DomTree
                 // The slot is handed out again, so dirty form state recorded against it must
                 // not survive onto whatever node lands there next.
                 ForgetDirtyFormState(id);
+
+                // Same reason: a fetched sheet is recorded against a node, not a node's
+                // identity, and must not be inherited by the next node in this slot.
+                _externalStylesheetCss?.Remove(id);
             }
         }
     }

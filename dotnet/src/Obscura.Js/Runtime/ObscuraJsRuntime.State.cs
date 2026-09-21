@@ -68,20 +68,22 @@ public sealed partial class ObscuraJsRuntime
         // That has to count as work in flight or the page's loop reports idle
         // and returns before any frame timer is due, which silently drops every
         // setTimeout a frame makes.
-        ops.SetProperty("op_sleep", (Func<object?, Task>)(millis => RealmSleepAsync(millis)));
+        _ops.BindRealmAsyncOp(ops, "op_sleep", (Func<object?, Task>)(millis => RealmSleepAsync(millis)));
     }
 
     /// <summary>
     /// <c>op_sleep</c> for a frame realm, counted as an async op in flight.
     /// </summary>
     /// <remarks>
-    /// The op is held open for a short grace period past the delay: the promise
-    /// resolves once this task completes, and the frame's callback runs in the
-    /// microtask that follows. Releasing the op at the instant the task
-    /// completes would let the loop observe idle in between and return with the
-    /// callback still queued.
+    /// The op is counted by its binding, not here. This used to hold the op open
+    /// for 5ms past the delay, because the promise resolves only once this task
+    /// completes and the frame's callback runs in the microtask after that, so
+    /// releasing it at completion let the loop observe idle in between and return
+    /// with the callback still queued. That was the same defect every async op has,
+    /// answered with a timeout; <see cref="Obscura.Js.Ops.AsyncOpBinding"/> answers
+    /// it by construction for all of them.
     /// </remarks>
-    private async Task RealmSleepAsync(object? millis)
+    private static async Task RealmSleepAsync(object? millis)
     {
         var delay = millis switch
         {
@@ -94,22 +96,8 @@ public sealed partial class ObscuraJsRuntime
         {
             delay = 0;
         }
-        var scope = TrackAsyncOp();
-        try
-        {
-            await Task.Delay(TimeSpan.FromMilliseconds(delay)).ConfigureAwait(false);
-        }
-        finally
-        {
-            _ = Task.Delay(RealmSleepReleaseGraceMs).ContinueWith(
-                _ => scope.Dispose(),
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
-        }
+        await Task.Delay(TimeSpan.FromMilliseconds(delay)).ConfigureAwait(false);
     }
-
-    private const int RealmSleepReleaseGraceMs = 5;
 
     /// <summary>
     /// Queues one posted-task delivery onto this runtime's event loop.

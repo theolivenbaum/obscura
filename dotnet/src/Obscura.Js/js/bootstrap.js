@@ -19,7 +19,9 @@
     '__obscura_frameId', '__obscura_parentFrameId', '__obscura_frameWindows',
     '__obscura_frameObjects', '__obscura_frameElements', '__obscura_deliverMessage',
     '__obscura_liveFrameIds', '__obscura_forgetFrame',
-    '__obscura_registerLinkedStylesheet', '__obscura_activateLabel',
+    '__obscura_registerLinkedStylesheet', '__obscura_linkedStylesheetCss',
+    '__obscura_setLinkedStylesheetCss',
+    '__obscura_activateLabel',
     '__obscura_isDisabled', '__obscura_labeledControl', '__obscura_interactiveHost',
     '__obscura_tryFragmentNavigate', '_rawFragment',
     '__markParserScripts', '__obscura_hasPendingDynamicScripts',
@@ -436,6 +438,22 @@ function _resolveResourceUrl(src) {
 const _linkedStylesheetNodes = new WeakMap();
 const _linkElementSheets = new WeakMap();
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where a fetched <link> sheet is a real
+// <style> element inserted next to the link, so its bytes are node text. Chromium 141 creates
+// no element: repro/a.html reports head children META,LINK and
+// head.querySelectorAll('style').length 0 while document.styleSheets.length is still 1. The
+// bytes now live beside the node, and these two reach them. See "Known deviations" in todo.md.
+function _externalStylesheetCss(node) {
+  if (!node || node._nid == null) return "";
+  return _dom("get_external_stylesheet_css", node._nid) || "";
+}
+function _setExternalStylesheetCss(node, css) {
+  if (!node || node._nid == null) return;
+  _dom("set_external_stylesheet_css", node._nid, css || "");
+}
+globalThis.__obscura_linkedStylesheetCss = _externalStylesheetCss;
+globalThis.__obscura_setLinkedStylesheetCss = _setExternalStylesheetCss;
+
 function _linkedStylesheetHref(link, explicitHref) {
   const raw = explicitHref || link?.getAttribute?.("href") || link?.href || "";
   return raw ? _resolveResourceUrl(String(raw)) : "";
@@ -453,6 +471,9 @@ function _linkedStylesheetIsOriginClean(href) {
   }
 }
 
+// `sourceNode === link` means the sheet's text is held beside the link rather than in a
+// <style> element; any other source node is a style element, which is still how
+// adoptedStyleSheets works.
 function _registerLinkedStylesheet(link, sourceNode, explicitHref) {
   if (!link || !sourceNode) return null;
   const href = _linkedStylesheetHref(link, explicitHref);
@@ -600,16 +621,18 @@ async function _loadLinkedStylesheet(c) {
   try { pageOrigin = new URL(fullUrl).origin; } catch(e) {}
   try {
     const css = await _fetchLinkedCss(fullUrl, pageOrigin);
+    // DEVIATION from crates/obscura-js, which inserts a <style data-obscura-linked> after the
+    // link. Chromium 141 creates no element for a dynamically inserted stylesheet link either,
+    // so the bytes go beside the node. The media query is no longer evaluated here: the
+    // renderer applies the link's own media attribute, which also makes it track a viewport
+    // change instead of being frozen at fetch time. `disabled` still gates, because the
+    // renderer has no view of it. See "Known deviations" in todo.md.
     const previous = _linkedStylesheetNodes.get(c);
-    if (previous?.parentNode) previous.parentNode.removeChild(previous);
-    const media = c.getAttribute("media") || "";
-    const style = document.createElement("style");
-    style.setAttribute("data-obscura-linked", fullUrl);
-    style.textContent = css;
-    _registerLinkedStylesheet(c, style, fullUrl);
-    if (c.parentNode && !c.disabled && _cssImportApplies(media)) {
-      c.parentNode.insertBefore(style, c.nextSibling);
+    if (previous && previous !== c && previous.parentNode) {
+      previous.parentNode.removeChild(previous);
     }
+    _setExternalStylesheetCss(c, c.disabled ? "" : css);
+    _registerLinkedStylesheet(c, c, fullUrl);
     try { c.dispatchEvent(new Event('load', { bubbles: true })); } catch(e) {}
   } catch(e) {
     try { c.dispatchEvent(new Event('error', { bubbles: true })); } catch(e) {}
@@ -2163,7 +2186,9 @@ class Node {
     const linkedStyle = c instanceof Element
       ? _linkedStylesheetNodes.get(c)
       : null;
-    if (linkedStyle?.parentNode === this) {
+    // A link that is its own sheet source has nothing extra to remove, and its entry is kept
+    // so re-appending the link restores its sheet, which is what Chromium does.
+    if (linkedStyle && linkedStyle !== c && linkedStyle.parentNode === this) {
       _dom("remove_child", linkedStyle._nid);
       _linkedStylesheetNodes.delete(c);
     }
@@ -8655,17 +8680,34 @@ globalThis.matchMedia = _markNative(function matchMedia(q) {
 // getComputedStyle() repeatedly on the same few roots; rebuilding and parsing
 // several hundred properties for every wrapper dominated real-page startup.
 const _computedStyleSnapshotCache = new WeakMap();
-globalThis.getComputedStyle = (el) => {
+globalThis.getComputedStyle = (el, pseudoElt) => {
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
+  // DEVIATION from crates/obscura-js: its getComputedStyle takes one argument and ignores
+  // pseudoElt, so every call answered with the originating element's own style. Chromium
+  // ignores null/undefined/'' and answers for the element, answers a recognised pseudo-element
+  // with its own style, and answers an unrecognised name with an empty declaration.
+  // Chromium parses pseudoElt as a selector: a string that is not one at all (surrounding
+  // whitespace, a functional pseudo like ::part(x) on a non-shadow host) is treated as absent
+  // and answers for the element, while a well-formed name it does not support answers with an
+  // empty declaration. The op below produces the second of those.
+  const pseudo = (typeof pseudoElt === 'string' && /^::?[a-zA-Z-][a-zA-Z0-9-]*$/.test(pseudoElt))
+    ? pseudoElt
+    : null;
   // Render builds expose one immutable snapshot from the retained final
   // cascade/layout. The native snapshot is shared per element and epoch while
   // each call still returns a distinct, live CSSStyleDeclaration proxy.
   const cacheable = (typeof el === 'object' && el !== null) || typeof el === 'function';
-  let snapshot = cacheable ? _computedStyleSnapshotCache.get(el) : null;
+  let perPseudo = cacheable ? _computedStyleSnapshotCache.get(el) : null;
+  if (!perPseudo) {
+    perPseudo = new Map();
+    if (cacheable) _computedStyleSnapshotCache.set(el, perPseudo);
+  }
+  const snapshotKey = pseudo || '';
+  let snapshot = perPseudo.get(snapshotKey);
   if (!snapshot) {
     snapshot = { rendered: null, epoch: -1, names: [] };
-    if (cacheable) _computedStyleSnapshotCache.set(el, snapshot);
+    perPseudo.set(snapshotKey, snapshot);
   }
   const refreshRendered = () => {
     const hasRunningAnimation = typeof _animationsForTarget === 'function'
@@ -8673,11 +8715,20 @@ globalThis.getComputedStyle = (el) => {
     if (snapshot.epoch === _domMutationEpoch && !hasRunningAnimation) return;
     snapshot.epoch = _domMutationEpoch;
     snapshot.rendered = null;
-    if (typeof Deno.core.ops.op_computed_style === 'function' && el?._nid != null) {
-      try {
-        const raw = Deno.core.ops.op_computed_style(String(el._nid | 0));
-        snapshot.rendered = raw ? JSON.parse(raw) : null;
-      } catch (e) {}
+    if (el?._nid != null) {
+      // op_computed_style keeps its one-argument shape; the pseudo-element snapshot is a
+      // separate op so that op's payload stays byte-identical.
+      const op = pseudo
+        ? Deno.core.ops.op_computed_style_pseudo
+        : Deno.core.ops.op_computed_style;
+      if (typeof op === 'function') {
+        try {
+          const raw = pseudo
+            ? op(String(el._nid | 0), pseudo)
+            : op(String(el._nid | 0));
+          snapshot.rendered = raw ? JSON.parse(raw) : null;
+        } catch (e) {}
+      }
     }
     snapshot.names = snapshot.rendered ? Object.keys(snapshot.rendered) : [];
   };
@@ -8746,6 +8797,10 @@ globalThis.getComputedStyle = (el) => {
     if (kebab.startsWith('webkit-')) kebab = '-' + kebab;
     if (snapshot.rendered && Object.prototype.hasOwnProperty.call(snapshot.rendered, kebab))
       return snapshot.rendered[kebab];
+    // A pseudo-element has neither an inline style nor a box of the element's to fall back on,
+    // and an unrecognised one has no snapshot at all, which is the empty declaration Chromium
+    // answers with. Falling through here would report the originating element's geometry.
+    if (pseudo) return '';
     // Non-render builds and properties outside the renderer snapshot retain
     // the lightweight inline CSSOM behavior.
     const inlineVal = target.getPropertyValue ? target.getPropertyValue(rawProp) : '';
@@ -8978,6 +9033,7 @@ class CSSStyleSheet {
     this.disabled = false;
     this._ownerNode = null;
     this._sourceNode = null;
+    this._sourceExternal = false;
     this._sourceText = "";
     this._href = null;
     this._originClean = true;
@@ -8999,20 +9055,34 @@ class CSSStyleSheet {
   _bindOwner(ownerNode, sourceNode = ownerNode) {
     this._ownerNode = ownerNode;
     this._sourceNode = sourceNode;
+    this._sourceExternal = false;
     this._sourceText = null;
     this._refreshFromOwner();
   }
   _bindLinkedOwner(ownerNode, sourceNode, href, originClean) {
     this._ownerNode = ownerNode;
     this._sourceNode = sourceNode;
+    // A link that is its own source keeps its bytes beside the node, not in a <style>.
+    this._sourceExternal = sourceNode === ownerNode;
     this._sourceText = null;
     this._href = href || null;
     this._originClean = originClean !== false;
     if (this._originClean) this._refreshFromOwner();
     else {
       this._setRules([]);
-      this._sourceText = sourceNode?.textContent || "";
+      this._sourceText = this._readSourceText();
     }
+  }
+  _readSourceText() {
+    if (!this._sourceNode) return "";
+    return this._sourceExternal
+      ? _externalStylesheetCss(this._sourceNode)
+      : (this._sourceNode.textContent || "");
+  }
+  _writeSourceText(text) {
+    if (!this._sourceNode) return;
+    if (this._sourceExternal) _setExternalStylesheetCss(this._sourceNode, text);
+    else if (this._sourceNode.textContent !== text) this._sourceNode.textContent = text;
   }
   _assertOriginClean() {
     if (!this._originClean) {
@@ -9021,7 +9091,7 @@ class CSSStyleSheet {
   }
   _refreshFromOwner() {
     if (!this._sourceNode || !this._originClean) return;
-    const text = this._sourceNode.textContent || "";
+    const text = this._readSourceText();
     if (text === this._sourceText) return;
     const parsed = _splitTopLevelCssRules(text);
     const rules = parsed.rules.map(_cssRuleFromText).filter(Boolean);
@@ -9037,11 +9107,11 @@ class CSSStyleSheet {
   _ruleChanged() {
     const text = this._serializeText();
     this._sourceText = text;
-    // DOM text is the renderer bridge for this bounded CSSOM implementation:
-    // its ordinary style-element mutation path invalidates cascade/layout.
-    // Avoiding the observable text rewrite requires a future native effective-
-    // source channel shared by CSSOM and the renderer.
-    if (this._sourceNode && this._sourceNode.textContent !== text) this._sourceNode.textContent = text;
+    // A <style>'s rules still live in its DOM text, which is what the renderer reads and what
+    // an author can observe. A linked sheet writes to the side table instead, so insertRule on
+    // a link-owned sheet no longer rewrites a phantom element's textContent - that rewrite is
+    // the "future native effective-source channel" the Rust comment here asked for.
+    this._writeSourceText(text);
     _syncAdoptedStyleSheet(this);
   }
   insertRule(rule, index = 0) {
@@ -9086,11 +9156,11 @@ class CSSStyleSheet {
 }
 
 const _styleElementSheets = new WeakMap();
+// Only adoptedStyleSheets still materializes a <style>. The three markers a fetched <link>
+// sheet, a dynamically inserted one and an @import used to carry are gone with the elements
+// they marked; those bytes are held beside their node now.
 function _styleElementIsCssomBridge(style) {
-  return style.hasAttribute("data-obscura-adopted")
-    || style.hasAttribute("data-obscura-linked")
-    || style.hasAttribute("data-obscura-external-stylesheets")
-    || style.hasAttribute("data-obscura-inline-import");
+  return style.hasAttribute("data-obscura-adopted");
 }
 function _styleElementHasCssSheet(style) {
   if (!style || style.localName !== "style" || !style.isConnected) return false;
@@ -13699,7 +13769,7 @@ class _IframeWindow {
     return true;
   }
 
-  getComputedStyle(el) { return globalThis.getComputedStyle(el); }
+  getComputedStyle(el, pseudoElt) { return globalThis.getComputedStyle(el, pseudoElt); }
   matchMedia(q) { return globalThis.matchMedia(q); }
   getSelection() { return globalThis.getSelection(); }
   fetch(input, init) { return globalThis.fetch(input, init); }

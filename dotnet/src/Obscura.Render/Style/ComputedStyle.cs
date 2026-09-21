@@ -118,8 +118,8 @@ public static partial class ComputedStyle
         }
         else if (tag is "p" or "dl" or "ul" or "ol" or "menu" or "dir")
         {
-            style.MarginRelative[0] = Dimension.Em(1.0f);
-            style.MarginRelative[2] = Dimension.Em(1.0f);
+            style.SetMarginRelative(0, Dimension.Em(1.0f));
+            style.SetMarginRelative(2, Dimension.Em(1.0f));
             if (tag is "ul" or "menu" or "dir")
             {
                 style.ListStyle = Obscura.Render.ListStyle.Disc;
@@ -361,8 +361,8 @@ public static partial class ComputedStyle
             style.FontSize = null;
             style.FontSizeRaw = Dimension.Em(fontSizeEm);
             style.FontWeight = "bold";
-            style.MarginRelative[0] = Dimension.Em(marginEm);
-            style.MarginRelative[2] = Dimension.Em(marginEm);
+            style.SetMarginRelative(0, Dimension.Em(marginEm));
+            style.SetMarginRelative(2, Dimension.Em(marginEm));
         }
     }
 
@@ -663,18 +663,20 @@ public static partial class ComputedStyle
         string trimmed = value.Trim();
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
-            style.Inset[index] = null;
-            style.InsetExpressions[index] = expression;
+            style.SetInset(index, null);
+            style.SetInsetExpression(index, expression);
             return;
         }
 
         Dimension? inset = InsetDim(trimmed);
-        style.Inset[index] = inset;
-        style.InsetExpressions[index] = inset is { } dimension
-            && dimension.Kind is DimensionKind.Vw or DimensionKind.Vh
-                or DimensionKind.Vmin or DimensionKind.Vmax
-            ? trimmed
-            : null;
+        style.SetInset(index, inset);
+        style.SetInsetExpression(
+            index,
+            inset is { } dimension
+                && dimension.Kind is DimensionKind.Vw or DimensionKind.Vh
+                    or DimensionKind.Vmin or DimensionKind.Vmax
+                ? trimmed
+                : null);
     }
 
     private static Edges SetEdge(Edges edges, int index, float value) => index switch
@@ -693,21 +695,21 @@ public static partial class ComputedStyle
         bool isAuto = CssText.EqualsAscii(trimmed, "auto");
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
-            style.MarginExpressions[index] = expression;
-            style.MarginPercent[index] = null;
-            style.MarginRelative[index] = null;
-            style.MarginAuto[index] = false;
+            style.SetMarginExpression(index, expression);
+            style.SetMarginPercent(index, null);
+            style.SetMarginRelative(index, null);
+            style.SetMarginAuto(index, false);
             style.Margin = SetEdge(style.Margin, index, 0f);
             return;
         }
 
-        style.MarginExpressions[index] = null;
+        style.SetMarginExpression(index, null);
         if (PercentFraction(trimmed) is { } fraction)
         {
-            style.MarginPercent[index] = fraction;
-            style.MarginRelative[index] = null;
+            style.SetMarginPercent(index, fraction);
+            style.SetMarginRelative(index, null);
             style.Margin = SetEdge(style.Margin, index, 0f);
-            style.MarginAuto[index] = false;
+            style.SetMarginAuto(index, false);
             return;
         }
 
@@ -716,7 +718,7 @@ public static partial class ComputedStyle
         {
             case DimensionKind.Px:
                 style.Margin = SetEdge(style.Margin, index, dimension.Value);
-                style.MarginRelative[index] = null;
+                style.SetMarginRelative(index, null);
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
@@ -727,16 +729,16 @@ public static partial class ComputedStyle
             case DimensionKind.Vmin:
             case DimensionKind.Vmax:
                 style.Margin = SetEdge(style.Margin, index, 0f);
-                style.MarginRelative[index] = dimension;
+                style.SetMarginRelative(index, dimension);
                 break;
             default:
                 style.Margin = SetEdge(style.Margin, index, 0f);
-                style.MarginRelative[index] = null;
+                style.SetMarginRelative(index, null);
                 break;
         }
 
-        style.MarginAuto[index] = isAuto;
-        style.MarginPercent[index] = null;
+        style.SetMarginAuto(index, isAuto);
+        style.SetMarginPercent(index, null);
     }
 
     /// <summary>Rust <c>set_padding_side</c>.</summary>
@@ -745,18 +747,18 @@ public static partial class ComputedStyle
         string trimmed = value.Trim();
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
-            style.PaddingExpressions[index] = expression;
-            style.PaddingPercent[index] = null;
-            style.PaddingRelative[index] = null;
+            style.SetPaddingExpression(index, expression);
+            style.SetPaddingPercent(index, null);
+            style.SetPaddingRelative(index, null);
             style.Padding = SetEdge(style.Padding, index, 0f);
             return;
         }
 
-        style.PaddingExpressions[index] = null;
+        style.SetPaddingExpression(index, null);
         if (PercentFraction(trimmed) is { } fraction)
         {
-            style.PaddingPercent[index] = fraction;
-            style.PaddingRelative[index] = null;
+            style.SetPaddingPercent(index, fraction);
+            style.SetPaddingRelative(index, null);
             style.Padding = SetEdge(style.Padding, index, 0f);
             return;
         }
@@ -766,8 +768,8 @@ public static partial class ComputedStyle
         {
             case DimensionKind.Px:
                 style.Padding = SetEdge(style.Padding, index, dimension.Value);
-                style.PaddingRelative[index] = null;
-                style.PaddingPercent[index] = null;
+                style.SetPaddingRelative(index, null);
+                style.SetPaddingPercent(index, null);
                 break;
             case DimensionKind.Em:
             case DimensionKind.Ex:
@@ -778,8 +780,8 @@ public static partial class ComputedStyle
             case DimensionKind.Vmin:
             case DimensionKind.Vmax:
                 style.Padding = SetEdge(style.Padding, index, 0f);
-                style.PaddingRelative[index] = dimension;
-                style.PaddingPercent[index] = null;
+                style.SetPaddingRelative(index, dimension);
+                style.SetPaddingPercent(index, null);
                 break;
         }
     }
@@ -983,7 +985,11 @@ public static partial class ComputedStyle
         }
     }
 
-    private static readonly string[] GapUnits = ["rem", "em", "ex", "vw", "vh", "vmin", "vmax"];
+    // `ch` sits in this list beside `ex` because both are measured on the element's own face
+    // (FontUnits), so a gap naming either has to be re-read in the top-down pass rather than
+    // resolved at parse time against the initial 16px. It was absent, which made `gap: 2ch` at
+    // font-size 40px in Liberation Mono 18px where Chromium 141 gives 48px.
+    private static readonly string[] GapUnits = ["rem", "em", "ex", "ch", "vw", "vh", "vmin", "vmax"];
 
     /// <summary>Rust <c>apply_font_shorthand</c>.</summary>
     internal static void ApplyFontShorthand(LayoutStyle style, string value)
@@ -1250,7 +1256,7 @@ public static partial class ComputedStyle
             case "container-name":
                 if (CssText.EqualsAscii(value, "inherit"))
                 {
-                    style.ContainerNames.Clear();
+                    style.ClearContainerNames();
                     style.ContainerNamesInherit = true;
                 }
                 else if (ParseContainerNames(value) is { } names)
@@ -1264,7 +1270,7 @@ public static partial class ComputedStyle
             case "container":
                 if (CssText.EqualsAscii(value, "inherit"))
                 {
-                    style.ContainerNames.Clear();
+                    style.ClearContainerNames();
                     style.ContainerType = ContainerType.Normal;
                     style.ContainerNamesInherit = true;
                     style.ContainerTypeInherit = true;
@@ -1285,7 +1291,7 @@ public static partial class ComputedStyle
             case "inline-size":
                 style.Width = DimensionValue(value);
                 style.WidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[0] = DeferredLengthExpression(value);
+                style.SetSizeExpression(0, DeferredLengthExpression(value));
                 SetSizeInherit(style, 0, value);
                 style.WidthSet = true;
                 return true;
@@ -1294,7 +1300,7 @@ public static partial class ComputedStyle
             case "block-size":
                 style.Height = DimensionValue(value);
                 style.HeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[1] = DeferredLengthExpression(value);
+                style.SetSizeExpression(1, DeferredLengthExpression(value));
                 SetSizeInherit(style, 1, value);
                 style.HeightSet = true;
                 return true;
@@ -1326,15 +1332,16 @@ public static partial class ComputedStyle
             case "min-inline-size":
                 style.MinWidth = DimensionValue(value);
                 style.MinWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[2] = DeferredLengthExpression(value);
+                style.SetSizeExpression(2, DeferredLengthExpression(value));
                 SetSizeInherit(style, 2, value);
+                style.MinWidthAuthored = true;
                 return true;
 
             case "min-height":
             case "min-block-size":
                 style.MinHeight = DimensionValue(value);
                 style.MinHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[3] = DeferredLengthExpression(value);
+                style.SetSizeExpression(3, DeferredLengthExpression(value));
                 SetSizeInherit(style, 3, value);
                 return true;
 
@@ -1342,7 +1349,7 @@ public static partial class ComputedStyle
             case "max-inline-size":
                 style.MaxWidth = DimensionValue(value);
                 style.MaxWidthIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[4] = DeferredLengthExpression(value);
+                style.SetSizeExpression(4, DeferredLengthExpression(value));
                 SetSizeInherit(style, 4, value);
                 return true;
 
@@ -1350,7 +1357,7 @@ public static partial class ComputedStyle
             case "max-block-size":
                 style.MaxHeight = DimensionValue(value);
                 style.MaxHeightIntrinsicKeyword = IntrinsicSizeKeywordValue(value);
-                style.SizeExpressions[5] = DeferredLengthExpression(value);
+                style.SetSizeExpression(5, DeferredLengthExpression(value));
                 SetSizeInherit(style, 5, value);
                 return true;
 
@@ -1894,6 +1901,7 @@ public static partial class ComputedStyle
                 if (valid && alignment is { } parsed)
                 {
                     style.AlignItems = parsed;
+                    style.AlignItemsAuthored = true;
                 }
 
                 return true;
@@ -1917,6 +1925,7 @@ public static partial class ComputedStyle
                 {
                     style.AlignItems = parsedAlign;
                     style.JustifyItems = parsedJustify;
+                    style.AlignItemsAuthored = true;
                 }
 
                 return true;
@@ -2435,12 +2444,15 @@ public static partial class ComputedStyle
             case "vertical-align":
                 style.VerticalAlign = CssText.AsciiLower(value.Trim()) switch
                 {
-                    "top" or "baseline" or "text-top" => Obscura.Render.VerticalAlign.Top,
+                    "baseline" => Obscura.Render.VerticalAlign.Baseline,
+                    "top" or "text-top" => Obscura.Render.VerticalAlign.Top,
                     "middle" => Obscura.Render.VerticalAlign.Middle,
                     "bottom" or "text-bottom" => Obscura.Render.VerticalAlign.Bottom,
                     // sub/super/lengths are text-level; leave the cell default.
                     _ => style.VerticalAlign,
                 };
+                style.InlineVerticalAlign = InlineVerticalAlignValue(value.Trim())
+                    ?? style.InlineVerticalAlign;
                 return true;
 
             case "list-style-type":
@@ -2687,23 +2699,8 @@ public static partial class ComputedStyle
                 return true;
 
             case "border-spacing":
-            {
-                List<float> dimensions = [];
-                foreach (string token in SplitWhitespace(value))
-                {
-                    if (PxValue(token) is { } pixels)
-                    {
-                        dimensions.Add(pixels);
-                    }
-                }
-
-                if (dimensions.Count > 0)
-                {
-                    style.BorderSpacing = (dimensions[0], dimensions.Count > 1 ? dimensions[1] : dimensions[0]);
-                }
-
+                ApplyBorderSpacing(style, value, 16.0f, 16.0f);
                 return true;
-            }
 
             case "border-collapse":
                 style.BorderCollapse = CssText.AsciiLower(value.Trim()) switch
@@ -2712,6 +2709,16 @@ public static partial class ComputedStyle
                     "separate" or "initial" or "revert" or "revert-layer" => false,
                     "inherit" or "unset" => null,
                     _ => style.BorderCollapse,
+                };
+                return true;
+
+            case "caption-side":
+                style.CaptionSideBottom = CssText.AsciiLower(value.Trim()) switch
+                {
+                    "bottom" => true,
+                    "top" or "initial" or "revert" or "revert-layer" => false,
+                    "inherit" or "unset" => null,
+                    _ => style.CaptionSideBottom,
                 };
                 return true;
 
@@ -2814,7 +2821,7 @@ public static partial class ComputedStyle
             case "filter":
                 SetContainingBlockTrigger(style, ContainingBlockTrigger.Filter, NonNoneValue(value));
                 style.Filter = ParseFilterFunctions(value, style.Color, style.ColorSchemeDark);
-                style.FilterFontRelative = ContainsFontRelativeUnit(value) ? value : null;
+                style.FilterFontRelative = NeedsLateResolution(value) ? value : null;
                 return true;
             case "backdrop-filter":
             case "-webkit-backdrop-filter":
@@ -2869,7 +2876,7 @@ public static partial class ComputedStyle
             case "box-shadow":
             case "-webkit-box-shadow":
                 style.BoxShadow = ParseBoxShadow(value, style.Color, style.ColorSchemeDark);
-                style.BoxShadowFontRelative = ContainsFontRelativeUnit(value) ? value : null;
+                style.BoxShadowFontRelative = NeedsLateResolution(value) ? value : null;
                 return true;
 
             default:
@@ -2890,8 +2897,11 @@ public static partial class ComputedStyle
         return false;
     }
 
+    // See GapUnits: `ch` belongs beside `ex` wherever a unit list decides what gets re-read once
+    // the element's font is known. `line-height: 3ch` fell out of this one and reverted to
+    // `normal` - 45px against Chromium's 72.016px on Liberation Mono at font-size 40px.
     private static readonly string[] RelativeLineHeightUnits =
-        ["rem", "em", "ex", "vw", "vh", "vmin", "vmax"];
+        ["rem", "em", "ex", "ch", "vw", "vh", "vmin", "vmax"];
 
     private static string FirstAnimationValue(string value)
     {
@@ -2899,15 +2909,61 @@ public static partial class ComputedStyle
         return (layers.Count > 0 ? layers[0] : string.Empty).Trim();
     }
 
+    /// <summary>
+    /// The <see cref="TableInternalDisplay"/> a display keyword names, or
+    /// <see cref="TableInternalDisplay.None"/> when it names something else.
+    /// </summary>
+    private static TableInternalDisplay InternalTableDisplayOf(string value) => value switch
+    {
+        "table-row" => TableInternalDisplay.Row,
+        "table-row-group" => TableInternalDisplay.RowGroup,
+        "table-header-group" => TableInternalDisplay.HeaderGroup,
+        "table-footer-group" => TableInternalDisplay.FooterGroup,
+        "table-column" => TableInternalDisplay.Column,
+        "table-column-group" => TableInternalDisplay.ColumnGroup,
+        "table-caption" => TableInternalDisplay.Caption,
+        _ => TableInternalDisplay.None,
+    };
+
     private static void ApplyDisplay(LayoutStyle style, string rawValue)
     {
         string value = CssText.AsciiLower(rawValue.Trim());
+
+        // The seven displays this engine records but does not lay out. Measured on Chromium
+        // 141, each one generates the anonymous table CSS 2.1 17.2.1 asks for - a
+        // `display: table-row` div holding `Hello world` in 16px monospace is 105.97 wide, the
+        // shrink-to-fit width of the anonymous table around it, not the 600 of its block
+        // parent - and this engine's table builder is keyed on the HTML element names
+        // (`tr`, `tbody`, `col`, `caption`, ...), not on the computed display, so it has
+        // nowhere to put such a box.
+        //
+        // Recording the keyword without honouring it is deliberate and not half a fix: CSSOM
+        // defines the computed value as the resolved value, not the used one, and Chromium
+        // reports `table-row` whatever layout achieves, so reporting it is the correct answer
+        // to `getComputedStyle` on its own terms and it is what makes the layout gap visible
+        // instead of silent. Returning here leaves every layout-visible field exactly as the
+        // previous winner left it, which is what this engine already did with these values.
+        //
+        // DEVIATION from crates/obscura-render/src/style.rs, which also rejects all seven and
+        // has no record of them either, so its snapshot reports the display the box kept. See
+        // "Known deviations" in todo.md.
+        TableInternalDisplay internalTable = InternalTableDisplayOf(value);
+        if (internalTable != TableInternalDisplay.None)
+        {
+            style.DisplayAuthored = true;
+            style.AuthoredTableDisplay = internalTable;
+            return;
+        }
+
         if (value is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
             or "inline-grid" or "block" or "flow-root" or "table" or "inline-table" or "table-cell"
             or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset")
         {
             // Every valid authored display value replaces the complete outer/inner
-            // display pair, including the UA table/control approximation.
+            // display pair, including the UA table/control approximation and any
+            // internal-table keyword an earlier declaration recorded.
+            style.DisplayAuthored = true;
+            style.AuthoredTableDisplay = TableInternalDisplay.None;
             style.InternalFlexContainer = false;
             style.IsTableBox = false;
             style.IsTableCellBox = false;
@@ -2916,6 +2972,33 @@ public static partial class ComputedStyle
             style.DisplayContents = false;
             style.DisplayInherit = false;
             style.WebkitBoxDisplay = null;
+
+            // DEVIATION from crates/obscura-render/src/style.rs, which clears none of this:
+            // the UA `table`/`td` arms there set `flex-direction: column`, `align-items`, and
+            // `min-width: 0` and an authored `display` left them behind, so a
+            // `<table style="display:flex">` laid out and reported as a column flex container.
+            // Those three are the internal flex/grid construction this engine approximates a
+            // table with, not style the author can see, so replacing the display pair takes
+            // them with it and the arms below re-establish whatever the new display needs.
+            // Chromium reports `row` / `normal` / `auto` on such a table and keeps only
+            // `box-sizing: border-box`, `border-spacing: 2px` and `border-collapse: separate`,
+            // which are genuine UA declarations on `table` and survive any `display`
+            // (the last two are inherited properties, so a descendant reads them too).
+            // See "Known deviations" in todo.md.
+            if (!style.FlexDirectionAuthored)
+            {
+                style.FlexDirection = null;
+            }
+
+            if (!style.AlignItemsAuthored)
+            {
+                style.AlignItems = null;
+            }
+
+            if (!style.MinWidthAuthored)
+            {
+                style.MinWidth = Dimension.Auto;
+            }
         }
 
         switch (value)

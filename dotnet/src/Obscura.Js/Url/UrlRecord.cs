@@ -70,8 +70,30 @@ public sealed class UrlRecord
     /// <summary>Parses an absolute URL. Returns null when the input is not a valid URL.</summary>
     public static UrlRecord? Parse(string input) => UrlParser.Parse(input, null);
 
+    /// <summary>
+    /// <see cref="Parse(string)"/>, also reporting why a rejected URL was rejected.
+    /// </summary>
+    /// <remarks>
+    /// The port of the Rust crate's <c>Url::parse</c> in full: there the reason is the
+    /// <c>Err</c> half of the returned <c>Result</c>, and <c>page.rs</c> puts its
+    /// <c>Display</c> text straight into the navigation error a client reads.
+    /// <paramref name="error"/> is meaningful only when the result is null.
+    /// </remarks>
+    public static UrlRecord? Parse(string input, out UrlParseError error) =>
+        UrlParser.Parse(input, null, out error);
+
     /// <summary>Resolves <paramref name="input"/> against this URL, per the spec's "join".</summary>
     public UrlRecord? Join(string input) => UrlParser.Parse(input, this);
+
+    /// <summary>
+    /// <see cref="Join(string)"/>, also reporting why a rejected reference was rejected.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="error"/> is meaningful only when the result is null. Rust's
+    /// <c>Url::join</c> returns the same <c>ParseError</c>, and its callers print it.
+    /// </remarks>
+    public UrlRecord? Join(string input, out UrlParseError error) =>
+        UrlParser.Parse(input, this, out error);
 
     /// <summary>The full serialization; this is the <c>href</c> getter.</summary>
     public string Href => Serialization;

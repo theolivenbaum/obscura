@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -24,9 +25,11 @@ namespace Obscura.Cdp.Tests;
 /// pumping, then drives it from several independent connections at once.
 /// </para>
 /// <para>
-/// On the single-scheduler server this aborted deterministically. The
-/// thread-per-connection server confines each connection's isolates to their own
-/// OS thread, so the abort cannot happen and all clients complete.
+/// On the single-scheduler Rust server this aborted deterministically, which is
+/// why that engine gives every connection its own OS thread. ClearScript has no
+/// per-thread isolate rule, so what the port relies on is that connections never
+/// share pages and that <c>CdpContext.V8Lock</c> keeps one connection from
+/// driving two of its own at once; all clients must complete.
 /// </para>
 /// </remarks>
 public sealed class ConcurrentConnectionsHeavyPageTests
@@ -74,9 +77,9 @@ public sealed class ConcurrentConnectionsHeavyPageTests
         // script; that is what keeps the settle loop pumping and makes this a #430
         // repro at all. Without this assertion, pointing the page URL at a dead
         // port still passes, and the test silently degrades into the `data:`-URL
-        // one it was written to replace. Two per client, not three: the engine
-        // does not fetch the <img>, so only the document and /slow.js are
-        // requested.
+        // one it was written to replace. A healthy run serves three per client -
+        // the document, the <img> the render warmup seeds, and /slow.js - so two
+        // is a floor that still fails a client whose page never loaded.
         var hits = fixture.Served;
         Assert.True(
             hits >= Clients * 2,
@@ -166,6 +169,16 @@ public sealed class ConcurrentConnectionsHeavyPageTests
             0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
 
+        /// <summary>
+        /// Serving threads, started before the first connection arrives.
+        /// </summary>
+        /// <remarks>
+        /// Twelve covers this fixture's whole workload - four clients, each fetching
+        /// a document and two subresources - so a connection never waits for one.
+        /// </remarks>
+        private const int Workers = 12;
+
+        private readonly BlockingCollection<TcpClient> _accepted = [];
         private readonly TcpListener _listener;
         private readonly CancellationTokenSource _stop = new();
         private int _served;
@@ -175,7 +188,35 @@ public sealed class ConcurrentConnectionsHeavyPageTests
             _listener = new TcpListener(IPAddress.Loopback, 0);
             _listener.Start();
             Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-            _ = Task.Run(AcceptAsync);
+
+            // Dedicated threads with blocking I/O rather than the thread pool. The
+            // fixture serves the page this test is timing, and four clients plus the
+            // server already saturate the pool on a small box: a pool-scheduled
+            // fixture then adds its own scheduling delay to every subresource, on top
+            // of the delay it is supposed to be simulating.
+            //
+            // Started up front rather than one per connection. The whole assembly runs
+            // at the runner's parallelism on a small box, so `new Thread(...).Start()`
+            // on the serving path waits for the scheduler to place a brand-new thread
+            // among all of them: a connection whose request had already been read sat
+            // over twelve seconds before its handler ran (both ends ESTABLISHED, both
+            // queues empty). The engine's navigation deadline and this test's client
+            // deadline are both 30s, so a subresource delayed like that fails the test
+            // rather than merely slowing it.
+            for (var i = 0; i < Workers; i++)
+            {
+                new Thread(Serve)
+                {
+                    IsBackground = true,
+                    Name = "heavy-fixture-connection",
+                }.Start();
+            }
+
+            new Thread(Accept)
+            {
+                IsBackground = true,
+                Name = "heavy-fixture-accept",
+            }.Start();
         }
 
         internal int Port { get; }
@@ -187,14 +228,14 @@ public sealed class ConcurrentConnectionsHeavyPageTests
         /// </summary>
         internal int Served => Volatile.Read(ref _served);
 
-        private async Task AcceptAsync()
+        private void Accept()
         {
             while (!_stop.IsCancellationRequested)
             {
                 TcpClient client;
                 try
                 {
-                    client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    client = _listener.AcceptTcpClient();
                 }
                 catch (Exception e) when (e is OperationCanceledException or SocketException
                                               or ObjectDisposedException)
@@ -202,26 +243,76 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                     return;
                 }
 
-                _ = Task.Run(() => ServeAsync(client));
+                try
+                {
+                    _accepted.Add(client);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The fixture is shutting down.
+                    client.Dispose();
+                    return;
+                }
             }
         }
 
-        private async Task ServeAsync(TcpClient client)
+        /// <summary>One serving thread: take accepted connections until the test ends.</summary>
+        private void Serve()
+        {
+            try
+            {
+                foreach (var client in _accepted.GetConsumingEnumerable(_stop.Token))
+                {
+                    ServeOne(client);
+                }
+            }
+            catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException
+                                          or InvalidOperationException)
+            {
+            }
+        }
+
+        private void ServeOne(TcpClient client)
         {
             using (client)
             {
                 try
                 {
+                    // A worker is a shared resource now, so a peer that connects and
+                    // says nothing must not hold one. Real clients send their head
+                    // immediately.
+                    client.ReceiveTimeout = 5_000;
+                    client.SendTimeout = 5_000;
                     var stream = client.GetStream();
+
+                    // Read the whole head rather than whatever the first read
+                    // returned: a request split across segments used to be answered
+                    // from a truncated request line, and the leftover bytes then made
+                    // the close abortive, which discards the response with it.
                     var buffer = new byte[2048];
-                    var n = await stream.ReadAsync(buffer.AsMemory(), _stop.Token);
-                    if (n == 0)
+                    var received = 0;
+                    while (received < buffer.Length)
+                    {
+                        var read = stream.Read(buffer, received, buffer.Length - received);
+                        if (read == 0)
+                        {
+                            break;
+                        }
+
+                        received += read;
+                        if (buffer.AsSpan(0, received).IndexOf("\r\n\r\n"u8) >= 0)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (received == 0)
                     {
                         return;
                     }
 
                     Interlocked.Increment(ref _served);
-                    var request = Encoding.UTF8.GetString(buffer, 0, n);
+                    var request = Encoding.UTF8.GetString(buffer, 0, received);
                     var parts = request.Split(' ');
                     var path = parts.Length > 1 ? parts[1] : "/";
 
@@ -233,13 +324,13 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                     byte[] payload;
                     if (string.Equals(path, "/slow.js", StringComparison.Ordinal))
                     {
-                        await Task.Delay(120, _stop.Token);
+                        Thread.Sleep(120);
                         contentType = "application/javascript";
                         payload = "void 0;"u8.ToArray();
                     }
                     else if (string.Equals(path, "/slow.png", StringComparison.Ordinal))
                     {
-                        await Task.Delay(120, _stop.Token);
+                        Thread.Sleep(120);
                         contentType = "image/png";
                         payload = OnePixelPng;
                     }
@@ -252,9 +343,9 @@ public sealed class ConcurrentConnectionsHeavyPageTests
                     var header = Encoding.ASCII.GetBytes(
                         $"HTTP/1.1 200 OK\r\nContent-Type: {contentType}\r\n" +
                         $"Content-Length: {payload.Length}\r\nConnection: close\r\n\r\n");
-                    await stream.WriteAsync(header, _stop.Token);
-                    await stream.WriteAsync(payload, _stop.Token);
-                    await stream.FlushAsync(_stop.Token);
+                    stream.Write(header, 0, header.Length);
+                    stream.Write(payload, 0, payload.Length);
+                    stream.Flush();
                 }
                 catch (Exception e) when (e is IOException or SocketException
                                               or OperationCanceledException or ObjectDisposedException)
@@ -267,6 +358,13 @@ public sealed class ConcurrentConnectionsHeavyPageTests
         {
             _stop.Cancel();
             _listener.Stop();
+            _accepted.CompleteAdding();
+            while (_accepted.TryTake(out var pending))
+            {
+                pending.Dispose();
+            }
+
+            _accepted.Dispose();
             _stop.Dispose();
         }
     }

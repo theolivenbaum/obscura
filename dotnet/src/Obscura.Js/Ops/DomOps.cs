@@ -333,6 +333,29 @@ public static class DomOps
                 return "null";
             }
 
+            // DEVIATION from crates/obscura-js: two more commands the Rust op table does not
+            // have. In the Rust engine a fetched <link> sheet becomes a real <style> element
+            // (crates/obscura-browser/src/page.rs), so its bytes reach the renderer as node
+            // text and the CSSOM edits that text. Chromium 141 creates no element - on
+            // repro/a.html head.querySelectorAll('style').length is 0 while
+            // document.styleSheets.length is 1 - so the bytes live beside the node instead and
+            // these two are how bootstrap.js reads and writes them. Every pre-existing command
+            // is untouched, and the Rust bootstrap.js never calls these, so the shared op
+            // protocol still matches byte for byte. See "Known deviations" in todo.md.
+            case "get_external_stylesheet_css":
+            {
+                return dom.ExternalStylesheetCss(ParseNodeOrZero(arg1)) ?? "null";
+            }
+
+            case "set_external_stylesheet_css":
+            {
+                // An empty sheet contributes nothing, so it is stored as absence.
+                dom.SetExternalStylesheetCss(
+                    ParseNodeOrZero(arg1),
+                    arg2.Length == 0 ? null : arg2);
+                return "null";
+            }
+
             case "set_attribute":
             {
                 var nodeId = ParseNodeOrZero(arg1);

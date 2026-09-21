@@ -6728,8 +6728,15 @@ public class DomLayoutTests
     {
         // #685: an empty textarea must keep a real control box instead of
         // laying out as a plain block. Chromium lays cols=20/rows=2 out as a
-        // 182x36 border box: 20 columns of the face's average character width,
+        // 181x36 border box: 20 columns of the face's average character width,
         // the 15px scrollbar gutter, and one 15px control line per row.
+        //
+        // The fixture names no family, so the face is the UA's `monospace`, and
+        // the reference has to be measured against the one this engine embeds -
+        // Chromium picks its own from fontconfig and reports 182 with the
+        // DejaVu Sans Mono it finds on a typical Linux host. Measured on
+        // Chromium 141 with `Assets/liberation-mono.ttf` served as a web font:
+        // 181 at cols 20, and 29 / 37 / 61 / 421 at cols 1 / 2 / 5 / 50.
         DomTree tree = Parse(
             """
             <style>html, body { margin: 0 }</style>
@@ -6737,16 +6744,19 @@ public class DomLayoutTests
             <div><textarea id="rows8" rows="8"></textarea></div>
             <div><textarea id="cssheight" style="height: 36px"></textarea></div>
             <div><textarea id="invalid-rows" rows="0"></textarea></div>
+            <div><textarea id="cols1" cols="1"></textarea></div>
+            <div><textarea id="cols5" cols="5"></textarea></div>
+            <div><textarea id="cols50" cols="50"></textarea></div>
             """);
         DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
         Rect Get(string id) => laid.Rects[Id(tree, id)];
 
         Rect plain = Get("plain");
-        Assert.True(MathF.Abs(plain.Width - 182f) < 0.5f, $"{plain.Width}");
+        Assert.True(MathF.Abs(plain.Width - 181f) < 0.5f, $"{plain.Width}");
         Assert.True(MathF.Abs(plain.Height - 36f) < 0.5f, $"{plain.Height}");
 
         Rect rows8 = Get("rows8");
-        Assert.True(MathF.Abs(rows8.Width - 182f) < 0.5f);
+        Assert.True(MathF.Abs(rows8.Width - 181f) < 0.5f);
         Assert.True(MathF.Abs(rows8.Height - 126f) < 0.5f, $"{rows8.Height}");
 
         // Author height wins over the rows-derived intrinsic height, and the
@@ -6758,6 +6768,12 @@ public class DomLayoutTests
         // back to the HTML defaults (rows=2).
         Rect invalid = Get("invalid-rows");
         Assert.True(MathF.Abs(invalid.Height - 36f) < 0.5f, $"{invalid.Height}");
+
+        // Away from cols=20 the fit is per-column plus one constant gutter, so a
+        // calibrated constant and the real curve part company: 1 / 5 / 50 columns.
+        Assert.True(MathF.Abs(Get("cols1").Width - 29f) < 0.5f, $"{Get("cols1").Width}");
+        Assert.True(MathF.Abs(Get("cols5").Width - 61f) < 0.5f, $"{Get("cols5").Width}");
+        Assert.True(MathF.Abs(Get("cols50").Width - 421f) < 0.5f, $"{Get("cols50").Width}");
 
         // The control is an atomic inline-block, not a stretched block.
         LayoutStyle style = laid.Styles[Id(tree, "plain")];
@@ -6933,7 +6949,177 @@ public class DomLayoutTests
         Assert.True(Get("nowrap").Width > 880f, $"nowrap {Get("nowrap").Width}");
         Assert.True(MathF.Abs(Get("fits").Width - 300f) < 1f, $"fits {Get("fits").Width}");
     }
+
+    [Fact]
+    public void APinnedCyclicFlexItemFollowsAReservedScrollbarGutter()
+    {
+        // F35's residual. `PinFlexItems` writes a cyclic flex item's *used* main size back as a
+        // definite length and freezes its flex factors, so nothing re-derives it; the scrollbar
+        // gutter is reserved afterwards. Where the row flex container sits inside the scroll
+        // container the pin is stale, and everything below it follows. Values measured against
+        // Chromium 141 driven over CDP - Playwright launches with `--hide-scrollbars`, under
+        // which nothing is reserved and every box here is the control's width.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              ::-webkit-scrollbar { width:9px; height:9px }
+              .sc { width:400px; height:100px; overflow-y:auto; overflow-x:hidden }
+              .ns { width:400px; height:100px; overflow:hidden }
+              .row { display:flex }
+              .item { flex:1 1 auto }
+              .cont { padding:2px }
+              .card { display:block; width:calc(100% - 4px); box-sizing:border-box; height:10px }
+              .pct { display:block; width:100%; height:10px }
+              u { display:block; height:400px }
+            </style>
+            <div class="sc"><div class="row"><div id="in" class="item">
+              <div class="cont"><i id="a" class="card"></i><i id="b" class="pct"></i></div>
+            </div></div><u></u></div>
+            <div class="ns"><div class="row"><div id="out" class="item">
+              <div class="cont"><i id="c" class="card"></i><i id="d" class="pct"></i></div>
+            </div></div><u></u></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The scrollport is 400 - 9 = 391, so the item is 391, the container's content box 387
+        // and the card 383.
+        Assert.True(MathF.Abs(Width("in") - 391f) < 0.01f, $"in: {Width("in")}");
+        Assert.True(MathF.Abs(Width("a") - 383f) < 0.01f, $"a: {Width("a")}");
+        Assert.True(MathF.Abs(Width("b") - 387f) < 0.01f, $"b: {Width("b")}");
+
+        // Control: the same subtree in a box that reserves nothing.
+        Assert.True(MathF.Abs(Width("out") - 400f) < 0.01f, $"out: {Width("out")}");
+        Assert.True(MathF.Abs(Width("c") - 392f) < 0.01f, $"c: {Width("c")}");
+        Assert.True(MathF.Abs(Width("d") - 396f) < 0.01f, $"d: {Width("d")}");
+    }
+
+    [Fact]
+    public void ACyclicPercentageIsMeasuredAsAutoOnlyWhereTheItemIsContentSized()
+    {
+        // CSS Sizing 3 5.2.2: a cyclic percentage behaves as `auto` for intrinsic contribution.
+        // A content-sized flex item is measured from exactly the content the neutralization
+        // touches, so it gets `auto`; an item sized from a declared width or basis is not
+        // measured from its content, and carrying `auto` there is what made `width: 100%`
+        // buttons shrink-wrap. Both halves are asserted here so a change that widens one
+        // breaks the other. Values measured against Chromium 141 over CDP.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .row { display:flex; width:400px }
+              .p { flex:1 1 auto }
+              .pct { display:block; width:100% }
+              .l1 { display:block; width:40px; height:10px }
+              .l2 { display:block; width:160px; height:10px }
+              .side { width:1px; min-width:0; flex-grow:1 }
+              .btn { display:inline-block; width:100%; border:1px solid #000; box-sizing:border-box; height:20px }
+            </style>
+            <div class="row">
+              <div id="p1" class="p"><div class="pct"><i class="l1"></i></div></div>
+              <div id="p2" class="p"><div class="pct"><i class="l2"></i></div></div>
+            </div>
+            <div class="row">
+              <div id="stf"><div class="pct"><i class="l1"></i></div></div><div class="p"></div>
+            </div>
+            <div class="row">
+              <div id="side" class="side"><span id="btn" class="btn"><i class="l1"></i></span></div>
+            </div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (600f, 600f));
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // Two `flex: 1 1 auto` panels whose only content is percentage-sized: the bases are the
+        // leaves' 40 and 160, and the 200 of free space is split evenly between them. A zero
+        // base for both would split the row 200/200.
+        Assert.True(MathF.Abs(Width("p1") - 140f) < 0.01f, $"p1: {Width("p1")}");
+        Assert.True(MathF.Abs(Width("p2") - 260f) < 0.01f, $"p2: {Width("p2")}");
+
+        // A shrink-to-fit block in a flex row gets its percentage child's contribution.
+        Assert.True(MathF.Abs(Width("stf") - 40f) < 0.01f, $"stf: {Width("stf")}");
+
+        // The contrast: an item whose width comes from a declaration keeps it, and the
+        // `width: 100%` atomic inline inside fills it rather than shrink-wrapping to 40.
+        Assert.True(MathF.Abs(Width("side") - 400f) < 0.01f, $"side: {Width("side")}");
+        Assert.True(MathF.Abs(Width("btn") - 400f) < 0.01f, $"btn: {Width("btn")}");
+    }
+
+    [Fact]
+    public void AnAutoRowIsSizedFromALoneItemWhoseWidthWasMeasuredFirst()
+    {
+        // A grid item whose width comes from stretch alignment is measured horizontally
+        // first whenever the column axis has anything intrinsic to resolve - an unoccupied
+        // `1fr` track is enough. That horizontal-only measurement short-circuits to
+        // `(known width, 0)` inside the flex/grid/table/block algorithms, and the measure
+        // cache used to hand the placeholder zero back for the following block-axis
+        // measurement, collapsing the auto row to 0. Chromium 141 sizes every one of these
+        // rows to the item's 30px content.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .g { display:grid; grid-template-columns:200px 1fr; width:600px }
+              .box { width:10px; height:30px }
+              table { border-spacing:0 }
+              td { padding:0 }
+            </style>
+            <div class="g" id="gflex"><div id="flex" style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="ggrid"><div id="grid" style="display:grid"><div class="box"></div></div></div>
+            <div class="g" id="gblock"><div id="block"><div class="box"></div></div></div>
+            <div class="g" id="gstart"><div id="start" style="display:flex; align-self:start"><div class="box"></div></div></div>
+            <div class="g" id="gtable"><table id="table"><tr><td><div class="box"></div></td></tr></table></div>
+            <div class="g" id="gsib"><div id="sibflex" style="display:flex"><div class="box"></div></div><div id="sib"></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        float Height(string id) => laid.Rects[Id(tree, id)].Height;
+        float Width(string id) => laid.Rects[Id(tree, id)].Width;
+
+        // The row track, read off the grid container.
+        foreach (string id in new[] { "gflex", "ggrid", "gblock", "gstart", "gtable", "gsib" })
+        {
+            Assert.True(MathF.Abs(Height(id) - 30f) < 0.01f, $"{id}: {Height(id)}");
+        }
+
+        // ... and the items stretched into it.
+        foreach (string id in new[] { "flex", "grid", "block", "start", "table", "sibflex" })
+        {
+            Assert.True(MathF.Abs(Height(id) - 30f) < 0.01f, $"{id}: {Height(id)}");
+            Assert.True(MathF.Abs(Width(id) - 200f) < 0.01f, $"{id}: {Width(id)}");
+        }
+    }
+
+    [Fact]
+    public void ALoneGridItemsRowIsSizedTheSameWhateverTheSecondTrackIs()
+    {
+        // The collapse was specific to a column axis that still had work to do after
+        // initialisation: `200px 200px` skipped the inline pass entirely and came out right,
+        // while `1fr`, `minmax(0,1fr)` and a third `1fr` all collapsed. Chromium 141 gives
+        // 30 for every one of them.
+        DomTree tree = Parse(
+            """
+            <style>
+              html, body { margin:0 }
+              .g { display:grid; width:600px }
+              .box { width:10px; height:30px }
+            </style>
+            <div class="g" id="fixed" style="grid-template-columns:200px 200px"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="fr" style="grid-template-columns:200px 1fr"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="minmax" style="grid-template-columns:200px minmax(0,1fr)"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="three" style="grid-template-columns:200px 1fr 1fr"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="rows" style="grid-template-columns:200px 1fr; grid-template-rows:auto auto"><div style="display:flex"><div class="box"></div></div></div>
+            <div class="g" id="placed" style="grid-template-columns:200px 1fr"><div style="display:flex; grid-row:1; grid-column:1"><div class="box"></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (800f, 600f));
+        float Height(string id) => laid.Rects[Id(tree, id)].Height;
+
+        foreach (string id in new[] { "fixed", "fr", "minmax", "three", "rows", "placed" })
+        {
+            Assert.True(MathF.Abs(Height(id) - 30f) < 0.01f, $"{id}: {Height(id)}");
+        }
+    }
 }
+
 
 /// <summary>Deterministic reflected dump of renderer style graphs, used as a Debug analogue.</summary>
 internal static class StyleDump

@@ -53,13 +53,16 @@ public sealed class ImportMap
     {
         map = new ImportMap();
 
-        var baseRecord = UrlRecord.Parse(baseUrl);
+        var baseRecord = UrlRecord.Parse(baseUrl, out var baseError);
         if (baseRecord is null)
         {
+            // Rust formats the url crate's ParseError here, so the reason varies with what
+            // was wrong; the port used to name the relative-reference case for all of them.
             error = string.Format(
                 CultureInfo.InvariantCulture,
-                "Invalid import map base URL {0}: relative URL without a base",
-                baseUrl);
+                "Invalid import map base URL {0}: {1}",
+                baseUrl,
+                baseError.Message());
             return false;
         }
 
@@ -507,14 +510,15 @@ public sealed class ImportMap
                 }
 
                 var afterPrefix = normalized[key.Length..];
-                var joined = prefixAddress.Join(afterPrefix);
+                var joined = prefixAddress.Join(afterPrefix, out var joinError);
                 if (joined is null)
                 {
                     error = string.Format(
                         CultureInfo.InvariantCulture,
-                        "Module specifier \"{0}\" could not resolve through import map prefix \"{1}\": relative URL without a base",
+                        "Module specifier \"{0}\" could not resolve through import map prefix \"{1}\": {2}",
                         normalized,
-                        key);
+                        key,
+                        joinError.Message());
                     return false;
                 }
 

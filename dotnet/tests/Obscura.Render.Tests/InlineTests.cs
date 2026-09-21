@@ -173,7 +173,7 @@ public class InlineTests
         {
             using var engine = new TextEngine();
             var style = new LayoutStyle();
-            style.SizeExpressions[expressionIndex] = "calc(100% - 1px)";
+            style.SetSizeExpression(expressionIndex, "calc(100% - 1px)");
             int item = engine.RegisterReplaced(800f, 400f, style);
             var unknown = new Size<float?>(null, null);
             Size<float> minContent = engine.MeasureTaffy(

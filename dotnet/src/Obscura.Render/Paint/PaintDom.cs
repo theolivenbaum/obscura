@@ -1149,10 +1149,10 @@ internal static class PaintDomPainter
                 // A canvas bitmap is replaced content: CSS sizing and object-fit operate on the
                 // content box, never the padding or border box.
                 Sides<float> contentInsets = new(
-                    style.Border.Top + style.Padding.Top,
-                    style.Border.Right + style.Padding.Right,
-                    style.Border.Bottom + style.Padding.Bottom,
-                    style.Border.Left + style.Padding.Left);
+                    style.UsedBorder.Top + style.Padding.Top,
+                    style.UsedBorder.Right + style.Padding.Right,
+                    style.UsedBorder.Bottom + style.Padding.Bottom,
+                    style.UsedBorder.Left + style.Padding.Left);
                 Rect contentRect = new(
                     rect.X + contentInsets.Left,
                     rect.Y + contentInsets.Top,

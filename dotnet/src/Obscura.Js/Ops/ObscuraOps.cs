@@ -55,6 +55,12 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
     public IPostedTaskSpawner? TaskSpawner { get; set; }
 
     /// <summary>
+    /// Set by the runtime before the ops are bound, so an async op stays counted
+    /// until its promise reaction has run. See <see cref="AsyncOpBinding"/>.
+    /// </summary>
+    public IAsyncOpTracker? AsyncOps { get; set; }
+
+    /// <summary>
     /// The document of the realm a DOM call came from, named rather than inferred.
     /// </summary>
     /// <remarks>
@@ -253,6 +259,12 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
             nids => RenderOps.OpIntersectionObserverMeasurements(Page, S(nids))));
         Bind(ops, "op_computed_style", (Func<object?, string>)(
             nid => RenderOps.OpComputedStyle(Page, S(nid))));
+
+        // Additive: op_computed_style keeps its one-argument shape and its payload, because the
+        // op protocol is a contract. getComputedStyle() only reaches for this second op when it
+        // is given a pseudo-element.
+        Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
+            (nid, pseudo) => RenderOps.OpComputedStylePseudo(Page, S(nid), S(pseudo))));
         Bind(ops, "op_layout_metrics", (Func<string>)(() => RenderOps.OpLayoutMetrics(Page)));
         Bind(ops, "op_element_scroll_metrics", (Func<object?, string>)(
             nid => RenderOps.OpElementScrollMetrics(Page, S(nid))));
@@ -315,8 +327,24 @@ public sealed class ObscuraOps(ObscuraState page, RealmStates? realms = null)
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
     }
 
-    private static void Bind(ScriptObject ops, string name, object function) =>
+    private void Bind(ScriptObject ops, string name, object function)
+    {
+        // An async op is bound through the JS shim that keeps it counted until its
+        // promise reaction runs; everything else goes straight to the fast path.
+        if (AsyncOpBinding.TryBind(ops, name, function, AsyncOps))
+        {
+            return;
+        }
+
         FastOpBinding.Bind(ops, name, function);
+    }
+
+    /// <summary>
+    /// Binds one realm-local async op - the frame timer source - with the same
+    /// tracking every other async op gets.
+    /// </summary>
+    internal void BindRealmAsyncOp(ScriptObject ops, string name, object function) =>
+        Bind(ops, name, function);
 
     // -----------------------------------------------------------------------
     // Argument normalization. The shim passes JS values; deno_core coerced them

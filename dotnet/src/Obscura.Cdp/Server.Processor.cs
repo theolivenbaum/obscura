@@ -16,13 +16,15 @@ public static partial class CdpServer
 
     /// <summary>Per-connection CDP processor.</summary>
     /// <remarks>
-    /// Each connection runs its own processor (with its own <see cref="CdpContext"/>
-    /// and pages) on its own OS thread, so every page's V8 isolate is confined to a
-    /// single thread. This removes the #430 abort by construction: V8's
-    /// per-thread isolate invariant means two connections' isolates can never
-    /// collide. All processors own an isolated <see cref="BrowserContext"/> (cookie
-    /// jar and HTTP client); cookie deltas are merged into the persistence template
-    /// when the connection thread exits.
+    /// Each connection runs its own processor, with its own <see cref="CdpContext"/>
+    /// and pages, so no two connections ever touch the same V8 isolate. The Rust
+    /// server additionally pins each connection to an OS thread, because rusty_v8's
+    /// per-thread isolate invariant made a shared thread abort the process (#430);
+    /// ClearScript has no such invariant, so the port lets a connection's
+    /// continuations land wherever the pool places them (see
+    /// <c>RunConnection</c>). All processors own an isolated
+    /// <see cref="BrowserContext"/> (cookie jar and HTTP client); cookie deltas are
+    /// merged into the persistence template when the connection ends.
     /// </remarks>
     internal static async Task CdpProcessorAsync(
         ChannelReader<ServerMessage> rx,
@@ -40,9 +42,9 @@ public static partial class CdpServer
 
         // Issue #19 follow-up: messages deferred from inside the interception path
         // because routing them through dispatch while a navigation was in flight
-        // would have tripped V8's per-thread isolate invariant. Drained at the top
-        // of each outer iteration so they are processed sequentially with no other
-        // navigation in flight.
+        // would have had two of this connection's pages in V8 at once. Drained at
+        // the top of each outer iteration so they are processed sequentially with
+        // no other navigation in flight.
         Queue<ServerMessage> deferred = new();
 
         var screencastDue = Environment.TickCount64 + ScreencastTickMs;
@@ -63,8 +65,8 @@ public static partial class CdpServer
             {
                 // Drain any deferred messages from the previous interception window
                 // before pulling new ones off the wire. Each is processed with no
-                // navigation task in flight, so this connection's only entered
-                // isolate is the one dispatch is about to touch.
+                // navigation task in flight, so the only isolate this connection
+                // is inside is the one dispatch is about to touch.
                 ServerMessage? msg = null;
                 if (deferred.Count != 0)
                 {
@@ -97,7 +99,7 @@ public static partial class CdpServer
                     // awaited to completion rather than cancelled when a frame
                     // arrives: a turn is already bounded (it parks for at most 50ms
                     // before re-pumping), and abandoning a half-run turn would leave
-                    // this page's isolate entered while dispatch enters another.
+                    // this page mid-flight while dispatch drives another.
                     bool reachedIdle;
                     try
                     {
@@ -238,7 +240,7 @@ public static partial class CdpServer
         }
         finally
         {
-            // The connection thread merges this context's cookie delta into the
+            // The connection merges this context's cookie delta into the
             // persistence template after the processor stops.
             foreach (var page in ctx.Pages)
             {

@@ -422,8 +422,17 @@ default `flex-shrink: 1` and gets squeezed into the line. Reduced to a 98px cont
 **Fix.** `DomBuild.BuildAny` zeroes `flex-shrink` on an in-flow inline-level box whose width
 is definite. See "Known deviations" in todo.md and `AtomicInlineSizingTests`.
 
-**Residual.** A bare cyclic `width: 100%` on an atomic inline is still clamped, because
-`DeferCyclicFlexInlineSizes` has already rewritten it to `Auto` by the time the box is built.
+**Residual, since fixed.** A bare cyclic `width: 100%` on an atomic inline was still clamped,
+because `DeferCyclicFlexInlineSizes` had already rewritten it to `Auto` by the time the box was
+built, so `BuildAny` read the declaration as `auto` and left the box shrink-wrapping at taffy's
+default `flex-shrink: 1`. The `calc()` spelling was unaffected only because its
+`SizeExpressions[0]` survives the same neutralization - the two spellings of the same CSS behaved
+differently. `LayoutStyle.DeferredCyclicInlineSlots` now records that the declaration is still
+definite, and both of `BuildAny`'s readings of it - `pinsInlineSize` and the `needsOuter`
+shrink-wrapping participant an `inline-flex`/`inline-grid` gets - consult it. On the reduction
+(`width: 100%; margin-right: 22px` on an `inline-flex` in a shrink-wrapping flex item) the
+dropdown goes from 117 to **139**, which is Chromium, and the container stays at 141. See
+`AtomicInlineSizingTests.ABareCyclicPercentageInlineSizeIsStillDefinite`.
 
 ## F34 - a classic scrollbar takes no space out of its scroll container (FIXED)
 
@@ -563,10 +572,16 @@ width and everything below it follows:
 | `calc(100% - 4px)` card under it | 383 | **392** |
 
 Un-pinning and re-pinning means re-running the whole deferred cyclic resolution after the
-gutter, which is the ordering F34 warns about, so it is left alone. In the Tesserae app the
-pinned item sits above the scroll container on the affected routes, which is why the card is
-right there. The largest remaining +9 cluster is `#/view/Omni Result` (333 of the 449), whose
-route mean still improved (1.6649 -> 1.2037).
+gutter, which is the ordering F34 warns about. **Fixed instead by carrying the pin.**
+`PinFlexItems` now records each pin's provenance - the flex container it was taken against and
+that container's content width at the time - as a `PinnedFlexItem`, and
+`RescalePinnedFlexItems` scales the frozen length with the container from inside the gutter
+loop, outermost-first so a nested pin sees its container's new width. Scaling rather than
+re-deriving is deliberate: the item's flex factors were frozen on purpose, because re-running
+the flex algorithm off an already-flexed size flexes it twice. It is exact for the one-item and
+equal-factor rows this reaches and an approximation for a row of unequal bases, and it costs one
+list walk on a page that reserves nothing. The reduction above is now 391 / 383, both Chromium's.
+See `DomLayoutTests.APinnedCyclicFlexItemFollowsAReservedScrollbarGutter`.
 
 See "Known deviations" in todo.md and
 `DomLayoutTests.AReservedScrollbarReResolvesFunctionalWidthsBelowIt`.
@@ -797,3 +812,80 @@ Pinned by `Obscura.Js.Tests/MutationObserverTests.cs` (7 facts). Cost: interleav
 builds on `#/view/Button`, five runs each, 8418ms vs 8431ms (0.15%, noise floor ~10%); a
 20,000-mutation churn page is likewise unchanged. The three `#/view/Masonry` timings are
 **unchanged**, as expected - they are governed by the forced-layout cost above.
+
+### Follow-up: half of the forced-layout cost is fixed, and the Masonry attribution above is wrong
+
+**Fixed: a retained restyle that changes nothing layout can see now keeps its layout.**
+`Obscura.Render.RetainedLayoutReuse` is a gate in front of the layout half of a retained restyle.
+At the end of the top-down pass - the last point at which this pass's style objects are
+comparable to the ones the previous layout was produced from - it compares every element the
+cascade recomputed against the style object it replaced. If nothing differs, or the only
+differences are in members no pass after that point reads, `LayoutDomOnce` returns the previous
+`DomLayout` itself and `PrepareInternal` reuses its derived geometry too. It fails closed three
+ways: only eight named members may differ and every other member of `LayoutStyle` forces a
+layout, equality is proven structurally and anything the comparer cannot compare counts as
+changed, and the gate is only offered a layout for a batch of pure attribute mutations against a
+container-query-free sheet with at most 512 recomputed elements.
+
+`thrash.html` again, interleaved A/B on one binary (`OBSCURA_DISABLE_RETAINED_LAYOUT_REUSE=1`),
+three runs each, medians. This container measures ~1.7x slower than the table above, so the
+"before" column is not the same number as the one at the top of this finding:
+
+| 50 iterations | before | after | Chromium |
+|---|---|---|---|
+| read-only `offsetWidth` | 130ms | 133ms | 15-28ms |
+| write `opacity`, read | 5261ms | **1211ms** | 0.2ms |
+| write `class`, read | 4947ms | **524ms** | 0.1ms |
+| write `transform`, read | 5114ms | 5320ms | 2.6-3.1ms |
+| write `left`/`top`, read | 5107ms | 5272ms | 3.5-3.9ms |
+| write `left`/`top`, no read | 5ms | 5ms | 0.1ms |
+| one read after that batch | 71ms | 77ms | 0.2ms |
+
+The last four rows are unchanged on purpose: those writes really do change a box, and the gate
+decides *whether* to lay out, not *how much*.
+
+**The Masonry attribution in this finding is wrong.** It was measured on `thrash.html` and
+carried over. Instrumenting the prepare path per call (`PREP #n <ms> <mutations>`) and driving
+`#/view/Masonry` shows the route running ~33 prepares totalling **13.4s**, not fifty cheap ones:
+
+```
+PREP #1  2782ms full
+PREP #2   972ms retained mut=4   [attr:data-tss-unmount-pending, attr:style, Tree, Animation]
+PREP #3  2523ms retained mut=167 [Tree, attr:data-tss-mount-pending, attr:class, Animation]
+...
+PREP #7   462ms retained mut=1   [attr:style]      <- 25 of these, 120-460ms each
+PREP #31  196ms retained mut=1   [attr:style]
+```
+
+Prepares #7-#31 are Outlayer's `Item._transitionTo`, which reads `getComputedStyle` for the
+item's current position and then writes the new one, fifty times. Those writes change `left`,
+`top` and `transform`, so they are layout and the gate correctly declines them - the route was
+measured with the gate on and off and fails identically, with the same single
+`autonomous browser task exceeded its task budget` and the same `left: NaN%`.
+
+What actually costs the 13.4s is that **one full prepare of the Tesserae SPA costs 130-460ms**,
+against 77ms for the 2059-node `thrash.html`. Profiled per phase on a 133ms Masonry prepare:
+`DomBuild.Build` 57ms, taffy 40ms (21 `ComputeRootLayout` calls, from the intrinsic-sizing and
+scrollbar-gutter repair passes), HarfBuzz shaping 24ms over 509 paragraphs, web-font collection
+18ms, cascade + top-down 7ms, `DerivedLayoutState` 4ms. On `thrash.html` the same profile is
+shaping 31ms of 77ms - **every text node is reshaped from scratch on every prepare**, because
+the shaping cache lives on the per-pass `TextEngine`.
+
+So the remaining work is not a better gate, it is retained layout, in two independent pieces:
+
+1. **A cross-pass shape cache.** Shaping is a pure function of (text, attributes, tab width) and
+   is ~40% of a prepare on a text-heavy page. This is the cheapest large win and carries no
+   layout-semantics risk; the only care needed is that a cached `ShapeLine` is not mutated by
+   its consumer.
+2. **A retained box tree**, so a restyled out-of-flow box re-runs layout for its formatting
+   context rather than the document. That is what would bring the last four rows of the table
+   down, and it is what `#/view/Masonry` needs: fifty flushes at 130ms do not fit in a 5.5s
+   budget however cheap the gate is.
+
+Pinned by `Obscura.Render.Tests/RetainedLayoutReuseTests.cs` (10 facts), each comparing the
+incremental result against a full from-scratch layout of the same mutated tree. Parity: all 101
+Tesserae routes captured twice from one pinned binary, gate off and gate on - 98 byte-identical
+in geometry and computed style, and the three that are not (`Searchable List`, `Masonry`,
+`Dropdown`) vary at least as much *within* an arm as between the arms when each is captured
+three more times per arm. Against the Chromium reference, 99 of 101 routes have a bit-identical
+geometry divergence in the two arms and every style column is identical.

@@ -32,6 +32,15 @@ public static class CssDeclarations
             var current = css[index];
             if (quote is { } open)
             {
+                // CSS Syntax 3 4.3.1: a backslash inside a string escapes the next code point,
+                // so a `\"` does not close it. Without this the rest of the block reads as
+                // string content and every declaration after the escape is lost.
+                if (current == '\\' && index + 1 < css.Length)
+                {
+                    index++;
+                    continue;
+                }
+
                 if (current == open)
                 {
                     quote = null;
