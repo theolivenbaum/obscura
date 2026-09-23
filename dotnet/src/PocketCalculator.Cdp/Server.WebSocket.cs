@@ -123,14 +123,16 @@ public static partial class CdpServer
                 var text = Encoding.UTF8.GetString(frame.ToArray());
                 frame.Clear();
 
-                if (text.Contains("\"Browser.close\"", StringComparison.Ordinal))
+                // Deviation: Rust closes the connection on any message whose text
+                // contains "Browser.close", a string argument included, and so did
+                // the port. The substring is now only a cheap prefilter: the
+                // message closes the connection when its parsed method is
+                // Browser.close, and anything else takes the ordinary path.
+                if (text.Contains("\"Browser.close\"", StringComparison.Ordinal)
+                    && CdpRequest.TryParse(text) is { Method: "Browser.close" } close)
                 {
-                    if (CdpRequest.TryParse(text) is { } close)
-                    {
-                        replies.Writer.TryWrite(
-                            CdpResponse.Success(close.Id, new JsonObject(), null).ToJson());
-                    }
-
+                    replies.Writer.TryWrite(
+                        CdpResponse.Success(close.Id, new JsonObject(), null).ToJson());
                     break;
                 }
 
