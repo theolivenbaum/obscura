@@ -209,16 +209,25 @@ internal sealed class CdpServerHandle : IAsyncDisposable
         StartAsync(CdpTestClient.PickPort(), maxConnections);
 
     internal static Task<CdpServerHandle> StartAsync(int port, int maxConnections) =>
-        StartAsync(port, maxConnections, null);
+        StartAsync(port, maxConnections, null, null);
 
     /// <summary>
     /// Start a loopback server that demands <paramref name="controlToken"/> as its
     /// bearer token (null for none), as <c>POCKETCALCULATOR_CDP_TOKEN</c> would.
     /// </summary>
     internal static Task<CdpServerHandle> StartWithTokenAsync(string? controlToken) =>
-        StartAsync(CdpTestClient.PickPort(), CdpServer.DefaultMaxConnections, controlToken);
+        StartAsync(CdpTestClient.PickPort(), CdpServer.DefaultMaxConnections, controlToken, null);
 
-    private static async Task<CdpServerHandle> StartAsync(int port, int maxConnections, string? controlToken)
+    /// <summary>
+    /// Start a loopback worker told <paramref name="forwarded"/> as its balancer's
+    /// client-facing authority, as <c>POCKETCALCULATOR_CDP_FORWARDED_HOST</c>/<c>_PORT</c> would.
+    /// </summary>
+    internal static Task<CdpServerHandle> StartForwardedAsync(
+        string? controlToken, CdpServer.ForwardedAuthority forwarded) =>
+        StartAsync(CdpTestClient.PickPort(), CdpServer.DefaultMaxConnections, controlToken, forwarded);
+
+    private static async Task<CdpServerHandle> StartAsync(
+        int port, int maxConnections, string? controlToken, CdpServer.ForwardedAuthority? forwarded)
     {
         var stop = new CancellationTokenSource();
 
@@ -236,6 +245,7 @@ internal sealed class CdpServerHandle : IAsyncDisposable
             true,
             maxConnections,
             () => controlToken,
+            () => forwarded,
             stop.Token));
 
         var handle = new CdpServerHandle(port, stop, server);

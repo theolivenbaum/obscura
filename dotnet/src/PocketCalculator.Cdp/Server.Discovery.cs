@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 
 namespace PocketCalculator.Cdp;
 
@@ -40,9 +42,28 @@ public static partial class CdpServer
     /// it came, and <c>127.0.0.1:{port}</c> otherwise. Chromium's DevTools server
     /// echoes the Host header here too.
     /// </summary>
-    internal static string WebSocketAuthority(string requestHead, int port)
+    internal static string WebSocketAuthority(string requestHead, int port) =>
+        WebSocketAuthority(requestHead, port, null);
+
+    /// <summary>
+    /// As <see cref="WebSocketAuthority(string, int)"/>, for a worker behind the
+    /// multi-worker balancer. A DNS Host the forwarded authority let through is
+    /// echoed like any other (upstream a156914).
+    /// </summary>
+    /// <remarks>
+    /// Deviation: with no usable Host, upstream falls back to
+    /// <c>127.0.0.1:{worker port}</c>, an internal port no client can use. It never
+    /// reaches that fallback through the balancer, because it refuses a request
+    /// without Host; this port serves one (Chromium's rule, see
+    /// <see cref="HostAllowed(string?, IPAddress)"/>), so it falls back to the
+    /// balancer's public authority instead: its address, or loopback for a
+    /// wildcard bind, and its port.
+    /// </remarks>
+    internal static string WebSocketAuthority(string requestHead, int port, ForwardedAuthority? forwarded)
     {
-        var fallback = $"127.0.0.1:{port.ToString(CultureInfo.InvariantCulture)}";
+        var fallback = forwarded is { } authority
+            ? FallbackAuthority(authority)
+            : $"127.0.0.1:{port.ToString(CultureInfo.InvariantCulture)}";
         if (HeaderValue(requestHead, "host") is not { Length: > 0 } value)
         {
             return fallback;
@@ -65,5 +86,21 @@ public static partial class CdpServer
         }
 
         return value;
+    }
+
+    private static string FallbackAuthority(ForwardedAuthority authority)
+    {
+        var address = authority.Address;
+        if (address.Equals(IPAddress.Any))
+        {
+            address = IPAddress.Loopback;
+        }
+        else if (address.Equals(IPAddress.IPv6Any))
+        {
+            address = IPAddress.IPv6Loopback;
+        }
+
+        var host = address.AddressFamily == AddressFamily.InterNetworkV6 ? $"[{address}]" : address.ToString();
+        return $"{host}:{authority.Port.ToString(CultureInfo.InvariantCulture)}";
     }
 }
