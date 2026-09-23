@@ -9,6 +9,12 @@ public sealed class Matcher
 {
     private readonly AncestorFilter _ancestors = new();
     private readonly List<uint> _candidateSeen = [];
+
+    /// <summary>
+    /// <c>:has()</c> results shared by every match this matcher runs; see
+    /// <see cref="MatchingContext.HasCache"/>. A matcher lives for one cascade.
+    /// </summary>
+    private readonly Dictionary<(RelativeSelector[] Relatives, DomTree Tree, NodeId Anchor), bool> _hasCache = [];
     private uint _candidateGeneration;
 
     internal uint CandidateGeneration
@@ -78,7 +84,7 @@ public sealed class Matcher
             return false;
         }
 
-        var context = new MatchingContext(QuirksMode.NoQuirks) { BloomFilter = _ancestors.Filter };
+        var context = new MatchingContext(QuirksMode.NoQuirks) { BloomFilter = _ancestors.Filter, HasCache = _hasCache };
         return SelectorMatching.MatchesSelector(
             compiled.Selector,
             compiled.Hashes,
@@ -118,7 +124,7 @@ public sealed class Matcher
         // bloom would cause false negatives for `.wrapper slot::slotted(...)`. Scoped rules are
         // already narrowed to a small per-shadow index; match them without an incompatible ancestor
         // filter.
-        var context = new MatchingContext(QuirksMode.NoQuirks) { CurrentHost = host };
+        var context = new MatchingContext(QuirksMode.NoQuirks) { CurrentHost = host, HasCache = _hasCache };
         return SelectorMatching.MatchesSelector(
             compiled.Selector,
             compiled.Hashes,

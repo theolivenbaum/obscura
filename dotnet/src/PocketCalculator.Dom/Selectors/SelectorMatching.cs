@@ -29,6 +29,21 @@ public sealed class MatchingContext
 
     internal bool InNegation { get; set; }
 
+    /// <summary>
+    /// <c>:has()</c> results already computed in this match, keyed by the argument list and
+    /// its anchor. A context lives for one query, and a <see cref="Matcher"/> (which shares
+    /// one table across its contexts) for one cascade, with no DOM mutation in either; a
+    /// relative selector's result depends only on the argument and the anchor, so reuse is
+    /// exact.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: the reference (like Servo's matcher it ports) recomputes every
+    /// <c>:has()</c> at every anchor, so <c>:has(:has(:has(:has(:has(:has(span))))))</c> on a
+    /// 500-deep tree ran past 45 s inside one op. Chromium caches <c>:has()</c> results per
+    /// anchor for the same reason.
+    /// </remarks>
+    internal Dictionary<(RelativeSelector[] Relatives, DomTree Tree, NodeId Anchor), bool>? HasCache { get; set; }
+
     internal CaseSensitivity ClassesAndIdsCaseSensitivity => QuirksMode == QuirksMode.Quirks
         ? CaseSensitivity.AsciiCaseInsensitive
         : CaseSensitivity.CaseSensitive;
@@ -577,6 +592,23 @@ public static class SelectorMatching
     // ------------------------------------------------------------------ :has()
 
     private static bool MatchesRelativeSelectors(
+        RelativeSelector[] relatives,
+        DomElement element,
+        MatchingContext context)
+    {
+        var cache = context.HasCache ??= [];
+        var key = (relatives, element.Tree, element.NodeId);
+        if (cache.TryGetValue(key, out var known))
+        {
+            return known;
+        }
+
+        var matched = MatchesRelativeSelectorsUncached(relatives, element, context);
+        cache[key] = matched;
+        return matched;
+    }
+
+    private static bool MatchesRelativeSelectorsUncached(
         RelativeSelector[] relatives,
         DomElement element,
         MatchingContext context)
