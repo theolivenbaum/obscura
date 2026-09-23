@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using PocketCalculator.Js.Ops;
@@ -115,6 +116,112 @@ public sealed class ServerTests
 
         server.Writer.TryComplete();
         await processor.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private static string NativeHead(string host) =>
+        $"GET /devtools/browser HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
+
+    [Fact]
+    public void NativeLoopbackCdpRequestIsAllowed() =>
+        Assert.Null(CdpServer.GetControlRefusal(NativeHead("127.0.0.1:9222"), IPAddress.Loopback, null));
+
+    [Fact]
+    public void BrowserOriginAndReboundHostAreRefused()
+    {
+        var withOrigin = NativeHead("127.0.0.1:9222").Replace(
+            "Upgrade: websocket",
+            "Origin: https://evil.example\r\nUpgrade: websocket",
+            StringComparison.Ordinal);
+        Assert.Equal(
+            CdpServer.ControlRefusal.BrowserOrigin,
+            CdpServer.GetControlRefusal(withOrigin, IPAddress.Loopback, null));
+        Assert.Equal(
+            CdpServer.ControlRefusal.ForeignHost,
+            CdpServer.GetControlRefusal(NativeHead("rebind.example:9222"), IPAddress.Loopback, null));
+    }
+
+    [Fact]
+    public void ConfiguredCdpTokenIsMandatory()
+    {
+        const string token = "01234567890123456789012345678901";
+        var head = NativeHead("127.0.0.1:9222");
+        Assert.False(CdpServer.BearerAuthorized(head, token));
+        head = head.Replace(
+            "Upgrade: websocket",
+            $"Authorization: Bearer {token}\r\nUpgrade: websocket",
+            StringComparison.Ordinal);
+        Assert.True(CdpServer.BearerAuthorized(head, token));
+    }
+
+    /// <summary>
+    /// The Host rule is Chromium's, not upstream's (see
+    /// <see cref="CdpServer.HostAllowed"/>): any IP literal or localhost name on
+    /// any port, or no Host at all, is served; a DNS name is not, unless the
+    /// server is bound to every interface.
+    /// </summary>
+    [Theory]
+    [InlineData("127.0.0.1:9222", true)]
+    [InlineData("127.0.0.1:9223", true)]
+    [InlineData("localhost:9333", true)]
+    [InlineData("LOCALHOST", true)]
+    [InlineData("devtools.localhost:9222", true)]
+    [InlineData("[::1]:9222", true)]
+    [InlineData("10.1.2.3:9222", true)]
+    [InlineData("rebind.example:9222", false)]
+    [InlineData("localhost.evil.example:9222", false)]
+    [InlineData("127.0.0.1.nip.io:9222", false)]
+    public void HostHeaderFollowsChromiumRequestIsSafeToServe(string host, bool allowed) =>
+        Assert.Equal(allowed, CdpServer.HostAllowed(host, IPAddress.Loopback));
+
+    [Fact]
+    public void MissingHostIsServedAndUnspecifiedBindAcceptsAnyHost()
+    {
+        Assert.True(CdpServer.HostAllowed(null, IPAddress.Loopback));
+        Assert.True(CdpServer.HostAllowed("cdp.example.test:9222", IPAddress.Any));
+        Assert.True(CdpServer.HostAllowed("cdp.example.test:9222", IPAddress.IPv6Any));
+        Assert.False(CdpServer.HostAllowed("cdp.example.test:9222", IPAddress.Parse("10.0.0.5")));
+    }
+
+    [Fact]
+    public void ShortCdpTokenIsAStartupError()
+    {
+        Assert.Null(CdpServer.ValidateControlToken(null));
+        Assert.Null(CdpServer.ValidateControlToken(""));
+        var error = Assert.Throws<InvalidOperationException>(
+            () => CdpServer.ValidateControlToken("0123456789012345678901234567890"));
+        Assert.Equal("POCKETCALCULATOR_CDP_TOKEN must be at least 32 bytes", error.Message);
+        Assert.Equal(
+            "01234567890123456789012345678901",
+            CdpServer.ValidateControlToken("01234567890123456789012345678901"));
+    }
+
+    [Fact]
+    public void RefusalResponsesMatchTheReferenceBytes()
+    {
+        Assert.Equal(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 35\r\n"
+            + "Connection: close\r\n\r\n{\"error\":\"authentication required\"}",
+            CdpServer.ControlRefusalResponse(CdpServer.ControlRefusal.Unauthorized));
+        Assert.Equal(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 27\r\n"
+            + "Connection: close\r\n\r\n{\"error\":\"request refused\"}",
+            CdpServer.ControlRefusalResponse(CdpServer.ControlRefusal.ForeignHost));
+        Assert.Equal(
+            "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Type: application/json\r\n"
+            + "Content-Length: 34\r\nConnection: close\r\n\r\n{\"error\":\"request head too large\"}",
+            CdpServer.ControlRefusalResponse(CdpServer.ControlRefusal.OversizedHead));
+    }
+
+    [Fact]
+    public async Task NonLoopbackBindWithoutTokenIsRefused()
+    {
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CdpServer.StartWithControlTokenAsync(
+                CdpTestClient.PickPort(), "0.0.0.0", null, false, null, false, null, false,
+                CdpServer.DefaultMaxConnections, () => null));
+        Assert.Equal(
+            "refusing to expose CDP without authentication; set POCKETCALCULATOR_CDP_TOKEN to at least 32 bytes",
+            error.Message);
     }
 
     [Fact]

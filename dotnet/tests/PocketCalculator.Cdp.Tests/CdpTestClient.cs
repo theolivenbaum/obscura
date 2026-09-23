@@ -208,13 +208,24 @@ internal sealed class CdpServerHandle : IAsyncDisposable
     internal static Task<CdpServerHandle> StartAsync(int maxConnections = CdpServer.DefaultMaxConnections) =>
         StartAsync(CdpTestClient.PickPort(), maxConnections);
 
-    internal static async Task<CdpServerHandle> StartAsync(int port, int maxConnections)
+    internal static Task<CdpServerHandle> StartAsync(int port, int maxConnections) =>
+        StartAsync(port, maxConnections, null);
+
+    /// <summary>
+    /// Start a loopback server that demands <paramref name="controlToken"/> as its
+    /// bearer token (null for none), as <c>POCKETCALCULATOR_CDP_TOKEN</c> would.
+    /// </summary>
+    internal static Task<CdpServerHandle> StartWithTokenAsync(string? controlToken) =>
+        StartAsync(CdpTestClient.PickPort(), CdpServer.DefaultMaxConnections, controlToken);
+
+    private static async Task<CdpServerHandle> StartAsync(int port, int maxConnections, string? controlToken)
     {
         var stop = new CancellationTokenSource();
 
         // allow_private_network so the server may fetch 127.0.0.1 fixtures, which
-        // is what the Rust integration tests pass too.
-        var server = Task.Run(() => CdpServer.StartWithServeOptionsAndLimitAsync(
+        // is what the Rust integration tests pass too. The token is passed
+        // directly: the environment is shared by the whole parallel test run.
+        var server = Task.Run(() => CdpServer.StartWithControlTokenAsync(
             port,
             "127.0.0.1",
             null,
@@ -224,6 +235,7 @@ internal sealed class CdpServerHandle : IAsyncDisposable
             null,
             true,
             maxConnections,
+            () => controlToken,
             stop.Token));
 
         var handle = new CdpServerHandle(port, stop, server);

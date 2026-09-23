@@ -99,6 +99,26 @@ public static class ServeCommand
         string? userAgent,
         IReadOnlyList<string>? fontDirs = null)
     {
+        // Upstream 04418a5 gates only the CDP server, and a multi-worker server's
+        // workers bind loopback, so `serve --workers 2 --host 0.0.0.0` exposed the
+        // control plane without a token (upstream closed that later, in a156914,
+        // through POCKETCALCULATOR_CDP_FORWARDED_HOST). The balancer applies the same rule
+        // as the single-worker server before it binds anything. Workers inherit
+        // POCKETCALCULATOR_CDP_TOKEN from this process's environment and check it.
+        var token = Environment.GetEnvironmentVariable("POCKETCALCULATOR_CDP_TOKEN");
+        if (!string.IsNullOrEmpty(token) && System.Text.Encoding.UTF8.GetByteCount(token) < 32)
+        {
+            throw new CliException("POCKETCALCULATOR_CDP_TOKEN must be at least 32 bytes");
+        }
+        var loopback = IPAddress.TryParse(host, out var literal)
+            ? IPAddress.IsLoopback(literal)
+            : host.Equals("localhost", StringComparison.OrdinalIgnoreCase);
+        if (!loopback && string.IsNullOrEmpty(token))
+        {
+            throw new CliException(
+                "refusing to expose CDP without authentication; set POCKETCALCULATOR_CDP_TOKEN to at least 32 bytes");
+        }
+
         var exe = Environment.ProcessPath
             ?? throw new CliException("cannot locate the running executable to spawn workers");
         var children = new List<Process>();

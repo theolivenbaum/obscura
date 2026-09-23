@@ -177,7 +177,7 @@ public static partial class CdpServer
     /// live CDP connections. Each connection owns its pages' V8 isolates, so this
     /// is what bounds the server's memory footprint.
     /// </summary>
-    public static async Task StartWithServeOptionsAndLimitAsync(
+    public static Task StartWithServeOptionsAndLimitAsync(
         int port,
         string host,
         string? proxy,
@@ -187,12 +187,42 @@ public static partial class CdpServer
         string? storageDir,
         bool allowPrivateNetwork,
         int maxConnections,
+        CancellationToken cancellationToken = default) =>
+        StartWithControlTokenAsync(
+            port, host, proxy, stealth, userAgent, allowFileAccess, storageDir,
+            allowPrivateNetwork, maxConnections, ControlTokenFromEnv, cancellationToken);
+
+    /// <summary>
+    /// The server body. <paramref name="controlToken"/> supplies the bearer token
+    /// (<c>POCKETCALCULATOR_CDP_TOKEN</c> in production), read after the host is parsed as
+    /// the Rust server does; tests pass one directly instead of mutating the
+    /// process environment under a parallel test run.
+    /// </summary>
+    internal static async Task StartWithControlTokenAsync(
+        int port,
+        string host,
+        string? proxy,
+        bool stealth,
+        string? userAgent,
+        bool allowFileAccess,
+        string? storageDir,
+        bool allowPrivateNetwork,
+        int maxConnections,
+        Func<string?> controlToken,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(controlToken);
         if (!IPAddress.TryParse(host, out var ip))
         {
             throw new ArgumentException($"invalid --host '{host}'", nameof(host));
+        }
+
+        var authToken = controlToken();
+        if (!IPAddress.IsLoopback(ip) && authToken is null)
+        {
+            throw new InvalidOperationException(
+                "refusing to expose CDP without authentication; set POCKETCALCULATOR_CDP_TOKEN to at least 32 bytes");
         }
 
         // Issue #62: the HTTP control plane (/json/version, /json) must remain
@@ -223,6 +253,11 @@ public static partial class CdpServer
                 "file:// navigation enabled (--allow-file-access). Do not expose this port to untrusted networks.");
         }
 
+        if (authToken is not null)
+        {
+            CdpLog.Info("CDP bearer authentication enabled");
+        }
+
         var handoff = Channel.CreateBounded<Socket>(new BoundedChannelOptions(MaxPendingWsHandoffs)
         {
             FullMode = BoundedChannelFullMode.Wait,
@@ -235,7 +270,8 @@ public static partial class CdpServer
         using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var signals = InstallSignalHandlers(shutdown);
 
-        var acceptThread = new Thread(() => AcceptLoop(listener, port, handoff.Writer, shutdown.Token))
+        var acceptThread = new Thread(
+            () => AcceptLoop(listener, ip, port, authToken, handoff.Writer, shutdown.Token))
         {
             IsBackground = true,
             Name = "obscura-cdp-accept",
@@ -476,7 +512,9 @@ public static partial class CdpServer
     /// </remarks>
     private static void AcceptLoop(
         Socket listener,
+        IPAddress bindIp,
         int port,
+        string? authToken,
         ChannelWriter<Socket> handoff,
         CancellationToken shutdown)
     {
@@ -569,8 +607,11 @@ public static partial class CdpServer
                     case { Kind: PeekKind.Closed }:
                         socket.Dispose();
                         break;
+                    case { Kind: PeekKind.Oversized }:
+                        RefuseControlConnection(socket, ControlRefusal.OversizedHead);
+                        break;
                     case { Kind: PeekKind.Head, Head: var head }:
-                        if (!AcceptDispatch(socket, port, handoff, head!))
+                        if (!AcceptDispatch(socket, bindIp, port, authToken, handoff, head!))
                         {
                             socket.Dispose();
                         }
@@ -598,6 +639,12 @@ public static partial class CdpServer
 
         /// <summary>Peer went away without sending a full head.</summary>
         Closed,
+
+        /// <summary>
+        /// The header terminator did not fit in the bounded peek buffer. Refused:
+        /// security-sensitive headers could otherwise be hidden beyond the cap.
+        /// </summary>
+        Oversized,
 
         /// <summary>A classifiable request head.</summary>
         Head,
@@ -647,12 +694,12 @@ public static partial class CdpServer
             return new PeekStatus(PeekKind.Head, Lossy(head));
         }
 
-        // A head that overflows the peek buffer is classified with what arrived,
-        // matching the pre-polling behavior for oversized headers.
-        var complete = n == HttpPeekBuf || head.IndexOf("\r\n\r\n"u8) >= 0;
-        return complete
-            ? new PeekStatus(PeekKind.Head, Lossy(head))
-            : new PeekStatus(PeekKind.NotReady, null);
+        if (head.IndexOf("\r\n\r\n"u8) >= 0)
+        {
+            return new PeekStatus(PeekKind.Head, Lossy(head));
+        }
+
+        return new PeekStatus(n == HttpPeekBuf ? PeekKind.Oversized : PeekKind.NotReady, null);
     }
 
     /// <summary>
@@ -674,10 +721,18 @@ public static partial class CdpServer
     /// </remarks>
     private static bool AcceptDispatch(
         Socket socket,
+        IPAddress bindIp,
         int port,
+        string? authToken,
         ChannelWriter<Socket> handoff,
         string head)
     {
+        if (GetControlRefusal(head, bindIp, authToken) is { } refusal)
+        {
+            RefuseControlConnection(socket, refusal);
+            return true;
+        }
+
         string? endpoint = null;
         if (head.Contains("/json/version", StringComparison.Ordinal))
         {
