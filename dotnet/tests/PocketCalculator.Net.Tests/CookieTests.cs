@@ -444,6 +444,43 @@ public class CookieTests
         }
     }
 
+    /// <summary>
+    /// SECURITY.md I4: the jar holds session cookies, so its file (and a storage
+    /// directory the save creates) is owner-only on Unix, whatever the umask.
+    /// </summary>
+    [Fact]
+    public void SavedCookieFileIsOwnerOnly()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateTempSubdirectory("obscura-cookies");
+        try
+        {
+            var storage = Path.Combine(directory.FullName, "storage");
+            var path = Path.Combine(storage, "cookies.json");
+            var jar = new CookieJar();
+            jar.SetCookie("session=abc123; Path=/", new Uri("https://example.com/"));
+
+            jar.SaveToFile(path);
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+            Assert.Equal(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                File.GetUnixFileMode(storage));
+
+            // A second save replaces the file and keeps the mode.
+            jar.SaveToFile(path);
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+            Assert.Single(Directory.GetFiles(storage));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public void TestLoadNonexistentFileReturnsZero()
     {

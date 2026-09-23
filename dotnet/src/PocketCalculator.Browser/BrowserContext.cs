@@ -193,7 +193,8 @@ public sealed class BrowserContext
         }
         try
         {
-            Directory.CreateDirectory(StorageDir);
+            // Owner-only when this creates it (SECURITY.md I4).
+            PocketCalculator.Net.CookieJar.CreateOwnerOnlyDirectory(StorageDir);
             CookieJar.SaveToFile(Path.Combine(StorageDir, "cookies.json"));
         }
         catch (Exception)

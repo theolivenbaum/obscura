@@ -764,8 +764,25 @@ public sealed class CookieJar
     }
 
     /// <summary>
+    /// Create <paramref name="directory"/> (and any missing parents) owner-only
+    /// (0700) on Unix. An existing directory keeps the mode it has.
+    /// </summary>
+    public static void CreateOwnerOnlyDirectory(string directory)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(directory);
+        }
+        else
+        {
+            Directory.CreateDirectory(
+                directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    /// <summary>
     /// Serialize all non-expired cookies to a JSON file. Writes atomically via a
-    /// temp file then rename.
+    /// temp file then rename. The file is owner-only on Unix.
     /// </summary>
     public void SaveToFile(string path)
     {
@@ -779,13 +796,31 @@ public sealed class CookieJar
         var parent = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrEmpty(parent))
         {
-            Directory.CreateDirectory(parent);
+            CreateOwnerOnlyDirectory(parent);
         }
 
         var tmp = Path.Combine(
             string.IsNullOrEmpty(parent) ? "." : parent,
             $".obscura-cookies-{Guid.NewGuid():N}.tmp");
-        File.WriteAllText(tmp, json, new UTF8Encoding(false));
+        // Deviation (SECURITY.md I4): Rust writes the jar with the process umask,
+        // which on most systems leaves every session cookie readable by other
+        // local users. The port creates the file owner-only (0600) on Unix; the
+        // rename keeps that mode. Windows files inherit the directory's ACL.
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+        };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+        using (var stream = new FileStream(tmp, options))
+        {
+            stream.Write(new UTF8Encoding(false).GetBytes(json));
+        }
+
         File.Move(tmp, path, overwrite: true);
     }
 
