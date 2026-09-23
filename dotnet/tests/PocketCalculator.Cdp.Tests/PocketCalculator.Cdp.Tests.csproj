@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>PocketCalculator.Cdp.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/PocketCalculator.Cdp/PocketCalculator.Cdp.csproj" />
+    <!-- PocketCalculator.Cdp and PocketCalculator.Mcp reference the engine privately (it ships inside
+         the PocketCalculator package), so its types do not flow through them. -->
+    <ProjectReference Include="../../src/PocketCalculator.Browser/PocketCalculator.Browser.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+  </ItemGroup>
+
+</Project>

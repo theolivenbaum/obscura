@@ -3,7 +3,7 @@
 #
 # The goldens let the C# port be compared against recorded Rust behavior on a
 # machine with no Rust toolchain. They are a convenience, not the authority:
-# the live differential tests in Obscura.Parity.Tests run both engines and are
+# the live differential tests in PocketCalculator.Parity.Tests run both engines and are
 # what actually gates a component. Regenerate whenever the Rust engine changes.
 #
 # Usage: scripts/regen-golden.sh [path-to-obscura-binary]
@@ -11,7 +11,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${1:-${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}}"
-OUT="$REPO/dotnet/tests/Obscura.Parity.Tests/golden"
+OUT="$REPO/dotnet/tests/PocketCalculator.Parity.Tests/golden"
 
 if [[ ! -x "$BIN" ]]; then
   echo "reference binary not found: $BIN" >&2

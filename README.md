@@ -1,6 +1,6 @@
-# Obscura for .NET
+# PocketCalculator
 
-A headless browser engine in C# / .NET 10. It runs real JavaScript through V8,
+PocketCalculator is a headless browser engine in C# / .NET 10. It runs real JavaScript through V8,
 keeps a real DOM tree, owns its layout and paint pipeline, speaks the Chrome
 DevTools Protocol, and works as a drop-in replacement for headless Chrome with
 Puppeteer and Playwright, without shipping or launching Chromium.
@@ -8,9 +8,10 @@ Puppeteer and Playwright, without shipping or launching Chromium.
 This is a reimplementation of **[Obscura](https://github.com/h4ckf0r0day/obscura)**,
 the open-source headless browser written in Rust by the Obscura authors. The
 engine here is a port of that code base, component by component, into idiomatic
-C#. The wire surfaces (CDP messages, the MCP tools, the CLI output, the JavaScript
-op protocol) match the original byte for byte so clients built against Obscura
-keep working; DOM, CSS and layout behaviour is measured against Chromium, and
+C#. The wire surfaces (CDP messages, the MCP tools, the JavaScript op protocol)
+match the original byte for byte so clients built against Obscura keep working;
+the command-line tool is `pocket-calculator` and its environment variables are
+`POCKETCALCULATOR_*` where Obscura's are `obscura` and `OBSCURA_*`; DOM, CSS and layout behaviour is measured against Chromium, and
 where the original disagrees with Chromium this port follows Chromium. The Rust
 source it was ported from is kept, read-only, under
 [`.reference/obscura/`](.reference/obscura/) for reference.
@@ -30,6 +31,8 @@ source it was ported from is kept, read-only, under
 - **Deterministic output**: fonts are embedded (Liberation, DejaVu, Noto Color
   Emoji), so a page rasterizes the same on every host, including distroless
   images with no fontconfig.
+  Extra faces can be added with `pocket-calculator serve --font-dir DIR` (or
+  `BrowserConfig.FontDirectories`), at the cost of that host independence.
 - **Safe defaults**: fetches to loopback, RFC1918 and link-local addresses are
   blocked unless `--allow-private-network` is given.
 
@@ -40,23 +43,23 @@ managed code.
 
 | Package | What it is |
 |---|---|
-| `Obscura` | The embeddable library API: `Browser`, `Page`, `Element`, cookies. Start here. |
-| `Obscura.Browser` | Pages, navigation, lifecycle, screenshots, PDF |
-| `Obscura.Cdp` | The Chrome DevTools Protocol server |
-| `Obscura.Mcp` | The MCP server |
-| `Obscura.Js` | The V8 runtime, ops and Web API shim |
-| `Obscura.Render` | CSS, computed style, layout, paint |
-| `Obscura.Net` | HTTP, cookies, robots.txt, tracker blocklist, encoding |
-| `Obscura.Dom` | The DOM tree, HTML parsing, selectors, serialization |
+| `PocketCalculator` | The engine and its library API: `Browser`, `Page`, `Element`, cookies. Start here. |
+| `PocketCalculator.Cdp` | The Chrome DevTools Protocol server, on top of `PocketCalculator` |
+| `PocketCalculator.Mcp` | The MCP server, on top of `PocketCalculator` |
+
+`PocketCalculator` carries the whole engine as separate assemblies: `PocketCalculator.Browser`
+(pages, navigation, screenshots, PDF), `PocketCalculator.Js` (V8, ops, the Web API shim),
+`PocketCalculator.Render` (CSS, layout, paint), `PocketCalculator.Net` (HTTP, cookies, robots.txt,
+tracker blocklist) and `PocketCalculator.Dom` (DOM tree, HTML parsing, selectors).
 
 ```bash
-dotnet add package Obscura
+dotnet add package PocketCalculator
 ```
 
 ## Use it as a library
 
 ```csharp
-using Obscura.Api;
+using PocketCalculator.Api;
 
 var browser = Browser.Builder()
     .Stealth(true)
@@ -80,26 +83,26 @@ interception (`EnableInterception`, `OnRequest`, `OnResponse`).
 ```bash
 cd dotnet
 dotnet build -c Release
-alias obscura="$PWD/src/Obscura.Cli/bin/Release/net10.0/obscura"
+alias pocket-calculator="$PWD/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator"
 
-obscura fetch https://example.com --dump text          # also html, markdown, links, assets, cookies
-obscura fetch https://example.com --eval "document.title"
-obscura fetch https://example.com --screenshot page.png
-obscura scrape https://a.example https://b.example --concurrency 4
-obscura serve --port 9222                               # CDP server
-obscura mcp                                             # MCP server over stdio (--http for HTTP)
+pocket-calculator fetch https://example.com --dump text          # also html, markdown, links, assets, cookies
+pocket-calculator fetch https://example.com --eval "document.title"
+pocket-calculator fetch https://example.com --screenshot page.png
+pocket-calculator scrape https://a.example https://b.example --concurrency 4
+pocket-calculator serve --port 9222                               # CDP server
+pocket-calculator mcp                                             # MCP server over stdio (--http for HTTP)
 ```
 
 Global options include `--stealth`, `--proxy <url>`, `--user-agent`,
 `--storage-dir`, `--obey-robots` and `--allow-private-network`. Run
-`obscura --help` or `obscura <command> --help` for the full list.
+`pocket-calculator --help` or `pocket-calculator <command> --help` for the full list.
 
 ## Connect Puppeteer or Playwright
 
 Start the CDP server and point a CDP client at it:
 
 ```bash
-obscura serve --port 9222
+pocket-calculator serve --port 9222
 ```
 
 ```js
@@ -109,6 +112,12 @@ const browser = await puppeteer.connect({ browserWSEndpoint: "ws://127.0.0.1:922
 // Playwright
 const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
 ```
+
+On loopback no credentials are needed. Binding the CDP or MCP server anywhere else
+(`--host 0.0.0.0`) requires a bearer token of at least 32 bytes in
+`POCKETCALCULATOR_CDP_TOKEN` or `POCKETCALCULATOR_MCP_TOKEN`. Requests carrying a
+browser `Origin`, and CDP requests with a foreign `Host`, are refused. MCP callers
+from a browser can be allowed with `POCKETCALCULATOR_MCP_ALLOWED_ORIGINS`.
 
 ## Build, test and publish
 
@@ -122,7 +131,7 @@ For anything sensitive to cold start, measure a publish rather than `bin/`;
 ReadyToRun precompiles the engine:
 
 ```bash
-dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained true
+dotnet publish -c Release src/PocketCalculator.Cli -r linux-x64 --self-contained true
 ```
 
 Packages are built, tested and pushed to NuGet by the Azure DevOps pipeline in
@@ -148,11 +157,12 @@ deliberately differs from the original and why.
 
 ## License and credits
 
-Obscura for .NET is Copyright (c) 2026 Curiosity GmbH and is licensed under the
-[Apache License 2.0](LICENSE).
+PocketCalculator is Copyright (c) 2026 Curiosity GmbH and is licensed under the
+[MIT License](LICENSE).
 
 It is derived from [Obscura](https://github.com/h4ckf0r0day/obscura), Copyright
-the Obscura authors, licensed under the Apache License 2.0; its license is kept
-at [`.reference/obscura/LICENSE`](.reference/obscura/LICENSE). The layout engine
+the Obscura authors, licensed under the Apache License 2.0; that license is kept
+at [`.reference/obscura/LICENSE`](.reference/obscura/LICENSE) and ships in every
+package as `LICENSE-OBSCURA.txt`. The layout engine
 is a port of Taffy and the text layer follows cosmic-text, both MIT licensed. See
 [`NOTICE`](NOTICE) for the full attributions.

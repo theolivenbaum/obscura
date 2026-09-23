@@ -11,7 +11,7 @@
 #      the diff then measures network access instead of rendering.
 #   2. Full page, not viewport. Playwright takes fullPage; the Obscura CLI has no
 #      such flag, so the document height is measured first and fed back as
-#      OBSCURA_SHOT_H. See the skill for the caveat that carries.
+#      OBSCURA_SHOT_H (POCKETCALCULATOR_SHOT_H for the port). See the skill for the caveat that carries.
 #
 # Usage: scripts/render-compare.sh <fixture.html> [width...]
 #        scripts/render-compare.sh test-html-files/renderlab-complex.html 1280 640
@@ -28,7 +28,7 @@ WIDTHS=("$@")
 [[ ${#WIDTHS[@]} -eq 0 ]] && WIDTHS=(1280 900 640)
 
 RUST="${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}"
-CS="${OBSCURA_PORT_BIN:-$REPO/dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura}"
+CS="${POCKETCALCULATOR_PORT_BIN:-$REPO/dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator}"
 OUT="${RENDER_COMPARE_OUT:-$REPO/target/render-compare}"
 PORT="${RENDER_COMPARE_PORT:-8099}"
 SETTLE="${RENDER_COMPARE_SETTLE:-3}"
@@ -86,12 +86,14 @@ obscura_run() {  # engine bin width -> sets HEIGHT, writes png
   local probe height
   probe="$(env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u NO_PROXY -u no_proxy \
     OBSCURA_ALLOW_PRIVATE_NETWORK=1 OBSCURA_SHOT_W="$w" OBSCURA_SHOT_H=900 \
+    POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1 POCKETCALCULATOR_SHOT_W="$w" POCKETCALCULATOR_SHOT_H=900 \
     "$bin" fetch "$URL" --screenshot /dev/null --eval "$PROBE" --quiet --wait "$SETTLE" --timeout 90 2>/dev/null | head -1)"
   height="$(printf '%s' "$probe" | grep -oE '\\"h\\":[0-9]+' | head -1 | cut -d: -f2)"
   [[ -z "$height" ]] && height="$(printf '%s' "$probe" | grep -oE '"h":[0-9]+' | head -1 | cut -d: -f2)"
   [[ -z "$height" ]] && height=900
   env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u NO_PROXY -u no_proxy \
     OBSCURA_ALLOW_PRIVATE_NETWORK=1 OBSCURA_SHOT_W="$w" OBSCURA_SHOT_H="$height" \
+    POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1 POCKETCALCULATOR_SHOT_W="$w" POCKETCALCULATOR_SHOT_H="$height" \
     "$bin" fetch "$URL" --screenshot "$OUT/$STEM.w$w.$eng.png" --quiet --wait "$SETTLE" --timeout 90 >/dev/null 2>&1
   printf '%s\t%s\t%s\t%s\n' "$w" "$eng" "$height" "$probe" >> "$OUT/$STEM.probes.tsv"
   echo "  w$w $eng: full height $height px"

@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PocketCalculator</RootNamespace>
+    <AssemblyName>PocketCalculator</AssemblyName>
+    <Description>PocketCalculator: an embeddable headless browser engine with real JavaScript (V8), a real DOM, its own layout and paint, and no Chromium.</Description>
+  </PropertyGroup>
+
+  <!-- The PocketCalculator package is the whole engine. Browser, Js, Render, Net and Dom
+       are separate assemblies but not separate packages: nobody installs one
+       without the rest, and shipping them together keeps their versions in step.
+       PrivateAssets keeps the project reference out of the package's dependency
+       list, and IncludeEngineAssemblies puts the engine DLLs in lib/ instead. -->
+  <ItemGroup>
+    <ProjectReference Include="../PocketCalculator.Browser/PocketCalculator.Browser.csproj" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- PrivateAssets also stops the engine's own package references flowing to
+       consumers, so they are restated here. Keep this list equal to the union of
+       the PackageReferences in the five engine projects. -->
+  <ItemGroup>
+    <PackageReference Include="AngleSharp" />
+    <PackageReference Include="Microsoft.ClearScript.V8" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.linux-x64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.linux-arm64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.osx-x64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.osx-arm64" />
+    <PackageReference Include="Microsoft.ClearScript.V8.Native.win-x64" />
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.HarfBuzz" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" />
+    <PackageReference Include="SkiaSharp.NativeAssets.macOS" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.macOS" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);IncludeEngineAssemblies</TargetsForTfmSpecificBuildOutput>
+  </PropertyGroup>
+
+  <!-- Named from the output directory rather than resolved from the references,
+       so it also works in a no-build pack, which is what the pipeline runs. -->
+  <ItemGroup>
+    <EngineAssembly Include="PocketCalculator.Browser;PocketCalculator.Js;PocketCalculator.Render;PocketCalculator.Net;PocketCalculator.Dom" />
+  </ItemGroup>
+
+  <Target Name="IncludeEngineAssemblies">
+    <ItemGroup>
+      <BuildOutputInPackage Include="@(EngineAssembly->'$(OutDir)%(Identity).dll')" />
+    </ItemGroup>
+  </Target>
+
+</Project>

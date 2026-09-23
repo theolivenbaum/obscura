@@ -1,4 +1,4 @@
-# Builds the Obscura C# port and publishes its library packages to NuGet.
+# Builds PocketCalculator, the C# port of Obscura, and publishes its library packages to NuGet.
 #
 # This is the only thing that publishes, and it is the only build definition in the
 # repository: the upstream GitHub workflows live, disabled, under .reference/obscura/.github/.
@@ -9,7 +9,7 @@
 # dotnet/Directory.Build.props is only the local default; the /p:Version below overrides it.
 
 variables:
-  solution: 'dotnet/Obscura.slnx'
+  solution: 'dotnet/PocketCalculator.slnx'
   buildConfiguration: 'Release'
   targetVersion: yy.M.$(build.buildId)
 
@@ -56,7 +56,7 @@ steps:
     projects: '$(solution)'
     arguments: '-c $(buildConfiguration) --no-restore /p:Version=$(targetVersion)'
 
-# Everything. Obscura.Parity.Tests skips itself here: it needs the Rust reference binary
+# Everything. PocketCalculator.Parity.Tests skips itself here: it needs the Rust reference binary
 # (OBSCURA_RUST_BIN), and building V8 from source on every release is not worth it.
 # Parity is a porting check, run by hand; the area suites are the release gate.
 - task: DotNetCoreCLI@2
@@ -67,8 +67,9 @@ steps:
     arguments: '-c $(buildConfiguration) --no-build'
     publishTestResults: true
 
-# Packs the solution: the eight library projects pack, the CLI and the test projects opt
-# out with IsPackable.
+# Packs the solution into three packages: PocketCalculator (the engine assemblies ride inside it),
+# PocketCalculator.Cdp and PocketCalculator.Mcp. The engine projects, the CLI and the test projects opt out
+# with IsPackable.
 - task: DotNetCoreCLI@2
   displayName: 'pack'
   inputs:

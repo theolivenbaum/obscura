@@ -18,11 +18,18 @@ The shim touches exactly four non-op members. `DenoCoreShim` implements them.
 | `setUnhandledPromiseRejectionHandler` | `(handler) -> void` | Drives `unhandledrejection`. |
 | `setHandledPromiseRejectionHandler` | `(handler) -> void` | Drives `rejectionhandled`. |
 
-The op table is handed to the shim as `Deno.core.ops`. After bootstrap runs, the
-host deletes `globalThis.Deno` so page script can never reach the ops, exactly as
-deno_core does. The shim keeps its own captured reference.
+The op table is handed to the shim as `Deno.core.ops`. The shim captures
+`Deno.core` in a closure-private `const __obscuraCore` as its first statement, and
+once bootstrap has run `BootstrapLoader.Install` deletes `globalThis.Deno` and
+`__obscura_core_handoff` in every realm, so page script can never reach the ops
+(upstream 04418a5). Host-evaluated script runs in the page realm too, so it has no
+ops either: `Runtime.addBinding` forwards through the frozen
+`globalThis.__obscura_binding_called(name, payload)`, and `DOM.resolveNode` goes
+through `globalThis._wrap(nid)`. The PocketCalculator.Js test assembly alone republishes the
+page realm's table as `__obscura_test_ops` (`BootstrapLoader.ExposeOpsForTests`),
+as upstream's `#[cfg(test)]` `expose_ops_for_tests` does.
 
-## Ops (52)
+## Ops (55)
 
 `fast` marks ops deno_core binds on the fast path; in C# the distinction is
 informational, but a `fast` op must stay allocation-light. Argument types are
@@ -45,7 +52,10 @@ shown with the deno_core attribute markers stripped: `String` is a JS string,
 | `op_element_scroll_metrics` | sync | `nid_str: String` | `String` |
 | `op_element_scroll_to` | sync | `nid_str: String, x: f64, y: f64` | `String` |
 | `op_encoding_for_label` | sync | `label: &str` | `String` |
-| `op_fetch_url` | async | `url: String, method: String, headers_json: String, body: JsBuffer, origin: String, mode: String, credentials: String` | `String` |
+| `op_external_stylesheet_get` | sync | `owner_nid: u32, frame_id: u32` | `String` |
+| `op_external_stylesheet_remove` | fast | `owner_nid: u32, frame_id: u32` | `bool` |
+| `op_external_stylesheet_set` | fast | `owner_nid: u32, css: String, response_url: String, imported_origin_clean: bool, frame_id: u32` | `bool` |
+| `op_fetch_url` | async | `url: String, method: String, headers_json: String, body: JsBuffer, origin: String, mode: String, credentials: String, internal_load: bool` | `String` |
 | `op_frame_document_ready` | fast | `url: &str, html: &str, viewport_width: u64, viewport_height: u64` | `u32` |
 | `op_get_cookies` | sync | `(none)` | `String` |
 | `op_image_metadata` | sync | `nid: u32, _cached_only: bool` | `String` |
@@ -117,6 +127,18 @@ set_text_content                tag_name                        template_content
 text_content
 ```
 
+The three `op_external_stylesheet_*` ops (upstream 04418a5) hold a linked sheet's
+fetched CSS beside its `<link>` (or an `@import`'s beside its `<style>`) in the
+`DomTree`, with an origin-clean bit. `set` accepts only a `link` or `style` owner
+and stores the sheet as origin-clean only when `imported_origin_clean` is true and
+`response_url` is same-origin with the frame's document URL (opaque origins never
+are); it returns whether it stored. `get` returns `null` when the owner has no
+sheet, `{"originClean":false}` without the bytes when it is not origin-clean, and
+`{"originClean":true,"css":...}` otherwise, in that key order. A change to a
+connected owner discards the prepared render. They replace the port's own
+`op_dom` commands `get_external_stylesheet_css` / `set_external_stylesheet_css`,
+which returned any sheet's bytes and are gone.
+
 ## Rules for the C# implementation
 
 1. **Never let an exception cross back into V8.** The Rust ops wrap their
@@ -130,6 +152,38 @@ text_content
    the Rust output in a parity test rather than reasoning about it.
 4. **`frame_id` selects the realm state.** Ops that take `frame_id` resolve
    per-frame state; the main realm is frame 0.
+
+## `op_fetch_url`: what page script may see
+
+The eighth argument, `internal_load`, came with upstream 04418a5. The public
+`fetch()` (and XHR, which goes through it) passes `false`; the shim's own
+subresource loads pass `true`: `__fetchDynClassicScript`, `_fetchLinkedCss` and
+the iframe loader. The result keys are unchanged (`status, body, bodyBase64,
+requestId, url, redirected, opaque, headers`); only the values are filtered:
+
+- `set-cookie` / `set-cookie2` are never in `headers`.
+- For a response whose final URL is cross-origin to the page, `headers` holds
+  only the seven CORS-safelisted names (`cache-control`, `content-language`,
+  `content-length`, `content-type`, `expires`, `last-modified`, `pragma`) and
+  those named in `Access-Control-Expose-Headers`; `*` exposes all of them only
+  when credentials are not `include`.
+- When `!internal_load && mode == "no-cors"` and any hop was cross-origin, the
+  response is opaque: `status` 0, `body` and `bodyBase64` `""`, `headers` `{}`,
+  `opaque` true. The shim turns it into a null-body `Response`.
+- A request fulfilled through `Fetch.fulfillRequest` follows the same rules, and
+  its result gains an `opaque` key: `{status, body, url, headers, opaque}`. Rust
+  also emits `bodyBase64` there (#912); the C# fulfill carries text only and
+  leaves it out, as before.
+
+The CDP-facing records (network events, `Network.getResponseBody`, the response
+callbacks) keep the full response.
+
+In cors mode a failed CORS check on a cross-origin redirect hop (upstream
+05846de) returns `{"status":0,"body":"","url":<hop url>,"headers":{},
+"corsBlocked":true,"corsError":"CORS error: cross-origin redirect from '<url>'
+not allowed by Access-Control-Allow-Origin '<value>'"}`. A preflight that is not
+2xx, lists an invalid token, or does not allow the method or an unsafe request
+header rejects the op (upstream 04f0475), and the request is never sent.
 
 ## Port-added ops (4)
 

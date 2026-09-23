@@ -40,16 +40,19 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
 - [x] Move the Rust tree and everything upstream-only into `.reference/obscura/`; the
-      root README, `LICENSE` (Apache-2.0, Curiosity GmbH) and `NOTICE` are the port's
+      root README, `LICENSE` (MIT, Curiosity GmbH) and `NOTICE` are the port's
 - [x] NuGet packaging metadata in `dotnet/Directory.Build.props`; publish pipeline
       in `.devops/build-nuget.yml`
 - [x] Upstream sync procedure in `CLAUDE.md` ("Merging upstream changes")
+- [x] Rename the port to PocketCalculator: projects, namespaces, types, packages, the
+      `pocket-calculator` executable and `POCKETCALCULATOR_*` env vars; wire names keep
+      Obscura's (CLAUDE.md, "Naming")
 
-## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green
+## 1. PocketCalculator.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green
 
 - [x] `tree.rs` -> `DomTree`, `Node`, `NodeId`, `NodeData`, shadow roots, slots
 - [x] `tree_sink.rs` -> HTML parsing via AngleSharp adapted into the arena tree
-- [x] `selector.rs` -> selector parsing, matching, specificity (`Obscura.Dom.Selectors`)
+- [x] `selector.rs` -> selector parsing, matching, specificity (`PocketCalculator.Dom.Selectors`)
 - [x] `serialize.rs` -> `innerHTML` / `outerHTML` serialization
 - [x] Unit tests ported (81 facts: 29 tree, 14 tree_sink, 31 selector, 7 serialize)
 - [~] Parity: parse + serialize a corpus through both engines. Validated ad hoc against
@@ -57,9 +60,9 @@ vendored variable-font coordinate fix needs to carry over.
       parse + serialize (the other 7 differ only where the Rust run executed page script or
       injected engine markup), and 3323 (selector, fixture) `querySelectorAll` count
       comparisons over the 57 script-free fixtures with no semantic divergence. A standing
-      parity test needs `Obscura.Cli`, which the harness shells out to.
+      parity test needs `PocketCalculator.Cli`, which the harness shells out to.
 
-## 2. Obscura.Net  (<- crates/obscura-net, ~5.6k lines)  -  94/94 tests green
+## 2. PocketCalculator.Net  (<- crates/obscura-net, ~5.6k lines)  -  94/94 tests green
 
 - [x] `encoding.rs` -> charset detection and transcoding (429)
 - [x] `cookies.rs` -> `CookieJar`, parsing, domain/path matching, persistence (1281)
@@ -72,14 +75,14 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Unit tests ported (94 facts, all green)
 - [ ] Parity: cookie jar and SSRF decisions over a shared fixture table
 
-## 3. Obscura.Js  (<- crates/obscura-js, ~44k lines; 15.8k of it is shared JS)
+## 3. PocketCalculator.Js  (<- crates/obscura-js, ~44k lines; 15.8k of it is shared JS)
 
 - [x] Share `bootstrap.js` with the Rust tree by linking it as an embedded resource
-- [~] `runtime.rs` -> `ObscuraJsRuntime` on ClearScript (3704)
+- [~] `runtime.rs` -> `PocketCalculatorJsRuntime` on ClearScript (3704)
       - [x] 80 of 95 public methods; watchdog, heap cap, event loop, CDP object
             store, module graphs, frame realms
       - [x] the 15 `screenshot_*`/render-seeding methods (the Page-capture
-            boundary), in `Runtime/ObscuraJsRuntime.Capture.cs`, plus
+            boundary), in `Runtime/PocketCalculatorJsRuntime.Capture.cs`, plus
             `RuntimeCanvasSurfaceSource` and `WithSyncRenderLoadingDisabled`.
             The 29 tests that named them are written and green.
       - [ ] **404 of 455 tests are unwritten**, not blocked. Bodies are kept as
@@ -103,7 +106,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [ ] Unit + integration tests ported
 - [ ] Parity: run the same scripts through both runtimes, compare results
 
-## 4. Obscura.Render  (<- crates/obscura-render + vendor/taffy)  -  COMPLETE, 621 tests green
+## 4. PocketCalculator.Render  (<- crates/obscura-render + vendor/taffy)  -  COMPLETE, 621 tests green
 
 The largest component. Split into stages; each stage is independently testable.
 
@@ -130,11 +133,11 @@ The largest component. Split into stages; each stage is independently testable.
       capture limits, and the `LayoutStyle`->taffy style mapping (2914)
 - [x] Fonts: embedded font assets, WOFF1/WOFF2 decoding, variable-font axes
       carried through both shaping and rasterization
-- [x] Unit tests ported. Only skip left in Obscura.Render.Tests is the cascade
+- [x] Unit tests ported. Only skip left in PocketCalculator.Render.Tests is the cascade
       microbenchmark Rust itself marks `#[ignore]`.
 - [ ] Parity: render `render-repros/**` fixtures in both engines and compare
 
-## 5. Obscura.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  91/96 tests green, 5 skipped on Obscura.Js gaps
+## 5. PocketCalculator.Browser  (<- crates/obscura-browser, ~9.8k lines)  -  91/96 tests green, 5 skipped on PocketCalculator.Js gaps
 
 - [x] `page.rs` -> `Page`: navigation, evaluation, waiting, interception (4591),
       split across `Page.cs`, `Page.Navigation.cs`, `Page.Frames.cs`,
@@ -147,16 +150,16 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] `pdf.rs` -> raster PDF export (1027), on SkiaSharp for JPEG encode and
       PNG/JPEG decode instead of the `image` crate
 - [x] Unit + integration tests ported: all 92 Rust tests (74 page.rs, 10 pdf.rs,
-      4 context.rs, 4 across `tests/`), 87 green, 5 skipped on named Obscura.Js
+      4 context.rs, 4 across `tests/`), 87 green, 5 skipped on named PocketCalculator.Js
       gaps (see Known deviations), plus 4 written for the `UrlRecord` migration
-- [x] URLs go through `Obscura.Js.Url.UrlRecord`, not `System.Uri`. `Page.Url` is
+- [x] URLs go through `PocketCalculator.Js.Url.UrlRecord`, not `System.Uri`. `Page.Url` is
       a `UrlRecord`, `PageUrl` sits on the ported WHATWG parser, and
       `Page.UrlString()` returns its serialization, so a `data:` URL on the CDP
-      wire and in `location.href` matches the reference. `Obscura.Browser.NetUrl`
-      is the remaining conversion at the `Obscura.Net` boundary (see Open issues)
+      wire and in `location.href` matches the reference. `PocketCalculator.Browser.NetUrl`
+      is the remaining conversion at the `PocketCalculator.Net` boundary (see Open issues)
 - [ ] Parity: navigate a fixture corpus, compare DOM + text + links
 
-## 6. Obscura.Cdp  (<- crates/obscura-cdp, ~12.7k lines)  -  279/279 tests green
+## 6. PocketCalculator.Cdp  (<- crates/obscura-cdp, ~12.7k lines)  -  279/279 tests green
 
 - [x] `server.rs` -> WebSocket server, sessions, targets (1730)
 - [x] `dispatch.rs` -> method routing (1273)
@@ -175,7 +178,7 @@ The largest component. Split into stages; each stage is independently testable.
       `HashMap` and is nondeterministic per process, and header sets the two
       HTTP clients normalize differently.
 
-## 7. Obscura.Mcp  (<- crates/obscura-mcp, ~3.2k lines)
+## 7. PocketCalculator.Mcp  (<- crates/obscura-mcp, ~3.2k lines)
 
 - [x] `lib.rs` -> stdio MCP server and tools (2077) - 37 tools, tool list
       byte-identical to the Rust `json!` source (pinned by a differential test)
@@ -183,13 +186,13 @@ The largest component. Split into stages; each stage is independently testable.
 - [x] Integration tests ported (16 found, 16 ported, 16 passing)
 - [ ] Parity: identical tool listings and tool-call results
 
-## 8. Obscura.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)  -  177/178 tests green
+## 8. PocketCalculator.Cli + Obscura  (<- crates/obscura-cli, crates/obscura, ~6k lines)  -  177/178 tests green
 
 - [x] `main.rs` -> `fetch`, `serve`, `scrape`, `mcp`, global flags (1946).
       `serve` had five real defects, `scrape` one protocol bug, and every
       numeric option went through a parser that could kill the process where
       clap prints a usage error; see the commit.
-- [x] `worker.rs` -> the `obscura-worker` binary for parallel scrape (165)
+- [x] `worker.rs` -> the `pocket-calculator-worker` binary for parallel scrape (165)
 - [x] `crates/obscura` -> embeddable library API (`Obscura` project) (2224) -
       diffed item by item; every public type, method and property present
 - [x] Integration tests ported: every file under `crates/obscura-cli/tests` and
@@ -207,24 +210,42 @@ Reviewed 2026-09-23; detail per commit in `dotnet/docs/upstream-review-2026-09.m
 `.reference/obscura/` stays at `727cc46` until these are ported or declined. Ordered
 by severity; one upstream fix per commit, citing the upstream sha.
 
-Security (the C# port is exposed today):
+Security - all ported (2026-09-23; deviations under "Known deviations", "Upstream security
+ports 727cc46..1a3169d"):
 
-- [ ] `04418a5` G - MCP HTTP: origin allowlist, Content-Type, token, limits, no `file://`
-- [ ] `04418a5` A - hide `Deno.core.ops` from page script
-- [ ] `97ff86d` + `99647b4` - route render resource loads through the page transport
+- [x] `04418a5` G - MCP HTTP: origin allowlist, Content-Type, token, limits, no `file://`
+- [x] `04418a5` A - hide `Deno.core.ops` from page script
+- [x] `97ff86d` + `99647b4` - route render resource loads through the page transport
       (SSRF guard, blocklist, cookies, proxy); DOM-only screenshots stay network-free
-- [ ] `04418a5` C - fetch/XHR response confidentiality (`Set-Cookie`, unexposed
+- [x] `04418a5` C - fetch/XHR response confidentiality (`Set-Cookie`, unexposed
       headers, `no-cors`); `op_fetch_url` gains the `internalLoad` argument
-- [ ] `04f0475` + `05846de` - CORS preflight enforcement, CORS check per redirect hop
-- [ ] `ebe5973` - drop credentials on cross-origin redirects; only POST downgrades on 301/302
-- [ ] `04418a5` D - iframe same-origin check against the final URL
-- [ ] `4778192` - `op_navigate` must not move the page URL before commit
-- [ ] `b369f78` - `document.cookie` cannot write or delete HttpOnly cookies
-- [ ] `04418a5` B - cross-origin stylesheet confidentiality
-- [ ] `04418a5` F + `0671d94` - CDP token, Origin refusal, Host check; endpoint from Host
-- [ ] `04418a5` E - cookie jar RFC 6265bis rules, host-only persistence (`hostOnly` key)
-- [ ] `04418a5` H, `c2e6fb2`, `8395f29` - calc() nesting guard, random-bytes cap,
+- [x] `04f0475` + `05846de` - CORS preflight enforcement, CORS check per redirect hop
+- [x] `ebe5973` - drop credentials on cross-origin redirects; only POST downgrades on 301/302
+- [x] `04418a5` D - iframe same-origin check against the final URL
+- [x] `4778192` - `op_navigate` must not move the page URL before commit
+- [x] `b369f78` - `document.cookie` cannot write or delete HttpOnly cookies
+- [x] `04418a5` B - cross-origin stylesheet confidentiality
+- [x] `04418a5` F + `0671d94` - CDP token, Origin refusal, Host check; endpoint from Host
+- [x] `04418a5` E - cookie jar RFC 6265bis rules, host-only persistence (`hostOnly` key)
+- [x] `04418a5` H, `c2e6fb2`, `8395f29` - calc() nesting guard, random-bytes cap,
       oversized transform layer skipped rather than failing the capture
+
+Security follow-ups found while porting (not upstream fixes):
+
+- [ ] `__obscura_markTrusted` and the other `__obscura_*` helpers stay page-visible, as
+      upstream has them; page script can mark its own events trusted
+- [ ] Page-initiated navigations carry no initiator, so a cross-site one still sends
+      SameSite=Strict cookies (upstream behaves the same; Chromium withholds them).
+      Fixing it also changes `Referer` and `sec-fetch-site`
+- [ ] `no-cors` requests may carry `Authorization`; Chromium refuses non-safelisted
+      request headers in `no-cors` mode
+- [ ] `ImageAgent` has no SSRF check; it is reachable only from standalone `RenderPaint`
+      callers with no page (as upstream), since `Obscura.Render` cannot see `SsrfGuard`
+- [ ] `serve --workers` behind a DNS Host name: the loopback-bound workers refuse it until
+      a156914's `OBSCURA_CDP_FORWARDED_HOST/PORT` is ported
+- [ ] A `serve` process with stdin closed may still hit the fd-0 close at shutdown in
+      code paths other than the accept thread fixed here; audit `Socket.Dispose` under a
+      blocked call
 
 Correctness:
 
@@ -252,12 +273,25 @@ Decisions:
 
 - [ ] `d792bae` - keep every CDP page's isolate live; conflicts with "Page suspension
       stays". Measure memory, then decide (recommended: port, Chromium never suspends)
-- [ ] `343fdc7` `--font-dir` - conflicts with the embedded-fonts-only rule
+- [x] `343fdc7` `--font-dir` - ported as an opt-in: `serve --font-dir DIR` (repeatable,
+      forwarded to workers) and `BrowserConfig.FontDirectories` / `FontDirectory(...)`.
+      Unset, no file is read and layout is unchanged; set, it gives up identical output
+      across hosts, which is the operator's choice. See "Operator font directories" under
+      Known deviations
 
 Found during the review, not from upstream:
 
 - [ ] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
       caller, around line 796); repro in the review document
+- [ ] An inline `<span>` reports width 0 from `getBoundingClientRect()`; an `inline-block`
+      reports its real width (seen writing the font-directory CDP test)
+- [ ] Render loads on CDP pages other than the first produce no Network events:
+      `SyncLivePageNetworkEvents` forwards only the first live page
+- [ ] Timing-sensitive tests under heavy host load (the two worst IntersectionObserver ones now wait for the event instead of a fixed window): the IntersectionObserver/ResizeObserver
+      group in `RuntimeTests` (25/60 ms timer windows) and
+      `ConcurrentConnectionsHeavyPageDoNotAbortV8`; both pass alone and fail on the
+      unmodified base under the same load. `ForwardWaapiSampleUpdatesRetainedStyleAndPaint`
+      was reported failing on the base at low load once; it passes in full runs here
 
 ## Open issues
 
@@ -298,7 +332,7 @@ Found during the review, not from upstream:
 - **The ClearScript op boundary is ~3x the deno_core cost, down from ~20x.**
   Ops used to be registered with `ScriptObject.SetProperty(name, delegate)`,
   which routes every call from `bootstrap.js` through ClearScript's
-  reflection-based host-object dispatcher. `Obscura.Js.Ops.FastOpBinding` now
+  reflection-based host-object dispatcher. `PocketCalculator.Js.Ops.FastOpBinding` now
   wraps each op in a `V8FastHostFunction` (ClearScript 7.5), which hands the
   invoker V8's raw argument list instead. Measured in-page after warmup, same
   host, same V8, us/call:
@@ -428,50 +462,50 @@ Found during the review, not from upstream:
   between runs. Publishing the same project self-contained and then
   framework-dependent into different folders leaves stale intermediates that
   produce a binary which aborts on startup with no output.
-- **`Obscura.Net` still speaks `System.Uri`, so URLs are reserialized at the
-  transport boundary.** `Obscura.Browser` now keeps `UrlRecord` throughout, but
-  `Response.Url`, `Request.Url` and every `ObscuraHttpClient` entry point take a
-  `System.Uri`, and `Obscura.Browser.NetUrl` converts in both directions. In Rust
+- **`PocketCalculator.Net` still speaks `System.Uri`, so URLs are reserialized at the
+  transport boundary.** `PocketCalculator.Browser` now keeps `UrlRecord` throughout, but
+  `Response.Url`, `Request.Url` and every `PocketCalculatorHttpClient` entry point take a
+  `System.Uri`, and `PocketCalculator.Browser.NetUrl` converts in both directions. In Rust
   there is no such boundary: `obscura-net` takes and returns the `url` crate's
   `Url`. The visible effect left is the error text for a host `UrlRecord` accepts
   and `System.Uri` rejects (`http://a..b/`: the reference reports a DNS-shaped
   transport failure, the port reports one too but with the BCL's wording).
-  Removing it means moving `Obscura.Js/Url/**` into a project both `Obscura.Net`
-  and `Obscura.Js` can reference - `Obscura.Js` depends on `Obscura.Net`, so it
+  Removing it means moving `PocketCalculator.Js/Url/**` into a project both `PocketCalculator.Net`
+  and `PocketCalculator.Js` can reference - `PocketCalculator.Js` depends on `PocketCalculator.Net`, so it
   cannot go the other way. That mirrors the Rust tree, where `url` is a crate
   both depend on.
 
   Surveyed, not started. The cut is cleaner than the folder suggests, because
   only part of `Url/` is the `url` crate:
 
-  - **Moves** to a new `src/Obscura.Url/Obscura.Url.csproj` (namespace
-    `Obscura.Url`), which references nothing: `UrlRecord.cs`, `UrlParser.cs`,
+  - **Moves** to a new `src/PocketCalculator.Url/PocketCalculator.Url.csproj` (namespace
+    `PocketCalculator.Url`), which references nothing: `UrlRecord.cs`, `UrlParser.cs`,
     `UrlHost.cs`, `UrlParseError.cs`, `PercentEncoding.cs`, `Idna.cs`,
     `Punycode.cs`, `UnicodeNormalization.cs` - ~3.6k lines, no dependency on
-    anything outside themselves. `Obscura.Net`, `Obscura.Js`, `Obscura.Browser`,
-    `Obscura.Cdp`, `Obscura.Cli` and `Obscura` reference it; the solution gains
+    anything outside themselves. `PocketCalculator.Net`, `PocketCalculator.Js`, `PocketCalculator.Browser`,
+    `PocketCalculator.Cdp`, `PocketCalculator.Cli` and `Obscura` reference it; the solution gains
     one `<Project Path=.../>` line.
-  - **Stays** in `Obscura.Js`, because each depends on something `Obscura.Url`
+  - **Stays** in `PocketCalculator.Js`, because each depends on something `PocketCalculator.Url`
     must not: `UrlOps.cs` (the `ops.rs` layer - needs `OpGuard`),
-    `QueryEncoding.cs` (needs `Obscura.Net.WhatwgEncoding`), and
+    `QueryEncoding.cs` (needs `PocketCalculator.Net.WhatwgEncoding`), and
     `FormUrlEncoded.cs` / `PublicSuffixList.cs`, which only `UrlOps` calls.
-    Alternatively move `Obscura.Net/Encoding/WhatwgEncoding.cs` +
-    `SingleByteTables.cs` into `Obscura.Url` as well, mirroring `encoding_rs`
+    Alternatively move `PocketCalculator.Net/Encoding/WhatwgEncoding.cs` +
+    `SingleByteTables.cs` into `PocketCalculator.Url` as well, mirroring `encoding_rs`
     being a crate both depend on, and then all four move too.
-  - **`using Obscura.Js.Url;`** appears in 20 source files and 7 test files; the
-    moved types need it changed to `using Obscura.Url;`.
+  - **`using PocketCalculator.Js.Url;`** appears in 20 source files and 7 test files; the
+    moved types need it changed to `using PocketCalculator.Url;`.
 
   The transport conversion is the larger half: 59 `System.Uri` references across
-  7 files in `Obscura.Net` (`ObscuraHttpClient.cs` 28, `Requests.cs` 8,
+  7 files in `PocketCalculator.Net` (`PocketCalculatorHttpClient.cs` 28, `Requests.cs` 8,
   `CookieJar.cs` 8, `UrlOrigin.cs` 6, `StealthHttpClient.cs` 6, `SsrfGuard.cs` 3,
-  `ObscuraNetException.cs` 1). Four of them are behaviour, not signature, and
+  `PocketCalculatorNetException.cs` 1). Four of them are behaviour, not signature, and
   need their own test:
 
   - `CookieJar.HostOf` and `UrlOrigin.Host` strip brackets by testing
     `UriHostNameType.IPv6`; on a `UrlRecord` that is `HostKind.Ipv6`.
   - `SsrfGuard.ValidateUrl` switches on `UriHostNameType` to decide whether the
     host is a literal address - same replacement.
-  - `ObscuraHttpClient` resolves a redirect `Location` with
+  - `PocketCalculatorHttpClient` resolves a redirect `Location` with
     `Uri.TryCreate(currentUrl, locationString, out _)`; on a `UrlRecord` that is
     `Join`, which is WHATWG and therefore resolves a few `Location` values
     differently. That is the direction of the fix (it is what Rust does), but it
@@ -481,12 +515,12 @@ Found during the review, not from upstream:
     a transport error naming the URL, the way the reference reports it, instead
     of as a BCL `UriFormatException`.
 
-  Then `Obscura.Browser/NetUrl.cs` is deleted (15 call sites in `Page.cs`,
+  Then `PocketCalculator.Browser/NetUrl.cs` is deleted (15 call sites in `Page.cs`,
   `Page.Navigation.cs`, `Page.Capture.cs`, `Page.Scripts.cs`,
   `Page.Stylesheets.cs`), `Obscura/Api/Cookie.cs` loses its port-only
   "host not representable as a System.Uri" arm, and
-  `Obscura.Cli/Commands/FetchCommand.cs` + `Obscura.Js/Runtime/
-  ObscuraJsRuntime.Modules.cs` can stop gating on `Uri.TryCreate` and report the
+  `PocketCalculator.Cli/Commands/FetchCommand.cs` + `PocketCalculator.Js/Runtime/
+  PocketCalculatorJsRuntime.Modules.cs` can stop gating on `Uri.TryCreate` and report the
   `UrlParseError` reason like every other rejection does now.
 - **`ConcurrentConnectionsHeavyPageDoNotAbortV8` has room now, and still asserts
   on a 30s guard.** It drives four concurrent CDP connections against a
@@ -529,7 +563,7 @@ Found during the review, not from upstream:
   `Rc<RefCell<State>>`, so the five elements' completions are serialized by
   construction. In the port four of them ran at once against a plain
   `Dictionary` (`RenderResourceCache._entries` plus its `_order` list and byte
-  counter), a plain `Dictionary` (`ObscuraState.RenderImageInFlight`) and a plain
+  counter), a plain `Dictionary` (`PocketCalculatorState.RenderImageInFlight`) and a plain
   `List` (`PendingStyleMutations`, through `InvalidateRenderResourceGeometry`).
   Concurrent inserts lost entries outright - which is the seed that reads back
   unknown - and a lost in-flight removal is the stranded follower. The rest
@@ -539,7 +573,7 @@ Found during the review, not from upstream:
 
   Three changes, all host-side (bootstrap.js needed none):
 
-  - `ObscuraState.AsyncResourceGate`, taken around the whole post-fetch tail in
+  - `PocketCalculatorState.AsyncResourceGate`, taken around the whole post-fetch tail in
     `RenderOps.LoadImageMetadataAsync` - seed, invalidate, remove the in-flight
     entry, compute the result - and around the in-flight registration and the
     follower's `FinishAsyncImageMetadata`. Waiters are released outside it.
@@ -557,10 +591,10 @@ Found during the review, not from upstream:
   wall-clock bound is a proxy for. It is the startup-latency gap in this section,
   not a lifecycle bug.
 
-  Ruled out along the way: the `ObscuraHttpClient.ConnectCallback` change for IP
+  Ruled out along the way: the `PocketCalculatorHttpClient.ConnectCallback` change for IP
   literals, and thread-pool starvation from the harness's blocking handler
   (`RawHttpServer` already gives each connection a dedicated thread).
-- **FIXED - the two load-flaky `Obscura.Browser.Tests` cases.** Reproduced with
+- **FIXED - the two load-flaky `PocketCalculator.Browser.Tests` cases.** Reproduced with
   CPU burners on this 4-core box rather than by re-running the suite.
   `ModuleGraphAndEvaluationShareOneActiveBudget` failed 3 of 3 under six burners,
   always `[false, false]`: the module's whole 350ms budget went to fetching the
@@ -605,7 +639,7 @@ Found during the review, not from upstream:
 
 ## 9. Validation
 
-- [x] `Obscura.Parity.Tests` harness: runs a case through both binaries and diffs
+- [x] `PocketCalculator.Parity.Tests` harness: runs a case through both binaries and diffs
 - [x] `scripts/parity-sweep.sh` drives both engines over every fixture:
       **320 of 320 outputs byte-identical** (64 fixtures x text/links/html/
       markdown/assets). It now checks exit status as well, and reports a signal
@@ -614,7 +648,7 @@ Found during the review, not from upstream:
 - [x] `scripts/parity-sweep-scrape.sh` covers `scrape`, `serve` and the worker
       protocol: 169 cases, **165 identical**, the 4 remaining both traced to
       recorded deviations outside the CLI
-- [x] `Obscura.Parity.Tests`: **306 of 307**, one skipped. Includes the 17
+- [x] `PocketCalculator.Parity.Tests`: **306 of 307**, one skipped. Includes the 17
       `--eval` expressions and `UrlSerializationParityTests`, which pins page-URL
       serialization over 13 opaque-path cases.
 - [ ] Obstacle course (companion repo `obscura-benchmark`) at 33/33
@@ -1147,6 +1181,90 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Upstream security ports 727cc46..1a3169d
+
+Each is commented at its site. Where upstream and Chromium differ, Chromium wins.
+
+Page script and the shim:
+
+- `globalThis.Deno` is deleted after bootstrap in every realm (upstream 04418a5 A). The shim
+  closes over `__obscuraCore`; host script reaches the page through `__obscura_binding_called`
+  and `_wrap`. Only `PocketCalculator.Js.Tests` get `__obscura_test_ops`, through
+  `BootstrapLoader.ExposeOpsForTests` (upstream's cfg(test) `expose_ops_for_tests`).
+- Stylesheet ops use the closure-private `_realmFrameId`, not page-writable
+  `globalThis.__obscura_frameId`, so one realm's script cannot aim them at another's document.
+- `sheet.href` stays the request URL (CSSOM); upstream binds it to the response URL. The
+  response URL is kept privately for origin-clean writes.
+- A stylesheet is tainted when any redirect hop left the origin, not only the final URL
+  (Fetch response tainting): the dynamic path treats an opaque response as unclean, the static
+  path checks `Response.RedirectedFrom`.
+- Removing a linked `<link>` keeps its stored bytes, so re-appending restores the sheet as in
+  Chromium; upstream deletes them. `DomTree.ExternalStylesheetCss` skips a `<link disabled>`
+  instead of the shim writing an empty sheet. The store joins text on write, and
+  `op_external_stylesheet_set` invalidates the render only when the CSS changed.
+- `contentDocument` never treats the opaque origin `"null"` as same-origin. An iframe loads
+  through `op_fetch_url(..., internalLoad=true)`, since a public no-cors fetch() is now opaque.
+- The fallback `Response` keeps `status: 0` rather than reading it as 200.
+
+Network:
+
+- A redirect downgrades to GET only where Fetch says so: 301/302 for POST, 303 for anything but
+  GET/HEAD (`FetchOps.RedirectDowngradesToGet`). Rust downgrades every 301/302/303.
+- The `Fetch.fulfillRequest` result for `op_fetch_url` omits `bodyBase64` (Rust has it since
+  #912, not ported); the C# fulfill body is text only.
+- Cookies: an empty `Domain=` is ignored (host-only), not rejected; on an IP host only the exact
+  address is accepted, as a host cookie; `CookieJar.IsSameSite` treats an IP as its own site
+  (Rust's psl groups IPs by their last two octets). The CDP server's cookie delta merge keeps
+  host-only scope, which Rust widens. The curated public suffix list (see "The public suffix
+  list is curated") now also governs cookies.
+
+Rendering:
+
+- After a capture, the CLI and MCP screenshot paths load what that capture's own layout missed
+  through the transport and capture again (`Page.LoadCaptureMissesAsync`); upstream leaves those
+  bytes out of that capture. Chromium would have loaded them, and the port used to fetch them
+  synchronously, so this keeps what those pages showed.
+- The autonomous CDP turn awaits to completion instead of being cancelled by an arriving
+  command, so waiting on a pending render load is capped at 50 ms and the pump stays armed.
+- A runtime with no transport drops the misses a capture records (its next synchronous layout
+  loads them) instead of marking them missing. Each document's loads are one object, retired
+  and replaced on a new document (upstream swaps an mpsc channel); the applied-event backlog is
+  capped at 1024; `data:` URLs are skipped in the warm-up scan.
+
+Servers:
+
+- CDP Host check (`Server.Control.cs` `HostAllowed`) follows Chromium's
+  `RequestIsSafeToServe`: no Host, any IP literal, or `localhost` / `*.localhost` on any port;
+  a wildcard bind accepts any Host. Upstream requires the bind IP and port and refuses a
+  missing Host, which breaks tunnels, port forwards and the multi-worker balancer.
+- Multi-worker `serve` refuses a non-loopback balancer bind without `POCKETCALCULATOR_CDP_TOKEN`
+  (32+ bytes). Upstream 04418a5 left it open; a156914 closed it another way.
+- CDP refusals drain the unread request and half-close before closing, so the client reads the
+  401/403/431 rather than a reset; Rust drops the stream.
+- CDP shutdown stops the accept thread before disposing the listener: disposing it under a
+  blocked `Accept()` made .NET close fd 0, which in a process with stdin closed is some other
+  live handle.
+
+### Operator font directories load per render pass, not into a cached base database
+
+Upstream 343fdc7 adds `serve --font-dir DIR`: `ttf/ttc/otf/otc` files found recursively
+(symlinks skipped, paths sorted, each file once) join the base font database, configured
+once per process before the first render. The port keeps all of that observable behaviour
+(`PocketCalculator.Render/Inline/FontDirectories.cs`), with three differences:
+
+- The files are read once into memory and each `TextEngine` loads them after the embedded
+  faces, the way it loads the embedded faces, since upstream's cross-document database
+  cache is not ported yet (open item `343fdc7` (cache only) above).
+- C# has no `render` feature, so the flag is always available rather than render-only.
+- The library exposes it too (`BrowserConfig.FontDirectories`), where upstream only has the
+  CLI flag. A missing or non-directory path fails with upstream's CLI message,
+  `Font directory does not exist or is not a directory: <path>`, and a second, different
+  configuration after the first render is refused rather than silently ignored.
+
+This relaxes "the engine never uses host fonts" only on request: with nothing configured
+no file is read and output is byte-identical to before. Faces still load with
+`SKTypeface.FromData`, never `FromFamilyName`, and no fontconfig is involved.
+
 ### A linked stylesheet leaves no element in the DOM
 
 `crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic
@@ -1188,7 +1306,7 @@ Two residuals on that fixture are **not** this change and are tracked separately
 a block that also has block children reports an all-zero rect (487 of the 491 remaining distance),
 and a `br` under `line-height: 10px` reports height 20 where Chromium gives 17.
 
-`dotnet/tests/Obscura.Render.Tests/ForcedBreakLineBoxTests.cs` pins the behaviour.
+`dotnet/tests/PocketCalculator.Render.Tests/ForcedBreakLineBoxTests.cs` pins the behaviour.
 
 ### `ch` and `ex` are measured on the element's own face, not scaled from the font size
 
@@ -1198,7 +1316,7 @@ it resolves a length: it scales the font size by one fixed fraction per unit, an
 unit at all. This port inherited that and added `ch` as a second constant, `1139/2048` - Liberation
 Sans' digit advance - so every page got Liberation Sans' `ch` whatever it asked for.
 
-DEVIATION from crates/obscura-render/src/style.rs. `Obscura.Render.FontUnits` carries the pixel
+DEVIATION from crates/obscura-render/src/style.rs. `PocketCalculator.Render.FontUnits` carries the pixel
 size of `em`, `ch` and `ex` together, and `FontUnitResolver` measures the latter two on the face
 `FontResolution.ResolveLoadedFont` selects - the same decision the text engine shapes with. The `0`
 advance is read through HarfBuzz at the face's design em; the x-height is `OS/2.sxHeight` via
@@ -1274,7 +1392,7 @@ inherits `font-family` / `font-weight` / `font-style`, so the resolver reads tho
 that block will (`style.X ?? inh.X`) rather than the pass being reordered. `font-size: 2ch`
 correctly uses the *parent's* face.
 
-`dotnet/tests/Obscura.Render.Tests/FontRelativeUnitTests.cs` pins the behaviour (11 facts, 8 of
+`dotnet/tests/PocketCalculator.Render.Tests/FontRelativeUnitTests.cs` pins the behaviour (11 facts, 8 of
 which fail at the parent commit; of the other three one does not compile there because
 `FontUnitResolver` does not exist, one is vacuous while every unit is a single constant, and one is
 the em/rem/viewport regression fence that correctly passes both sides).
@@ -1287,7 +1405,7 @@ engine's speed that is affordable. The port is slower per pass - 77ms for a 2059
 whole-document prepare, which is finding F39.
 
 DEVIATION from crates/obscura-render/src/dom.rs, which has no equivalent.
-`Obscura.Render.RetainedLayoutReuse` is a gate in front of the layout half of a retained
+`PocketCalculator.Render.RetainedLayoutReuse` is a gate in front of the layout half of a retained
 restyle. At the end of the top-down pass - the last point at which this pass's style objects
 are comparable to the ones the previous layout was produced from - it compares every element
 the cascade recomputed against the style object it replaced. If nothing differs, or the only
@@ -1303,7 +1421,7 @@ no container queries and the dirty set is at most 512 elements. A tree, text, re
 animation mutation never reaches it.
 
 `OBSCURA_DISABLE_RETAINED_LAYOUT_REUSE=1` turns it off, which is how the A/B below was measured
-on one binary. `dotnet/tests/Obscura.Render.Tests/RetainedLayoutReuseTests.cs` pins the
+on one binary. `dotnet/tests/PocketCalculator.Render.Tests/RetainedLayoutReuseTests.cs` pins the
 behaviour (10 facts), each against a full from-scratch layout of the same mutated tree.
 
 Measured on `thrash.html` (2059 nodes), 50 (write, read) pairs, three interleaved runs each,
@@ -1330,7 +1448,7 @@ the thread pool, so five `<img>` elements meant five threads writing plain
 collections, and entries were lost - a seeded image read back as unknown and the
 shim reported a load error for bytes it had successfully fetched.
 
-The port therefore has something Rust has no need for: `ObscuraState.AsyncResourceGate`,
+The port therefore has something Rust has no need for: `PocketCalculatorState.AsyncResourceGate`,
 taken around the whole post-fetch tail of `RenderOps.LoadImageMetadataAsync`, and a
 lock inside `RenderResourceCache` over the retained byte cache (the renderer reads it
 from the pump thread while a page-transport seed writes it from a pool thread, so the
@@ -1348,7 +1466,7 @@ then 12 of 12 after.
 
 ### An idle verdict during an explicit settle is confirmed against the page
 
-`ObscuraJsRuntime.RunEventLoopUntilQuiescentAsync` no longer stops the moment `PumpTick`
+`PocketCalculatorJsRuntime.RunEventLoopUntilQuiescentAsync` no longer stops the moment `PumpTick`
 reports `LoopTick.Idle`: while `__obscura_hasPendingDynamicScripts()` is still true the tick is
 demoted to `Waiting` and the loop parks and re-pumps. `budget` still bounds it, so it cannot
 hang.
@@ -1357,25 +1475,25 @@ DEVIATION from `crates/obscura-js`, which cannot reach this state. deno_core res
 op's promise inside `poll_event_loop`, so `has_pending_ops` stays true until the page's
 continuation has been delivered. In the port an op is a `Task` whose promise ClearScript
 resolves from its continuation, and the only host-side evidence of the request -
-`ObscuraState.PageInFlight` - is dropped in `FetchOps.FetchUrlAsync`'s `finally`, which runs
+`PocketCalculatorState.PageInFlight` - is dropped in `FetchOps.FetchUrlAsync`'s `finally`, which runs
 *before* that `Task` completes. A settle landing in that window saw no timers, no posted tasks
 and nothing in flight, called itself idle, and returned with most of its budget unspent while a
 dynamically inserted external script was still waiting for its body.
 
 It only showed under load, which is why it read as a flaky test rather than a defect:
-`Obscura.Cdp.Tests.DynamicScriptOnloadFires.DynamicExternalScriptsExecuteAndFireLoad` failed 1
+`PocketCalculator.Cdp.Tests.DynamicScriptOnloadFires.DynamicExternalScriptsExecuteAndFireLoad` failed 1
 of 12 full-suite runs, 2 of 7 with `-maxThreads 16`, and 0 of 10 and 0 of 5 after. Widening the
 window artificially made it deterministic before the fix and harmless after it, out to a 200ms
 gap.
 
-That gap is now closed generally, one layer down. `Obscura.Js.Ops.AsyncOpBinding` binds every
+That gap is now closed generally, one layer down. `PocketCalculator.Js.Ops.AsyncOpBinding` binds every
 `Task`-returning op through a JavaScript shim that increments a counter where the op is called
 and decrements it from a reaction on the op's *own* promise. A promise reaction can only run
 inside a microtask checkpoint, and the loop evaluates its idle verdict after the checkpoint it
 performs rather than during one, so the count outlives the promise resolution for exactly as
 long as deno_core's `has_pending_ops` does. The shim's reaction is registered before the page
 gets the promise, so the page's continuation runs later in the same drain and anything it
-schedules is registered before the loop asks whether it is idle. `ObscuraJsRuntime` implements
+schedules is registered before the loop asks whether it is idle. `PocketCalculatorJsRuntime` implements
 `IAsyncOpTracker` over `_pendingAsyncOps`, which `PumpTick` already read.
 
 `TrackAsyncOp` / `AsyncOpScope` are gone. **An earlier version of this entry called them dead
@@ -1387,7 +1505,7 @@ The `HasPendingDynamicScripts()` confirmation stays, for the work that is not an
 dynamic script between its body arriving and its evaluation, and a module the loader is still
 resolving.
 
-Regression: `Obscura.Js.Tests.RuntimeTests.SettleWaitsForAnOutstandingAsyncOpContinuation`. It
+Regression: `PocketCalculator.Js.Tests.RuntimeTests.SettleWaitsForAnOutstandingAsyncOpContinuation`. It
 uses `op_sleep`, the plainest async op there is - no host timer, no posted task, nothing in
 flight - so the op itself is the only evidence the page is owed a continuation, and it needs no
 artificial widening. Verified by reverting rather than by reasoning: 5 of 5 runs fail with the
@@ -1864,7 +1982,7 @@ inherited list is empty would remove.
 ### One watchdog thread services every arm, instead of one thread per arm
 
 `Watchdog.Spawn` used to `new Thread(...)` for every armed watchdog and `Stop()` used to
-`Thread.Join()` it. `ObscuraJsRuntime.RunEventLoopBoundedAsync` arms one **per event-loop tick**
+`Thread.Join()` it. `PocketCalculatorJsRuntime.RunEventLoopBoundedAsync` arms one **per event-loop tick**
 and every CDP command arms one, so the cost was unbounded in the number of ticks. On a small box
 running the suite at high parallelism it aborted the process outright:
 `Fatal error. ResumeThread failed with error 6` out of `Thread.StartCore` <- `Watchdog.Spawn` <-
@@ -1889,7 +2007,7 @@ slots would pin its `V8ScriptEngine`, and through it a whole document.
 Measured: 2000 arm+stop pairs add **0** threads and take **7ms** in total, where before each one
 started and joined an OS thread. A runaway `while (true) {}` is still interrupted at 256ms
 against a 250ms budget, and `Stop()` still reports that it fired.
-`Obscura.Js.Tests.WatchdogSchedulerTests` pins all three.
+`PocketCalculator.Js.Tests.WatchdogSchedulerTests` pins all three.
 
 ### What the CDP pool move did and did not change
 
@@ -1951,7 +2069,7 @@ handler in the same process, so it is not engine code and there is no fix here s
 longer.
 
 Ruled out by separate measured runs: the fixture alone (3600 requests through it were clean),
-`Obscura.Net`'s custom `ConnectCallback`, the aggressive gen2 GC from 81c6ea8, V8 isolate churn,
+`PocketCalculator.Net`'s custom `ConnectCallback`, the aggressive gen2 GC from 81c6ea8, V8 isolate churn,
 and the CDP accept loop.
 
 ### Shaped paragraphs are carried across render passes
@@ -1964,7 +2082,7 @@ are exactly the passes that pay for shaping. A container-query prepare re-lays t
 several times inside one prepare and paid for it each time.
 
 DEVIATION from `crates/obscura-render`, which builds its `TextEngine` per pass too and can
-afford to reshape; HarfBuzz through P/Invoke cannot. `Obscura.Render.ShapeCache` holds shaped
+afford to reshape; HarfBuzz through P/Invoke cannot. `PocketCalculator.Render.ShapeCache` holds shaped
 paragraphs and `TextEngine.AdoptShapeCache` takes over the previous pass's cache - but only when
 both passes were built from the same web-font set, so a face arriving later discards it
 wholesale. The key covers every input the shaper reads, `TextAttrs.FontId` included, which pins
@@ -1989,8 +2107,8 @@ and off, all 40 byte-identical. `OBSCURA_DISABLE_SHAPE_CACHE=1` is the switch th
 (`[MethodImpl(MethodImplOptions.NoInlining)]`) rather than scanning inline. The worker parks on
 `Monitor.Wait` for as long as nothing is armed, and a `Slot` left in that frame's stack slots is
 a GC root for that whole time. A `Slot` holds a `V8IsolateHandle`, and through ClearScript's
-`V8ScriptEngine -> DocumentSettings -> RecordingModuleLoader -> ObscuraJsRuntime ->
-ObscuraState -> PreparedRender` that is the entire previous document - about 440 MB on a
+`V8ScriptEngine -> DocumentSettings -> RecordingModuleLoader -> PocketCalculatorJsRuntime ->
+PocketCalculatorState -> PreparedRender` that is the entire previous document - about 440 MB on a
 60k-node page, held from the moment a command disarmed until the next one armed. So every
 navigation built its new document with the old one still fully resident, and no collection
 could reclaim it.
@@ -2117,7 +2235,7 @@ against a correct parent instead of an inflated one. +0.0062 mean abs, one more 
 ### The MutationObserver shim follows DOM 4.3.4; the Rust shim's registration rules are wrong
 
 `bootstrap.js` is the port's own copy now (CLAUDE.md rule 5), and the shim in
-`dotnet/src/Obscura.Js/js/bootstrap.js` diverges from the one in
+`dotnet/src/PocketCalculator.Js/js/bootstrap.js` diverges from the one in
 `crates/obscura-js/js/bootstrap.js` in four places, all of them bugs against DOM 4.3.4 and
 against Chromium. Measured with `mo2probe.html` (expected / Rust shim / this one):
 
@@ -2140,9 +2258,9 @@ against Chromium. Measured with `mo2probe.html` (expected / Rust shim / this one
   observer queued 20,000 jobs to deliver one callback.
 
 Delivery *placement* was never the problem: the notify set is drained by
-`ObscuraJsRuntime.PumpTick`'s `PerformMicrotaskCheckpoint()`, at the top of the turn and after
+`PocketCalculatorJsRuntime.PumpTick`'s `PerformMicrotaskCheckpoint()`, at the top of the turn and after
 every posted task and timer callback, which is where the HTML event loop puts it. Covered by
-`Obscura.Js.Tests/MutationObserverTests.cs` (7 facts). Worth carrying back to the Rust shim if
+`PocketCalculator.Js.Tests/MutationObserverTests.cs` (7 facts). Worth carrying back to the Rust shim if
 `crates/` ever stops being read-only.
 
 ### Shaped inline items flush before a level's positive z-index layers, not after them
@@ -2178,7 +2296,7 @@ assigns them, and `bootstrap.js` models that with two globals keyed by node id
 Chromium 141 paints "My awesome space".
 
 `bootstrap.js` is shared verbatim with the Rust engine, so the fix sits on this side of
-the boundary: `Obscura.Js.Runtime.FormStateMirror` installs both globals as proxies
+the boundary: `PocketCalculator.Js.Runtime.FormStateMirror` installs both globals as proxies
 *before* bootstrap.js runs (it adopts them, `globalThis.X = globalThis.X || {}`), and
 their write traps forward to two op_dom commands the Rust op table does not have,
 `set_form_value` / `set_form_checked`. Those land in `DomTree`'s dirty-form-state tables,
@@ -2196,7 +2314,7 @@ attributes, so a script-driven state change restyles only what the attribute say
 an unstyled checkbox and radio are blank, a range input has no thumb, and a date/time
 input is an empty box sized as though it were a 20-character text field, which collapses a
 shrink-to-fit ancestor around it (Curiosity Workspace's `.tss-daterange-picker` measured
-80px against Chromium's 324px). `Obscura.Render.PaintNativeControls` paints all of them,
+80px against Chromium's 324px). `PocketCalculator.Render.PaintNativeControls` paints all of them,
 and three pieces of it are worth knowing:
 
 - **`::-webkit-slider-thumb` is matched and cascaded properly**, not replaced by a UA
@@ -2245,9 +2363,9 @@ second form: `Unhandled exception. System.ObjectDisposedException ... at
 V8SplitProxyManaged.<get_InvokePromiseRejectionCallbackFastMethodPtr>g__Thunk`.
 
 So `DenoCoreShim.Report` contains every exception, the interrupt included, and suspends
-further delivery until `ObscuraJsRuntime.CancelTermination` clears the termination (a
+further delivery until `PocketCalculatorJsRuntime.CancelTermination` clears the termination (a
 terminated page can raise thousands of rejections, each one a re-entry). And
-`DenoCoreShim.Detach` unregisters the hook before `ObscuraJsRuntime.Dispose` /
+`DenoCoreShim.Detach` unregisters the hook before `PocketCalculatorJsRuntime.Dispose` /
 `FrameRealm.Dispose` destroy the engine, which is the actual fix for the disposed-engine
 form: the catch cannot reach an exception thrown inside the thunk.
 
@@ -2799,7 +2917,7 @@ and `a` is `pointer` when it has an `href` - which is why that one is set in
 `DomCascade` rather than in the tag-keyed `UaStyle`.
 
 `pointer-events` is reporting only. Hit testing runs in JavaScript through
-`document.elementFromPoint` in `Obscura.Js`, which does not consult the cascade, so
+`document.elementFromPoint` in `PocketCalculator.Js`, which does not consult the cascade, so
 making the property behavioural is a separate change there.
 
 Covered by `CursorAndPointerEventsAreModelled` and
@@ -2824,7 +2942,7 @@ the `margin` / `padding` / `border-width` / `border-style` / `border-color` /
 snapshot falls through to bootstrap's inline-declaration fallback, which answers
 the empty string or a box-derived number, so ~1700 of 1715 measured element pairs
 read a wrong value. Covered by
-`dotnet/tests/Obscura.Render.Tests/ComputedStyleSnapshotTests.cs`, whose
+`dotnet/tests/PocketCalculator.Render.Tests/ComputedStyleSnapshotTests.cs`, whose
 expectations are all taken from Chromium.
 
 `cursor`, `pointer-events` and the `font-family` casing were on that list and are
@@ -3163,7 +3281,7 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   surfaces and logs that TLS impersonation is inactive.
 - **HTML parsing delegates to AngleSharp** instead of porting `html5ever`.
   AngleSharp is fully managed and spec-compliant; its DOM is adapted into
-  Obscura's arena tree at parse time and never escapes `Obscura.Dom`. Two behaviors
+  Obscura's arena tree at parse time and never escapes `PocketCalculator.Dom`. Two behaviors
   html5ever exposed through its `TreeSink` are reimplemented on the adapter because
   AngleSharp has no equivalent: declarative shadow roots
   (`<template shadowrootmode>`, including the valid-shadow-host allowlist) and the
@@ -3200,7 +3318,7 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   WHATWG legacy set (GBK, Big5, Shift_JIS, EUC-JP/KR, windows-125x, ISO-8859-x),
   which older .NET Core releases only had via `System.Text.Encoding.CodePages`.
   On `net10.0` `CodePagesEncodingProvider` is in the shared framework, so
-  `Obscura.Net` registers the provider and takes no package reference at all;
+  `PocketCalculator.Net` registers the provider and takes no package reference at all;
   the `PackageVersion` entry in `Directory.Packages.props` is unused and can be
   dropped.
   The three pages the framework still lacks (ISO-8859-10, ISO-8859-14,
@@ -3212,7 +3330,7 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   `Encoding/WhatwgEncoding.cs` carries the standard's label -> canonical-name
   table and maps canonical names onto code pages. `label_name` and
   `document.characterSet` therefore report the WHATWG spelling, as in Rust.
-- **`ObscuraHttpClient` follows redirects by hand and owns cookies.**
+- **`PocketCalculatorHttpClient` follows redirects by hand and owns cookies.**
   `SocketsHttpHandler` is configured with `AllowAutoRedirect = false` and
   `UseCookies = false` so the SSRF gate, the CORS check and the `CookieJar` see
   every hop, exactly as the reqwest client does with `Policy::none()`.
@@ -3249,10 +3367,10 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   in Chrome's navigation order; `HttpRequestMessage` serializes in its own order.
   Every header value matches; only the ordering differs, which the stealth
   surfaces would care about and the tracked TLS gap already covers.
-- **`Obscura.Net` no longer references `Obscura.Dom`.** `crates/obscura-net` has no
+- **`PocketCalculator.Net` no longer references `PocketCalculator.Dom`.** `crates/obscura-net` has no
   `obscura-dom` dependency; the scaffold's project reference was removed so the
   two areas can be built and tested independently.
-- **Obscura.Dom selector-engine differences**, all verified as behavior-preserving:
+- **PocketCalculator.Dom selector-engine differences**, all verified as behavior-preserving:
   - The bloom filter uses one djb2 hash where Rust uses two different hashers.
     Self-consistent between the selector and element sides, so the only effect
     is a marginally higher false-positive rate, never a missed match.
@@ -3419,7 +3537,7 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   process-per-test requirement) does not apply. Tests run in-process.
 
 - **`Page` is `IDisposable` and assigning `Page.Js` disposes the previous
-  runtime.** Rust drops the old `Option<ObscuraJsRuntime>` on assignment and the
+  runtime.** Rust drops the old `Option<PocketCalculatorJsRuntime>` on assignment and the
   isolate goes with it; ClearScript needs an explicit `Dispose`, and a leaked
   `V8ScriptEngine` wedges the process. The property setter therefore has the
   side effect Rust's move already had, which is what makes `init_js`,
@@ -3456,7 +3574,7 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   equivalent would depend on when the GC runs, so `encode_pdf_pages` calls
   `RasterPage.Release()` in a `finally` before requesting the next page and the
   test asserts on that. Same invariant, deterministic.
-- **`Obscura.Browser` takes a direct `SkiaSharp` reference** for the PDF
+- **`PocketCalculator.Browser` takes a direct `SkiaSharp` reference** for the PDF
   exporter's JPEG encode and PNG decode, which is what the `image` crate does
   for `pdf.rs`. No new native dependency: it is the same `libSkiaSharp` the
   render layer already loads.
@@ -3469,14 +3587,14 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   that set it explicitly; the port sets it up front rather than depending on
   test order.
 
-### Bugs found in the layers below Obscura.Browser (not fixed here)
+### Bugs found in the layers below PocketCalculator.Browser (not fixed here)
 
 Each of these is pinned by a written-but-skipped test in
-`Obscura.Browser.Tests` or `Obscura.Js.Tests`, with the blocker named in the
+`PocketCalculator.Browser.Tests` or `PocketCalculator.Js.Tests`, with the blocker named in the
 skip reason.
 
 - **`op_frame_document_ready` records the wrong parent frame.** It reads the
-  calling realm from `ObscuraOps.RealmState()`, which resolves
+  calling realm from `PocketCalculatorOps.RealmState()`, which resolves
   `RealmStates.Current` - and the runtime only sets that around *synchronous*
   host entries into a realm. `bootstrap.js` calls the op from inside
   `fetch(...).then(...)` in `_loadIframeSrc`, so a frame created by a frame's
@@ -3486,12 +3604,12 @@ skip reason.
   doubly-nested frame point at the page, and the detach sweep cannot discard a
   grandchild when its parent frame is removed. Pinned by
   `PageTests.DetachingAParentDiscardsItsQueuedDescendantWork`.
-- **There are two import maps.** `ObscuraJsRuntime` builds
-  `new ObscuraModuleLoader(baseUrl, proxyUrl)`, which allocates its own
+- **There are two import maps.** `PocketCalculatorJsRuntime` builds
+  `new PocketCalculatorModuleLoader(baseUrl, proxyUrl)`, which allocates its own
   `new ImportMap()`, while `op_add_import_map` writes into
-  `ObscuraState.ImportMap`. Any import map registered from page JavaScript (a
+  `PocketCalculatorState.ImportMap`. Any import map registered from page JavaScript (a
   script-inserted `<script type="importmap">`) is therefore silently dropped;
-  only maps registered through `ObscuraJsRuntime.AddImportMap` (the path `Page`
+  only maps registered through `PocketCalculatorJsRuntime.AddImportMap` (the path `Page`
   uses for parser-discovered maps) take effect. Rust shares one
   `Rc<RefCell<ImportMap>>` between the op state and the loader
   (`runtime.rs`: `let import_map = state.borrow().import_map.clone();`). Pinned
@@ -3524,7 +3642,7 @@ fired `load`, and published nothing: `globalThis.lib` stayed `undefined` and eve
 a later `eval('lib')` threw. Chromium evaluates the element as a top-level classic
 script, where those declarations create global bindings whatever the strictness.
 Parser-inserted scripts were never affected; they go through
-`Page.ExecuteClassic` -> `ObscuraJsRuntime.ExecuteScript`, which already compiles
+`Page.ExecuteClassic` -> `PocketCalculatorJsRuntime.ExecuteScript`, which already compiles
 a script.
 
 The fix belongs in the shim, which is shared with Rust and read-only here (rule 1),
@@ -3649,7 +3767,7 @@ happily - an inline-block whose used width is fractional still reads back as
 `221.4px` today.
 
 The integers come from taffy's layout rounding: `Compute.RoundLayout`
-(`Obscura.Render/Layout/Compute.cs`), driven from `TaffyTree.cs`, snaps every
+(`PocketCalculator.Render/Layout/Compute.cs`), driven from `TaffyTree.cs`, snaps every
 rect to whole pixels, which is what the reference engine does and what Chromium
 does not. Fixing it means giving the CSSOM and rect paths an unrounded layout to
 read, which is a renderer change; it is recorded here and left alone.
@@ -3661,7 +3779,7 @@ side on a trivial page with a `window` marker and `hashchange` / `popstate` coun
 four are fixed on the C# and shared-shim sides; `crates/` has the same gaps.
 
 - **`Page.navigate` to a URL differing only in the fragment refetched the document.**
-  `Page.TryNavigateSameDocumentAsync` (`Obscura.Browser/Page.Navigation.cs`) now asks
+  `Page.TryNavigateSameDocumentAsync` (`PocketCalculator.Browser/Page.Navigation.cs`) now asks
   `bootstrap.js` whether the target is same-document and, if so, performs it there: no
   request, the realm and every `window` property intact, `Page.navigatedWithinDocument`
   instead of a `Page.frameNavigated` + load cycle. Both navigate entry points consult it -
@@ -3679,7 +3797,7 @@ four are fixed on the C# and shared-shim sides; `crates/` has the same gaps.
   moved out of them and into the location-driven path, which is where it belongs; a router
   that both pushes state and listens for `hashchange` was routing twice per navigation.
 - **Clicking an `<a href="#/x">` did nothing.** Both click paths - `Element.click()` in
-  `bootstrap.js` and the CDP mouse path's `MouseReleasedJs` (`Obscura.Cdp/Domains/Input.cs`,
+  `bootstrap.js` and the CDP mouse path's `MouseReleasedJs` (`PocketCalculator.Cdp/Domains/Input.cs`,
   which mirrors `crates/obscura-cdp/src/domains/input.rs`) - skipped a fragment href
   outright. That was correct back when `location.assign` tore the document down; it now
   means an in-page link, how most single page apps route, was inert.
@@ -3693,8 +3811,8 @@ Measured on the Curiosity Workspace SPA: walking seven hash routes now costs zer
 requests and keeps one long-lived app instance, with node counts within two of Chromium on
 every route. Before, the app rebooted on each.
 
-Pinned by `FragmentNavigationTests` (12 facts, `Obscura.Js.Tests`) and
-`SameDocumentNavigationEvents` (6 facts, `Obscura.Cdp.Tests`).
+Pinned by `FragmentNavigationTests` (12 facts, `PocketCalculator.Js.Tests`) and
+`SameDocumentNavigationEvents` (6 facts, `PocketCalculator.Cdp.Tests`).
 
 ### The SVG viewport is a real viewport, and an `overflow: visible` raster grows right/down
 
@@ -3728,7 +3846,7 @@ which is the same "skip what usvg cannot represent" rule the rest of the file fo
 because Skia treats a layer's bounds as a rasterization hint that an image filter expands
 past.
 
-Pinned by `SvgViewportTests` (13 facts, `Obscura.Render.Tests`).
+Pinned by `SvgViewportTests` (13 facts, `PocketCalculator.Render.Tests`).
 
 ### An SVG shape answers `getBoundingClientRect()`, and the reference has nothing to port
 
@@ -3742,7 +3860,7 @@ route of the Tesserae sample app (143 `circle`, 116 `text`, 44 `rect`, 43 `line`
 7 `g`), with no other divergence on that route at all. Charting libraries measure their own
 output, so a whole class of app is unmeasurable without it.
 
-`SvgBoxes` (`Obscura.Render/Dom/SvgBoxes.cs`) is a post-layout pass that walks the SVG
+`SvgBoxes` (`PocketCalculator.Render/Dom/SvgBoxes.cs`) is a post-layout pass that walks the SVG
 rendering tree of every outermost `<svg>` that got a box, resolves each element's user-space
 box through the viewport and `transform` chain, and writes document-space rects into
 `DomLayout.SvgRects`. `PreparedRender.DocumentRect` / `FragmentSource` fall back to that map.
@@ -3779,7 +3897,7 @@ Three deliberate deviations inside it:
 `SvgRenderer.ShapePath` was generalized to `(tag, attribute-accessor)` so the raster's parsed
 `XElement` document and this pass's live DOM nodes build shape geometry from the same code.
 
-Pinned by `SvgBoxTests` (10 facts, `Obscura.Render.Tests`).
+Pinned by `SvgBoxTests` (10 facts, `PocketCalculator.Render.Tests`).
 
 ### A text control's intrinsic width comes from the face's metrics, not a fixed em fraction
 
@@ -3803,7 +3921,7 @@ Blink rounding the metric but never below the real advance: at 13px Liberation S
 7.668 and Chromium multiplies by 8, while at 16px it measures 9.4375 and Chromium multiplies
 by 9.4375. A face with no usable OS/2 entry falls back to the advance of `0`, as Blink does.
 
-`FaceMetrics` carries the two new values (`Obscura.Render.Inline`), `TextEngine
+`FaceMetrics` carries the two new values (`PocketCalculator.Render.Inline`), `TextEngine
 .ControlCharacterMetrics` scales them, and `LayoutDomControls` applies the two formulas.
 
 What is left is a font difference, not a formula difference: an `<input>` with no

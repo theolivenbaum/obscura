@@ -86,7 +86,7 @@ Build the reference binary once:
 export OBSCURA_RUST_BIN="$PWD/.reference/obscura/target/release/obscura"
 ```
 
-`dotnet/tests/Obscura.Parity.Tests` skips itself when `OBSCURA_RUST_BIN` is
+`dotnet/tests/PocketCalculator.Parity.Tests` skips itself when `OBSCURA_RUST_BIN` is
 unset, so parity coverage silently disappears if you forget to export it. Check
 that the parity tests actually ran before claiming a component is done.
 

@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-Guidance for AI coding agents working on the **C# / .NET 10 port of Obscura**.
+Guidance for AI coding agents working on **PocketCalculator**, the C# / .NET 10
+port of Obscura.
 
 Obscura is a headless browser engine: it runs real JavaScript through V8, keeps
 a real DOM tree, owns its layout and paint pipeline, speaks the Chrome DevTools
@@ -12,6 +13,20 @@ deliverable is the C# engine under `dotnet/`; the original Rust tree lives in
 the baseline for merging newer upstream work (see "Merging upstream changes").
 
 Read `todo.md` for the live port status and the ordered work queue.
+
+**Naming.** The port's own names are PocketCalculator's: projects, assemblies,
+namespaces and types (`PocketCalculator.*`), the NuGet packages, the CLI
+executable (`pocket-calculator`, with `pocket-calculator-worker`) and the
+engine's environment variables (`POCKETCALCULATOR_*`). Names that pages and
+clients observe on the wire keep Obscura's, because they are behaviour rather
+than branding: the `__obscura_*` globals and other names in `bootstrap.js`,
+`data-obscura-ref`, `obscura://` URIs, the MCP `serverInfo` name, the `obscura*`
+keys in CDP payloads, and the `X-Obscura-Reason` header. `OBSCURA_RUST_BIN`
+keeps its name because it points at the Rust reference, and anything that runs
+both engines (the parity harness, `scripts/`, `render-repros/`) sets both
+`OBSCURA_*` and `POCKETCALCULATOR_*`. The parity assertions map the port's own
+name back to `obscura` before comparing output (`ParityAssert.UnbrandPort`).
+Prose that means the upstream project, and the Rust tree, still say Obscura.
 
 **Paths into the reference.** The Rust tree used to sit at the repository root
 and now sits under `.reference/obscura/`. Comments in C#, `todo.md` and
@@ -65,7 +80,7 @@ comments to rewrite them.
    dependency needs an explicit decision recorded in `todo.md` first. In
    particular: no native TLS stack, which is why stealth TLS impersonation is
    a tracked gap rather than a port target.
-5. **`bootstrap.js` is ours now.** `dotnet/src/Obscura.Js/js/bootstrap.js` began
+5. **`bootstrap.js` is ours now.** `dotnet/src/PocketCalculator.Js/js/bootstrap.js` began
    as a verbatim copy of `crates/obscura-js/js/bootstrap.js` and is embedded from
    that local path. It used to be linked out of the Rust tree so the two engines
    could not drift, but the Rust tree is read-only (rule 1), which made a shim bug
@@ -76,9 +91,9 @@ comments to rewrite them.
    installs the `Deno.core` shim first.
 
    The same applies to the other things the build and tests used to take out of
-   the Rust tree: the tracker blocklist (`dotnet/src/Obscura.Net/Resources/pgl_domains.txt`),
-   the embedded fonts (`dotnet/src/Obscura.Render/Assets/*.ttf`) and the test
-   fonts (`dotnet/tests/Obscura.Render.Tests/Fixtures/fonts/`). Nothing in
+   the Rust tree: the tracker blocklist (`dotnet/src/PocketCalculator.Net/Resources/pgl_domains.txt`),
+   the embedded fonts (`dotnet/src/PocketCalculator.Render/Assets/*.ttf`) and the test
+   fonts (`dotnet/tests/PocketCalculator.Render.Tests/Fixtures/fonts/`). Nothing in
    `dotnet/` reads across into `.reference/` to build or to pass. Two checks look
    for it and skip themselves when it is absent: the parity suite (the Rust
    binary) and `ToolListMatchesRustSource` (the MCP tool JSON literals).
@@ -102,13 +117,13 @@ comments to rewrite them.
 - **`MathF` is not `f32`.** Rust's `f32::min`/`f32::max` ignore NaN, while
   `MathF.Min`/`MathF.Max` propagate it, and `f32::round` is half-away-from-zero
   while `MathF.Round` is banker's rounding. Every one of these in the render
-  layer must go through `Obscura.Render.F32` instead. This is silent when wrong:
+  layer must go through `PocketCalculator.Render.F32` instead. This is silent when wrong:
   it produces slightly different geometry rather than an error.
 - **Layout rounding is a third thing again.** taffy defines its own
   `round` as `floor(v + 0.5)`, half towards positive infinity. That is neither
   `MathF.Round` (half to even) nor `F32.Round` (half away from zero), and the
   three disagree at negative midpoints: `round(-2.5)` is -2 for taffy and -3 for
-  `F32.Round`. Layout rounding must use `Obscura.Render.Layout.Sys.Round`.
+  `F32.Round`. Layout rounding must use `PocketCalculator.Render.Layout.Sys.Round`.
 - **The render layer is `float`, never `double`.** The Rust engine is f32
   throughout, and f64 accumulation diverges visibly in layout and paint. The one
   exception is capture-dimension checking, which is f64 in Rust too.
@@ -117,7 +132,7 @@ comments to rewrite them.
 
 ```
 README.md                       the C# port's README
-LICENSE                         Apache-2.0, for the port (Copyright Curiosity GmbH)
+LICENSE                         MIT, for the port (Copyright Curiosity GmbH)
 NOTICE                          attributions: Obscura, Taffy, cosmic-text, the fonts
 todo.md                         port status, open issues, known deviations
 .devops/build-nuget.yml         the only build definition: build, test, pack, push
@@ -134,22 +149,22 @@ scripts/                        parity-sweep.sh, render-compare.sh, regen-golden
 tools/                          imgdiff (C#), the canvas conformance probe, live-view
 skills/                         obscura-port, render-compare
 dotnet/
-  Obscura.slnx                  solution
+  PocketCalculator.slnx         solution
   Directory.Build.props         shared TFM/analyzer/lang settings
   Directory.Packages.props      central package versions
   src/
-    Obscura.Dom/       <- crates/obscura-dom      arena DOM, parsing, selectors, serialization
-    Obscura.Net/       <- crates/obscura-net      HTTP, cookies, robots, blocklist, encoding
-    Obscura.Js/        <- crates/obscura-js       V8 runtime, ops, bootstrap.js
-    Obscura.Render/    <- crates/obscura-render   CSS, computed style, layout, paint
-    Obscura.Browser/   <- crates/obscura-browser  Page, navigation, lifecycle, PDF
-    Obscura.Cdp/       <- crates/obscura-cdp      CDP server and domains
-    Obscura.Mcp/       <- crates/obscura-mcp      MCP tools
-    Obscura.Cli/       <- crates/obscura-cli      the `obscura` executable
+    PocketCalculator.Dom/       <- crates/obscura-dom      arena DOM, parsing, selectors, serialization
+    PocketCalculator.Net/       <- crates/obscura-net      HTTP, cookies, robots, blocklist, encoding
+    PocketCalculator.Js/        <- crates/obscura-js       V8 runtime, ops, bootstrap.js
+    PocketCalculator.Render/    <- crates/obscura-render   CSS, computed style, layout, paint
+    PocketCalculator.Browser/   <- crates/obscura-browser  Page, navigation, lifecycle, PDF
+    PocketCalculator.Cdp/       <- crates/obscura-cdp      CDP server and domains
+    PocketCalculator.Mcp/       <- crates/obscura-mcp      MCP tools
+    PocketCalculator.Cli/       <- crates/obscura-cli      the `obscura` executable
     Obscura/           <- crates/obscura          embeddable library API
   tests/
-    Obscura.<Area>.Tests          xUnit ports of the Rust tests
-    Obscura.Parity.Tests          differential tests: C# output vs the Rust binary
+    PocketCalculator.<Area>.Tests xUnit ports of the Rust tests
+    PocketCalculator.Parity.Tests          differential tests: C# output vs the Rust binary
   docs/                           port-specific notes (op protocol, dependency map)
 ```
 
@@ -159,8 +174,8 @@ dotnet/
 |---|---|---|
 | `deno_core` + `v8` | `Microsoft.ClearScript.V8` | Ops are bound onto a plain object exposed as `Deno.core.ops`; `DenoCoreShim` supplies the four non-op `Deno.core` members the shim uses. |
 | `html5ever` / `markup5ever` | `AngleSharp` | Used as a spec HTML5 tokenizer/tree builder; its output is adapted into Obscura's arena tree. We do not expose AngleSharp's DOM. |
-| `selectors` / `cssparser` | in-tree port | `Obscura.Dom.Selectors`, `Obscura.Render.Css`. Ported, not delegated to AngleSharp, because the cascade needs specificity and matching internals. |
-| `taffy` (vendored) | in-tree port | `Obscura.Render.Layout`, including the vendored grid shrink-to-fit fix. |
+| `selectors` / `cssparser` | in-tree port | `PocketCalculator.Dom.Selectors`, `PocketCalculator.Render.Css`. Ported, not delegated to AngleSharp, because the cascade needs specificity and matching internals. |
+| `taffy` (vendored) | in-tree port | `PocketCalculator.Render.Layout`, including the vendored grid shrink-to-fit fix. |
 | `tiny-skia` | `SkiaSharp` | tiny-skia is a port of Skia, so this is the closest available match for path filling, anti-aliasing, and blending. Also supplies the PNG/JPEG/WebP/GIF codecs, so no separate image package is needed. |
 | `ab_glyph` / `cosmic-text` (vendored) | `SkiaSharp` + `SkiaSharp.HarfBuzz` | Glyph outlines and metrics from Skia, shaping from HarfBuzz. Carry the vendored variable-font coordinate fix forward. |
 | `reqwest` | `System.Net.Http` / `SocketsHttpHandler` | gzip/deflate/brotli are in-box. |
@@ -176,18 +191,27 @@ dotnet/
 The engine never uses system fonts. It embeds its own faces (Liberation, DejaVu,
 Noto Color Emoji) so rasterization is identical on every host and works on
 distroless images with no fontconfig. They live in
-`dotnet/src/Obscura.Render/Assets/` and are byte-identical copies of
+`dotnet/src/PocketCalculator.Render/Assets/` and are byte-identical copies of
 `.reference/obscura/crates/obscura-render/assets/`; if an upstream sync updates
 those faces, re-copy them or the two engines will rasterize differently. Resolve typefaces with
 `SKTypeface.FromData` over the embedded resources; never
 `SKTypeface.FromFamilyName`.
+
+The one exception is opt-in: an operator can add font directories
+(`pocket-calculator serve --font-dir DIR`, repeatable, or `BrowserConfig.FontDirectories`
+in the library), ported from upstream `343fdc7`. Those files are read from disk
+once, loaded with `SKTypeface.FromData` after the embedded faces, and never
+through fontconfig. With nothing configured no file is read and output is
+byte-identical to the embedded-only engine, so determinism stays the default and
+giving it up is the operator's explicit choice. See
+`dotnet/src/PocketCalculator.Render/Inline/FontDirectories.cs`.
 
 ## Build
 
 ```bash
 cd dotnet
 dotnet build -c Release
-dotnet run -c Release --project src/Obscura.Cli -- fetch https://example.com --dump text
+dotnet run -c Release --project src/PocketCalculator.Cli -- fetch https://example.com --dump text
 ```
 
 `dotnet build` output starts in ~790ms on a trivial page, and about 300ms of
@@ -196,11 +220,11 @@ Publish precompiles it away, so measure anything cold-start-sensitive against a
 publish, not against `bin/`:
 
 ```bash
-dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained false   # ~480ms
-dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained true    # ~360ms
+dotnet publish -c Release src/PocketCalculator.Cli -r linux-x64 --self-contained false   # ~480ms
+dotnet publish -c Release src/PocketCalculator.Cli -r linux-x64 --self-contained true    # ~360ms
 ```
 
-`PublishReadyToRun` is set in `Obscura.Cli.csproj` whenever a RuntimeIdentifier
+`PublishReadyToRun` is set in `PocketCalculator.Cli.csproj` whenever a RuntimeIdentifier
 is given, and `PublishReadyToRunComposite` turns itself on when the publish is
 also self-contained. Delete `obj/` and `bin/` for the RID when switching
 between self-contained and framework-dependent: stale intermediates from the
@@ -228,7 +252,7 @@ probe for this and refuse to run, rather than producing the misleading numbers.
 ```bash
 cd dotnet
 dotnet test -c Release                                  # everything
-dotnet test -c Release tests/Obscura.Dom.Tests          # one area
+dotnet test -c Release tests/PocketCalculator.Dom.Tests          # one area
 ```
 
 - Tests are xUnit v3. Each Rust integration test under
@@ -237,7 +261,7 @@ dotnet test -c Release tests/Obscura.Dom.Tests          # one area
   per process, so tests do not need process-per-test. They do need to dispose
   their runtime; a leaked `V8ScriptEngine` will wedge the test host. Use the
   `RuntimeFixture` helper rather than constructing engines ad hoc.
-- **Parity tests** (`Obscura.Parity.Tests`) shell out to the Rust binary and
+- **Parity tests** (`PocketCalculator.Parity.Tests`) shell out to the Rust binary and
   compare output. They run when `OBSCURA_RUST_BIN` points at a release build,
   or one sits at `.reference/obscura/target/release/obscura`, and skip
   otherwise. The publish pipeline does not build V8 from source, so parity is a
@@ -246,7 +270,7 @@ dotnet test -c Release tests/Obscura.Dom.Tests          # one area
 - **A deliberate deviation makes parity the wrong assertion for that input.**
   Since `.reference/**` is read-only, a bug fixed on the C# side leaves the two
   engines legitimately disagreeing. Do not weaken the fix to keep parity green:
-  assert the correct (Chromium) value in an `Obscura.<Area>.Tests` fact instead,
+  assert the correct (Chromium) value in a `PocketCalculator.<Area>.Tests` fact instead,
   and if a parity test covers the same input, narrow it and name the deviation
   in the skip/why comment.
 
@@ -309,7 +333,16 @@ when C# layout drifts from Rust:
 - **Multi-statement `--eval` starting with `const` returns `null`** (V8 gives
   `const` an empty completion value). This is V8 behavior and must be preserved.
 - **SSRF:** loopback / RFC1918 / link-local fetches are blocked by default. Use
-  `--allow-private-network` (or `OBSCURA_ALLOW_PRIVATE_NETWORK=1`).
+  `--allow-private-network` (or `POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1`). Render
+  resource loads (images, SVG, fonts found during layout) go through the page's
+  transport too, never a side channel; synchronous layout is cache-only and records
+  misses for the transport to load.
+- **Page script never reaches the engine.** `globalThis.Deno` is deleted after
+  bootstrap; the shim holds the ops in a closure. Do not add a page-visible global that
+  exposes an op, the stylesheet store, or response bytes an internal load fetched.
+- **Control planes are gated.** A non-loopback CDP or MCP bind needs a 32+ byte token
+  (`POCKETCALCULATOR_CDP_TOKEN`, `POCKETCALCULATOR_MCP_TOKEN`); browser `Origin`s are
+  refused, and so are foreign `Host`s on CDP.
 - **Watchdog:** synchronous V8 work runs unbounded, so a timeout that only
   cancels at await points cannot interrupt it. The Rust engine terminates the
   isolate from a separate thread. The C# port uses `V8Runtime.Interrupt()` /
@@ -365,7 +398,7 @@ the root, and a merge would put it back there.
      wins: measure it, and keep the C# if the C# is right;
    - **skip** - it cannot apply (Rust-only build, deps, docs).
    Fixes to `crates/obscura-js/js/bootstrap.js` land in
-   `dotnet/src/Obscura.Js/js/bootstrap.js` by hand; diff the two copies around
+   `dotnet/src/PocketCalculator.Js/js/bootstrap.js` by hand; diff the two copies around
    the hunk first, because ours has diverged (rule 5). A change to a wire surface
    (CDP JSON, MCP tool JSON, op payloads, CLI output) is ported byte for byte.
    Security fixes come first, and for each one say whether the C# is exposed
@@ -409,10 +442,18 @@ The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
 
 ## Packaging, publishing and licensing
 
-- **Packages.** The eight library projects under `dotnet/src/` pack as
-  `Obscura`, `Obscura.Browser`, `Obscura.Cdp`, `Obscura.Mcp`, `Obscura.Js`,
-  `Obscura.Render`, `Obscura.Net` and `Obscura.Dom`. `Obscura.Cli` and every
-  test project set `IsPackable` to false. Package metadata (authors, copyright,
+- **Packages.** Three: `PocketCalculator`, `PocketCalculator.Cdp` and `PocketCalculator.Mcp`. The engine
+  projects (`PocketCalculator.Browser`, `PocketCalculator.Js`, `PocketCalculator.Render`, `PocketCalculator.Net`,
+  `PocketCalculator.Dom`) stay separate assemblies but are not packages
+  (`IsPackable` false): `PocketCalculator` references `PocketCalculator.Browser` with
+  `PrivateAssets="all"` and puts all five DLLs in its own `lib/` through the
+  `IncludeEngineAssemblies` target, so they ship together and cannot drift.
+  Because `PrivateAssets` also stops the engine's package references flowing,
+  `PocketCalculator.csproj` restates them: **a PackageReference added to an engine project
+  must be added there too**, or consumers get a missing-assembly failure at run
+  time. `PocketCalculator.Cdp` and `PocketCalculator.Mcp` depend on the `PocketCalculator` package and
+  reference `PocketCalculator.Browser` privately to compile. `PocketCalculator.Cli` and every test
+  project set `IsPackable` to false. Package metadata (authors, copyright,
   license, repository, README, NOTICE) is set once in
   `dotnet/Directory.Build.props`; give a new project a `<Description>` and
   nothing else.
@@ -423,13 +464,16 @@ The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
   `nuget-curiosity-org` service connection, so no API key lives in the
   repository. The version is CalVer computed in the pipeline,
   `yy.M.<build id mod 65536>`; the `0.1.0` in `Directory.Build.props` is only the
-  local default, which keeps a local `obscura --version` in the shape of the
+  local default, which keeps a local `pocket-calculator --version` in the shape of the
   reference's.
-- **Licensing.** The port is Copyright Curiosity GmbH and licensed Apache-2.0
+- **Licensing.** The port is Copyright Curiosity GmbH and licensed MIT
   (`LICENSE`). It is a derivative of Obscura (Apache-2.0), Taffy (MIT) and
-  cosmic-text (MIT/Apache-2.0), and `NOTICE` carries those attributions; both
-  files travel in every package. Upstream's own license stays, unmodified, at
-  `.reference/obscura/LICENSE`. Keep the original authors credited in
+  cosmic-text (MIT/Apache-2.0). Apache-2.0 lets a derivative work carry its own
+  terms provided the Apache text and the attribution notices go with it, so
+  `NOTICE` carries the attributions, upstream's license stays unmodified at
+  `.reference/obscura/LICENSE`, and every package ships `LICENSE`, `NOTICE` and
+  that Apache text as `LICENSE-OBSCURA.txt`. Do not drop either of the last
+  two. Keep the original authors credited in
   `Authors` and `Copyright`, and add to `NOTICE` if a port of another project
   lands.
 

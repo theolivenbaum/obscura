@@ -7,7 +7,7 @@ description: Compare how Obscura renders a page against a real browser (headless
 
 Three lanes: **Chromium** through Playwright (the ground truth a user's browser
 would show), the **Rust reference** in `.reference/obscura/target/release/obscura`, and the **C#
-port** in `dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura`.
+port** in `dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator`.
 
 Run it:
 
@@ -69,13 +69,13 @@ same 404.
 **Capture the full page, not the viewport.** Playwright takes `fullPage: true`.
 The Obscura CLI has no equivalent, so `render-compare.sh` measures
 `document.documentElement.scrollHeight` first and passes it back as
-`OBSCURA_SHOT_H`. Carry the caveat: in Obscura that also changes the *navigation*
+`POCKETCALCULATOR_SHOT_H`. Carry the caveat: in Obscura that also changes the *navigation*
 viewport, so `vh` units, `position: fixed` and anything driven by viewport height
 resolve against the tall viewport rather than the real one. Chromium's
 `fullPage` keeps the viewport and stitches. For a page that leans on `vh`,
 compare at viewport height as well before concluding anything.
 
-**Pin the animation frame.** `OBSCURA_SHOT_ANIMATION_TIME_MS` makes the engine
+**Pin the animation frame.** `POCKETCALCULATOR_SHOT_ANIMATION_TIME_MS` makes the engine
 paint an exact instant on the document timeline instead of sampling live, so two
 runs of an animated page are comparable. Without it a `requestAnimationFrame`
 page differs from itself between runs.
@@ -110,7 +110,7 @@ Decide which tree owns it before writing any code.
 - **Both engines** (reference and port agree with each other and differ from
   Chromium): the gap is in the engine's rendering, not the port. If it lives in
   `bootstrap.js`, fix it in the port's own copy,
-  `dotnet/src/Obscura.Js/js/bootstrap.js`, and record the divergence under
+  `dotnet/src/PocketCalculator.Js/js/bootstrap.js`, and record the divergence under
   "Known deviations" in `todo.md`. If it lives in the render layer, fix it in
   the port and record it the same way. The reference tree under
   `.reference/obscura/` is read-only; never edit it to keep the engines in step.

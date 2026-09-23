@@ -107,7 +107,7 @@ Line numbers are as of this review.
 Upstream range reviewed against fork point 727cc46. C# paths are relative to
 `dotnet/src` unless absolute. "Vulnerable" findings were verified by
 reading the C# code; the ones marked *(probed)* were also run against the existing
-Release CLI build (`Obscura.Cli/bin/Release/net10.0/Obscura.Cli`). No file outside this
+Release CLI build (`PocketCalculator.Cli/bin/Release/net10.0/PocketCalculator.Cli`). No file outside this
 report was modified.
 
 | sha | title | class |
@@ -140,15 +140,15 @@ goes through a narrow, frozen `globalThis.__obscura_binding_called(name, payload
 instead of `Deno.core.ops.op_binding_called`. Tests reach ops through a
 `#[cfg(test)]`-only `__obscura_test_ops`.
 
-C#: `Obscura.Js/Runtime/BootstrapLoader.cs:83-101` deliberately **keeps**
+C#: `PocketCalculator.Js/Runtime/BootstrapLoader.cs:83-101` deliberately **keeps**
 `globalThis.Deno`. It only makes it non-enumerable, because the shim resolves
-`Deno.core.ops.X` at call time (93 sites in `Obscura.Js/js/bootstrap.js`). Probe:
+`Deno.core.ops.X` at call time (93 sites in `PocketCalculator.Js/js/bootstrap.js`). Probe:
 `typeof Deno` is `"object"` and `typeof Deno.core.ops.op_fetch_url` is `"function"` from
 page script. Page script can therefore call any op directly. For example it can call
 `op_post_frame_message` with a forged source origin (the origin is a JS argument), call
 `op_fetch_url` with the new `internal_load` flag (see C), call `op_navigate`,
 `op_frame_document_ready` and `op_set_cookie`, and read cross-origin CSS through
-`op_dom("get_external_stylesheet_css", …)` (see B). `Obscura.Cdp/Domains/Runtime.cs:305`
+`op_dom("get_external_stylesheet_css", …)` (see B). `PocketCalculator.Cdp/Domains/Runtime.cs:305`
 still emits `Deno.core.ops.op_binding_called`.
 
 Suggested C#: in our bootstrap.js add `const __obscuraCore = globalThis.Deno.core;` at the
@@ -185,7 +185,7 @@ C#: we already have the no-synthetic-element half as a deliberate deviation ("A 
 stylesheet leaves no element in the DOM", `DomTree.SetExternalStylesheetCss`,
 `Page.Navigation.cs:340-383`), so the *rendering* side matches the new Rust design. The
 confidentiality side is missing:
-- `Obscura.Browser/Page.Navigation.cs:337` still sets `globalThis.__obscura_css` to all
+- `PocketCalculator.Browser/Page.Navigation.cs:337` still sets `globalThis.__obscura_css` to all
   fetched CSS, cross-origin included.
 - `bootstrap.js:454-455` publishes `__obscura_linkedStylesheetCss(node)` and
   `__obscura_setLinkedStylesheetCss`. The probe shows both are `"function"` to page
@@ -232,12 +232,12 @@ Rust (`ops.rs`):
 - The same rules apply to `Fetch.fulfillRequest` interception results
   (`intercept_fulfill_response`).
 
-C#: `Obscura.Js/Ops/FetchOps.cs:728-746` returns the real status, body and **all**
+C#: `PocketCalculator.Js/Ops/FetchOps.cs:728-746` returns the real status, body and **all**
 headers, Set-Cookie included, for every mode. `opaque` is only a flag, and the shim still
 builds a body from it (`bootstrap.js:7535`). So `fetch(crossOrigin, {mode:'no-cors'})`
 returns the cross-origin body, and any response exposes HttpOnly `Set-Cookie` values to
 page JS. `bootstrap.js:7985` has the `init.status || 200` bug, so status 0 reads as 200.
-The binding at `Obscura.Js/Ops/ObscuraOps.cs:192` takes 7 args.
+The binding at `PocketCalculator.Js/Ops/PocketCalculatorOps.cs:192` takes 7 args.
 
 Wire note: `op_fetch_url`'s JSON result is inside our op contract, and the key set
 (`status, body, bodyBase64, requestId, url, redirected, opaque, headers`) is unchanged.
@@ -292,13 +292,13 @@ Rust (`cookies.rs`, `client.rs`, `wreq_client.rs`, `ops.rs`):
    uses `copy_from`, a raw clone that keeps host-only. Import also skips a
    public-suffix domain and a `SameSite=None` cookie without Secure.
 
-C# (`Obscura.Net/Cookies/CookieJar.cs`): none of this is present.
+C# (`PocketCalculator.Net/Cookies/CookieJar.cs`): none of this is present.
 - `TryResolveCookieDomain` (574-608) keeps the old "ignore the attribute, store
   host-only" behaviour. Its comment still says no PSL is bundled.
 - `Store` (96-217) has no Secure-origin, SameSite=None or secure-overlay checks.
 - `Collect` (225-275) ignores `SameSite` entirely. **This is the concrete vulnerability**:
   a cross-site subresource or `fetch()` with `credentials:'include'` carries
-  `SameSite=Strict/Lax` cookies. Both callers are affected: `ObscuraHttpClient.cs:796-797`
+  `SameSite=Strict/Lax` cookies. Both callers are affected: `PocketCalculatorHttpClient.cs:796-797`
   and `FetchOps.cs:506`.
 - `SetCookiesFromCdp` hard-codes `HostOnly = false` (340-342).
 - `BrowserContext.cs:180` copies through `GetAllCookies` / `SetCookiesFromCdp`, which
@@ -310,8 +310,8 @@ Chromium agrees with Rust on 1-3. It rejects a non-matching Domain, rejects
 `SameSite=None` without Secure, applies "Leave Secure Cookies Alone", and enforces
 SameSite with Lax-by-default. So these are ports, not conflicts.
 
-PSL: `Obscura.Net` cannot use `Obscura.Js/Url/PublicSuffixList.cs`, because Js references
-Net and not the other way round. Move `PublicSuffixList` down into `Obscura.Net` and have
+PSL: `PocketCalculator.Net` cannot use `PocketCalculator.Js/Url/PublicSuffixList.cs`, because Js references
+Net and not the other way round. Move `PublicSuffixList` down into `PocketCalculator.Net` and have
 Js use it from there. It is curated (~450 multi-label suffixes; see the Known deviation
 "The public suffix list is curated, not complete"), so the coverage gap carries over to
 cookies. Check that `co.uk` and `github.io` are in it, since both are in the Rust test.
@@ -323,7 +323,7 @@ flatten output. `CookieInfo` / CDP `Network.getCookies` payloads are unchanged.
 Suggested C#: port `SameSiteContext`, `SameSite(Uri, Uri)`, `GetCookieHeaderInContext`,
 `SecureCookieConflicts`, the new `TryResolveCookieDomain`, `SetCookiesFromCdpWithScope`,
 `CopyFrom` and a `PersistedCookie` DTO. Pass the context from
-`ObscuraHttpClient.SendAsync` (the initiator is already on `ResourceRequest.Initiator`,
+`PocketCalculatorHttpClient.SendAsync` (the initiator is already on `ResourceRequest.Initiator`,
 `Requests.cs:132`) and from `FetchOps` (the page origin). Make `CookieParams.Parse` return
 host-only. Tests: port `multi_label_and_private_public_suffixes_are_rejected`,
 `insecure_origin_cannot_set_or_overwrite_secure_cookie`,
@@ -335,7 +335,7 @@ host-only. Tests: port `multi_label_and_private_public_suffixes_are_rejected`,
 #### F. CDP control-plane authentication - PORT, vulnerable
 
 Rust `server.rs`:
-- `OBSCURA_CDP_TOKEN` must be at least 32 bytes. A non-loopback `--host` without a token
+- `POCKETCALCULATOR_CDP_TOKEN` must be at least 32 bytes. A non-loopback `--host` without a token
   is refused at startup.
 - Every discovery and WS request is refused if it carries **any `Origin` header** (403).
 - The `Host` header must match the bind IP and port (loopback accepts any loopback or
@@ -345,7 +345,7 @@ Rust `server.rs`:
   be classified with what had arrived.
 - The response is a JSON body `{"error":"…"}` with `Connection: close`.
 
-C#: `Obscura.Cdp/Server.cs:180-254` has no token, no Origin check and no Host check.
+C#: `PocketCalculator.Cdp/Server.cs:180-254` has no token, no Origin check and no Host check.
 `Server.cs:652` still treats `n == HttpPeekBuf` as a complete head. A web page can
 therefore reach a loopback CDP port through DNS rebinding (`/json/version` → WS URL), and
 any non-loopback bind is unauthenticated.
@@ -364,7 +364,7 @@ Also check that `CdpContext` / the Cli `serve` path surfaces the startup error.
 #### G. MCP HTTP transport - PORT, vulnerable (the most serious item)
 
 Rust `http.rs`:
-- `OBSCURA_MCP_TOKEN`, with a non-loopback bind refused without one.
+- `POCKETCALCULATOR_MCP_TOKEN`, with a non-loopback bind refused without one.
 - Browser `Origin` is **denied by default**; unset allowlist no longer means permissive.
 - No `Access-Control-Allow-Origin: *` is ever sent.
 - POST requires `Content-Type: application/json` (415).
@@ -376,7 +376,7 @@ Rust `http.rs`:
 - 401 and 415 status texts.
 - `lib.rs`: `browser_navigate` rejects `file://`.
 
-C# `Obscura.Mcp/Http.cs`:
+C# `PocketCalculator.Mcp/Http.cs`:
 - `MaxBodyBytes = 16 MiB` (line 28).
 - `OriginAllowed` is permissive when unset (234).
 - `CorsHeader` emits `Access-Control-Allow-Origin: *` when unset (269).
@@ -404,8 +404,8 @@ stalled-body test send `Content-Type: application/json`.
 Rust: `css_math_nesting_is_safe` (depth ≤64 parentheses) at the top of
 `resolve_contextual` and `resolve_length`.
 
-C#: `Obscura.Render/Style/StylePrimitives.cs:710 ResolveLength` and
-`Obscura.Render/Css/CssLength.cs:20 ResolveContextual` recurse with no bound and slice a
+C#: `PocketCalculator.Render/Style/StylePrimitives.cs:710 ResolveLength` and
+`PocketCalculator.Render/Css/CssLength.cs:20 ResolveContextual` recurse with no bound and slice a
 substring at each level, which is quadratic. Probe with `<div style="width:calc(calc(...1px...))">`:
 
 | depth | wall time |
@@ -432,14 +432,14 @@ dedicated thread with `maxStackSize`. No action now.
 #### J. Docs / Dockerfile / README - SKIP
 
 These are Rust-repo docs. There is no Dockerfile under `dotnet/`. Mirror the new env vars
-(`OBSCURA_CDP_TOKEN`, `OBSCURA_MCP_TOKEN`, the changed meaning of
-`OBSCURA_MCP_ALLOWED_ORIGINS`) in any C# docs once F and G land.
+(`POCKETCALCULATOR_CDP_TOKEN`, `POCKETCALCULATOR_MCP_TOKEN`, the changed meaning of
+`POCKETCALCULATOR_MCP_ALLOWED_ORIGINS`) in any C# docs once F and G land.
 
 #### K. Small items
 
 - `obscura/src/cookie.rs get_for_url` → the same-site alias: no C# change needed
   (`Obscura/Api/Cookie.cs`).
-- `ObscuraHttpClient` cache-key cookie check → same-site alias: no change.
+- `PocketCalculatorHttpClient` cache-key cookie check → same-site alias: no change.
 - `bootstrap.js _loadLinkedStylesheet` reflects the `rel` / `media` / `disabled` IDL
   properties into attributes. Useful with B; C# currently gates on `c.disabled` inside the
   shim (`bootstrap.js:634`).
@@ -448,13 +448,13 @@ These are Rust-repo docs. There is no Dockerfile under `dotnet/`. Mirror the new
 
 ### 9ced496 - fix(net): allow disabling stealth tracker blocking - PORT (small)
 
-Rust: `OBSCURA_BLOCK_TRACKERS` (`0` / `false` / `no` / `off`, case-insensitive, trimmed)
+Rust: `POCKETCALCULATOR_BLOCK_TRACKERS` (`0` / `false` / `no` / `off`, case-insensitive, trimmed)
 turns off the blocklist in the **stealth** (`wreq`) client. It stays on for unset, empty
 and unrecognised values. The reqwest client's `block_trackers` is still set
 unconditionally by `context.rs` under `--stealth`.
 
 C#: there is no stealth transport. `BrowserContext.cs:41-44` sets
-`ObscuraHttpClient.BlockTrackers = true` under stealth, and that client carries all
+`PocketCalculatorHttpClient.BlockTrackers = true` under stealth, and that client carries all
 stealth traffic. The env var does not exist (grep: no hits).
 
 Suggested C#: add `TrackerBlockingEnabled(string?)` and read it where `BlockTrackers` is
@@ -492,11 +492,11 @@ Rust: `merge_response_header` folds repeated field lines into one `", "`-joined 
 (RFC 9110 §5.3). `set-cookie` stays last-wins, because the jar reads every line
 separately. Both clients use it. `op_fetch_url` in `ops.rs` still collects last-wins.
 
-C#: `Obscura.Net/Http/ObscuraHttpClient.cs:860-885` `CollectHeaders`/`LastValue` is
-last-wins. `Obscura.Js/Ops/FetchOps.cs:820-839` is also last-wins, matching Rust's
+C#: `PocketCalculator.Net/Http/PocketCalculatorHttpClient.cs:860-885` `CollectHeaders`/`LastValue` is
+last-wins. `PocketCalculator.Js/Ops/FetchOps.cs:820-839` is also last-wins, matching Rust's
 unchanged op.
 
-Suggested C#: fold in `ObscuraHttpClient.CollectHeaders`, with a Set-Cookie exception.
+Suggested C#: fold in `PocketCalculatorHttpClient.CollectHeaders`, with a Set-Cookie exception.
 Consider folding in `FetchOps.CollectHeaders` too: Chromium's `Headers.get()` returns
 combined values, so that would be a Chromium-backed deviation from Rust and would need a
 comment and a todo.md entry. Tests: port `response_headers_preserve_duplicate_values` and
@@ -507,8 +507,8 @@ comment and a todo.md entry. Tests: port `response_headers_preserve_duplicate_va
 Rust: `tool_network_requests` calls `page.sync_js_network_events()` before reading
 `network_events`, so completed `fetch()`/XHR requests appear.
 
-C#: `Obscura.Mcp/Tools.cs:305-323` reads `page.NetworkEvents` without syncing.
-`Page.SyncJsNetworkEvents()` exists (`Obscura.Browser/Page.Network.cs:233`).
+C#: `PocketCalculator.Mcp/Tools.cs:305-323` reads `page.NetworkEvents` without syncing.
+`Page.SyncJsNetworkEvents()` exists (`PocketCalculator.Browser/Page.Network.cs:233`).
 
 Suggested C#: add one line, `page.SyncJsNetworkEvents();`. Test: port
 `network_tool_includes_completed_script_fetches`.
@@ -516,7 +516,7 @@ Suggested C#: add one line, `page.SyncJsNetworkEvents();`. Test: port
 ### bf11721 - fix(mcp): collect page console messages - PORT
 
 Rust:
-- `ObscuraState` gets `pending_console_messages` (a VecDeque capped at 1024, dropping the
+- `PocketCalculatorState` gets `pending_console_messages` (a VecDeque capped at 1024, dropping the
   oldest) and `console_messages_enabled`.
 - `op_console_msg` pushes `"[{level}] {msg}"` when enabled, before the Runtime-events gate.
 - `Page` keeps the flag across runtime replacement (`set_console_messages_enabled`,
@@ -525,11 +525,11 @@ Rust:
 - `browser_console_messages` drains into `state.console_messages`, capped at 1024.
 
 C#: `BrowserState._consoleMessages` exists but nothing ever fills it
-(`Obscura.Mcp/BrowserState.cs:28`, `Tools.cs:325`). `CoreOps.OpConsoleMsg`
-(`Obscura.Js/Ops/CoreOps.cs:172`) only records CDP runtime events. So the tool always
+(`PocketCalculator.Mcp/BrowserState.cs:28`, `Tools.cs:325`). `CoreOps.OpConsoleMsg`
+(`PocketCalculator.Js/Ops/CoreOps.cs:172`) only records CDP runtime events. So the tool always
 answers "No console messages."
 
-Suggested C#: add the fields to `ObscuraState`, the push in `OpConsoleMsg`, the page-owned
+Suggested C#: add the fields to `PocketCalculatorState`, the push in `OpConsoleMsg`, the page-owned
 flag re-applied in `Page.InitJs`, `TakePendingConsoleMessages`, the enable calls in
 `BrowserState` tab creation, and the drain in `Tools.ConsoleMessages`. The message format
 `"[level] text"` is user-visible MCP output and should match. Test: port
@@ -564,7 +564,7 @@ Rust:
   `configure_font_directories`.
 
 C#:
-- `Obscura.Render/Inline/TextEngine.cs:44-110` builds a fresh `FontDatabase` per
+- `PocketCalculator.Render/Inline/TextEngine.cs:44-110` builds a fresh `FontDatabase` per
   `TextEngine`, one per render pass.
 - `FontDatabase.LoadFontSource` (`Inline/FontDatabase.cs:252`) does `SKData.CreateCopy`
   and `SKTypeface.FromData` for every bundled face each time, including Noto Color Emoji
@@ -584,7 +584,7 @@ CLAUDE.md. This is performance only, and the output is identical.
 the engine never uses host fonts. An opt-in, explicit directory loaded with
 `SKTypeface.FromData` does not break the "never FromFamilyName / no fontconfig" rule, but
 it does give up byte-identical rasterization across hosts when used. If adopted, add it
-to `serve` in `Obscura.Cli/CommandLine/CliDefinition.cs`. Rust skips symlinks and sorts
+to `serve` in `PocketCalculator.Cli/CommandLine/CliDefinition.cs`. Rust skips symlinks and sorts
 paths. Since C# has no separate render feature, it is always available. Record it as a
 deliberate choice in todo.md.
 
@@ -593,7 +593,7 @@ deliberate choice in todo.md.
 Rust test-only fix: it selects the iframe whose `_frameId` matches the attached frame
 instead of `querySelector('iframe')`. The C# counterpart
 `CancellingFrameScriptFetchKeepsAllSiblingsResumable`
-(`dotnet/tests/Obscura.Browser.Tests/PageTests.cs:815-870`) already
+(`dotnet/tests/PocketCalculator.Browser.Tests/PageTests.cs:815-870`) already
 asserts `Assert.Single(page.Frames)` and evaluates in that attached realm through
 `EvaluateInFrame(0, ...)` (a recorded port deviation). It never depended on DOM iframe
 order, so no change is needed.
@@ -615,7 +615,7 @@ order, so no change is needed.
 ## Upstream review: render / layout / browser commits
 
 Upstream: `727cc46..HEAD`. C# checked at `dotnet/src`. Probes ran with
-the existing Release CLI (`dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura`). Scratch
+the existing Release CLI (`dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator`). Scratch
 fixtures are in a scratch directory, and a FloatContext harness is in a scratch directory.
 Nothing in the repo was edited.
 
@@ -652,13 +652,13 @@ pump turn. Network events are emitted for these loads.
 
 **C# state.** C# still has the fork-point model:
 - `RenderResourceCache` defaults to `HttpResourceLoader` with sync loading on
-  (`Obscura.Render/Paint/RenderResourceCache.cs:133,144`).
+  (`PocketCalculator.Render/Paint/RenderResourceCache.cs:133,144`).
 - `GetOrLoad` / `GetOrLoadImage` fall through to `ImageAgent.Get` (`:499-560`, `:765`). That
   is a bare static `HttpClient` with a fixed UA. It has no SSRF check, no blocklist, no
   cookies and no proxy, and it retries with `Thread.Sleep`.
-- Sync loading is disabled only around capture (`Obscura.Js/Runtime/ObscuraJsRuntime.Capture.cs:39-52`).
+- Sync loading is disabled only around capture (`PocketCalculator.Js/Runtime/PocketCalculatorJsRuntime.Capture.cs:39-52`).
 - There is no miss queue (no `TakeSyncMisses` or `RecordSyncMiss`).
-- `Page.PrepareScreenshotResourcesAsync` (`Obscura.Browser/Page.Capture.cs:22`) is the older
+- `Page.PrepareScreenshotResourcesAsync` (`PocketCalculator.Browser/Page.Capture.cs:22`) is the older
   DOM-scan warmup only.
 
 **Probe (SSRF).** Setup: a `file://` page, **no** `--allow-private-network`, and script that
@@ -672,14 +672,14 @@ load-bearing invariant.
 - `RenderResourceCache`: add `SyncLoadingEnabled`, `RecordSyncMiss(key, url, profile, isFont)`,
   `TakeSyncMisses()` and `HasSyncMisses`, bounded by `_maxEntries`. Split `FetchBytes` /
   `FetchFontBytes` so `is_font` is carried, and add `SeedShared`.
-- `ObscuraState` / `ObscuraJsRuntime.State.cs:173,482`: build the page cache with sync loading
+- `PocketCalculatorState` / `PocketCalculatorJsRuntime.State.cs:173,482`: build the page cache with sync loading
   off whenever `HttpClient` or `StealthClient` is present.
-- `Obscura.Browser/Page.Capture.cs`: add `QueuePendingRenderResources`,
+- `PocketCalculator.Browser/Page.Capture.cs`: add `QueuePendingRenderResources`,
   `DrainRenderResourceResults`, `HasPendingRenderResources` and `RetireRenderResources`. Loads
   go through the page transport with `ShouldBlockUrl`, `SubresourceAllowed` and the interception
   patterns, under a shared `SemaphoreSlim(16)`, with results fenced by `DocumentGeneration`.
   Rebuild `PrepareScreenshotResourcesAsync` on top of the miss queue.
-- `Obscura.Cdp`: service the render resources before and after each dispatch and after pump
+- `PocketCalculator.Cdp`: service the render resources before and after each dispatch and after pump
   turns.
 - Independently, and cheap: put the SSRF/private-network check in `ImageAgent`, or retire it
   for page runtimes, so a standalone path cannot reach loopback either.
@@ -712,8 +712,8 @@ No PR number.
 **C# state.**
 - ALREADY for value and checked paint: this is the documented C# deviation "Dirty form state
   is mirrored onto the arena" (todo.md:2112). It uses `FormStateMirror`
-  (`Obscura.Js/Runtime/FormStateMirror.cs`), `DomTree._dirtyFormValues/_dirtyFormChecked`
-  (`Obscura.Dom/DomTree.cs:32-139`, freed at `:138`) and
+  (`PocketCalculator.Js/Runtime/FormStateMirror.cs`), `DomTree._dirtyFormValues/_dirtyFormChecked`
+  (`PocketCalculator.Dom/DomTree.cs:32-139`, freed at `:138`) and
   `PaintNativeControls.cs:615,655,659`. The op names `set_form_value` / `set_form_checked`
   happen to match upstream.
 - Probe with `render-repros/live-form-state.html`: the typed, cleared, password, checked and
@@ -722,7 +722,7 @@ No PR number.
   1. **indeterminate.** It is not mirrored (`_formIndeterminate` is a plain object,
      bootstrap.js:726), and `PaintNativeControls` has no indeterminate glyph. In the probe the
      "Mixed" checkbox paints empty, where Chromium paints the dash.
-  2. **`:checked` uses attributes only** (`Obscura.Dom/Selectors/SelectorMatching.cs:484`).
+  2. **`:checked` uses attributes only** (`PocketCalculator.Dom/Selectors/SelectorMatching.cs:484`).
      Probe: `querySelectorAll(':checked').length` is 1, and Chromium gives 2.
   3. **cloneNode does not propagate dirty state.** Probe result is
      `["default","default",false,false]`, where Chromium gives `["current","default",true,false]`.
@@ -755,7 +755,7 @@ of other inputs from the `value` attribute.
 - Perf: ALREADY. The C# mirror keeps the JS maps authoritative for reads, with no op on read
   (`FormStateMirror.cs`).
 - reset: **PORT.** C# still has `reset() { for (f of this.elements) if ('value' in f) f.value = ''; }`
-  (`Obscura.Js/js/bootstrap.js:12462`). It dispatches no reset event, sets checkbox and radio
+  (`PocketCalculator.Js/js/bootstrap.js:12462`). It dispatches no reset event, sets checkbox and radio
   *value* to '' instead of restoring checkedness, and wipes inputs that had a default `value`.
 
 **Suggested change.** In `bootstrap.js` HTMLFormElement.reset:
@@ -781,7 +781,7 @@ against the float height. With rounded segment ends, the sum said "fits" while
 `slot_height`, `add_height` and `fits_vertically` and compares endpoints:
 `if float_end > end_segment.y.end { end_idx += 1; continue; }`.
 
-**C# state.** Same bug (`Obscura.Render/Layout/FloatLayout.cs:85,113,116,277-312`). Running
+**C# state.** Same bug (`PocketCalculator.Render/Layout/FloatLayout.cs:85,113,116,277-312`). Running
 the upstream test case through the harness in a scratch FloatContext harness gives:
 `THROW cannot subdivide segment [2259.3333, 2280.3333) at 2259.3333` (`SubdivideSegment`,
 `:172-176`).
@@ -792,7 +792,7 @@ the upstream test case through the harness in a scratch FloatContext harness giv
 `if (floatEnd > endSegment.YEnd) { endIdx++; continue; }`.
 
 **Test.** Port `float_ending_at_rounded_segment_boundary_does_not_panic` into
-`Obscura.Render.Tests` layout tests. It expects the third float at y 1859. `FloatContext` is
+`PocketCalculator.Render.Tests` layout tests. It expects the third float at y 1859. `FloatContext` is
 public.
 
 **Side finding (not from this commit).** In HTML, a left float, then a right float, then a
@@ -815,7 +815,7 @@ Fixes upstream issue #935.
   line-through `-0.3*size` and underline `max(0.12*size, 1)`; thickness is `max(size/14, 1)`.
 - `@supports` accepts overline and line-through.
 
-**C# state.** Missing. There is no Overline or LineThrough anywhere in `Obscura.Render`. The
+**C# state.** Missing. There is no Overline or LineThrough anywhere in `PocketCalculator.Render`. The
 probe with `render-repros/text-decoration-lines.html` paints only the underlines.
 `PreparedRender.cs:926` notes that the cascade models underline only.
 
@@ -883,9 +883,9 @@ No PR number.
 also check that warmup and renderer misses honour blocked URLs on a fresh page.
 
 **C# state.** Missing. `Page.ScreenshotWithAnimationSample`
-(`Obscura.Browser/Page.Capture.cs:248-289`) has two fallbacks:
+(`PocketCalculator.Browser/Page.Capture.cs:248-289`) has two fallbacks:
 - `ScreenshotUnpreparedWithRetainedResources` uses `state.RenderResources` with sync loading
-  **on** (`ObscuraJsRuntime.Capture.cs:153-171`).
+  **on** (`PocketCalculatorJsRuntime.Capture.cs:153-171`).
 - The final `RenderPaint.ScreenshotPngScrolledAtAnimationTimeWithSurfaceColor` uses a default
   HTTP-loading cache.
 
@@ -951,7 +951,7 @@ Implement `HitTest` in `Paint/PreparedRender.cs` as reverse C# paint order, reus
 order in `PaintDom` (negative z, block backgrounds, floats, inline content, positioned z-auto
 and z 0 in tree order, positive z). Honour `pointer-events:none`, `visibility:hidden` and
 overflow clips (`ScrollPaintState` inherited clip). Then expose `op_layout_hit_test` in
-`Obscura.Js/Ops/RenderOps.cs` and use it from `bootstrap.js` `elementFromPoint`. Update the
+`PocketCalculator.Js/Ops/RenderOps.cs` and use it from `bootstrap.js` `elementFromPoint`. Update the
 todo.md:2744 note ("pointer-events is reporting only").
 
 **Tests.** Port the three layout tests (C# already passes them, so they are cheap regression
@@ -960,7 +960,7 @@ z-auto overlay over deep flow content, a negative-z layer under flow, and a clip
 
 ## Upstream JS/DOM review (fork point 727cc46)
 
-Method: read each upstream diff, found the C# counterpart, and where it was cheap, ran the upstream test's JS through the C# CLI (`obscura fetch data:... --eval`, Release build of the current tree). Paths below are relative to `dotnet/`. Bootstrap line numbers refer to `src/Obscura.Js/js/bootstrap.js` (the C# copy).
+Method: read each upstream diff, found the C# counterpart, and where it was cheap, ran the upstream test's JS through the C# CLI (`obscura fetch data:... --eval`, Release build of the current tree). Paths below are relative to `dotnet/`. Bootstrap line numbers refer to `src/PocketCalculator.Js/js/bootstrap.js` (the C# copy).
 
 | sha | title | class |
 |---|---|---|
@@ -993,12 +993,12 @@ Method: read each upstream diff, found the C# counterpart, and where it was chea
 **Classification:** PORT. This is Chromium behaviour: a document.write'd script blocks the parser.
 
 **Suggested change:**
-- `ObscuraState`: add a `DocumentWriteInsertedScript` bool. `DomOps.cs` `document_write`: set it when any placement node is a `<script>`. `document_write_reset`: clear it.
-- `ObscuraJsRuntime.EventLoop.cs`, next to `HasPendingLoadDelayingScripts` (:664): add `HasPendingParserBlockingScripts()` and `TakeDocumentWriteInsertedScript()`.
+- `PocketCalculatorState`: add a `DocumentWriteInsertedScript` bool. `DomOps.cs` `document_write`: set it when any placement node is a `<script>`. `document_write_reset`: clear it.
+- `PocketCalculatorJsRuntime.EventLoop.cs`, next to `HasPendingLoadDelayingScripts` (:664): add `HasPendingParserBlockingScripts()` and `TakeDocumentWriteInsertedScript()`.
 - `Page.Scripts.cs`: generalise `DriveLoadDelayingScriptsAsync` (:66) into a pump that takes a predicate, and call it after both `ExecuteClassic` sites when the flag was taken.
 - bootstrap: add `__documentWriteScripts` (WeakSet), the queue and counters, `__obscura_hasPendingParserBlockingScripts` (non-enumerable, and added to the hidden-globals list at the top), the `inlineCode` path in `__runDynScriptTask`, and the branches in `__prepareInsertedScript`.
 
-**Tests:** port `document_write_external_script_blocks_later_parser_scripts` and `document_write_does_not_start_later_async_script_before_blocker` to `tests/Obscura.Browser.Tests/PageTests.cs` using `TestHttpServer`. Also extend the hidden-global assertion in `RuntimeTests`.
+**Tests:** port `document_write_external_script_blocks_later_parser_scripts` and `document_write_does_not_start_later_async_script_before_blocker` to `tests/PocketCalculator.Browser.Tests/PageTests.cs` using `TestHttpServer`. Also extend the hidden-global assertion in `RuntimeTests`.
 
 ### 6aef52d - fix(obscura-js): remove_attribute must update the id_index (#1013)
 
@@ -1153,7 +1153,7 @@ Method: read each upstream diff, found the C# counterpart, and where it was chea
 
 ### 88d2174 - HTMLSlotElement class and assignedNodes/assignedElements (#930)
 
-**C#:** bootstrap:12502 is still `globalThis.HTMLSlotElement = Element`, and there is no `assigned_nodes` op. The native algorithm already exists as `DomTree.AssignedNodes` (`src/Obscura.Dom/DomTree.cs:950`), used by render.
+**C#:** bootstrap:12502 is still `globalThis.HTMLSlotElement = Element`, and there is no `assigned_nodes` op. The native algorithm already exists as `DomTree.AssignedNodes` (`src/PocketCalculator.Dom/DomTree.cs:950`), used by render.
 
 **Classification:** PORT.
 
@@ -1188,7 +1188,7 @@ Method: read each upstream diff, found the C# counterpart, and where it was chea
 **JS-visible changes upstream:**
 1. The timer shim moved from `Deno.core.queueUserTimer` to `createTimer`, and `cancelTimer` got a null guard. This is deno_core API only. C# supplies its own `DenoCoreShim` and timer queue, so it does not apply.
 2. `_installWasmStreamingFallback()` is re-run in the `<obscura:init>` script. C# already calls it on every document reset (bootstrap:16994) and at load (:7420), so there is nothing to do.
-3. `execute_classic_script` now runs `perform_microtask_checkpoint()` after the script, because deno_core 0.412 uses an explicit microtask policy. C# ClearScript keeps V8's automatic policy, which checkpoints when the outermost call returns (`Runtime/ObscuraJsRuntime.EventLoop.cs:13-16, 42-57`), so C# already has it.
+3. `execute_classic_script` now runs `perform_microtask_checkpoint()` after the script, because deno_core 0.412 uses an explicit microtask policy. C# ClearScript keeps V8's automatic policy, which checkpoints when the outermost call returns (`Runtime/PocketCalculatorJsRuntime.EventLoop.cs:13-16, 42-57`), so C# already has it.
 
 Everything else is `HandleScope`→`PinScope` churn, tokio test attributes, and a tokio-context guard for isolate creation.
 
@@ -1210,7 +1210,7 @@ The Rust `ops.rs`/`runtime.rs` diff is mostly rustfmt. Substantive JS/DOM items:
    - **Chromium notes (Chromium wins):**
      - Upstream pushes `window` onto every path, even for a detached element tree. Chromium includes Window only when the path reaches the Document. Push `globalThis` only when the last ancestor is the document.
      - Upstream's path follows `parentNode`, so it stops at a ShadowRoot. Chromium continues to the host with retargeting (for composed events). The current C# code has the same limitation, so this is not a regression, but record it.
-   - **Test:** port `dom_events_follow_capture_target_and_bubble_order` (the CDP test in `tests/Obscura.Cdp.Tests`, or directly in `RuntimeTests`).
+   - **Test:** port `dom_events_follow_capture_target_and_bubble_order` (the CDP test in `tests/PocketCalculator.Cdp.Tests`, or directly in `RuntimeTests`).
    - `_eventRegistry` / `__windowListeners` have no other readers in C# (`grep`), so removing them is safe.
 2. **focus()/blur() fire FocusEvents**
    - **Upstream:** `blur`/`focusout` on the previous element, then `focus`/`focusin`, with `relatedTarget`.
@@ -1235,7 +1235,7 @@ The Rust `ops.rs`/`runtime.rs` diff is mostly rustfmt. Substantive JS/DOM items:
    - **Classification:** PORT.
    - **Test:** `assignment_shadows_window_named_element_property`.
 6. **`:scope` bound to the query root** (`obscura-dom/src/selector.rs`)
-   - **C#:** `src/Obscura.Dom/Selectors/SelectorMatching.cs:393` maps `:scope` to `IsRoot()`, and :194 carries the same assumption. `DomTree.Query.cs:42/85/112` never binds a scope element.
+   - **C#:** `src/PocketCalculator.Dom/Selectors/SelectorMatching.cs:393` maps `:scope` to `IsRoot()`, and :194 carries the same assumption. `DomTree.Query.cs:42/85/112` never binds a scope element.
    - **Probe:**
      - `root.querySelectorAll(':scope > .item')` gives `[]` (Chromium: `[direct]`).
      - `':scope .menu .item'` gives `[direct,nested]` (Chromium: `[nested]`).
@@ -1255,7 +1255,7 @@ The Rust `ops.rs`/`runtime.rs` diff is mostly rustfmt. Substantive JS/DOM items:
 
 ## Upstream review: CDP area (fork point 727cc46)
 
-Paths: C# = `dotnet/src/Obscura.Cdp/...` unless stated. Rust = the upstream repository.
+Paths: C# = `dotnet/src/PocketCalculator.Cdp/...` unless stated. Rust = the upstream repository.
 
 ### Summary
 
@@ -1291,14 +1291,14 @@ C#: `Domains/Input.cs` `MousePressedJs` (~line 380) and `MouseReleasedJs` dispat
 
 #### 2. mouseReleased no longer runs the navigation inline
 Rust replaced `process_pending_navigation().await` with `if !page.has_pending_navigation() && page.sync_virtual_url() { emit frameNavigated }`. A real navigation is left for the server loop's `take_live_pending_navigation`, so the `Input.dispatchMouseEvent` response goes out before `Page.frameNavigated`. That is Chromium's order: the input ack comes first and the navigation commits later. It adds `Page::has_pending_navigation()`, and a new server test pins the order: `click_navigation_acknowledges_input_before_navigation_events`.
-C#: `Input.cs:204-259` still awaits `page.ProcessPendingNavigationOutcomeAsync()` inside the handler. **PORT**, but keep the C# same-document deviation: when `SyncVirtualUrl()` reports `IsSameDocument`, keep emitting `Page.EmitSameDocumentNavigation` rather than `frameNavigated`. Add `Page.HasPendingNavigation` (Obscura.Browser, over `Js`) and rely on `Server.Processor.TakeLivePendingNavigation`. Port the test into `ServerTests.cs`.
+C#: `Input.cs:204-259` still awaits `page.ProcessPendingNavigationOutcomeAsync()` inside the handler. **PORT**, but keep the C# same-document deviation: when `SyncVirtualUrl()` reports `IsSameDocument`, keep emitting `Page.EmitSameDocumentNavigation` rather than `frameNavigated`. Add `Page.HasPendingNavigation` (PocketCalculator.Browser, over `Js`) and rely on `Server.Processor.TakeLivePendingNavigation`. Port the test into `ServerTests.cs`.
 
-#### 3. Forwarded CDP authority (OBSCURA_CDP_FORWARDED_HOST/PORT) and CLI multi-worker
-Rust: `host_matches_bind` now also accepts the Host header when it matches a forwarded (ip, port) pair. The server reads `OBSCURA_CDP_FORWARDED_HOST`/`_PORT` (both or neither), refuses them on a non-loopback bind, and still requires `OBSCURA_CDP_TOKEN` when the forwarded host is public. The CLI multi-worker balancer binds the public port first, reserves OS-assigned worker ports, passes the forwarded env to workers, waits for workers by polling connect instead of a fixed 500 ms sleep, sets TCP_NODELAY and tolerates early-closed peeks.
-C#: there is no Origin/Host/bearer control gate at all. `control_refusal` came from upstream 04418a5 ("harden security boundaries"), which is not in this set. `Obscura.Cli/Commands/ServeCommand.cs:87` still uses `port+1+i` and `Task.Delay(500)`. **PORT, after 04418a5 is ported.** The forwarded-authority part is meaningless without the gate. The CLI balancer changes (free-port reservation, readiness polling, NODELAY, tolerant peek) can be ported on their own.
+#### 3. Forwarded CDP authority (POCKETCALCULATOR_CDP_FORWARDED_HOST/PORT) and CLI multi-worker
+Rust: `host_matches_bind` now also accepts the Host header when it matches a forwarded (ip, port) pair. The server reads `POCKETCALCULATOR_CDP_FORWARDED_HOST`/`_PORT` (both or neither), refuses them on a non-loopback bind, and still requires `POCKETCALCULATOR_CDP_TOKEN` when the forwarded host is public. The CLI multi-worker balancer binds the public port first, reserves OS-assigned worker ports, passes the forwarded env to workers, waits for workers by polling connect instead of a fixed 500 ms sleep, sets TCP_NODELAY and tolerates early-closed peeks.
+C#: there is no Origin/Host/bearer control gate at all. `control_refusal` came from upstream 04418a5 ("harden security boundaries"), which is not in this set. `PocketCalculator.Cli/Commands/ServeCommand.cs:87` still uses `port+1+i` and `Task.Delay(500)`. **PORT, after 04418a5 is ported.** The forwarded-authority part is meaningless without the gate. The CLI balancer changes (free-port reservation, readiness polling, NODELAY, tolerant peek) can be ported on their own.
 
 #### 4. CDP integration tests added by this commit
-- `iframe_event_dispatch.rs::dom_events_follow_capture_target_and_bubble_order`: capture/target/bubble phases window→document→…→target and back, plus re-dispatching the same Event object. The C# `Node.dispatchEvent` (bootstrap.js:3702) has no capture phase. The fix lives in the bootstrap part of a156914, and the test goes into `tests/Obscura.Cdp.Tests/IframeEventDispatch.cs`.
+- `iframe_event_dispatch.rs::dom_events_follow_capture_target_and_bubble_order`: capture/target/bubble phases window→document→…→target and back, plus re-dispatching the same Event object. The C# `Node.dispatchEvent` (bootstrap.js:3702) has no capture phase. The fix lives in the bootstrap part of a156914, and the test goes into `tests/PocketCalculator.Cdp.Tests/IframeEventDispatch.cs`.
 - `input_mouse_event_parity.rs`: wheel with `overflow: auto hidden` must not scroll the hidden axis. `MouseWheelJs` already reads `overflowX`/`overflowY` separately, so this needs the computed longhands to be right. It also adds `pointer-events:none` overlay hit testing, negative z-index stacking in hit testing, offsetLeft/Top relative to the padding edge of the offsetParent (clientLeft/Top 3), and the extended press/release event order from part 1. These are render/bootstrap fixes; port the tests into `InputMouseEventParity.cs`.
 - `window_conformance_parity.rs::assignment_shadows_window_named_element_property`: `window.a = 42` over a named element makes a writable data property. This is a bootstrap fix; the test goes into `WindowConformanceParity.cs`.
 
@@ -1314,9 +1314,9 @@ Rust `accessibility.rs` rewrite:
 - It builds an id→element map (first occurrence wins) and label→control association: `for=` must point at a labelable element, otherwise the first labelable descendant is used.
 - The name computation follows accname order: aria-labelledby (deduped, skips missing ids, uses the referenced node's text alternative or content, including hidden content when the reference itself is hidden, never recursing into another labelledby), then aria-label (whitespace-flattened, blank ignored), then native labels, then a text alternative (img/input image alt, submit→"Submit", reset→"Reset", button value), then content for button/link/heading/checkbox/radio/menuitem/tab/cell/row/LabelText/StaticText, then title, then placeholder (input/textarea only). Content names skip nested controls and treat br/p/div/li/h* as word boundaries.
 - `childIds` are now computed from AX `parentId`, not DOM children, so they reach through non-AX intermediate nodes.
-- New `ObscuraJsRuntime::accessibility_styles()` exposes display/visibility from the prepared render.
+- New `PocketCalculatorJsRuntime::accessibility_styles()` exposes display/visibility from the prepared render.
 
-C#: `Domains/Accessibility.cs` is the old version. `BuildAxNodes` has no hidden filtering, `ComputeName` (line 367) uses the old aria-label→labelledby→alt→title→placeholder order, and `childIds` come from DOM children (line ~128). **PORT.** Add an accessor in Obscura.Js over `RenderState.EnsurePreparedRender(state)` that returns `NodeId → (DisplayNone, VisibilityHidden)`, and check how C# `ComputedStyle.VisibilityHidden` models "inherit vs explicit" (Rust uses `Option<bool>`). The wire shape of AXNode is unchanged apart from which nodes appear and their name/childIds. Chromium note: real `getFullAXTree` returns hidden nodes as `ignored: true` with `ignoredReasons` rather than omitting them. Upstream omits them. Puppeteer/Playwright filter out ignored nodes either way, so omission is acceptable, but it is not byte-for-byte Chromium. Tests: port the 10 unit tests plus `tests/accessibility_names.rs` into `AccessibilityDomainTests.cs`.
+C#: `Domains/Accessibility.cs` is the old version. `BuildAxNodes` has no hidden filtering, `ComputeName` (line 367) uses the old aria-label→labelledby→alt→title→placeholder order, and `childIds` come from DOM children (line ~128). **PORT.** Add an accessor in PocketCalculator.Js over `RenderState.EnsurePreparedRender(state)` that returns `NodeId → (DisplayNone, VisibilityHidden)`, and check how C# `ComputedStyle.VisibilityHidden` models "inherit vs explicit" (Rust uses `Option<bool>`). The wire shape of AXNode is unchanged apart from which nodes appear and their name/childIds. Chromium note: real `getFullAXTree` returns hidden nodes as `ignored: true` with `ignoredReasons` rather than omitting them. Upstream omits them. Puppeteer/Playwright filter out ignored nodes either way, so omission is acceptable, but it is not byte-for-byte Chromium. Tests: port the 10 unit tests plus `tests/accessibility_names.rs` into `AccessibilityDomainTests.cs`.
 
 ### a161a8d - honor textarea selection when pressing Enter (#939)
 Rust `EnterJs` textarea branch: clamp selectionStart/End (null start → end of value), replace `[lower, upper)` with "\n", then `setSelectionRange(lower+1, lower+1)`, then the trusted `input` event.
@@ -1324,7 +1324,7 @@ C#: `Input.cs` `EnterJs` (~line 86) still appends `'\n'`. **PORT.** This matches
 
 ### 403356f - unique browser attachment sessions (#975)
 Rust: `Target.attachToBrowserTarget` returns `format!("browser-{uuid}")` instead of the constant "browser-session", so detaching one attachment does not remove another.
-C#: `Domains/Target.cs:161` still has `const string sessionId = "browser-session"`. `detachFromTarget` (Target.cs:244) already removes by id, so only the id needs to change. **PORT**, using `"browser-" + Guid.NewGuid()` (hyphenated lowercase, like the Rust uuid Display). Update `tests/Obscura.Cdp.Tests/TargetDomainTests.cs:69-76`, which asserts the literal, and the tests at lines 88/118/134 that use it as a parent session. Add `BrowserAttachmentsDetachIndependently`. Chromium also issues a unique session id per attach.
+C#: `Domains/Target.cs:161` still has `const string sessionId = "browser-session"`. `detachFromTarget` (Target.cs:244) already removes by id, so only the id needs to change. **PORT**, using `"browser-" + Guid.NewGuid()` (hyphenated lowercase, like the Rust uuid Display). Update `tests/PocketCalculator.Cdp.Tests/TargetDomainTests.cs:69-76`, which asserts the literal, and the tests at lines 88/118/134 that use it as a parent session. Add `BrowserAttachmentsDetachIndependently`. Chromium also issues a unique session id per attach.
 
 ### 94e857b - canonical node wrappers when resolving CDP handles (no PR)
 Rust `DOM.resolveNode`: the hand-rolled `_cache`/`new Element(nid)` wrapper, which made a plain `Element` instead of `HTMLTextAreaElement` and so on, is replaced by `t === 9 ? document : _wrap(nid)`.
@@ -1343,15 +1343,15 @@ C#: `Server.cs:759,771` hard-code `ws://127.0.0.1:{port}`, and `HandleHttpJsonBl
 
 ### af955b3 - release memory after client disconnect (no PR)
 Rust: when the last live connection ends, it drops the runtime and LocalSet, then calls `malloc_trim(0)` (glibc only). `SlotGuard::release` returns the remaining count.
-C#: `Server.cs:886-905`. `RunConnection`'s finally calls `slots.Release()` (`ConnectionSlots.Release` at Server.cs:448 returns void), with no idle trim. **PORT, adapted.** Make `Release()` return `Interlocked.Decrement`. When it reaches 0, run a full blocking compacting GC (`GCSettings.LargeObjectHeapCompactionMode = CompactOnce; GC.Collect(2, Aggressive, true, true)`, as `PageHelpers.ReleaseReplacedDocumentMemory` already does). V8 native heaps are freed by isolate disposal, so for the RSS part optionally P/Invoke `malloc_trim(0)` on Linux/glibc. libc P/Invoke already exists in Obscura.Cli (ProcessExit/ProcessEnvironment), so it does not count as a new native dependency under rule 4, but guard it for musl/non-Linux. Measure RSS before and after, per the performance rule.
+C#: `Server.cs:886-905`. `RunConnection`'s finally calls `slots.Release()` (`ConnectionSlots.Release` at Server.cs:448 returns void), with no idle trim. **PORT, adapted.** Make `Release()` return `Interlocked.Decrement`. When it reaches 0, run a full blocking compacting GC (`GCSettings.LargeObjectHeapCompactionMode = CompactOnce; GC.Collect(2, Aggressive, true, true)`, as `PageHelpers.ReleaseReplacedDocumentMemory` already does). V8 native heaps are freed by isolate disposal, so for the RSS part optionally P/Invoke `malloc_trim(0)` on Linux/glibc. libc P/Invoke already exists in PocketCalculator.Cli (ProcessExit/ProcessEnvironment), so it does not count as a new native dependency under rule 4, but guard it for musl/non-Linux. Measure RSS before and after, per the performance rule.
 
 ### 20a3e02 - preserve undefined in by-value results (#779)
 Rust: `v8_to_cdp_value` checks `is_undefined()` before JSON conversion in evaluate-by-value and both callFunctionOn by-value paths (awaited and not). It returns `{type:"undefined"}` with no value and no subtype.
-C#: `Obscura.Js/Runtime/ObscuraJsRuntime.Cdp.cs:195`, `:289` and `:308` all use `InfoFromJson(ToJson(read))`, and `ToJson` maps `Undefined`/`VoidResult` to null (line 651). So `returnByValue` of `undefined` reports `{type:"object",subtype:"null",value:null}`. **PORT**: add `ToCdpValue(object? v)`, which returns `new RemoteObjectInfo(false, "undefined", null, "", "", null, null)` (HasValue false) for `Undefined`/`VoidResult` and otherwise `InfoFromJson(ToJson(v))`. This is a wire change toward Chromium (Chromium returns `{"type":"undefined"}`). Test: port `runtime_by_value_undefined.rs`, a 7-value table x {evaluate, callFunctionOn} x {sync, awaited}, into `RuntimeRemoteObjectNullValue.cs` or a new `RuntimeByValueUndefined.cs`.
+C#: `PocketCalculator.Js/Runtime/PocketCalculatorJsRuntime.Cdp.cs:195`, `:289` and `:308` all use `InfoFromJson(ToJson(read))`, and `ToJson` maps `Undefined`/`VoidResult` to null (line 651). So `returnByValue` of `undefined` reports `{type:"object",subtype:"null",value:null}`. **PORT**: add `ToCdpValue(object? v)`, which returns `new RemoteObjectInfo(false, "undefined", null, "", "", null, null)` (HasValue false) for `Undefined`/`VoidResult` and otherwise `InfoFromJson(ToJson(v))`. This is a wire change toward Chromium (Chromium returns `{"type":"undefined"}`). Test: port `runtime_by_value_undefined.rs`, a 7-value table x {evaluate, callFunctionOn} x {sync, awaited}, into `RuntimeRemoteObjectNullValue.cs` or a new `RuntimeByValueUndefined.cs`.
 
 ### 4383793 - binary Fetch.fulfillRequest bodies intact via bodyBase64 (#912)
 Rust: `InterceptResolution::Fulfill` gains `body_base64`. server.rs passes the raw CDP base64 through, and `op_fetch_url`'s intercept path emits `{"status","body","bodyBase64","url","headers"}` (in that key order), which the bootstrap already prefers (`_base64ToUint8Array`).
-C#: `Obscura.Js/Ops/ObscuraState.cs:395` `Fulfill(Status, Headers, Body)` has no base64. `FetchOps.cs:359-372` emits status/body/url/headers only. `ServerSupport.cs:351` builds it from the lossy `DecodeBase64` string. The C# bootstrap's consumer already reads `parsed.bodyBase64` (bootstrap.js:7535). **PORT**: add `BodyBase64` to `InterceptResolution.Fulfill` and emit it after `body` in `FetchOps` so the key order matches Rust. One improvement over Rust: the lenient decoder drops non-alphabet characters, so passing the raw param through can hand `atob` a string it rejects. Decode to bytes once, then send `body = lossy UTF-8(bytes)` and `bodyBase64 = Convert.ToBase64String(bytes)`. If you do that, comment it as a deviation. Test: non-UTF-8 bytes (PNG header, FF FE 00) round-trip through `Response.arrayBuffer()` under Fetch interception.
+C#: `PocketCalculator.Js/Ops/PocketCalculatorState.cs:395` `Fulfill(Status, Headers, Body)` has no base64. `FetchOps.cs:359-372` emits status/body/url/headers only. `ServerSupport.cs:351` builds it from the lossy `DecodeBase64` string. The C# bootstrap's consumer already reads `parsed.bodyBase64` (bootstrap.js:7535). **PORT**: add `BodyBase64` to `InterceptResolution.Fulfill` and emit it after `body` in `FetchOps` so the key order matches Rust. One improvement over Rust: the lenient decoder drops non-alphabet characters, so passing the raw param through can hand `atob` a string it rejects. Decode to bytes once, then send `body = lossy UTF-8(bytes)` and `bodyBase64 = Convert.ToBase64String(bytes)`. If you do that, comment it as a deviation. Test: non-UTF-8 bytes (PNG header, FF FE 00) round-trip through `Response.arrayBuffer()` under Fetch interception.
 
 ### fa0362b - navigateToHistoryEntry index corruption and dropped network events (#920)
 Rust: snapshots history and index before `set_history_index`. When `navigate_with_wait` fails, it restores both and returns the error. On success it restores history with `history_index = entry_id` and calls `sync_js_network_events()` before draining `network_events`.
@@ -1359,7 +1359,7 @@ C#: `Domains/Page.cs:1139-1194` calls `SetHistoryIndex` before navigating. The `
 
 ### d792bae - keep concurrent pages' JS isolates live on a shared connection (#872)
 Rust: `get_session_page_mut` only resumes the target and no longer suspends others. The interception path's suspend-all loop is removed. The server helpers now service every live page: the event-loop pump runs a turn on each, network-event sync runs per page with its own session and frame, and pending-navigation pickup scans all live pages. New test `concurrent_page_isolation.rs` checks that a page's globalThis state and a live objectId survive a command routed to another page.
-C#: `CdpContext.cs:718-757` still suspends another page. `Server.Navigation.cs:83-86` suspends all pages. `Server.Processor.cs` `LiveJsPage`/`PumpLivePageEventLoopAsync`/`SyncLivePageNetworkEvents`/`TakeLivePendingNavigation` (lines ~294-370) serve only the first live page. `Page.SuspendJs` (Obscura.Browser/Page.Evaluate.cs:163) keeps the DOM and `CdpObjectState` recipes but drops the JS heap: globals, listeners, timers, closures.
+C#: `CdpContext.cs:718-757` still suspends another page. `Server.Navigation.cs:83-86` suspends all pages. `Server.Processor.cs` `LiveJsPage`/`PumpLivePageEventLoopAsync`/`SyncLivePageNetworkEvents`/`TakeLivePendingNavigation` (lines ~294-370) serve only the first live page. `Page.SuspendJs` (PocketCalculator.Browser/Page.Evaluate.cs:163) keeps the DOM and `CdpObjectState` recipes but drops the JS heap: globals, listeners, timers, closures.
 **CONFLICT**: todo.md section "What the CDP pool move did and did not change", under "Page suspension stays", deliberately keeps suspension to bound one live isolate per connection for memory reasons, and says relaxing it "is a memory trade needing its own measurement". Chromium keeps every tab's heap live. Suspension silently destroys page A's state when page B is driven, which breaks Playwright `connectOverCDP` with several pages. Chromium wins on behaviour, so port it. Remove the two suspend sites, make the four processor helpers loop over all live pages, and keep `CdpContext.V8Lock`, which is unchanged. First run the memory measurement the todo entry asks for (N pages on one connection, RSS) and then rewrite that todo section. ClearScript's multiple isolates per process make this simpler than in Rust. The emitted events are unchanged per page. Test: port `concurrent_page_isolation.rs` into a new `ConcurrentPageIsolation.cs`, and keep `ConcurrentConnectionsHeavyPage` green.
 
 ### dc88742 - Fetch domain path parity with server.rs (#919)
