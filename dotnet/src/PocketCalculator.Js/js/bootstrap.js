@@ -7629,8 +7629,10 @@ globalThis.fetch = async (input, init = {}) => {
   if (fetchCredentials !== "omit" && fetchCredentials !== "same-origin" && fetchCredentials !== "include") {
     throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
   }
-  const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, false);
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which passes an origin computed
+  // with the page's own URL global: op_fetch_url derives the requesting origin from the
+  // calling realm's document host-side and ignores this argument (SECURITY.md C1).
+  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, "", fetchMode, fetchCredentials, false);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');

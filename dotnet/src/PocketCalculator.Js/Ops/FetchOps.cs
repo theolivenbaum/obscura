@@ -257,12 +257,15 @@ public static partial class FetchOps
         string origin,
         string mode,
         string credentials,
-        bool internalLoad = false)
+        bool internalLoad = false,
+        PocketCalculatorState? document = null)
     {
         try
         {
+            // `origin` is the shim's argument slot and is ignored: see FetchUrlAsync.
+            _ = origin;
             return await FetchUrlAsync(
-                    state, url, method, headersJson, body, origin, mode, credentials, internalLoad)
+                    state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad)
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -281,16 +284,25 @@ public static partial class FetchOps
 
     private static async Task<string> FetchUrlAsync(
         PocketCalculatorState gs,
+        PocketCalculatorState document,
         string url,
         string method,
         string headersJson,
         byte[] body,
-        string origin,
         string mode,
         string credentials,
         bool internalLoad)
     {
         ArgumentNullException.ThrowIfNull(gs);
+        ArgumentNullException.ThrowIfNull(document);
+
+        // DEVIATION from crates/obscura-js (ops.rs), which takes the request origin from
+        // the op's `origin` argument. The shim computed it with the page's own `URL`
+        // global, so a page that replaced `URL` could claim any origin and read another
+        // site's credentialed responses. The origin is the calling realm's document
+        // origin as the host knows it, and the argument is accepted and ignored so the
+        // op keeps its shape.
+        var origin = StateHelpers.DocumentOrigin(document);
         using FetchConcurrency.Slot slot = await FetchConcurrency.EnterAsync(gs).ConfigureAwait(false);
 
         // Page-script requests run under the Fetch request guards; the engine's own
@@ -429,7 +441,7 @@ public static partial class FetchOps
             var client = httpClient?.RequestClient ?? SharedRequestClient(allowPrivateNetwork);
 
             var initialRequestOrigin = RequestOrigin(url) ?? string.Empty;
-            var pageOrigin = origin.Length == 0 ? initialRequestOrigin : origin;
+            var pageOrigin = origin;
             var isCrossOrigin = pageOrigin.Length != 0
                 && !string.Equals(initialRequestOrigin, pageOrigin, StringComparison.Ordinal);
             var credentialsMode = ParseCredentials(credentials);
@@ -549,7 +561,7 @@ public static partial class FetchOps
             // Referer, no Origin on a GET, and SameSite=None cookies only when it is
             // cross-site with the embedding document.
             var frameNavigation = string.Equals(mode, "navigate", StringComparison.Ordinal)
-                && Uri.TryCreate(gs.Url, UriKind.Absolute, out var frameInitiator)
+                && Uri.TryCreate(document.Url, UriKind.Absolute, out var frameInitiator)
                     ? ResourceRequest.FrameNavigation(frameInitiator)
                     : null;
 

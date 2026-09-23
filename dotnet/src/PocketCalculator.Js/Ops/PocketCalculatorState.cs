@@ -38,6 +38,13 @@ public sealed class PocketCalculatorState
     public string Url { get; set; } = "about:blank";
 
     /// <summary>
+    /// Whether the document has an opaque origin whatever its URL says, as a frame
+    /// sandboxed without <c>allow-same-origin</c> does. Port addition: Rust derives
+    /// no origin host-side at all (see <see cref="StateHelpers.DocumentOrigin"/>).
+    /// </summary>
+    public bool OpaqueOrigin { get; set; }
+
+    /// <summary>
     /// WHATWG canonical name of the document's character encoding (e.g. "UTF-8",
     /// "EUC-JP"). Backs <c>document.characterSet</c> and the URL query encoding
     /// override for <c>&lt;a&gt;</c>/<c>&lt;area&gt;</c> hrefs in legacy-charset documents.

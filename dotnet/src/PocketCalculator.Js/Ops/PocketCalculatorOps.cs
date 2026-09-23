@@ -197,10 +197,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (source, baseUrl) => CoreOps.OpAddImportMap(Page, S(source), S(baseUrl))));
 
         // --- Network -------------------------------------------------------
-        Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
-            (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
-                RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
-                B(internalLoad))));
+        BindFetch(ops, Page);
 
         // --- Encoding ------------------------------------------------------
         Bind(ops, "op_encoding_for_label", (Func<object?, string>)(
@@ -334,7 +331,23 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
+        BindFetch(ops, state);
     }
+
+    /// <summary>
+    /// <c>op_fetch_url</c>, judged against <paramref name="document"/>: the realm the op
+    /// table belongs to, never an origin the shim passes.
+    /// </summary>
+    /// <remarks>
+    /// The transport state (cookie jar, client, interception) is still the running realm's,
+    /// as before; only the document the request is made <em>by</em> is pinned, because that
+    /// is what decides CORS, credentials and SameSite.
+    /// </remarks>
+    private void BindFetch(ScriptObject ops, PocketCalculatorState document) =>
+        Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
+            (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
+                RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
+                B(internalLoad), document)));
 
     private void Bind(ScriptObject ops, string name, object function)
     {
