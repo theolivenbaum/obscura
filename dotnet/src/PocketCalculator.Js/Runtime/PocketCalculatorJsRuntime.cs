@@ -55,6 +55,7 @@ public sealed partial class PocketCalculatorJsRuntime
     private readonly PocketCalculatorModuleLoader _moduleLoader;
     private readonly PocketCalculatorHttpClient _standaloneModuleClient;
     private readonly V8IsolateHandle _isolateHandle;
+    private readonly IDisposable _memoryRegistration;
     private readonly Dictionary<string, string> _objectStore = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _evaluationRecipes = new(StringComparer.Ordinal);
     private readonly Dictionary<long, string?> _moduleEvaluations = [];
@@ -68,6 +69,9 @@ public sealed partial class PocketCalculatorJsRuntime
 
     private PocketCalculatorJsRuntime(string baseUrl, string? proxyUrl)
     {
+        // A process over POCKETCALCULATOR_MAX_PROCESS_BYTES takes no new page (M7).
+        ProcessMemoryGuard.Default.ThrowIfOverLimit();
+
         // A runtime is about to initialize the V8 platform; from here on a
         // SetV8Flags call must be refused rather than changing nothing silently.
         V8Flags.MarkPlatformStarted();
@@ -96,6 +100,7 @@ public sealed partial class PocketCalculatorJsRuntime
         _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
+        _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
         _ops.Cancellation.Interrupter = () =>
         {
             if (_disposed)
@@ -148,6 +153,9 @@ public sealed partial class PocketCalculatorJsRuntime
 
     /// <summary>The main realm's script engine. Frames get their own.</summary>
     internal V8ScriptEngine Engine => _engine;
+
+    /// <summary>Test seam: watch this isolate with a guard of the test's own.</summary>
+    internal IDisposable WatchMemoryWith(ProcessMemoryGuard guard) => guard.Register(_isolateHandle);
 
     /// <summary>The isolate every realm of this page shares.</summary>
     internal V8Runtime Isolate => _v8;
@@ -812,6 +820,7 @@ public sealed partial class PocketCalculatorJsRuntime
             return;
         }
         _disposed = true;
+        _memoryRegistration.Dispose();
         // Background render-resource loads belong to this document; a closed page must
         // not keep fetching for a document nobody can observe any more.
         AbandonRenderResources();
