@@ -34,7 +34,7 @@
   <PropertyGroup>
     <Authors>Curiosity GmbH; the Obscura authors</Authors>
     <Company>Curiosity GmbH</Company>
-    <Product>Obscura</Product>
+    <Product>PocketCalculator</Product>
     <Copyright>Copyright (c) 2026 Curiosity GmbH. Based on Obscura, Copyright (c) the Obscura authors (https://github.com/h4ckf0r0day/obscura).</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/theolivenbaum/obscura</PackageProjectUrl>
@@ -57,7 +57,7 @@
   <!-- Upstream's license file has no extension, and NuGet packs an extensionless
        source under a renamed PackagePath as a folder. Copy it to obj/ under the
        name it ships as, and pack that. -->
-  <Target Name="PackObscuraLicense" BeforeTargets="_GetPackageFiles" Condition="'$(IsPackable)' != 'false'">
+  <Target Name="PackPocketCalculatorLicense" BeforeTargets="_GetPackageFiles" Condition="'$(IsPackable)' != 'false'">
     <Copy SourceFiles="$(MSBuildThisFileDirectory)../.reference/obscura/LICENSE"
           DestinationFiles="$(IntermediateOutputPath)LICENSE-OBSCURA.txt" SkipUnchangedFiles="true" />
     <ItemGroup>

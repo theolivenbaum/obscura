@@ -28,7 +28,7 @@ WIDTHS=("$@")
 [[ ${#WIDTHS[@]} -eq 0 ]] && WIDTHS=(1280 900 640)
 
 RUST="${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}"
-CS="${OBSCURA_PORT_BIN:-$REPO/dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura}"
+CS="${POCKETCALCULATOR_PORT_BIN:-$REPO/dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocketcalculator}"
 OUT="${RENDER_COMPARE_OUT:-$REPO/target/render-compare}"
 PORT="${RENDER_COMPARE_PORT:-8099}"
 SETTLE="${RENDER_COMPARE_SETTLE:-3}"

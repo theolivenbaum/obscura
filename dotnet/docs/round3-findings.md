@@ -719,8 +719,8 @@ on to run: it exceeds the 5.5s autonomous task budget and V8 is terminated insid
 ### Where the notify set is drained
 
 `bootstrap.js`'s `MutationObserver._notify` queues a promise job; the host drains it in
-`ObscuraJsRuntime.PumpTick`, which calls `PerformMicrotaskCheckpoint()` at the top of the turn,
-after every posted task and after every timer callback (`ObscuraJsRuntime.EventLoop.cs`). That is
+`PocketCalculatorJsRuntime.PumpTick`, which calls `PerformMicrotaskCheckpoint()` at the top of the turn,
+after every posted task and after every timer callback (`PocketCalculatorJsRuntime.EventLoop.cs`). That is
 the placement DOM 4.3.4 and the HTML event loop ask for. An isolated probe (a `MutationObserver`
 on `document.body`, one `appendChild`, timestamps against a `queueMicrotask` scheduled just before
 it) shows the callback in the **same checkpoint** as the microtask and ahead of `setTimeout(0)` and
@@ -788,7 +788,7 @@ budget only moves the threshold.
 ### Fixed here: the MutationObserver shim's notify set and registration rules
 
 Measuring the above turned up three real spec divergences in the shared shim, all of them now
-fixed in `dotnet/src/Obscura.Js/js/bootstrap.js` - the port owns its copy now, so this is a deviation from the Rust shim and is recorded in `todo.md` (`mo2probe.html`, expected/Obscura-before/after):
+fixed in `dotnet/src/PocketCalculator.Js/js/bootstrap.js` - the port owns its copy now, so this is a deviation from the Rust shim and is recorded in `todo.md` (`mo2probe.html`, expected/Obscura-before/after):
 
 | case | Chromium | before | after |
 |---|---|---|---|
@@ -808,7 +808,7 @@ fixed in `dotnet/src/Obscura.Js/js/bootstrap.js` - the port owns its copy now, s
   an empty queue - so this is shape and allocation, not behaviour: 20,000 mutations under an
   observer queued 20,000 promise jobs to deliver one callback.
 
-Pinned by `Obscura.Js.Tests/MutationObserverTests.cs` (7 facts). Cost: interleaved A/B of the two
+Pinned by `PocketCalculator.Js.Tests/MutationObserverTests.cs` (7 facts). Cost: interleaved A/B of the two
 builds on `#/view/Button`, five runs each, 8418ms vs 8431ms (0.15%, noise floor ~10%); a
 20,000-mutation churn page is likewise unchanged. The three `#/view/Masonry` timings are
 **unchanged**, as expected - they are governed by the forced-layout cost above.
@@ -816,7 +816,7 @@ builds on `#/view/Button`, five runs each, 8418ms vs 8431ms (0.15%, noise floor 
 ### Follow-up: half of the forced-layout cost is fixed, and the Masonry attribution above is wrong
 
 **Fixed: a retained restyle that changes nothing layout can see now keeps its layout.**
-`Obscura.Render.RetainedLayoutReuse` is a gate in front of the layout half of a retained restyle.
+`PocketCalculator.Render.RetainedLayoutReuse` is a gate in front of the layout half of a retained restyle.
 At the end of the top-down pass - the last point at which this pass's style objects are
 comparable to the ones the previous layout was produced from - it compares every element the
 cascade recomputed against the style object it replaced. If nothing differs, or the only
@@ -827,7 +827,7 @@ layout, equality is proven structurally and anything the comparer cannot compare
 changed, and the gate is only offered a layout for a batch of pure attribute mutations against a
 container-query-free sheet with at most 512 recomputed elements.
 
-`thrash.html` again, interleaved A/B on one binary (`OBSCURA_DISABLE_RETAINED_LAYOUT_REUSE=1`),
+`thrash.html` again, interleaved A/B on one binary (`POCKETCALCULATOR_DISABLE_RETAINED_LAYOUT_REUSE=1`),
 three runs each, medians. This container measures ~1.7x slower than the table above, so the
 "before" column is not the same number as the one at the top of this finding:
 
@@ -882,7 +882,7 @@ So the remaining work is not a better gate, it is retained layout, in two indepe
    down, and it is what `#/view/Masonry` needs: fifty flushes at 130ms do not fit in a 5.5s
    budget however cheap the gate is.
 
-Pinned by `Obscura.Render.Tests/RetainedLayoutReuseTests.cs` (10 facts), each comparing the
+Pinned by `PocketCalculator.Render.Tests/RetainedLayoutReuseTests.cs` (10 facts), each comparing the
 incremental result against a full from-scratch layout of the same mutated tree. Parity: all 101
 Tesserae routes captured twice from one pinned binary, gate off and gate on - 98 byte-identical
 in geometry and computed style, and the three that are not (`Searchable List`, `Masonry`,

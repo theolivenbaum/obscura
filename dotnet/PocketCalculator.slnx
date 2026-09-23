@@ -1,0 +1,24 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PocketCalculator.Browser/PocketCalculator.Browser.csproj" />
+    <Project Path="src/PocketCalculator.Cdp/PocketCalculator.Cdp.csproj" />
+    <Project Path="src/PocketCalculator.Cli/PocketCalculator.Cli.csproj" />
+    <Project Path="src/PocketCalculator.Dom/PocketCalculator.Dom.csproj" />
+    <Project Path="src/PocketCalculator.Js/PocketCalculator.Js.csproj" />
+    <Project Path="src/PocketCalculator.Mcp/PocketCalculator.Mcp.csproj" />
+    <Project Path="src/PocketCalculator.Net/PocketCalculator.Net.csproj" />
+    <Project Path="src/PocketCalculator.Render/PocketCalculator.Render.csproj" />
+    <Project Path="src/PocketCalculator/PocketCalculator.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PocketCalculator.Browser.Tests/PocketCalculator.Browser.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Cdp.Tests/PocketCalculator.Cdp.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Cli.Tests/PocketCalculator.Cli.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Dom.Tests/PocketCalculator.Dom.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Js.Tests/PocketCalculator.Js.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Mcp.Tests/PocketCalculator.Mcp.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Net.Tests/PocketCalculator.Net.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Parity.Tests/PocketCalculator.Parity.Tests.csproj" />
+    <Project Path="tests/PocketCalculator.Render.Tests/PocketCalculator.Render.Tests.csproj" />
+  </Folder>
+</Solution>

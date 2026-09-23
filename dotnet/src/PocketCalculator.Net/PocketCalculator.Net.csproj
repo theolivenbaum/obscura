@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PocketCalculator.Net</RootNamespace>
+    <AssemblyName>PocketCalculator.Net</AssemblyName>
+    <Description>Obscura networking: HTTP transport, cookies, robots.txt, tracker blocklist and encoding detection.</Description>
+    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Tracker blocklist. Copied from crates/obscura-net/src/pgl_domains.txt
+       rather than linked, so the C# tree stands on its own. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources/pgl_domains.txt">
+      <LogicalName>PocketCalculator.Net.pgl_domains.txt</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PocketCalculator.Net.Tests" />
+  </ItemGroup>
+</Project>

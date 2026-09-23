@@ -1,0 +1,177 @@
+using System.Text.Json.Serialization;
+using PocketCalculator.Js.Url;
+using PocketCalculator.Net;
+
+namespace PocketCalculator.Api;
+
+/// <summary>A cookie as exposed to the embeddable API.</summary>
+/// <remarks>
+/// The Rust type derives <c>Serialize</c>/<c>Deserialize</c> with no rename, so
+/// its JSON keys are the Rust field names. The property names here are the
+/// idiomatic C# ones and the JSON names are pinned to Rust's, so a cookie list
+/// written by one engine is readable by the other.
+/// </remarks>
+public sealed class Cookie
+{
+    /// <summary>Cookie name.</summary>
+    [JsonPropertyName("name")]
+    public required string Name { get; init; }
+
+    /// <summary>Cookie value.</summary>
+    [JsonPropertyName("value")]
+    public required string Value { get; init; }
+
+    /// <summary>Scope domain.</summary>
+    [JsonPropertyName("domain")]
+    public required string Domain { get; init; }
+
+    /// <summary>Scope path.</summary>
+    [JsonPropertyName("path")]
+    public required string Path { get; init; }
+
+    /// <summary>Only sent over https when true.</summary>
+    [JsonPropertyName("secure")]
+    public bool Secure { get; init; }
+
+    /// <summary>Hidden from <c>document.cookie</c> when true.</summary>
+    [JsonPropertyName("http_only")]
+    public bool HttpOnly { get; init; }
+
+    /// <summary>Create a cookie from a name/value pair with Rust's defaults.</summary>
+    public static Cookie New(string name, string value, string domain) => new()
+    {
+        Name = name,
+        Value = value,
+        Domain = domain,
+        Path = "/",
+        Secure = false,
+        HttpOnly = false,
+    };
+}
+
+/// <summary>Cookie management for a browser session.</summary>
+public sealed class CookieStore
+{
+    private readonly CookieJar _jar;
+
+    internal CookieStore(CookieJar jar) => _jar = jar;
+
+    /// <summary>
+    /// Set a cookie from a <c>Set-Cookie</c> header string, as it would arrive
+    /// from <paramref name="url"/>.
+    /// </summary>
+    public void Set(string setCookieString, string url)
+    {
+        var parsed = ParseUrl(url);
+        _jar.SetCookie(setCookieString, parsed);
+    }
+
+    /// <summary>Every cookie in the jar, including HttpOnly ones.</summary>
+    public List<Cookie> GetAll()
+    {
+        var all = _jar.GetAllCookies();
+        var result = new List<Cookie>(all.Count);
+        foreach (var c in all)
+        {
+            result.Add(new Cookie
+            {
+                Name = c.Name,
+                Value = c.Value,
+                Domain = c.Domain,
+                Path = c.Path,
+                Secure = c.Secure,
+                HttpOnly = c.HttpOnly,
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// The cookies that would be sent to <paramref name="url"/>.
+    /// </summary>
+    /// <remarks>
+    /// Reconstructed from the request header exactly as Rust does, so the
+    /// per-cookie domain/path/flags are the request's, not the stored cookie's.
+    /// </remarks>
+    public List<Cookie> GetForUrl(string url)
+    {
+        var parsed = ParseUrl(url);
+        var header = _jar.GetCookieHeader(parsed);
+        var result = new List<Cookie>();
+        var host = parsed.Host;
+        foreach (var pair in header.Split("; "))
+        {
+            if (pair.Length == 0)
+            {
+                continue;
+            }
+            var split = pair.IndexOf('=');
+            var name = split < 0 ? pair : pair[..split];
+            var value = split < 0 ? string.Empty : pair[(split + 1)..];
+            // Rust's `host_str()?` drops the cookie when the URL has no host.
+            if (host.Length == 0)
+            {
+                continue;
+            }
+            result.Add(new Cookie
+            {
+                Name = name,
+                Value = value,
+                Domain = host,
+                Path = "/",
+                Secure = false,
+                HttpOnly = false,
+            });
+        }
+        return result;
+    }
+
+    /// <summary>Save every cookie to a JSON file.</summary>
+    public void SaveToFile(string path)
+    {
+        try
+        {
+            _jar.SaveToFile(path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw PocketCalculatorException.Internal(error);
+        }
+    }
+
+    /// <summary>Load cookies from a JSON file, returning how many were restored.</summary>
+    public int LoadFromFile(string path)
+    {
+        try
+        {
+            return _jar.LoadFromFile(path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw PocketCalculatorException.Internal(error);
+        }
+    }
+
+    private static Uri ParseUrl(string url)
+    {
+        // The WHATWG parser is the port of the `url` crate this API parses with,
+        // so an input the reference accepts is accepted here too. Rust wraps the
+        // crate's ParseError, so the reason names the component that was wrong.
+        if (UrlRecord.Parse(url, out UrlParseError error) is not { } record)
+        {
+            throw PocketCalculatorException.Internal(new UriFormatException($"{error.Message()}: {url}"));
+        }
+
+        // Port-only arm: Rust hands the `url` crate's Url straight to the jar, while the
+        // port's jar still takes a System.Uri, which rejects a few hosts the WHATWG parser
+        // accepts (`http://a..b/`). Say so rather than borrowing a ParseError string the
+        // reference would never produce here. Goes away with the System.Uri boundary.
+        if (!Uri.TryCreate(record.Href, UriKind.Absolute, out var uri))
+        {
+            throw PocketCalculatorException.Internal(
+                new UriFormatException($"host not representable as a System.Uri: {url}"));
+        }
+
+        return uri;
+    }
+}

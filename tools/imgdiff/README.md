@@ -16,6 +16,6 @@ cd tools/imgdiff && dotnet build -c Release
 bin/Release/net10.0/imgdiff a.png b.png 8
 ```
 
-Kept out of `dotnet/Obscura.slnx` on purpose: it is a diagnostic for comparing
+Kept out of `dotnet/PocketCalculator.slnx` on purpose: it is a diagnostic for comparing
 engines, not part of the engine, and it takes a SkiaSharp native asset of its
 own.

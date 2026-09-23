@@ -10,7 +10,7 @@ Run it through all three engines and compare:
 
 ```bash
 # Obscura, either engine
-.reference/obscura/target/release/obscura fetch 'data:text/html,<p>x</p>' --eval "$(cat tools/canvas-conformance/probe.js)" --quiet
+.reference/obscura/target/release/pocketcalculator fetch 'data:text/html,<p>x</p>' --eval "$(cat tools/canvas-conformance/probe.js)" --quiet
 
 # Chromium
 node -e '

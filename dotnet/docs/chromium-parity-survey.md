@@ -26,7 +26,7 @@ against the same live Curiosity Workspace server (auto-login, Lorem Ipsum AI pro
 - Effect: `document.body.innerText` begins with the contents of the `<style>` and `<script>`
   elements. Obscura *does* compute `display:none` on those elements correctly; `innerText`
   simply does not consult layout.
-- Impact: any consumer reading visible text (the MCP tools in `Obscura.Mcp/Tools.cs` use
+- Impact: any consumer reading visible text (the MCP tools in `PocketCalculator.Mcp/Tools.cs` use
   `innerText || textContent`), plus scrapers and assertions.
 
 ## F3 — `font-family: inherit` is dropped on form controls, so the UA font survives
@@ -41,7 +41,7 @@ against the same live Curiosity Workspace server (auto-login, Lorem Ipsum AI pro
   `font-size: inherit` beside it. "Plus Jakarta Sans" itself is only ever declared in
   `@font-face`; the page font reaches controls purely through that `inherit`.
 - Obscura's UA sheet sets `style.FontFamily = "arial"` (and `FontSize = 13.333px`) on
-  button/select/input/textarea in `Obscura.Render/Style/ComputedStyle.cs:130-175`, an explicit
+  button/select/input/textarea in `PocketCalculator.Render/Style/ComputedStyle.cs:130-175`, an explicit
   documented deviation. Chromium's UA sheet does the same thing, so the UA value is not the bug -
   the author rule failing to override it is.
 - **The narrowing detail:** `font-size: inherit` in that *same rule* works. Obscura computes
@@ -71,7 +71,7 @@ against the same live Curiosity Workspace server (auto-login, Lorem Ipsum AI pro
 - Measured: home route, 546 aligned elements. Chromium computes `hidden` x94, `hidden auto` x7,
   `clip` x6, `auto` x4, `auto hidden` x1 (112 non-visible). Obscura reports `hidden` x8 and
   `visible` for everything else.
-- Root cause: `Obscura.Render/Paint/PreparedRender.cs:674-675` emits `overflow-x` and
+- Root cause: `PocketCalculator.Render/Paint/PreparedRender.cs:674-675` emits `overflow-x` and
   `overflow-y` into the computed-style snapshot but **never `overflow`**. The JS
   `getComputedStyle` shim (`bootstrap.js:8382`) falls back to the element's own declaration
   when the snapshot has no entry, so only the 8 elements carrying an *inline*
@@ -113,11 +113,11 @@ Home route, aligned elements:
 
 ## F9a — CDP never reports a same-document navigation (`Page.navigatedWithinDocument`)
 - **`Page.navigatedWithinDocument` does not exist anywhere in Obscura** - not in
-  `dotnet/src/Obscura.Cdp/**` and not in `crates/obscura-cdp/**`. The only navigation event ever
+  `dotnet/src/PocketCalculator.Cdp/**` and not in `crates/obscura-cdp/**`. The only navigation event ever
   emitted is `Page.frameNavigated`.
 - Mechanism: `bootstrap.js` implements `history.pushState`/`replaceState` correctly in JS - it
   sets `globalThis.__virtualUrl` and never navigates. The host then notices that URL in
-  `Page.SyncVirtualUrl` (`dotnet/src/Obscura.Browser/Page.cs:563`), called from
+  `Page.SyncVirtualUrl` (`dotnet/src/PocketCalculator.Browser/Page.cs:563`), called from
   `ProcessPendingNavigationAsync` (`Page.Navigation.cs:615`), adopts it and returns `true`
   meaning "navigated". That is surfaced to CDP as `Page.frameNavigated`.
 - Why it matters: in CDP, `frameNavigated` means a *cross-document* navigation, and every client
@@ -150,7 +150,7 @@ Home route, aligned elements:
   update the URL and fire `hashchange` instead of calling `op_navigate`.
 
 ## F10 — the computed-style snapshot omits many commonly-read properties
-`PreparedRender.ComputedStyle` (`Obscura.Render/Paint/PreparedRender.cs`) emits ~50 properties.
+`PreparedRender.ComputedStyle` (`PocketCalculator.Render/Paint/PreparedRender.cs`) emits ~50 properties.
 Absent, and therefore falling back to the element's inline declaration (usually the empty
 string) in `getComputedStyle`:
 
@@ -171,7 +171,7 @@ the JS-visible snapshot - but any script that measures them gets the wrong answe
 ## Policy note — most of these fixes land in `crates/obscura-js/js/bootstrap.js`
 `CLAUDE.md` rule 1 says `crates/**` is read-only; rule 5 carves this one file out explicitly
 ("`bootstrap.js` is shared, not ported… Fix the shim in place and both engines pick the fix
-up"), because `Obscura.Js.csproj` links that exact file rather than copying it. F1, F2, F8 and
+up"), because `PocketCalculator.Js.csproj` links that exact file rather than copying it. F1, F2, F8 and
 F9 are all defects *in that shim*, so rule 5 is the one that governs and the fix belongs there -
 it also fixes the Rust engine. Flagging it because the two rules read as contradictory at first
 glance and this is not a decision to make silently.
@@ -252,9 +252,9 @@ declarations never reach `globalThis`, while a sloppy-mode one's do. Chromium pu
 That is exactly the semantics of a **strict-mode `eval`**, where `var`/`function` stay confined
 to the eval's own scope instead of creating global bindings. Obscura is evaluating classic
 scripts with eval-like semantics rather than as top-level scripts. The path is
-`Page.Scripts.cs:604/621` -> `ObscuraJsRuntime.ExecuteScriptGuarded` ->
+`Page.Scripts.cs:604/621` -> `PocketCalculatorJsRuntime.ExecuteScriptGuarded` ->
 `ExecuteScript` -> `_engine.Execute(DocumentInfoFor(name), source)`
-(`dotnet/src/Obscura.Js/Runtime/ObscuraJsRuntime.cs:384`). The fix is in the C# runtime, **not**
+(`dotnet/src/PocketCalculator.Js/Runtime/PocketCalculatorJsRuntime.cs:384`). The fix is in the C# runtime, **not**
 in `bootstrap.js`.
 
 **Blast radius is the reason this ranks high.** Essentially every modern bundler emits
@@ -402,9 +402,9 @@ works. The card is simply stretching to fill its flex line instead of hugging it
 :where(.tss-avatar, .tss-btn, .tss-contextcard, .tss-cron-editor, .tss-daterange-p…)
   { width: fit-content; height: fit-content; }
 ```
-`:where()` is supported (`Obscura.Dom/Selectors/SelectorParser.cs:692`), so that is not the
+`:where()` is supported (`PocketCalculator.Dom/Selectors/SelectorParser.cs:692`), so that is not the
 problem. The problem is the declaration itself:
-`Obscura.Render/Style/ComputedStyle.cs:1054-1069` handles `width: fit-content` by setting
+`PocketCalculator.Render/Style/ComputedStyle.cs:1054-1069` handles `width: fit-content` by setting
 `style.WidthFitContent`, consumed in `DomPasses`, `DomTableSupport`, `CssAnimationSampler` and
 `PreparedRender`. The `height` / `block-size` arm sets no equivalent - **`HeightFitContent` does
 not exist anywhere in the tree.** `height: fit-content` therefore resolves through
@@ -649,7 +649,7 @@ the presentation attributes that never reach the cascade.
 
 Three separate causes:
 
-1. `ComputedStyle`'s default-`display` table (`dotnet/src/Obscura.Render/Style/ComputedStyle.cs`)
+1. `ComputedStyle`'s default-`display` table (`dotnet/src/PocketCalculator.Render/Style/ComputedStyle.cs`)
    switches on the local name with no namespace test, so SVG elements take the HTML `block`
    fallback and `title`/`desc` take HTML's `display: none`.
 2. SVG presentation attributes are not mapped to declarations at all. In Chromium they are
@@ -1319,7 +1319,7 @@ not have been enough.
 
 `DenoCoreShim.Report` now contains every exception, the interrupt included, and suspends further
 delivery until `CancelTermination` clears the termination. `DenoCoreShim.Detach` unregisters the
-hook before `ObscuraJsRuntime.Dispose` and `FrameRealm.Dispose` destroy the engine. The wedging
+hook before `PocketCalculatorJsRuntime.Dispose` and `FrameRealm.Dispose` destroy the engine. The wedging
 script now terminates in 0.6s; covered by two facts in `RejectionEventTests`.
 
 ### A harness bug found alongside it

@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PocketCalculator.Render</RootNamespace>
+    <AssemblyName>PocketCalculator.Render</AssemblyName>
+    <Description>Obscura rendering: CSS cascade, computed style, layout, and painting onto Skia.</Description>
+    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../PocketCalculator.Dom/PocketCalculator.Dom.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.HarfBuzz" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Linux" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.macOS" />
+    <PackageReference Include="HarfBuzzSharp.NativeAssets.Win32" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" />
+    <PackageReference Include="SkiaSharp.NativeAssets.macOS" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
+  </ItemGroup>
+
+  <!-- Font assets, copied from crates/obscura-render/assets/ rather than linked.
+       They are byte-identical to the Rust engine's today; re-copy if that tree's
+       faces are ever updated, or the two engines will rasterize differently. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets/*.ttf">
+      <LogicalName>PocketCalculator.Render.Assets.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

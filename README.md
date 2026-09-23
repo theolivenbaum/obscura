@@ -30,7 +30,7 @@ source it was ported from is kept, read-only, under
 - **Deterministic output**: fonts are embedded (Liberation, DejaVu, Noto Color
   Emoji), so a page rasterizes the same on every host, including distroless
   images with no fontconfig.
-  Extra faces can be added with `obscura serve --font-dir DIR` (or
+  Extra faces can be added with `pocketcalculator serve --font-dir DIR` (or
   `BrowserConfig.FontDirectories`), at the cost of that host independence.
 - **Safe defaults**: fetches to loopback, RFC1918 and link-local addresses are
   blocked unless `--allow-private-network` is given.
@@ -43,13 +43,13 @@ managed code.
 | Package | What it is |
 |---|---|
 | `Obscura` | The engine and its library API: `Browser`, `Page`, `Element`, cookies. Start here. |
-| `Obscura.Cdp` | The Chrome DevTools Protocol server, on top of `Obscura` |
-| `Obscura.Mcp` | The MCP server, on top of `Obscura` |
+| `PocketCalculator.Cdp` | The Chrome DevTools Protocol server, on top of `Obscura` |
+| `PocketCalculator.Mcp` | The MCP server, on top of `Obscura` |
 
-`Obscura` carries the whole engine as separate assemblies: `Obscura.Browser`
-(pages, navigation, screenshots, PDF), `Obscura.Js` (V8, ops, the Web API shim),
-`Obscura.Render` (CSS, layout, paint), `Obscura.Net` (HTTP, cookies, robots.txt,
-tracker blocklist) and `Obscura.Dom` (DOM tree, HTML parsing, selectors).
+`Obscura` carries the whole engine as separate assemblies: `PocketCalculator.Browser`
+(pages, navigation, screenshots, PDF), `PocketCalculator.Js` (V8, ops, the Web API shim),
+`PocketCalculator.Render` (CSS, layout, paint), `PocketCalculator.Net` (HTTP, cookies, robots.txt,
+tracker blocklist) and `PocketCalculator.Dom` (DOM tree, HTML parsing, selectors).
 
 ```bash
 dotnet add package Obscura
@@ -58,7 +58,7 @@ dotnet add package Obscura
 ## Use it as a library
 
 ```csharp
-using Obscura.Api;
+using PocketCalculator.Api;
 
 var browser = Browser.Builder()
     .Stealth(true)
@@ -82,14 +82,14 @@ interception (`EnableInterception`, `OnRequest`, `OnResponse`).
 ```bash
 cd dotnet
 dotnet build -c Release
-alias obscura="$PWD/src/Obscura.Cli/bin/Release/net10.0/obscura"
+alias obscura="$PWD/src/PocketCalculator.Cli/bin/Release/net10.0/pocketcalculator"
 
-obscura fetch https://example.com --dump text          # also html, markdown, links, assets, cookies
-obscura fetch https://example.com --eval "document.title"
-obscura fetch https://example.com --screenshot page.png
-obscura scrape https://a.example https://b.example --concurrency 4
-obscura serve --port 9222                               # CDP server
-obscura mcp                                             # MCP server over stdio (--http for HTTP)
+pocketcalculator fetch https://example.com --dump text          # also html, markdown, links, assets, cookies
+pocketcalculator fetch https://example.com --eval "document.title"
+pocketcalculator fetch https://example.com --screenshot page.png
+pocketcalculator scrape https://a.example https://b.example --concurrency 4
+pocketcalculator serve --port 9222                               # CDP server
+pocketcalculator mcp                                             # MCP server over stdio (--http for HTTP)
 ```
 
 Global options include `--stealth`, `--proxy <url>`, `--user-agent`,
@@ -101,7 +101,7 @@ Global options include `--stealth`, `--proxy <url>`, `--user-agent`,
 Start the CDP server and point a CDP client at it:
 
 ```bash
-obscura serve --port 9222
+pocketcalculator serve --port 9222
 ```
 
 ```js
@@ -124,7 +124,7 @@ For anything sensitive to cold start, measure a publish rather than `bin/`;
 ReadyToRun precompiles the engine:
 
 ```bash
-dotnet publish -c Release src/Obscura.Cli -r linux-x64 --self-contained true
+dotnet publish -c Release src/PocketCalculator.Cli -r linux-x64 --self-contained true
 ```
 
 Packages are built, tested and pushed to NuGet by the Azure DevOps pipeline in
