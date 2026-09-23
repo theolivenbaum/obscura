@@ -22,7 +22,7 @@ public static class BootstrapLoader
     /// </summary>
     internal static bool ExposeOpsForTests { get; set; }
 
-    public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps)
+    public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps, uint frameId = 0)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(bindOps);
@@ -49,7 +49,7 @@ public static class BootstrapLoader
             """);
 
         // Ahead of bootstrap.js, which adopts the two globals this installs.
-        FormStateMirror.Install(engine);
+        FormStateMirror.Install(engine, frameId);
 
         // EngineText, not Text: the shim's dynamic-classic-script call sites are
         // bridged onto op_run_classic_script on the way in. See BootstrapSource.
@@ -90,6 +90,13 @@ public static class BootstrapLoader
             """);
         shim.AttachTo(engine, tracker);
 
+        // The host helpers bootstrap.js built (markTrusted, deliverMessage, ...), taken
+        // off the global before any page script runs. DEVIATION from upstream, which
+        // leaves each of them on globalThis as a page-callable __obscura_* function;
+        // see the end of bootstrap.js. Host scripts receive this object as an argument
+        // (HostScript), which is what keeps it unreachable from the page.
+        shim.HostHelpers = engine.Evaluate("globalThis.__obscura_host_handoff") as ScriptObject;
+
         // Drop the op-table handoff and `Deno` itself, exactly as
         // `take_ops_handoff` / `share_ops_with_realm` do in upstream runtime.rs
         // (04418a5): the host has the table already, and bootstrap.js closes over
@@ -101,6 +108,7 @@ public static class BootstrapLoader
         // (non-enumerable), which left every op callable from page script.
         engine.Execute("bootstrap-postamble", """
             delete globalThis.__obscura_core_handoff;
+            delete globalThis.__obscura_host_handoff;
             delete globalThis.__obscura_deno_core;
             delete globalThis.Deno;
             """);

@@ -22,6 +22,48 @@ public sealed partial class PocketCalculatorJsRuntime
     }
 
     /// <summary>
+    /// <see cref="Evaluate"/> for host-authored script that uses the page realm's host
+    /// helpers, which it names as <c>__obscura_host</c> (see <see cref="HostScript"/>).
+    /// Never pass client- or page-supplied code here.
+    /// </summary>
+    public JsonNode? EvaluateHost(string expression)
+    {
+        BeginJavaScriptTask();
+        return ToJson(InvokeHostScript("<host-eval>", HostScript.WrapExpression(expression)));
+    }
+
+    /// <summary>
+    /// <see cref="ExecuteScript"/> for host-authored statements that use the page realm's
+    /// host helpers as <c>__obscura_host</c> (see <see cref="HostScript"/>).
+    /// </summary>
+    public void ExecuteHostScript(string name, string source)
+    {
+        BeginJavaScriptTask();
+        InvokeHostScript(name, HostScript.WrapStatements(source));
+    }
+
+    private object? InvokeHostScript(string name, string functionSource)
+    {
+        try
+        {
+            return HostScript.Invoke(_engine, _shim.HostHelpers, name, functionSource);
+        }
+        catch (ScriptInterruptedException)
+        {
+            throw new JsRuntimeException("JS error: Uncaught Error: execution terminated");
+        }
+        catch (ScriptEngineException error)
+        {
+            if (IsHeapLimitFailure(error))
+            {
+                RecoverHeapLimit();
+                throw new JsRuntimeException("JavaScript heap limit exceeded; execution terminated");
+            }
+            throw new JsRuntimeException($"JS error: Uncaught {error.Message}");
+        }
+    }
+
+    /// <summary>
     /// Like <see cref="Evaluate"/> but bounded by a watchdog, so a
     /// <c>--eval</c> expression that loops forever cannot hang the process.
     /// </summary>

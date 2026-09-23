@@ -12737,7 +12737,8 @@ public sealed partial class RuntimeTests
             }
         */
         using var fixture = RuntimeFixture.Setup("""<input id="i">""");
-        var result = fixture.Runtime.Evaluate("""
+        // setFieldValue is a host helper in the port (EvaluateHost), not a page global.
+        var result = fixture.Runtime.EvaluateHost("""
             (function(){
                 var el = document.getElementById('i');
                 var d = Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value');
@@ -12749,7 +12750,7 @@ public sealed partial class RuntimeTests
                 });
                 el.value = 'wrapped';
                 var afterDirect = { value: el.value, tracked: tracked };
-                globalThis.__obscura_setFieldValue(el, 'value', 'native');
+                __obscura_host.setFieldValue(el, 'value', 'native');
                 var afterHelper = { value: el.value, tracked: tracked };
                 return JSON.stringify({ afterDirect: afterDirect, afterHelper: afterHelper });
             })()
@@ -20006,9 +20007,9 @@ public sealed partial class RuntimeTests
         Assert.Single(queued);
         Assert.Equal(0u, queued[0].TargetFrameId);
         Assert.Equal(1u, queued[0].SourceFrameId);
-        parent.ExecuteScript(
+        parent.ExecuteHostScript(
             "<frame-message>",
-            "globalThis.__obscura_deliverMessage("
+            "__obscura_host.deliverMessage("
             + System.Text.Json.JsonSerializer.Serialize(queued[0].DataJson) + ", "
             + System.Text.Json.JsonSerializer.Serialize(queued[0].Origin) + ", "
             + queued[0].SourceFrameId + ");");
@@ -20102,9 +20103,9 @@ public sealed partial class RuntimeTests
         Assert.NotNull(frame);
 
         // Deliver the way `Page` does, now carrying the queued targetOrigin.
-        void Deliver(PocketCalculator.Js.Ops.PendingFrameMessage message) => parent.ExecuteScript(
+        void Deliver(PocketCalculator.Js.Ops.PendingFrameMessage message) => parent.ExecuteHostScript(
             "<frame-message>",
-            "globalThis.__obscura_deliverMessage("
+            "__obscura_host.deliverMessage("
             + System.Text.Json.JsonSerializer.Serialize(message.DataJson) + ", "
             + System.Text.Json.JsonSerializer.Serialize(message.Origin) + ", "
             + message.SourceFrameId + ", "

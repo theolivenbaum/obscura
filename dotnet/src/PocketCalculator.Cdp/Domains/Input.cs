@@ -4,6 +4,14 @@ using System.Text.Json.Nodes;
 namespace PocketCalculator.Cdp.Domains;
 
 /// <summary>CDP <c>Input</c> domain: mouse, keyboard and touch dispatch.</summary>
+/// <remarks>
+/// Every snippet here runs through <c>Page.EvaluateHost</c> and reaches the shim's input
+/// helpers as <c>__obscura_host.markTrusted</c>, <c>setFieldValue</c>, <c>isDisabled</c>,
+/// <c>labeledControl</c>, <c>interactiveHost</c>, <c>activateLabel</c> and
+/// <c>pointer.down</c>. DEVIATION from crates/obscura-cdp/src/domains/input.rs, which
+/// names them as page-visible <c>globalThis.__obscura_*</c> globals, so page script could
+/// mark its own events trusted and aim the click a real mouseup produces.
+/// </remarks>
 public static class Input
 {
     /// <summary>
@@ -42,16 +50,16 @@ public static class Input
             + "var v = t.value || '';"
             + "var s = t.selectionStart, e = t.selectionEnd;"
             + "if (s == null) {"
-            + "globalThis.__obscura_setFieldValue(t, 'value', v + ins);"
+            + "__obscura_host.setFieldValue(t, 'value', v + ins);"
             + "} else {"
             + "s = Math.max(0, Math.min(s, v.length));"
             + "e = (e == null) ? s : Math.max(0, Math.min(e, v.length));"
             + "var lo = Math.min(s, e), hi = Math.max(s, e);"
-            + "globalThis.__obscura_setFieldValue(t, 'value', v.slice(0, lo) + ins + v.slice(hi));"
+            + "__obscura_host.setFieldValue(t, 'value', v.slice(0, lo) + ins + v.slice(hi));"
             + "var caret = lo + ins.length;"
             + "t.setSelectionRange(caret, caret);"
             + "}"
-            + "t.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));"
+            + "t.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));"
             + "})()";
     }
 
@@ -69,30 +77,30 @@ public static class Input
         + "var v = t.value || '';"
         + "var s = t.selectionStart, e = t.selectionEnd;"
         + "if (s == null) {"
-        + "globalThis.__obscura_setFieldValue(t, 'value', v.slice(0, -1));"
+        + "__obscura_host.setFieldValue(t, 'value', v.slice(0, -1));"
         + "} else {"
         + "s = Math.max(0, Math.min(s, v.length));"
         + "e = (e == null) ? s : Math.max(0, Math.min(e, v.length));"
         + "if (s !== e) {"
         + "var lo = Math.min(s, e), hi = Math.max(s, e);"
-        + "globalThis.__obscura_setFieldValue(t, 'value', v.slice(0, lo) + v.slice(hi));"
+        + "__obscura_host.setFieldValue(t, 'value', v.slice(0, lo) + v.slice(hi));"
         + "t.setSelectionRange(lo, lo);"
         + "} else if (s > 0) {"
-        + "globalThis.__obscura_setFieldValue(t, 'value', v.slice(0, s - 1) + v.slice(s));"
+        + "__obscura_host.setFieldValue(t, 'value', v.slice(0, s - 1) + v.slice(s));"
         + "t.setSelectionRange(s - 1, s - 1);"
         + "}"
         + "}"
-        + "t.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));"
+        + "t.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));"
         + "})()";
 
     private const string EnterJs = "(function() {"
         + "var target = document.activeElement;"
         + "if (!target) return;"
-        + "target.dispatchEvent(globalThis.__obscura_markTrusted("
+        + "target.dispatchEvent(__obscura_host.markTrusted("
         + "new KeyboardEvent('keypress', {bubbles:true,key:'Enter',code:'Enter'})));"
         + "if (target.localName === 'textarea') {"
-        + "globalThis.__obscura_setFieldValue(target, 'value', (target.value || '') + '\\n');"
-        + "target.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));"
+        + "__obscura_host.setFieldValue(target, 'value', (target.value || '') + '\\n');"
+        + "target.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));"
         + "} else {"
         + "var form = target.form || (target.closest && target.closest('form'));"
         + "if (form) { try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(); }"
@@ -194,7 +202,7 @@ public static class Input
                         // A mouse press is activation-triggering input (HTML "user
                         // activation"), so a navigation it causes is user-activated.
                         page.NoteUserActivation();
-                        page.Evaluate(MousePressedJs(
+                        page.EvaluateHost(MousePressedJs(
                             x, y, buttonCode, buttons, clickCount, altKey, ctrlKey, metaKey, shiftKey));
                     }
                 }
@@ -205,7 +213,7 @@ public static class Input
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
                         page.NoteUserActivation();
-                        page.Evaluate(MouseReleasedJs(
+                        page.EvaluateHost(MouseReleasedJs(
                             x, y, buttonCode, clickCount, altKey, ctrlKey, metaKey, shiftKey));
                         PocketCalculator.Browser.PageNavigationOutcome moved;
                         try
@@ -272,7 +280,7 @@ public static class Input
                     double deltaY = parameters.Get("deltaY").AsF64() ?? 0.0;
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
-                        page.Evaluate(MouseWheelJs(
+                        page.EvaluateHost(MouseWheelJs(
                             x, y, deltaX, deltaY, altKey, ctrlKey, metaKey, shiftKey));
                     }
                 }
@@ -285,7 +293,7 @@ public static class Input
             case "insertText":
             {
                 string text = parameters.Get("text").AsString() ?? string.Empty;
-                ctx.GetSessionPageMut(sessionId)?.Evaluate(InsertTextJs(text));
+                ctx.GetSessionPageMut(sessionId)?.EvaluateHost(InsertTextJs(text));
                 return DomainResult.Empty();
             }
 
@@ -312,9 +320,9 @@ public static class Input
                             // Escape backslash BEFORE single-quote (as the text path below does) so
                             // a key like "\" - Chrome's backslash key - doesn't escape the closing
                             // quote and produce a syntax error that drops the event.
-                            page.Evaluate("(function() {"
+                            page.EvaluateHost("(function() {"
                                 + "var target = document.activeElement || document.body;"
-                                + "var evt = globalThis.__obscura_markTrusted(new KeyboardEvent('keydown', "
+                                + "var evt = __obscura_host.markTrusted(new KeyboardEvent('keydown', "
                                 + "{bubbles:true,cancelable:true,key:" + JsStr(key)
                                 + ",code:" + JsStr(code) + "}));"
                                 + "target.dispatchEvent(evt);"
@@ -322,7 +330,7 @@ public static class Input
 
                             if (text.Length != 0 && text != "\r" && text != "\n")
                             {
-                                page.Evaluate(InsertTextJs(text));
+                                page.EvaluateHost(InsertTextJs(text));
                             }
 
                             if (key == "Enter")
@@ -331,21 +339,21 @@ public static class Input
                                 // the containing form. Real Chrome distinguishes these two and we
                                 // should too: previously every Enter tried to submit the nearest
                                 // form even from a textarea.
-                                page.Evaluate(EnterJs);
+                                page.EvaluateHost(EnterJs);
                             }
 
                             if (key == "Backspace")
                             {
-                                page.Evaluate(BackspaceJs);
+                                page.EvaluateHost(BackspaceJs);
                             }
 
                             break;
                         }
 
                         case "keyUp":
-                            page.Evaluate("(function() {"
+                            page.EvaluateHost("(function() {"
                                 + "var target = document.activeElement || document.body;"
-                                + "var evt = globalThis.__obscura_markTrusted(new KeyboardEvent('keyup', "
+                                + "var evt = __obscura_host.markTrusted(new KeyboardEvent('keyup', "
                                 + "{bubbles:true,key:" + JsStr(key) + ",code:" + JsStr(code) + "}));"
                                 + "target.dispatchEvent(evt);"
                                 + "})()");
@@ -354,7 +362,7 @@ public static class Input
                         case "char":
                             if (text.Length != 0)
                             {
-                                page.Evaluate(InsertTextJs(text));
+                                page.EvaluateHost(InsertTextJs(text));
                                 // Pump the event loop so Angular change detection picks up the input.
                                 await page.SettleAsync(50).ConfigureAwait(false);
                             }
@@ -399,9 +407,9 @@ public static class Input
             + ")) || globalThis.__obscura_click_target || document.activeElement || document.body;"
             + "if (!target) return;"
             + "globalThis.__obscura_click_target = target;"
-            + "globalThis.__obscura_mouse_down = {target:target,button:" + button
+            + "__obscura_host.pointer.down = {target:target,button:" + button
             + ",clickCount:" + detail + "};"
-            + "var evt = globalThis.__obscura_markTrusted(new MouseEvent('mousedown', "
+            + "var evt = __obscura_host.markTrusted(new MouseEvent('mousedown', "
             + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:" + button + ",buttons:" + mask + ",detail:" + detail
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
@@ -430,9 +438,9 @@ public static class Input
             + "var target = (document.elementFromPoint && document.elementFromPoint(" + sx + "," + sy
             + ")) || globalThis.__obscura_click_target || document.activeElement || document.body;"
             + "if (!target) return;"
-            + "var down = globalThis.__obscura_mouse_down;"
-            + "globalThis.__obscura_mouse_down = null;"
-            + "var evt = globalThis.__obscura_markTrusted(new MouseEvent('mouseup', "
+            + "var down = __obscura_host.pointer.down;"
+            + "__obscura_host.pointer.down = null;"
+            + "var evt = __obscura_host.markTrusted(new MouseEvent('mouseup', "
             + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:" + button + ",buttons:0,detail:" + detail + modifiers + "}));"
             + "target.dispatchEvent(evt);"
@@ -445,7 +453,7 @@ public static class Input
             + "if (!clickTarget) return;"
             + "var tag = clickTarget.tagName;"
             + "var type = (clickTarget.getAttribute && clickTarget.getAttribute('type') || '').toLowerCase();"
-            + "if (globalThis.__obscura_isDisabled(clickTarget)) return;"
+            + "if (__obscura_host.isDisabled(clickTarget)) return;"
             + "var checkable = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');"
             + "var oldChecked = checkable ? !!clickTarget.checked : false;"
             + "var oldIndeterminate = checkable ? !!clickTarget.indeterminate : false;"
@@ -468,7 +476,7 @@ public static class Input
             + "clickTarget.checked = !oldChecked;"
             + "clickTarget.indeterminate = false;"
             + "}"
-            + "var click = globalThis.__obscura_markTrusted(new MouseEvent('click', "
+            + "var click = __obscura_host.markTrusted(new MouseEvent('click', "
             + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:0,buttons:0,detail:" + detail + modifiers + "}));"
             + "var cancelled = !clickTarget.dispatchEvent(click);"
@@ -480,18 +488,18 @@ public static class Input
             + "return;"
             + "}"
             + "if (checkable && clickTarget.checked !== oldChecked) {"
-            + "try { clickTarget.dispatchEvent(globalThis.__obscura_markTrusted("
+            + "try { clickTarget.dispatchEvent(__obscura_host.markTrusted("
             + "new Event('input', {bubbles:true}))); } catch(e) {}"
-            + "try { clickTarget.dispatchEvent(globalThis.__obscura_markTrusted("
+            + "try { clickTarget.dispatchEvent(__obscura_host.markTrusted("
             + "new Event('change', {bubbles:true}))); } catch(e) {}"
             + "return;"
             + "}"
             + "var labelHost = tag === 'LABEL' ? clickTarget : "
             + "(clickTarget.closest ? clickTarget.closest('label') : null);"
-            + "var interactiveHost = globalThis.__obscura_interactiveHost(clickTarget);"
+            + "var interactiveHost = __obscura_host.interactiveHost(clickTarget);"
             + "if (labelHost && !(interactiveHost && labelHost.contains(interactiveHost))) {"
-            + "var ctl = globalThis.__obscura_labeledControl(labelHost);"
-            + "if (ctl && ctl !== clickTarget && globalThis.__obscura_activateLabel(labelHost, ctl, true)) { return; }"
+            + "var ctl = __obscura_host.labeledControl(labelHost);"
+            + "if (ctl && ctl !== clickTarget && __obscura_host.activateLabel(labelHost, ctl, true)) { return; }"
             + "}"
             + "var link = clickTarget.closest ? clickTarget.closest('a[href]') : null;"
             + "if (!link && tag === 'A' && clickTarget.getAttribute('href')) link = clickTarget;"
@@ -538,7 +546,7 @@ public static class Input
             + "var target = (document.elementFromPoint && document.elementFromPoint(" + sx + "," + sy
             + ")) || document.body || document.documentElement;"
             + "if (!target) return;"
-            + "var wheel = globalThis.__obscura_markTrusted(new WheelEvent('wheel', "
+            + "var wheel = __obscura_host.markTrusted(new WheelEvent('wheel', "
             + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",deltaX:" + dx + ",deltaY:" + dy + ",deltaMode:0"
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)

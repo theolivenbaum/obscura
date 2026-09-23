@@ -121,9 +121,9 @@ internal static partial class Tools
                     (function(){
                         var el = document.querySelector({{sel}});
                         if (!el) return "error:not found";
-                        globalThis.__obscura_setFieldValue(el, 'checked', true);
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('change', {bubbles:true})));
+                        __obscura_host.setFieldValue(el, 'checked', true);
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
                         return "ok";
                     })()
                     """,
@@ -131,9 +131,9 @@ internal static partial class Tools
                     (function(){
                         var el = document.querySelector({{sel}});
                         if (!el) return "error:not found";
-                        globalThis.__obscura_setFieldValue(el, 'checked', false);
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('change', {bubbles:true})));
+                        __obscura_host.setFieldValue(el, 'checked', false);
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
                         return "ok";
                     })()
                     """,
@@ -152,8 +152,8 @@ internal static partial class Tools
                             }
                         }
                         if (!matched) return "error:no matching option";
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('change', {bubbles:true})));
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
                         return "ok";
                     })()
                     """,
@@ -161,14 +161,16 @@ internal static partial class Tools
                     (function(){
                         var el = document.querySelector({{sel}});
                         if (!el) return "error:not found";
-                        globalThis.__obscura_setFieldValue(el, 'value', {{val}});
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(globalThis.__obscura_markTrusted(new Event('change', {bubbles:true})));
+                        __obscura_host.setFieldValue(el, 'value', {{val}});
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
+                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
                         return "ok";
                     })()
                     """,
             };
-            var res = state.PageMut().Evaluate(js);
+            // EvaluateHost: markTrusted and setFieldValue are host helpers here, where
+            // crates/obscura-mcp names them as page-visible __obscura_* globals.
+            var res = state.PageMut().EvaluateHost(js);
             switch (res.AsString())
             {
                 case "ok":

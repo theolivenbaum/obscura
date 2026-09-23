@@ -2247,7 +2247,7 @@ public sealed class PageTests
             dom.SetExternalStylesheet(dom.QuerySelector("#async")!.Value, ".target{color:red}", originClean: true);
             return 0;
         });
-        runtime.ExecuteScript("<async-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
+        runtime.ExecuteHostScript("<async-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
 
         var state = runtime.WithDom(dom =>
         {
@@ -2285,7 +2285,7 @@ public sealed class PageTests
             dom.SetExternalStylesheet(dom.QuerySelector("#print")!.Value, "body{display:none}", originClean: true);
             return 0;
         });
-        runtime.ExecuteScript("<print-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
+        runtime.ExecuteHostScript("<print-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
 
         var state = runtime.WithDom(dom =>
         {
@@ -2333,10 +2333,10 @@ public sealed class PageTests
                 originClean: false);
             return 0;
         });
-        runtime.ExecuteScript(
+        runtime.ExecuteHostScript(
             "<same-origin-sheet>",
             PageHelpers.LinkedStylesheetLoadScript(0, "https://example.test/assets/app.css"));
-        runtime.ExecuteScript(
+        runtime.ExecuteHostScript(
             "<cross-origin-sheet>",
             PageHelpers.LinkedStylesheetLoadScript(1, "https://cdn.example.test/theme.css"));
 
@@ -2444,8 +2444,8 @@ public sealed class PageTests
             dom.SetExternalStylesheet(links[1], ".target{height:30px}", originClean: true);
             return 0;
         });
-        runtime.ExecuteScript("<first-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
-        runtime.ExecuteScript("<second-sheet>", PageHelpers.LinkedStylesheetLoadScript(1));
+        runtime.ExecuteHostScript("<first-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
+        runtime.ExecuteHostScript("<second-sheet>", PageHelpers.LinkedStylesheetLoadScript(1));
 
         // The author sheets in the order the renderer collects them: the bytes held beside an
         // element, then that element's own text if it is a <style>, at each element's document

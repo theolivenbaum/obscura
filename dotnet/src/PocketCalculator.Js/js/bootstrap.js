@@ -23,14 +23,15 @@ const __obscuraCore = globalThis.Deno.core;
     '__obscura_errors', '__obscura_init', '__obscura_hide_list',
     '__obscura_objects', '__obscura_oid', '__obscura_ua',
     '__obscura_platform', '__obscura_ua_platform', '__obscura_ua_platform_version',
-    '__obscura_stealth', '__obscura_markTrusted', '__obscura_core_handoff',
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, which also lists the host
+    // helpers here (__obscura_markTrusted, __obscura_deliverMessage,
+    // __obscura_activateLabel and the rest of __obscura_host at the end of this file)
+    // because it leaves them on the global. They are closure-private here, and
+    // pre-declaring them would put an own `undefined` property back on globalThis.
+    '__obscura_stealth', '__obscura_core_handoff',
     '__obscura_frameId', '__obscura_parentFrameId', '__obscura_frameWindows',
-    '__obscura_frameObjects', '__obscura_frameElements', '__obscura_deliverMessage',
-    '__obscura_liveFrameIds', '__obscura_forgetFrame',
-    '__obscura_registerLinkedStylesheet',
-    '__obscura_activateLabel',
-    '__obscura_isDisabled', '__obscura_labeledControl', '__obscura_interactiveHost',
-    '__obscura_tryFragmentNavigate', '_rawFragment',
+    '__obscura_frameObjects', '__obscura_frameElements',
+    '_rawFragment',
     '__markParserScripts', '__obscura_hasPendingDynamicScripts',
     '__obscura_hasPendingLoadDelayingScripts',
     '__obscura_nextPendingTimeoutDelay',
@@ -141,6 +142,10 @@ const _DOM_TREE_MUTATION_COMMANDS = new Set([
 // makes `iframe.contentDocument.title` read the frame's document rather than
 // the caller's. Set by __obscura_init; 0 is the page.
 let _realmFrameId = 0;
+// The parent realm's frame id, also fixed by __obscura_init. The shim reads these
+// two rather than globalThis.__obscura_frameId / __obscura_parentFrameId, which page
+// script can overwrite.
+let _realmParentFrameId = 0;
 
 const _dom = (cmd, a1, a2) => {
   const result = __obscuraCore.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
@@ -508,9 +513,11 @@ function _registerLinkedStylesheet(link, explicitHref, responseUrl) {
   sheet._bindLinkedOwner(link, href, responseUrl || href);
   return sheet;
 }
-// Static registration only: the host deletes this once the document's own sheets are
-// registered, before any page script runs (upstream 04418a5).
-globalThis.__obscura_registerLinkedStylesheet = _registerLinkedStylesheet;
+// Static registration reaches this through __obscura_host.registerLinkedStylesheet.
+// DEVIATION from upstream 04418a5, which publishes it as
+// globalThis.__obscura_registerLinkedStylesheet and has the host delete it once the
+// document's own sheets are registered. That delete never ran in a frame realm, so a
+// frame's script could bind any <link> to a response URL of its choosing.
 
 // A fetched sheet becomes an inline <style>, so relative url() references
 // must keep resolving against the stylesheet URL rather than document.URL.
@@ -955,7 +962,8 @@ const _scheduleAfter = (delay, fn) => {
   // tell the two queues apart. Keep cancellation state by native id and remove
   // it on either fire or clear, so repeated clearTimeout calls do not grow a
   // permanent set.
-  if (globalThis.__obscura_frameId) {
+  // _realmFrameId, not upstream's page-writable globalThis.__obscura_frameId.
+  if (_realmFrameId) {
     const frameTimerId = -(++_frameTimerSeq);
     const state = { cancelled: false };
     _frameTimerStates.set(frameTimerId, state);
@@ -2871,27 +2879,24 @@ function _isActuallyDisabled(el) {
   return false;
 }
 
-globalThis.__obscura_activateLabel = function(label, control, trusted) {
+function _activateLabel(label, control, trusted) {
   if (!label || !control || _forwardingLabels.has(label)) return false;
   if (_isActuallyDisabled(control) || typeof control.click !== 'function') return false;
   _forwardingLabels.add(label);
   try { control.click(trusted ? _TRUSTED_ACTIVATION : undefined); }
   finally { _forwardingLabels.delete(label); }
   return true;
-};
+}
 // The CDP click path runs its own JS snippet, so it reaches the same rules
 // through these helpers rather than restating the selectors.
-globalThis.__obscura_isDisabled = function(el) { return _isActuallyDisabled(el); };
-globalThis.__obscura_labeledControl = function(label) { return _labeledControl(label); };
-globalThis.__obscura_interactiveHost = function(el) {
+function _interactiveHost(el) {
   return el && el.closest ? el.closest(_INTERACTIVE) : null;
-};
-// Frozen so page script can neither replace the helpers to suppress or fake
-// label activation, nor delete them and make later clicks throw.
-for (const _name of ['__obscura_activateLabel', '__obscura_isDisabled',
-                     '__obscura_labeledControl', '__obscura_interactiveHost']) {
-  Object.defineProperty(globalThis, _name, { writable: false, configurable: false });
 }
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which publishes these as frozen
+// __obscura_activateLabel / __obscura_isDisabled / __obscura_labeledControl /
+// __obscura_interactiveHost globals. activateLabel(label, control, true) forwards a
+// trusted activation, which page script must never be able to ask for, so all four
+// reach the host through __obscura_host instead (see the end of this file).
 
 function _isSubmitButton(el) {
   if (!el || typeof el.localName !== "string") return false;
@@ -3836,7 +3841,7 @@ class Element extends Node {
       }
     }
     const _clickEvent = new MouseEvent("click", {bubbles: true, cancelable: true});
-    if (_trusted) globalThis.__obscura_markTrusted(_clickEvent);
+    if (_trusted) _markTrusted(_clickEvent);
     const cancelled = !this.dispatchEvent(_clickEvent);
     if (cancelled) {
       if (_radioStates) { for (let i = 0; i < _radioStates.length; i++) _radioStates[i][0].checked = _radioStates[i][1]; }
@@ -3846,7 +3851,7 @@ class Element extends Node {
     if (_checkable && this.checked !== _oldChecked) {
       for (const _type of ['input', 'change']) {
         const _e = new Event(_type, {bubbles: true});
-        if (_trusted) globalThis.__obscura_markTrusted(_e);
+        if (_trusted) _markTrusted(_e);
         try { this.dispatchEvent(_e); } catch (e) {}
       }
       return;
@@ -3860,7 +3865,7 @@ class Element extends Node {
     if (_label && !(this.closest && this.closest(_INTERACTIVE) &&
         _label.contains(this.closest(_INTERACTIVE)))) {
       const control = _labeledControl(_label);
-      if (control && control !== this && globalThis.__obscura_activateLabel(_label, control)) {
+      if (control && control !== this && _activateLabel(_label, control)) {
         return;
       }
     }
@@ -6870,14 +6875,16 @@ function _locationNavigate(url, replace) {
 // The host side asks whether a navigation it was handed is same-document, and
 // performs it here if so, so CDP's Page.navigate and location share one
 // implementation of the fragment path instead of growing a second one.
-globalThis.__obscura_tryFragmentNavigate = function (url, replace) {
+// Host-only (__obscura_host.tryFragmentNavigate); upstream's global
+// __obscura_tryFragmentNavigate.
+function _tryFragmentNavigate(url, replace) {
   try {
     var target = _resolveUrl(String(url));
     if (!_isSameDocumentNavigation(__currentUrl(), target)) return false;
     _fragmentNavigate(target, !!replace);
     return true;
   } catch (e) { return false; }
-};
+}
 // Assigning to a URL component rebuilds the document URL and navigates, the
 // same way the href setter does. These were getter-only, so `location.hash =
 // '/route'` was a silent no-op in sloppy mode and a hash router could never
@@ -7404,7 +7411,9 @@ function _applyScreenSize(w, h, emulated) {
     globalThis.screen = new Screen(w, h, w, emulated ? h : h - 40);
   }
 }
-globalThis.__obscura_set_screen_override = function(w, h, emulated) {
+// Host-only (__obscura_host.setScreenOverride); upstream's global
+// __obscura_set_screen_override.
+function _setScreenOverride(w, h, emulated) {
   globalThis.__obscura_screen_emulated = !!emulated;
   if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
     globalThis.__obscura_screen_w = w;
@@ -7416,7 +7425,7 @@ globalThis.__obscura_set_screen_override = function(w, h, emulated) {
   delete globalThis.__obscura_screen_h;
   const fallback = _fp('screen');
   _applyScreenSize(fallback[0], fallback[1], !!emulated);
-};
+}
 globalThis.visualViewport = { width:1920, height:1000, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
 globalThis.devicePixelRatio = 1;
 globalThis.innerWidth = 1920; globalThis.innerHeight = 1000;
@@ -10476,10 +10485,21 @@ globalThis.DOMException = (function () {
 // `new Event(...)` must report isTrusted === false (issue #303). Returning true
 // for everything is a trivial bot-detection tell. Trusted events are tracked in
 // a closure-private WeakSet so page JS can neither read nor forge the flag.
-// obscura's CDP input pipeline marks its synthetic events via the
-// non-enumerable __obscura_markTrusted helper.
+// obscura's CDP input pipeline marks its synthetic events via __obscura_host.markTrusted.
+//
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which publishes the marker as
+// globalThis.__obscura_markTrusted, so any page could mark its own events trusted
+// (`__obscura_markTrusted(new Event('x')).isTrusted === true`). Chromium never lets
+// page script create a trusted event. The marker is closure-private and reaches only
+// the host (see __obscura_host at the end of this file).
+//
+// The set is also reached through WeakSet.prototype methods captured now, not looked
+// up on each call: a page that replaced WeakSet.prototype.has would otherwise be
+// handed this very set as `this` on its first isTrusted read, and could add to it.
 const _trustedEvents = new WeakSet();
-globalThis.__obscura_markTrusted = function(ev) { try { if (ev) _trustedEvents.add(ev); } catch (_e) {} return ev; };
+const _trustedAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _trustedHas = Function.prototype.call.bind(WeakSet.prototype.has);
+function _markTrusted(ev) { try { if (ev) _trustedAdd(_trustedEvents, ev); } catch (_e) {} return ev; }
 
 // Write value/checked through the element's *prototype* accessor, skipping any
 // per-instance property a framework layered on top. React (and Preact/Vue)
@@ -10490,7 +10510,8 @@ globalThis.__obscura_markTrusted = function(ev) { try { if (ev) _trustedEvents.a
 // prototype setter leaves the tracker stale, so the edit is seen as a real
 // user change. When no framework wrapper is present this is identical to a
 // direct assignment.
-globalThis.__obscura_setFieldValue = function(el, field, value) {
+// Host-only (__obscura_host.setFieldValue); upstream's global __obscura_setFieldValue.
+function _setFieldValue(el, field, value) {
   try {
     let proto = Object.getPrototypeOf(el);
     let desc;
@@ -10500,7 +10521,7 @@ globalThis.__obscura_setFieldValue = function(el, field, value) {
     if (desc && desc.set) { desc.set.call(el, value); return; }
   } catch (_e) {}
   el[field] = value;
-};
+}
 
 // Build a FileList-like object: an array with the DOM's `item(i)` accessor.
 function _makeFileList(files) {
@@ -10516,7 +10537,9 @@ function _emptyFileList() { return _makeFileList([]); }
 // Rust side. Real File objects (backed by the bytes) are created so page code can
 // read them via FileReader or upload them via fetch/FormData, then input+change
 // fire as a genuine selection would (issue #359).
-globalThis.__obscura_setInputFiles = function(el, specs) {
+// Host-only (__obscura_host.setInputFiles); upstream's global __obscura_setInputFiles,
+// which let a page fill a file input and fire trusted input/change events.
+function _setInputFiles(el, specs) {
   const files = (specs || []).map((s) => {
     let bytes;
     try {
@@ -10532,12 +10555,12 @@ globalThis.__obscura_setInputFiles = function(el, specs) {
   // trusted events; upload flows that gate their change handler on
   // event.isTrusted (common in frameworks and anti-bot code) ignore untrusted
   // ones, which would silently break the exact case this feature targets.
-  try { el.dispatchEvent(globalThis.__obscura_markTrusted(new Event("input", { bubbles: true }))); } catch (_e) {}
-  try { el.dispatchEvent(globalThis.__obscura_markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
-};
+  try { el.dispatchEvent(_markTrusted(new Event("input", { bubbles: true }))); } catch (_e) {}
+  try { el.dispatchEvent(_markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
+}
 globalThis.Event = class Event {
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
-  get isTrusted() { return _trustedEvents.has(this); }
+  get isTrusted() { return _trustedHas(_trustedEvents, this); }
   preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
   initEvent(type,bubbles,cancelable) { if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present."); this.type=String(type);this.bubbles=!!bubbles;this.cancelable=!!cancelable;this.defaultPrevented=false;this._propagationStopped=false;this._immediatePropagationStopped=false; }
   composedPath() {
@@ -13816,23 +13839,25 @@ globalThis.__obscura_frameObjects = Object.create(null);
 // a shadow root is absent from `document.querySelectorAll('iframe')` — the
 // shape a challenge widget uses — while `isConnected` reports it correctly.
 // Treating it as gone would tear down a frame that is still in the page.
-globalThis.__obscura_liveFrameIds = function () {
+// Host-only (__obscura_host.liveFrameIds); upstream's global __obscura_liveFrameIds.
+function _liveFrameIds() {
   const live = [];
   for (const id in globalThis.__obscura_frameElements) {
     const element = globalThis.__obscura_frameElements[id];
     if (element && element.isConnected) live.push(id >>> 0);
   }
   return live;
-};
+}
 
 // Drop everything this realm holds for a frame the host has discarded. One
 // place, so a registry added later cannot be missed by the discard path: any
 // surviving reference keeps the frame's context and DOM tree alive.
-globalThis.__obscura_forgetFrame = function (frameId) {
+// Host-only (__obscura_host.forgetFrame); upstream's global __obscura_forgetFrame.
+function _forgetFrame(frameId) {
   delete globalThis.__obscura_frameElements[frameId];
   delete globalThis.__obscura_frameObjects[frameId];
   delete globalThis.__obscura_frameWindows[frameId];
-};
+}
 
 function _realmOrigin() {
   try { return new URL(_domParse('document_url')).origin; } catch (_) { return 'null'; }
@@ -13868,8 +13893,11 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
   // An unspecified targetOrigin stays permissive (empty string); the receiver
   // enforces a specified one against its own origin in __obscura_deliverMessage.
   const to = (targetOrigin === undefined || targetOrigin === null) ? '' : String(targetOrigin);
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which sends the page-writable
+  // globalThis.__obscura_frameId as the source: a frame could set it to a sibling's
+  // id and have its message arrive with `event.source` naming that sibling.
   __obscuraCore.ops.op_post_frame_message(
-    targetFrameId >>> 0, globalThis.__obscura_frameId >>> 0, _realmOrigin(), to, json);
+    targetFrameId >>> 0, _realmFrameId, _realmOrigin(), to, json);
 }
 
 // The frame's own window and document, when this page is allowed to touch
@@ -13920,8 +13948,11 @@ function _frameWindowFor(frameId) {
   return win;
 }
 
-// The host calls this inside the target realm.
-globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId, targetOrigin) {
+// The host calls this inside the target realm, as __obscura_host.deliverMessage.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where it is the global
+// __obscura_deliverMessage: page script could call it to receive a trusted
+// MessageEvent claiming any origin and any source.
+function _deliverMessage(dataJson, origin, sourceFrameId, targetOrigin) {
   // Enforce postMessage's targetOrigin against THIS (the receiving) realm's
   // origin, the same check a real browser does at delivery time. A mismatch
   // drops the message silently.
@@ -13929,8 +13960,7 @@ globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId, 
   let data = null;
   try { data = JSON.parse(dataJson).v; } catch (_) {}
   // Who to reply to: the frame above, or one of the frames below.
-  const source = (globalThis.__obscura_frameId !== 0
-                  && sourceFrameId === globalThis.__obscura_parentFrameId)
+  const source = (_realmFrameId !== 0 && sourceFrameId === _realmParentFrameId)
     ? globalThis.parent
     : _frameWindowFor(sourceFrameId);
   try {
@@ -13938,12 +13968,12 @@ globalThis.__obscura_deliverMessage = function(dataJson, origin, sourceFrameId, 
     // postMessage, it did not dispatch this. Real embedders check the flag and
     // drop anything untrusted, so an untrusted event is not merely suspicious,
     // it is silently discarded and the widget waits forever.
-    globalThis.dispatchEvent(globalThis.__obscura_markTrusted(
+    globalThis.dispatchEvent(_markTrusted(
       new MessageEvent('message', { data, origin, source })));
   } catch (error) {
     console.error('message listener failed:', error && error.message || error);
   }
-};
+}
 
 // A window in another browsing context, as seen from this one.
 //
@@ -15868,7 +15898,7 @@ globalThis.postMessage = function(data, targetOrigin, _transfer) {
   if (!_targetOriginAllows(targetOrigin, origin, origin)) return;
   setTimeout(() => {
     try {
-      globalThis.dispatchEvent(globalThis.__obscura_markTrusted(
+      globalThis.dispatchEvent(_markTrusted(
         new MessageEvent('message', { data: clone, origin, source: globalThis })));
     } catch (error) {
       console.error('message listener failed:', error && error.message || error);
@@ -17289,6 +17319,7 @@ if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint)
 globalThis.__obscura_init = function() {
   // The host sets __obscura_frameId on a frame realm before calling this.
   _realmFrameId = globalThis.__obscura_frameId >>> 0;
+  _realmParentFrameId = globalThis.__obscura_parentFrameId >>> 0;
   _browserPostedTaskWakePending = false;
   for (const queue of _browserPostedTaskQueues) _browserPostedTaskDiscardQueue(queue);
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
@@ -17383,7 +17414,11 @@ globalThis.__obscura_init = function() {
   // Object.keys + filter on every navigation, ~5-40ms per page on
   // SPAs that load 1000+ globals.
   const toHide = globalThis.__obscura_hide_list || [];
+  // Own properties only: defineProperty on a missing name creates it, which put
+  // __obscura_core_handoff back on the global (as undefined) after the host had
+  // deleted it. Upstream has the same loop without the guard.
   for (let i = 0; i < toHide.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(globalThis, toHide[i])) continue;
     try { Object.defineProperty(globalThis, toHide[i], { enumerable: false }); } catch(e) {}
   }
   delete globalThis.__obscura_init;
@@ -17941,5 +17976,37 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
     if (typeof val === 'function') { walk(val); }
   }
 })();
+
+// Host helpers: what the host's own scripts (CDP Input, DOM.setFileInputFiles, the
+// MCP form tools, frame messaging, navigation) need and page script must not have.
+//
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which publishes each of these as
+// a page-visible __obscura_* global. There, `__obscura_markTrusted(new Event('x'))`
+// hands any page a trusted event, and `__obscura_deliverMessage` a trusted
+// MessageEvent from any origin. Here the object is handed to the host through a
+// one-shot global that BootstrapLoader reads and deletes before any page script runs,
+// the same handoff as __obscura_core_handoff, in every realm. The host keeps it as a
+// ScriptObject and passes it to its scripts as an argument (`__obscura_host`), so no
+// name on globalThis reaches it. See dotnet/docs/op-protocol.md, "Host helpers".
+globalThis.__obscura_host_handoff = Object.freeze({
+  __proto__: null,
+  markTrusted: _markTrusted,
+  setFieldValue: _setFieldValue,
+  setInputFiles: _setInputFiles,
+  deliverMessage: _deliverMessage,
+  activateLabel: _activateLabel,
+  isDisabled: _isActuallyDisabled,
+  labeledControl: _labeledControl,
+  interactiveHost: _interactiveHost,
+  registerLinkedStylesheet: _registerLinkedStylesheet,
+  tryFragmentNavigate: _tryFragmentNavigate,
+  setScreenOverride: _setScreenOverride,
+  liveFrameIds: _liveFrameIds,
+  forgetFrame: _forgetFrame,
+  // The CDP pointer's pressed state, which the mouseReleased snippet turns into a
+  // trusted click. Upstream keeps it in page-writable globalThis.__obscura_mouse_down,
+  // so a page could aim the click a real mouseup produces.
+  pointer: Object.seal({ __proto__: null, down: null }),
+});
 
 })();

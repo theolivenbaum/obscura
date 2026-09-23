@@ -319,8 +319,10 @@ public static class Dom
                 string specsJson = CdpJson.Serialize(specs);
                 string code =
                     $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
-                    + $"if (el && globalThis.__obscura_setInputFiles) {{ globalThis.__obscura_setInputFiles(el, {specsJson}); return true; }} return false; }})()";
-                page.Evaluate(code);
+                    + $"if (el) {{ __obscura_host.setInputFiles(el, {specsJson}); return true; }} return false; }})()";
+                // A host helper; upstream calls the page-visible __obscura_setInputFiles global,
+                // which let page script fill a file input and fire trusted input and change.
+                page.EvaluateHost(code);
                 return DomainResult.Empty();
             }
 

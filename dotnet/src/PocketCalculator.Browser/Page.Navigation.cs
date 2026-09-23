@@ -390,22 +390,16 @@ public sealed partial class Page
             // does both, and its load handler may still change what applies.
             foreach ((int linkIndex, string responseUrl) in linked)
             {
-                TryExecute(
+                TryExecuteHost(
                     cssJs,
                     "<fetch_stylesheets>",
                     PageHelpers.LinkedStylesheetLoadScript(linkIndex, responseUrl));
             }
         }
 
-        // Static registration is complete before page script runs. Remove the temporary
-        // host bridge even when the document had no initial sheets (upstream 04418a5).
-        if (Js is { } cleanupJs)
-        {
-            TryExecute(
-                cleanupJs,
-                "<fetch_stylesheets-cleanup>",
-                PageHelpers.LinkedStylesheetRegistrationCleanupScript);
-        }
+        // DEVIATION from upstream 04418a5, which deletes the page-visible
+        // __obscura_registerLinkedStylesheet bridge here. The registration is a host
+        // helper (HostScript), so there is no global to remove.
 
         _documentTimelineOrigin = Stopwatch.GetTimestamp();
         Js?.ResetAnimationTimeline();
@@ -764,7 +758,7 @@ public sealed partial class Page
     /// does on every step.
     /// <para>
     /// The decision and the events belong to <c>bootstrap.js</c>
-    /// (<c>__obscura_tryFragmentNavigate</c>), which already owns the fragment path for
+    /// (the <c>tryFragmentNavigate</c> host helper), which already owns the fragment path for
     /// <c>location.href</c> / <c>assign</c> / <c>replace</c> and the component setters. The
     /// host asks rather than re-deciding, so the two cannot disagree about what counts as a
     /// fragment navigation.
@@ -799,7 +793,8 @@ public sealed partial class Page
         JsonNode? handled;
         try
         {
-            handled = Evaluate($"globalThis.__obscura_tryFragmentNavigate({literal}, false)");
+            // A host helper, not upstream's page-visible __obscura_tryFragmentNavigate.
+            handled = EvaluateHost($"__obscura_host.tryFragmentNavigate({literal}, false)");
         }
         catch (JsRuntimeException)
         {

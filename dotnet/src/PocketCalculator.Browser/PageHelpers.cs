@@ -1050,6 +1050,11 @@ internal static partial class PageHelpers
     /// reads, rather than the script re-writing the CSS it had read out (which also needed the
     /// page-visible <c>__obscura_linkedStylesheetCss</c> / <c>__obscura_setLinkedStylesheetCss</c>).
     ///
+    /// Run it with <see cref="Page.TryExecuteHost"/>: <c>registerLinkedStylesheet</c> is a host
+    /// helper. DEVIATION from upstream 04418a5, which calls a page-visible
+    /// <c>globalThis.__obscura_registerLinkedStylesheet</c> and deletes it once static
+    /// registration is done (never in a frame realm).
+    ///
     /// A non-matching sheet still loads and fires its event, which is what the common
     /// <c>media="print" onload="this.media='all'"</c> async-CSS pattern relies on. Chromium
     /// reflects <c>HTMLLinkElement.media</c>, and on repro/ord/o5.html reports
@@ -1076,20 +1081,12 @@ internal static partial class PageHelpers
                         }
 
                         syncSheet();
-                        globalThis.__obscura_registerLinkedStylesheet(link, undefined, {{response}});
+                        __obscura_host.registerLinkedStylesheet(link, undefined, {{response}});
                         try { link.dispatchEvent(new Event('load')); }
                         finally { syncSheet(); }
                     })()
             """;
     }
-
-    /// <summary>
-    /// Removes the static-registration bridge once the document's own sheets are registered,
-    /// before any page script runs (upstream 04418a5). Dynamic loads use the closure-private
-    /// function directly.
-    /// </summary>
-    internal const string LinkedStylesheetRegistrationCleanupScript =
-        "delete globalThis.__obscura_registerLinkedStylesheet";
 
     internal static bool ScriptResponseIsExecutable(int status) => status is >= 200 and <= 299;
 

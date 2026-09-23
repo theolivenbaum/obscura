@@ -29,6 +29,40 @@ through `globalThis._wrap(nid)`. The PocketCalculator.Js test assembly alone rep
 page realm's table as `__obscura_test_ops` (`BootstrapLoader.ExposeOpsForTests`),
 as upstream's `#[cfg(test)]` `expose_ops_for_tests` does.
 
+## Host helpers (port deviation)
+
+Upstream publishes the shim's host-side helpers as page-visible globals, which
+host script calls by name (`globalThis.__obscura_markTrusted(ev)` and so on). That
+lets any page mark its own events trusted. The port keeps them closure-private:
+bootstrap.js hands one frozen object to the host through
+`globalThis.__obscura_host_handoff`, which `BootstrapLoader.Install` reads into
+`DenoCoreShim.HostHelpers` and deletes together with `__obscura_core_handoff`,
+before any page script runs, in every realm. Host script reaches it as the
+parameter `__obscura_host` of a strict function the host compiles and calls with
+that object (`HostScript`; `PocketCalculatorJsRuntime.EvaluateHost` /
+`ExecuteHostScript`, `FrameRealm.EvaluateHost` / `ExecuteHostScript`,
+`Page.EvaluateHost` / `TryExecuteHost`). Nothing on `globalThis` names it. Client- or
+page-supplied code must never go through these entry points.
+
+| Member | Upstream global | Used by |
+|---|---|---|
+| `markTrusted(ev) -> ev` | `__obscura_markTrusted` | CDP Input, MCP fill/type/fill_form |
+| `setFieldValue(el, field, value)` | `__obscura_setFieldValue` | CDP Input, MCP |
+| `setInputFiles(el, specs)` | `__obscura_setInputFiles` | `DOM.setFileInputFiles` |
+| `deliverMessage(dataJson, origin, sourceFrameId, targetOrigin)` | `__obscura_deliverMessage` | frame `postMessage` delivery |
+| `activateLabel(label, control, trusted) -> bool` | `__obscura_activateLabel` | CDP mouseReleased |
+| `isDisabled(el)`, `labeledControl(label)`, `interactiveHost(el)` | `__obscura_isDisabled`, `__obscura_labeledControl`, `__obscura_interactiveHost` | CDP mouseReleased |
+| `registerLinkedStylesheet(link, href, responseUrl)` | `__obscura_registerLinkedStylesheet` | static `<link>` sheet registration |
+| `tryFragmentNavigate(url, replace) -> bool` | `__obscura_tryFragmentNavigate` | `Page.navigate` to a fragment |
+| `setScreenOverride(w, h, emulated)` | `__obscura_set_screen_override` | `Emulation.setDeviceMetricsOverride` |
+| `liveFrameIds() -> number[]`, `forgetFrame(id)` | `__obscura_liveFrameIds`, `__obscura_forgetFrame` | detached-frame release |
+| `pointer.down` | `globalThis.__obscura_mouse_down` | CDP mousePressed / mouseReleased |
+
+The shim also sends its own closure-held realm id, not the page-writable
+`globalThis.__obscura_frameId`, as `op_post_frame_message`'s `source_frame_id`,
+and the form-state mirror passes the id `BootstrapLoader.Install` was given as
+`op_dom`'s frame id. The op signatures are unchanged.
+
 ## Ops (55)
 
 `fast` marks ops deno_core binds on the fast path; in C# the distinction is

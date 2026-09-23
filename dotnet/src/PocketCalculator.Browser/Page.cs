@@ -641,6 +641,22 @@ public sealed partial class Page : IDisposable
         }
     }
 
+    /// <summary>
+    /// <see cref="TryExecute"/> for a host script that uses the realm's host helpers as
+    /// <c>__obscura_host</c> (see <see cref="HostScript"/>).
+    /// </summary>
+    internal static void TryExecuteHost(PocketCalculatorJsRuntime js, string name, string source)
+    {
+        try
+        {
+            js.ExecuteHostScript(name, source);
+        }
+        catch (JsRuntimeException)
+        {
+            // A broken page must degrade, never throw out of navigation.
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)

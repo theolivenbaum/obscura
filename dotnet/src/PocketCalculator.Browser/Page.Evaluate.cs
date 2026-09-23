@@ -67,6 +67,32 @@ public sealed partial class Page
         };
     }
 
+    /// <summary>
+    /// <see cref="Evaluate"/> for host-authored script that uses the page realm's host
+    /// helpers, which it names as <c>__obscura_host</c> (<c>__obscura_host.markTrusted(ev)</c>
+    /// and the rest; see <see cref="HostScript"/>). Page script cannot reach these, so
+    /// never pass client- or page-supplied code here.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from the Rust engine, whose host scripts call the helpers as page-visible
+    /// <c>globalThis.__obscura_*</c> globals through the ordinary evaluate path.
+    /// </remarks>
+    public JsonNode? EvaluateHost(string expression)
+    {
+        if (Js is not { } js)
+        {
+            return null;
+        }
+        try
+        {
+            return js.EvaluateHost(expression);
+        }
+        catch (JsRuntimeException)
+        {
+            return null;
+        }
+    }
+
     public async Task<RemoteObjectInfo> EvaluateForCdpAsync(
         string expression,
         bool returnByValue,
