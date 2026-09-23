@@ -575,7 +575,9 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         ResourceRequest request,
         CancellationToken cancellationToken)
     {
-        SsrfGuard.ValidateUrl(url, AllowPrivateNetwork);
+        // file: is served only to an initiator that may read local files (C4); the gate
+        // runs before the file system is touched, so a refusal leaks nothing.
+        SsrfGuard.ValidateUrl(url, AllowPrivateNetwork, SsrfGuard.FileAccessAllowed(request));
         ValidateRequestMode(request, url);
 
         if (string.Equals(url.Scheme, "file", StringComparison.Ordinal))

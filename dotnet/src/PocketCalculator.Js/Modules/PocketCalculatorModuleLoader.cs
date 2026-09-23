@@ -293,6 +293,19 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
             ? documentUrl
             : UrlRecord.Parse(referrerHref) ?? documentUrl;
 
+        // Deviation from module_loader.rs, which fetches any file: module (SECURITY.md
+        // C4): a module graph may reach file: only when both the owning document and
+        // the importing module are file:, which is Chromium's rule. The refusal is
+        // raised before anything touches the file system and carries the same text a
+        // missing file does, so a web page cannot probe which local paths exist.
+        var isFile = string.Equals(resolved.Scheme, "file", StringComparison.Ordinal);
+        if (isFile
+            && !(string.Equals(documentUrl.Scheme, "file", StringComparison.Ordinal)
+                && string.Equals(referrer.Scheme, "file", StringComparison.Ordinal)))
+        {
+            throw new ModuleLoadException(FileModuleFetchFailed(url));
+        }
+
         // Register before the fetch starts. The lifecycle can inspect the runtime
         // between the load being accepted and the first byte moving.
         lock (_gate)
@@ -338,6 +351,12 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         }
         catch (Exception ex) when (ex is not ModuleLoadException)
         {
+            if (isFile)
+            {
+                // No I/O detail ("Could not find a part of the path"), for the reason above.
+                throw new ModuleLoadException(FileModuleFetchFailed(url));
+            }
+
             throw new ModuleLoadException(string.Format(
                 CultureInfo.InvariantCulture,
                 "Failed to fetch module {0}: {1}",
@@ -391,6 +410,13 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
 
         return document;
     }
+
+    /// <summary>
+    /// The one failure a <c>file:</c> module reports, forbidden or missing alike:
+    /// Chromium's <c>import()</c> rejection text.
+    /// </summary>
+    private static string FileModuleFetchFailed(string url) =>
+        "Failed to fetch dynamically imported module: " + url;
 
     /// <summary>
     /// The href to resolve against for a load requested by <paramref name="sourceInfo"/>.
