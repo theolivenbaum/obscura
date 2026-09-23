@@ -339,6 +339,20 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             cancellationToken);
 
     /// <summary>
+    /// Issue a navigation with an explicit fetch profile: <see cref="ResourceRequest.Navigation"/>
+    /// for a browser-initiated one, <see cref="ResourceRequest.PageNavigation"/> for one a
+    /// document started, which carries the initiator into cookies, fetch metadata and Referer.
+    /// </summary>
+    public Task<Response> FetchNavigationAsync(
+        HttpMethod method,
+        Uri url,
+        byte[]? body,
+        ResourceRequest request,
+        CallbackRegistry? callbacks,
+        CancellationToken cancellationToken = default) =>
+        FetchWithProfileAsync(method, url, body, callbacks, request, cancellationToken);
+
+    /// <summary>
     /// Fetch a non-navigation resource through the same validated client, cookie jar,
     /// proxy, connection pool, interception and callback path as the owning page. The
     /// renderer can seed its byte cache from this result instead of opening a second
@@ -634,7 +648,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             }
 
             var requestOrigin = SerializedRequestOrigin(request, redirectTainted);
-            using var message = BuildRequest(method, currentUrl, body, request, requestOrigin);
+            using var message = BuildRequest(method, currentUrl, body, request, requestOrigin, redirects);
 
             Interlocked.Increment(ref _inFlight);
             HttpResponseMessage resp;
@@ -756,7 +770,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         Uri currentUrl,
         byte[]? body,
         ResourceRequest request,
-        string requestOrigin)
+        string requestOrigin,
+        IReadOnlyList<Uri> redirects)
     {
         var message = new HttpRequestMessage(method, currentUrl);
         var headers = message.Headers;
@@ -774,15 +789,18 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
         headers.TryAddWithoutValidation("User-Agent", ua);
         headers.TryAddWithoutValidation("Accept", request.Accept());
-        headers.TryAddWithoutValidation("sec-fetch-site", RequestFetchSite(request, currentUrl));
+        headers.TryAddWithoutValidation("sec-fetch-site", RequestFetchSite(request, currentUrl, redirects));
         headers.TryAddWithoutValidation("sec-fetch-mode", request.Mode.HeaderValue());
-        if (request.Mode == RequestMode.Navigate)
+        // Deviation: upstream sends `?1` on every navigation. Chromium sends it only when
+        // the navigation had user activation: always for a browser-initiated one, never
+        // for a script's `location.href = ...` or `a.click()` outside a user gesture.
+        if (request.Mode == RequestMode.Navigate && request.UserActivated)
         {
             headers.TryAddWithoutValidation("sec-fetch-user", "?1");
         }
 
         headers.TryAddWithoutValidation("sec-fetch-dest", request.Destination());
-        if (RequestReferrer(request, currentUrl) is { } referer)
+        if (RequestReferrer(request, currentUrl, redirects) is { } referer)
         {
             headers.TryAddWithoutValidation("Referer", referer);
         }
@@ -796,7 +814,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         var cookieHeader = request.SendsCredentialsTo(currentUrl)
             ? CookieJar.GetCookieHeaderInContext(
                 currentUrl,
-                SameSiteContextFor(request, currentUrl, method == HttpMethod.Get || method == HttpMethod.Head))
+                SameSiteContextFor(
+                    request, currentUrl, method == HttpMethod.Get || method == HttpMethod.Head, redirects))
             : string.Empty;
         if (cookieHeader.Length != 0)
         {
@@ -825,7 +844,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         // Origin is a forbidden browser request header. Keep it derived from the
         // initiator even when callers supplied extra headers.
         headers.Remove("Origin");
-        if (CorsRequired(request, currentUrl))
+        if (CorsRequired(request, currentUrl) || NavigationSendsOrigin(request, method))
         {
             headers.TryAddWithoutValidation("Origin", requestOrigin);
         }
@@ -1132,18 +1151,58 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         return first;
     }
 
-    internal static string RequestFetchSite(ResourceRequest request, Uri target)
+    internal static string RequestFetchSite(ResourceRequest request, Uri target) =>
+        RequestFetchSite(request, target, []);
+
+    /// <summary>
+    /// The <c>Sec-Fetch-Site</c> value (Fetch Metadata, "set the Sec-Fetch-Site header"):
+    /// the least trusted relation between the initiator and any URL in the request's
+    /// URL list, so a redirect through another site stays <c>cross-site</c> after it
+    /// comes back. No initiator is a browser-initiated navigation, <c>none</c> across
+    /// its redirects too (measured on Chromium 140).
+    /// </summary>
+    /// <remarks>
+    /// Deviation: upstream compares origins only, so a same-site cross-origin request
+    /// reported <c>cross-site</c>, and it looks at the current hop alone. This uses the
+    /// registrable-domain site the cookie jar uses and walks the whole chain.
+    /// </remarks>
+    internal static string RequestFetchSite(ResourceRequest request, Uri target, IReadOnlyList<Uri> redirects)
     {
         if (request.Initiator is not { } initiator)
         {
             return "none";
         }
 
-        // A public-suffix-aware `same-site` classification will be added with the page
-        // resource scheduler. Until then, cross-site is the safe conservative value; it
-        // never overstates ambient trust.
-        return UrlOrigin.SameOrigin(initiator, target) ? "same-origin" : "cross-site";
+        var value = "same-origin";
+        for (var i = 0; i <= redirects.Count; i++)
+        {
+            var url = i < redirects.Count ? redirects[i] : target;
+            if (UrlOrigin.SameOrigin(initiator, url))
+            {
+                continue;
+            }
+
+            if (!CookieJar.IsSameSite(initiator, url))
+            {
+                return "cross-site";
+            }
+
+            value = "same-site";
+        }
+
+        return value;
     }
+
+    /// <summary>
+    /// Whether a navigation carries an <c>Origin</c> header: a document-initiated one
+    /// with a method other than GET or HEAD (a form POST), as in Chromium. Upstream
+    /// sends none on any navigation.
+    /// </summary>
+    internal static bool NavigationSendsOrigin(ResourceRequest request, HttpMethod method) =>
+        request.Mode == RequestMode.Navigate
+        && request.Initiator is not null
+        && method != HttpMethod.Get
+        && method != HttpMethod.Head;
 
     /// <summary>
     /// The SameSite context for a request's cookies (port of <c>same_site_context</c>
@@ -1151,26 +1210,124 @@ public sealed class PocketCalculatorHttpClient : IDisposable
     /// same-site; a cross-site top-level navigation with a safe method may carry Lax
     /// cookies; anything else cross-site carries only SameSite=None.
     /// </summary>
-    internal static SameSiteContext SameSiteContextFor(ResourceRequest request, Uri target, bool methodIsSafe)
+    internal static SameSiteContext SameSiteContextFor(ResourceRequest request, Uri target, bool methodIsSafe) =>
+        SameSiteContextFor(request, target, methodIsSafe, []);
+
+    /// <summary>
+    /// <see cref="SameSiteContextFor(ResourceRequest, Uri, bool)"/> for one hop of a
+    /// redirect chain. A navigation whose chain passed through another site than the
+    /// current target's is cross-site even when it has no initiator or a same-site
+    /// one, as Chromium computes it: <c>Page.navigate</c> to a.example that redirects
+    /// to b.example sends b's Lax cookies but not its Strict ones.
+    /// </summary>
+    /// <remarks>
+    /// Deviation: upstream judges the initiator alone, so it has no redirect-chain
+    /// rule, and a cross-site iframe load counted as a top-level navigation for Lax.
+    /// Chromium only lets Lax cookies through on a top-level navigation.
+    /// </remarks>
+    internal static SameSiteContext SameSiteContextFor(
+        ResourceRequest request,
+        Uri target,
+        bool methodIsSafe,
+        IReadOnlyList<Uri> redirects)
     {
-        if (request.Initiator is not { } initiator)
+        var sameSite = request.Initiator is not { } initiator || CookieJar.IsSameSite(initiator, target);
+        if (sameSite && request.Mode == RequestMode.Navigate)
+        {
+            foreach (var hop in redirects)
+            {
+                if (!CookieJar.IsSameSite(hop, target))
+                {
+                    sameSite = false;
+                    break;
+                }
+            }
+        }
+
+        if (sameSite)
         {
             return SameSiteContext.SameSite;
         }
 
-        if (CookieJar.IsSameSite(initiator, target))
-        {
-            return SameSiteContext.SameSite;
-        }
-
-        return request.Mode == RequestMode.Navigate && methodIsSafe
+        return request.Mode == RequestMode.Navigate && !request.NestedDocument && methodIsSafe
             ? SameSiteContext.CrossSiteTopLevelSafe
             : SameSiteContext.CrossSite;
     }
 
-    internal static string? RequestReferrer(ResourceRequest request, Uri target)
+    /// <summary>
+    /// The navigation request headers a transport other than this client has to add
+    /// itself: the page's <c>op_fetch_url</c>, which loads iframe documents. Values are
+    /// those <see cref="BuildRequest"/> sends for the same profile and hop.
+    /// </summary>
+    public static IReadOnlyList<(string Name, string Value)> NavigationHeaders(
+        ResourceRequest request,
+        Uri target,
+        IReadOnlyList<Uri> redirects)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        List<(string Name, string Value)> headers =
+        [
+            ("upgrade-insecure-requests", "1"),
+            ("Accept", request.Accept()),
+            ("sec-fetch-site", RequestFetchSite(request, target, redirects)),
+            ("sec-fetch-mode", request.Mode.HeaderValue()),
+        ];
+        if (request.Mode == RequestMode.Navigate && request.UserActivated)
+        {
+            headers.Add(("sec-fetch-user", "?1"));
+        }
+
+        headers.Add(("sec-fetch-dest", request.Destination()));
+        if (RequestReferrer(request, target, redirects) is { } referer)
+        {
+            headers.Add(("Referer", referer));
+        }
+
+        return headers;
+    }
+
+    /// <summary>
+    /// The SameSite context of one hop of <paramref name="request"/>, for a transport
+    /// other than this client (see <see cref="NavigationHeaders"/>).
+    /// </summary>
+    public static SameSiteContext NavigationSameSiteContext(
+        ResourceRequest request,
+        Uri target,
+        bool methodIsSafe,
+        IReadOnlyList<Uri> redirects) =>
+        SameSiteContextFor(request, target, methodIsSafe, redirects);
+
+    internal static string? RequestReferrer(ResourceRequest request, Uri target) =>
+        ReferrerFor(request.Referrer ?? request.Initiator, target);
+
+    /// <summary>
+    /// The Referer of one hop of a redirect chain. The policy is applied at every hop to
+    /// what the previous hop sent, so a referrer trimmed to its origin for a
+    /// cross-origin first hop stays trimmed when the chain comes back to the referrer's
+    /// own origin, and one dropped stays dropped (Fetch "HTTP-redirect fetch" and
+    /// Chromium 140: a.example to b.example/redirect to a.example/next sends
+    /// <c>https://a.example/</c> on the last hop).
+    /// </summary>
+    /// <remarks>
+    /// Deviation: upstream derives each hop's Referer from the original referrer URL,
+    /// which restored the full URL on the way back.
+    /// </remarks>
+    internal static string? RequestReferrer(ResourceRequest request, Uri target, IReadOnlyList<Uri> redirects)
     {
         var source = request.Referrer ?? request.Initiator;
+        foreach (var hop in redirects)
+        {
+            if (ReferrerFor(source, hop) is not { } sent || !Uri.TryCreate(sent, UriKind.Absolute, out source))
+            {
+                return null;
+            }
+        }
+
+        return ReferrerFor(source, target);
+    }
+
+    private static string? ReferrerFor(Uri? source, Uri target)
+    {
         if (source is null)
         {
             return null;

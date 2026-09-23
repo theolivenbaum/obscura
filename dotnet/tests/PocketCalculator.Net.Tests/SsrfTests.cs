@@ -261,6 +261,36 @@ public class SsrfTests
         Assert.Null(PocketCalculatorHttpClient.RequestReferrer(request, downgrade));
     }
 
+    [Fact]
+    public void FetchSiteAndReferrerFollowTheRedirectChain()
+    {
+        // Deviation from client.rs, measured on Chromium 140: same-site is its own value,
+        // the least trusted hop wins, and a trimmed referrer is not restored.
+        var source = new Uri("https://app.example.com/path?q=1");
+        var request = ResourceRequest.PageNavigation(source, userActivated: false);
+        var sameSite = new Uri("https://cdn.example.com/next");
+        var sameOrigin = new Uri("https://app.example.com/next");
+        var crossSite = new Uri("https://other.test/redirect");
+
+        Assert.Equal("same-site", PocketCalculatorHttpClient.RequestFetchSite(request, sameSite));
+        Assert.Equal("same-site", PocketCalculatorHttpClient.RequestFetchSite(request, sameOrigin, [sameSite]));
+        Assert.Equal("cross-site", PocketCalculatorHttpClient.RequestFetchSite(request, sameOrigin, [crossSite]));
+        Assert.Equal("none", PocketCalculatorHttpClient.RequestFetchSite(ResourceRequest.Navigation(), sameOrigin, [crossSite]));
+
+        Assert.Equal(
+            "https://app.example.com/path?q=1",
+            PocketCalculatorHttpClient.RequestReferrer(request, sameOrigin, []));
+        Assert.Equal(
+            "https://app.example.com/",
+            PocketCalculatorHttpClient.RequestReferrer(request, sameOrigin, [crossSite]));
+        Assert.Null(PocketCalculatorHttpClient.RequestReferrer(
+            request, sameOrigin, [new Uri("http://other.test/downgrade")]));
+
+        Assert.True(PocketCalculatorHttpClient.NavigationSendsOrigin(request, HttpMethod.Post));
+        Assert.False(PocketCalculatorHttpClient.NavigationSendsOrigin(request, HttpMethod.Get));
+        Assert.False(PocketCalculatorHttpClient.NavigationSendsOrigin(ResourceRequest.Navigation(), HttpMethod.Post));
+    }
+
     // WPT fetch/api/redirect/redirect-count: the 20th redirect must still be
     // followed, the 21st must fail. Guards the inclusive redirect bound in the fetch
     // loop; an exclusive bound regressed this to 19.
