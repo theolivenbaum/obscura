@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../Obscura.Browser/Obscura.Browser.csproj" />
+    <!-- The package depends on Obscura, which carries the engine assemblies;
+         Browser is referenced directly to compile against it, and kept out of
+         the dependency list because it is not a package. -->
+    <ProjectReference Include="../Obscura/Obscura.csproj" />
+    <ProjectReference Include="../Obscura.Browser/Obscura.Browser.csproj" PrivateAssets="all" />
   </ItemGroup>
 </Project>

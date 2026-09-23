@@ -4,6 +4,8 @@
     <RootNamespace>Obscura.Render</RootNamespace>
     <AssemblyName>Obscura.Render</AssemblyName>
     <Description>Obscura rendering: CSS cascade, computed style, layout, and painting onto Skia.</Description>
+    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

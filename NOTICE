@@ -3,9 +3,13 @@ Copyright 2026 Curiosity GmbH
 
 This product is a C# / .NET reimplementation of Obscura
 (https://github.com/h4ckf0r0day/obscura), a headless browser engine written in
-Rust. Obscura is Copyright the Obscura authors and contributors, and is licensed
-under the Apache License, Version 2.0. Its license is kept, unmodified, at
-.reference/obscura/LICENSE, alongside the source tree this port was derived from.
+Rust, ported component by component and modified. Obscura is Copyright the
+Obscura authors and contributors, and is licensed under the Apache License,
+Version 2.0. This port is distributed under the MIT License (LICENSE), as
+Section 4 of the Apache License permits for a derivative work, and the Apache
+License's conditions for the Obscura-derived portions are met by distributing
+its text and this NOTICE with it. That text is kept, unmodified, at
+.reference/obscura/LICENSE, and ships in every package as LICENSE-OBSCURA.txt.
 
 The layout engine is a port of Taffy (https://github.com/DioxusLabs/taffy),
 Copyright (c) 2018 Visly Inc. and Copyright (c) 2026 Taffy Authors, licensed

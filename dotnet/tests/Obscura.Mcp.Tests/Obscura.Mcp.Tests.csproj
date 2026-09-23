@@ -12,6 +12,9 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Obscura.Mcp/Obscura.Mcp.csproj" />
+    <!-- Obscura.Cdp and Obscura.Mcp reference the engine privately (it ships inside
+         the Obscura package), so its types do not flow through them. -->
+    <ProjectReference Include="../../src/Obscura.Browser/Obscura.Browser.csproj" />
   </ItemGroup>
 
   <ItemGroup>

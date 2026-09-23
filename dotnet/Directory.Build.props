@@ -36,7 +36,7 @@
     <Company>Curiosity GmbH</Company>
     <Product>Obscura</Product>
     <Copyright>Copyright (c) 2026 Curiosity GmbH. Based on Obscura, Copyright (c) the Obscura authors (https://github.com/h4ckf0r0day/obscura).</Copyright>
-    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/theolivenbaum/obscura</PackageProjectUrl>
     <RepositoryUrl>https://github.com/theolivenbaum/obscura</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -45,12 +45,24 @@
     <Deterministic>true</Deterministic>
   </PropertyGroup>
 
-  <!-- Every package carries the README, the license and the NOTICE, which the
-       Apache License requires to travel with redistributed copies. -->
+  <!-- Every package carries the README, the port's MIT license, and the NOTICE
+       and Apache License text of Obscura, which that license requires to travel
+       with the derived code. -->
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)../README.md" Pack="true" PackagePath="\" Visible="false" />
     <None Include="$(MSBuildThisFileDirectory)../LICENSE" Pack="true" PackagePath="\" Visible="false" />
     <None Include="$(MSBuildThisFileDirectory)../NOTICE" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
+
+  <!-- Upstream's license file has no extension, and NuGet packs an extensionless
+       source under a renamed PackagePath as a folder. Copy it to obj/ under the
+       name it ships as, and pack that. -->
+  <Target Name="PackObscuraLicense" BeforeTargets="_GetPackageFiles" Condition="'$(IsPackable)' != 'false'">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)../.reference/obscura/LICENSE"
+          DestinationFiles="$(IntermediateOutputPath)LICENSE-OBSCURA.txt" SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <None Include="$(IntermediateOutputPath)LICENSE-OBSCURA.txt" Pack="true" PackagePath="\" Visible="false" />
+    </ItemGroup>
+  </Target>
 
 </Project>

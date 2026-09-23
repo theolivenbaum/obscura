@@ -4,6 +4,8 @@
     <RootNamespace>Obscura.Js</RootNamespace>
     <AssemblyName>Obscura.Js</AssemblyName>
     <Description>Obscura JavaScript runtime: V8 through ClearScript, the op layer and the Web API shim.</Description>
+    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

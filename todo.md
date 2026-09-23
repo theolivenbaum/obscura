@@ -40,7 +40,7 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
 - [x] Move the Rust tree and everything upstream-only into `.reference/obscura/`; the
-      root README, `LICENSE` (Apache-2.0, Curiosity GmbH) and `NOTICE` are the port's
+      root README, `LICENSE` (MIT, Curiosity GmbH) and `NOTICE` are the port's
 - [x] NuGet packaging metadata in `dotnet/Directory.Build.props`; publish pipeline
       in `.devops/build-nuget.yml`
 - [x] Upstream sync procedure in `CLAUDE.md` ("Merging upstream changes")

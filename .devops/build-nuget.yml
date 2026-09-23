@@ -67,8 +67,9 @@ steps:
     arguments: '-c $(buildConfiguration) --no-build'
     publishTestResults: true
 
-# Packs the solution: the eight library projects pack, the CLI and the test projects opt
-# out with IsPackable.
+# Packs the solution into three packages: Obscura (the engine assemblies ride inside it),
+# Obscura.Cdp and Obscura.Mcp. The engine projects, the CLI and the test projects opt out
+# with IsPackable.
 - task: DotNetCoreCLI@2
   displayName: 'pack'
   inputs:

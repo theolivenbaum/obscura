@@ -40,14 +40,14 @@ managed code.
 
 | Package | What it is |
 |---|---|
-| `Obscura` | The embeddable library API: `Browser`, `Page`, `Element`, cookies. Start here. |
-| `Obscura.Browser` | Pages, navigation, lifecycle, screenshots, PDF |
-| `Obscura.Cdp` | The Chrome DevTools Protocol server |
-| `Obscura.Mcp` | The MCP server |
-| `Obscura.Js` | The V8 runtime, ops and Web API shim |
-| `Obscura.Render` | CSS, computed style, layout, paint |
-| `Obscura.Net` | HTTP, cookies, robots.txt, tracker blocklist, encoding |
-| `Obscura.Dom` | The DOM tree, HTML parsing, selectors, serialization |
+| `Obscura` | The engine and its library API: `Browser`, `Page`, `Element`, cookies. Start here. |
+| `Obscura.Cdp` | The Chrome DevTools Protocol server, on top of `Obscura` |
+| `Obscura.Mcp` | The MCP server, on top of `Obscura` |
+
+`Obscura` carries the whole engine as separate assemblies: `Obscura.Browser`
+(pages, navigation, screenshots, PDF), `Obscura.Js` (V8, ops, the Web API shim),
+`Obscura.Render` (CSS, layout, paint), `Obscura.Net` (HTTP, cookies, robots.txt,
+tracker blocklist) and `Obscura.Dom` (DOM tree, HTML parsing, selectors).
 
 ```bash
 dotnet add package Obscura
@@ -149,10 +149,11 @@ deliberately differs from the original and why.
 ## License and credits
 
 Obscura for .NET is Copyright (c) 2026 Curiosity GmbH and is licensed under the
-[Apache License 2.0](LICENSE).
+[MIT License](LICENSE).
 
 It is derived from [Obscura](https://github.com/h4ckf0r0day/obscura), Copyright
-the Obscura authors, licensed under the Apache License 2.0; its license is kept
-at [`.reference/obscura/LICENSE`](.reference/obscura/LICENSE). The layout engine
+the Obscura authors, licensed under the Apache License 2.0; that license is kept
+at [`.reference/obscura/LICENSE`](.reference/obscura/LICENSE) and ships in every
+package as `LICENSE-OBSCURA.txt`. The layout engine
 is a port of Taffy and the text layer follows cosmic-text, both MIT licensed. See
 [`NOTICE`](NOTICE) for the full attributions.

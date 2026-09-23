@@ -117,7 +117,7 @@ comments to rewrite them.
 
 ```
 README.md                       the C# port's README
-LICENSE                         Apache-2.0, for the port (Copyright Curiosity GmbH)
+LICENSE                         MIT, for the port (Copyright Curiosity GmbH)
 NOTICE                          attributions: Obscura, Taffy, cosmic-text, the fonts
 todo.md                         port status, open issues, known deviations
 .devops/build-nuget.yml         the only build definition: build, test, pack, push
@@ -409,10 +409,18 @@ The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
 
 ## Packaging, publishing and licensing
 
-- **Packages.** The eight library projects under `dotnet/src/` pack as
-  `Obscura`, `Obscura.Browser`, `Obscura.Cdp`, `Obscura.Mcp`, `Obscura.Js`,
-  `Obscura.Render`, `Obscura.Net` and `Obscura.Dom`. `Obscura.Cli` and every
-  test project set `IsPackable` to false. Package metadata (authors, copyright,
+- **Packages.** Three: `Obscura`, `Obscura.Cdp` and `Obscura.Mcp`. The engine
+  projects (`Obscura.Browser`, `Obscura.Js`, `Obscura.Render`, `Obscura.Net`,
+  `Obscura.Dom`) stay separate assemblies but are not packages
+  (`IsPackable` false): `Obscura` references `Obscura.Browser` with
+  `PrivateAssets="all"` and puts all five DLLs in its own `lib/` through the
+  `IncludeEngineAssemblies` target, so they ship together and cannot drift.
+  Because `PrivateAssets` also stops the engine's package references flowing,
+  `Obscura.csproj` restates them: **a PackageReference added to an engine project
+  must be added there too**, or consumers get a missing-assembly failure at run
+  time. `Obscura.Cdp` and `Obscura.Mcp` depend on the `Obscura` package and
+  reference `Obscura.Browser` privately to compile. `Obscura.Cli` and every test
+  project set `IsPackable` to false. Package metadata (authors, copyright,
   license, repository, README, NOTICE) is set once in
   `dotnet/Directory.Build.props`; give a new project a `<Description>` and
   nothing else.
@@ -425,11 +433,14 @@ The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
   `yy.M.<build id mod 65536>`; the `0.1.0` in `Directory.Build.props` is only the
   local default, which keeps a local `obscura --version` in the shape of the
   reference's.
-- **Licensing.** The port is Copyright Curiosity GmbH and licensed Apache-2.0
+- **Licensing.** The port is Copyright Curiosity GmbH and licensed MIT
   (`LICENSE`). It is a derivative of Obscura (Apache-2.0), Taffy (MIT) and
-  cosmic-text (MIT/Apache-2.0), and `NOTICE` carries those attributions; both
-  files travel in every package. Upstream's own license stays, unmodified, at
-  `.reference/obscura/LICENSE`. Keep the original authors credited in
+  cosmic-text (MIT/Apache-2.0). Apache-2.0 lets a derivative work carry its own
+  terms provided the Apache text and the attribution notices go with it, so
+  `NOTICE` carries the attributions, upstream's license stays unmodified at
+  `.reference/obscura/LICENSE`, and every package ships `LICENSE`, `NOTICE` and
+  that Apache text as `LICENSE-OBSCURA.txt`. Do not drop either of the last
+  two. Keep the original authors credited in
   `Authors` and `Copyright`, and add to `NOTICE` if a port of another project
   lands.
 

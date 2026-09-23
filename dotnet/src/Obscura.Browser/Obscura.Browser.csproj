@@ -4,6 +4,8 @@
     <RootNamespace>Obscura.Browser</RootNamespace>
     <AssemblyName>Obscura.Browser</AssemblyName>
     <Description>Obscura browser: pages, navigation, lifecycle, screenshots and PDF export.</Description>
+    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
