@@ -10,6 +10,9 @@ namespace PocketCalculator.Js.Runtime;
 /// </summary>
 public sealed partial class PocketCalculatorJsRuntime
 {
+    /// <summary>The most isolated worlds one document may have at once.</summary>
+    public const int MaxIsolatedWorlds = 32;
+
     private readonly Dictionary<long, IsolatedWorld> _worlds = [];
 
     /// <summary>Worlds a suspension took down, rebuilt when a command next names one.</summary>
@@ -34,6 +37,13 @@ public sealed partial class PocketCalculatorJsRuntime
             return existing;
         }
         ObjectDisposedException.ThrowIf(_disposed, this);
+        // Each world is an engine with its own copy of bootstrap.js's heap, so a client
+        // naming world after world would grow the page without bound.
+        if (_worlds.Count >= MaxIsolatedWorlds)
+        {
+            throw new JsRuntimeException(
+                $"Too many isolated worlds: this document already has {MaxIsolatedWorlds}");
+        }
         var world = IsolatedWorld.Create(this, target);
         _worlds[target.Key] = world;
         _ops.MutationForwarder ??= new WorldMutationForwarder(this);

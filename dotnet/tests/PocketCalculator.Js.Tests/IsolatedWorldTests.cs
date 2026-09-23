@@ -213,6 +213,22 @@ public sealed class IsolatedWorldTests
     }
 
     [Fact]
+    public async Task WorldsPerDocumentAreCapped()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var runtime = fixture.Runtime;
+        for (var key = 2; key < 2 + PocketCalculatorJsRuntime.MaxIsolatedWorlds; key++)
+        {
+            await InWorld(runtime, "1", new IsolatedWorldTarget(key, "w" + key, []));
+        }
+        var error = await Assert.ThrowsAsync<JsRuntimeException>(() => runtime.EvaluateForCdpWithTimeoutAsync(
+            "1", true, false, 5_000, new IsolatedWorldTarget(1000, "one-too-many", [])));
+        Assert.Contains("Too many isolated worlds", error.Message, StringComparison.Ordinal);
+        // An existing world still answers.
+        Assert.Equal(1, (await InWorld(runtime, "1", new IsolatedWorldTarget(2, "w2", [])))?.GetValue<double>());
+    }
+
+    [Fact]
     public async Task WorldInitScriptsRunAtCreation()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
