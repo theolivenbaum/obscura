@@ -183,7 +183,10 @@ public static partial class FetchOps
     /// chunked server). Streaming keeps a multi-GB response from ever being fully
     /// allocated.
     /// </summary>
-    internal static async Task<byte[]> ReadBodyCappedAsync(HttpResponseMessage response, int max)
+    internal static async Task<byte[]> ReadBodyCappedAsync(
+        HttpResponseMessage response,
+        int max,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(response);
         if (response.Content.Headers.ContentLength is { } length && length > max)
@@ -191,26 +194,33 @@ public static partial class FetchOps
             throw new OpException($"response body of {length} bytes exceeds the maximum of {max}");
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[64 * 1024];
-        while (true)
+        try
         {
-            var read = await stream.ReadAsync(chunk).ConfigureAwait(false);
-            if (read == 0)
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[64 * 1024];
+            while (true)
             {
-                break;
+                var read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                if (buffer.Length + read > max)
+                {
+                    throw new OpException($"response body exceeds the maximum of {max} bytes");
+                }
+
+                buffer.Write(chunk, 0, read);
             }
 
-            if (buffer.Length + read > max)
-            {
-                throw new OpException($"response body exceeds the maximum of {max} bytes");
-            }
-
-            buffer.Write(chunk, 0, read);
+            return buffer.ToArray();
         }
-
-        return buffer.ToArray();
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OpException("operation timed out");
+        }
     }
 
     internal static int ResponseBodyEntryLimit() => EnvInt("POCKETCALCULATOR_NETWORK_BODY_BUFFER_ENTRIES", 128);
@@ -229,7 +239,11 @@ public static partial class FetchOps
     internal static int FetchMaxBodyBytes() => EnvInt("POCKETCALCULATOR_FETCH_MAX_BODY_BYTES", 100 * 1024 * 1024);
 
     internal static TimeSpan FetchTimeout() =>
-        TimeSpan.FromMilliseconds(EnvInt("POCKETCALCULATOR_FETCH_TIMEOUT_MS", 30_000));
+        FetchTimeoutOverride.Value
+        ?? TimeSpan.FromMilliseconds(EnvInt("POCKETCALCULATOR_FETCH_TIMEOUT_MS", 30_000));
+
+    /// <summary>Test seam: a per-flow <see cref="FetchTimeout"/> that parallel tests cannot see.</summary>
+    internal static readonly AsyncLocal<TimeSpan?> FetchTimeoutOverride = new();
 
     private static int EnvInt(string name, int fallback) =>
         int.TryParse(
@@ -465,6 +479,12 @@ public static partial class FetchOps
                 });
             }
 
+            // One deadline for the whole exchange: the preflight, every redirect hop and
+            // the body. DEVIATION from crates/obscura-js (ops.rs), whose timeout covered
+            // each hop's headers only, so a server that trickled the body one byte at a
+            // time held the fetch, and the page's in-flight count, forever (SECURITY.md M3).
+            using var deadline = new CancellationTokenSource(FetchTimeout());
+
             var isCors = string.Equals(mode, "cors", StringComparison.Ordinal);
             var unsafeHeaderNames = isCrossOrigin && isCors
                 ? CorsUnsafeRequestHeaderNames(customHeaders2)
@@ -488,7 +508,7 @@ public static partial class FetchOps
                             string.Join(',', unsafeHeaderNames));
                     }
 
-                    preflight = await SendAsync(client, preflightRequest).ConfigureAwait(false);
+                    preflight = await SendAsync(client, preflightRequest, deadline.Token).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OpException)
                 {
@@ -651,7 +671,7 @@ public static partial class FetchOps
                         }
                     }
 
-                    var hop = await SendAsync(client, request).ConfigureAwait(false);
+                    var hop = await SendAsync(client, request, deadline.Token).ConfigureAwait(false);
 
                     if (credentialsAllowed
                         && jar is not null
@@ -793,7 +813,8 @@ public static partial class FetchOps
                     }
                 }
 
-                var respBytes = await ReadBodyCappedAsync(response, FetchMaxBodyBytes()).ConfigureAwait(false);
+                var respBytes = await ReadBodyCappedAsync(response, FetchMaxBodyBytes(), deadline.Token)
+                    .ConfigureAwait(false);
                 var respBody = Encoding.UTF8.GetString(respBytes);
                 var respBodyBase64 = Convert.ToBase64String(respBytes);
 
@@ -912,16 +933,18 @@ public static partial class FetchOps
         }
     }
 
-    private static async Task<HttpResponseMessage> SendAsync(HttpClient client, HttpRequestMessage request)
+    private static async Task<HttpResponseMessage> SendAsync(
+        HttpClient client,
+        HttpRequestMessage request,
+        CancellationToken deadline)
     {
-        using var timeout = new CancellationTokenSource(FetchTimeout());
         try
         {
             return await client
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline)
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
             throw new OpException("operation timed out");
         }
