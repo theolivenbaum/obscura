@@ -6,16 +6,13 @@ using Xunit;
 namespace PocketCalculator.Mcp.Tests;
 
 /// <summary>
-/// Regression test for issue #175: the MCP HTTP server's OPTIONS preflight
-/// response must list every header a browser MCP client may send, including
-/// <c>mcp-protocol-version</c> (from the MCP spec) and <c>Authorization</c> /
-/// <c>X-API-Key</c> (common in hosted deployments). Otherwise the browser blocks
-/// the actual request with a CORS error.
+/// Browser callers are denied unless the operator explicitly allowlists their
+/// Origin. Native MCP clients send no Origin and are unaffected.
 /// </summary>
 public sealed class CorsPreflightTests
 {
     [Fact]
-    public async Task OptionsPreflightListsRequiredBrowserHeaders()
+    public async Task BrowserPreflightIsDeniedWithoutAnOriginAllowlist()
     {
         var port = SseStreamDoesNotWedgeTests.PickFreePort();
         using var cts = new CancellationTokenSource();
@@ -44,21 +41,10 @@ public sealed class CorsPreflightTests
                 stream, TimeSpan.FromSeconds(2), "read timed out");
 
             Assert.True(
-                response.StartsWith("HTTP/1.1 204", StringComparison.Ordinal),
-                $"expected 204 No Content preflight, got:\n{response}");
+                response.StartsWith("HTTP/1.1 403", StringComparison.Ordinal),
+                $"expected 403, got:\n{response}");
             var lc = response.ToLowerInvariant();
-            Assert.True(
-                lc.Contains("access-control-allow-headers:", StringComparison.Ordinal),
-                $"preflight must include Access-Control-Allow-Headers; got:\n{response}");
-            Assert.True(
-                lc.Contains("mcp-protocol-version", StringComparison.Ordinal),
-                $"ACAH must list mcp-protocol-version (per MCP spec); got:\n{response}");
-            Assert.True(
-                lc.Contains("authorization", StringComparison.Ordinal),
-                $"ACAH must list Authorization for hosted deployments; got:\n{response}");
-            Assert.True(
-                lc.Contains("x-api-key", StringComparison.Ordinal),
-                $"ACAH must list X-API-Key for hosted deployments; got:\n{response}");
+            Assert.DoesNotContain("access-control-allow-origin: *", lc, StringComparison.Ordinal);
         }
         finally
         {

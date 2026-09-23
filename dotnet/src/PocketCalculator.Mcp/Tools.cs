@@ -60,6 +60,15 @@ internal static partial class Tools
     internal static async Task<string> NavigateAsync(JsonNode? args, BrowserState state)
     {
         var url = RequireString(args, "url", "Missing url parameter");
+        // An MCP caller must not read local files through the browser session:
+        // navigate to file:// and snapshot the text. Rust tests the scheme of
+        // `Url::parse`, so an unparseable string falls through to the navigation
+        // and fails there with its own error.
+        if (PocketCalculator.Js.Url.UrlRecord.Parse(url) is { Scheme: "file" })
+        {
+            throw new ToolException("file:// navigation is disabled for MCP");
+        }
+
         var waitUntil = args.Get("waitUntil").AsString() ?? "load";
 
         var condition = WaitUntilExtensions.ParseWaitUntil(waitUntil);

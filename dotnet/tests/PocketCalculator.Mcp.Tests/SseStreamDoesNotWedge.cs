@@ -95,7 +95,6 @@ public sealed class SseStreamDoesNotWedgeTests
             var request = Encoding.UTF8.GetBytes(
                 "OPTIONS /mcp HTTP/1.1\r\n"
                 + "Host: 127.0.0.1\r\n"
-                + "Origin: https://dashboard.example.com\r\n"
                 + "Access-Control-Request-Method: POST\r\n"
                 + "\r\n");
             await stream.WriteAsync(request);

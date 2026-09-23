@@ -44,6 +44,20 @@ public sealed class LibTests
         }
     }
 
+    [Fact]
+    public async Task McpNavigationRejectsLocalFiles()
+    {
+        using var state = new BrowserState(null, null, false);
+        var error = await Assert.ThrowsAsync<ToolException>(() =>
+            Tools.NavigateAsync(JsonNode.Parse("{\"url\":\"file:///etc/passwd\"}"), state));
+        Assert.Contains("file:// navigation is disabled", error.Message, StringComparison.Ordinal);
+
+        // The url crate lowercases the scheme and strips surrounding blanks, so
+        // neither spelling slips past the check.
+        await Assert.ThrowsAsync<ToolException>(() =>
+            Tools.NavigateAsync(JsonNode.Parse("{\"url\":\" FILE:///etc/passwd\"}"), state));
+    }
+
     // Ported but inapplicable, not unwritten. The Rust test is
     // `#[cfg(not(feature = "render"))]`, and the C# port has no non-render build:
     // rendering is always compiled in (see the note in ToolSchemas), so

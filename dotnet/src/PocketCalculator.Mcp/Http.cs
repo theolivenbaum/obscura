@@ -2,9 +2,11 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 
 namespace PocketCalculator.Mcp;
 
@@ -23,14 +25,38 @@ public static class Http
     /// <c>Content-Length</c> is used to pre-size the read buffer; without a ceiling
     /// a request advertising e.g. <c>Content-Length: 4294967296</c> makes the server
     /// allocate and zero-fill that many bytes before reading any body - an
-    /// unauthenticated OOM/DoS. 16 MiB is far above any real JSON-RPC tool call.
+    /// unauthenticated OOM/DoS. One MiB is far above any real JSON-RPC tool call.
     /// </summary>
-    internal const int MaxBodyBytes = 16 * 1024 * 1024;
+    internal const int MaxBodyBytes = 1024 * 1024;
+
+    /// <summary>Cap on the request line, its line feed included.</summary>
+    internal const int MaxRequestLineBytes = 8 * 1024;
+
+    /// <summary>Cap on one header line, its line feed included.</summary>
+    internal const int MaxHeaderLineBytes = 16 * 1024;
+
+    /// <summary>Cap on the whole header block.</summary>
+    internal const int MaxHeaderBytes = 64 * 1024;
+
+    /// <summary>Largest JSON-RPC batch. An empty batch is refused as well.</summary>
+    internal const int MaxBatchItems = 64;
+
+    /// <summary>Largest serialized JSON-RPC <c>id</c>.</summary>
+    internal const int MaxIdBytes = 1024;
+
+    /// <summary>Live connections. One more is closed at accept.</summary>
+    internal const int MaxConnections = 128;
+
+    /// <summary>Requests queued for the single dispatcher that owns the browser session.</summary>
+    internal const int MaxPendingRequests = 32;
+
+    /// <summary>Shortest bearer token <c>POCKETCALCULATOR_MCP_TOKEN</c> may hold, in bytes.</summary>
+    internal const int MinTokenBytes = 32;
 
     /// <summary>
     /// Maximum time allowed to receive one complete HTTP request (request line,
     /// headers, and body). The deadline is shared across all reads so a client
-    /// cannot keep the sequential MCP server occupied by slowly dribbling data.
+    /// cannot keep a connection slot occupied by slowly dribbling data.
     /// </summary>
     internal static readonly TimeSpan RequestReadTimeout = TimeSpan.FromSeconds(30);
 
@@ -57,6 +83,8 @@ public static class Http
         bool AcceptSse,
         bool KeepAlive,
         string? Origin,
+        bool Authorized,
+        bool ContentTypeIsJson,
         RequestBody Body);
 
     internal enum RequestReadKind
@@ -77,12 +105,61 @@ public static class Http
     /// <summary>Raised where the Rust transport returns <c>Err</c> from a read.</summary>
     internal sealed class HttpTransportException(string message) : Exception(message);
 
+    /// <summary>One request queued for the dispatcher, and where its reply goes.</summary>
+    private sealed record PendingRequest(byte[] Body, TaskCompletionSource<JsonNode?> Reply);
+
+    /// <summary>
+    /// The bearer token from <c>POCKETCALCULATOR_MCP_TOKEN</c>. Unset or empty means no
+    /// token; one shorter than <see cref="MinTokenBytes"/> is a startup error.
+    /// </summary>
+    internal static string? TokenFromEnv() =>
+        ValidateToken(Environment.GetEnvironmentVariable("POCKETCALCULATOR_MCP_TOKEN"));
+
+    internal static string? ValidateToken(string? token)
+    {
+        if (string.IsNullOrEmpty(token))
+        {
+            return null;
+        }
+
+        if (Encoding.UTF8.GetByteCount(token) < MinTokenBytes)
+        {
+            throw new InvalidOperationException("POCKETCALCULATOR_MCP_TOKEN must be at least 32 bytes");
+        }
+
+        return token;
+    }
+
+    /// <summary>
+    /// Whether an <c>Authorization</c> value carries the expected bearer token. With
+    /// no token configured every request is authorized. The comparison does not
+    /// short-circuit on the first differing byte.
+    /// </summary>
+    internal static bool BearerAuthorized(string? header, string? expected)
+    {
+        if (expected is null)
+        {
+            return true;
+        }
+
+        if (header is null || !header.StartsWith("Bearer ", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(header["Bearer ".Length..]),
+            Encoding.UTF8.GetBytes(expected));
+    }
+
     internal static async Task<RequestRead> ReadRequestAsync(
         LineReader reader,
         string? allowedOrigins,
+        string? authToken,
         CancellationToken cancellationToken)
     {
-        var requestLineRaw = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        var requestLineRaw = await reader.ReadLineAsync(MaxRequestLineBytes, cancellationToken)
+            .ConfigureAwait(false);
         if (requestLineRaw is null)
         {
             return RequestRead.Closed;
@@ -107,11 +184,26 @@ public static class Http
         var acceptSse = false;
         var keepAlive = false;
         string? origin = null;
+        string? authorization = null;
+        var contentTypeIsJson = false;
+        var headerBytes = 0;
 
         while (true)
         {
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            var trimmed = line ?? string.Empty;
+            var line = await reader.ReadLineAsync(MaxHeaderLineBytes, cancellationToken)
+                .ConfigureAwait(false);
+            if (line is null)
+            {
+                return RequestRead.Invalid;
+            }
+
+            headerBytes += reader.LastLineBytes;
+            if (headerBytes > MaxHeaderBytes)
+            {
+                throw new HttpTransportException("HTTP headers too large");
+            }
+
+            var trimmed = line;
             if (trimmed.Length == 0)
             {
                 break;
@@ -144,6 +236,27 @@ public static class Http
                 }
             }
 
+            if (lower.StartsWith("authorization:", StringComparison.Ordinal))
+            {
+                var idx = trimmed.IndexOf(':', StringComparison.Ordinal);
+                if (idx >= 0)
+                {
+                    authorization = trimmed[(idx + 1)..].Trim();
+                }
+            }
+
+            if (lower.StartsWith("content-type:", StringComparison.Ordinal))
+            {
+                var mediaType = lower["content-type:".Length..];
+                var semicolon = mediaType.IndexOf(';', StringComparison.Ordinal);
+                if (semicolon >= 0)
+                {
+                    mediaType = mediaType[..semicolon];
+                }
+
+                contentTypeIsJson = mediaType.Trim() == "application/json";
+            }
+
             if (lower.Contains("text/event-stream", StringComparison.Ordinal))
             {
                 acceptSse = true;
@@ -156,12 +269,16 @@ public static class Http
             }
         }
 
-        // Only consume a body for a POST that can reach the MCP route. Invalid paths
-        // and forbidden origins retain the existing early-response behavior.
+        // Only consume a body for a POST that can reach the MCP route. Invalid paths,
+        // forbidden origins, unauthenticated callers and non-JSON bodies retain the
+        // early-response behavior.
+        var authorized = BearerAuthorized(authorization, authToken);
         RequestBody body;
         if (string.Equals(method, "POST", StringComparison.Ordinal)
             && string.Equals(path, "/mcp", StringComparison.Ordinal)
-            && OriginAllowed(origin, allowedOrigins))
+            && OriginAllowed(origin, allowedOrigins)
+            && authorized
+            && contentTypeIsJson)
         {
             if (contentLength is not { } length)
             {
@@ -183,16 +300,18 @@ public static class Http
             body = RequestBody.NotRead;
         }
 
-        return RequestRead.Of(new HttpRequestLine(method, path, acceptSse, keepAlive, origin, body));
+        return RequestRead.Of(new HttpRequestLine(
+            method, path, acceptSse, keepAlive, origin, authorized, contentTypeIsJson, body));
     }
 
     internal static async Task<RequestRead> ReadRequestWithTimeoutAsync(
         LineReader reader,
         string? allowedOrigins,
+        string? authToken,
         TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource();
-        var read = ReadRequestAsync(reader, allowedOrigins, cts.Token);
+        var read = ReadRequestAsync(reader, allowedOrigins, authToken, cts.Token);
         try
         {
             return await read.WaitAsync(timeout).ConfigureAwait(false);
@@ -214,8 +333,8 @@ public static class Http
 
     /// <summary>
     /// Origin allowlist for browser callers, read from
-    /// <c>POCKETCALCULATOR_MCP_ALLOWED_ORIGINS</c> (comma-separated). Unset/empty means
-    /// permissive (unchanged <c>*</c>) so hosted dashboards keep working (issue #175).
+    /// <c>POCKETCALCULATOR_MCP_ALLOWED_ORIGINS</c> (comma-separated). Unset/empty refuses
+    /// browser callers; native clients do not send Origin and remain unaffected.
     /// </summary>
     internal static string? AllowedOriginsEnv()
     {
@@ -226,21 +345,21 @@ public static class Http
     /// <summary>
     /// Whether a request's <c>Origin</c> is permitted. A request with no
     /// <c>Origin</c> (native, non-browser MCP clients) is always allowed - the
-    /// same-origin policy only constrains browser callers. When an allowlist is
-    /// configured, a browser <c>Origin</c> must match one of its entries
-    /// (case-insensitive); this stops a malicious local web page from driving the
-    /// loopback MCP port.
+    /// same-origin policy only constrains browser callers. A browser <c>Origin</c>
+    /// must match an allowlist entry (case-insensitive), and with no allowlist it is
+    /// refused; this stops a malicious local web page from driving the loopback MCP
+    /// port.
     /// </summary>
     internal static bool OriginAllowed(string? origin, string? allowlist)
     {
-        if (allowlist is null)
+        if (origin is null)
         {
             return true;
         }
 
-        if (origin is null)
+        if (allowlist is null)
         {
-            return true;
+            return false;
         }
 
         var trimmed = origin.Trim();
@@ -258,52 +377,83 @@ public static class Http
     }
 
     /// <summary>
-    /// CORS <c>Access-Control-Allow-Origin</c> value for a response. With no
-    /// allowlist we keep the permissive <c>*</c> (issue #175). With an allowlist the
-    /// request's origin has already passed <see cref="OriginAllowed"/>, so echo it
-    /// back plus <c>Vary: Origin</c> instead of advertising <c>*</c>; a native client
-    /// with no <c>Origin</c> needs no CORS header at all.
+    /// CORS response headers for an already-authorized browser caller: its origin
+    /// echoed back plus <c>Vary: Origin</c>. A wildcard is never emitted for this
+    /// privileged endpoint, and a native client with no <c>Origin</c> needs no CORS
+    /// header at all.
     /// </summary>
     internal static string CorsHeader(string? origin, string? allowlist) =>
-        allowlist is null
-            ? "Access-Control-Allow-Origin: *\r\n"
-            : origin is { } value
-                ? $"Access-Control-Allow-Origin: {value}\r\nVary: Origin\r\n"
-                : string.Empty;
+        origin is { } value && allowlist is not null
+            ? $"Access-Control-Allow-Origin: {value}\r\nVary: Origin\r\n"
+            : string.Empty;
 
     /// <summary>
     /// Run the MCP HTTP server until cancelled.
     /// </summary>
     /// <remarks>
-    /// Connections are handled sequentially - the browser session (including the V8
-    /// runtime) is single-threaded, so state never crosses threads. That is exactly
-    /// why the SSE keep-alive must be detached: holding its infinite ping loop
-    /// inline would never return to the accept loop and would wedge every later
-    /// request.
+    /// Reads <c>POCKETCALCULATOR_MCP_TOKEN</c> and <c>POCKETCALCULATOR_MCP_ALLOWED_ORIGINS</c>. A
+    /// non-loopback bind without a token is refused before anything is bound.
     /// </remarks>
-    public static async Task RunAsync(
+    public static Task RunAsync(
         string host,
         ushort port,
         string? proxy,
         string? userAgent,
         bool stealth,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RunAsync(host, port, proxy, userAgent, stealth, AllowedOriginsEnv(), TokenFromEnv(), cancellationToken);
+
+    /// <summary>
+    /// <see cref="RunAsync(string, ushort, string?, string?, bool, CancellationToken)"/>
+    /// with the allowlist and token passed in rather than read from the process
+    /// environment, which tests running in parallel share.
+    /// </summary>
+    /// <remarks>
+    /// Connections are served concurrently, up to <see cref="MaxConnections"/>, but
+    /// every JSON-RPC body goes through one dispatcher over a bounded queue. The
+    /// browser session is single-threaded, so only the dispatcher ever touches it,
+    /// and a slow or silent client holds a connection slot rather than the server.
+    /// </remarks>
+    internal static async Task RunAsync(
+        string host,
+        ushort port,
+        string? proxy,
+        string? userAgent,
+        bool stealth,
+        string? allowedOrigins,
+        string? authToken,
+        CancellationToken cancellationToken)
     {
         var address = IPAddress.Parse(host);
+        authToken = ValidateToken(authToken);
+        if (!IPAddress.IsLoopback(address) && authToken is null)
+        {
+            throw new InvalidOperationException(
+                "refusing to expose MCP without authentication; set POCKETCALCULATOR_MCP_TOKEN to at least 32 bytes");
+        }
+
         var listener = new TcpListener(address, port);
         listener.Start();
 
         using var state = new BrowserState(proxy, userAgent, stealth);
-        var allowedOrigins = AllowedOriginsEnv();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var requests = Channel.CreateBounded<PendingRequest>(new BoundedChannelOptions(MaxPendingRequests)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+        });
+        var stopping = stop.Token;
+        var dispatcher = DispatchAsync(requests.Reader, state, stopping);
+        using var slots = new SemaphoreSlim(MaxConnections, MaxConnections);
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            while (!stopping.IsCancellationRequested)
             {
                 TcpClient client;
                 try
                 {
-                    client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
+                    client = await listener.AcceptTcpClientAsync(stopping).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -314,29 +464,85 @@ public static class Http
                     return;
                 }
 
-                try
+                if (!slots.Wait(0))
                 {
-                    await HandleConnectionAsync(client, state, allowedOrigins, cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // tracing::debug!("connection closed: {}", e)
+                    // tracing::warn!("refusing MCP connection: connection limit reached")
                     client.Dispose();
+                    continue;
                 }
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await HandleConnectionAsync(client, requests.Writer, allowedOrigins, authToken, stopping)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        // tracing::debug!("connection closed: {}", e)
+                        client.Dispose();
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            slots.Release();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // The server already stopped.
+                        }
+                    }
+                }, CancellationToken.None);
             }
         }
         finally
         {
             listener.Stop();
             listener.Dispose();
+            await stop.CancelAsync().ConfigureAwait(false);
+            requests.Writer.TryComplete();
+            try
+            {
+                await dispatcher.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            while (requests.Reader.TryRead(out var orphan))
+            {
+                orphan.Reply.TrySetCanceled();
+            }
+        }
+    }
+
+    /// <summary>The one consumer of the request queue: the only code that touches the browser session.</summary>
+    private static async Task DispatchAsync(
+        ChannelReader<PendingRequest> requests,
+        BrowserState state,
+        CancellationToken cancellationToken)
+    {
+        await foreach (var request in requests.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        {
+            try
+            {
+                request.Reply.TrySetResult(await ProcessBodyAsync(request.Body, state).ConfigureAwait(false));
+            }
+            catch (Exception error)
+            {
+                // The connection that asked closes; the dispatcher keeps serving.
+                request.Reply.TrySetException(error);
+            }
         }
     }
 
     private static async Task HandleConnectionAsync(
         TcpClient client,
-        BrowserState state,
+        ChannelWriter<PendingRequest> requests,
         string? allowedOrigins,
+        string? authToken,
         CancellationToken cancellationToken)
     {
         var stream = client.GetStream();
@@ -347,7 +553,7 @@ public static class Http
         {
             while (true)
             {
-                var read = await ReadRequestWithTimeoutAsync(reader, allowedOrigins, RequestReadTimeout)
+                var read = await ReadRequestWithTimeoutAsync(reader, allowedOrigins, authToken, RequestReadTimeout)
                     .ConfigureAwait(false);
                 if (read.Kind is RequestReadKind.Closed or RequestReadKind.Invalid)
                 {
@@ -363,14 +569,20 @@ public static class Http
                     break;
                 }
 
-                // Origin gate: when POCKETCALCULATOR_MCP_ALLOWED_ORIGINS is configured, a
-                // browser request from a non-listed origin is refused before it can
-                // drive the browser session (mitigates a malicious local web page
-                // issuing cross-origin POSTs to the loopback MCP port). The
-                // permissive default and no-Origin native clients are unaffected.
+                // Origin gate: a browser request is refused unless its origin is on
+                // POCKETCALCULATOR_MCP_ALLOWED_ORIGINS, before it can drive the browser
+                // session (a malicious local web page issuing cross-origin POSTs to
+                // the loopback MCP port). No-Origin native clients are unaffected.
                 if (!OriginAllowed(request.Origin, allowedOrigins))
                 {
                     await RespondAsync(stream, 403, "{\"error\":\"origin not allowed\"}")
+                        .ConfigureAwait(false);
+                    break;
+                }
+
+                if (!string.Equals(request.Method, "OPTIONS", StringComparison.Ordinal) && !request.Authorized)
+                {
+                    await RespondAsync(stream, 401, "{\"error\":\"authentication required\"}")
                         .ConfigureAwait(false);
                     break;
                 }
@@ -379,15 +591,14 @@ public static class Http
 
                 if (string.Equals(request.Method, "OPTIONS", StringComparison.Ordinal))
                 {
-                    // mcp-protocol-version is part of the MCP spec, Authorization /
-                    // X-API-Key are common for hosted deployments. Without these
-                    // listed the browser preflight check fails and blocks the actual
-                    // request.
+                    // mcp-protocol-version is part of the MCP spec and Authorization
+                    // carries the bearer token. Without these listed the browser
+                    // preflight check fails and blocks the actual request.
                     var header =
                         "HTTP/1.1 204 No Content\r\n"
                         + cors
                         + "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                        + "Access-Control-Allow-Headers: Content-Type, Authorization, X-API-Key, mcp-protocol-version\r\n"
+                        + "Access-Control-Allow-Headers: Content-Type, Authorization, mcp-protocol-version\r\n"
                         + "Access-Control-Max-Age: 86400\r\n"
                         + "\r\n";
                     await WriteAsync(stream, Encoding.UTF8.GetBytes(header)).ConfigureAwait(false);
@@ -395,12 +606,9 @@ public static class Http
                 else if (string.Equals(request.Method, "GET", StringComparison.Ordinal) && request.AcceptSse)
                 {
                     // SSE stream: hold open and send periodic keep-alive comments.
-                    // Connections are served sequentially, so holding this infinite
-                    // keep-alive loop inline would never return to the accept loop
-                    // and would wedge every later request. The keep-alive touches no
-                    // browser state, so detach the ping loop onto its own task and
-                    // return - the accept loop stays free while the stream lives on
-                    // independently.
+                    // The keep-alive touches no browser state, so detach the ping
+                    // loop onto its own task and return, releasing the connection
+                    // slot the way the Rust server drops its permit.
                     var header =
                         "HTTP/1.1 200 OK\r\n"
                         + "Content-Type: text/event-stream\r\n"
@@ -436,6 +644,13 @@ public static class Http
                 }
                 else if (string.Equals(request.Method, "POST", StringComparison.Ordinal))
                 {
+                    if (!request.ContentTypeIsJson)
+                    {
+                        await RespondAsync(stream, 415, "{\"error\":\"Content-Type must be application/json\"}")
+                            .ConfigureAwait(false);
+                        break;
+                    }
+
                     if (request.Body.Kind == RequestBodyKind.MissingLength)
                     {
                         await RespondAsync(stream, 400, "{\"error\":\"missing Content-Length\"}")
@@ -450,7 +665,11 @@ public static class Http
                         break;
                     }
 
-                    var response = await ProcessBodyAsync(request.Body.Bytes!, state).ConfigureAwait(false);
+                    var pending = new PendingRequest(
+                        request.Body.Bytes!,
+                        new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously));
+                    await requests.WriteAsync(pending, cancellationToken).ConfigureAwait(false);
+                    var response = await pending.Reply.Task.ConfigureAwait(false);
                     await RespondJsonAsync(stream, McpJson.SerializeToUtf8(response), cors)
                         .ConfigureAwait(false);
 
@@ -490,6 +709,11 @@ public static class Http
 
         if (message is JsonArray batch)
         {
+            if (batch.Count == 0 || batch.Count > MaxBatchItems)
+            {
+                return InvalidRequest();
+            }
+
             var results = new JsonArray();
             foreach (var item in batch)
             {
@@ -538,6 +762,13 @@ public static class Http
         }
 
         var id = message.Get("id")?.DeepClone();
+        // The id is echoed into the reply, so a structured or oversized one would
+        // let a caller make the server build and send arbitrary payloads.
+        if (id is JsonArray or JsonObject || McpJson.SerializeToUtf8(id).Length > MaxIdBytes)
+        {
+            return InvalidRequest();
+        }
+
         var method = message.Get("method").AsString() ?? string.Empty;
         var parameters = message.Get("params");
         var response = await McpServer.DispatchAsync(method, id, parameters, state).ConfigureAwait(false);
@@ -562,10 +793,12 @@ public static class Http
         var statusText = status switch
         {
             400 => "Bad Request",
+            401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
+            415 => "Unsupported Media Type",
             _ => "OK",
         };
         var payload = Encoding.UTF8.GetBytes(body);
@@ -585,23 +818,31 @@ public static class Http
     }
 
     /// <summary>
-    /// <c>tokio::io::BufReader</c>'s <c>read_line</c> / <c>read_exact</c> pair over a
+    /// <c>tokio::io::BufReader</c>'s bounded line read / <c>read_exact</c> pair over a
     /// byte stream: line reads must not swallow the bytes that follow the blank line,
     /// because the request body is read straight out of the same buffer.
     /// </summary>
     internal sealed class LineReader(Stream stream)
     {
+        private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
         private readonly byte[] _buffer = new byte[8192];
         private int _start;
         private int _end;
 
+        /// <summary>Raw length of the last line read, its CR/LF included.</summary>
+        internal int LastLineBytes { get; private set; }
+
         /// <summary>
         /// One line without its trailing CR/LF, or null at end of stream. An empty
-        /// string means a blank line, which is how the header block ends.
+        /// string means a blank line, which is how the header block ends. A line
+        /// longer than <paramref name="limit"/> bytes, line feed included, or one that
+        /// is not UTF-8, is an error rather than a line.
         /// </summary>
-        internal async Task<string?> ReadLineAsync(CancellationToken cancellationToken)
+        internal async Task<string?> ReadLineAsync(int limit, CancellationToken cancellationToken)
         {
             var line = new List<byte>(128);
+            LastLineBytes = 0;
             while (true)
             {
                 if (_start == _end)
@@ -616,6 +857,11 @@ public static class Http
                 }
 
                 var b = _buffer[_start++];
+                if (++LastLineBytes > limit)
+                {
+                    throw new HttpTransportException("HTTP line too long");
+                }
+
                 if (b == (byte)'\n')
                 {
                     return Decode(line);
@@ -659,7 +905,14 @@ public static class Http
                 span = span[..^1];
             }
 
-            return Encoding.UTF8.GetString(span);
+            try
+            {
+                return StrictUtf8.GetString(span);
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new HttpTransportException("HTTP head is not UTF-8");
+            }
         }
     }
 }
