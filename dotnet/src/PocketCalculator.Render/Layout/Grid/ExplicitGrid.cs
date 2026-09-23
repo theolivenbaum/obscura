@@ -154,10 +154,14 @@ internal static class ExplicitGrid
             float gapSize = style.Gap.GetAbs(axis).ResolveOrZero(innerContainerSize, resolveCalcValue);
 
             // Compute the amount of space that a single repetition of the repeated track list takes
+            // Deviation from taffy: each repeated track counts as at least 1px, as in Chromium
+            // (css-grid-2 7.2.3.2 floors the track size at 1px for this computation), so a
+            // repeat(auto-fill, 0px) no longer divides by zero into an unbounded count.
             float perRepetitionTrackUsedSpace = 0.0f;
             foreach (var sizingFunction in repetition.Tracks)
             {
-                perRepetitionTrackUsedSpace += TrackDefiniteValue(sizingFunction, parentSize, resolveCalcValue);
+                perRepetitionTrackUsedSpace += F32.Max(
+                    TrackDefiniteValue(sizingFunction, parentSize, resolveCalcValue), 1.0f);
             }
 
             // The first repetition is special-cased because the number of gaps in it depends on the
@@ -181,12 +185,21 @@ internal static class ExplicitGrid
                     (innerContainerSize - firstRepetitionAndNonRepeatingTracksUsedSpace)
                     / perRepetitionUsedSpace;
 
-                numRepetitions = autoFitStrategy switch
+                float repetitions = autoFitStrategy switch
                 {
-                    AutoRepeatStrategy.MaxRepetitionsThatDoNotOverflow =>
-                        (ushort)((ushort)Sys.Floor(numRepetitionThatFit) + 1),
-                    _ => (ushort)((ushort)Sys.Ceil(numRepetitionThatFit) + 1),
+                    AutoRepeatStrategy.MaxRepetitionsThatDoNotOverflow => Sys.Floor(numRepetitionThatFit) + 1,
+                    _ => Sys.Ceil(numRepetitionThatFit) + 1,
                 };
+
+                // Deviation from taffy, which casts the float straight to u16 (wrapping, or
+                // saturating to garbage for a huge container): the count stops where the grid
+                // would pass GridLimits.MaxTracks, as Chromium stops at kGridMaxTracks.
+                int maxRepetitions = Math.Max(
+                    (GridLimits.MaxTracks - nonAutoRepeatingTrackCount) / Math.Max((int)repetitionTrackCount, 1),
+                    1);
+                numRepetitions = float.IsNaN(repetitions) ? (ushort)1
+                    : repetitions >= maxRepetitions ? (ushort)maxRepetitions
+                    : (ushort)Math.Max((int)repetitions, 1);
             }
         }
 

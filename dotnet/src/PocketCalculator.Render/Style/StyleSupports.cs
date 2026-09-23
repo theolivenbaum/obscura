@@ -1219,8 +1219,8 @@ public static partial class ComputedStyle
             case "grid-template-columns":
             case "grid-template-rows":
             {
-                (List<Layout.GridTemplateComponent> tracks, _, _) = ParseTrackListNamed(value);
-                return tracks.Count != 0 || lower.StartsWith("subgrid", StringComparison.Ordinal);
+                return TryParseTrackListNamed(value, out var tracks, out _, out _)
+                    && (tracks.Count != 0 || lower.StartsWith("subgrid", StringComparison.Ordinal));
             }
 
             case "grid-template-areas":

@@ -579,11 +579,11 @@ internal static class DomStyleFixups
                     if (spans.TryGetValue(name, out var span))
                     {
                         childStyle.GridRow = new TaffyLine(
-                            TaffyGridPlacement.FromLineIndex((short)(span.R0 + 1)),
-                            TaffyGridPlacement.FromLineIndex((short)(span.R1 + 2)));
+                            TaffyGridPlacement.FromLineIndex(AreaLine(span.R0 + 1)),
+                            TaffyGridPlacement.FromLineIndex(AreaLine(span.R1 + 2)));
                         childStyle.GridColumn = new TaffyLine(
-                            TaffyGridPlacement.FromLineIndex((short)(span.C0 + 1)),
-                            TaffyGridPlacement.FromLineIndex((short)(span.C1 + 2)));
+                            TaffyGridPlacement.FromLineIndex(AreaLine(span.C0 + 1)),
+                            TaffyGridPlacement.FromLineIndex(AreaLine(span.C1 + 2)));
                     }
                 }
             }
@@ -616,6 +616,12 @@ internal static class DomStyleFixups
     }
 
     /// <summary>
+    /// A line number from <c>grid-template-areas</c>, clamped to the grid limit. Rust casts the
+    /// index to <c>i16</c>, which wraps for an areas string more than 32767 names wide.
+    /// </summary>
+    private static short AreaLine(int line) => (short)Math.Min(line, Layout.GridLimits.MaxTracks);
+
+    /// <summary>
     /// Resolve a raw <c>grid-column</c>/<c>grid-row</c> value that names grid lines into a
     /// numeric taffy line. Returns <c>null</c> when a referenced name is absent.
     /// </summary>
@@ -629,23 +635,18 @@ internal static class DomStyleFixups
                 return TaffyGridPlacement.Auto;
             }
 
+            // Integers are clamped to the grid limit as ParseGridPlacement clamps them; Rust
+            // parses i16/u16 and drops the whole placement on overflow.
             if (t.StartsWith("span", StringComparison.Ordinal)
-                && ushort.TryParse(
-                    t[4..].Trim(),
-                    System.Globalization.NumberStyles.Integer,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    out ushort span))
+                && ComputedStyle.ParseIntegerClamped(t[4..].Trim(), Layout.GridLimits.MaxTracks) is { } span
+                && span >= 0)
             {
-                return TaffyGridPlacement.FromSpan(span);
+                return TaffyGridPlacement.FromSpan((ushort)span);
             }
 
-            if (short.TryParse(
-                t,
-                System.Globalization.NumberStyles.AllowLeadingSign,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out short index))
+            if (ComputedStyle.ParseIntegerClamped(t, Layout.GridLimits.MaxTracks) is { } index)
             {
-                return TaffyGridPlacement.FromLineIndex(index);
+                return TaffyGridPlacement.FromLineIndex((short)index);
             }
 
             if (map.TryGetValue(t, out short direct))

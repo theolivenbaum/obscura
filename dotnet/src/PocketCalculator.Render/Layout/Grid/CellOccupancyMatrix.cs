@@ -84,12 +84,17 @@ internal sealed class CellOccupancyMatrix
             rowRange = _rows.OzLineRangeToTrackRange(rowSpan);
         }
 
-        for (short x = rowRange.Start; x < rowRange.End; x++)
+        // One Fill per row rather than a store per cell: a spanning item covers up to
+        // GridLimits.MaxTracks squared cells.
+        int width = colRange.End - colRange.Start;
+        if (width <= 0)
         {
-            for (short y = colRange.Start; y < colRange.End; y++)
-            {
-                _inner[(x * _colCount) + y] = value;
-            }
+            return;
+        }
+
+        for (int x = rowRange.Start; x < rowRange.End; x++)
+        {
+            _inner.AsSpan((x * _colCount) + colRange.Start, width).Fill(value);
         }
     }
 
@@ -108,6 +113,132 @@ internal sealed class CellOccupancyMatrix
     }
 
     /// <summary>
+    /// The first and last occupied primary-axis tracks of an area given by grid lines, as the
+    /// origin-zero line starting each, or <c>null</c> when the whole area is unoccupied.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (taffy has only the yes/no query). Auto-placement uses it to jump past an
+    /// occupied cell instead of stepping one track at a time, which visits the same positions'
+    /// outcomes in far fewer probes: a candidate that contains an occupied track fails however
+    /// far the search has moved within it.
+    /// </remarks>
+    public (OriginZeroLine First, OriginZeroLine Last)? OccupiedPrimaryTrackBounds(
+        AbsoluteAxis primaryAxis,
+        Line<OriginZeroLine> primarySpan,
+        Line<OriginZeroLine> secondarySpan)
+    {
+        var primaryCounts = TrackCountsFor(primaryAxis);
+        var primaryRange = primaryCounts.OzLineRangeToTrackRange(primarySpan);
+        var secondaryRange = TrackCountsFor(primaryAxis.OtherAxis()).OzLineRangeToTrackRange(secondarySpan);
+        bool primaryIsColumns = primaryAxis == AbsoluteAxis.Horizontal;
+        var rowRange = primaryIsColumns ? secondaryRange : primaryRange;
+        var colRange = primaryIsColumns ? primaryRange : secondaryRange;
+
+        int rowStart = Math.Max((int)rowRange.Start, 0);
+        int rowEnd = Math.Min((int)rowRange.End, _rowCount);
+        int colStart = Math.Max((int)colRange.Start, 0);
+        int colEnd = Math.Min((int)colRange.End, _colCount);
+        if (colEnd <= colStart || rowEnd <= rowStart)
+        {
+            return null;
+        }
+
+        int first = int.MaxValue;
+        int last = -1;
+        for (int x = rowStart; x < rowEnd; x++)
+        {
+            var row = _inner.AsSpan((x * _colCount) + colStart, colEnd - colStart);
+            if (primaryIsColumns)
+            {
+                int lo = row.IndexOfAnyExcept(CellOccupancyState.Unoccupied);
+                if (lo >= 0)
+                {
+                    first = Math.Min(first, colStart + lo);
+                    last = Math.Max(last, colStart + row.LastIndexOfAnyExcept(CellOccupancyState.Unoccupied));
+                }
+            }
+            else if (row.ContainsAnyExcept(CellOccupancyState.Unoccupied))
+            {
+                first = Math.Min(first, x);
+                last = x;
+            }
+        }
+
+        return last < 0
+            ? null
+            : (primaryCounts.TrackToPrevOzLine((ushort)first), primaryCounts.TrackToPrevOzLine((ushort)last));
+    }
+
+    /// <summary>
+    /// The first primary-axis track at or after <paramref name="from"/> (at or before it, when
+    /// <paramref name="reversed"/>) whose cells across <paramref name="secondarySpan"/> are all
+    /// unoccupied, as the origin-zero line starting it. Tracks outside the matrix are unoccupied,
+    /// so the search ends at the matrix edge.
+    /// </summary>
+    /// <remarks>
+    /// Port addition. A candidate position whose own track is occupied fails whatever its span,
+    /// so auto-placement may skip every such position at once.
+    /// </remarks>
+    public OriginZeroLine NextFreePrimaryTrack(
+        AbsoluteAxis primaryAxis,
+        OriginZeroLine from,
+        Line<OriginZeroLine> secondarySpan,
+        bool reversed)
+    {
+        var primaryCounts = TrackCountsFor(primaryAxis);
+        var secondaryRange = TrackCountsFor(primaryAxis.OtherAxis()).OzLineRangeToTrackRange(secondarySpan);
+        bool primaryIsColumns = primaryAxis == AbsoluteAxis.Horizontal;
+        int primaryLength = primaryIsColumns ? _colCount : _rowCount;
+        int secondaryStart = Math.Max((int)secondaryRange.Start, 0);
+        int secondaryEnd = Math.Min((int)secondaryRange.End, primaryIsColumns ? _rowCount : _colCount);
+        int track = primaryCounts.OzLineToNextTrack(from);
+        if (secondaryEnd <= secondaryStart)
+        {
+            return from;
+        }
+
+        while (track >= 0 && track < primaryLength)
+        {
+            int next = track;
+            if (primaryIsColumns)
+            {
+                // Each row of the span proposes its own next free column; the answer is a column
+                // every row agrees on, so move to the furthest proposal until they agree.
+                for (int x = secondaryStart; x < secondaryEnd; x++)
+                {
+                    var row = _inner.AsSpan(x * _colCount, _colCount);
+                    int free = reversed
+                        ? row[..(next + 1)].LastIndexOf(CellOccupancyState.Unoccupied)
+                        : row[next..].IndexOf(CellOccupancyState.Unoccupied) is var offset and >= 0
+                            ? next + offset
+                            : -1;
+                    if (free < 0)
+                    {
+                        next = reversed ? -1 : primaryLength;
+                        break;
+                    }
+
+                    next = free;
+                }
+            }
+            else if (_inner.AsSpan((track * _colCount) + secondaryStart, secondaryEnd - secondaryStart)
+                .ContainsAnyExcept(CellOccupancyState.Unoccupied))
+            {
+                next = reversed ? track - 1 : track + 1;
+            }
+
+            if (next == track)
+            {
+                break;
+            }
+
+            track = next;
+        }
+
+        return new OriginZeroLine((short)(track - primaryCounts.NegativeImplicit));
+    }
+
+    /// <summary>
     /// Determines whether a grid area specified by a range of indexes into this matrix is entirely
     /// unoccupied. Out of bounds cells are considered unoccupied.
     /// </summary>
@@ -119,16 +250,22 @@ internal sealed class CellOccupancyMatrix
         var rowRange = primaryAxis == AbsoluteAxis.Horizontal ? secondaryRange : primaryRange;
         var colRange = primaryAxis == AbsoluteAxis.Horizontal ? primaryRange : secondaryRange;
 
-        for (short x = rowRange.Start; x < rowRange.End; x++)
+        // Out-of-bounds cells are unoccupied, so only the part of the area inside the matrix is
+        // scanned, a row at a time.
+        int rowStart = Math.Max((int)rowRange.Start, 0);
+        int rowEnd = Math.Min((int)rowRange.End, _rowCount);
+        int colStart = Math.Max((int)colRange.Start, 0);
+        int colEnd = Math.Min((int)colRange.End, _colCount);
+        if (colEnd <= colStart)
         {
-            for (short y = colRange.Start; y < colRange.End; y++)
-            {
-                var cell = Get(x, y);
-                if (cell is null or CellOccupancyState.Unoccupied)
-                {
-                    continue;
-                }
+            return true;
+        }
 
+        for (int x = rowStart; x < rowEnd; x++)
+        {
+            if (_inner.AsSpan((x * _colCount) + colStart, colEnd - colStart)
+                .ContainsAnyExcept(CellOccupancyState.Unoccupied))
+            {
                 return false;
             }
         }
@@ -233,16 +370,6 @@ internal sealed class CellOccupancyMatrix
     private static (int Rows, int Cols) NormalizeDimensions(int rows, int cols) =>
         rows == 0 || cols == 0 ? (0, 0) : (rows, cols);
 
-    private CellOccupancyState? Get(int row, int col)
-    {
-        if (row < 0 || col < 0 || row >= _rowCount || col >= _colCount)
-        {
-            return null;
-        }
-
-        return _inner[(row * _colCount) + col];
-    }
-
     private int? PositionInRow(int row, CellOccupancyState kind)
     {
         for (int col = 0; col < _colCount; col++)
@@ -311,42 +438,18 @@ internal sealed class CellOccupancyMatrix
         int newRowCount = oldRowCount + reqNegativeRows + reqPositiveRows;
         int newColCount = oldColCount + reqNegativeCols + reqPositiveCols;
 
-        var data = new List<CellOccupancyState>(newRowCount * newColCount);
-
-        // Push new negative rows
-        for (int i = 0; i < reqNegativeRows * newColCount; i++)
-        {
-            data.Add(CellOccupancyState.Unoccupied);
-        }
-
-        // Push existing rows
+        // Copy whole rows into a fresh zeroed array (Unoccupied is zero) rather than appending
+        // cell by cell as taffy's Vec-based grid does; the layout is the same.
+        var data = new CellOccupancyState[newRowCount * newColCount];
         for (int row = 0; row < oldRowCount; row++)
         {
-            for (int i = 0; i < reqNegativeCols; i++)
-            {
-                data.Add(CellOccupancyState.Unoccupied);
-            }
-
-            for (int col = 0; col < oldColCount; col++)
-            {
-                data.Add(_inner[(row * _colCount) + col]);
-            }
-
-            for (int i = 0; i < reqPositiveCols; i++)
-            {
-                data.Add(CellOccupancyState.Unoccupied);
-            }
+            _inner.AsSpan(row * _colCount, oldColCount)
+                .CopyTo(data.AsSpan(((row + reqNegativeRows) * newColCount) + reqNegativeCols));
         }
 
-        // Push new positive rows
-        for (int i = 0; i < reqPositiveRows * newColCount; i++)
-        {
-            data.Add(CellOccupancyState.Unoccupied);
-        }
-
-        _inner = [.. data];
+        _inner = data;
         _colCount = newColCount;
-        _rowCount = newColCount == 0 ? 0 : data.Count / newColCount;
+        _rowCount = newColCount == 0 ? 0 : data.Length / newColCount;
 
         _rows = _rows with { NegativeImplicit = (ushort)(_rows.NegativeImplicit + reqNegativeRows) };
         _rows = _rows with { PositiveImplicit = (ushort)(_rows.PositiveImplicit + reqPositiveRows) };

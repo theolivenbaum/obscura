@@ -236,6 +236,22 @@ public static partial class ComputedStyle
     }
 
     /// <summary>
+    /// A signed CSS integer clamped to <c>[-limit, limit]</c>, the way Blink clamps an integer
+    /// too large for its storage instead of rejecting the declaration. <c>null</c> when the
+    /// text is not an integer at all.
+    /// </summary>
+    internal static long? ParseIntegerClamped(string value, long limit)
+    {
+        if (ParseDigits(value, out bool negative, out bool overflow) is not { } magnitude)
+        {
+            return null;
+        }
+
+        long clamped = overflow || magnitude > (ulong)limit ? limit : (long)magnitude;
+        return negative ? -clamped : clamped;
+    }
+
+    /// <summary>
     /// Rust <c>value.parse::&lt;u64&gt;().unwrap_or(u64::MAX)</c> over an all-digit string.
     /// </summary>
     internal static ulong ParseU64Saturating(string value)
@@ -1655,14 +1671,20 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>parse_column_count</c>.</summary>
+    /// <remarks>
+    /// Deviation from Rust, which parses <c>u32</c> and drops a larger count as invalid:
+    /// Chromium accepts any positive integer and clamps it (the computed value stops at
+    /// 65535), so <c>column-count: 99999999999</c> is a many-column layout, not
+    /// <c>auto</c>. The used count keeps Rust's cap of 64 columns.
+    /// </remarks>
     internal static ushort? ParseColumnCount(string value)
     {
-        if (ParseU32(value.Trim()) is not { } count || count == 0)
+        if (ParseIntegerClamped(value.Trim(), uint.MaxValue) is not { } count || count <= 0)
         {
             return null;
         }
 
-        return (ushort)Math.Min(count, 64u);
+        return (ushort)Math.Min(count, 64L);
     }
 
     /// <summary>Rust <c>valid_counter_name</c>.</summary>
