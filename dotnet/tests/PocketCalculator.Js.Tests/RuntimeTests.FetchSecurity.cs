@@ -79,6 +79,25 @@ public sealed partial class RuntimeTests
     }
 
     /// <summary>
+    /// Upstream 4778192 (#940), <c>queued_navigation_does_not_expose_another_origins_cookies</c>:
+    /// a queued navigation must not move document.cookie's jar scope before it commits.
+    /// </summary>
+    [Fact]
+    public void QueuedNavigationDoesNotExposeAnotherOriginsCookies()
+    {
+        using var fixture = SetupRuntimeWithCookies("<html><body></body></html>", out var jar);
+        var rt = fixture.Runtime;
+        jar.SetCookie("secret=victimtoken; Path=/", new Uri("https://victim.example/"));
+
+        rt.Evaluate("location.href = 'https://victim.example/'");
+        rt.Evaluate("document.cookie = 'planted=1; Path=/'");
+        var cookies = rt.Evaluate("document.cookie")!.GetValue<string>();
+
+        Assert.DoesNotContain("victimtoken", cookies, StringComparison.Ordinal);
+        Assert.DoesNotContain("planted", jar.GetCookieHeader(new Uri("https://victim.example/")), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Upstream 05846de (#973), <c>cors_mode_blocks_unauthorized_cross_origin_redirect_hop</c>:
     /// in cors mode a cross-origin 302 without Access-Control-Allow-Origin is rejected
     /// before it is followed, even though the final response would allow the request.

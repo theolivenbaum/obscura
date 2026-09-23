@@ -247,7 +247,11 @@ public static class CoreOps
         OpGuard.Run("op_navigate", () =>
         {
             ArgumentNullException.ThrowIfNull(state);
-            state.Url = url;
+            // Only queue the navigation; do not change the realm URL here. It moves on
+            // commit, once the navigation is performed. Moving it early let synchronous
+            // script between two navigations read and write another origin's cookies
+            // through document.cookie, whose ops scope the jar by this URL (upstream
+            // 4778192, #940).
             state.PendingNavigation = (url, method, body);
         });
 
