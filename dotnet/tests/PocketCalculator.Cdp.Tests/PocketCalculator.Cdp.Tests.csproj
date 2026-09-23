@@ -10,7 +10,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/PocketCalculator.Cdp/PocketCalculator.Cdp.csproj" />
     <!-- PocketCalculator.Cdp and PocketCalculator.Mcp reference the engine privately (it ships inside
-         the Obscura package), so its types do not flow through them. -->
+         the PocketCalculator package), so its types do not flow through them. -->
     <ProjectReference Include="../../src/PocketCalculator.Browser/PocketCalculator.Browser.csproj" />
   </ItemGroup>
 

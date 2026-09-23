@@ -1,6 +1,6 @@
-# Obscura for .NET
+# PocketCalculator
 
-A headless browser engine in C# / .NET 10. It runs real JavaScript through V8,
+PocketCalculator is a headless browser engine in C# / .NET 10. It runs real JavaScript through V8,
 keeps a real DOM tree, owns its layout and paint pipeline, speaks the Chrome
 DevTools Protocol, and works as a drop-in replacement for headless Chrome with
 Puppeteer and Playwright, without shipping or launching Chromium.
@@ -8,9 +8,10 @@ Puppeteer and Playwright, without shipping or launching Chromium.
 This is a reimplementation of **[Obscura](https://github.com/h4ckf0r0day/obscura)**,
 the open-source headless browser written in Rust by the Obscura authors. The
 engine here is a port of that code base, component by component, into idiomatic
-C#. The wire surfaces (CDP messages, the MCP tools, the CLI output, the JavaScript
-op protocol) match the original byte for byte so clients built against Obscura
-keep working; DOM, CSS and layout behaviour is measured against Chromium, and
+C#. The wire surfaces (CDP messages, the MCP tools, the JavaScript op protocol)
+match the original byte for byte so clients built against Obscura keep working;
+the command-line tool is `pocket-calculator` and its environment variables are
+`POCKETCALCULATOR_*` where Obscura's are `obscura` and `OBSCURA_*`; DOM, CSS and layout behaviour is measured against Chromium, and
 where the original disagrees with Chromium this port follows Chromium. The Rust
 source it was ported from is kept, read-only, under
 [`.reference/obscura/`](.reference/obscura/) for reference.
@@ -30,7 +31,7 @@ source it was ported from is kept, read-only, under
 - **Deterministic output**: fonts are embedded (Liberation, DejaVu, Noto Color
   Emoji), so a page rasterizes the same on every host, including distroless
   images with no fontconfig.
-  Extra faces can be added with `pocketcalculator serve --font-dir DIR` (or
+  Extra faces can be added with `pocket-calculator serve --font-dir DIR` (or
   `BrowserConfig.FontDirectories`), at the cost of that host independence.
 - **Safe defaults**: fetches to loopback, RFC1918 and link-local addresses are
   blocked unless `--allow-private-network` is given.
@@ -42,17 +43,17 @@ managed code.
 
 | Package | What it is |
 |---|---|
-| `Obscura` | The engine and its library API: `Browser`, `Page`, `Element`, cookies. Start here. |
-| `PocketCalculator.Cdp` | The Chrome DevTools Protocol server, on top of `Obscura` |
-| `PocketCalculator.Mcp` | The MCP server, on top of `Obscura` |
+| `PocketCalculator` | The engine and its library API: `Browser`, `Page`, `Element`, cookies. Start here. |
+| `PocketCalculator.Cdp` | The Chrome DevTools Protocol server, on top of `PocketCalculator` |
+| `PocketCalculator.Mcp` | The MCP server, on top of `PocketCalculator` |
 
-`Obscura` carries the whole engine as separate assemblies: `PocketCalculator.Browser`
+`PocketCalculator` carries the whole engine as separate assemblies: `PocketCalculator.Browser`
 (pages, navigation, screenshots, PDF), `PocketCalculator.Js` (V8, ops, the Web API shim),
 `PocketCalculator.Render` (CSS, layout, paint), `PocketCalculator.Net` (HTTP, cookies, robots.txt,
 tracker blocklist) and `PocketCalculator.Dom` (DOM tree, HTML parsing, selectors).
 
 ```bash
-dotnet add package Obscura
+dotnet add package PocketCalculator
 ```
 
 ## Use it as a library
@@ -82,26 +83,26 @@ interception (`EnableInterception`, `OnRequest`, `OnResponse`).
 ```bash
 cd dotnet
 dotnet build -c Release
-alias obscura="$PWD/src/PocketCalculator.Cli/bin/Release/net10.0/pocketcalculator"
+alias pocket-calculator="$PWD/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator"
 
-pocketcalculator fetch https://example.com --dump text          # also html, markdown, links, assets, cookies
-pocketcalculator fetch https://example.com --eval "document.title"
-pocketcalculator fetch https://example.com --screenshot page.png
-pocketcalculator scrape https://a.example https://b.example --concurrency 4
-pocketcalculator serve --port 9222                               # CDP server
-pocketcalculator mcp                                             # MCP server over stdio (--http for HTTP)
+pocket-calculator fetch https://example.com --dump text          # also html, markdown, links, assets, cookies
+pocket-calculator fetch https://example.com --eval "document.title"
+pocket-calculator fetch https://example.com --screenshot page.png
+pocket-calculator scrape https://a.example https://b.example --concurrency 4
+pocket-calculator serve --port 9222                               # CDP server
+pocket-calculator mcp                                             # MCP server over stdio (--http for HTTP)
 ```
 
 Global options include `--stealth`, `--proxy <url>`, `--user-agent`,
 `--storage-dir`, `--obey-robots` and `--allow-private-network`. Run
-`obscura --help` or `obscura <command> --help` for the full list.
+`pocket-calculator --help` or `pocket-calculator <command> --help` for the full list.
 
 ## Connect Puppeteer or Playwright
 
 Start the CDP server and point a CDP client at it:
 
 ```bash
-pocketcalculator serve --port 9222
+pocket-calculator serve --port 9222
 ```
 
 ```js
@@ -150,7 +151,7 @@ deliberately differs from the original and why.
 
 ## License and credits
 
-Obscura for .NET is Copyright (c) 2026 Curiosity GmbH and is licensed under the
+PocketCalculator is Copyright (c) 2026 Curiosity GmbH and is licensed under the
 [MIT License](LICENSE).
 
 It is derived from [Obscura](https://github.com/h4ckf0r0day/obscura), Copyright

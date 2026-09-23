@@ -44,6 +44,9 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] NuGet packaging metadata in `dotnet/Directory.Build.props`; publish pipeline
       in `.devops/build-nuget.yml`
 - [x] Upstream sync procedure in `CLAUDE.md` ("Merging upstream changes")
+- [x] Rename the port to PocketCalculator: projects, namespaces, types, packages, the
+      `pocket-calculator` executable and `POCKETCALCULATOR_*` env vars; wire names keep
+      Obscura's (CLAUDE.md, "Naming")
 
 ## 1. PocketCalculator.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green
 
@@ -189,7 +192,7 @@ The largest component. Split into stages; each stage is independently testable.
       `serve` had five real defects, `scrape` one protocol bug, and every
       numeric option went through a parser that could kill the process where
       clap prints a usage error; see the commit.
-- [x] `worker.rs` -> the `pocketcalculator-worker` binary for parallel scrape (165)
+- [x] `worker.rs` -> the `pocket-calculator-worker` binary for parallel scrape (165)
 - [x] `crates/obscura` -> embeddable library API (`Obscura` project) (2224) -
       diffed item by item; every public type, method and property present
 - [x] Integration tests ported: every file under `crates/obscura-cli/tests` and

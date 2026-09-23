@@ -3,8 +3,8 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator.Render</RootNamespace>
     <AssemblyName>PocketCalculator.Render</AssemblyName>
-    <Description>Obscura rendering: CSS cascade, computed style, layout, and painting onto Skia.</Description>
-    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <Description>PocketCalculator rendering: CSS cascade, computed style, layout, and painting onto Skia.</Description>
+    <!-- Ships inside the PocketCalculator package, not as a package of its own. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

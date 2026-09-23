@@ -3,10 +3,9 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>PocketCalculator.Cli</RootNamespace>
-    <!-- The assembly cannot be named "obscura": NuGet resolves project identity
-         case-insensitively by assembly name and would collide with the Obscura
-         library project. The launcher below still produces an `obscura` binary
-         so CLI invocations match the Rust build. -->
+    <!-- The assembly cannot be named "pocket-calculator": NuGet resolves project identity
+         case-insensitively by assembly name and would collide with the PocketCalculator
+         library project. The launcher below produces a `pocket-calculator` binary. -->
     <AssemblyName>PocketCalculator.Cli</AssemblyName>
     <!-- The executable is published as a binary, not as a NuGet package. -->
     <IsPackable>false</IsPackable>
@@ -33,7 +32,7 @@
   <ItemGroup>
     <ProjectReference Include="../PocketCalculator/PocketCalculator.csproj" />
     <!-- PocketCalculator.Cdp and PocketCalculator.Mcp reference the engine privately (it ships inside
-         the Obscura package), so its types do not flow through them. -->
+         the PocketCalculator package), so its types do not flow through them. -->
     <ProjectReference Include="../PocketCalculator.Browser/PocketCalculator.Browser.csproj" />
     <ProjectReference Include="../PocketCalculator.Js/PocketCalculator.Js.csproj" />
     <ProjectReference Include="../PocketCalculator.Render/PocketCalculator.Render.csproj" />
@@ -45,20 +44,20 @@
     <PackageReference Include="System.CommandLine" />
   </ItemGroup>
 
-  <!-- Emit `obscura` (and `pocketcalculator-worker`) next to the apphost so the CLI is
-       invoked exactly as the Rust binary is. -->
+  <!-- Emit `pocket-calculator` (and `pocket-calculator-worker`) next to the apphost,
+       the same two-binary layout as the Rust build's obscura / obscura-worker. -->
   <Target Name="CopyPocketCalculatorLauncher" AfterTargets="Build"
           Condition="'$(OS)' != 'Windows_NT'">
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)pocketcalculator"
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)pocket-calculator"
           Condition="Exists('$(TargetDir)$(AssemblyName)')" />
-    <Exec Command="chmod +x &quot;$(TargetDir)pocketcalculator&quot;" Condition="Exists('$(TargetDir)pocketcalculator')" />
+    <Exec Command="chmod +x &quot;$(TargetDir)pocket-calculator&quot;" Condition="Exists('$(TargetDir)pocket-calculator')" />
     <!-- The apphost embeds the managed entry assembly's name, so a renamed copy
          still runs PocketCalculator.Cli.dll; WorkerHost selects worker mode from the
          launcher's own file name, exactly matching the Rust build's two-binary
          layout that `scrape`'s sibling lookup depends on. -->
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)pocketcalculator-worker"
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName)" DestinationFiles="$(TargetDir)pocket-calculator-worker"
           Condition="Exists('$(TargetDir)$(AssemblyName)')" />
-    <Exec Command="chmod +x &quot;$(TargetDir)pocketcalculator-worker&quot;" Condition="Exists('$(TargetDir)pocketcalculator-worker')" />
+    <Exec Command="chmod +x &quot;$(TargetDir)pocket-calculator-worker&quot;" Condition="Exists('$(TargetDir)pocket-calculator-worker')" />
   </Target>
 
   <!-- The same two launchers in the publish directory. `scrape` finds its worker
@@ -66,12 +65,12 @@
        run time, not at build time. -->
   <Target Name="CopyPocketCalculatorLauncherOnPublish" AfterTargets="Publish"
           Condition="'$(OS)' != 'Windows_NT'">
-    <Copy SourceFiles="$(PublishDir)$(AssemblyName)" DestinationFiles="$(PublishDir)pocketcalculator"
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName)" DestinationFiles="$(PublishDir)pocket-calculator"
           Condition="Exists('$(PublishDir)$(AssemblyName)')" />
-    <Exec Command="chmod +x &quot;$(PublishDir)pocketcalculator&quot;" Condition="Exists('$(PublishDir)pocketcalculator')" />
-    <Copy SourceFiles="$(PublishDir)$(AssemblyName)" DestinationFiles="$(PublishDir)pocketcalculator-worker"
+    <Exec Command="chmod +x &quot;$(PublishDir)pocket-calculator&quot;" Condition="Exists('$(PublishDir)pocket-calculator')" />
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName)" DestinationFiles="$(PublishDir)pocket-calculator-worker"
           Condition="Exists('$(PublishDir)$(AssemblyName)')" />
-    <Exec Command="chmod +x &quot;$(PublishDir)pocketcalculator-worker&quot;" Condition="Exists('$(PublishDir)pocketcalculator-worker')" />
+    <Exec Command="chmod +x &quot;$(PublishDir)pocket-calculator-worker&quot;" Condition="Exists('$(PublishDir)pocket-calculator-worker')" />
   </Target>
 
 </Project>

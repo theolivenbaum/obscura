@@ -615,7 +615,7 @@ order, so no change is needed.
 ## Upstream review: render / layout / browser commits
 
 Upstream: `727cc46..HEAD`. C# checked at `dotnet/src`. Probes ran with
-the existing Release CLI (`dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocketcalculator`). Scratch
+the existing Release CLI (`dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator`). Scratch
 fixtures are in a scratch directory, and a FloatContext harness is in a scratch directory.
 Nothing in the repo was edited.
 

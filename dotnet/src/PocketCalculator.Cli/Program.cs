@@ -4,7 +4,7 @@ using PocketCalculator.Cli.CommandLine;
 using PocketCalculator.Cli.Commands;
 using PocketCalculator.Js.Runtime;
 
-// The pocketcalculator-worker launcher runs the same assembly in worker mode, so the
+// The pocket-calculator-worker launcher runs the same assembly in worker mode, so the
 // scrape fan-out finds its sibling binary exactly as the Rust build lays it out.
 if (WorkerHost.IsWorkerProcess())
 {
@@ -117,7 +117,7 @@ catch (NotPortedException error)
 {
     // Loud on purpose: exiting 0 here would let a CLI parity test pass against
     // an engine that never ran.
-    Console.Error.WriteLine($"pocketcalculator: {error.Message}");
+    Console.Error.WriteLine($"pocket-calculator: {error.Message}");
     return ProcessExit.Immediately(70); // EX_SOFTWARE
 }
 catch (CliException error)
@@ -160,7 +160,7 @@ internal sealed class PrintVersionAction : System.CommandLine.Invocation.Synchro
 {
     public override int Invoke(ParseResult parseResult)
     {
-        Console.Out.WriteLine($"pocketcalculator {BuildVersion.Value}");
+        Console.Out.WriteLine($"pocket-calculator {BuildVersion.Value}");
         return 0;
     }
 }

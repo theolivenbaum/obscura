@@ -89,7 +89,7 @@ public static class Target
                 if (CdpUtil.UrlIsFileScheme(url) && !context.AllowFileAccess)
                 {
                     return DomainResult.Err(
-                        "Target.createTarget to file:// is disabled. Restart with `pocketcalculator serve --allow-file-access` to enable.");
+                        "Target.createTarget to file:// is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable.");
                 }
 
                 if (!ctx.CreatePageInContext(contextId, out string? created, out string? createError)

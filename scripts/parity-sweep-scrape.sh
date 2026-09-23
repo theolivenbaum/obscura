@@ -2,7 +2,7 @@
 # Differential sweep for `scrape` (and the worker protocol underneath it),
 # the sibling of parity-sweep.sh, which covers `fetch`.
 #
-# `scrape` fans out to one pocketcalculator-worker process per URL over a
+# `scrape` fans out to one pocket-calculator-worker process per URL over a
 # newline-delimited JSON protocol, so this exercises three things at once: the
 # CLI's flag handling and output format, the parent/worker wire protocol, and
 # the worker's own navigate/evaluate/shutdown handling. Only running both
@@ -19,7 +19,7 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUST="${1:-${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}}"
-CS="${2:-${POCKETCALCULATOR_PORT_BIN:-$REPO/dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocketcalculator}}"
+CS="${2:-${POCKETCALCULATOR_PORT_BIN:-$REPO/dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator}}"
 
 for bin in "$RUST" "$CS"; do
   if [[ ! -x "$bin" ]]; then
@@ -28,7 +28,8 @@ for bin in "$RUST" "$CS"; do
     echo "build the port with:      cd dotnet && dotnet build -c Release" >&2
     exit 1
   fi
-  worker="$(dirname "$bin")/pocketcalculator-worker"
+  # The Rust reference's worker is obscura-worker, the port's pocket-calculator-worker.
+  worker="$(dirname "$bin")/$(basename "$bin")-worker"
   if [[ ! -x "$worker" ]]; then
     echo "worker binary missing next to $bin: $worker" >&2
     exit 1
@@ -36,7 +37,7 @@ for bin in "$RUST" "$CS"; do
 done
 
 # The fixtures are local files, so no network and no per-run variation.
-export OBSCURA_ALLOW_PRIVATE_NETWORK=1
+export OBSCURA_ALLOW_PRIVATE_NETWORK=1 POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1
 # anyhow appends a backtrace to a top-level error when this is set, which the
 # port has no equivalent for and which would report every error case as a
 # difference.
@@ -200,8 +201,8 @@ worker_script() {
     '' \
     '{"cmd":"shutdown"}'
 }
-r="$(worker_script | timeout 60 "$(dirname "$RUST")/pocketcalculator-worker" 2>/dev/null)"
-c="$(worker_script | timeout 60 "$(dirname "$CS")/pocketcalculator-worker" 2>/dev/null)"
+r="$(worker_script | timeout 60 "$RUST-worker" 2>/dev/null)"
+c="$(worker_script | timeout 60 "$CS-worker" 2>/dev/null)"
 if [[ "$r" == "$c" ]]; then
   pass=$((pass + 1))
 else

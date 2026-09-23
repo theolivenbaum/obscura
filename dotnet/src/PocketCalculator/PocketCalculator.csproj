@@ -3,10 +3,10 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator</RootNamespace>
     <AssemblyName>PocketCalculator</AssemblyName>
-    <Description>Obscura for .NET: an embeddable headless browser engine with real JavaScript (V8), a real DOM, its own layout and paint, and no Chromium.</Description>
+    <Description>PocketCalculator: an embeddable headless browser engine with real JavaScript (V8), a real DOM, its own layout and paint, and no Chromium.</Description>
   </PropertyGroup>
 
-  <!-- The Obscura package is the whole engine. Browser, Js, Render, Net and Dom
+  <!-- The PocketCalculator package is the whole engine. Browser, Js, Render, Net and Dom
        are separate assemblies but not separate packages: nobody installs one
        without the rest, and shipping them together keeps their versions in step.
        PrivateAssets keeps the project reference out of the package's dependency

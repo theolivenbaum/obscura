@@ -33,7 +33,7 @@ public static class CliProcess
                 foreach (var configuration in new[] { "Release", "Debug" })
                 {
                     var candidate = Path.Combine(
-                        dir, "dotnet", "src", "PocketCalculator.Cli", "bin", configuration, "net10.0", "pocketcalculator");
+                        dir, "dotnet", "src", "PocketCalculator.Cli", "bin", configuration, "net10.0", "pocket-calculator");
                     if (File.Exists(candidate))
                     {
                         return candidate;

@@ -1,7 +1,7 @@
-Obscura for .NET
+PocketCalculator
 Copyright 2026 Curiosity GmbH
 
-This product is a C# / .NET reimplementation of Obscura
+This product (PocketCalculator) is a C# / .NET reimplementation of Obscura
 (https://github.com/h4ckf0r0day/obscura), a headless browser engine written in
 Rust, ported component by component and modified. Obscura is Copyright the
 Obscura authors and contributors, and is licensed under the Apache License,

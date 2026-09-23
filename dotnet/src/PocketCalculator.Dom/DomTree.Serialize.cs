@@ -59,7 +59,7 @@ public sealed partial class DomTree
             steps++;
             if (steps > maxSteps)
             {
-                Console.Error.WriteLine("pocketcalculator: serialize worklist cap hit - tree has a cycle");
+                Console.Error.WriteLine("pocket-calculator: serialize worklist cap hit - tree has a cycle");
                 break;
             }
 

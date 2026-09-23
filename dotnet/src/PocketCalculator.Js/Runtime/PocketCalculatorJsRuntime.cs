@@ -614,7 +614,7 @@ public sealed partial class PocketCalculatorJsRuntime
         // registered it can call back into a half-disposed engine, and
         // ClearScript raises that ObjectDisposedException inside its own thunk,
         // where no managed frame of ours can contain it. That killed an
-        // `pocketcalculator serve` process outright. See DenoCoreShim.Detach.
+        // `pocket-calculator serve` process outright. See DenoCoreShim.Detach.
         _shim.Detach();
         _engine.Dispose();
         _v8.Dispose();

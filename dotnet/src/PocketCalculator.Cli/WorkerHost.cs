@@ -7,24 +7,24 @@ using Page = PocketCalculator.Browser.Page;
 namespace PocketCalculator.Cli;
 
 /// <summary>
-/// Port of <c>crates/obscura-cli/src/worker.rs</c>: the <c>pocketcalculator-worker</c>
+/// Port of <c>crates/obscura-cli/src/worker.rs</c>: the <c>pocket-calculator-worker</c>
 /// binary that parallel <c>scrape</c> drives over newline-delimited JSON.
 /// </summary>
 /// <remarks>
 /// Rust builds this as a second binary from the same crate. The port ships one
 /// managed assembly and selects the worker by the name of the launcher it was
 /// started through, so the file layout beside the executable is the same
-/// (<c>obscura</c> and <c>pocketcalculator-worker</c> side by side) and
+/// (<c>obscura</c> and <c>pocket-calculator-worker</c> side by side) and
 /// <c>run_parallel_scrape</c>'s sibling lookup works unchanged.
 /// </remarks>
 public static class WorkerHost
 {
     /// <summary>The launcher name that selects worker mode.</summary>
-    public const string LauncherName = "pocketcalculator-worker";
+    public const string LauncherName = "pocket-calculator-worker";
 
     /// <summary>
     /// Whether this process was started as the worker, either through the
-    /// <c>pocketcalculator-worker</c> launcher or with <c>POCKETCALCULATOR_WORKER=1</c> set.
+    /// <c>pocket-calculator-worker</c> launcher or with <c>POCKETCALCULATOR_WORKER=1</c> set.
     /// </summary>
     public static bool IsWorkerProcess()
     {

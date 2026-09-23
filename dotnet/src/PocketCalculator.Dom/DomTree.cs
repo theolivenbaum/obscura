@@ -847,7 +847,7 @@ public sealed partial class DomTree
             if (result.Count > _nodes.Count)
             {
                 Console.Error.WriteLine(
-                    $"pocketcalculator: descendants() cap hit at node {nodeId.Index} ({_nodes.Count} nodes) - tree has a cycle");
+                    $"pocket-calculator: descendants() cap hit at node {nodeId.Index} ({_nodes.Count} nodes) - tree has a cycle");
                 break;
             }
 
@@ -866,7 +866,7 @@ public sealed partial class DomTree
             childrenToPush.Add(childId);
             if (childrenToPush.Count > _nodes.Count)
             {
-                Console.Error.WriteLine($"pocketcalculator: sibling-chain cap hit at node {nodeId.Index} - cycle");
+                Console.Error.WriteLine($"pocket-calculator: sibling-chain cap hit at node {nodeId.Index} - cycle");
                 break;
             }
 
@@ -1261,7 +1261,7 @@ public sealed partial class DomTree
             steps++;
             if (steps > maxSteps)
             {
-                Console.Error.WriteLine("pocketcalculator: collect_text_inner cap hit - tree has a cycle");
+                Console.Error.WriteLine("pocket-calculator: collect_text_inner cap hit - tree has a cycle");
                 break;
             }
 
@@ -1287,7 +1287,7 @@ public sealed partial class DomTree
                 kids.Add(childId);
                 if (kids.Count > _nodes.Count)
                 {
-                    Console.Error.WriteLine("pocketcalculator: collect_text_inner sibling cap hit - cycle");
+                    Console.Error.WriteLine("pocket-calculator: collect_text_inner sibling cap hit - cycle");
                     break;
                 }
 

@@ -55,6 +55,6 @@ public static class Log
             return;
         }
         var stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ", CultureInfo.InvariantCulture);
-        Console.Error.WriteLine($"{stamp} {label,5} pocketcalculator_cli: {message}");
+        Console.Error.WriteLine($"{stamp} {label,5} pocket_calculator_cli: {message}");
     }
 }

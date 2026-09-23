@@ -708,7 +708,7 @@ public static partial class Page
         // Block CDP-initiated file:// navigation by default. Anyone who can reach the CDP
         // port (default localhost, but Docker images bind 0.0.0.0) could otherwise read
         // any file the obscura process can read. Opt in via
-        // `pocketcalculator serve --allow-file-access` when local-HTML testing is the intended
+        // `pocket-calculator serve --allow-file-access` when local-HTML testing is the intended
         // workflow.
         bool allowFileAccess = ctx.GetSessionPage(sessionId) is { } gate
             ? gate.Context.AllowFileAccess
@@ -716,7 +716,7 @@ public static partial class Page
         if (CdpUtil.UrlIsFileScheme(url) && !allowFileAccess)
         {
             throw new DomainError(
-                "Page.navigate to file:// is disabled. Restart with `pocketcalculator serve --allow-file-access` to enable.");
+                "Page.navigate to file:// is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable.");
         }
 
         List<string> preloadScripts = [.. ctx.PreloadScripts.Select(entry => entry.Source)];
@@ -1276,9 +1276,9 @@ public static partial class Page
                 // A DOM/layer-tree snapshot (not a raster image). Distinct from
                 // captureScreenshot; keep the clear error so clients fail fast.
                 return DomainResult.Err(
-                    $"Page.{method} is not supported by Obscura: no layout or paint engine. "
+                    $"Page.{method} is not supported by PocketCalculator: no layout or paint engine. "
                     + "For visual snapshots, drive a real headless Chromium for the "
-                    + "screenshot leg of your pipeline and use Obscura for the scraping leg.");
+                    + "screenshot leg of your pipeline and use PocketCalculator for the scraping leg.");
 
             default:
                 return DomainResult.Err($"Unknown Page method: {method}");
@@ -1294,7 +1294,7 @@ public static partial class Page
         if (!options.FromSurface)
         {
             throw new DomainError(
-                "Page.captureScreenshot fromSurface=false is not supported: Obscura has no separate browser-window compositor surface");
+                "Page.captureScreenshot fromSurface=false is not supported: PocketCalculator has no separate browser-window compositor surface");
         }
 
         if (options.Format == ScreenshotFormat.Webp && options.QualitySupplied)

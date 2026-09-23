@@ -3,11 +3,11 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator.Cdp</RootNamespace>
     <AssemblyName>PocketCalculator.Cdp</AssemblyName>
-    <Description>Obscura Chrome DevTools Protocol server, for driving the engine with Puppeteer or Playwright.</Description>
+    <Description>PocketCalculator Chrome DevTools Protocol server, for driving the engine with Puppeteer or Playwright.</Description>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The package depends on Obscura, which carries the engine assemblies;
+    <!-- The package depends on PocketCalculator, which carries the engine assemblies;
          Browser is referenced directly to compile against it, and kept out of
          the dependency list because it is not a package. -->
     <ProjectReference Include="../PocketCalculator/PocketCalculator.csproj" />

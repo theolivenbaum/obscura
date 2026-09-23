@@ -3,8 +3,8 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator.Js</RootNamespace>
     <AssemblyName>PocketCalculator.Js</AssemblyName>
-    <Description>Obscura JavaScript runtime: V8 through ClearScript, the op layer and the Web API shim.</Description>
-    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <Description>PocketCalculator JavaScript runtime: V8 through ClearScript, the op layer and the Web API shim.</Description>
+    <!-- Ships inside the PocketCalculator package, not as a package of its own. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

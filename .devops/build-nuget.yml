@@ -1,4 +1,4 @@
-# Builds the Obscura C# port and publishes its library packages to NuGet.
+# Builds PocketCalculator, the C# port of Obscura, and publishes its library packages to NuGet.
 #
 # This is the only thing that publishes, and it is the only build definition in the
 # repository: the upstream GitHub workflows live, disabled, under .reference/obscura/.github/.
@@ -67,7 +67,7 @@ steps:
     arguments: '-c $(buildConfiguration) --no-build'
     publishTestResults: true
 
-# Packs the solution into three packages: Obscura (the engine assemblies ride inside it),
+# Packs the solution into three packages: PocketCalculator (the engine assemblies ride inside it),
 # PocketCalculator.Cdp and PocketCalculator.Mcp. The engine projects, the CLI and the test projects opt out
 # with IsPackable.
 - task: DotNetCoreCLI@2

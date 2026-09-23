@@ -76,7 +76,7 @@ public static class HardDeadline
             Thread.Sleep(budget);
             Console.Error.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"pocketcalculator: hard timeout exceeded ({(long)budget.TotalSeconds}s); forcing exit"));
+                $"pocket-calculator: hard timeout exceeded ({(long)budget.TotalSeconds}s); forcing exit"));
             Console.Error.Flush();
             Console.Out.Flush();
             Environment.Exit(124);

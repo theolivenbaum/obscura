@@ -7,7 +7,7 @@ description: Compare how Obscura renders a page against a real browser (headless
 
 Three lanes: **Chromium** through Playwright (the ground truth a user's browser
 would show), the **Rust reference** in `.reference/obscura/target/release/obscura`, and the **C#
-port** in `dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocketcalculator`.
+port** in `dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator`.
 
 Run it:
 

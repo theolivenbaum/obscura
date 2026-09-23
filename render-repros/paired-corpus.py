@@ -609,6 +609,17 @@ def obscura_environment(width, height, animation_time_ms=None):
     )
     if animation_time_ms is not None:
         env["OBSCURA_SHOT_ANIMATION_TIME_MS"] = str(animation_time_ms)
+    return with_port_environment(env)
+
+
+def with_port_environment(env):
+    """Mirror every OBSCURA_* setting as POCKETCALCULATOR_*.
+
+    The Rust reference reads OBSCURA_*, the C# port (PocketCalculator) reads
+    POCKETCALCULATOR_*, and either binary can be the one under test here.
+    """
+    for key in [k for k in env if k.startswith("OBSCURA_")]:
+        env["POCKETCALCULATOR_" + key[len("OBSCURA_"):]] = env[key]
     return env
 
 
@@ -617,7 +628,7 @@ def with_controlled_scroll_environment(env, scroll):
     if scroll is not None:
         env["OBSCURA_SHOT_SCROLL_X"] = str(scroll[0])
         env["OBSCURA_SHOT_SCROLL_Y"] = str(scroll[1])
-    return env
+    return with_port_environment(env)
 
 
 def probe_obscura_identity(binary):

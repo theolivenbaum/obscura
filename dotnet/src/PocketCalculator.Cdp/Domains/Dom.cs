@@ -287,7 +287,7 @@ public static class Dom
                 if (!page.Context.AllowFileAccess)
                 {
                     throw new DomainError(
-                        "DOM.setFileInputFiles is disabled. Restart with `pocketcalculator serve --allow-file-access` to enable local file uploads.");
+                        "DOM.setFileInputFiles is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable local file uploads.");
                 }
 
                 ulong nodeId = ResolveNodeId(page, parameters);

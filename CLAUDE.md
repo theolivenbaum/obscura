@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-Guidance for AI coding agents working on the **C# / .NET 10 port of Obscura**.
+Guidance for AI coding agents working on **PocketCalculator**, the C# / .NET 10
+port of Obscura.
 
 Obscura is a headless browser engine: it runs real JavaScript through V8, keeps
 a real DOM tree, owns its layout and paint pipeline, speaks the Chrome DevTools
@@ -12,6 +13,20 @@ deliverable is the C# engine under `dotnet/`; the original Rust tree lives in
 the baseline for merging newer upstream work (see "Merging upstream changes").
 
 Read `todo.md` for the live port status and the ordered work queue.
+
+**Naming.** The port's own names are PocketCalculator's: projects, assemblies,
+namespaces and types (`PocketCalculator.*`), the NuGet packages, the CLI
+executable (`pocket-calculator`, with `pocket-calculator-worker`) and the
+engine's environment variables (`POCKETCALCULATOR_*`). Names that pages and
+clients observe on the wire keep Obscura's, because they are behaviour rather
+than branding: the `__obscura_*` globals and other names in `bootstrap.js`,
+`data-obscura-ref`, `obscura://` URIs, the MCP `serverInfo` name, the `obscura*`
+keys in CDP payloads, and the `X-Obscura-Reason` header. `OBSCURA_RUST_BIN`
+keeps its name because it points at the Rust reference, and anything that runs
+both engines (the parity harness, `scripts/`, `render-repros/`) sets both
+`OBSCURA_*` and `POCKETCALCULATOR_*`. The parity assertions map the port's own
+name back to `obscura` before comparing output (`ParityAssert.UnbrandPort`).
+Prose that means the upstream project, and the Rust tree, still say Obscura.
 
 **Paths into the reference.** The Rust tree used to sit at the repository root
 and now sits under `.reference/obscura/`. Comments in C#, `todo.md` and
@@ -134,7 +149,7 @@ scripts/                        parity-sweep.sh, render-compare.sh, regen-golden
 tools/                          imgdiff (C#), the canvas conformance probe, live-view
 skills/                         obscura-port, render-compare
 dotnet/
-  Obscura.slnx                  solution
+  PocketCalculator.slnx         solution
   Directory.Build.props         shared TFM/analyzer/lang settings
   Directory.Packages.props      central package versions
   src/
@@ -148,7 +163,7 @@ dotnet/
     PocketCalculator.Cli/       <- crates/obscura-cli      the `obscura` executable
     Obscura/           <- crates/obscura          embeddable library API
   tests/
-    Obscura.<Area>.Tests          xUnit ports of the Rust tests
+    PocketCalculator.<Area>.Tests xUnit ports of the Rust tests
     PocketCalculator.Parity.Tests          differential tests: C# output vs the Rust binary
   docs/                           port-specific notes (op protocol, dependency map)
 ```
@@ -183,7 +198,7 @@ those faces, re-copy them or the two engines will rasterize differently. Resolve
 `SKTypeface.FromFamilyName`.
 
 The one exception is opt-in: an operator can add font directories
-(`pocketcalculator serve --font-dir DIR`, repeatable, or `BrowserConfig.FontDirectories`
+(`pocket-calculator serve --font-dir DIR`, repeatable, or `BrowserConfig.FontDirectories`
 in the library), ported from upstream `343fdc7`. Those files are read from disk
 once, loaded with `SKTypeface.FromData` after the embedded faces, and never
 through fontconfig. With nothing configured no file is read and output is
@@ -255,7 +270,7 @@ dotnet test -c Release tests/PocketCalculator.Dom.Tests          # one area
 - **A deliberate deviation makes parity the wrong assertion for that input.**
   Since `.reference/**` is read-only, a bug fixed on the C# side leaves the two
   engines legitimately disagreeing. Do not weaken the fix to keep parity green:
-  assert the correct (Chromium) value in an `Obscura.<Area>.Tests` fact instead,
+  assert the correct (Chromium) value in a `PocketCalculator.<Area>.Tests` fact instead,
   and if a parity test covers the same input, narrow it and name the deviation
   in the skip/why comment.
 
@@ -418,16 +433,16 @@ The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
 
 ## Packaging, publishing and licensing
 
-- **Packages.** Three: `Obscura`, `PocketCalculator.Cdp` and `PocketCalculator.Mcp`. The engine
+- **Packages.** Three: `PocketCalculator`, `PocketCalculator.Cdp` and `PocketCalculator.Mcp`. The engine
   projects (`PocketCalculator.Browser`, `PocketCalculator.Js`, `PocketCalculator.Render`, `PocketCalculator.Net`,
   `PocketCalculator.Dom`) stay separate assemblies but are not packages
-  (`IsPackable` false): `Obscura` references `PocketCalculator.Browser` with
+  (`IsPackable` false): `PocketCalculator` references `PocketCalculator.Browser` with
   `PrivateAssets="all"` and puts all five DLLs in its own `lib/` through the
   `IncludeEngineAssemblies` target, so they ship together and cannot drift.
   Because `PrivateAssets` also stops the engine's package references flowing,
-  `Obscura.csproj` restates them: **a PackageReference added to an engine project
+  `PocketCalculator.csproj` restates them: **a PackageReference added to an engine project
   must be added there too**, or consumers get a missing-assembly failure at run
-  time. `PocketCalculator.Cdp` and `PocketCalculator.Mcp` depend on the `Obscura` package and
+  time. `PocketCalculator.Cdp` and `PocketCalculator.Mcp` depend on the `PocketCalculator` package and
   reference `PocketCalculator.Browser` privately to compile. `PocketCalculator.Cli` and every test
   project set `IsPackable` to false. Package metadata (authors, copyright,
   license, repository, README, NOTICE) is set once in
@@ -440,7 +455,7 @@ The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
   `nuget-curiosity-org` service connection, so no API key lives in the
   repository. The version is CalVer computed in the pipeline,
   `yy.M.<build id mod 65536>`; the `0.1.0` in `Directory.Build.props` is only the
-  local default, which keeps a local `obscura --version` in the shape of the
+  local default, which keeps a local `pocket-calculator --version` in the shape of the
   reference's.
 - **Licensing.** The port is Copyright Curiosity GmbH and licensed MIT
   (`LICENSE`). It is a derivative of Obscura (Apache-2.0), Taffy (MIT) and

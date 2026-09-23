@@ -3,8 +3,8 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator.Dom</RootNamespace>
     <AssemblyName>PocketCalculator.Dom</AssemblyName>
-    <Description>Obscura DOM: an arena DOM tree, HTML parsing, CSS selectors and serialization.</Description>
-    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <Description>PocketCalculator DOM: an arena DOM tree, HTML parsing, CSS selectors and serialization.</Description>
+    <!-- Ships inside the PocketCalculator package, not as a package of its own. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

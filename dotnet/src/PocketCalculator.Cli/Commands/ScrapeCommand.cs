@@ -10,7 +10,7 @@ namespace PocketCalculator.Cli.Commands;
 
 /// <summary>Port of <c>run_parallel_scrape</c>.</summary>
 /// <remarks>
-/// Each URL is driven by a separate <c>pocketcalculator-worker</c> process over a
+/// Each URL is driven by a separate <c>pocket-calculator-worker</c> process over a
 /// newline-delimited JSON protocol, so one page cannot take the parent down.
 /// </remarks>
 public static class ScrapeCommand
@@ -30,7 +30,7 @@ public static class ScrapeCommand
 
     /// <summary>The worker binary's file name for this platform.</summary>
     public static string WorkerName =>
-        OperatingSystem.IsWindows() ? "pocketcalculator-worker.exe" : "pocketcalculator-worker";
+        OperatingSystem.IsWindows() ? "pocket-calculator-worker.exe" : "pocket-calculator-worker";
 
     /// <summary>
     /// The worker binary next to the running executable, falling back to a bare

@@ -35,6 +35,8 @@ public static class PipedEngine
         {
             psi.ArgumentList.Add(arg);
         }
+        // The Rust reference reads OBSCURA_*, the port POCKETCALCULATOR_*.
+        psi.Environment["OBSCURA_ALLOW_PRIVATE_NETWORK"] = "1";
         psi.Environment["POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK"] = "1";
 
         using var process = Process.Start(psi)

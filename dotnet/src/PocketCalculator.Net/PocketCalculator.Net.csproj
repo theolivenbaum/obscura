@@ -3,8 +3,8 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator.Net</RootNamespace>
     <AssemblyName>PocketCalculator.Net</AssemblyName>
-    <Description>Obscura networking: HTTP transport, cookies, robots.txt, tracker blocklist and encoding detection.</Description>
-    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <Description>PocketCalculator networking: HTTP transport, cookies, robots.txt, tracker blocklist and encoding detection.</Description>
+    <!-- Ships inside the PocketCalculator package, not as a package of its own. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

@@ -207,7 +207,7 @@ public sealed class CliArgsTests
 
     // Not in the Rust suite, because clap rejects an unknown flag for free.
     // System.CommandLine binds it to the next positional instead, so
-    // `pocketcalculator fetch --nope` would navigate to "--nope" and exit 1 where clap
+    // `pocket-calculator fetch --nope` would navigate to "--nope" and exit 1 where clap
     // exits 2. No URL starts with a dash.
     [Fact]
     public void An_option_like_positional_is_a_usage_error()

@@ -73,7 +73,7 @@ public static class CliDefinition
     /// <summary>Builds the full command tree.</summary>
     public static RootCommand Build()
     {
-        var root = new RootCommand("Obscura - A lightweight headless browser for web scraping and automation")
+        var root = new RootCommand("PocketCalculator - A lightweight headless browser for web scraping and automation")
         {
             Verbose, Proxy, Stealth, ObeyRobots, AllowPrivateNetwork,
             RootPort, RootUserAgent, RootStorageDir, V8FlagsOption,

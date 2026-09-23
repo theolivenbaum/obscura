@@ -9,7 +9,7 @@ using Xunit;
 namespace PocketCalculator.Cli.Tests;
 
 /// <summary>
-/// The <c>pocketcalculator-worker</c> binary and the newline-delimited JSON protocol
+/// The <c>pocket-calculator-worker</c> binary and the newline-delimited JSON protocol
 /// <c>scrape</c> drives it with, ported from
 /// <c>crates/obscura-cli/src/worker.rs</c>.
 /// </summary>
@@ -55,7 +55,7 @@ public sealed class WorkerHostTests
         if (!child.WaitForExit(120_000))
         {
             child.Kill(entireProcessTree: true);
-            throw new TimeoutException("pocketcalculator-worker did not exit within 120s");
+            throw new TimeoutException("pocket-calculator-worker did not exit within 120s");
         }
         return [.. stdout.Result.Split('\n', StringSplitOptions.RemoveEmptyEntries)];
     }
@@ -70,7 +70,7 @@ public sealed class WorkerHostTests
             File.Exists(WorkerBinary),
             $"scrape resolves its worker as a sibling of the CLI; {WorkerBinary} is missing");
         Assert.Equal(
-            OperatingSystem.IsWindows() ? "pocketcalculator-worker.exe" : "pocketcalculator-worker",
+            OperatingSystem.IsWindows() ? "pocket-calculator-worker.exe" : "pocket-calculator-worker",
             ScrapeCommand.WorkerName);
     }
 

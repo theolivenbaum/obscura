@@ -233,11 +233,11 @@ public sealed class CliBehaviorParityTests
         Assert.Equal(0, rust.ExitCode);
         Assert.Equal(0, port.ExitCode);
         Assert.StartsWith("obscura ", rust.StdOut, StringComparison.Ordinal);
-        Assert.StartsWith("obscura ", port.StdOut, StringComparison.Ordinal);
+        Assert.StartsWith("pocket-calculator ", port.StdOut, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// <c>scrape</c> drives one <c>pocketcalculator-worker</c> process per URL and emits
+    /// <c>scrape</c> drives one <c>pocket-calculator-worker</c> process per URL and emits
     /// the same JSON report, in input order, with the same worker indices.
     /// </summary>
     /// <remarks>

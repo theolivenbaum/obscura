@@ -68,7 +68,7 @@ public static class ReferenceEngine
         {
             return null;
         }
-        foreach (var name in new[] { "obscura", "PocketCalculator.Cli" })
+        foreach (var name in new[] { "pocket-calculator", "PocketCalculator.Cli" })
         {
             var candidate = Path.Combine(repo, "dotnet", "src", "PocketCalculator.Cli", "bin", "Release", "net10.0", name);
             if (File.Exists(candidate))
@@ -115,6 +115,8 @@ public static class ReferenceEngine
         }
         // Both engines must see the same environment, or a difference in
         // behavior could come from configuration rather than from the port.
+        // The Rust reference reads OBSCURA_*, the port POCKETCALCULATOR_*.
+        psi.Environment["OBSCURA_ALLOW_PRIVATE_NETWORK"] = "1";
         psi.Environment["POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK"] = "1";
 
         using var proc = Process.Start(psi)

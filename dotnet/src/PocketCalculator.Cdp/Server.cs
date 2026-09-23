@@ -215,7 +215,7 @@ public static partial class CdpServer
             throw new IOException($"bind {host}:{port}: {e.Message}", e);
         }
 
-        CdpLog.Info($"Obscura CDP server listening on ws://{host}:{port}");
+        CdpLog.Info($"PocketCalculator CDP server listening on ws://{host}:{port}");
         CdpLog.Info($"DevTools endpoint: ws://{host}:{port}/devtools/browser");
         if (allowFileAccess)
         {

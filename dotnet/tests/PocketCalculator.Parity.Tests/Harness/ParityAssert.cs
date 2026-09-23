@@ -20,7 +20,7 @@ public static class ParityAssert
     /// <summary>Asserts two completed runs produced identical stdout.</summary>
     public static void SameLines(EngineRun rust, EngineRun port, string[] args)
     {
-        if (string.Equals(Normalize(rust.StdOut), Normalize(port.StdOut), StringComparison.Ordinal))
+        if (string.Equals(Normalize(rust.StdOut), Normalize(UnbrandPort(port.StdOut)), StringComparison.Ordinal))
         {
             return;
         }
@@ -37,7 +37,7 @@ public static class ParityAssert
         var rust = ReferenceEngine.Rust(args);
         var port = ReferenceEngine.Port(args);
         var r = rust.OutLines.Order(StringComparer.Ordinal).ToArray();
-        var p = port.OutLines.Order(StringComparer.Ordinal).ToArray();
+        var p = port.OutLines.Select(UnbrandPort).Order(StringComparer.Ordinal).ToArray();
         if (!r.SequenceEqual(p, StringComparer.Ordinal))
         {
             throw new XunitException(Describe(rust, port, args));
@@ -45,6 +45,17 @@ public static class ParityAssert
     }
 
     private static string Normalize(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
+
+    /// <summary>
+    /// The port's executable is <c>pocket-calculator</c> where the reference's is
+    /// <c>obscura</c>, and that name shows up in its own output (error prefixes,
+    /// log labels, the worker's name). Compare with the name mapped back, so a
+    /// parity difference means behaviour rather than branding.
+    /// </summary>
+    internal static string UnbrandPort(string s) =>
+        s.Replace("pocket-calculator-worker", "obscura-worker", StringComparison.Ordinal)
+            .Replace("pocket_calculator_cli", "obscura_cli", StringComparison.Ordinal)
+            .Replace("pocket-calculator", "obscura", StringComparison.Ordinal);
 
     private static string Describe(EngineRun rust, EngineRun port, string[] args)
     {

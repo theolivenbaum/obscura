@@ -3,8 +3,8 @@
   <PropertyGroup>
     <RootNamespace>PocketCalculator.Browser</RootNamespace>
     <AssemblyName>PocketCalculator.Browser</AssemblyName>
-    <Description>Obscura browser: pages, navigation, lifecycle, screenshots and PDF export.</Description>
-    <!-- Ships inside the Obscura package, not as a package of its own. -->
+    <Description>PocketCalculator browser: pages, navigation, lifecycle, screenshots and PDF export.</Description>
+    <!-- Ships inside the PocketCalculator package, not as a package of its own. -->
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
