@@ -362,6 +362,12 @@ public static class Dispatcher
     /// is running inside a CDP handler, so there is no window in which they could
     /// pile up without a draining opportunity.
     /// </remarks>
+    /// <summary>
+    /// The preload identifier prefix <c>Runtime.addBinding</c> files its shim
+    /// under; the rest of the identifier is the binding name.
+    /// </summary>
+    internal const string BindingPreloadPrefix = "__obscura_binding__";
+
     public static void DrainBindingCalls(CdpContext ctx)
     {
         ArgumentNullException.ThrowIfNull(ctx);
@@ -385,6 +391,21 @@ public static class Dispatcher
         // that follows opens another, so a client that reaches a page the ordinary
         // way holds two and uses the second.
         var pageToSessions = SessionsByPage(ctx, ctx.Sessions.Keys);
+
+        // Deviation (SECURITY.md M6): Rust reports a call for whatever name page
+        // script passes to globalThis.__obscura_binding_called, so a page could
+        // fire Runtime.bindingCalled for a binding no client registered, or one
+        // it removed. Only names with a live Runtime.addBinding shim in this
+        // context are reported now; the rest are dropped.
+        HashSet<string> registeredNames = new(StringComparer.Ordinal);
+        foreach (var (identifier, _) in ctx.PreloadScripts)
+        {
+            if (identifier.StartsWith(BindingPreloadPrefix, StringComparison.Ordinal))
+            {
+                registeredNames.Add(identifier[BindingPreloadPrefix.Length..]);
+            }
+        }
+
         List<CdpEvent> events = [];
         foreach (var (pageId, calls) in drained)
         {
@@ -398,6 +419,11 @@ public static class Dispatcher
             var executionContextId = ctx.DefaultContextId(pageId) ?? 1;
             foreach (var (name, payload) in calls)
             {
+                if (!registeredNames.Contains(name))
+                {
+                    continue;
+                }
+
                 // The sessions that asked for this binding, narrowed to the page
                 // the call came from. Falling back to every session of the page
                 // keeps a binding that was installed without a session (a preload,
