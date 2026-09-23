@@ -42,6 +42,51 @@ public static class SelectorParser
         return parsed;
     }
 
+    /// <summary>
+    /// Whether <paramref name="selector"/>'s parentheses nest deeper than <paramref name="limit"/>,
+    /// read off the text without parsing it. Strings and escapes are skipped.
+    /// </summary>
+    public static bool NestsDeeperThan(string selector, int limit)
+    {
+        ArgumentNullException.ThrowIfNull(selector);
+        var depth = 0;
+        for (var i = 0; i < selector.Length; i++)
+        {
+            switch (selector[i])
+            {
+                case '\\':
+                    i++;
+                    break;
+                case '"' or '\'':
+                {
+                    var quote = selector[i];
+                    for (i++; i < selector.Length && selector[i] != quote; i++)
+                    {
+                        if (selector[i] == '\\')
+                        {
+                            i++;
+                        }
+                    }
+
+                    break;
+                }
+
+                case '(':
+                    if (++depth > limit)
+                    {
+                        return true;
+                    }
+
+                    break;
+                case ')':
+                    depth = Math.Max(0, depth - 1);
+                    break;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Parse a selector list, reporting failure instead of throwing.</summary>
     public static bool TryParse(
         string selector,
@@ -140,7 +185,27 @@ public static class SelectorParser
     private static bool IsAsciiIdentChar(char c) =>
         c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '_' or '-';
 
-    private sealed class ParseFailure(string message) : Exception(message);
+    private class ParseFailure(string message) : Exception(message);
+
+    /// <summary>
+    /// Nesting beyond <see cref="MaxNestingDepth"/>. Never recovered by a forgiving list, so it
+    /// fails the whole selector rather than leaving an arm that can never match.
+    /// </summary>
+    private sealed class NestingTooDeep() : ParseFailure("selector nesting is too deep");
+
+    /// <summary>
+    /// How deeply functional pseudo-classes (<c>:not()</c>, <c>:is()</c>, <c>:where()</c>,
+    /// <c>:has()</c>, <c>:nth-child(of)</c>, <c>:host()</c>, <c>::slotted()</c>) may nest.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from the Rust <c>selectors</c> crate, which recurses once per level with no
+    /// bound: <c>":not(".repeat(20000)</c> overflowed the stack and killed the process, from a
+    /// plain <c>&lt;style&gt;</c> as well as from <c>querySelector</c> (SECURITY.md C6). A selector
+    /// nested deeper than this is invalid: the query finds nothing and the style rule is
+    /// dropped, the way this engine treats every invalid selector. Real selectors nest a
+    /// handful of levels.
+    /// </remarks>
+    public const int MaxNestingDepth = 64;
 
     // ------------------------------------------------------------------ the recursive descent parser
 
@@ -148,6 +213,8 @@ public static class SelectorParser
     {
         private readonly string _input = input;
         private int _pos;
+        private int _nesting;
+        private bool _inHas;
 
         public int Position => _pos;
 
@@ -192,12 +259,14 @@ public static class SelectorParser
                 if (forgiving)
                 {
                     var start = _pos;
+                    var nesting = _nesting;
                     try
                     {
                         selectors.Add(ParseComplexSelector());
                     }
-                    catch (ParseFailure)
+                    catch (ParseFailure failure) when (failure is not NestingTooDeep)
                     {
+                        _nesting = nesting;
                         // A forgiving list (:is / :where) keeps an invalid arm as a selector that
                         // can never match, instead of discarding the whole list.
                         _pos = start;
@@ -629,6 +698,11 @@ public static class SelectorParser
                 case "slotted":
                 {
                     ExpectOpenParen();
+                    if (++_nesting > MaxNestingDepth)
+                    {
+                        throw new NestingTooDeep();
+                    }
+
                     SkipWhitespaceAndComments();
                     var inner = ParseComplexSelector();
                     if (inner.Compounds.Length != 1)
@@ -638,6 +712,7 @@ public static class SelectorParser
 
                     SkipWhitespaceAndComments();
                     ExpectCloseParen();
+                    _nesting--;
                     return (new SlottedComponent(inner), Combinator.SlotAssignment);
                 }
 
@@ -671,6 +746,11 @@ public static class SelectorParser
             }
 
             ExpectOpenParen();
+            if (++_nesting > MaxNestingDepth)
+            {
+                throw new NestingTooDeep();
+            }
+
             Component component;
             switch (lower)
             {
@@ -698,18 +778,33 @@ public static class SelectorParser
 
                 case "has":
                 {
-                    var relatives = new List<RelativeSelector>();
-                    while (true)
+                    // Selectors 4: :has() is not allowed inside :has(), however deep. Chromium
+                    // rejects `:has(:has(a))` as an invalid selector.
+                    if (_inHas)
                     {
-                        relatives.Add(ParseRelativeSelector());
-                        SkipWhitespaceAndComments();
-                        if (!AtEnd && Peek == ',')
-                        {
-                            _pos++;
-                            continue;
-                        }
+                        throw new ParseFailure(":has() cannot be nested inside :has()");
+                    }
 
-                        break;
+                    _inHas = true;
+                    var relatives = new List<RelativeSelector>();
+                    try
+                    {
+                        while (true)
+                        {
+                            relatives.Add(ParseRelativeSelector());
+                            SkipWhitespaceAndComments();
+                            if (!AtEnd && Peek == ',')
+                            {
+                                _pos++;
+                                continue;
+                            }
+
+                            break;
+                        }
+                    }
+                    finally
+                    {
+                        _inHas = false;
                     }
 
                     component = new HasComponent([.. relatives]);
@@ -748,6 +843,7 @@ public static class SelectorParser
 
             SkipWhitespaceAndComments();
             ExpectCloseParen();
+            _nesting--;
             return component;
         }
 

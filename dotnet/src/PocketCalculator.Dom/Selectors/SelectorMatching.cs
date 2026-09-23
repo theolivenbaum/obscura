@@ -113,6 +113,14 @@ public static class SelectorMatching
         DomElement element,
         MatchingContext context)
     {
+        // One frame per combinator step: `div~div~...~div` over thousands of siblings recursed
+        // as deep as the selector was long, and an overflow cannot be caught (SECURITY.md C6).
+        // Out of stack, the selector simply does not match.
+        if (!System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            return SelectorMatchingResult.NotMatchedGlobally;
+        }
+
         if (!MatchesCompoundSelector(selector.Compounds[index], element, context))
         {
             return SelectorMatchingResult.NotMatchedAndRestartFromClosestLaterSibling;
