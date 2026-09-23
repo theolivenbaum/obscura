@@ -7560,6 +7560,26 @@ function _serializeBody(initBody, headers, synthesizeContentType = true) {
   return new TextEncoder().encode(typeof initBody === 'string' ? initBody : String(initBody));
 }
 
+// RequestMode as the Request constructor reads it: an init value must be one of
+// the enum's strings, and "navigate" is refused; otherwise the input's mode.
+function _requestMode(initMode, fallback, op) {
+  if (initMode === undefined) return fallback;
+  const mode = String(initMode);
+  const where = op === 'fetch' ? "Failed to execute 'fetch' on 'Window'" : "Failed to construct 'Request'";
+  if (mode !== 'cors' && mode !== 'no-cors' && mode !== 'same-origin' && mode !== 'navigate') {
+    throw new TypeError(where + ": Failed to read the 'mode' property from 'RequestInit': The provided value '" + mode + "' is not a valid enum value of type RequestMode.");
+  }
+  if (mode === 'navigate') {
+    throw new TypeError(where + ": Cannot construct a Request with a RequestInit whose mode member is set as 'navigate'.");
+  }
+  return mode;
+}
+// A CORS-safelisted method after Fetch's method normalization.
+function _noCorsMethodAllowed(method) {
+  const upper = String(method).toUpperCase();
+  return upper === 'GET' || upper === 'HEAD' || upper === 'POST';
+}
+
 globalThis.fetch = async (input, init = {}) => {
   init = init || {};
   const request = input instanceof Request ? input : null;
@@ -7574,14 +7594,21 @@ globalThis.fetch = async (input, init = {}) => {
   url = _resolveUrl(url);
   const method = init.method || (request ? request.method : "GET");
   const headers = init.headers !== undefined ? init.headers : (request ? request.headers : undefined);
-  let _h = headers instanceof Headers ? Object.fromEntries(headers.entries()) : (headers || {});
+  const fetchMode = _requestMode(init.mode, request ? request.mode : "cors", 'fetch');
+  // Fetch's Request constructor, which fetch() runs on its arguments: a no-cors
+  // request must use a CORS-safelisted method, and its headers take the
+  // "request" or "request-no-cors" guard. Deviation from Rust, which sent any
+  // method and every header in no-cors mode (see _headersGuards).
+  if (fetchMode === 'no-cors' && !_noCorsMethodAllowed(method)) {
+    throw new TypeError("Failed to execute 'fetch' on 'Window': '" + String(method) + "' is unsupported in no-cors mode.");
+  }
+  let _h = _makeGuardedHeaders(headers, fetchMode === 'no-cors' ? 'request-no-cors' : 'request')._wireObject();
   const inheritsRequestBody = init.body === undefined && request !== null;
   const initBody = init.body !== undefined
     ? init.body
     : (request ? request.body : undefined);
   const body = _serializeBody(initBody, _h, !(inheritsRequestBody && init.headers !== undefined));
   const hdrs = JSON.stringify(_h);
-  const fetchMode = init.mode || (request ? request.mode : "cors");
   const fetchRedirect = init.redirect || (request ? request.redirect : "follow");
   const fetchCredentials = init.credentials !== undefined
     ? String(init.credentials)
@@ -7623,16 +7650,187 @@ globalThis.fetch = async (input, init = {}) => {
   return response;
 };
 
+// Fetch's header guards. Deviation from Rust, whose Headers keeps every name
+// (lower-cased, append overwriting) and whose fetch()/Request forward whatever
+// script set: a Headers owned by a Request has the "request" guard, which
+// silently ignores a forbidden request-header (Cookie, Host, Origin, Sec-*,
+// Proxy-*, ...), or for a no-cors Request the "request-no-cors" guard, which
+// also ignores anything but a no-CORS-safelisted Accept, Accept-Language,
+// Content-Language or Content-Type. Invalid names and values throw TypeError, as
+// in Chromium. op_fetch_url applies the same filter host-side. The guard lives
+// in a closure WeakMap so page script cannot reset it.
+const _headersGuards = new WeakMap();
+const _HEADERS_FORBIDDEN_NAMES = new Set([
+  'accept-charset', 'accept-encoding', 'access-control-request-headers',
+  'access-control-request-method', 'access-control-request-private-network',
+  'connection', 'content-length', 'cookie', 'cookie2', 'date', 'dnt', 'expect',
+  'host', 'keep-alive', 'origin', 'referer', 'set-cookie', 'te', 'trailer',
+  'transfer-encoding', 'upgrade', 'via',
+]);
+const _HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+function _isForbiddenRequestHeader(name, value) {
+  const lower = String(name).toLowerCase();
+  if (_HEADERS_FORBIDDEN_NAMES.has(lower) || lower.startsWith('proxy-') || lower.startsWith('sec-')) return true;
+  if (lower === 'x-http-method' || lower === 'x-http-method-override' || lower === 'x-method-override') {
+    return String(value).split(',').some(m => /^(connect|trace|track)$/i.test(m.replace(/^[ \t]+|[ \t]+$/g, '')));
+  }
+  return false;
+}
+function _hasCorsUnsafeByte(value) {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f || '"():<>?@[\\]{}'.indexOf(value[i]) >= 0) return true;
+  }
+  return false;
+}
+// The no-CORS-safelisted request-header (Fetch): the name check, then the
+// CORS-safelisted value rules, including the 128-byte value cap. Values are
+// ByteStrings here, so the length in chars is the length in bytes.
+function _isNoCorsSafelistedRequestHeader(name, value) {
+  const lower = String(name).toLowerCase();
+  value = String(value);
+  if (value.length > 128) return false;
+  switch (lower) {
+    case 'accept':
+      return !_hasCorsUnsafeByte(value);
+    case 'accept-language':
+    case 'content-language':
+      return /^[0-9A-Za-z *,\-.;=]*$/.test(value);
+    case 'content-type': {
+      if (_hasCorsUnsafeByte(value)) return false;
+      const semi = value.indexOf(';');
+      const essence = (semi < 0 ? value : value.slice(0, semi)).replace(/^[ \t]+|[ \t]+$/g, '');
+      const slash = essence.indexOf('/');
+      if (slash <= 0 || slash === essence.length - 1) return false;
+      if (!_HTTP_TOKEN_RE.test(essence.slice(0, slash)) || !_HTTP_TOKEN_RE.test(essence.slice(slash + 1))) return false;
+      const e = essence.toLowerCase();
+      return e === 'application/x-www-form-urlencoded' || e === 'multipart/form-data' || e === 'text/plain';
+    }
+    default:
+      return false;
+  }
+}
+function _isNoCorsSafelistedName(lower) {
+  return lower === 'accept' || lower === 'accept-language' || lower === 'content-language' || lower === 'content-type';
+}
+function _headerByteString(value, op) {
+  const s = String(value);
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) > 0xff) {
+      throw new TypeError("Failed to execute '" + op + "' on 'Headers': String contains non ISO-8859-1 code point.");
+    }
+  }
+  return s;
+}
+function _headerName(name, op) {
+  const n = _headerByteString(name, op);
+  if (!_HTTP_TOKEN_RE.test(n)) throw new TypeError("Failed to execute '" + op + "' on 'Headers': Invalid name");
+  return n;
+}
+function _headerValue(value, op) {
+  // Normalize: strip leading and trailing HTTP whitespace, then refuse NUL/CR/LF.
+  const v = _headerByteString(value, op).replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+  if (/[\0\r\n]/.test(v)) throw new TypeError("Failed to execute '" + op + "' on 'Headers': Invalid value");
+  return v;
+}
+function _makeGuardedHeaders(init, guard) {
+  const headers = new Headers();
+  _headersGuards.set(headers, guard);
+  if (init !== undefined && init !== null) _fillHeaders(headers, init);
+  return headers;
+}
+function _fillHeaders(headers, init) {
+  if (init instanceof Headers) {
+    for (const [, entry] of init._h) headers.append(entry.name, entry.value);
+    return;
+  }
+  if (typeof init !== 'object' && typeof init !== 'function') {
+    throw new TypeError("Failed to construct 'Headers': The provided value is not of type '(record<ByteString, ByteString> or sequence<sequence<ByteString>>)'.");
+  }
+  if (typeof init[Symbol.iterator] === 'function') {
+    for (const pair of init) {
+      const items = pair != null && typeof pair[Symbol.iterator] === 'function' ? Array.from(pair) : null;
+      if (!items || items.length !== 2) {
+        throw new TypeError("Failed to construct 'Headers': Invalid value");
+      }
+      headers.append(items[0], items[1]);
+    }
+    return;
+  }
+  for (const key of Object.keys(init)) headers.append(key, init[key]);
+}
+
 if (typeof Headers === "undefined") {
+  // _h maps the lower-cased name to { name, value }: the casing the name was
+  // first set with (what goes on the wire) and the combined value. Iteration is
+  // sorted by lower-cased name, as Fetch's "sort and combine" requires.
   globalThis.Headers = class Headers {
-    constructor(init={}) { this._h={}; if(init) { if(init instanceof Headers) { init.forEach((v,k)=>{this._h[k]=v;}); } else if(typeof init==="object") { for(const[k,v]of Object.entries(init)) this._h[k.toLowerCase()]=String(v); } } }
-    get(n) { return this._h[n.toLowerCase()]??null; } set(n,v) { this._h[n.toLowerCase()]=String(v); }
-    has(n) { return n.toLowerCase() in this._h; } delete(n) { delete this._h[n.toLowerCase()]; }
-    append(n,v) { this._h[n.toLowerCase()]=String(v); }
-    forEach(cb) { for(const[k,v] of Object.entries(this._h)) cb(v,k,this); }
-    entries() { return Object.entries(this._h)[Symbol.iterator](); }
-    keys() { return Object.keys(this._h)[Symbol.iterator](); }
-    values() { return Object.values(this._h)[Symbol.iterator](); }
+    constructor(init) {
+      Object.defineProperty(this, '_h', { value: new Map(), writable: true, configurable: true });
+      if (init !== undefined && init !== null) _fillHeaders(this, init);
+    }
+    _guard() { return _headersGuards.get(this) || 'none'; }
+    _validate(name, value) {
+      // Fetch "validate": false means the guard ignores this header.
+      const guard = this._guard();
+      if (guard === 'immutable') throw new TypeError("Failed to execute on 'Headers': Headers are immutable");
+      if (guard === 'request' && _isForbiddenRequestHeader(name, value)) return false;
+      if (guard === 'response') {
+        const lower = name.toLowerCase();
+        if (lower === 'set-cookie' || lower === 'set-cookie2') return false;
+      }
+      return true;
+    }
+    _removePrivilegedNoCors() {
+      if (this._guard() === 'request-no-cors') this._h.delete('range');
+    }
+    get(n) {
+      const e = this._h.get(_headerName(n, 'get').toLowerCase());
+      return e ? e.value : null;
+    }
+    has(n) { return this._h.has(_headerName(n, 'has').toLowerCase()); }
+    set(n, v) {
+      const name = _headerName(n, 'set');
+      const value = _headerValue(v, 'set');
+      if (!this._validate(name, value)) return;
+      if (this._guard() === 'request-no-cors' && !_isNoCorsSafelistedRequestHeader(name, value)) return;
+      const lower = name.toLowerCase();
+      const existing = this._h.get(lower);
+      this._h.set(lower, { name: existing ? existing.name : name, value });
+      this._removePrivilegedNoCors();
+    }
+    append(n, v) {
+      const name = _headerName(n, 'append');
+      const value = _headerValue(v, 'append');
+      if (!this._validate(name, value)) return;
+      const lower = name.toLowerCase();
+      const existing = this._h.get(lower);
+      const combined = existing ? existing.value + ', ' + value : value;
+      if (this._guard() === 'request-no-cors' && !_isNoCorsSafelistedRequestHeader(name, combined)) return;
+      this._h.set(lower, { name: existing ? existing.name : name, value: combined });
+      this._removePrivilegedNoCors();
+    }
+    delete(n) {
+      const name = _headerName(n, 'delete');
+      if (!this._validate(name, '')) return;
+      const lower = name.toLowerCase();
+      if (this._guard() === 'request-no-cors' && !_isNoCorsSafelistedName(lower) && lower !== 'range') return;
+      this._h.delete(lower);
+      this._removePrivilegedNoCors();
+    }
+    _sorted() {
+      return Array.from(this._h.keys()).sort().map(k => [k, this._h.get(k).value]);
+    }
+    // The header list as the wire should carry it: first-set casing, combined values.
+    _wireObject() {
+      const out = {};
+      for (const [, entry] of this._h) out[entry.name] = entry.value;
+      return out;
+    }
+    forEach(cb, thisArg) { for (const [k, v] of this._sorted()) cb.call(thisArg, v, k, this); }
+    entries() { return this._sorted()[Symbol.iterator](); }
+    keys() { return this._sorted().map(p => p[0])[Symbol.iterator](); }
+    values() { return this._sorted().map(p => p[1])[Symbol.iterator](); }
     [Symbol.iterator]() { return this.entries(); }
   };
 }
@@ -7723,6 +7921,9 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   setRequestHeader(name, value) {
+    // XHR: a forbidden request-header is silently ignored. Rust stored and sent
+    // it. fetch() applies the same guard again on the way out.
+    if (_isForbiddenRequestHeader(name, value)) return;
     this._headers[name] = value;
   }
 
@@ -7998,9 +8199,14 @@ if (typeof Request === 'undefined') {
       else if (typeof URL === 'function' && input instanceof URL) { this.url = input.href; }
       else { this.url = input?.url || input?.href || String(input); }
       this.method = (init.method || 'GET').toUpperCase();
-      this.headers = new Headers(init.headers);
+      this.mode = _requestMode(init.mode, 'cors', 'Request');
+      // A no-cors Request refuses a non-safelisted method and guards its headers
+      // (see _headersGuards); Rust accepted both.
+      if (this.mode === 'no-cors' && !_noCorsMethodAllowed(this.method)) {
+        throw new TypeError("Failed to construct 'Request': '" + this.method + "' is unsupported in no-cors mode.");
+      }
+      this.headers = _makeGuardedHeaders(init.headers, this.mode === 'no-cors' ? 'request-no-cors' : 'request');
       this.body = init.body || null;
-      this.mode = init.mode || 'cors';
       this.credentials = init.credentials !== undefined
         ? String(init.credentials)
         : (inputRequest ? inputRequest.credentials : 'same-origin');
