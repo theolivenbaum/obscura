@@ -16,6 +16,10 @@ variables:
 trigger:
 - main
 
+# Never build pull requests: with no `pr:` section Azure DevOps builds every PR of a
+# GitHub repository, and a same-repository branch PR would reach the push step below.
+pr: none
+
 # Linux: the engine's native set (ClearScript V8, SkiaSharp, HarfBuzzSharp) ships for
 # linux-x64, the fonts are embedded rather than read from the host, and the CLI tests rely
 # on the `obscura` launcher the Cli project only emits off Windows.
@@ -67,11 +71,15 @@ steps:
     arguments: '-c $(buildConfiguration) --no-build'
     publishTestResults: true
 
+# Pack and push run for main only, whatever triggered the build (a manual run of another
+# branch included); `pr: none` above is the first half of the same rule.
+#
 # Packs the solution into three packages: PocketCalculator (the engine assemblies ride inside it),
 # PocketCalculator.Cdp and PocketCalculator.Mcp. The engine projects, the CLI and the test projects opt out
 # with IsPackable.
 - task: DotNetCoreCLI@2
   displayName: 'pack'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   inputs:
     command: 'pack'
     packagesToPack: '$(solution)'
@@ -83,12 +91,14 @@ steps:
 
 - task: PublishBuildArtifacts@1
   displayName: 'publish the packages as build artifacts'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   inputs:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)'
     ArtifactName: 'packages'
 
 - task: NuGetCommand@2
   displayName: 'push nuget'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   inputs:
     command: 'push'
     packagesToPush: '$(Build.ArtifactStagingDirectory)/*.nupkg'
