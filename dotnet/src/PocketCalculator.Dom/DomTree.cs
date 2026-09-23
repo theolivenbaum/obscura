@@ -488,6 +488,11 @@ public sealed partial class DomTree
 
     public NodeId NewNode(NodeData data)
     {
+        // Charged before the slot is taken, so a refusal leaves the tree as it was (M7).
+        long size = SizeOf(data);
+        EnsureCanGrow(size);
+        _contentBytes += size;
+
         NodeId id;
         if (_freeList.Count > 0)
         {
@@ -783,8 +788,9 @@ public sealed partial class DomTree
         // time -- later handing the same NodeId to two live nodes (aliasing).
         foreach (var id in nodesToRemove)
         {
-            if (Slot(id) is not null)
+            if (Slot(id) is { } freed)
             {
+                _contentBytes = Math.Max(0, _contentBytes - SizeOf(freed.Data));
                 _nodes[id.Index] = null;
                 _freeList.Add(id.Value);
 
@@ -1367,6 +1373,7 @@ public sealed partial class DomTree
         var lastChildId = Slot(parentId)?.LastChild;
         if (lastChildId is { } lastId && Slot(lastId)?.Data is TextData lastText)
         {
+            ChargeGrowth(2L * text.Length);
             lastText.Contents += text;
             return;
         }

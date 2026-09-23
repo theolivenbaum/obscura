@@ -106,7 +106,9 @@ public sealed class DocumentWriteStream
                 // creation.
                 if (node.IsText && dom.GetNode(known)?.Data is TextData text)
                 {
-                    text.Contents = source.TextContent(entry.Node);
+                    var grown = source.TextContent(entry.Node);
+                    dom.ChargeGrowth(2L * (grown.Length - text.Contents.Length));
+                    text.Contents = grown;
                 }
 
                 AppendFreshChildren(stack, source, entry.Node, entry.Path);

@@ -153,6 +153,12 @@ let _realmParentFrameId = 0;
 
 const _dom = (cmd, a1, a2) => {
   const result = __obscuraCore.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
+  // DEVIATION (SECURITY.md M7): the host refused a mutation that would take the
+  // document past its byte budget, and changed nothing. Rust has no budget;
+  // Chromium would run out of memory and kill the renderer.
+  if (result === "quota-exceeded") {
+    throw new DOMException("The document exceeded its memory budget.", "QuotaExceededError");
+  }
   if (_DOM_MUTATION_COMMANDS.has(cmd)) {
     _domMutationEpoch++;
     // Resize observation is tied to rendering-invalidating DOM work. The

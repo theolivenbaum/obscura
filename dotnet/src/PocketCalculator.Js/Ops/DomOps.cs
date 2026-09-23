@@ -35,7 +35,40 @@ public static class DomOps
     /// to a null result for that single call.
     /// </summary>
     public static string OpDom(PocketCalculatorState state, string cmd, string arg1, string arg2) =>
-        OpGuard.Run("op_dom", () => Inner(state, cmd, arg1, arg2), "null");
+        OpGuard.Run("op_dom", () =>
+        {
+            try
+            {
+                return Inner(state, cmd, arg1, arg2);
+            }
+            catch (DomQuotaExceededException)
+            {
+                return QuotaExceeded;
+            }
+        }, "null");
+
+    /// <summary>
+    /// What op_dom returns when a mutation would take the document past its byte budget
+    /// (SECURITY.md M7); <c>_dom</c> in bootstrap.js turns it into a <c>QuotaExceededError</c>.
+    /// Not valid JSON, so no ordinary result can be mistaken for it. Rust has no budget and
+    /// never returns it.
+    /// </summary>
+    internal const string QuotaExceeded = "quota-exceeded";
+
+    /// <summary>
+    /// Refuses a parsed fragment that cannot join the document within its byte budget, before
+    /// the old children go, so a refused <c>innerHTML</c> changes nothing. A fragment the parse
+    /// itself truncated never fits.
+    /// </summary>
+    private static void EnsureFragmentFits(DomTree dom, DomTree fragment)
+    {
+        if (fragment.ParseTruncated)
+        {
+            throw new DomQuotaExceededException(fragment.ContentBytes, dom.ContentBytes, dom.ContentByteBudget);
+        }
+
+        dom.EnsureCanGrow(fragment.ContentBytes);
+    }
 
     internal static string Inner(PocketCalculatorState gs, string cmd, string arg1, string arg2)
     {
@@ -345,6 +378,9 @@ public static class DomOps
                 {
                     var name = arg2[..split];
                     var value = arg2[(split + 1)..];
+                    var existing = dom.GetNode(nodeId)?.GetAttribute(name);
+                    dom.EnsureCanGrow(2L * (value.Length - (existing?.Length ?? -name.Length)));
+                    var sizeBefore = dom.DataSize(nodeId);
                     if (string.Equals(name, "id", StringComparison.Ordinal))
                     {
                         var oldId = dom.GetNode(nodeId)?.GetAttribute("id");
@@ -355,6 +391,8 @@ public static class DomOps
                     {
                         dom.GetNode(nodeId)?.SetAttribute(name, value);
                     }
+
+                    dom.RecordChange(dom.DataSize(nodeId) - sizeBefore);
                 }
 
                 return "true";
@@ -412,8 +450,11 @@ public static class DomOps
 
             case "remove_attribute":
             {
-                var attrs = dom.GetNode(ParseNodeOrZero(arg1))?.Attrs;
+                var nodeId = ParseNodeOrZero(arg1);
+                var sizeBefore = dom.DataSize(nodeId);
+                var attrs = dom.GetNode(nodeId)?.Attrs;
                 attrs?.RemoveAll(a => a.QualifiedNameEquals(arg2));
+                dom.RecordChange(dom.DataSize(nodeId) - sizeBefore);
                 return "true";
             }
 
@@ -438,6 +479,9 @@ public static class DomOps
                 {
                     var colon = qualified.IndexOf(':', StringComparison.Ordinal);
                     var local = colon >= 0 ? qualified[(colon + 1)..] : qualified;
+                    var existing = dom.GetNode(nodeId)?.GetAttributeNs(ns, local);
+                    dom.EnsureCanGrow(2L * (value.Length - (existing?.Length ?? -qualified.Length)));
+                    var sizeBefore = dom.DataSize(nodeId);
                     if (ns.Length == 0 && string.Equals(local, "id", StringComparison.Ordinal))
                     {
                         var oldId = dom.GetNode(nodeId)?.GetAttribute("id");
@@ -448,6 +492,8 @@ public static class DomOps
                     {
                         dom.GetNode(nodeId)?.SetAttributeNs(ns, qualified, value);
                     }
+
+                    dom.RecordChange(dom.DataSize(nodeId) - sizeBefore);
                 }
 
                 return "true";
@@ -457,6 +503,7 @@ public static class DomOps
             {
                 var nodeId = ParseNodeOrZero(arg1);
                 var (ns, local) = SplitOnceNul(arg2);
+                var sizeBefore = dom.DataSize(nodeId);
                 if (ns.Length == 0 && string.Equals(local, "id", StringComparison.Ordinal))
                 {
                     var oldId = dom.GetNode(nodeId)?.GetAttribute("id");
@@ -468,6 +515,7 @@ public static class DomOps
                     dom.GetNode(nodeId)?.RemoveAttributeNs(ns, local);
                 }
 
+                dom.RecordChange(dom.DataSize(nodeId) - sizeBefore);
                 return "true";
             }
 
@@ -481,17 +529,23 @@ public static class DomOps
                 }
 
                 var target = NodeId.New(raw);
+                DomTree? fragment = null;
+                if (arg2.Length != 0)
+                {
+                    var contextName = (dom.GetNode(target)?.Data as ElementData)?.Name;
+                    fragment = contextName is { } context
+                        ? HtmlParsing.ParseFragmentWithContext(arg2, context)
+                        : HtmlParsing.ParseFragment(arg2);
+                    EnsureFragmentFits(dom, fragment);
+                }
+
                 foreach (var child in dom.Children(target))
                 {
                     dom.Detach(child);
                 }
 
-                if (arg2.Length != 0)
+                if (fragment is not null)
                 {
-                    var contextName = (dom.GetNode(target)?.Data as ElementData)?.Name;
-                    var fragment = contextName is { } context
-                        ? HtmlParsing.ParseFragmentWithContext(arg2, context)
-                        : HtmlParsing.ParseFragment(arg2);
                     dom.ImportChildrenFrom(target, fragment, fragment.FragmentRoot());
                     foreach (var child in dom.Children(target))
                     {
@@ -511,14 +565,19 @@ public static class DomOps
 
                 var target = NodeId.New(raw);
                 var (contextName, html) = StateHelpers.FragmentContextAndHtml(arg2);
+                var fragment = html.Length != 0 ? HtmlParsing.ParseFragmentWithContext(html, contextName) : null;
+                if (fragment is not null)
+                {
+                    EnsureFragmentFits(dom, fragment);
+                }
+
                 foreach (var child in dom.Children(target))
                 {
                     dom.Detach(child);
                 }
 
-                if (html.Length != 0)
+                if (fragment is not null)
                 {
-                    var fragment = HtmlParsing.ParseFragmentWithContext(html, contextName);
                     dom.ImportChildrenFrom(target, fragment, fragment.FragmentRoot());
                     foreach (var child in dom.Children(target))
                     {
@@ -541,14 +600,19 @@ public static class DomOps
 
                 var target = NodeId.New(raw);
                 var (contextName, html) = StateHelpers.FragmentContextAndHtml(arg2);
+                var fragment = html.Length != 0 ? HtmlParsing.ParseFragmentWithContext(html, contextName) : null;
+                if (fragment is not null)
+                {
+                    EnsureFragmentFits(dom, fragment);
+                }
+
                 foreach (var child in dom.Children(target))
                 {
                     dom.Detach(child);
                 }
 
-                if (html.Length != 0)
+                if (fragment is not null)
                 {
-                    var fragment = HtmlParsing.ParseFragmentWithContext(html, contextName);
                     dom.ImportChildrenFrom(target, fragment, fragment.FragmentRoot());
                 }
 
@@ -564,6 +628,9 @@ public static class DomOps
             // mutation, registers window named access, and loads a written stylesheet.
             case "document_write":
             {
+                // The stream keeps every write and reparses it, so a write that cannot fit
+                // is refused before it joins the stream (M7).
+                dom.EnsureCanGrow(2L * arg2.Length);
                 gs.WriteStream ??= new DocumentWriteStream();
                 var placements = gs.WriteStream.Write(arg2, dom);
                 var sb = new StringBuilder(placements.Count * 8 + 2);
@@ -593,7 +660,17 @@ public static class DomOps
 
             case "set_text_content":
             {
-                var node = dom.GetNode(ParseNodeOrZero(arg1));
+                var nodeId = ParseNodeOrZero(arg1);
+                var node = dom.GetNode(nodeId);
+                var sizeBefore = dom.DataSize(nodeId);
+                var oldLength = node?.Data switch
+                {
+                    TextData t => t.Contents.Length,
+                    CommentData c => c.Contents.Length,
+                    ProcessingInstructionData p => p.Data.Length,
+                    _ => arg2.Length,
+                };
+                dom.EnsureCanGrow(2L * (arg2.Length - oldLength));
                 switch (node?.Data)
                 {
                     case TextData text:
@@ -607,6 +684,7 @@ public static class DomOps
                         break;
                 }
 
+                dom.RecordChange(dom.DataSize(nodeId) - sizeBefore);
                 return "true";
             }
 
