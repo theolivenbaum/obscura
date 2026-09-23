@@ -23,8 +23,10 @@ public sealed class CookieParamsTests
             ["sameSite"] = "Strict",
             ["expires"] = 1_900_000_000.0,
         };
-        var c = CookieParams.ParseCdpCookie(v);
-        Assert.NotNull(c);
+        var parsed = CookieParams.ParseCdpCookie(v);
+        Assert.NotNull(parsed);
+        Assert.False(parsed.HostOnly);
+        var c = parsed.Cookie;
         Assert.Equal("session", c.Name);
         Assert.Equal("abc", c.Value);
         Assert.Equal(".example.com", c.Domain);
@@ -50,10 +52,18 @@ public sealed class CookieParamsTests
             ["value"] = "xyz",
             ["url"] = "https://api.example.com/v1/things",
         };
-        var c = CookieParams.ParseCdpCookie(v);
-        Assert.NotNull(c);
+        var parsed = CookieParams.ParseCdpCookie(v);
+        Assert.NotNull(parsed);
+        Assert.True(parsed.HostOnly);
+        var c = parsed.Cookie;
         Assert.Equal("api.example.com", c.Domain);
         Assert.Equal("/v1", c.Path);
+
+        // Upstream 04418a5: a cookie set from a url is host-only in the jar too.
+        var jar = new Obscura.Net.CookieJar();
+        jar.SetCookiesFromCdpWithScope([(c, parsed.HostOnly)]);
+        Assert.Contains("tok=xyz", jar.GetCookieHeader(new Uri("https://api.example.com/v1/item")), StringComparison.Ordinal);
+        Assert.Equal(string.Empty, jar.GetCookieHeader(new Uri("https://sub.api.example.com/v1/item")));
     }
 
     /// <summary>An explicit Path attribute wins over the RFC default-path.</summary>
@@ -67,7 +77,7 @@ public sealed class CookieParamsTests
             ["url"] = "https://api.example.com/v1/things",
             ["path"] = "/v1/things",
         };
-        var c = CookieParams.ParseCdpCookie(v);
+        var c = CookieParams.ParseCdpCookie(v)?.Cookie;
         Assert.NotNull(c);
         Assert.Equal("/v1/things", c.Path);
     }
@@ -86,7 +96,7 @@ public sealed class CookieParamsTests
             ["value"] = "v",
             ["domain"] = "example.com",
         };
-        var c = CookieParams.ParseCdpCookie(v);
+        var c = CookieParams.ParseCdpCookie(v)?.Cookie;
         Assert.NotNull(c);
         Assert.Equal("/", c.Path);
     }

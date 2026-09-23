@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Obscura.Net;
 
@@ -171,76 +172,184 @@ public sealed class CookieJar
         }
 
         // Validate Domain against the response origin (RFC 6265): an unrelated or
-        // public-suffix Domain is ignored so a response from attacker.test cannot
-        // scope a cookie to victim.test (GHSA-f22c-8v6q-v6h6).
+        // public-suffix Domain rejects the cookie so a response from attacker.test
+        // cannot scope a cookie to victim.test (GHSA-f22c-8v6q-v6h6).
         if (!TryResolveCookieDomain(requestHost, domainAttr, out var domain, out var hostOnly))
         {
             return;
         }
 
-        if (expires is { } exp && exp <= Now())
+        // RFC 6265bis: an insecure origin cannot set a Secure cookie, and
+        // SameSite=None is only accepted together with Secure.
+        var sourceIsSecure = string.Equals(url.Scheme, "https", StringComparison.Ordinal);
+        if ((secure && !sourceIsSecure) || (sameSite == "None" && !secure))
         {
-            lock (_lock)
-            {
-                if (_cookies.TryGetValue(domain, out var domainCookies))
-                {
-                    // RFC 6265 5.3: a non-HTTP API (document.cookie) must not delete
-                    // an existing HttpOnly cookie.
-                    if (fromJavaScript
-                        && domainCookies.TryGetValue((name, path), out var existing)
-                        && existing.HttpOnly)
-                    {
-                        return;
-                    }
+            return;
+        }
 
-                    domainCookies.Remove((name, path));
+        lock (_lock)
+        {
+            if (!sourceIsSecure && SecureCookieConflicts(name, domain, path))
+            {
+                return;
+            }
+
+            StoreLocked(
+                new CookieEntry
+                {
+                    Name = name,
+                    Value = value,
+                    Path = path,
+                    Domain = domain,
+                    HostOnly = hostOnly,
+                    Secure = secure,
+                    HttpOnly = httpOnly,
+                    Expires = expires,
+                    SameSite = sameSite,
+                },
+                fromJavaScript);
+        }
+    }
+
+    /// <summary>Delete or insert <paramref name="entry"/>. Caller holds the lock.</summary>
+    private void StoreLocked(CookieEntry entry, bool fromJavaScript)
+    {
+        var (name, path, domain) = (entry.Name, entry.Path, entry.Domain);
+        if (entry.Expires is { } exp && exp <= Now())
+        {
+            if (_cookies.TryGetValue(domain, out var doomedIn))
+            {
+                // RFC 6265 5.3: a non-HTTP API (document.cookie) must not delete an
+                // existing HttpOnly cookie.
+                if (fromJavaScript
+                    && doomedIn.TryGetValue((name, path), out var doomed)
+                    && doomed.HttpOnly)
+                {
+                    return;
                 }
+
+                doomedIn.Remove((name, path));
             }
 
             return;
         }
 
-        var entry = new CookieEntry
+        if (!_cookies.TryGetValue(domain, out var domainCookies))
         {
-            Name = name,
-            Value = value,
-            Path = path,
-            Domain = domain,
-            HostOnly = hostOnly,
-            Secure = secure,
-            HttpOnly = httpOnly,
-            Expires = expires,
-            SameSite = sameSite,
-        };
-
-        lock (_lock)
-        {
-            if (!_cookies.TryGetValue(domain, out var domainCookies))
-            {
-                domainCookies = [];
-                _cookies[domain] = domainCookies;
-            }
-
-            // RFC 6265 5.3: a non-HTTP API (document.cookie) must not overwrite an
-            // existing HttpOnly cookie set by the server.
-            if (fromJavaScript
-                && domainCookies.TryGetValue((name, path), out var existing)
-                && existing.HttpOnly)
-            {
-                return;
-            }
-
-            domainCookies[(name, path)] = entry;
+            domainCookies = [];
+            _cookies[domain] = domainCookies;
         }
+
+        // RFC 6265 5.3: a non-HTTP API (document.cookie) must not overwrite an
+        // existing HttpOnly cookie set by the server.
+        if (fromJavaScript
+            && domainCookies.TryGetValue((name, path), out var existing)
+            && existing.HttpOnly)
+        {
+            return;
+        }
+
+        domainCookies[(name, path)] = entry;
     }
 
-    /// <summary>The <c>Cookie</c> request header value for <paramref name="url"/>.</summary>
-    public string GetCookieHeader(Uri url) => Collect(url, jsVisibleOnly: false);
+    /// <summary>
+    /// RFC 6265bis "Leave Secure Cookies Alone": an insecure response must not replace
+    /// or shadow a Secure cookie. Cookie writes are rare, so scanning the jar here is
+    /// preferable to adding another index to every request. Caller holds the lock.
+    /// </summary>
+    private bool SecureCookieConflicts(string name, string domain, string path)
+    {
+        foreach (var (storedDomain, entries) in _cookies)
+        {
+            if (!DomainMatches(domain, storedDomain) && !DomainMatches(storedDomain, domain))
+            {
+                continue;
+            }
+
+            foreach (var entry in entries.Values)
+            {
+                if (entry.Secure
+                    && string.Equals(entry.Name, name, StringComparison.Ordinal)
+                    && (PathMatches(path, entry.Path) || PathMatches(entry.Path, path)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The <c>Cookie</c> request header value for a same-site request to
+    /// <paramref name="url"/>. Callers that know the request's initiator use
+    /// <see cref="GetCookieHeaderInContext"/> so the SameSite policy is enforced.
+    /// </summary>
+    public string GetCookieHeader(Uri url) => GetCookieHeaderSameSite(url);
+
+    /// <summary>The <c>Cookie</c> header for a request known to be same-site.</summary>
+    public string GetCookieHeaderSameSite(Uri url) =>
+        GetCookieHeaderInContext(url, SameSiteContext.SameSite);
+
+    /// <summary>The <c>Cookie</c> header for a request in the given site context.</summary>
+    public string GetCookieHeaderInContext(Uri url, SameSiteContext context) =>
+        Collect(url, jsVisibleOnly: false, context);
 
     /// <summary>The <c>document.cookie</c> value for <paramref name="url"/>: HttpOnly cookies are hidden.</summary>
-    public string GetJsVisibleCookies(Uri url) => Collect(url, jsVisibleOnly: true);
+    public string GetJsVisibleCookies(Uri url) =>
+        Collect(url, jsVisibleOnly: true, SameSiteContext.SameSite);
 
-    private string Collect(Uri url, bool jsVisibleOnly)
+    /// <summary>
+    /// Registrable-domain same-site check (port of <c>same_site</c> in
+    /// <c>cookies.rs</c>): same scheme and the same eTLD+1, where a host that has no
+    /// registrable domain (a public suffix itself) stands for its own site.
+    /// </summary>
+    /// <remarks>
+    /// Deviation: Rust hands an IP address to <c>psl::domain_str</c> too, which treats
+    /// the dotted quad as labels, so <c>10.0.0.1</c> and <c>192.168.0.1</c> share the
+    /// "site" <c>0.1</c>. Chromium's site for an IP host is the whole address, and so is
+    /// this one.
+    /// </remarks>
+    public static bool IsSameSite(Uri source, Uri target)
+    {
+        if (!string.Equals(source.Scheme, target.Scheme, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var sourceHost = HostOf(source);
+        var targetHost = HostOf(target);
+        if (sourceHost.Length == 0 || targetHost.Length == 0)
+        {
+            return false;
+        }
+
+        return string.Equals(SiteOf(source, sourceHost), SiteOf(target, targetHost), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string SiteOf(Uri url, string host)
+    {
+        if (url.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
+        {
+            return host;
+        }
+
+        var lower = host.ToLowerInvariant();
+        return PublicSuffixList.RegistrableDomain(lower) ?? lower;
+    }
+
+    /// <summary>
+    /// The site context of a scripted fetch/XHR from a page whose serialized origin is
+    /// <paramref name="initiatorOrigin"/> (port of the context <c>op_fetch_url</c>
+    /// computes). An origin that does not parse, such as <c>null</c>, is cross-site to
+    /// everything.
+    /// </summary>
+    public static SameSiteContext ContextForInitiator(string? initiatorOrigin, Uri target) =>
+        Uri.TryCreate(initiatorOrigin, UriKind.Absolute, out var source) && IsSameSite(source, target)
+            ? SameSiteContext.SameSite
+            : SameSiteContext.CrossSite;
+
+    private string Collect(Uri url, bool jsVisibleOnly, SameSiteContext context)
     {
         var host = HostOf(url);
         var path = url.AbsolutePath;
@@ -279,6 +388,17 @@ public sealed class CookieJar
                         continue;
                     }
 
+                    var sameSiteAllows = context switch
+                    {
+                        SameSiteContext.CrossSiteTopLevelSafe => entry.SameSite != "Strict",
+                        SameSiteContext.CrossSite => entry.SameSite == "None",
+                        _ => true,
+                    };
+                    if (!sameSiteAllows)
+                    {
+                        continue;
+                    }
+
                     if (!PathMatches(path, entry.Path))
                     {
                         continue;
@@ -295,8 +415,25 @@ public sealed class CookieJar
     /// <summary>Every non-expired cookie in the jar.</summary>
     public List<CookieInfo> GetAllCookies()
     {
+        var all = GetAllCookiesWithScope();
+        var result = new List<CookieInfo>(all.Count);
+        foreach (var (cookie, _) in all)
+        {
+            result.Add(cookie);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Every non-expired cookie in the jar, with the host-only flag the public CDP
+    /// model has no field for. Pair with <see cref="SetCookiesFromCdpWithScope"/> to
+    /// move cookies between jars without widening a host-only cookie to subdomains.
+    /// </summary>
+    public List<(CookieInfo Cookie, bool HostOnly)> GetAllCookiesWithScope()
+    {
         var now = Now();
-        var result = new List<CookieInfo>();
+        var result = new List<(CookieInfo, bool)>();
         lock (_lock)
         {
             foreach (var domainCookies in _cookies.Values)
@@ -308,7 +445,7 @@ public sealed class CookieJar
                         continue;
                     }
 
-                    result.Add(ToInfo(entry));
+                    result.Add((ToInfo(entry), entry.HostOnly));
                 }
             }
         }
@@ -316,18 +453,87 @@ public sealed class CookieJar
         return result;
     }
 
-    /// <summary>Import cookies from CDP or a persisted store. A zero/past expiry deletes.</summary>
+    /// <summary>
+    /// Import cookies from CDP or a persisted store. A zero/past expiry deletes. Each
+    /// cookie is domain-scoped: its Domain field has always meant that.
+    /// </summary>
     public void SetCookiesFromCdp(IEnumerable<CookieInfo> cookies)
+    {
+        var scoped = new List<(CookieInfo, bool)>();
+        foreach (var cookie in cookies)
+        {
+            scoped.Add((cookie, false));
+        }
+
+        SetCookiesFromImport(scoped);
+    }
+
+    /// <summary>
+    /// Import CDP cookies while preserving whether each was created from a URL
+    /// (host-only) or from an explicit Domain field (domain-scoped).
+    /// </summary>
+    public void SetCookiesFromCdpWithScope(IEnumerable<(CookieInfo Cookie, bool HostOnly)> cookies) =>
+        SetCookiesFromImport(cookies);
+
+    /// <summary>
+    /// Replace this jar with an independent copy of <paramref name="source"/>,
+    /// including the host-only scope the public CDP model leaves out.
+    /// </summary>
+    public void CopyFrom(CookieJar source)
+    {
+        if (ReferenceEquals(this, source))
+        {
+            return;
+        }
+
+        // Entries are immutable, so copying the two map levels is a full copy.
+        Dictionary<string, Dictionary<(string Name, string Path), CookieEntry>> snapshot =
+            new(StringComparer.Ordinal);
+        lock (source._lock)
+        {
+            foreach (var (domain, entries) in source._cookies)
+            {
+                snapshot[domain] = new Dictionary<(string Name, string Path), CookieEntry>(entries);
+            }
+        }
+
+        lock (_lock)
+        {
+            _cookies.Clear();
+            foreach (var (domain, entries) in snapshot)
+            {
+                _cookies[domain] = entries;
+            }
+        }
+    }
+
+    private void SetCookiesFromImport(IEnumerable<(CookieInfo Cookie, bool HostOnly)> cookies)
     {
         var now = Now();
         lock (_lock)
         {
-            foreach (var cookie in cookies)
+            foreach (var (cookie, hostOnly) in cookies)
             {
                 // RFC 6265 4.1.2.3: the leading dot is ignored. The Set-Cookie path
                 // already strips it, but this code did not, which is why one cookie
                 // became two entries.
                 var domain = CanonicalDomain(cookie.Domain);
+                if (domain.Length == 0
+                    || (PublicSuffixList.IsPublicSuffix(domain)
+                        && domain != "localhost"
+                        && !System.Net.IPAddress.TryParse(domain, out _)))
+                {
+                    continue;
+                }
+
+                var sameSite = cookie.SameSite.Length == 0
+                    ? DefaultSameSite
+                    : NormalizeSameSite(cookie.SameSite);
+                if (sameSite == "None" && !cookie.Secure)
+                {
+                    continue;
+                }
+
                 if (cookie.Expires is { } expires && (expires == 0 || (expires > 0 && expires <= now)))
                 {
                     if (_cookies.TryGetValue(domain, out var existing))
@@ -346,18 +552,13 @@ public sealed class CookieJar
                     continue;
                 }
 
-                var sameSite = cookie.SameSite.Length == 0
-                    ? DefaultSameSite
-                    : NormalizeSameSite(cookie.SameSite);
                 var entry = new CookieEntry
                 {
                     Name = cookie.Name,
                     Value = cookie.Value,
                     Path = cookie.Path,
                     Domain = domain,
-                    // CDP/persisted import is trusted; honor the explicit domain as
-                    // domain-scoped (matches the prior behavior).
-                    HostOnly = false,
+                    HostOnly = hostOnly,
                     Secure = cookie.Secure,
                     HttpOnly = cookie.HttpOnly,
                     Expires = cookie.Expires is { } e && e > 0 ? e : null,
@@ -435,7 +636,12 @@ public sealed class CookieJar
     /// </summary>
     public void SaveToFile(string path)
     {
-        var all = GetAllCookies();
+        var all = new List<PersistedCookie>();
+        foreach (var (cookie, hostOnly) in GetAllCookiesWithScope())
+        {
+            all.Add(PersistedCookie.From(cookie, hostOnly));
+        }
+
         var json = JsonSerializer.Serialize(all, CookieJsonOptions);
         var parent = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrEmpty(parent))
@@ -462,10 +668,10 @@ public sealed class CookieJar
         }
 
         var data = File.ReadAllText(path);
-        List<CookieInfo>? cookies;
+        List<PersistedCookie>? cookies;
         try
         {
-            cookies = JsonSerializer.Deserialize<List<CookieInfo>>(data, CookieJsonOptions);
+            cookies = JsonSerializer.Deserialize<List<PersistedCookie>>(data, CookieJsonOptions);
         }
         catch (JsonException error)
         {
@@ -473,7 +679,15 @@ public sealed class CookieJar
         }
 
         cookies ??= [];
-        SetCookiesFromCdp(cookies);
+        var scoped = new List<(CookieInfo, bool)>(cookies.Count);
+        foreach (var persisted in cookies)
+        {
+            // Absent in older and third-party files, whose Domain field has always
+            // meant a domain-scoped cookie.
+            scoped.Add((persisted.ToInfo(), persisted.HostOnly ?? false));
+        }
+
+        SetCookiesFromImport(scoped);
         return cookies.Count;
     }
 
@@ -482,6 +696,69 @@ public sealed class CookieJar
         WriteIndented = true,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never,
     };
+
+    /// <summary>
+    /// One <c>cookies.json</c> entry: the <see cref="CookieInfo"/> fields, then an
+    /// optional <c>hostOnly</c>, in the order serde writes Rust's
+    /// <c>PersistedCookie</c> (<c>#[serde(flatten)] cookie</c> followed by
+    /// <c>hostOnly</c>). Obscura always writes <c>hostOnly</c>; a file without it
+    /// still loads.
+    /// </summary>
+    private sealed class PersistedCookie
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; } = string.Empty;
+
+        [JsonPropertyName("value")]
+        public string Value { get; set; } = string.Empty;
+
+        [JsonPropertyName("domain")]
+        public string Domain { get; set; } = string.Empty;
+
+        [JsonPropertyName("path")]
+        public string Path { get; set; } = string.Empty;
+
+        [JsonPropertyName("secure")]
+        public bool Secure { get; set; }
+
+        [JsonPropertyName("httpOnly")]
+        public bool HttpOnly { get; set; }
+
+        [JsonPropertyName("sameSite")]
+        public string SameSite { get; set; } = string.Empty;
+
+        [JsonPropertyName("expires")]
+        public long? Expires { get; set; }
+
+        [JsonPropertyName("hostOnly")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? HostOnly { get; set; }
+
+        public static PersistedCookie From(CookieInfo cookie, bool hostOnly) => new()
+        {
+            Name = cookie.Name,
+            Value = cookie.Value,
+            Domain = cookie.Domain,
+            Path = cookie.Path,
+            Secure = cookie.Secure,
+            HttpOnly = cookie.HttpOnly,
+            SameSite = cookie.SameSite,
+            Expires = cookie.Expires,
+            HostOnly = hostOnly,
+        };
+
+        public CookieInfo ToInfo() => new()
+        {
+            Name = Name,
+            Value = Value,
+            Domain = Domain,
+            Path = Path,
+            Secure = Secure,
+            HttpOnly = HttpOnly,
+            SameSite = SameSite,
+            Expires = Expires,
+        };
+    }
 
     private static CookieInfo ToInfo(CookieEntry entry) => new()
     {
@@ -577,17 +854,13 @@ public sealed class CookieJar
     /// <paramref name="originHost"/> (RFC 6265 sections 5.2/5.3). With no Domain
     /// attribute the cookie is host-only: scoped to the exact origin host. A Domain
     /// attribute is honored only when it domain-matches the origin (equal to it or a
-    /// parent domain) and is not an obvious public suffix; otherwise the attribute is
-    /// ignored and the cookie is stored host-only on the origin. This is what stops a
-    /// response from attacker.test planting a cookie scoped to victim.test.
+    /// parent domain) and is not a public suffix. An invalid Domain rejects the cookie
+    /// (returns false) rather than silently changing its scope; this is what stops a
+    /// response from attacker.test planting a cookie scoped to victim.test. Per RFC
+    /// 6265, a public suffix equal to the origin host is kept as a host-only cookie.
     ///
-    /// Returns false only when the origin host itself is absent (the cookie cannot be
-    /// scoped and is dropped).
-    ///
-    /// Note: a full public suffix list is not bundled, so multi-label public suffixes
-    /// (co.uk, github.io) are not rejected; the domain-match check still blocks the
-    /// reported cross-domain attack, and single-label suffixes (com, local) are
-    /// rejected.
+    /// The public suffix list is the curated <see cref="PublicSuffixList"/>, so a
+    /// multi-label suffix missing from it is accepted as a Domain.
     /// </summary>
     internal static bool TryResolveCookieDomain(
         string originHost,
@@ -609,20 +882,38 @@ public sealed class CookieJar
         }
 
         var dom = CanonicalDomain(domainAttr);
-        if (dom.Length == 0 || string.Equals(dom, origin, StringComparison.Ordinal))
+
+        // Deviation: Rust rejects an empty Domain (`Domain=`). Chromium and RFC
+        // 6265bis 5.6.3 ignore the attribute, so the cookie stays host-only.
+        if (dom.Length == 0)
         {
             return true;
         }
 
-        if (dom.Contains('.', StringComparison.Ordinal)
-            && origin.EndsWith($".{dom}", StringComparison.Ordinal))
+        // Deviation: Rust runs an IP host through the suffix check too, which lets
+        // 10.0.0.1 set Domain=0.0.1. Chromium accepts a Domain on an IP host only when
+        // it is the address itself, and stores a host cookie.
+        if (System.Net.IPAddress.TryParse(origin, out _))
+        {
+            return string.Equals(dom, origin, StringComparison.Ordinal);
+        }
+
+        if (PublicSuffixList.IsPublicSuffix(dom))
+        {
+            return string.Equals(dom, origin, StringComparison.Ordinal);
+        }
+
+        if (string.Equals(dom, origin, StringComparison.Ordinal)
+            || (origin.Length > dom.Length
+                && origin.EndsWith(dom, StringComparison.Ordinal)
+                && origin[origin.Length - dom.Length - 1] == '.'))
         {
             domain = dom;
             hostOnly = false;
             return true;
         }
 
-        return true;
+        return false;
     }
 
     /// <summary>

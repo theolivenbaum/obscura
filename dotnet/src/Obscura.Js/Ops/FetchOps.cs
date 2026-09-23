@@ -503,7 +503,8 @@ public static class FetchOps
                         && jar is not null
                         && Uri.TryCreate(currentUrl, UriKind.Absolute, out var cookieUri))
                     {
-                        var cookieHeader = jar.GetCookieHeader(cookieUri);
+                        var cookieHeader = jar.GetCookieHeaderInContext(
+                            cookieUri, CookieJar.ContextForInitiator(pageOrigin, cookieUri));
                         if (cookieHeader.Length != 0)
                         {
                             request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);

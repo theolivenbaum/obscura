@@ -384,7 +384,7 @@ public sealed class ObscuraHttpClient : IDisposable
             }
         }
 
-        if (request.SendsCredentialsTo(url) && CookieJar.GetCookieHeader(url).Length != 0)
+        if (request.SendsCredentialsTo(url) && CookieJar.GetCookieHeaderSameSite(url).Length != 0)
         {
             return null;
         }
@@ -794,7 +794,9 @@ public sealed class ObscuraHttpClient : IDisposable
         }
 
         var cookieHeader = request.SendsCredentialsTo(currentUrl)
-            ? CookieJar.GetCookieHeader(currentUrl)
+            ? CookieJar.GetCookieHeaderInContext(
+                currentUrl,
+                SameSiteContextFor(request, currentUrl, method == HttpMethod.Get || method == HttpMethod.Head))
             : string.Empty;
         if (cookieHeader.Length != 0)
         {
@@ -1141,6 +1143,29 @@ public sealed class ObscuraHttpClient : IDisposable
         // resource scheduler. Until then, cross-site is the safe conservative value; it
         // never overstates ambient trust.
         return UrlOrigin.SameOrigin(initiator, target) ? "same-origin" : "cross-site";
+    }
+
+    /// <summary>
+    /// The SameSite context for a request's cookies (port of <c>same_site_context</c>
+    /// in <c>client.rs</c>). No initiator is a browser-initiated navigation, which is
+    /// same-site; a cross-site top-level navigation with a safe method may carry Lax
+    /// cookies; anything else cross-site carries only SameSite=None.
+    /// </summary>
+    internal static SameSiteContext SameSiteContextFor(ResourceRequest request, Uri target, bool methodIsSafe)
+    {
+        if (request.Initiator is not { } initiator)
+        {
+            return SameSiteContext.SameSite;
+        }
+
+        if (CookieJar.IsSameSite(initiator, target))
+        {
+            return SameSiteContext.SameSite;
+        }
+
+        return request.Mode == RequestMode.Navigate && methodIsSafe
+            ? SameSiteContext.CrossSiteTopLevelSafe
+            : SameSiteContext.CrossSite;
     }
 
     internal static string? RequestReferrer(ResourceRequest request, Uri target)

@@ -43,6 +43,8 @@ public sealed class ContextTests
 
         Assert.Single(persistent.CookieJar.GetAllCookies());
         Assert.Empty(incognito.CookieJar.GetAllCookies());
+        // Upstream 04418a5: the copy keeps the host-only scope.
+        Assert.Equal(string.Empty, persistent.CookieJar.GetCookieHeader(new Uri("https://sub.example.com")));
         persistent.CookieJar.Clear();
         persistent.HttpClient.SetUserAgent("Changed-UA/2.0");
 

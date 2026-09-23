@@ -927,7 +927,7 @@ public static partial class CdpServer
         using (stream)
         {
             var defaultContext = template.IsolatedCopy("default", true);
-            var initialCookies = defaultContext.CookieJar.GetAllCookies();
+            var initialCookies = defaultContext.CookieJar.GetAllCookiesWithScope();
 
             try
             {
@@ -996,7 +996,7 @@ public static partial class CdpServer
                         ServerSupport.MergeCookieDelta(
                             persistence.CookieJar,
                             initialCookies,
-                            defaultContext.CookieJar.GetAllCookies());
+                            defaultContext.CookieJar.GetAllCookiesWithScope());
                         persistence.SaveCookies();
                     }
                 }

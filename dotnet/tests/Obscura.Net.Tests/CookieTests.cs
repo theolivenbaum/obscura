@@ -523,8 +523,10 @@ public class CookieTests
 
         var victim = new Uri("http://victim.test/account");
         Assert.DoesNotContain("sid=attacker", jar.GetCookieHeader(victim), StringComparison.Ordinal);
-        // The cookie is stored host-only on the attacker origin instead.
-        Assert.Contains("sid=attacker", jar.GetCookieHeader(attacker), StringComparison.Ordinal);
+        // Upstream 04418a5: an invalid Domain attribute rejects the cookie rather than
+        // silently changing its scope. It used to be stored host-only on the attacker
+        // origin; Chromium rejects it too.
+        Assert.DoesNotContain("sid=attacker", jar.GetCookieHeader(attacker), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -547,6 +549,276 @@ public class CookieTests
         // "com" is a public suffix; the cookie must not be scoped to it.
         var other = new Uri("http://other.com/");
         Assert.DoesNotContain("bad=1", jar.GetCookieHeader(other), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MultiLabelAndPrivatePublicSuffixesAreRejected()
+    {
+        (string Origin, string Suffix, string Sibling)[] cases =
+        [
+            ("https://a.example.co.uk/", "co.uk", "https://b.example.co.uk/"),
+            ("https://alice.github.io/", "github.io", "https://bob.github.io/"),
+        ];
+        foreach (var (origin, suffix, sibling) in cases)
+        {
+            var jar = new CookieJar();
+            jar.SetCookie($"sid=secret; Domain={suffix}; Path=/; Secure", new Uri(origin));
+            Assert.Equal(string.Empty, jar.GetCookieHeaderSameSite(new Uri(origin)));
+            Assert.Equal(string.Empty, jar.GetCookieHeaderSameSite(new Uri(sibling)));
+        }
+
+        var suffixJar = new CookieJar();
+        var publicSuffixHost = new Uri("https://github.io/");
+        suffixJar.SetCookie("sid=secret; Domain=github.io; Path=/; Secure", publicSuffixHost);
+        Assert.Contains("sid=secret", suffixJar.GetCookieHeaderSameSite(publicSuffixHost), StringComparison.Ordinal);
+        Assert.Equal(string.Empty, suffixJar.GetCookieHeaderSameSite(new Uri("https://sub.github.io/")));
+    }
+
+    [Fact]
+    public void InsecureOriginCannotSetOrOverwriteSecureCookie()
+    {
+        var jar = new CookieJar();
+        var https = new Uri("https://example.com/");
+        var http = new Uri("http://example.com/");
+
+        jar.SetCookie("sid=secure; Secure; Path=/", https);
+        jar.SetCookie("sid=attacker; Path=/", http);
+        Assert.Equal("sid=secure", jar.GetCookieHeaderSameSite(https));
+
+        jar.SetCookie("new=attacker; Secure; Path=/", http);
+        Assert.DoesNotContain("new=", jar.GetCookieHeaderSameSite(https), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InsecureOriginCannotDeleteSecureCookie()
+    {
+        // The overlay check runs before the Max-Age=0 delete, as it does in Rust.
+        var jar = new CookieJar();
+        jar.SetCookie("sid=secure; Secure; Path=/", new Uri("https://example.com/"));
+        jar.SetCookieFromJs("sid=; Max-Age=0; Path=/", new Uri("http://example.com/"));
+        Assert.Equal("sid=secure", jar.GetCookieHeaderSameSite(new Uri("https://example.com/")));
+    }
+
+    [Fact]
+    public void HostOnlyScopeSurvivesSaveAndLoad()
+    {
+        var directory = Directory.CreateTempSubdirectory("obscura-cookies");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "cookies.json");
+            var jar = new CookieJar();
+            var host = new Uri("https://www.example.com/");
+            jar.SetCookie("sid=host-only; Secure; Path=/", host);
+            jar.SaveToFile(path);
+
+            var loaded = new CookieJar();
+            loaded.LoadFromFile(path);
+            Assert.Contains("sid=host-only", loaded.GetCookieHeaderSameSite(host), StringComparison.Ordinal);
+            Assert.Equal(string.Empty, loaded.GetCookieHeaderSameSite(new Uri("https://sub.www.example.com/")));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CookiesJsonWritesHostOnlyAfterTheCookieInfoFields()
+    {
+        // serde writes Rust's PersistedCookie as the flattened CookieInfo, then hostOnly.
+        var directory = Directory.CreateTempSubdirectory("obscura-cookies");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "cookies.json");
+            var jar = new CookieJar();
+            jar.SetCookie("sid=1; Path=/", new Uri("https://example.com/"));
+            jar.SaveToFile(path);
+
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var names = document.RootElement[0].EnumerateObject().Select(p => p.Name).ToArray();
+            Assert.Equal(
+                ["name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "expires", "hostOnly"],
+                names);
+            Assert.True(document.RootElement[0].GetProperty("hostOnly").GetBoolean());
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CookiesJsonWithoutHostOnlyLoadsDomainScoped()
+    {
+        var directory = Directory.CreateTempSubdirectory("obscura-cookies");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "cookies.json");
+            File.WriteAllText(
+                path,
+                """[{"name":"sid","value":"1","domain":"example.com","path":"/","secure":false,"httpOnly":false,"sameSite":"Lax","expires":null}]""");
+            var jar = new CookieJar();
+            Assert.Equal(1, jar.LoadFromFile(path));
+            Assert.Contains("sid=1", jar.GetCookieHeaderSameSite(new Uri("https://api.example.com/")), StringComparison.Ordinal);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SameSiteIsEnforcedForSubresources()
+    {
+        var jar = new CookieJar();
+        var target = new Uri("https://api.example.com/data");
+        jar.SetCookie("strict=1; Domain=example.com; SameSite=Strict; Secure", target);
+        jar.SetCookie("lax=1; Domain=example.com; SameSite=Lax; Secure", target);
+        jar.SetCookie("none=1; Domain=example.com; SameSite=None; Secure", target);
+
+        var sameSiteSource = new Uri("https://www.example.com/page");
+        Assert.True(CookieJar.IsSameSite(sameSiteSource, target));
+        var sameSiteHeader = jar.GetCookieHeaderInContext(target, SameSiteContext.SameSite);
+        Assert.Contains("strict=1", sameSiteHeader, StringComparison.Ordinal);
+        Assert.Contains("lax=1", sameSiteHeader, StringComparison.Ordinal);
+        Assert.Contains("none=1", sameSiteHeader, StringComparison.Ordinal);
+
+        var crossSiteSource = new Uri("https://attacker.test/page");
+        Assert.False(CookieJar.IsSameSite(crossSiteSource, target));
+        Assert.Equal("none=1", jar.GetCookieHeaderInContext(target, SameSiteContext.CrossSite));
+
+        var topLevel = jar.GetCookieHeaderInContext(target, SameSiteContext.CrossSiteTopLevelSafe);
+        Assert.DoesNotContain("strict=1", topLevel, StringComparison.Ordinal);
+        Assert.Contains("lax=1", topLevel, StringComparison.Ordinal);
+        Assert.Contains("none=1", topLevel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SameSiteNoneRequiresSecure()
+    {
+        var jar = new CookieJar();
+        var target = new Uri("https://example.com/");
+        jar.SetCookie("insecure=1; SameSite=None", target);
+        jar.SetCookie("secure=1; SameSite=None; Secure", target);
+        Assert.Equal("secure=1", jar.GetCookieHeaderInContext(target, SameSiteContext.CrossSite));
+    }
+
+    [Fact]
+    public void SameSiteUsesRegistrableDomainAndScheme()
+    {
+        Assert.True(CookieJar.IsSameSite(new Uri("https://a.example.co.uk/"), new Uri("https://b.example.co.uk/")));
+        Assert.False(CookieJar.IsSameSite(new Uri("https://a.example.co.uk/"), new Uri("https://b.other.co.uk/")));
+        Assert.False(CookieJar.IsSameSite(new Uri("https://alice.github.io/"), new Uri("https://bob.github.io/")));
+        Assert.False(CookieJar.IsSameSite(new Uri("http://example.com/"), new Uri("https://example.com/")));
+        Assert.True(CookieJar.IsSameSite(new Uri("https://example.com:8443/"), new Uri("https://www.example.com/")));
+    }
+
+    [Fact]
+    public void IpHostsAreTheirOwnSite()
+    {
+        // Deviation from Rust, whose psl lookup reads the last two octets as a site.
+        Assert.False(CookieJar.IsSameSite(new Uri("http://10.0.0.1/"), new Uri("http://192.168.0.1/")));
+        Assert.True(CookieJar.IsSameSite(new Uri("http://10.0.0.1/"), new Uri("http://10.0.0.1:8080/")));
+    }
+
+    [Fact]
+    public void ContextForInitiatorTreatsAnOpaqueOriginAsCrossSite()
+    {
+        var target = new Uri("https://example.com/api");
+        Assert.Equal(SameSiteContext.SameSite, CookieJar.ContextForInitiator("https://www.example.com", target));
+        Assert.Equal(SameSiteContext.CrossSite, CookieJar.ContextForInitiator("https://attacker.test", target));
+        Assert.Equal(SameSiteContext.CrossSite, CookieJar.ContextForInitiator("null", target));
+        Assert.Equal(SameSiteContext.CrossSite, CookieJar.ContextForInitiator(string.Empty, target));
+    }
+
+    [Fact]
+    public void HttpClientDerivesTheContextFromTheInitiatorAndMode()
+    {
+        // Port of same_site_context in client.rs.
+        var target = new Uri("https://api.example.com/data");
+        var attacker = new Uri("https://attacker.test/page");
+
+        Assert.Equal(
+            SameSiteContext.SameSite,
+            ObscuraHttpClient.SameSiteContextFor(ResourceRequest.Navigation(), target, methodIsSafe: false));
+        Assert.Equal(
+            SameSiteContext.SameSite,
+            ObscuraHttpClient.SameSiteContextFor(
+                ResourceRequest.Subresource(ResourceType.Script, new Uri("https://www.example.com/")), target, true));
+        Assert.Equal(
+            SameSiteContext.CrossSite,
+            ObscuraHttpClient.SameSiteContextFor(ResourceRequest.Subresource(ResourceType.Image, attacker), target, true));
+
+        var navigation = ResourceRequest.Subresource(ResourceType.Document, attacker);
+        Assert.Equal(
+            SameSiteContext.CrossSiteTopLevelSafe,
+            ObscuraHttpClient.SameSiteContextFor(navigation, target, methodIsSafe: true));
+        Assert.Equal(
+            SameSiteContext.CrossSite,
+            ObscuraHttpClient.SameSiteContextFor(navigation, target, methodIsSafe: false));
+    }
+
+    [Fact]
+    public void EmptyDomainAttributeIsIgnored()
+    {
+        // Deviation from Rust, which rejects the cookie: Chromium and RFC 6265bis 5.6.3
+        // ignore an empty Domain, leaving the cookie host-only.
+        var jar = new CookieJar();
+        var www = new Uri("https://www.example.com/");
+        jar.SetCookie("sid=1; Domain=; Path=/", www);
+        Assert.Equal("sid=1", jar.GetCookieHeaderSameSite(www));
+        Assert.Equal(string.Empty, jar.GetCookieHeaderSameSite(new Uri("https://sub.www.example.com/")));
+    }
+
+    [Fact]
+    public void IpHostAcceptsOnlyItsOwnAddressAsDomain()
+    {
+        // Deviation from Rust (which accepts Domain=0.0.1 on 10.0.0.1): Chromium takes a
+        // Domain on an IP host only when it is that address, as a host cookie.
+        var jar = new CookieJar();
+        var ip = new Uri("http://10.0.0.1/");
+        jar.SetCookie("wide=1; Domain=0.0.1; Path=/", ip);
+        jar.SetCookie("exact=1; Domain=10.0.0.1; Path=/", ip);
+        Assert.Equal("exact=1", jar.GetCookieHeaderSameSite(ip));
+    }
+
+    [Fact]
+    public void DomainEqualToTheOriginIsDomainScoped()
+    {
+        // Upstream 04418a5: Domain=example.com set by example.com reaches subdomains, as
+        // in Chromium. It used to be stored host-only.
+        var jar = new CookieJar();
+        jar.SetCookie("sid=1; Domain=example.com; Path=/", new Uri("https://example.com/"));
+        Assert.Equal("sid=1", jar.GetCookieHeaderSameSite(new Uri("https://api.example.com/")));
+    }
+
+    [Fact]
+    public void CdpImportSkipsPublicSuffixAndInsecureSameSiteNone()
+    {
+        var jar = new CookieJar();
+        var suffix = Cdp("a", "1", "co.uk", "/");
+        var none = Cdp("b", "1", "example.com", "/");
+        none.SameSite = "None";
+        var localhost = Cdp("c", "1", "localhost", "/");
+        jar.SetCookiesFromCdp([suffix, none, localhost]);
+        var all = jar.GetAllCookies();
+        Assert.Single(all);
+        Assert.Equal("c", all[0].Name);
+    }
+
+    [Fact]
+    public void CopyFromKeepsHostOnlyScopeAndIsIndependent()
+    {
+        var source = new CookieJar();
+        source.SetCookie("host=1; Path=/", new Uri("https://example.com/"));
+        var copy = new CookieJar();
+        copy.SetCookie("stale=1; Path=/", new Uri("https://example.com/"));
+        copy.CopyFrom(source);
+
+        Assert.Equal("host=1", copy.GetCookieHeaderSameSite(new Uri("https://example.com/")));
+        Assert.Equal(string.Empty, copy.GetCookieHeaderSameSite(new Uri("https://sub.example.com/")));
+        copy.Clear();
+        Assert.Single(source.GetAllCookies());
     }
 
     [Fact]

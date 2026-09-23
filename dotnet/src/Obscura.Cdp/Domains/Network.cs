@@ -99,7 +99,7 @@ public static class Network
                     return DomainResult.Err("setCookie: missing required name/domain (or url)");
                 }
 
-                CookieJarFor(ctx, sessionId).SetCookiesFromCdp([cookie]);
+                CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope([(cookie.Cookie, cookie.HostOnly)]);
                 return DomainResult.Ok(new JsonObject { ["success"] = true });
             }
 
@@ -107,7 +107,7 @@ public static class Network
             {
                 if (parameters.Get("cookies").AsJsonArray() is { } cookies)
                 {
-                    CookieJarFor(ctx, sessionId).SetCookiesFromCdp(ParseCookies(cookies));
+                    CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope(ParseCookies(cookies));
                 }
 
                 return DomainResult.Empty();
@@ -200,14 +200,15 @@ public static class Network
         }
     }
 
-    internal static List<CookieInfo> ParseCookies(JsonArray cookies)
+    /// <summary>Parse a <c>cookies</c> array, keeping each cookie's host-only scope.</summary>
+    internal static List<(CookieInfo Cookie, bool HostOnly)> ParseCookies(JsonArray cookies)
     {
-        var parsed = new List<CookieInfo>();
+        var parsed = new List<(CookieInfo, bool)>();
         foreach (JsonNode? entry in cookies)
         {
             if (CookieParams.ParseCdpCookie(entry) is { } cookie)
             {
-                parsed.Add(cookie);
+                parsed.Add((cookie.Cookie, cookie.HostOnly));
             }
         }
 

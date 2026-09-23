@@ -136,6 +136,21 @@ public sealed class ServerTests
         Assert.DoesNotContain(cookies, c => string.Equals(c.Name, "removed", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void CookieDeltaKeepsHostOnlyScope()
+    {
+        // Deviation from Rust's merge_cookie_delta, which widens a host-only cookie a
+        // connection set to every subdomain of its host in the persisted jar.
+        var destination = new CookieJar();
+        var connection = new CookieJar();
+        connection.SetCookie("sid=1; Path=/", new Uri("https://example.com/"));
+
+        ServerSupport.MergeCookieDelta(destination, [], connection.GetAllCookiesWithScope());
+
+        Assert.Equal("sid=1", destination.GetCookieHeader(new Uri("https://example.com/")));
+        Assert.Equal(string.Empty, destination.GetCookieHeader(new Uri("https://sub.example.com/")));
+    }
+
     /// <summary>
     /// Issue #363: only an exact <c>Page.navigate</c> may take the spawn-and-defer
     /// navigation path. A substring match also caught

@@ -45,7 +45,7 @@ public static class Storage
                     if (parameters.Get("cookies").AsJsonArray() is { } cookies)
                     {
                         CookieJarFor(ctx, parameters, sessionId)
-                            .SetCookiesFromCdp(Network.ParseCookies(cookies));
+                            .SetCookiesFromCdpWithScope(Network.ParseCookies(cookies));
                     }
 
                     return DomainResult.Empty();

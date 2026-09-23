@@ -14,6 +14,12 @@ public sealed class DeleteCookiesFilter
     public required string? Path { get; init; }
 }
 
+/// <summary>
+/// A parsed CDP cookie and its scope: host-only when the payload named a <c>url</c>
+/// and no <c>domain</c>, as a cookie set from that URL without a Domain attribute is.
+/// </summary>
+public sealed record ParsedCookie(CookieInfo Cookie, bool HostOnly);
+
 /// <summary>Turning CDP cookie payloads into <see cref="CookieInfo"/>.</summary>
 public static class CookieParams
 {
@@ -23,7 +29,7 @@ public static class CookieParams
     /// Read one <c>Network.setCookie</c>-shaped object. Null when the payload
     /// carries neither a name nor a domain the cookie could be scoped to.
     /// </summary>
-    public static CookieInfo? ParseCdpCookie(JsonNode? value)
+    public static ParsedCookie? ParseCdpCookie(JsonNode? value)
     {
         if (value.Get("name").AsString() is not { } name)
         {
@@ -34,7 +40,8 @@ public static class CookieParams
 
         var urlParsed = value.Get("url").AsString() is { } rawUrl ? UrlRecord.Parse(rawUrl) : null;
 
-        var domain = value.Get("domain").AsString() ?? urlParsed?.HostStr ?? string.Empty;
+        var explicitDomain = value.Get("domain").AsString();
+        var domain = explicitDomain ?? urlParsed?.HostStr ?? string.Empty;
         if (domain.Length == 0)
         {
             return null;
@@ -49,17 +56,19 @@ public static class CookieParams
         var sameSite = value.Get("sameSite").AsStringOr(string.Empty);
         var expires = value.Get("expires").AsF64() is { } seconds ? SaturatingI64(seconds) : (long?)null;
 
-        return new CookieInfo
-        {
-            Name = name,
-            Value = cookieValue,
-            Domain = domain,
-            Path = path,
-            Secure = secure,
-            HttpOnly = httpOnly,
-            SameSite = sameSite,
-            Expires = expires,
-        };
+        return new ParsedCookie(
+            new CookieInfo
+            {
+                Name = name,
+                Value = cookieValue,
+                Domain = domain,
+                Path = path,
+                Secure = secure,
+                HttpOnly = httpOnly,
+                SameSite = sameSite,
+                Expires = expires,
+            },
+            HostOnly: explicitDomain is null);
     }
 
     /// <summary>

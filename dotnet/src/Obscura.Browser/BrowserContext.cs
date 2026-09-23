@@ -177,7 +177,9 @@ public sealed class BrowserContext
         };
         if (persistent)
         {
-            copy.CookieJar.SetCookiesFromCdp(CookieJar.GetAllCookies());
+            // A raw copy, so host-only cookies stay host-only. Going through the CDP
+            // model would widen every one of them to its subdomains.
+            copy.CookieJar.CopyFrom(CookieJar);
         }
         return copy;
     }

@@ -175,40 +175,66 @@ internal static class ServerSupport
     internal static void MergeCookieDelta(
         CookieJar destination,
         IReadOnlyList<CookieInfo> initial,
-        IReadOnlyList<CookieInfo> current)
+        IReadOnlyList<CookieInfo> current) =>
+        MergeCookieDelta(destination, DomainScoped(initial), DomainScoped(current));
+
+    /// <inheritdoc cref="MergeCookieDelta(CookieJar, IReadOnlyList{CookieInfo}, IReadOnlyList{CookieInfo})"/>
+    /// <remarks>
+    /// Deviation: Rust's <c>merge_cookie_delta</c> writes the changes back through
+    /// <c>set_cookies_from_cdp</c>, which widens every host-only cookie a connection set
+    /// to its subdomains in the persisted jar. This carries each cookie's host-only
+    /// flag through, the same leak upstream 04418a5 closed for isolated copies.
+    /// </remarks>
+    internal static void MergeCookieDelta(
+        CookieJar destination,
+        IReadOnlyList<(CookieInfo Cookie, bool HostOnly)> initial,
+        IReadOnlyList<(CookieInfo Cookie, bool HostOnly)> current)
     {
-        Dictionary<(string, string, string), CookieInfo> before = [];
-        foreach (var cookie in initial)
+        Dictionary<(string, string, string), (CookieInfo Cookie, bool HostOnly)> before = [];
+        foreach (var scoped in initial)
         {
-            before[CookieKey(cookie)] = cookie;
+            before[CookieKey(scoped.Cookie)] = scoped;
         }
 
-        Dictionary<(string, string, string), CookieInfo> after = [];
-        foreach (var cookie in current)
+        Dictionary<(string, string, string), (CookieInfo Cookie, bool HostOnly)> after = [];
+        foreach (var scoped in current)
         {
-            after[CookieKey(cookie)] = cookie;
+            after[CookieKey(scoped.Cookie)] = scoped;
         }
 
-        foreach (var (key, cookie) in before)
+        foreach (var (key, scoped) in before)
         {
             if (!after.ContainsKey(key))
             {
-                destination.DeleteCookiesFiltered(cookie.Name, cookie.Domain, cookie.Path);
+                destination.DeleteCookiesFiltered(scoped.Cookie.Name, scoped.Cookie.Domain, scoped.Cookie.Path);
             }
         }
 
-        List<CookieInfo> changed = [];
-        foreach (var (key, cookie) in after)
+        List<(CookieInfo, bool)> changed = [];
+        foreach (var (key, scoped) in after)
         {
-            if (before.TryGetValue(key, out var previous) && CookieValuesMatch(previous, cookie))
+            if (before.TryGetValue(key, out var previous)
+                && previous.HostOnly == scoped.HostOnly
+                && CookieValuesMatch(previous.Cookie, scoped.Cookie))
             {
                 continue;
             }
 
-            changed.Add(cookie);
+            changed.Add(scoped);
         }
 
-        destination.SetCookiesFromCdp(changed);
+        destination.SetCookiesFromCdpWithScope(changed);
+    }
+
+    private static List<(CookieInfo, bool)> DomainScoped(IReadOnlyList<CookieInfo> cookies)
+    {
+        var scoped = new List<(CookieInfo, bool)>(cookies.Count);
+        foreach (var cookie in cookies)
+        {
+            scoped.Add((cookie, false));
+        }
+
+        return scoped;
     }
 
     /// <summary>Seconds since the Unix epoch, as <c>Duration::as_secs_f64</c> reports them.</summary>
