@@ -72,6 +72,54 @@ public sealed class OpsTests
         Assert.Equal(32, dk.Length);
     }
 
+    // HKDF and the CSPRNG draw share the same DoS shape: both size an output
+    // buffer straight from an untrusted u32 length. Each must reject a length
+    // above its fixed maximum before allocating, and still work for ordinary
+    // inputs. See #910.
+
+    [Fact]
+    public void Hkdf_rejects_excessive_output_length()
+    {
+        // HKDF.DeriveKey rejects above 255*HashLen before allocating, so the
+        // message is the C# one rather than upstream's "exceeds" wording.
+        Assert.Throws<CryptoOperationException>(() => CryptoOps.Hkdf(
+            "SHA-256",
+            Encoding.ASCII.GetBytes("ikm"),
+            Encoding.ASCII.GetBytes("salt"),
+            Encoding.ASCII.GetBytes("info"),
+            CryptoOps.HkdfMaxOutputBytes + 1));
+        Assert.Throws<CryptoOperationException>(() => CryptoOps.Hkdf(
+            "SHA-256", [1], [], [], uint.MaxValue));
+    }
+
+    [Fact]
+    public void Hkdf_derives_within_limits()
+    {
+        var okm = CryptoOps.Hkdf(
+            "SHA-256",
+            Encoding.ASCII.GetBytes("ikm"),
+            Encoding.ASCII.GetBytes("salt"),
+            Encoding.ASCII.GetBytes("info"),
+            32);
+        Assert.Equal(32, okm.Length);
+    }
+
+    [Fact]
+    public void Random_bytes_rejects_excessive_length()
+    {
+        var error = Assert.Throws<CryptoOperationException>(
+            () => CryptoOps.RandomBytes(CryptoOps.RandomBytesMax + 1));
+        Assert.Contains("exceeds", error.Message, StringComparison.Ordinal);
+        Assert.Throws<CryptoOperationException>(() => CryptoOps.RandomBytes(uint.MaxValue));
+    }
+
+    [Fact]
+    public void Random_bytes_within_limits()
+    {
+        Assert.Equal(32, CryptoOps.RandomBytes(32).Length);
+        Assert.Equal((int)CryptoOps.RandomBytesMax, CryptoOps.RandomBytes(CryptoOps.RandomBytesMax).Length);
+    }
+
     // SEC-005 / #581 - op_fetch_url must not buffer an unbounded response body.
     // ReadBodyCappedAsync streams the body and refuses anything larger than the
     // cap, covering a server that just keeps sending with no Content-Length.

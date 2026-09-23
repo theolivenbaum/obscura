@@ -206,7 +206,32 @@ public static class CryptoOps
     /// generation. Must stay cryptographically random: a Math.random-style shim
     /// is both non-uniform across typed-array widths and a fingerprinting tell.
     /// </summary>
-    public static byte[] RandomBytes(uint length) => RandomNumberGenerator.GetBytes((int)length);
+    public static byte[] RandomBytes(uint length)
+    {
+        if (length > RandomBytesMax)
+        {
+            throw new CryptoOperationException(
+                $"random byte request of {length} bytes exceeds the supported maximum of {RandomBytesMax}");
+        }
+
+        return RandomNumberGenerator.GetBytes((int)length);
+    }
+
+    /// <summary>
+    /// DoS backstop on one CSPRNG draw. <c>getRandomValues</c> already enforces
+    /// the WebCrypto 65536-byte limit in JS, but HMAC <c>generateKey</c> passes a
+    /// page-controlled length straight through, which would otherwise force a
+    /// GB-scale allocation on the runtime thread (upstream c2e6fb2, #910).
+    /// </summary>
+    public const uint RandomBytesMax = 1024 * 1024;
+
+    /// <summary>
+    /// The HKDF output length upstream caps at. <see cref="Hkdf"/> needs no
+    /// explicit check: <see cref="HKDF.DeriveKey(HashAlgorithmName, byte[], int, byte[], byte[])"/>
+    /// rejects anything above 255*HashLen before allocating, and a length above
+    /// <see cref="int.MaxValue"/> casts negative and is rejected too.
+    /// </summary>
+    public const uint HkdfMaxOutputBytes = 1024 * 1024;
 
     private static void RequireAesKeyLength(byte[] key, string algorithm)
     {
