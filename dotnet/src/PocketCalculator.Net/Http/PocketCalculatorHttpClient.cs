@@ -133,16 +133,12 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
     }
 
-    private void ExtendExtraHeaders(IReadOnlyDictionary<string, string> headers)
-    {
-        lock (_stateLock)
-        {
-            foreach (var (name, value) in headers)
-            {
-                _extraHeaders[name] = value;
-            }
-        }
-    }
+    /// <summary>
+    /// Resolves a proxied request's target host so it can be vetted before the proxy
+    /// sees it. Tests substitute a resolver; the default asks the system resolver.
+    /// </summary>
+    internal Func<string, CancellationToken, Task<IPAddress[]>> ProxyTargetResolver { get; set; } =
+        static (host, token) => Dns.GetHostAddressesAsync(host, token);
 
     /// <summary>
     /// Read-only accessor for the proxy URL the client was configured with (if any).
@@ -228,15 +224,37 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 handler.SslOptions.RemoteCertificateValidationCallback = ValidateWithConfiguredRoots;
             }
 
+            // Deviation from client.rs (SECURITY.md M2): reqwest, like SocketsHttpHandler,
+            // picks up HTTP_PROXY / HTTPS_PROXY from the environment. Behind a proxy the
+            // connect-time guard sees only the proxy's address, so an ambient proxy
+            // silently switched off the hostname half of the SSRF check. Only a proxy
+            // the operator configured (--proxy, POCKETCALCULATOR_PROXY, BrowserConfig)
+            // is used, and its targets are vetted by TransportGuardHandler.
+            handler.UseProxy = false;
+            var proxied = false;
             if (_proxyUrl is not null && Uri.TryCreate(_proxyUrl, UriKind.Absolute, out var proxyUri))
             {
                 handler.Proxy = new WebProxy(proxyUri);
                 handler.UseProxy = true;
+                proxied = true;
             }
 
-            _client = new HttpClient(handler, disposeHandler: true) { Timeout = Timeout };
+            var guard = new TransportGuardHandler(this, proxied, handler);
+            _client = new HttpClient(guard, disposeHandler: true) { Timeout = Timeout };
             return _client;
         }
+    }
+
+    /// <summary>Whether <see cref="BlockTrackers"/> refuses a request to <paramref name="url"/>.</summary>
+    internal bool IsBlockedTracker(Uri url)
+    {
+        if (!BlockTrackers)
+        {
+            return false;
+        }
+
+        var host = UrlOrigin.Host(url);
+        return host.Length != 0 && Blocklist.IsBlocked(host);
     }
 
     /// <summary>
@@ -588,22 +606,6 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
         var method = initialMethod;
         var body = initialBody;
-        if (BlockTrackers)
-        {
-            var blockedHost = UrlOrigin.Host(url);
-            if (blockedHost.Length != 0 && Blocklist.IsBlocked(blockedHost))
-            {
-                return new Response
-                {
-                    Status = 0,
-                    Url = url,
-                    Headers = new Dictionary<string, string>(StringComparer.Ordinal),
-                    Body = [],
-                    RedirectedFrom = [],
-                };
-            }
-        }
-
         var currentUrl = url;
         var redirects = new List<Uri>();
         // Follow up to 20 redirects, matching the Fetch spec and the fetch()/XHR path
@@ -615,6 +617,20 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
         for (var redirectCount = 0; redirectCount <= MaxRedirects; redirectCount++)
         {
+            // Deviation from client.rs, which checks the blocklist on the first URL only
+            // (SECURITY.md L7): a redirect into a tracker is blocked the same way.
+            if (IsBlockedTracker(currentUrl))
+            {
+                return new Response
+                {
+                    Status = 0,
+                    Url = currentUrl,
+                    Headers = new Dictionary<string, string>(StringComparer.Ordinal),
+                    Body = [],
+                    RedirectedFrom = redirects,
+                };
+            }
+
             ValidateRequestMode(request, currentUrl);
             var requestInfo = new RequestInfo
             {
@@ -624,6 +640,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 ResourceType = request.ResourceType,
             };
 
+            IReadOnlyDictionary<string, string>? hopHeaders = null;
             if (Interceptor is { } interceptor)
             {
                 var action = await interceptor.InterceptAsync(requestInfo).ConfigureAwait(false);
@@ -636,7 +653,11 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                     case InterceptAction.Fulfill fulfill:
                         return fulfill.Response;
                     case InterceptAction.ModifyHeaders modify:
-                        ExtendExtraHeaders(modify.Headers);
+                        // Deviation from client.rs, which merges these into the
+                        // client-wide extra headers for good (SECURITY.md L8): a header
+                        // added for one request (an Authorization, say) then went to
+                        // every later host. They apply to this request only.
+                        hopHeaders = modify.Headers;
                         break;
                     default:
                         break;
@@ -650,14 +671,24 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             }
 
             var requestOrigin = SerializedRequestOrigin(request, redirectTainted);
-            using var message = BuildRequest(method, currentUrl, body, request, requestOrigin, redirects);
+            using var message = BuildRequest(method, currentUrl, body, request, requestOrigin, redirects, hopHeaders);
+
+            // Deviation (SECURITY.md M3): HttpClient.Timeout stops at the response
+            // headers under ResponseHeadersRead, so a server trickling the body held a
+            // navigation forever. One deadline spans this hop's headers and body.
+            using var hopDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (Timeout > TimeSpan.Zero && Timeout != System.Threading.Timeout.InfiniteTimeSpan)
+            {
+                hopDeadline.CancelAfter(Timeout);
+            }
+            var hopToken = hopDeadline.Token;
 
             Interlocked.Increment(ref _inFlight);
             HttpResponseMessage resp;
             try
             {
                 resp = await GetClient()
-                    .SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                    .SendAsync(message, HttpCompletionOption.ResponseHeadersRead, hopToken)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -722,7 +753,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 try
                 {
                     bodyBytes = await ReadBodyLimitedAsync(
-                            resp, currentUrl, request.MaxResponseBytes, cancellationToken)
+                            resp, currentUrl, request.MaxResponseBytes, hopToken)
                         .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -773,7 +804,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         byte[]? body,
         ResourceRequest request,
         string requestOrigin,
-        IReadOnlyList<Uri> redirects)
+        IReadOnlyList<Uri> redirects,
+        IReadOnlyDictionary<string, string>? hopHeaders)
     {
         var message = new HttpRequestMessage(method, currentUrl);
         var headers = message.Headers;
@@ -841,6 +873,15 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         {
             headers.Remove(name);
             headers.TryAddWithoutValidation(name, value);
+        }
+
+        if (hopHeaders is not null)
+        {
+            foreach (var (name, value) in hopHeaders)
+            {
+                headers.Remove(name);
+                headers.TryAddWithoutValidation(name, value);
+            }
         }
 
         // Origin is a forbidden browser request header. Keep it derived from the

@@ -96,8 +96,13 @@ public static class SsrfGuard
             return IsForbiddenIpv4(v4);
         }
 
-        // Discard-only, local-use NAT64, and documentation prefixes.
+        // Discard-only, local-use NAT64, and documentation prefixes, plus two the Rust
+        // deny-set lacks (deviation, SECURITY.md I9): fec0::/10, the deprecated
+        // site-local range some networks still route internally, and Teredo
+        // 2001::/32, whose tunnelled IPv4 endpoint is obfuscated and cannot be vetted.
         return (s[0] == 0x100 && s[1] == 0 && s[2] == 0 && s[3] == 0)
+            || (s[0] & 0xffc0) == 0xfec0
+            || (s[0] == 0x2001 && s[1] == 0)
             || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
             || (s[0] == 0x2001 && s[1] == 0x0db8)
             || (s[0] == 0x3fff && (s[1] & 0xf000) == 0);
