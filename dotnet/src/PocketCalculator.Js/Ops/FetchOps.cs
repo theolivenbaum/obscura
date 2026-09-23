@@ -25,7 +25,7 @@ public enum FetchCredentials
 }
 
 /// <summary><c>op_fetch_url</c> and the request policy helpers around it.</summary>
-public static class FetchOps
+public static partial class FetchOps
 {
     /// <summary>
     /// Cap on the number of redirect hops <c>op_fetch_url</c> will follow.
@@ -435,10 +435,13 @@ public static class FetchOps
                 });
             }
 
+            var isCors = string.Equals(mode, "cors", StringComparison.Ordinal);
+            var unsafeHeaderNames = isCrossOrigin && isCors
+                ? CorsUnsafeRequestHeaderNames(customHeaders2)
+                : [];
             var needsPreflight = isCrossOrigin
-                && string.Equals(mode, "cors", StringComparison.Ordinal)
-                && ((reqMethod != HttpMethod.Get && reqMethod != HttpMethod.Head && reqMethod != HttpMethod.Post)
-                    || HasNonSimpleHeader(customHeaders2));
+                && isCors
+                && (!IsCorsSafelistedMethod(reqMethod) || unsafeHeaderNames.Count != 0);
 
             if (needsPreflight)
             {
@@ -448,9 +451,13 @@ public static class FetchOps
                     using var preflightRequest = new HttpRequestMessage(HttpMethod.Options, url);
                     preflightRequest.Headers.TryAddWithoutValidation("Origin", pageOrigin);
                     preflightRequest.Headers.TryAddWithoutValidation("Access-Control-Request-Method", method);
-                    preflightRequest.Headers.TryAddWithoutValidation(
-                        "Access-Control-Request-Headers",
-                        string.Join(", ", customHeaders2.Keys));
+                    if (unsafeHeaderNames.Count != 0)
+                    {
+                        preflightRequest.Headers.TryAddWithoutValidation(
+                            "Access-Control-Request-Headers",
+                            string.Join(',', unsafeHeaderNames));
+                    }
+
                     preflight = await SendAsync(client, preflightRequest).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OpException)
@@ -470,6 +477,32 @@ public static class FetchOps
                         throw new OpException(
                             $"CORS preflight: Origin '{pageOrigin}' not allowed by "
                             + $"Access-Control-Allow-Origin '{allowedOrigin}'");
+                    }
+
+                    var preflightStatus = (int)preflight.StatusCode;
+                    if (preflightStatus is < 200 or > 299)
+                    {
+                        throw new OpException($"CORS preflight returned HTTP {StatusDisplay(preflightStatus)}");
+                    }
+
+                    var allowedMethods = ParseCorsHeaderList(preflight, "Access-Control-Allow-Methods")
+                        ?? throw new OpException(
+                            "CORS preflight returned an invalid Access-Control-Allow-Methods value");
+                    var allowedHeaders = ParseCorsHeaderList(preflight, "Access-Control-Allow-Headers")
+                        ?? throw new OpException(
+                            "CORS preflight returned an invalid Access-Control-Allow-Headers value");
+                    var credentialed = credentialsMode == FetchCredentials.Include;
+                    if (!PreflightAllowsMethod(reqMethod.Method, allowedMethods, credentialed))
+                    {
+                        throw new OpException($"CORS preflight did not allow method '{reqMethod.Method}'");
+                    }
+
+                    foreach (var name in unsafeHeaderNames)
+                    {
+                        if (!PreflightAllowsHeader(name, allowedHeaders, credentialed))
+                        {
+                            throw new OpException($"CORS preflight did not allow request header '{name}'");
+                        }
                     }
                 }
             }
@@ -838,23 +871,6 @@ public static class FetchOps
         }
 
         return headers;
-    }
-
-    private static bool HasNonSimpleHeader(Dictionary<string, string> headers)
-    {
-        foreach (var key in headers.Keys)
-        {
-            var lower = key.ToLowerInvariant();
-            if (!string.Equals(lower, "accept", StringComparison.Ordinal)
-                && !string.Equals(lower, "accept-language", StringComparison.Ordinal)
-                && !string.Equals(lower, "content-language", StringComparison.Ordinal)
-                && !string.Equals(lower, "content-type", StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static Dictionary<string, string> ParseHeaders(string json)

@@ -287,6 +287,83 @@ public sealed class OpsTests
         Assert.Contains("scheme", error.ToLowerInvariant(), StringComparison.Ordinal);
     }
 
+    // Upstream 04f0475: the CORS request-header safelist checks values, not only names.
+    [Fact]
+    public void Cors_request_header_safelist_checks_values()
+    {
+        Assert.True(FetchOps.IsCorsSafelistedContentType("application/x-www-form-urlencoded;charset=UTF-8"));
+        Assert.True(FetchOps.IsCorsSafelistedContentType("multipart/form-data; boundary=test"));
+        Assert.True(FetchOps.IsCorsSafelistedContentType("text/plain"));
+        Assert.False(FetchOps.IsCorsSafelistedContentType("application/json"));
+        Assert.False(FetchOps.IsCorsSafelistedContentType("text /plain"));
+
+        Assert.True(FetchOps.IsCorsSafelistedRequestHeader("Accept-Language", "en-US, en;q=0.9"));
+        Assert.False(FetchOps.IsCorsSafelistedRequestHeader("Accept-Language", "en_US"));
+        Assert.False(FetchOps.IsCorsSafelistedRequestHeader("Accept", new string('a', 129)));
+        Assert.True(FetchOps.IsCorsSafelistedRequestHeader("Range", "bytes=0-499"));
+        Assert.True(FetchOps.IsCorsSafelistedRequestHeader("Range", "bytes=500-"));
+        Assert.False(FetchOps.IsCorsSafelistedRequestHeader("Range", "bytes=-500"));
+        Assert.False(FetchOps.IsCorsSafelistedRequestHeader("Range", "bytes=500-499"));
+        Assert.False(FetchOps.IsCorsSafelistedRequestHeader("Range", "bytes=0-1,4-5"));
+    }
+
+    [Fact]
+    public void Cors_unsafe_header_names_are_lowercase_sorted_and_only_include_unsafe_headers()
+    {
+        var headers = new Dictionary<string, string>
+        {
+            ["Content-Type"] = "application/json",
+            ["X-Trace"] = "1",
+            ["Accept"] = "text/html",
+            ["Range"] = "bytes=0-99",
+        };
+        Assert.Equal(["content-type", "x-trace"], FetchOps.CorsUnsafeRequestHeaderNames(headers));
+    }
+
+    [Fact]
+    public void Cors_safelist_aggregate_cap_forces_preflight()
+    {
+        var headers = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var bits = 0; bits < 9; bits++)
+        {
+            var name = new StringBuilder();
+            for (var index = 0; index < "accept".Length; index++)
+            {
+                var c = "accept"[index];
+                name.Append((bits & (1 << index)) == 0 ? c : char.ToUpperInvariant(c));
+            }
+
+            headers[name.ToString()] = new string('a', 128);
+        }
+
+        Assert.Equal(["accept"], FetchOps.CorsUnsafeRequestHeaderNames(headers));
+    }
+
+    [Fact]
+    public void Cors_preflight_permissions_follow_credentials_and_authorization_rules()
+    {
+        Assert.True(FetchOps.PreflightAllowsMethod("POST", [], true));
+        Assert.True(FetchOps.PreflightAllowsMethod("DELETE", ["DELETE"], true));
+        Assert.False(FetchOps.PreflightAllowsMethod("DELETE", ["delete"], false));
+        Assert.True(FetchOps.PreflightAllowsMethod("DELETE", ["*"], false));
+        Assert.False(FetchOps.PreflightAllowsMethod("DELETE", ["*"], true));
+
+        Assert.True(FetchOps.PreflightAllowsHeader("Authorization", ["authorization"], true));
+        Assert.False(FetchOps.PreflightAllowsHeader("Authorization", ["*"], false));
+        Assert.True(FetchOps.PreflightAllowsHeader("X-Trace", ["*"], false));
+        Assert.False(FetchOps.PreflightAllowsHeader("X-Trace", ["*"], true));
+    }
+
+    [Fact]
+    public void Cors_preflight_rejects_malformed_permission_lists()
+    {
+        List<string> values = ["GET, DELETE", "PATCH"];
+        Assert.Equal(["GET", "DELETE", "PATCH"], FetchOps.ParseCorsHeaderList(values));
+
+        values.Add("@invalid");
+        Assert.Null(FetchOps.ParseCorsHeaderList(values));
+    }
+
     private const string PostedTaskBlocker =
         "Blocked on the runtime: nothing sets PocketCalculatorJsRuntime.OpTableBinder yet, and the "
         + "runtime exposes no V8 task-queue seam for IPostedTaskSpawner, so scheduler.postTask "

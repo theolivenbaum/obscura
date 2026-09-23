@@ -64,7 +64,7 @@ internal sealed class RuntimeFixture : IDisposable
 /// that are genuinely blocked say what blocks them: a missing HTTP fixture, the
 /// unported screenshot family, or a ClearScript limit named in the port report.
 /// </remarks>
-public sealed class RuntimeTests
+public sealed partial class RuntimeTests
 {
     /// <summary>A CDP <c>callFunctionOn</c> by-value argument.</summary>
     private static JsonNode? Arg(double value) => new JsonObject { ["value"] = value };
