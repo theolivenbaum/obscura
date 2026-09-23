@@ -74,6 +74,25 @@ public sealed partial class RuntimeTests
     private static JsonNode? Arg(JsonNode? value) => new JsonObject { ["value"] = value };
 
     /// <summary>The Rust tests' <c>assert_eq!(value, serde_json::json!(...))</c>.</summary>
+    /// <summary>
+    /// Pumps the event loop in short slices until <paramref name="condition"/> holds
+    /// in the page, or five seconds pass. For tests whose assertion is about order,
+    /// not about how quickly a loaded host gets there.
+    /// </summary>
+    private static async Task RunEventLoopUntilAsync(PocketCalculatorJsRuntime rt, string condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        do
+        {
+            await rt.RunEventLoopBoundedAsync(20);
+            if (rt.Evaluate($"Boolean({condition})")?.GetValue<bool>() == true)
+            {
+                return;
+            }
+        }
+        while (DateTime.UtcNow < deadline);
+    }
+
     private static void AssertJson(string expected, JsonNode? actual) =>
         Assert.Equal(JsonNode.Parse(expected)?.ToJsonString() ?? "null", actual?.ToJsonString() ?? "null");
 
@@ -3283,7 +3302,10 @@ public sealed partial class RuntimeTests
             });
             __sameFrameObserver.observe(target);
             """);
-        await rt.RunEventLoopBoundedAsync(50);
+        // Wait for the initial observation itself rather than a fixed 50 ms: on a
+        // loaded host it can land later, and the mutation below must come after it
+        // or its intersection is taken for the initial one.
+        await RunEventLoopUntilAsync(rt, "__sameFrameInitial === true");
 
         rt.ExecuteScript(
             "mutate-in-animation-frame",
@@ -3294,7 +3316,7 @@ public sealed partial class RuntimeTests
                 requestAnimationFrame(() => __sameFrameOrder.push("next-raf"));
             });
             """);
-        await rt.RunEventLoopBoundedAsync(80);
+        await RunEventLoopUntilAsync(rt, "__sameFrameOrder.includes('next-raf')");
 
         AssertJson("""["raf","intersection","next-raf"]""", rt.Evaluate("__sameFrameOrder"));
     }
@@ -6830,8 +6852,22 @@ public sealed partial class RuntimeTests
                     threshold: [0, 1],
                 });
                 observer.observe(document.getElementById("target"));
-                setTimeout(() => { clip.scrollTop = 999; }, 25);
-                setTimeout(() => resolve(records), 60);
+                // Scroll once the initial observation has arrived, then wait for the
+                // next one, instead of fixed 25/60 ms windows a loaded host misses.
+                const deadline = Date.now() + 5000;
+                let scrolled = false;
+                const poll = () => {
+                    if (!scrolled && records.length >= 1) {
+                        scrolled = true;
+                        clip.scrollTop = 999;
+                    }
+                    if (records.length >= 2 || Date.now() > deadline) {
+                        resolve(records);
+                        return;
+                    }
+                    setTimeout(poll, 5);
+                };
+                setTimeout(poll, 5);
             })
             """,
             returnByValue: true,
