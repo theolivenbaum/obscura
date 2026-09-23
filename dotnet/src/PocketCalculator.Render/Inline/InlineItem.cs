@@ -222,6 +222,9 @@ internal static class InlineGeometry
 
     public static float LineEdgeAdvance(InlineItem item, int lineStart, int lineEnd)
     {
+        // Linear in the item's boundary events and called once per line, so deeply
+        // nested inline boxes make a paragraph quadratic: the deadline is checked here.
+        WorkCancellation.ThrowIfCancellationRequested();
         float sum = 0f;
         foreach (InlineBoundaryEvent evt in item.BoundaryEvents)
         {
@@ -244,6 +247,7 @@ internal static class InlineGeometry
 
     public static float LineAdvanceBeforeEvent(InlineItem item, int eventIndex, int lineStart, int lineEnd)
     {
+        WorkCancellation.ThrowIfCancellationRequested();
         float sum = 0f;
         for (int i = 0; i < eventIndex && i < item.BoundaryEvents.Count; i++)
         {

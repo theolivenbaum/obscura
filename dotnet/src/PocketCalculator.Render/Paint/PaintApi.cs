@@ -73,8 +73,10 @@ public static partial class RenderPaint
         (float X, float Y) scroll,
         AnimationSampleTime animationSampleTime,
         RgbaColor surfaceColor,
-        RenderResourceCache resources)
+        RenderResourceCache resources,
+        CancellationToken cancellationToken = default)
     {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
         PreparedRender? prepared = PrepareDomAtAnimationTime(
             tree,
             viewport,
@@ -193,8 +195,11 @@ public static partial class RenderPaint
         IReadOnlyList<DynamicFontFace> dynamicFonts,
         StylesheetCache stylesheetCache,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline) =>
-        PrepareDomWithDynamicFontsAndStylesheetCacheForMediaWithAnimationState(
+        AnimationTimelineState animationTimeline,
+        CancellationToken cancellationToken = default)
+    {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
+        return PrepareDomWithDynamicFontsAndStylesheetCacheForMediaWithAnimationState(
             tree,
             viewport,
             baseUrl,
@@ -204,6 +209,7 @@ public static partial class RenderPaint
             CssMediaType.Screen,
             animationSample,
             animationTimeline);
+    }
 
     public static PreparedRender? PrepareDomWithDynamicFontsAndStylesheetCacheForMediaWithAnimationState(
         DomTree tree,
@@ -214,8 +220,11 @@ public static partial class RenderPaint
         StylesheetCache stylesheetCache,
         CssMediaType mediaType,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline) =>
-        PaintApi.PrepareInternal(
+        AnimationTimelineState animationTimeline,
+        CancellationToken cancellationToken = default)
+    {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
+        return PaintApi.PrepareInternal(
             tree,
             viewport,
             baseUrl,
@@ -227,6 +236,7 @@ public static partial class RenderPaint
             mediaType,
             animationSample,
             animationTimeline);
+    }
 
     /// <summary>
     /// Rebuild geometry while moving clean computed styles out of the previous prepared render.
@@ -308,8 +318,10 @@ public static partial class RenderPaint
         PreparedRender previous,
         IReadOnlyList<RetainedStyleMutation> mutations,
         AnimationSample animationSample,
-        AnimationTimelineState animationTimeline)
+        AnimationTimelineState animationTimeline,
+        CancellationToken cancellationToken = default)
     {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
         ArgumentNullException.ThrowIfNull(previous);
         bool sampleChanged = previous.AnimationSampleValue != animationSample;
         bool forwardDocumentSample = sampleChanged
@@ -457,8 +469,10 @@ public static partial class RenderPaint
         RenderResourceCache resources,
         ResolvedScrollState scroll,
         RgbaColor surfaceColor,
-        ICanvasSurfaceSource canvasSurfaces)
+        ICanvasSurfaceSource canvasSurfaces,
+        CancellationToken cancellationToken = default)
     {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
         ArgumentNullException.ThrowIfNull(prepared);
         ArgumentNullException.ThrowIfNull(scroll);
         if (CaptureLimits.ValidateCaptureRegion(CaptureRegion.New(
@@ -545,8 +559,11 @@ public static partial class RenderPaint
             ResolvedScrollState scroll,
             CaptureRegion region,
             RgbaColor surfaceColor,
-            ICanvasSurfaceSource canvasSurfaces) =>
-        PaintApi.PaintPreparedRegionWithScrollPolicy(
+            ICanvasSurfaceSource canvasSurfaces,
+            CancellationToken cancellationToken = default)
+    {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
+        return PaintApi.PaintPreparedRegionWithScrollPolicy(
             tree,
             prepared,
             resources,
@@ -555,6 +572,7 @@ public static partial class RenderPaint
             printEconomy: false,
             surfaceColor,
             canvasSurfaces);
+    }
 
     /// <summary>Render <paramref name="tree"/> to PNG bytes.</summary>
     public static byte[]? ScreenshotPng(
@@ -600,8 +618,11 @@ public static partial class RenderPaint
         (float X, float Y) scroll,
         AnimationSampleTime animationSampleTime,
         RgbaColor surfaceColor,
-        RenderResourceCache resources) =>
-        PaintDomScrolledAtAnimationTimeWithSurfaceColorAndResources(
+        RenderResourceCache resources,
+        CancellationToken cancellationToken = default)
+    {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
+        return PaintDomScrolledAtAnimationTimeWithSurfaceColorAndResources(
             tree,
             viewport,
             baseUrl,
@@ -609,6 +630,7 @@ public static partial class RenderPaint
             animationSampleTime,
             surfaceColor,
             resources)?.EncodePng();
+    }
 
     public static byte[]? ScreenshotPrepared(
         DomTree tree,
@@ -638,14 +660,18 @@ public static partial class RenderPaint
         RenderResourceCache resources,
         ResolvedScrollState scroll,
         RgbaColor surfaceColor,
-        ICanvasSurfaceSource canvasSurfaces) =>
-        PaintPreparedWithScrollAndSurfaceColorAndCanvasSurfaces(
+        ICanvasSurfaceSource canvasSurfaces,
+        CancellationToken cancellationToken = default)
+    {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
+        return PaintPreparedWithScrollAndSurfaceColorAndCanvasSurfaces(
             tree,
             prepared,
             resources,
             scroll,
             surfaceColor,
             canvasSurfaces)?.EncodePng();
+    }
 
     public static (byte[]? Png, CaptureError? Error) ScreenshotPreparedRegionWithScroll(
         DomTree tree,
@@ -678,8 +704,11 @@ public static partial class RenderPaint
             ResolvedScrollState scroll,
             CaptureRegion region,
             RgbaColor surfaceColor,
-            ICanvasSurfaceSource canvasSurfaces) =>
-        Encode(PaintPreparedRegionWithScrollAndSurfaceColorAndCanvasSurfaces(
+            ICanvasSurfaceSource canvasSurfaces,
+            CancellationToken cancellationToken = default)
+    {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
+        return Encode(PaintPreparedRegionWithScrollAndSurfaceColorAndCanvasSurfaces(
             tree,
             prepared,
             resources,
@@ -687,6 +716,7 @@ public static partial class RenderPaint
             region,
             surfaceColor,
             canvasSurfaces));
+    }
 
     /// <summary>Capture a retained region using the PDF print-background policy.</summary>
     public static (byte[]? Png, CaptureError? Error) ScreenshotPreparedRegionWithScrollAndBackgrounds(
@@ -713,8 +743,10 @@ public static partial class RenderPaint
             ResolvedScrollState scroll,
             CaptureRegion region,
             bool paintBackgrounds,
-            ICanvasSurfaceSource canvasSurfaces)
+            ICanvasSurfaceSource canvasSurfaces,
+            CancellationToken cancellationToken = default)
     {
+        using var cancellationScope = WorkCancellation.Enter(cancellationToken);
         ArgumentNullException.ThrowIfNull(prepared);
         if (paintBackgrounds)
         {
@@ -730,24 +762,30 @@ public static partial class RenderPaint
 
         List<(NodeId Node, PrintEconomyStyleSnapshot Snapshot)> snapshots =
             [.. prepared.Layout.Styles.Select(pair => (pair.Key, PrintEconomyStyleSnapshot.Apply(pair.Value)))];
-        (byte[]? Png, CaptureError? Error) result = Encode(PaintApi.PaintPreparedRegionWithScrollPolicy(
-            tree,
-            prepared,
-            resources,
-            scroll,
-            region,
-            printEconomy: true,
-            White,
-            canvasSurfaces));
-        foreach ((NodeId node, PrintEconomyStyleSnapshot snapshot) in snapshots)
+        try
         {
-            if (prepared.Layout.Styles.TryGetValue(node, out LayoutStyle? style))
+            return Encode(PaintApi.PaintPreparedRegionWithScrollPolicy(
+                tree,
+                prepared,
+                resources,
+                scroll,
+                region,
+                printEconomy: true,
+                White,
+                canvasSurfaces));
+        }
+        finally
+        {
+            // In a finally: a paint cancelled half-way must not leave the retained
+            // layout with its print-economy colours.
+            foreach ((NodeId node, PrintEconomyStyleSnapshot snapshot) in snapshots)
             {
-                snapshot.Restore(style);
+                if (prepared.Layout.Styles.TryGetValue(node, out LayoutStyle? style))
+                {
+                    snapshot.Restore(style);
+                }
             }
         }
-
-        return result;
     }
 
     private static (byte[]? Png, CaptureError? Error) Encode((Pixmap? Pixmap, CaptureError? Error) painted)
