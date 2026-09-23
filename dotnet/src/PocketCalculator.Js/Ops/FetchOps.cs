@@ -291,6 +291,7 @@ public static partial class FetchOps
         bool internalLoad)
     {
         ArgumentNullException.ThrowIfNull(gs);
+        using FetchConcurrency.Slot slot = await FetchConcurrency.EnterAsync(gs).ConfigureAwait(false);
 
         // Page-script requests run under the Fetch request guards; the engine's own
         // loads do not. Rust applies neither (see FilterScriptRequestHeaders).
