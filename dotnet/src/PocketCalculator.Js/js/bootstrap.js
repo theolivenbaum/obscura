@@ -11917,6 +11917,34 @@ globalThis.atob = globalThis.atob || ((s) => {
     if (url === null || url === undefined) return __currentUrl();
     try { return new URL(String(url), __currentUrl()).href; } catch (e) { return String(url); }
   };
+  // HTML's "can have its URL rewritten": a history entry may not change the scheme,
+  // credentials, host or port, and outside http(s) it may change only the query and
+  // fragment (file:) or the fragment. DEVIATION from crates/obscura-js/js/bootstrap.js,
+  // which accepted any URL, so location.origin then reported a foreign origin
+  // (SECURITY.md L9). Chromium throws this SecurityError, message included.
+  const urlParts = (href) => {
+    try {
+      const c = _JSONparse(__obscuraCore.ops.op_url_parse(String(href), ''));
+      return (c && c.ok) ? c : null;
+    } catch (e) { return null; }
+  };
+  const assertRewritable = (method, target) => {
+    const documentUrl = __currentUrl();
+    const a = urlParts(target);
+    const b = urlParts(documentUrl);
+    let ok = !!a && !!b && a.protocol === b.protocol && a.username === b.username
+      && a.password === b.password && a.hostname === b.hostname && a.port === b.port;
+    if (ok && a.protocol !== 'http:' && a.protocol !== 'https:') {
+      ok = a.pathname === b.pathname && (a.protocol === 'file:' || a.search === b.search);
+    }
+    if (!ok) {
+      throw new DOMException(
+        "Failed to execute '" + method + "' on 'History': A history state object with URL '"
+          + target + "' cannot be created in a document with origin '" + _realmOrigin()
+          + "' and URL '" + documentUrl + "'.",
+        'SecurityError');
+    }
+  };
   const applyVirtual = () => {
     const entry = stack[idx];
     globalThis.__virtualUrl = entry.url ?? null;
@@ -11954,6 +11982,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     }
     pushState(state, _title, url) {
       const resolved = resolveOrFallback(url);
+      assertRewritable('pushState', resolved);
       // Truncate forward entries (real Chrome drops the forward stack on a
       // new push) then append + advance.
       stack.length = idx + 1;
@@ -11963,6 +11992,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     }
     replaceState(state, _title, url) {
       const resolved = resolveOrFallback(url);
+      assertRewritable('replaceState', resolved);
       stack[idx] = {state: state ?? null, url: resolved};
       applyVirtual();
     }
@@ -12064,8 +12094,18 @@ globalThis.atob = globalThis.atob || ((s) => {
     const old = entry;
     const state = options && Object.prototype.hasOwnProperty.call(options, "state")
       ? options.state : null;
-    if (options && options.history === "replace") history.replaceState(state, "", url);
-    else history.pushState(state, "", url);
+    const replace = !!(options && options.history === "replace");
+    try {
+      if (replace) history.replaceState(state, "", url);
+      else history.pushState(state, "", url);
+    } catch (e) {
+      // A URL the history API may not rewrite to (another origin) is a real
+      // navigation, as Navigation.navigate() performs one in Chromium.
+      if (!(e instanceof DOMException) || e.name !== "SecurityError") throw e;
+      _locationNavigate(String(url), replace);
+      const pending = Promise.resolve(entry);
+      return { committed: pending, finished: pending };
+    }
     const next = changed(old);
     const done = Promise.resolve(next);
     return { committed: done, finished: done };

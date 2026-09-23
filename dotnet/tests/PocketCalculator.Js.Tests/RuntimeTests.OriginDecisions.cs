@@ -371,4 +371,41 @@ public sealed partial class RuntimeTests
         Assert.False(pending[0].OpaqueOrigin);
         Assert.True(pending[1].OpaqueOrigin);
     }
+
+    /// <summary>
+    /// L9: <c>history.pushState</c> and <c>replaceState</c> refuse a URL of another origin
+    /// with Chromium's SecurityError, so <c>location.origin</c> cannot be made to report one.
+    /// </summary>
+    [Fact]
+    public void HistoryRefusesACrossOriginUrl()
+    {
+        using var fixture = RuntimeFixture.Page("http://example.com/page", "<html><body></body></html>");
+        var result = fixture.Runtime.Evaluate(
+            """
+            (() => {
+                const out = {};
+                try { history.pushState({}, "", "https://other.example/"); out.push = "ok"; }
+                catch (e) { out.push = e.name + ": " + e.message; }
+                try { history.replaceState({}, "", "http://example.com:8080/"); out.replace = "ok"; }
+                catch (e) { out.replace = e.name; }
+                history.pushState({}, "", "/next?x=1#y");
+                out.href = location.href;
+                out.origin = location.origin;
+                out.length = history.length;
+                return out;
+            })()
+            """);
+
+        AssertJsonEquals(
+            """
+            {
+                "push": "SecurityError: Failed to execute 'pushState' on 'History': A history state object with URL 'https://other.example/' cannot be created in a document with origin 'http://example.com' and URL 'http://example.com/page'.",
+                "replace": "SecurityError",
+                "href": "http://example.com/next?x=1#y",
+                "origin": "http://example.com",
+                "length": 2
+            }
+            """,
+            result);
+    }
 }
