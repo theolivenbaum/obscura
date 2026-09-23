@@ -70,6 +70,43 @@ public sealed partial class RuntimeTests
     }
 
     /// <summary>
+    /// C1, in a frame: a frame's fetch is made as the frame's document, whatever the frame
+    /// claims through <c>URL</c>, and from a promise continuation as well as synchronously.
+    /// </summary>
+    [Fact]
+    public async Task FrameFetchOriginIsTheFramesDocument()
+    {
+        using var server = new RawHttpServer(_ =>
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        using var fixture = RuntimeFixture.Blank();
+        var runtime = fixture.Runtime;
+        runtime.SetDom(HtmlParsing.ParseHtml("<html><body></body></html>"));
+        runtime.SetUrl("http://parent.example/");
+        runtime.SetHttpClient(new PocketCalculatorHttpClient(new CookieJar(), null, allowPrivateNetwork: true));
+        runtime.RunPageInit();
+        using var frame = FrameRealm.Create(runtime, 1, 0, "http://frame.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
+
+        frame.ExecuteScript(
+            "const RealURL = URL; globalThis.URL = class extends RealURL {"
+            + " get origin() { return 'http://parent.example'; } };"
+            + $"fetch('{server.Origin}/sync').catch(() => {{}});"
+            + $"Promise.resolve().then(() => fetch('{server.Origin}/later').catch(() => {{}}));");
+
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (server.Requests.Count < 2 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.Equal(2, server.Requests.Count);
+        foreach (var request in server.Requests)
+        {
+            Assert.Contains("Origin: http://frame.example\r\n", request, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
     /// M3: the fetch deadline covers the body as well as the headers. A server that sends
     /// its headers at once and then one byte every 200 ms used to hold the op open for as
     /// long as it liked.
