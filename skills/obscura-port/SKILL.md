@@ -1,11 +1,11 @@
 ---
 name: obscura-port
-description: Port a component of the Obscura headless browser engine from the Rust reference implementation in crates/ to the C# / .NET 10 implementation in dotnet/. Use when porting or reviewing ported code for the DOM tree, selectors, HTML parsing, the V8 op layer, CSS parsing and cascade, layout, paint, the Page API, the CDP server, the MCP server, or the CLI, when writing xUnit ports of Rust tests, or when validating C# output against the Rust binary.
+description: Port a component of the Obscura headless browser engine from the Rust reference implementation in .reference/obscura/crates/ to the C# / .NET 10 implementation in dotnet/. Use when porting or reviewing ported code for the DOM tree, selectors, HTML parsing, the V8 op layer, CSS parsing and cascade, layout, paint, the Page API, the CDP server, the MCP server, or the CLI, when writing xUnit ports of Rust tests, or when validating C# output against the Rust binary.
 ---
 
 # Porting Obscura to C#
 
-The Rust workspace in `crates/` is the specification. The C# tree in `dotnet/`
+The Rust workspace in `.reference/obscura/crates/` is the reference. The C# tree in `dotnet/`
 is the port. Read `CLAUDE.md` for the ground rules and `todo.md` for the queue
 and the list of accepted deviations before starting.
 
@@ -23,7 +23,7 @@ is wrong in ways tests do not catch.
 3. **Port the in-file `#[cfg(test)] mod tests` as xUnit facts, in the same
    order and with the same names.** These encode the edge cases someone already
    found the hard way.
-4. **Port the integration tests** under `crates/<crate>/tests/` to
+4. **Port the integration tests** under `.reference/obscura/crates/<crate>/tests/` to
    `dotnet/tests/Obscura.<Area>.Tests/`, keeping the file name.
 5. **Run `dotnet test` for the area.** Green means plausible, not done.
 6. **Add a parity case** that runs the same input through both engines. Green
@@ -82,8 +82,8 @@ must format the way the Rust code formats it; check against a parity test.
 Build the reference binary once:
 
 ```bash
-CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo build --release -p obscura-cli --bins --features render
-export OBSCURA_RUST_BIN="$PWD/target/release/obscura"
+(cd .reference/obscura && CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo build --release -p obscura-cli --bins --features render)
+export OBSCURA_RUST_BIN="$PWD/.reference/obscura/target/release/obscura"
 ```
 
 `dotnet/tests/Obscura.Parity.Tests` skips itself when `OBSCURA_RUST_BIN` is

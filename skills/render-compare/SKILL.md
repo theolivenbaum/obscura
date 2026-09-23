@@ -6,7 +6,7 @@ description: Compare how Obscura renders a page against a real browser (headless
 # Comparing Obscura's rendering against a real browser
 
 Three lanes: **Chromium** through Playwright (the ground truth a user's browser
-would show), the **Rust reference** in `target/release/obscura`, and the **C#
+would show), the **Rust reference** in `.reference/obscura/target/release/obscura`, and the **C#
 port** in `dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura`.
 
 Run it:
@@ -109,8 +109,8 @@ Decide which tree owns it before writing any code.
 - **Port only** (reference matches Chromium, port does not): fix in `dotnet/`.
 - **Both engines** (reference and port agree with each other and differ from
   Chromium): the gap is in the engine's rendering, not the port. If it lives in
-  `crates/obscura-js/js/bootstrap.js`, fix it there - that file is shared
-  verbatim by both engines and linked, not copied, so one fix lands in both and
-  parity is preserved. If it lives in the Rust render layer, it is a reference
-  change and needs to be decided as such; note it in `todo.md` rather than
-  working around it in the port.
+  `bootstrap.js`, fix it in the port's own copy,
+  `dotnet/src/Obscura.Js/js/bootstrap.js`, and record the divergence under
+  "Known deviations" in `todo.md`. If it lives in the render layer, fix it in
+  the port and record it the same way. The reference tree under
+  `.reference/obscura/` is read-only; never edit it to keep the engines in step.

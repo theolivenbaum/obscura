@@ -1,7 +1,9 @@
 # Obscura C# port - status and work queue
 
-Target: `net10.0`. Reference implementation: the Rust workspace in `crates/`.
-Rules and conventions: see `CLAUDE.md`.
+Target: `net10.0`. Reference implementation: the Rust workspace in
+`.reference/obscura/crates/`, synced to the upstream commit named in
+`.reference/obscura/UPSTREAM.md`. Paths below written `crates/...` or `vendor/...`
+are relative to `.reference/obscura/`. Rules and conventions: see `CLAUDE.md`.
 
 Legend: `[ ]` not started, `[~]` in progress, `[x]` ported + tests green,
 `[P]` parity-validated against the Rust binary.
@@ -37,6 +39,11 @@ vendored variable-font coordinate fix needs to carry over.
 - [x] Scaffold `dotnet/` (solution, `Directory.Build.props`, `Directory.Packages.props`, projects)
 - [x] Pin the dependency set; confirm V8 is the only native dependency
 - [x] `dotnet/docs/op-protocol.md` - the frozen `bootstrap.js` <-> host contract
+- [x] Move the Rust tree and everything upstream-only into `.reference/obscura/`; the
+      root README, `LICENSE` (Apache-2.0, Curiosity GmbH) and `NOTICE` are the port's
+- [x] NuGet packaging metadata in `dotnet/Directory.Build.props`; publish pipeline
+      in `.devops/build-nuget.yml`
+- [x] Upstream sync procedure in `CLAUDE.md` ("Merging upstream changes")
 
 ## 1. Obscura.Dom  (<- crates/obscura-dom, ~5.2k lines)  -  81/81 tests green
 

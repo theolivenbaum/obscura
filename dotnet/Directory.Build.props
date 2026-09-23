@@ -12,11 +12,10 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <Authors>Obscura contributors</Authors>
-    <Product>Obscura</Product>
+    <!-- The local default. The pipeline (.devops/build-nuget.yml) overrides it
+         with a CalVer /p:Version; 0.1.0 matches the Rust workspace version, so
+         the local version string reads the same shape as the reference one. -->
     <Version>0.1.0</Version>
-    <RepositoryUrl>https://github.com/h4ckf0r0day/obscura</RepositoryUrl>
-    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <!-- The engine is allocation-sensitive; server GC costs startup time the
          Rust build does not pay, so keep workstation GC and concurrent off. -->
     <ServerGarbageCollection>false</ServerGarbageCollection>
@@ -27,5 +26,31 @@
     <Optimize>true</Optimize>
     <DebugType>portable</DebugType>
   </PropertyGroup>
+
+  <!-- Package and assembly metadata. This is a reimplementation of Obscura
+       (https://github.com/h4ckf0r0day/obscura), so the original authors are
+       credited next to Curiosity GmbH; the upstream license is kept at
+       .reference/obscura/LICENSE and the attributions are in NOTICE. -->
+  <PropertyGroup>
+    <Authors>Curiosity GmbH; the Obscura authors</Authors>
+    <Company>Curiosity GmbH</Company>
+    <Product>Obscura</Product>
+    <Copyright>Copyright (c) 2026 Curiosity GmbH. Based on Obscura, Copyright (c) the Obscura authors (https://github.com/h4ckf0r0day/obscura).</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/theolivenbaum/obscura</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/theolivenbaum/obscura</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>headless-browser;browser;cdp;puppeteer;playwright;scraping;v8;ai-agents</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <!-- Every package carries the README, the license and the NOTICE, which the
+       Apache License requires to travel with redistributed copies. -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../LICENSE" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../NOTICE" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
 
 </Project>

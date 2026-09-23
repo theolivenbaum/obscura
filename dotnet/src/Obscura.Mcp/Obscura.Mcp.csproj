@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Mcp</RootNamespace>
     <AssemblyName>Obscura.Mcp</AssemblyName>
+    <Description>Obscura MCP server: browser tools for AI agents over the Model Context Protocol.</Description>
   </PropertyGroup>
 
   <ItemGroup>

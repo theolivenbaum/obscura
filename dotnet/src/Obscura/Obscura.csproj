@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura</RootNamespace>
     <AssemblyName>Obscura</AssemblyName>
+    <Description>Obscura for .NET: an embeddable headless browser engine with real JavaScript (V8), a real DOM, its own layout and paint, and no Chromium.</Description>
   </PropertyGroup>
 
   <ItemGroup>

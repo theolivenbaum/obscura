@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Render</RootNamespace>
     <AssemblyName>Obscura.Render</AssemblyName>
+    <Description>Obscura rendering: CSS cascade, computed style, layout, and painting onto Skia.</Description>
   </PropertyGroup>
 
   <ItemGroup>

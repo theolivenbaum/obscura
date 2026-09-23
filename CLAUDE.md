@@ -5,18 +5,27 @@ Guidance for AI coding agents working on the **C# / .NET 10 port of Obscura**.
 Obscura is a headless browser engine: it runs real JavaScript through V8, keeps
 a real DOM tree, owns its layout and paint pipeline, speaks the Chrome DevTools
 Protocol, and is a drop-in replacement for headless Chrome with Puppeteer and
-Playwright. The deliverable is the C# engine under `dotnet/`; the Rust workspace
-in `crates/` is kept only as reference to read while porting, and goes away when
-the port is done.
+Playwright. It is a reimplementation of the original Rust
+[Obscura](https://github.com/h4ckf0r0day/obscura) by the Obscura authors. The
+deliverable is the C# engine under `dotnet/`; the original Rust tree lives in
+`.reference/obscura/`, as reference to read while porting and as
+the baseline for merging newer upstream work (see "Merging upstream changes").
 
 Read `todo.md` for the live port status and the ordered work queue.
 
+**Paths into the reference.** The Rust tree used to sit at the repository root
+and now sits under `.reference/obscura/`. Comments in C#, `todo.md` and
+`dotnet/docs/` still cite it as `crates/...` and `vendor/...`; read those as
+relative to `.reference/obscura/`, so `crates/obscura-render/src/paint.rs` is
+`.reference/obscura/crates/obscura-render/src/paint.rs`. Do not churn existing
+comments to rewrite them.
+
 ## Ground rules for the port
 
-1. **The Rust tree in `crates/` is reference material, and it is read-only.**
+1. **The Rust tree in `.reference/obscura/` is reference material, and it is read-only.**
    It is kept to read while porting - what an area does, in what order, with what
    edge cases - and for nothing else. It is not maintained, it is not the
-   deliverable, and it will go away when the port is done.
+   deliverable, and nothing in `dotnet/` builds from it.
 
    **Chromium is the authority on observable behaviour, not Rust.** Where the two
    disagree, measure Chromium and match it. Rust is a useful prior and often
@@ -26,10 +35,12 @@ Read `todo.md` for the live port status and the ordered work queue.
    (F34), no `getBoundingClientRect()` for SVG descendants at all (F37), and four
    `MutationObserver` registration rules (F39). See `dotnet/docs/round3-findings.md`.
 
-   Never edit `crates/**` - not to make a C# test pass, not to carry a fix across,
-   not to keep the trees in step. Fix C# only, and leave the Rust tree where it is.
+   Never edit `.reference/**` - not to make a C# test pass, not to carry a fix
+   across, not to keep the trees in step. Fix C# only, and leave the Rust tree
+   where it is. The one change it ever takes is an upstream sync: upstream's own
+   diff, applied verbatim, as described in "Merging upstream changes".
 2. **Where C# deviates from Rust deliberately, say so in a comment at the
-   deviation.** Once a bug is fixed on the C# side and not in `crates/**`, the
+   deviation.** Once a bug is fixed on the C# side and not in `.reference/**`, the
    two trees no longer agree, and the next reader diffing them needs to know
    which side is intentional. Put a short comment at the C# code that differs:
    what Rust does, what C# does instead, and why (a bug fix against Chromium, a
@@ -57,18 +68,20 @@ Read `todo.md` for the live port status and the ordered work queue.
 5. **`bootstrap.js` is ours now.** `dotnet/src/Obscura.Js/js/bootstrap.js` began
    as a verbatim copy of `crates/obscura-js/js/bootstrap.js` and is embedded from
    that local path. It used to be linked out of the Rust tree so the two engines
-   could not drift, but `crates/**` is read-only (rule 1), which made a shim bug
+   could not drift, but the Rust tree is read-only (rule 1), which made a shim bug
    unfixable: the two rules contradicted each other and this one gave way. Fix
    the shim in the C# copy, comment the divergence at the site, and record it
    under "Known deviations" in `todo.md` like any other, and do not carry it back
    to the Rust copy. It reaches V8 through `BootstrapLoader.Install`, which
    installs the `Deno.core` shim first.
 
-   The same applies to the other two things the build used to take out of
-   `crates/`: the tracker blocklist (`dotnet/src/Obscura.Net/Resources/pgl_domains.txt`)
-   and the embedded fonts (`dotnet/src/Obscura.Render/Assets/*.ttf`). Nothing in
-   `dotnet/` reads across into the Rust tree any more, so the port can stand on
-   its own when `crates/` eventually goes away.
+   The same applies to the other things the build and tests used to take out of
+   the Rust tree: the tracker blocklist (`dotnet/src/Obscura.Net/Resources/pgl_domains.txt`),
+   the embedded fonts (`dotnet/src/Obscura.Render/Assets/*.ttf`) and the test
+   fonts (`dotnet/tests/Obscura.Render.Tests/Fixtures/fonts/`). Nothing in
+   `dotnet/` reads across into `.reference/` to build or to pass. Two checks look
+   for it and skip themselves when it is absent: the parity suite (the Rust
+   binary) and `ToolListMatchesRustSource` (the MCP tool JSON literals).
 6. **The op protocol is a contract.** `bootstrap.js` calls ~53 ops, and `op_dom`
    multiplexes ~90 string commands over `(cmd, arg1, arg2) -> string`. The C#
    implementation must accept and return byte-identical payloads. See
@@ -103,6 +116,23 @@ Read `todo.md` for the live port status and the ordered work queue.
 ## Layout
 
 ```
+README.md                       the C# port's README
+LICENSE                         Apache-2.0, for the port (Copyright Curiosity GmbH)
+NOTICE                          attributions: Obscura, Taffy, cosmic-text, the fonts
+todo.md                         port status, open issues, known deviations
+.devops/build-nuget.yml         the only build definition: build, test, pack, push
+.reference/
+  README.md                     what is vendored and why
+  obscura/                      the original Rust Obscura at the synced commit (read-only)
+    UPSTREAM.md                 the upstream commit the tree, and the port, are synced to
+    crates/, vendor/            the Rust workspace and its vendored taffy / cosmic-text
+    README.md, LICENSE, docs/   upstream's own README, license and docs, unmodified
+    render-repros -> ../../render-repros   symlink: the Rust tests include_str! fixtures from it
+render-repros/                  layout/paint fixtures, shared by the parity suite and the Rust tests
+test-html-files/                self-contained pages for comparison against Chromium
+scripts/                        parity-sweep.sh, render-compare.sh, regen-golden.sh
+tools/                          imgdiff (C#), the canvas conformance probe, live-view
+skills/                         obscura-port, render-compare
 dotnet/
   Obscura.slnx                  solution
   Directory.Build.props         shared TFM/analyzer/lang settings
@@ -147,8 +177,8 @@ The engine never uses system fonts. It embeds its own faces (Liberation, DejaVu,
 Noto Color Emoji) so rasterization is identical on every host and works on
 distroless images with no fontconfig. They live in
 `dotnet/src/Obscura.Render/Assets/` and are byte-identical copies of
-`crates/obscura-render/assets/`; if that tree's faces are ever updated, re-copy
-them or the two engines will rasterize differently. Resolve typefaces with
+`.reference/obscura/crates/obscura-render/assets/`; if an upstream sync updates
+those faces, re-copy them or the two engines will rasterize differently. Resolve typefaces with
 `SKTypeface.FromData` over the embedded resources; never
 `SKTypeface.FromFamilyName`.
 
@@ -176,14 +206,17 @@ also self-contained. Delete `obj/` and `bin/` for the RID when switching
 between self-contained and framework-dependent: stale intermediates from the
 other mode produce a binary that aborts at startup with no output.
 
-The Rust reference build (for differential testing) is unchanged:
+The Rust reference build (for differential testing) runs inside the reference
+tree and leaves its binary at `.reference/obscura/target/release/obscura`, which
+is where the parity suite and the scripts look for it:
 
 ```bash
+cd .reference/obscura
 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo build --release -p obscura-cli --bins --features render
 ```
 
 **Any `cargo test --release -p obscura-cli` without `--features render` rewrites
-`target/release/obscura` with a default-features binary.** That binary refuses
+`.reference/obscura/target/release/obscura` with a default-features binary.** That binary refuses
 `--screenshot` and drops the two render-gated MCP tools, so a parity or
 render-compare run after it reports differences that are entirely the build's.
 Rebuild the reference after running the Rust tests, or pass `--features render`
@@ -198,17 +231,20 @@ dotnet test -c Release                                  # everything
 dotnet test -c Release tests/Obscura.Dom.Tests          # one area
 ```
 
-- Tests are xUnit v3. Each Rust integration test under `crates/*/tests/` has a
-  named counterpart; keep the file name so the mapping stays obvious.
+- Tests are xUnit v3. Each Rust integration test under
+  `.reference/obscura/crates/*/tests/` has a named counterpart; keep the file name so the mapping stays obvious.
 - **V8 isolates:** unlike the Rust engine, ClearScript supports many isolates
   per process, so tests do not need process-per-test. They do need to dispose
   their runtime; a leaked `V8ScriptEngine` will wedge the test host. Use the
   `RuntimeFixture` helper rather than constructing engines ad hoc.
 - **Parity tests** (`Obscura.Parity.Tests`) shell out to the Rust binary and
-  compare output. They are skipped automatically unless `OBSCURA_RUST_BIN`
-  points at a release build. CI-equivalent runs must set it.
+  compare output. They run when `OBSCURA_RUST_BIN` points at a release build,
+  or one sits at `.reference/obscura/target/release/obscura`, and skip
+  otherwise. The publish pipeline does not build V8 from source, so parity is a
+  porting check run by hand, not a release gate: run it before claiming a
+  component or an upstream sync is done.
 - **A deliberate deviation makes parity the wrong assertion for that input.**
-  Since `crates/**` is read-only, a bug fixed on the C# side leaves the two
+  Since `.reference/**` is read-only, a bug fixed on the C# side leaves the two
   engines legitimately disagreeing. Do not weaken the fix to keep parity green:
   assert the correct (Chromium) value in an `Obscura.<Area>.Tests` fact instead,
   and if a parity test covers the same input, narrow it and name the deviation
@@ -285,7 +321,8 @@ when C# layout drifts from Rust:
 1. Read the Rust source completely before writing C#. Note every public item.
 2. Port the types and the public surface first, then the bodies.
 3. Port the Rust unit tests (`#[cfg(test)] mod tests`) as xUnit facts in the
-   same order, then the integration tests under `crates/<crate>/tests/`.
+   same order, then the integration tests under
+   `.reference/obscura/crates/<crate>/tests/`.
 4. Run `dotnet test` for the area. Green means the port is *plausible*.
 5. Check the behaviour against **Chromium**, which is the authority (rule 1) -
    a parity test against the Rust binary is a cheap way to catch a transcription
@@ -293,6 +330,108 @@ when C# layout drifts from Rust:
    wrong in places. Measuring Chromium is what says the port is *done*.
 6. Update `todo.md`: move the component's line from `[ ]` to `[x]` and record
    any deliberate deviation under "Known deviations".
+
+## Merging upstream changes
+
+Upstream Obscura keeps moving. `.reference/obscura/UPSTREAM.md` names the
+upstream commit the reference tree is a copy of, and the port covers upstream up
+to that commit. Bringing in newer work is a review, not a merge: upstream's
+commits are Rust, the deliverable is C#, and some upstream fixes are ones this
+port already made on its own (often differently), so each change has to be read
+against the C# before anything is ported. Never `git merge` upstream into this
+repository; the histories share ancestry, but upstream still has the Rust tree at
+the root, and a merge would put it back there.
+
+1. **Fetch upstream beside the repository**, not into it:
+
+   ```bash
+   git clone https://github.com/h4ckf0r0day/obscura "$TMP/upstream"
+   SYNC=$(sed -n 's/^- Commit: `\(.*\)`//p' .reference/obscura/UPSTREAM.md)
+   git -C "$TMP/upstream" log --no-merges --format='%h %s' "$SYNC"..origin/main
+   ```
+
+   That list is the work. Sort it by area (the crate each commit touches maps to
+   a project via the Layout table above) and skip only what cannot reach the
+   port: README/docs edits, Cargo dependency bumps, release packaging.
+
+2. **Review each commit against the C#.** Read the Rust diff and its tests, then
+   the C# counterpart, and classify it:
+   - **port** - the behaviour is missing in C#;
+   - **already** - the C# has it, often from a fix made here first (check
+     "Known deviations" and "Changes to the shared shim" in `todo.md`, and
+     `dotnet/docs/round3-findings.md`);
+   - **partial** - some of it is present;
+   - **conflict** - it contradicts a deliberate deviation or Chromium. Chromium
+     wins: measure it, and keep the C# if the C# is right;
+   - **skip** - it cannot apply (Rust-only build, deps, docs).
+   Fixes to `crates/obscura-js/js/bootstrap.js` land in
+   `dotnet/src/Obscura.Js/js/bootstrap.js` by hand; diff the two copies around
+   the hunk first, because ours has diverged (rule 5). A change to a wire surface
+   (CDP JSON, MCP tool JSON, op payloads, CLI output) is ported byte for byte.
+   Security fixes come first, and for each one say whether the C# is exposed
+   today.
+
+3. **Port, one upstream fix per commit**, citing the upstream commit and PR in
+   the message (`port upstream 6aef52d (#1013): removeAttribute updates the id
+   index`). Port the upstream tests with the fix, under the usual file-name
+   mapping. Where the C# already had it, or keeps different behaviour on
+   purpose, record that in `todo.md` so the next sync does not re-review it.
+
+4. **Advance the reference tree** in its own commit, carrying upstream's diff and
+   nothing else. Apply it three-way: the fork edited a few Rust files early in
+   the port (listed in `UPSTREAM.md`), so a plain apply fails on them, and the
+   upstream history this repository shares supplies the base blobs a three-way
+   apply needs. Leave out what the fork renamed or keeps at the root:
+
+   ```bash
+   NEW=$(git -C "$TMP/upstream" rev-parse origin/main)
+   git -C "$TMP/upstream" diff --binary "$SYNC" "$NEW" -- . \
+       ':!render-repros' ':!Dockerfile' ':!.github/workflows' ':!scripts/ci' \
+       ':!.gitignore' ':!.gitattributes' ':!build.log' ':!tools' \
+     | git apply --3way --directory=.reference/obscura
+   ```
+
+   Conflicts can only land in the files `UPSTREAM.md` lists; resolve them by
+   keeping both sides. Then update `UPSTREAM.md` (commit, date, subject) in the
+   same commit. New or changed upstream fixtures in `render-repros/` go into the
+   root `render-repros/` in a separate commit, since the C# parity suite runs
+   them too. If upstream changed `crates/obscura-render/assets/` or
+   `pgl_domains.txt`, re-copy them into `dotnet/` (rule 5) in a separate commit.
+
+5. **Record the sync in `todo.md`:** the range reviewed, each commit's
+   classification, and what is still open. Then build, run the area suites, and
+   run the parity suite against a reference binary rebuilt from the new tree:
+   an upstream change the port has not taken yet shows up there as a parity
+   difference, which is expected and should match the open items.
+
+The last review (upstream `727cc46..1a3169d`, 57 commits) is recorded in
+`dotnet/docs/upstream-review-2026-09.md`.
+
+## Packaging, publishing and licensing
+
+- **Packages.** The eight library projects under `dotnet/src/` pack as
+  `Obscura`, `Obscura.Browser`, `Obscura.Cdp`, `Obscura.Mcp`, `Obscura.Js`,
+  `Obscura.Render`, `Obscura.Net` and `Obscura.Dom`. `Obscura.Cli` and every
+  test project set `IsPackable` to false. Package metadata (authors, copyright,
+  license, repository, README, NOTICE) is set once in
+  `dotnet/Directory.Build.props`; give a new project a `<Description>` and
+  nothing else.
+- **Publishing.** `.devops/build-nuget.yml` is an Azure DevOps pipeline on a push
+  to `main`, and it is the only thing that publishes; upstream's GitHub
+  workflows sit disabled under `.reference/obscura/.github/`. It restores,
+  builds, runs the whole suite, packs and pushes through the
+  `nuget-curiosity-org` service connection, so no API key lives in the
+  repository. The version is CalVer computed in the pipeline,
+  `yy.M.<build id mod 65536>`; the `0.1.0` in `Directory.Build.props` is only the
+  local default, which keeps a local `obscura --version` in the shape of the
+  reference's.
+- **Licensing.** The port is Copyright Curiosity GmbH and licensed Apache-2.0
+  (`LICENSE`). It is a derivative of Obscura (Apache-2.0), Taffy (MIT) and
+  cosmic-text (MIT/Apache-2.0), and `NOTICE` carries those attributions; both
+  files travel in every package. Upstream's own license stays, unmodified, at
+  `.reference/obscura/LICENSE`. Keep the original authors credited in
+  `Authors` and `Copyright`, and add to `NOTICE` if a port of another project
+  lands.
 
 ## Stealth
 

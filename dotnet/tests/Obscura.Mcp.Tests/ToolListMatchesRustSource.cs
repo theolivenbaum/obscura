@@ -28,7 +28,7 @@ public sealed class ToolListMatchesRustSourceTests
     public void ToolListBytesMatchTheRustJsonLiterals()
     {
         var source = FindRustSource();
-        Assert.SkipWhen(source is null, "crates/obscura-mcp/src/lib.rs is not present in this checkout");
+        Assert.SkipWhen(source is null, ".reference/obscura/crates/obscura-mcp/src/lib.rs is not present in this checkout");
 
         var rust = File.ReadAllText(source!);
         var expected = new JsonObject { ["tools"] = RustToolArray(rust) };
@@ -69,7 +69,7 @@ public sealed class ToolListMatchesRustSourceTests
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null)
         {
-            var candidate = Path.Combine(dir.FullName, "crates", "obscura-mcp", "src", "lib.rs");
+            var candidate = Path.Combine(dir.FullName, ".reference", "obscura", "crates", "obscura-mcp", "src", "lib.rs");
             if (File.Exists(candidate))
             {
                 return candidate;
