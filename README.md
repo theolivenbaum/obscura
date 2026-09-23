@@ -117,7 +117,9 @@ On loopback no credentials are needed. Binding the CDP or MCP server anywhere el
 (`--host 0.0.0.0`) requires a bearer token of at least 32 bytes in
 `POCKETCALCULATOR_CDP_TOKEN` or `POCKETCALCULATOR_MCP_TOKEN`. Requests carrying a
 browser `Origin`, and CDP requests with a foreign `Host`, are refused. MCP callers
-from a browser can be allowed with `POCKETCALCULATOR_MCP_ALLOWED_ORIGINS`.
+from a browser can be allowed with `POCKETCALCULATOR_MCP_ALLOWED_ORIGINS`. With
+`serve --workers N`, the balancer tells its workers the public address it bound, so a
+DNS host name that reaches the balancer is accepted and advertised.
 
 ## Build, test and publish
 

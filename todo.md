@@ -232,24 +232,45 @@ ports 727cc46..1a3169d"):
 
 Security follow-ups found while porting (not upstream fixes):
 
-- [ ] `__obscura_markTrusted` and the other `__obscura_*` helpers stay page-visible, as
-      upstream has them; page script can mark its own events trusted
-- [ ] Page-initiated navigations carry no initiator, so a cross-site one still sends
-      SameSite=Strict cookies (upstream behaves the same; Chromium withholds them).
-      Fixing it also changes `Referer` and `sec-fetch-site`
-- [ ] `no-cors` requests may carry `Authorization`; Chromium refuses non-safelisted
-      request headers in `no-cors` mode
+- [x] `__obscura_markTrusted` and the other capability helpers are no longer page-visible:
+      they reach host script only as the `__obscura_host` parameter (`HostScript`)
+- [x] Page-initiated navigations carry their initiator (document URL, user activation):
+      cross-site ones withhold SameSite=Strict, a cross-site POST or iframe also Lax;
+      Sec-Fetch-Site/User/Dest, Referer and Origin match Chromium 140
+- [x] `no-cors` requests may carry `Authorization`: fixed. The shim's Headers/Request/fetch
+      apply the Fetch "request" / "request-no-cors" guards and op_fetch_url filters again
+      host-side. Also closed: `mode: "same-origin"` or an unknown mode read a cross-origin
+      body with no CORS check
 - [ ] `ImageAgent` has no SSRF check; it is reachable only from standalone `RenderPaint`
       callers with no page (as upstream), since `Obscura.Render` cannot see `SsrfGuard`
-- [ ] `serve --workers` behind a DNS Host name: the loopback-bound workers refuse it until
-      a156914's `OBSCURA_CDP_FORWARDED_HOST/PORT` is ported
+- [x] `serve --workers` behind a DNS Host name: a156914's forwarded authority is ported as
+      `POCKETCALCULATOR_CDP_FORWARDED_HOST/PORT`
+- [ ] The CDP remote-object store (`__obscura_objects`, `__obscura_oid`, `__obscura_await_meta`,
+      `__obscura_await_rejected`, `__obscura_done_N`) and the frame registries
+      (`__obscura_frameObjects/Elements/Windows`) are page-readable and page-writable, so a
+      page can read or forge a client's handles and awaitPromise results. Moving them behind
+      the host wrapper changes how client Runtime.evaluate code runs (sloppy mode, `var`)
+- [ ] `el.dispatchEvent(ev)` does not clear `isTrusted` as DOM requires, so page script can
+      re-dispatch a trusted event it received (check Chromium first)
+- [ ] Host snippets build events with the page's current `Event` / `MouseEvent`
+      constructors, which a page can replace; capture them at bootstrap
+- [ ] Every `__obscura_*` name is still detectable with `'name' in window`; the hide list
+      only filters reflection
+- [ ] Referrer policy: `<meta name=referrer>`, `referrerpolicy` and `rel=noreferrer` are not
+      supported (Chromium honours all three); meta refresh and followed `window.open` are
+      not implemented; third-party cookie blocking for cross-site iframes is not modelled
+- [ ] fetch: `User-Agent` stays settable from script (check whether Chromium ignores it);
+      an `Origin` header is sent on no-cors GET/HEAD (Fetch and Chromium omit it);
+      CONNECT/TRACE/TRACK are not refused (with open item `2e752b9`); response Headers are
+      not immutable; XHR `setRequestHeader` with an invalid name fails at send, not with a
+      synchronous SyntaxError
 - [ ] A `serve` process with stdin closed may still hit the fd-0 close at shutdown in
       code paths other than the accept thread fixed here; audit `Socket.Dispose` under a
       blocked call
 
 Correctness:
 
-- [ ] `a156914` - CDP mouse/pointer/focus order, event path phases, event classes,
+- [ ] `a156914` (CDP part 3, forwarded authority and multi-worker balancer, is ported) - CDP mouse/pointer/focus order, event path phases, event classes,
       window named properties, `:scope`, renderer hit test (on the port's paint order)
 - [ ] `2b07b76` - `document.write` script ordering
 - [ ] `6aef52d`, `61ec5b3`, `dc5e60e` - id index on removeAttribute, node identity,
@@ -1205,11 +1226,46 @@ Page script and the shim:
 - `contentDocument` never treats the opaque origin `"null"` as same-origin. An iframe loads
   through `op_fetch_url(..., internalLoad=true)`, since a public no-cors fetch() is now opaque.
 - The fallback `Response` keeps `status: 0` rather than reading it as 200.
+- The shim's host helpers are not globals: `markTrusted`, `setFieldValue`, `setInputFiles`,
+  `deliverMessage`, `activateLabel`, `isDisabled`, `labeledControl`, `interactiveHost`,
+  `registerLinkedStylesheet`, `tryFragmentNavigate`, `setScreenOverride`, `liveFrameIds`,
+  `forgetFrame` and the CDP pointer state. Upstream publishes them as `__obscura_*` globals, so
+  any page can mark its own events trusted. They travel in one frozen object through
+  `__obscura_host_handoff`, which `BootstrapLoader` deletes in every realm; host script gets it
+  as the `__obscura_host` parameter of a strict wrapper (`HostScript`, `EvaluateHost` /
+  `ExecuteHostScript`), which must never run client- or page-supplied code. The trusted-event
+  set is read through WeakSet methods captured at bootstrap. `postMessage` reports the
+  closure-held realm id as its source and the form-state mirror uses the realm's fixed frame id;
+  upstream reads the page-writable `__obscura_frameId` for both.
+- Headers follow Fetch: names and values are validated (TypeError), appends combine with ", ",
+  iteration is sorted and lower-cased, and a Request's headers take the "request" or
+  "request-no-cors" guard, which silently ignores forbidden request-headers and (no-cors)
+  anything but a no-CORS-safelisted Accept/Accept-Language/Content-Language/Content-Type. A
+  no-cors Request/fetch() with a method other than GET/HEAD/POST, an invalid mode or
+  "navigate" throws TypeError. XHR `setRequestHeader` ignores forbidden headers. Rust keeps and
+  forwards every header and method.
 
 Network:
 
 - A redirect downgrades to GET only where Fetch says so: 301/302 for POST, 303 for anything but
   GET/HEAD (`FetchOps.RedirectDowngradesToGet`). Rust downgrades every 301/302/303.
+- op_fetch_url filters page-script requests (internal_load false): forbidden request-headers
+  are dropped in every mode, no-cors keeps only no-CORS-safelisted headers and rejects methods
+  other than GET/HEAD/POST, an unknown mode is cors, and same-origin mode refuses a
+  cross-origin hop with the corsBlocked payload. Rust forwards everything and treats any
+  non-"cors" mode as CORS-free. CDP `continueRequest` headers and internal loads are not
+  filtered.
+- Navigations: upstream sends every navigation with no initiator, `Sec-Fetch-User: ?1` always,
+  origin-only `Sec-Fetch-Site`, and iframes as no-cors same-origin-credential fetches. The port
+  records the initiating document in op_navigate (`PendingNavigation`), forwards it through CDP
+  as `__initiator` / `__userActivated`, and applies Chromium 140's rules: Strict withheld
+  cross-site and when the redirect chain crosses sites (even browser-initiated), Lax only on
+  top-level safe-method navigations, `same-site` as its own value with the least trusted hop
+  winning, `?1` only with transient activation (CDP Input, `userGesture`, MCP click/press; 5 s),
+  Origin on document-initiated POST, Referer trimmed per hop and never restored. Iframe
+  documents load through op_fetch_url mode `navigate`, credentials `include`. Measured against
+  Playwright's Chromium 140; it also blocks third-party cookies in cross-site iframes, which the
+  port does not model.
 - The `Fetch.fulfillRequest` result for `op_fetch_url` omits `bodyBase64` (Rust has it since
   #912, not ported); the C# fulfill body is text only.
 - Cookies: an empty `Domain=` is ignored (host-only), not rejected; on an IP host only the exact
@@ -1236,9 +1292,18 @@ Servers:
 - CDP Host check (`Server.Control.cs` `HostAllowed`) follows Chromium's
   `RequestIsSafeToServe`: no Host, any IP literal, or `localhost` / `*.localhost` on any port;
   a wildcard bind accepts any Host. Upstream requires the bind IP and port and refuses a
-  missing Host, which breaks tunnels, port forwards and the multi-worker balancer.
+  missing Host, which breaks tunnels and port forwards.
 - Multi-worker `serve` refuses a non-loopback balancer bind without `POCKETCALCULATOR_CDP_TOKEN`
-  (32+ bytes). Upstream 04418a5 left it open; a156914 closed it another way.
+  (32+ bytes) before binding or spawning. Upstream a156914 leaves it to the workers, which
+  refuse through the forwarded authority, so its balancer fails with "worker 1 exited during
+  startup". Workers enforce the token too.
+- Forwarded CDP authority (a156914, `POCKETCALCULATOR_CDP_FORWARDED_HOST/PORT`): the forwarded
+  address widens the Host check exactly as a bind to that address would, on any port (upstream
+  also requires the forwarded port). With no usable Host, discovery advertises the balancer's
+  authority rather than the worker's internal port. The balancer forwards the address and port
+  it actually bound (upstream forwards the raw `--host`/`--port`, which breaks
+  `--host localhost` and `--port 0`), kills its workers if startup fails (upstream orphans
+  them), and never peeks the request.
 - CDP refusals drain the unread request and half-close before closing, so the client reads the
   401/403/431 rather than a reset; Rust drops the stream.
 - CDP shutdown stops the accept thread before disposing the listener: disposing it under a
