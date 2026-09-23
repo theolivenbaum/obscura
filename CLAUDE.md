@@ -182,6 +182,15 @@ those faces, re-copy them or the two engines will rasterize differently. Resolve
 `SKTypeface.FromData` over the embedded resources; never
 `SKTypeface.FromFamilyName`.
 
+The one exception is opt-in: an operator can add font directories
+(`obscura serve --font-dir DIR`, repeatable, or `BrowserConfig.FontDirectories`
+in the library), ported from upstream `343fdc7`. Those files are read from disk
+once, loaded with `SKTypeface.FromData` after the embedded faces, and never
+through fontconfig. With nothing configured no file is read and output is
+byte-identical to the embedded-only engine, so determinism stays the default and
+giving it up is the operator's explicit choice. See
+`dotnet/src/Obscura.Render/Inline/FontDirectories.cs`.
+
 ## Build
 
 ```bash

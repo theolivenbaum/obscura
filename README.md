@@ -30,6 +30,8 @@ source it was ported from is kept, read-only, under
 - **Deterministic output**: fonts are embedded (Liberation, DejaVu, Noto Color
   Emoji), so a page rasterizes the same on every host, including distroless
   images with no fontconfig.
+  Extra faces can be added with `obscura serve --font-dir DIR` (or
+  `BrowserConfig.FontDirectories`), at the cost of that host independence.
 - **Safe defaults**: fetches to loopback, RFC1918 and link-local addresses are
   blocked unless `--allow-private-network` is given.
 
