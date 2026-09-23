@@ -217,6 +217,14 @@ public static class Runtime
                 ulong timeoutMs = parameters.Get("timeout").AsU64() ?? DefaultCommandTimeoutMs;
 
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
+                // `userGesture: true` runs the expression as though the user had just
+                // interacted, which Chromium reports on a navigation it starts as
+                // Sec-Fetch-User: ?1.
+                if (parameters.Get("userGesture").AsBool() == true)
+                {
+                    page.NoteUserActivation();
+                }
+
                 RemoteObjectInfo info = await RunBoundedAsync(
                     () => page.EvaluateForCdpWithTimeoutAsync(
                         expression, returnByValue, awaitPromise, timeoutMs),

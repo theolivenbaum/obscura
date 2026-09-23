@@ -75,7 +75,24 @@ public sealed class PocketCalculatorState
     public IStealthHttpClient? StealthClient { get; set; }
 
     /// <summary>A navigation recorded by <c>op_navigate</c>, drained by the Page.</summary>
-    public (string Url, string Method, string Body)? PendingNavigation { get; set; }
+    public PendingNavigation? PendingNavigation { get; set; }
+
+    /// <summary>
+    /// <see cref="Stopwatch"/> timestamp of the last activation-triggering input the host
+    /// dispatched (a mouse press or release, a key press), or 0 for none.
+    /// </summary>
+    public long UserActivationTimestamp { get; set; }
+
+    /// <summary>
+    /// Chromium's transient activation duration: a navigation within this long of the
+    /// last user input counts as user-activated (<c>Sec-Fetch-User: ?1</c>).
+    /// </summary>
+    public static readonly TimeSpan TransientActivationDuration = TimeSpan.FromSeconds(5);
+
+    /// <summary>Whether this realm has transient user activation now.</summary>
+    public bool HasTransientActivation =>
+        UserActivationTimestamp != 0
+        && Stopwatch.GetElapsedTime(UserActivationTimestamp) < TransientActivationDuration;
 
     /// <summary>Where intercepted requests are published, when interception is on.</summary>
     public IInterceptSink? InterceptTx { get; set; }
@@ -624,4 +641,25 @@ public sealed class ByteArrayJsBuffer(byte[] bytes) : IJsBuffer
     public int Length => bytes.Length;
 
     public ReadOnlyMemory<byte> Read() => bytes;
+}
+
+/// <summary>
+/// A navigation a document queued through <c>op_navigate</c>: where, how, and who asked.
+/// </summary>
+/// <param name="Url">The absolute target URL.</param>
+/// <param name="Method">The HTTP method, <c>GET</c> or <c>POST</c>.</param>
+/// <param name="Body">The form-encoded body of a POST, otherwise empty.</param>
+/// <remarks>
+/// Deviation: upstream records only the three positional fields, so the host cannot
+/// tell a page-initiated navigation from an address-bar one and sends it with no
+/// initiator. <see cref="Initiator"/> and <see cref="UserActivated"/> are what the
+/// request needs to apply SameSite, <c>Sec-Fetch-*</c> and Referer as Chromium does.
+/// </remarks>
+public sealed record PendingNavigation(string Url, string Method, string Body)
+{
+    /// <summary>The URL of the document that started the navigation.</summary>
+    public string Initiator { get; init; } = string.Empty;
+
+    /// <summary>Whether the initiating realm had transient user activation.</summary>
+    public bool UserActivated { get; init; }
 }

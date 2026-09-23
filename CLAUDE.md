@@ -340,6 +340,10 @@ when C# layout drifts from Rust:
 - **Page script never reaches the engine.** `globalThis.Deno` is deleted after
   bootstrap; the shim holds the ops in a closure. Do not add a page-visible global that
   exposes an op, the stylesheet store, or response bytes an internal load fetched.
+  Helpers that host code needs (marking events trusted, setting field values or input
+  files, delivering messages, frame bookkeeping) live in the frozen `__obscura_host`
+  object: reach them with `EvaluateHost` / `ExecuteHostScript` (`HostScript`), never
+  through a global, and never pass client- or page-supplied code to those entry points.
 - **Control planes are gated.** A non-loopback CDP or MCP bind needs a 32+ byte token
   (`POCKETCALCULATOR_CDP_TOKEN`, `POCKETCALCULATOR_MCP_TOKEN`); browser `Origin`s are
   refused, and so are foreign `Host`s on CDP.

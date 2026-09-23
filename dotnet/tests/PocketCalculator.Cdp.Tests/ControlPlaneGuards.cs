@@ -87,6 +87,53 @@ public sealed class ControlPlaneGuardsTests
         Assert.Equal(WebSocketState.Open, ws.State);
     }
 
+    /// <summary>
+    /// Upstream a156914: a loopback worker behind a balancer on 0.0.0.0 serves the
+    /// DNS name a client used to reach the balancer, advertises it back, and still
+    /// demands the token.
+    /// </summary>
+    [Fact]
+    public async Task ForwardedWorkerServesAndAdvertisesTheBalancerDnsName()
+    {
+        await using var server = await CdpServerHandle.StartForwardedAsync(
+            Token, new CdpServer.ForwardedAuthority(System.Net.IPAddress.Any, 9222));
+        const string host = "cdp.example.test:9222";
+
+        var unauthorized = await CdpTestClient.HttpRawAsync(
+            server.Port, Get(server.Port, "/json/version", host: host), Timeout);
+        Assert.StartsWith("HTTP/1.1 401 Unauthorized\r\n", unauthorized, StringComparison.Ordinal);
+
+        var auth = $"Authorization: Bearer {Token}\r\n";
+        var version = await CdpTestClient.HttpRawAsync(
+            server.Port, Get(server.Port, "/json/version", auth, host), Timeout);
+        Assert.StartsWith("HTTP/1.1 200 OK\r\n", version, StringComparison.Ordinal);
+        Assert.Contains("\"webSocketDebuggerUrl\": \"ws://cdp.example.test:9222/devtools/browser\"", version, StringComparison.Ordinal);
+
+        var list = await CdpTestClient.HttpRawAsync(server.Port, Get(server.Port, "/json/list", auth, host), Timeout);
+        Assert.StartsWith("HTTP/1.1 200 OK\r\n", list, StringComparison.Ordinal);
+        Assert.Contains("ws://cdp.example.test:9222/devtools/", list, StringComparison.Ordinal);
+
+        // With no Host the worker advertises the balancer's port, not its own.
+        var noHost = await CdpTestClient.HttpRawAsync(
+            server.Port, $"GET /json/version HTTP/1.0\r\n{auth}\r\n", Timeout);
+        Assert.Contains("\"webSocketDebuggerUrl\": \"ws://127.0.0.1:9222/devtools/browser\"", noHost, StringComparison.Ordinal);
+    }
+
+    /// <summary>A loopback forwarded authority adds no DNS name to what a worker serves.</summary>
+    [Fact]
+    public async Task LoopbackForwardedWorkerStillRefusesAReboundHost()
+    {
+        await using var server = await CdpServerHandle.StartForwardedAsync(
+            null, new CdpServer.ForwardedAuthority(System.Net.IPAddress.Loopback, 9222));
+        var response = await CdpTestClient.HttpRawAsync(
+            server.Port, Get(server.Port, "/json/version", host: "rebind.example:9222"), Timeout);
+        Assert.StartsWith("HTTP/1.1 403 Forbidden\r\n", response, StringComparison.Ordinal);
+
+        var loopback = await CdpTestClient.HttpRawAsync(
+            server.Port, Get(server.Port, "/json/version", host: "127.0.0.1:9222"), Timeout);
+        Assert.StartsWith("HTTP/1.1 200 OK\r\n", loopback, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task OversizedRequestHeadIsRefused()
     {

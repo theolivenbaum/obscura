@@ -27,11 +27,18 @@ internal static class FormStateMirror
     /// <summary>
     /// Must run before bootstrap.js, which adopts whatever is already on the global.
     /// </summary>
-    internal static void Install(V8ScriptEngine engine)
+    /// <remarks>
+    /// <paramref name="frameId"/> is the realm's own frame id, fixed here. The mirror used
+    /// to read the page-writable <c>globalThis.__obscura_frameId</c> on every write, so a
+    /// frame's script could set it to another realm's id and write form state into that
+    /// realm's document.
+    /// </remarks>
+    internal static void Install(V8ScriptEngine engine, uint frameId = 0)
     {
         ArgumentNullException.ThrowIfNull(engine);
+        var id = frameId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         engine.Execute("form-state-mirror", """
-            (function () {
+            (function (frameId) {
               // Captured now: globalThis.Deno is deleted once bootstrap.js has run.
               const ops = globalThis.Deno.core.ops;
               const mirror = (cmd, coerce) => new Proxy({}, {
@@ -41,7 +48,7 @@ internal static class FormStateMirror
                   if (nid !== null && /^[0-9]+$/.test(nid)) {
                     try {
                       ops.op_dom(
-                        cmd, nid, coerce(value), globalThis.__obscura_frameId >>> 0);
+                        cmd, nid, coerce(value), frameId);
                     } catch (_) {}
                   }
                   return true;
@@ -49,7 +56,7 @@ internal static class FormStateMirror
               });
               globalThis._formValues = mirror('set_form_value', (v) => String(v));
               globalThis._formChecked = mirror('set_form_checked', (v) => (v ? 'true' : 'false'));
-            })();
-            """);
+            })
+            """ + "(" + id + ");");
     }
 }

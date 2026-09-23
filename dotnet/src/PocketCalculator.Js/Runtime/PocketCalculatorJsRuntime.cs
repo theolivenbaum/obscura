@@ -553,9 +553,17 @@ public sealed partial class PocketCalculatorJsRuntime
         var script = size is { } value
             && double.IsFinite(value.Width) && double.IsFinite(value.Height)
             && value.Width > 0 && value.Height > 0
-            ? $"globalThis.__obscura_set_screen_override({Number(value.Width)},{Number(value.Height)},{(emulated ? "true" : "false")});"
-            : $"globalThis.__obscura_set_screen_override(null,null,{(emulated ? "true" : "false")});";
-        RunSetter("<set-screen-size>", script);
+            ? $"__obscura_host.setScreenOverride({Number(value.Width)},{Number(value.Height)},{(emulated ? "true" : "false")});"
+            : $"__obscura_host.setScreenOverride(null,null,{(emulated ? "true" : "false")});";
+        // A host helper (upstream's page-visible __obscura_set_screen_override global).
+        try
+        {
+            InvokeHostScript("<set-screen-size>", HostScript.WrapStatements(script));
+        }
+        catch (JsRuntimeException)
+        {
+            // Discarded like every other profile setter (RunSetter).
+        }
     }
 
     private void RunSetter(string name, string source)

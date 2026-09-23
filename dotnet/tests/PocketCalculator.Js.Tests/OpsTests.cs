@@ -406,6 +406,93 @@ public sealed class OpsTests
         Assert.False(FetchOps.IsCorsSafelistedRequestHeader("Range", "bytes=0-1,4-5"));
     }
 
+    // Deviation from Rust: Fetch's forbidden request-headers never leave page script.
+    [Fact]
+    public void Forbidden_request_headers_follow_fetch()
+    {
+        foreach (var name in new[]
+                 {
+                     "Cookie", "cookie2", "Host", "Origin", "Referer", "Content-Length", "Connection",
+                     "Accept-Encoding", "Access-Control-Request-Headers", "Transfer-Encoding", "Via",
+                     "Sec-Fetch-Site", "sec-ch-ua", "Proxy-Authorization", "proxy-foo",
+                 })
+        {
+            Assert.True(FetchOps.IsForbiddenRequestHeader(name, "x"), name);
+        }
+
+        Assert.False(FetchOps.IsForbiddenRequestHeader("Authorization", "Bearer x"));
+        Assert.False(FetchOps.IsForbiddenRequestHeader("User-Agent", "ua"));
+        Assert.False(FetchOps.IsForbiddenRequestHeader("X-Custom", "1"));
+        Assert.False(FetchOps.IsForbiddenRequestHeader("Secret", "1"));
+
+        // The method-override headers are forbidden only when they name a forbidden method.
+        Assert.True(FetchOps.IsForbiddenRequestHeader("X-HTTP-Method-Override", "trace"));
+        Assert.True(FetchOps.IsForbiddenRequestHeader("X-HTTP-Method", "GET, CONNECT"));
+        Assert.True(FetchOps.IsForbiddenRequestHeader("x-method-override", " Track "));
+        Assert.False(FetchOps.IsForbiddenRequestHeader("X-HTTP-Method-Override", "PUT"));
+    }
+
+    // Fetch: only Accept, Accept-Language, Content-Language and a safelisted
+    // Content-Type are no-CORS-safelisted; Range is CORS- but not no-CORS-safelisted.
+    [Fact]
+    public void No_cors_safelist_is_the_four_names_with_safelisted_values()
+    {
+        Assert.True(FetchOps.IsNoCorsSafelistedRequestHeader("Accept", "text/html"));
+        Assert.True(FetchOps.IsNoCorsSafelistedRequestHeader("accept-language", "en-US, en;q=0.9"));
+        Assert.True(FetchOps.IsNoCorsSafelistedRequestHeader("Content-Language", "de"));
+        Assert.True(FetchOps.IsNoCorsSafelistedRequestHeader("Content-Type", "text/plain;charset=UTF-8"));
+
+        Assert.False(FetchOps.IsNoCorsSafelistedRequestHeader("Content-Type", "application/json"));
+        Assert.False(FetchOps.IsNoCorsSafelistedRequestHeader("Accept", new string('a', 129)));
+        Assert.False(FetchOps.IsNoCorsSafelistedRequestHeader("Accept", "a(b)"));
+        Assert.False(FetchOps.IsNoCorsSafelistedRequestHeader("Range", "bytes=0-499"));
+        Assert.False(FetchOps.IsNoCorsSafelistedRequestHeader("Authorization", "Bearer x"));
+        Assert.False(FetchOps.IsNoCorsSafelistedRequestHeader("X-Custom", "1"));
+    }
+
+    [Fact]
+    public void Script_request_headers_drop_forbidden_and_no_cors_unsafe_names()
+    {
+        var headers = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Authorization"] = "Bearer secret",
+            ["X-Custom"] = "1",
+            ["Accept"] = "text/plain",
+            ["Content-Type"] = "application/json",
+            ["Range"] = "bytes=0-1",
+            ["Cookie"] = "evil=1",
+            ["Host"] = "evil.test",
+            ["Origin"] = "http://evil.test",
+            ["Sec-Fetch-Site"] = "none",
+            ["Proxy-Authorization"] = "x",
+        };
+
+        var noCors = FetchOps.FilterScriptRequestHeaders(headers, noCors: true);
+        Assert.Equal(["Accept"], noCors.Keys);
+
+        var cors = FetchOps.FilterScriptRequestHeaders(headers, noCors: false);
+        Assert.Equal(["Authorization", "X-Custom", "Accept", "Content-Type", "Range"], cors.Keys);
+        Assert.Equal("Bearer secret", cors["Authorization"]);
+    }
+
+    [Fact]
+    public void Script_request_mode_and_no_cors_methods()
+    {
+        Assert.Equal("no-cors", FetchOps.ScriptRequestMode("no-cors"));
+        Assert.Equal("same-origin", FetchOps.ScriptRequestMode("same-origin"));
+        Assert.Equal("cors", FetchOps.ScriptRequestMode("cors"));
+        Assert.Equal("cors", FetchOps.ScriptRequestMode("navigate"));
+        Assert.Equal("cors", FetchOps.ScriptRequestMode("bogus"));
+        Assert.Equal("cors", FetchOps.ScriptRequestMode(string.Empty));
+
+        Assert.True(FetchOps.NoCorsAllowsMethod("GET"));
+        Assert.True(FetchOps.NoCorsAllowsMethod("head"));
+        Assert.True(FetchOps.NoCorsAllowsMethod("Post"));
+        Assert.False(FetchOps.NoCorsAllowsMethod("PUT"));
+        Assert.False(FetchOps.NoCorsAllowsMethod("DELETE"));
+        Assert.False(FetchOps.NoCorsAllowsMethod("PATCH"));
+    }
+
     [Fact]
     public void Cors_unsafe_header_names_are_lowercase_sorted_and_only_include_unsafe_headers()
     {

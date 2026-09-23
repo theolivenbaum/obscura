@@ -130,7 +130,7 @@ public sealed class FrameRealm : IDisposable
             // The realm's op table is filled the same way the page's is, with
             // this frame's state, which is what makes an op called from the
             // frame resolve against the frame's own document.
-            shim = BootstrapLoader.Install(engine, ops => parent.BindRealmOps(ops, state));
+            shim = BootstrapLoader.Install(engine, ops => parent.BindRealmOps(ops, state), frameId);
             CopyIdentityToRealm(parent, engine);
         }
         catch (ScriptEngineException)
@@ -202,9 +202,13 @@ public sealed class FrameRealm : IDisposable
             + "try { window.dispatchEvent(loadEvent); } catch (_) {} } catch (_) {}");
 
     /// <summary>Delivers a <c>postMessage</c> that another realm sent to this one.</summary>
+    /// <remarks>
+    /// A host helper (<see cref="HostScript"/>). DEVIATION from the Rust engine, which calls
+    /// the page-visible <c>globalThis.__obscura_deliverMessage</c>.
+    /// </remarks>
     public void DeliverMessage(string dataJson, string origin, uint sourceFrameId, string targetOrigin) =>
-        ExecuteScript(
-            $"globalThis.__obscura_deliverMessage({EncodeJsonArgument(dataJson)}, "
+        ExecuteHostScript(
+            $"__obscura_host.deliverMessage({EncodeJsonArgument(dataJson)}, "
             + $"{EncodeJsonArgument(origin)}, {sourceFrameId.ToString(CultureInfo.InvariantCulture)}, "
             + $"{EncodeJsonArgument(targetOrigin)});");
 
@@ -235,10 +239,29 @@ public sealed class FrameRealm : IDisposable
     /// </summary>
     public void ExecuteScript(string source) => Run(source);
 
+    /// <summary>
+    /// <see cref="ExecuteScript"/> for host-authored statements that use this realm's host
+    /// helpers as <c>__obscura_host</c> (see <see cref="HostScript"/>).
+    /// </summary>
+    public void ExecuteHostScript(string source) =>
+        Run(() => HostScript.Invoke(_engine, _shim?.HostHelpers, "<frame-host>", HostScript.WrapStatements(source)));
+
+    /// <summary>
+    /// <see cref="Evaluate"/> for a host-authored expression that uses this realm's host
+    /// helpers as <c>__obscura_host</c>.
+    /// </summary>
+    public JsonNode? EvaluateHost(string expression) =>
+        ParseJson(Run(() => HostScript.Invoke(
+            _engine,
+            _shim?.HostHelpers,
+            "<frame-host>",
+            HostScript.WrapStatements($"return JSON.stringify({expression});"))));
+
     /// <summary>Evaluates an expression inside the frame and decodes it as JSON.</summary>
-    public JsonNode? Evaluate(string expression)
+    public JsonNode? Evaluate(string expression) => ParseJson(Run($"JSON.stringify({expression})"));
+
+    private static JsonNode? ParseJson(string? json)
     {
-        var json = Run($"JSON.stringify({expression})");
         if (json is null)
         {
             return null;
@@ -369,13 +392,15 @@ public sealed class FrameRealm : IDisposable
     /// as a string. Ops called from it find the frame's document because the op
     /// table was bound with the frame's state.
     /// </summary>
-    private string? Run(string source)
+    private string? Run(string source) => Run(() => _engine.Evaluate(new DocumentInfo("<frame>"), source));
+
+    private string? Run(Func<object?> evaluate)
     {
         var previous = _parent.RealmStates.Current;
         _parent.RealmStates.Current = State;
         try
         {
-            var value = _engine.Evaluate(new DocumentInfo("<frame>"), source);
+            var value = evaluate();
             return value switch
             {
                 null or Undefined or VoidResult => null,

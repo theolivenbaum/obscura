@@ -140,6 +140,144 @@ public sealed class ServerTests
             CdpServer.GetControlRefusal(NativeHead("rebind.example:9222"), IPAddress.Loopback, null));
     }
 
+    /// <summary>
+    /// Upstream a156914's test. Its last assertion is inverted here: upstream
+    /// refuses <c>127.0.0.1:9444</c> because the port is neither the bind port nor
+    /// the forwarded one, while this port serves any IP literal on any port
+    /// (Chromium's <c>RequestIsSafeToServe</c>, see <see cref="CdpServer.HostAllowed(string?, IPAddress)"/>).
+    /// </summary>
+    [Fact]
+    public void LoopbackWorkerAcceptsOnlyItsForwardedPublicPort()
+    {
+        var bind = IPAddress.Loopback;
+        CdpServer.ForwardedAuthority? forwarded = new(bind, 9222);
+        Assert.Null(CdpServer.GetControlRefusal(NativeHead("127.0.0.1:9222"), bind, forwarded, null));
+        Assert.Equal(
+            CdpServer.ControlRefusal.ForeignHost,
+            CdpServer.GetControlRefusal(NativeHead("rebind.example:9222"), bind, forwarded, null));
+        Assert.Null(CdpServer.GetControlRefusal(NativeHead("127.0.0.1:9444"), bind, forwarded, null));
+    }
+
+    [Fact]
+    public void PublicWorkerAuthorityStillRequiresAuthentication()
+    {
+        var bind = IPAddress.Loopback;
+        CdpServer.ForwardedAuthority? forwarded = new(IPAddress.Any, 9222);
+        var head = NativeHead("cdp.example.test:9222");
+        Assert.Equal(
+            CdpServer.ControlRefusal.Unauthorized,
+            CdpServer.GetControlRefusal(head, bind, forwarded, "secret"));
+
+        var authorized = head.Replace(
+            "Upgrade: websocket", "Authorization: Bearer secret\r\nUpgrade: websocket", StringComparison.Ordinal);
+        Assert.Null(CdpServer.GetControlRefusal(authorized, bind, forwarded, "secret"));
+
+        // The same Host without the forwarded authority is a rebinding attempt.
+        Assert.Equal(
+            CdpServer.ControlRefusal.ForeignHost,
+            CdpServer.GetControlRefusal(authorized, bind, null, "secret"));
+    }
+
+    /// <summary>
+    /// A forwarded authority widens the Host check only as far as a bind to that
+    /// address would: a specific address still refuses DNS names, and a browser
+    /// Origin is refused whatever is forwarded.
+    /// </summary>
+    [Fact]
+    public void ForwardedHostDoesNotLetAnArbitraryHostThrough()
+    {
+        var bind = IPAddress.Loopback;
+        CdpServer.ForwardedAuthority? specific = new(IPAddress.Parse("10.0.0.5"), 9222);
+        Assert.False(CdpServer.HostAllowed("cdp.example.test:9222", bind, specific));
+        Assert.False(CdpServer.HostAllowed("rebind.example:9222", bind, new CdpServer.ForwardedAuthority(bind, 9222)));
+        Assert.True(CdpServer.HostAllowed("10.0.0.5:9222", bind, specific));
+        Assert.True(CdpServer.HostAllowed("cdp.example.test:9222", bind, new CdpServer.ForwardedAuthority(IPAddress.IPv6Any, 9222)));
+
+        var withOrigin = NativeHead("cdp.example.test:9222").Replace(
+            "Upgrade: websocket", "Origin: https://evil.example\r\nUpgrade: websocket", StringComparison.Ordinal);
+        Assert.Equal(
+            CdpServer.ControlRefusal.BrowserOrigin,
+            CdpServer.GetControlRefusal(withOrigin, bind, new CdpServer.ForwardedAuthority(IPAddress.Any, 9222), null));
+    }
+
+    [Fact]
+    public void ForwardedAuthorityEnvironmentIsBothOrNeitherAndMustParse()
+    {
+        Assert.Null(CdpServer.ParseForwardedAuthority(null, null));
+        Assert.Equal(
+            new CdpServer.ForwardedAuthority(IPAddress.Any, 9222),
+            CdpServer.ParseForwardedAuthority("0.0.0.0", "9222"));
+        Assert.Equal(
+            new CdpServer.ForwardedAuthority(IPAddress.IPv6Loopback, 9222),
+            CdpServer.ParseForwardedAuthority("::1", "9222"));
+
+        const string together =
+            "POCKETCALCULATOR_CDP_FORWARDED_HOST and POCKETCALCULATOR_CDP_FORWARDED_PORT must be set together";
+        Assert.Equal(
+            together,
+            Assert.Throws<InvalidOperationException>(() => CdpServer.ParseForwardedAuthority("127.0.0.1", null)).Message);
+        Assert.Equal(
+            together,
+            Assert.Throws<InvalidOperationException>(() => CdpServer.ParseForwardedAuthority(null, "9222")).Message);
+        Assert.Equal(
+            "invalid POCKETCALCULATOR_CDP_FORWARDED_HOST 'cdp.example.test': invalid IP address syntax",
+            Assert.Throws<InvalidOperationException>(
+                () => CdpServer.ParseForwardedAuthority("cdp.example.test", "9222")).Message);
+        Assert.Equal(
+            "invalid POCKETCALCULATOR_CDP_FORWARDED_PORT 'x': invalid digit found in string",
+            Assert.Throws<InvalidOperationException>(() => CdpServer.ParseForwardedAuthority("127.0.0.1", "x")).Message);
+        Assert.Equal(
+            "invalid POCKETCALCULATOR_CDP_FORWARDED_PORT '70000': number too large to fit in target type",
+            Assert.Throws<InvalidOperationException>(
+                () => CdpServer.ParseForwardedAuthority("127.0.0.1", "70000")).Message);
+    }
+
+    [Fact]
+    public async Task ForwardedAuthorityIsRefusedOnANonLoopbackBind()
+    {
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CdpServer.StartWithControlTokenAsync(
+                CdpTestClient.PickPort(), "0.0.0.0", null, false, null, false, null, false,
+                CdpServer.DefaultMaxConnections, () => "01234567890123456789012345678901",
+                () => new CdpServer.ForwardedAuthority(IPAddress.Any, 9222)));
+        Assert.Equal("forwarded CDP authority is only valid for loopback workers", error.Message);
+    }
+
+    [Fact]
+    public async Task PublicForwardedAuthorityWithoutTokenIsRefused()
+    {
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => CdpServer.StartWithControlTokenAsync(
+                CdpTestClient.PickPort(), "127.0.0.1", null, false, null, false, null, false,
+                CdpServer.DefaultMaxConnections, () => null,
+                () => new CdpServer.ForwardedAuthority(IPAddress.Any, 9222)));
+        Assert.Equal(
+            "refusing to expose CDP without authentication; set POCKETCALCULATOR_CDP_TOKEN to at least 32 bytes",
+            error.Message);
+    }
+
+    [Fact]
+    public void DiscoveryFallsBackToTheForwardedAuthority()
+    {
+        const string noHost = "GET /json/version HTTP/1.0\r\n\r\n";
+        Assert.Equal("127.0.0.1:9223", CdpServer.WebSocketAuthority(noHost, 9223));
+        Assert.Equal(
+            "127.0.0.1:9222",
+            CdpServer.WebSocketAuthority(noHost, 9223, new CdpServer.ForwardedAuthority(IPAddress.Any, 9222)));
+        Assert.Equal(
+            "[::1]:9222",
+            CdpServer.WebSocketAuthority(noHost, 9223, new CdpServer.ForwardedAuthority(IPAddress.IPv6Any, 9222)));
+        Assert.Equal(
+            "10.0.0.5:9222",
+            CdpServer.WebSocketAuthority(
+                noHost, 9223, new CdpServer.ForwardedAuthority(IPAddress.Parse("10.0.0.5"), 9222)));
+
+        const string named = "GET /json/version HTTP/1.1\r\nHost: cdp.example.test:9222\r\n\r\n";
+        Assert.Equal(
+            "cdp.example.test:9222",
+            CdpServer.WebSocketAuthority(named, 9223, new CdpServer.ForwardedAuthority(IPAddress.Any, 9222)));
+    }
+
     [Fact]
     public void ConfiguredCdpTokenIsMandatory()
     {

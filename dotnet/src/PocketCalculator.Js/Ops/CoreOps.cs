@@ -252,7 +252,13 @@ public static class CoreOps
             // script between two navigations read and write another origin's cookies
             // through document.cookie, whose ops scope the jar by this URL (upstream
             // 4778192, #940).
-            state.PendingNavigation = (url, method, body);
+            // The initiator is recorded with it (deviation: upstream queues only the
+            // target), so the request is judged against the document that asked.
+            state.PendingNavigation = new PendingNavigation(url, method, body)
+            {
+                Initiator = state.Url,
+                UserActivated = state.HasTransientActivation,
+            };
         });
 
     internal static int FrameMessageQueueEntryLimit() =>

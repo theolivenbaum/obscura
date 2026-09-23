@@ -190,13 +190,35 @@ public static partial class CdpServer
         CancellationToken cancellationToken = default) =>
         StartWithControlTokenAsync(
             port, host, proxy, stealth, userAgent, allowFileAccess, storageDir,
-            allowPrivateNetwork, maxConnections, ControlTokenFromEnv, cancellationToken);
+            allowPrivateNetwork, maxConnections, ControlTokenFromEnv, ForwardedAuthorityFromEnv,
+            cancellationToken);
+
+    /// <summary>
+    /// As the full overload, with no forwarded authority.
+    /// </summary>
+    internal static Task StartWithControlTokenAsync(
+        int port,
+        string host,
+        string? proxy,
+        bool stealth,
+        string? userAgent,
+        bool allowFileAccess,
+        string? storageDir,
+        bool allowPrivateNetwork,
+        int maxConnections,
+        Func<string?> controlToken,
+        CancellationToken cancellationToken = default) =>
+        StartWithControlTokenAsync(
+            port, host, proxy, stealth, userAgent, allowFileAccess, storageDir,
+            allowPrivateNetwork, maxConnections, controlToken, static () => null, cancellationToken);
 
     /// <summary>
     /// The server body. <paramref name="controlToken"/> supplies the bearer token
     /// (<c>POCKETCALCULATOR_CDP_TOKEN</c> in production), read after the host is parsed as
-    /// the Rust server does; tests pass one directly instead of mutating the
-    /// process environment under a parallel test run.
+    /// the Rust server does, and <paramref name="forwardedAuthority"/> the balancer's
+    /// client-facing authority (<c>POCKETCALCULATOR_CDP_FORWARDED_HOST</c>/<c>_PORT</c>);
+    /// tests pass them directly instead of mutating the process environment under
+    /// a parallel test run.
     /// </summary>
     internal static async Task StartWithControlTokenAsync(
         int port,
@@ -209,17 +231,31 @@ public static partial class CdpServer
         bool allowPrivateNetwork,
         int maxConnections,
         Func<string?> controlToken,
+        Func<ForwardedAuthority?> forwardedAuthority,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(controlToken);
+        ArgumentNullException.ThrowIfNull(forwardedAuthority);
         if (!IPAddress.TryParse(host, out var ip))
         {
             throw new ArgumentException($"invalid --host '{host}'", nameof(host));
         }
 
         var authToken = controlToken();
-        if (!IPAddress.IsLoopback(ip) && authToken is null)
+
+        // Upstream a156914: a worker behind the multi-worker balancer is told the
+        // client-facing authority, accepts it as its own Host, and counts as
+        // publicly reachable when that authority is, so it demands the token the
+        // balancer's environment passed down just as a public bind would.
+        var forwarded = forwardedAuthority();
+        if (forwarded is not null && !IPAddress.IsLoopback(ip))
+        {
+            throw new InvalidOperationException("forwarded CDP authority is only valid for loopback workers");
+        }
+
+        var publiclyReachable = !IPAddress.IsLoopback(ip) || forwarded is { IsPublic: true };
+        if (publiclyReachable && authToken is null)
         {
             throw new InvalidOperationException(
                 "refusing to expose CDP without authentication; set POCKETCALCULATOR_CDP_TOKEN to at least 32 bytes");
@@ -271,7 +307,7 @@ public static partial class CdpServer
         using var signals = InstallSignalHandlers(shutdown);
 
         var acceptThread = new Thread(
-            () => AcceptLoop(listener, ip, port, authToken, handoff.Writer, shutdown.Token))
+            () => AcceptLoop(listener, ip, port, forwarded, authToken, handoff.Writer, shutdown.Token))
         {
             IsBackground = true,
             Name = "obscura-cdp-accept",
@@ -553,6 +589,7 @@ public static partial class CdpServer
         Socket listener,
         IPAddress bindIp,
         int port,
+        ForwardedAuthority? forwarded,
         string? authToken,
         ChannelWriter<Socket> handoff,
         CancellationToken shutdown)
@@ -650,7 +687,7 @@ public static partial class CdpServer
                         RefuseControlConnection(socket, ControlRefusal.OversizedHead);
                         break;
                     case { Kind: PeekKind.Head, Head: var head }:
-                        if (!AcceptDispatch(socket, bindIp, port, authToken, handoff, head!))
+                        if (!AcceptDispatch(socket, bindIp, port, forwarded, authToken, handoff, head!))
                         {
                             socket.Dispose();
                         }
@@ -762,11 +799,12 @@ public static partial class CdpServer
         Socket socket,
         IPAddress bindIp,
         int port,
+        ForwardedAuthority? forwarded,
         string? authToken,
         ChannelWriter<Socket> handoff,
         string head)
     {
-        if (GetControlRefusal(head, bindIp, authToken) is { } refusal)
+        if (GetControlRefusal(head, bindIp, forwarded, authToken) is { } refusal)
         {
             RefuseControlConnection(socket, refusal);
             return true;
@@ -795,7 +833,7 @@ public static partial class CdpServer
             try
             {
                 socket.Blocking = true;
-                HandleHttpJsonBlocking(socket, port, endpoint, head);
+                HandleHttpJsonBlocking(socket, port, forwarded, endpoint, head);
             }
             catch (SocketException e)
             {
@@ -835,11 +873,12 @@ public static partial class CdpServer
     }
 
     /// <summary>Serve an HTTP <c>/json/*</c> endpoint with blocking I/O on the accept thread.</summary>
-    private static void HandleHttpJsonBlocking(Socket socket, int port, string endpoint, string requestHead)
+    private static void HandleHttpJsonBlocking(
+        Socket socket, int port, ForwardedAuthority? forwarded, string endpoint, string requestHead)
     {
         var scratch = new byte[4096];
         _ = socket.Receive(scratch, 0, scratch.Length, SocketFlags.None);
-        var authority = WebSocketAuthority(requestHead, port);
+        var authority = WebSocketAuthority(requestHead, port, forwarded);
 
         var body = endpoint switch
         {

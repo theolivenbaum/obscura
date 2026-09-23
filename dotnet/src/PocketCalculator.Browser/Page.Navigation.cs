@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json.Nodes;
 using PocketCalculator.Dom;
+using PocketCalculator.Js.Ops;
 using PocketCalculator.Js.Runtime;
 using PocketCalculator.Js.Url;
 using PocketCalculator.Net;
@@ -83,11 +84,25 @@ public sealed partial class Page
     /// <c>POCKETCALCULATOR_NAV_TIMEOUT_MS</c>, or set a page-scoped deadline when the
     /// automation request already has an explicit timeout.
     /// </remarks>
+    public Task NavigateWithWaitPostAsync(
+        string url,
+        WaitUntil waitUntil,
+        string method,
+        string body,
+        CancellationToken cancellationToken = default) =>
+        NavigateWithWaitPostAsync(url, waitUntil, method, body, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="NavigateWithWaitPostAsync(string, WaitUntil, string, string, CancellationToken)"/>
+    /// for a navigation a document started. <paramref name="initiator"/> is the queued
+    /// navigation as <c>op_navigate</c> recorded it; null is a browser-initiated one.
+    /// </summary>
     public async Task NavigateWithWaitPostAsync(
         string url,
         WaitUntil waitUntil,
         string method,
         string body,
+        PendingNavigation? initiator,
         CancellationToken cancellationToken = default)
     {
         TimeSpan navTimeout = NavigationTimeout;
@@ -96,9 +111,11 @@ public sealed partial class Page
         using var deadline = new CancellationTokenSource(navTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             deadline.Token, cancellationToken);
+        ResourceRequest profile = NavigationProfile(initiator);
+        string referrer = DocumentReferrer(profile, url);
         try
         {
-            await NavigateWithWaitPostInnerAsync(url, waitUntil, method, body, string.Empty, linked.Token)
+            await NavigateWithWaitPostInnerAsync(url, waitUntil, method, body, referrer, profile, linked.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
@@ -116,12 +133,14 @@ public sealed partial class Page
         string method,
         string body,
         string initialReferrer,
+        ResourceRequest initialProfile,
         CancellationToken cancellationToken)
     {
         string currentUrl = urlString;
         string currentMethod = method;
         string currentBody = body;
         string documentReferrer = initialReferrer;
+        ResourceRequest profile = initialProfile;
         int chainLimit = NavigationChainLimit;
         for (int chain = 0; chain < chainLimit; chain++)
         {
@@ -131,6 +150,7 @@ public sealed partial class Page
                 currentMethod,
                 currentBody,
                 documentReferrer,
+                profile,
                 cancellationToken).ConfigureAwait(false);
 
             if (TakePendingNavigation() is not { } next)
@@ -138,6 +158,9 @@ public sealed partial class Page
                 break;
             }
             (string nextUrl, string nextMethod, string nextBody) = next;
+            // The loaded document queued this one (onload, a script, a form), so it is
+            // page-initiated, whoever started the navigation that loaded it.
+            profile = NavigationProfile(next);
             if (PageHelpers.CrossSchemeToFile(currentUrl, nextUrl))
             {
                 // SOP gate. A web page must not be able to drive a navigation to
@@ -146,9 +169,7 @@ public sealed partial class Page
                 // harvests document.body from a local file once it loads.
                 break;
             }
-            documentReferrer = Url is { } source && PageUrl.TryParse(nextUrl) is { } target
-                ? PageHelpers.NavigationReferrer(source, target)
-                : string.Empty;
+            documentReferrer = DocumentReferrer(profile, nextUrl);
             currentUrl = nextUrl;
             currentMethod = nextMethod;
             currentBody = nextBody;
@@ -168,6 +189,7 @@ public sealed partial class Page
         string method,
         string body,
         string referrer,
+        ResourceRequest profile,
         CancellationToken cancellationToken)
     {
         UrlRecord? parsed = PageUrl.TryParse(urlString, out UrlParseError parseError);
@@ -277,12 +299,20 @@ public sealed partial class Page
             else if (string.Equals(method, "POST", StringComparison.Ordinal))
             {
                 response = await HttpClient
-                    .PostFormWithCallbacksAsync(NetUrl.From(url), body, _callbacks, cancellationToken)
+                    .FetchNavigationAsync(
+                        HttpMethod.Post,
+                        NetUrl.From(url),
+                        System.Text.Encoding.UTF8.GetBytes(body),
+                        profile,
+                        _callbacks,
+                        cancellationToken)
                     .ConfigureAwait(false);
             }
             else
             {
-                response = await DoFetchAsync(url, cancellationToken).ConfigureAwait(false);
+                response = await HttpClient
+                    .FetchNavigationAsync(HttpMethod.Get, NetUrl.From(url), null, profile, _callbacks, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
         catch (Exception error) when (error is not OperationCanceledException)
@@ -360,22 +390,16 @@ public sealed partial class Page
             // does both, and its load handler may still change what applies.
             foreach ((int linkIndex, string responseUrl) in linked)
             {
-                TryExecute(
+                TryExecuteHost(
                     cssJs,
                     "<fetch_stylesheets>",
                     PageHelpers.LinkedStylesheetLoadScript(linkIndex, responseUrl));
             }
         }
 
-        // Static registration is complete before page script runs. Remove the temporary
-        // host bridge even when the document had no initial sheets (upstream 04418a5).
-        if (Js is { } cleanupJs)
-        {
-            TryExecute(
-                cleanupJs,
-                "<fetch_stylesheets-cleanup>",
-                PageHelpers.LinkedStylesheetRegistrationCleanupScript);
-        }
+        // DEVIATION from upstream 04418a5, which deletes the page-visible
+        // __obscura_registerLinkedStylesheet bridge here. The registration is a host
+        // helper (HostScript), so there is no global to remove.
 
         _documentTimelineOrigin = Stopwatch.GetTimestamp();
         Js?.ResetAnimationTimeline();
@@ -734,7 +758,7 @@ public sealed partial class Page
     /// does on every step.
     /// <para>
     /// The decision and the events belong to <c>bootstrap.js</c>
-    /// (<c>__obscura_tryFragmentNavigate</c>), which already owns the fragment path for
+    /// (the <c>tryFragmentNavigate</c> host helper), which already owns the fragment path for
     /// <c>location.href</c> / <c>assign</c> / <c>replace</c> and the component setters. The
     /// host asks rather than re-deciding, so the two cannot disagree about what counts as a
     /// fragment navigation.
@@ -769,7 +793,8 @@ public sealed partial class Page
         JsonNode? handled;
         try
         {
-            handled = Evaluate($"globalThis.__obscura_tryFragmentNavigate({literal}, false)");
+            // A host helper, not upstream's page-visible __obscura_tryFragmentNavigate.
+            handled = EvaluateHost($"__obscura_host.tryFragmentNavigate({literal}, false)");
         }
         catch (JsRuntimeException)
         {
@@ -825,9 +850,8 @@ public sealed partial class Page
             return SyncVirtualUrl();
         }
         (string url, string method, string body) = pending;
-        string sourceUrl = Url is { } source && PageUrl.TryParse(url) is { } target
-            ? PageHelpers.NavigationReferrer(source, target)
-            : string.Empty;
+        ResourceRequest profile = NavigationProfile(pending);
+        string sourceUrl = DocumentReferrer(profile, url);
         TimeSpan navTimeout = NavigationTimeout;
         ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
         using var deadline = new CancellationTokenSource(navTimeout);
@@ -835,7 +859,7 @@ public sealed partial class Page
             deadline.Token, cancellationToken);
         try
         {
-            await NavigateWithWaitPostInnerAsync(url, WaitUntil.Load, method, body, sourceUrl, linked.Token)
+            await NavigateWithWaitPostInnerAsync(url, WaitUntil.Load, method, body, sourceUrl, profile, linked.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
@@ -847,6 +871,42 @@ public sealed partial class Page
         PushHistory(UrlString());
         return PageNavigationOutcome.CrossDocument;
     }
+
+    /// <summary>
+    /// The fetch profile of a navigation: browser-initiated when nothing queued it, and
+    /// otherwise page-initiated from the queuing document's URL.
+    /// </summary>
+    /// <remarks>
+    /// Deviation: upstream fetches every navigation, page-initiated or not, with the
+    /// initiator-less browser profile. An initiator URL that does not parse (it is the
+    /// realm URL, so this is only defensive) is an opaque origin: cross-site to
+    /// everything and no Referer, which is what Chromium gives an about:blank or data:
+    /// document too.
+    /// </remarks>
+    internal static ResourceRequest NavigationProfile(PendingNavigation? initiator)
+    {
+        if (initiator is null)
+        {
+            return ResourceRequest.Navigation();
+        }
+
+        Uri source = Uri.TryCreate(initiator.Initiator, UriKind.Absolute, out Uri? parsed)
+            ? parsed
+            : new Uri("about:blank");
+        return ResourceRequest.PageNavigation(source, initiator.UserActivated);
+    }
+
+    /// <summary>
+    /// <c>document.referrer</c> for the document a navigation loads: the same
+    /// strict-origin-when-cross-origin value the request's Referer header carries, and
+    /// empty for a browser-initiated navigation.
+    /// </summary>
+    private static string DocumentReferrer(ResourceRequest profile, string targetUrl) =>
+        profile.Referrer is { } source
+            && UrlRecord.Parse(source.AbsoluteUri) is { } from
+            && PageUrl.TryParse(targetUrl) is { } target
+            ? PageHelpers.NavigationReferrer(from, target)
+            : string.Empty;
 
     private static ulong ElapsedMilliseconds(long startTimestamp) =>
         (ulong)Math.Max(0.0, StopwatchElapsed(startTimestamp).TotalMilliseconds);

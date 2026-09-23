@@ -127,6 +127,9 @@ internal static partial class Tools
             })()
             """;
 
+        // The agent's click stands for a user's, so it gives the page user activation:
+        // a link it follows reports Sec-Fetch-User: ?1, as a real click in Chromium does.
+        state.PageMut().NoteUserActivation();
         var result = state.PageMut().Evaluate(js);
         if (result.AsString() == "error:element not found")
         {
@@ -149,14 +152,16 @@ internal static partial class Tools
             (function(){
                 var el = document.querySelector({{McpJson.String(selector)}});
                 if (!el) return "error:element not found";
-                globalThis.__obscura_setFieldValue(el, "value", {{McpJson.String(value)}});
-                el.dispatchEvent(globalThis.__obscura_markTrusted(new Event("input", {bubbles:true})));
-                el.dispatchEvent(globalThis.__obscura_markTrusted(new Event("change", {bubbles:true})));
+                __obscura_host.setFieldValue(el, "value", {{McpJson.String(value)}});
+                el.dispatchEvent(__obscura_host.markTrusted(new Event("input", {bubbles:true})));
+                el.dispatchEvent(__obscura_host.markTrusted(new Event("change", {bubbles:true})));
                 return "ok";
             })()
             """;
 
-        var result = state.PageMut().Evaluate(js);
+        // EvaluateHost: markTrusted and setFieldValue are host helpers here, where
+        // crates/obscura-mcp names them as page-visible __obscura_* globals.
+        var result = state.PageMut().EvaluateHost(js);
         if (result.AsString() == "error:element not found")
         {
             throw new ToolException($"Element not found: {selector}");
@@ -175,13 +180,13 @@ internal static partial class Tools
             (function(){
                 var el = document.querySelector({{McpJson.String(selector)}});
                 if (!el) return "error:element not found";
-                globalThis.__obscura_setFieldValue(el, "value", (el.value || "") + {{McpJson.String(text)}});
-                el.dispatchEvent(globalThis.__obscura_markTrusted(new Event("input", {bubbles:true})));
+                __obscura_host.setFieldValue(el, "value", (el.value || "") + {{McpJson.String(text)}});
+                el.dispatchEvent(__obscura_host.markTrusted(new Event("input", {bubbles:true})));
                 return "ok";
             })()
             """;
 
-        var result = state.PageMut().Evaluate(js);
+        var result = state.PageMut().EvaluateHost(js);
         if (result.AsString() == "error:element not found")
         {
             throw new ToolException($"Element not found: {selector}");
@@ -210,6 +215,7 @@ internal static partial class Tools
             })()
             """;
 
+        state.PageMut().NoteUserActivation();
         state.PageMut().Evaluate(js);
         await state.SettleSyntheticNavigationAsync().ConfigureAwait(false);
         return $"Pressed key '{key}'";

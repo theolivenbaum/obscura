@@ -141,6 +141,19 @@ public sealed record ResourceRequest
     /// <summary>Fetch mode.</summary>
     public RequestMode Mode { get; set; }
 
+    /// <summary>
+    /// Whether a navigation had transient user activation, which is what
+    /// <c>Sec-Fetch-User: ?1</c> reports. Browser-initiated navigations have it.
+    /// </summary>
+    public bool UserActivated { get; set; }
+
+    /// <summary>
+    /// Whether a document request loads a nested browsing context (an iframe) rather
+    /// than a top-level one: <c>Sec-Fetch-Dest: iframe</c>, and a cross-site one is
+    /// never a top-level navigation for SameSite=Lax.
+    /// </summary>
+    public bool NestedDocument { get; set; }
+
     /// <summary>Credentials mode.</summary>
     public RequestCredentials Credentials { get; set; }
 
@@ -150,16 +163,51 @@ public sealed record ResourceRequest
     /// </summary>
     public long MaxResponseBytes { get; set; }
 
-    /// <summary>The navigation profile.</summary>
+    /// <summary>
+    /// The profile of a browser-initiated navigation (the address bar: CDP
+    /// <c>Page.navigate</c>, the CLI's URL, MCP <c>browser_navigate</c>). It has no
+    /// initiator, so it is same-site for cookies, <c>Sec-Fetch-Site: none</c>, carries
+    /// no Referer, and counts as user-activated, as Chromium's does.
+    /// </summary>
     public static ResourceRequest Navigation() => new()
     {
         ResourceType = ResourceType.Document,
         Initiator = null,
         Referrer = null,
         Mode = RequestMode.Navigate,
+        UserActivated = true,
         Credentials = RequestCredentials.Include,
         MaxResponseBytes = 64L * 1024 * 1024,
     };
+
+    /// <summary>
+    /// The profile of a top-level navigation a document started (a link, a
+    /// <c>location</c> assignment, a form submission), with the initiating document's
+    /// URL as both initiator and referrer.
+    /// </summary>
+    /// <remarks>
+    /// Deviation: upstream has no page-initiated navigation profile. Every navigation
+    /// goes out as <c>ResourceRequest::navigation()</c> with no initiator, so a
+    /// cross-site page-initiated navigation was same-site for cookies (SameSite=Strict
+    /// sent), <c>Sec-Fetch-Site: none</c>, and carried no Referer. Chromium withholds
+    /// Strict cookies, reports the initiator's site, and sends the default
+    /// strict-origin-when-cross-origin referrer.
+    /// </remarks>
+    public static ResourceRequest PageNavigation(Uri initiator, bool userActivated) =>
+        Navigation() with
+        {
+            Initiator = initiator,
+            Referrer = initiator,
+            UserActivated = userActivated,
+        };
+
+    /// <summary>
+    /// The profile of an iframe's document load, started by the embedding document
+    /// <paramref name="initiator"/>: <c>Sec-Fetch-Dest: iframe</c>, and cross-site it
+    /// carries only SameSite=None cookies, because it is not a top-level navigation.
+    /// </summary>
+    public static ResourceRequest FrameNavigation(Uri initiator) =>
+        PageNavigation(initiator, userActivated: false) with { NestedDocument = true };
 
     /// <summary>The profile for a subresource loaded by <paramref name="initiator"/>.</summary>
     public static ResourceRequest Subresource(ResourceType resourceType, Uri initiator)
@@ -231,7 +279,7 @@ public sealed record ResourceRequest
 
     internal string Destination() => ResourceType switch
     {
-        ResourceType.Document => "document",
+        ResourceType.Document => NestedDocument ? "iframe" : "document",
         ResourceType.Script => "script",
         ResourceType.Stylesheet => "style",
         ResourceType.Image => "image",

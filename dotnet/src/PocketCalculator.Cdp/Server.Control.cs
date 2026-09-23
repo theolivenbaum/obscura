@@ -48,6 +48,66 @@ public static partial class CdpServer
     }
 
     /// <summary>
+    /// The client-facing authority a multi-worker balancer forwards to a loopback
+    /// worker (upstream a156914): the balancer's bind address and public port.
+    /// </summary>
+    internal readonly record struct ForwardedAuthority(IPAddress Address, int Port)
+    {
+        /// <summary>Whether a client could reach this authority from off the host.</summary>
+        internal bool IsPublic => !IPAddress.IsLoopback(Address);
+    }
+
+    /// <summary>
+    /// <c>POCKETCALCULATOR_CDP_FORWARDED_HOST</c> and <c>POCKETCALCULATOR_CDP_FORWARDED_PORT</c>,
+    /// which the multi-worker balancer sets on each worker. Both or neither.
+    /// </summary>
+    internal static ForwardedAuthority? ForwardedAuthorityFromEnv() =>
+        ParseForwardedAuthority(
+            Environment.GetEnvironmentVariable("POCKETCALCULATOR_CDP_FORWARDED_HOST"),
+            Environment.GetEnvironmentVariable("POCKETCALCULATOR_CDP_FORWARDED_PORT"));
+
+    /// <summary>Upstream's validation of the forwarded-authority pair, with its messages.</summary>
+    /// <remarks>
+    /// Rust's <c>std::env::var(..).ok()</c> treats a set-but-empty variable as set,
+    /// and the empty value then fails to parse. .NET does not tell an empty
+    /// variable from an unset one on every platform, so empty counts as unset here.
+    /// </remarks>
+    internal static ForwardedAuthority? ParseForwardedAuthority(string? host, string? port)
+    {
+        host = string.IsNullOrEmpty(host) ? null : host;
+        port = string.IsNullOrEmpty(port) ? null : port;
+        if (host is null && port is null)
+        {
+            return null;
+        }
+
+        if (host is null || port is null)
+        {
+            throw new InvalidOperationException(
+                "POCKETCALCULATOR_CDP_FORWARDED_HOST and POCKETCALCULATOR_CDP_FORWARDED_PORT must be set together");
+        }
+
+        // Rust's IpAddr grammar has no zone index.
+        if (host.Contains('%', StringComparison.Ordinal) || !IPAddress.TryParse(host, out var address))
+        {
+            throw new InvalidOperationException(
+                $"invalid POCKETCALCULATOR_CDP_FORWARDED_HOST '{host}': invalid IP address syntax");
+        }
+
+        if (!ushort.TryParse(port, NumberStyles.None, CultureInfo.InvariantCulture, out var number))
+        {
+            // core::num::ParseIntError's Display for u16.
+            var reason = port.All(char.IsAsciiDigit)
+                ? "number too large to fit in target type"
+                : "invalid digit found in string";
+            throw new InvalidOperationException(
+                $"invalid POCKETCALCULATOR_CDP_FORWARDED_PORT '{port}': {reason}");
+        }
+
+        return new ForwardedAuthority(address, number);
+    }
+
+    /// <summary>
     /// Whether the head carries <c>Authorization: Bearer &lt;token&gt;</c>. With no
     /// token configured every request is authorized. The comparison does not
     /// short-circuit on the first differing byte.
@@ -89,7 +149,29 @@ public static partial class CdpServer
     /// (0.0.0.0, ::) accepts any Host, because it is reached by whatever name the
     /// network gives it and cannot start without a token.
     /// </remarks>
-    internal static bool HostAllowed(string? hostHeader, IPAddress bindIp)
+    internal static bool HostAllowed(string? hostHeader, IPAddress bindIp) =>
+        HostAllowed(hostHeader, bindIp, null);
+
+    /// <summary>
+    /// As <see cref="HostAllowed(string?, IPAddress)"/>, for a worker that is also
+    /// reached through <paramref name="forwarded"/>, the client-facing authority of
+    /// the multi-worker balancer in front of it (upstream a156914). The Host is
+    /// served when the rule accepts it for the bind address or for the forwarded
+    /// address, and not otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Upstream's <c>host_matches_bind</c> also requires the Host's port to equal
+    /// the forwarded port. This port checks no ports anywhere (Chromium's rule,
+    /// above), so a forwarded authority is treated exactly as a bind to that
+    /// address: a forwarded wildcard accepts any Host, as a single-worker
+    /// <c>--host 0.0.0.0</c> does, and a forwarded specific address adds nothing
+    /// a loopback worker does not already serve (IP literals, localhost names).
+    /// </remarks>
+    internal static bool HostAllowed(string? hostHeader, IPAddress bindIp, ForwardedAuthority? forwarded) =>
+        HostAllowedForAddress(hostHeader, bindIp)
+        || (forwarded is { } authority && HostAllowedForAddress(hostHeader, authority.Address));
+
+    private static bool HostAllowedForAddress(string? hostHeader, IPAddress bindIp)
     {
         if (hostHeader is null || hostHeader.Length == 0)
         {
@@ -127,14 +209,24 @@ public static partial class CdpServer
     /// browser caller is recognised by any <c>Origin</c> header: native CDP clients
     /// (Puppeteer, Playwright, chromedp over Node or Go websockets) send none.
     /// </summary>
-    internal static ControlRefusal? GetControlRefusal(string head, IPAddress bindIp, string? authToken)
+    internal static ControlRefusal? GetControlRefusal(string head, IPAddress bindIp, string? authToken) =>
+        GetControlRefusal(head, bindIp, null, authToken);
+
+    /// <summary>
+    /// As <see cref="GetControlRefusal(string, IPAddress, string?)"/>, for a worker
+    /// behind the multi-worker balancer (upstream a156914's <c>control_refusal</c>
+    /// with <c>forwarded</c>). The forwarded authority only widens the Host check;
+    /// the Origin refusal and the token apply as before.
+    /// </summary>
+    internal static ControlRefusal? GetControlRefusal(
+        string head, IPAddress bindIp, ForwardedAuthority? forwarded, string? authToken)
     {
         if (HeaderValue(head, "origin") is not null)
         {
             return ControlRefusal.BrowserOrigin;
         }
 
-        if (!HostAllowed(HeaderValue(head, "host"), bindIp))
+        if (!HostAllowed(HeaderValue(head, "host"), bindIp, forwarded))
         {
             return ControlRefusal.ForeignHost;
         }

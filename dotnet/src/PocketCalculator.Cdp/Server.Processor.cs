@@ -128,17 +128,12 @@ public static partial class CdpServer
                     if (connectionReplyTx is { } pumpReply &&
                         TakeLivePendingNavigation(ctx) is { } pendingNav)
                     {
-                        var (navSession, navUrl, navMethod, navBody) = pendingNav;
+                        var (navSession, navPending) = pendingNav;
                         var navigation = CdpJson.Serialize(new JsonObject
                         {
                             ["id"] = 0,
                             ["method"] = "Page.navigate",
-                            ["params"] = new JsonObject
-                            {
-                                ["url"] = navUrl,
-                                ["__method"] = navMethod,
-                                ["__body"] = navBody,
-                            },
+                            ["params"] = Domains.Page.JsNavigationParams(navPending),
                             ["sessionId"] = navSession,
                         });
                         await ProcessWithInterceptionAsync(
@@ -381,7 +376,7 @@ public static partial class CdpServer
             ctx, sessionId, frameId, pageUrl, pageId, networkEvents);
     }
 
-    private static (string SessionId, string Url, string Method, string Body)?
+    private static (string SessionId, PendingNavigation Pending)?
         TakeLivePendingNavigation(CdpContext ctx)
     {
         if (LiveJsPage(ctx) is not { } page ||
@@ -391,8 +386,7 @@ public static partial class CdpServer
             return null;
         }
 
-        var (url, method, body) = pending;
-        return (sessionId, url, method, body);
+        return (sessionId, pending);
     }
 
     private static void ForwardPendingEvents(CdpContext ctx, ChannelWriter<string>? replyTx)

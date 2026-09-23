@@ -76,6 +76,7 @@ internal sealed class CdpTestServer : IDisposable
     private readonly string _contentType;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentQueue<string> _paths = new();
+    private readonly ConcurrentQueue<string> _requests = new();
     private bool _disposed;
 
     private CdpTestServer(string body, string contentType)
@@ -93,6 +94,9 @@ internal sealed class CdpTestServer : IDisposable
     internal string Url { get; }
 
     internal IReadOnlyCollection<string> Paths => [.. _paths];
+
+    /// <summary>The raw request line and headers of every request, in arrival order.</summary>
+    internal IReadOnlyCollection<string> Requests => [.. _requests];
 
     internal static CdpTestServer ServeHtml(string body) => new(body, "text/html");
 
@@ -127,6 +131,7 @@ internal sealed class CdpTestServer : IDisposable
                 string firstLine = headerText.Split("\r\n")[0];
                 string[] parts = firstLine.Split(' ');
                 _paths.Enqueue(parts.Length > 1 ? parts[1] : "/");
+                _requests.Enqueue(headerText);
 
                 var head = new StringBuilder();
                 head.Append("HTTP/1.1 200 OK\r\n");

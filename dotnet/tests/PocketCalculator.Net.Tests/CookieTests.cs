@@ -759,6 +759,44 @@ public class CookieTests
     }
 
     [Fact]
+    public void PageNavigationsFollowChromiumSameSiteRules()
+    {
+        // Deviation from same_site_context in client.rs: measured on Chromium 140.
+        var target = new Uri("https://api.example.com/data");
+        var sameSite = new Uri("https://www.example.com/page");
+        var attacker = new Uri("https://attacker.test/page");
+
+        Assert.Equal(
+            SameSiteContext.SameSite,
+            PocketCalculatorHttpClient.SameSiteContextFor(
+                ResourceRequest.PageNavigation(sameSite, userActivated: false), target, methodIsSafe: false));
+        Assert.Equal(
+            SameSiteContext.CrossSiteTopLevelSafe,
+            PocketCalculatorHttpClient.SameSiteContextFor(
+                ResourceRequest.PageNavigation(attacker, userActivated: true), target, methodIsSafe: true));
+
+        // An iframe is never a top-level navigation, so a cross-site one carries only None.
+        Assert.Equal(
+            SameSiteContext.CrossSite,
+            PocketCalculatorHttpClient.SameSiteContextFor(ResourceRequest.FrameNavigation(attacker), target, true));
+        Assert.Equal(
+            SameSiteContext.SameSite,
+            PocketCalculatorHttpClient.SameSiteContextFor(ResourceRequest.FrameNavigation(sameSite), target, true));
+
+        // A redirect chain through another site loses Strict, even for the address bar.
+        Assert.Equal(
+            SameSiteContext.CrossSiteTopLevelSafe,
+            PocketCalculatorHttpClient.SameSiteContextFor(ResourceRequest.Navigation(), target, true, [attacker]));
+        Assert.Equal(
+            SameSiteContext.SameSite,
+            PocketCalculatorHttpClient.SameSiteContextFor(ResourceRequest.Navigation(), target, true, [sameSite]));
+        Assert.Equal(
+            SameSiteContext.CrossSiteTopLevelSafe,
+            PocketCalculatorHttpClient.SameSiteContextFor(
+                ResourceRequest.PageNavigation(sameSite, userActivated: false), target, true, [attacker]));
+    }
+
+    [Fact]
     public void EmptyDomainAttributeIsIgnored()
     {
         // Deviation from Rust, which rejects the cookie: Chromium and RFC 6265bis 5.6.3

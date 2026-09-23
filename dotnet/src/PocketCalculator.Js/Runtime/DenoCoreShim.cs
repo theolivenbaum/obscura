@@ -25,6 +25,18 @@ public sealed class DenoCoreShim
     /// </summary>
     public required object Ops { get; init; }
 
+    /// <summary>
+    /// The realm's host helpers (<c>markTrusted</c>, <c>deliverMessage</c>, ...), taken off
+    /// <c>globalThis.__obscura_host_handoff</c> once bootstrap.js has run and before any
+    /// page script does. Host script receives it as an argument through
+    /// <see cref="HostScript"/>; no global reaches it.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from the Rust engine, where each helper is a page-visible
+    /// <c>__obscura_*</c> global, so page script could mark its own events trusted.
+    /// </remarks>
+    public ScriptObject? HostHelpers { get; internal set; }
+
     /// <summary>Callback registered via <c>setUnhandledPromiseRejectionHandler</c>.</summary>
     /// <remarks>
     /// Storing this is not enough: nothing in V8 calls it on its own. The engine's

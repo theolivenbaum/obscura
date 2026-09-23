@@ -212,10 +212,11 @@ public sealed partial class Page
                 {
                     continue;
                 }
+                // A host helper, not upstream's page-visible __obscura_deliverMessage global.
                 string script =
-                    $"globalThis.__obscura_deliverMessage({escapedData}, {escapedOrigin}, "
+                    $"__obscura_host.deliverMessage({escapedData}, {escapedOrigin}, "
                     + $"{message.SourceFrameId.ToString(CultureInfo.InvariantCulture)}, {escapedTargetOrigin});";
-                TryExecute(page, "<frame-message>", script);
+                TryExecuteHost(page, "<frame-message>", script);
                 continue;
             }
 
@@ -321,7 +322,9 @@ public sealed partial class Page
         // an iframe inside a shadow root is absent from
         // `document.querySelectorAll('iframe')` - the shape a challenge widget uses -
         // and treating it as detached tears down a live frame.
-        const string LiveFrameIds = "__obscura_liveFrameIds()";
+        // A host helper; upstream calls the page-visible __obscura_liveFrameIds global,
+        // which page script could replace to have its frames torn down or kept.
+        const string LiveFrameIds = "__obscura_host.liveFrameIds()";
 
         if (Js is not { } js)
         {
@@ -332,7 +335,7 @@ public sealed partial class Page
         // empty answer here reads as "all of them". Holding them is bounded by the
         // live-frame cap; discarding a live frame is not recoverable, so leave the
         // tree alone.
-        if (!TryCollectFrameIds(() => js.Evaluate(LiveFrameIds), live))
+        if (!TryCollectFrameIds(() => js.EvaluateHost(LiveFrameIds), live))
         {
             return;
         }
@@ -340,7 +343,7 @@ public sealed partial class Page
         for (int index = 0; index < Frames.Count; index++)
         {
             FrameRealm frame = Frames[index];
-            if (!TryCollectFrameIds(() => frame.Evaluate(LiveFrameIds), live))
+            if (!TryCollectFrameIds(() => frame.EvaluateHost(LiveFrameIds), live))
             {
                 return;
             }

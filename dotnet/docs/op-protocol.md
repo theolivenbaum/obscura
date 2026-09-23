@@ -29,6 +29,40 @@ through `globalThis._wrap(nid)`. The PocketCalculator.Js test assembly alone rep
 page realm's table as `__obscura_test_ops` (`BootstrapLoader.ExposeOpsForTests`),
 as upstream's `#[cfg(test)]` `expose_ops_for_tests` does.
 
+## Host helpers (port deviation)
+
+Upstream publishes the shim's host-side helpers as page-visible globals, which
+host script calls by name (`globalThis.__obscura_markTrusted(ev)` and so on). That
+lets any page mark its own events trusted. The port keeps them closure-private:
+bootstrap.js hands one frozen object to the host through
+`globalThis.__obscura_host_handoff`, which `BootstrapLoader.Install` reads into
+`DenoCoreShim.HostHelpers` and deletes together with `__obscura_core_handoff`,
+before any page script runs, in every realm. Host script reaches it as the
+parameter `__obscura_host` of a strict function the host compiles and calls with
+that object (`HostScript`; `PocketCalculatorJsRuntime.EvaluateHost` /
+`ExecuteHostScript`, `FrameRealm.EvaluateHost` / `ExecuteHostScript`,
+`Page.EvaluateHost` / `TryExecuteHost`). Nothing on `globalThis` names it. Client- or
+page-supplied code must never go through these entry points.
+
+| Member | Upstream global | Used by |
+|---|---|---|
+| `markTrusted(ev) -> ev` | `__obscura_markTrusted` | CDP Input, MCP fill/type/fill_form |
+| `setFieldValue(el, field, value)` | `__obscura_setFieldValue` | CDP Input, MCP |
+| `setInputFiles(el, specs)` | `__obscura_setInputFiles` | `DOM.setFileInputFiles` |
+| `deliverMessage(dataJson, origin, sourceFrameId, targetOrigin)` | `__obscura_deliverMessage` | frame `postMessage` delivery |
+| `activateLabel(label, control, trusted) -> bool` | `__obscura_activateLabel` | CDP mouseReleased |
+| `isDisabled(el)`, `labeledControl(label)`, `interactiveHost(el)` | `__obscura_isDisabled`, `__obscura_labeledControl`, `__obscura_interactiveHost` | CDP mouseReleased |
+| `registerLinkedStylesheet(link, href, responseUrl)` | `__obscura_registerLinkedStylesheet` | static `<link>` sheet registration |
+| `tryFragmentNavigate(url, replace) -> bool` | `__obscura_tryFragmentNavigate` | `Page.navigate` to a fragment |
+| `setScreenOverride(w, h, emulated)` | `__obscura_set_screen_override` | `Emulation.setDeviceMetricsOverride` |
+| `liveFrameIds() -> number[]`, `forgetFrame(id)` | `__obscura_liveFrameIds`, `__obscura_forgetFrame` | detached-frame release |
+| `pointer.down` | `globalThis.__obscura_mouse_down` | CDP mousePressed / mouseReleased |
+
+The shim also sends its own closure-held realm id, not the page-writable
+`globalThis.__obscura_frameId`, as `op_post_frame_message`'s `source_frame_id`,
+and the form-state mirror passes the id `BootstrapLoader.Install` was given as
+`op_dom`'s frame id. The op signatures are unchanged.
+
 ## Ops (55)
 
 `fast` marks ops deno_core binds on the fast path; in C# the distinction is
@@ -184,6 +218,41 @@ In cors mode a failed CORS check on a cross-origin redirect hop (upstream
 not allowed by Access-Control-Allow-Origin '<value>'"}`. A preflight that is not
 2xx, lists an invalid token, or does not allow the method or an unsafe request
 header rejects the op (upstream 04f0475), and the request is never sent.
+
+### Request guards on page-script requests (port deviation)
+
+Rust forwards every header in `headers_json` and any method in any mode. The
+port applies Fetch's request guards when `internal_load` is false, in the shim
+(`Headers`, `Request`, `fetch()`, `XMLHttpRequest.setRequestHeader`) and again in
+`op_fetch_url`, since page script decides what reaches the op. The signature and
+the result keys are unchanged; the op filters its inputs:
+
+- `mode` other than `no-cors` or `same-origin` is treated as `cors`, so an
+  unknown value cannot skip the CORS check and the opaque filter. (The shim
+  already throws a `TypeError` for an invalid `RequestMode` or `"navigate"`.)
+- A forbidden request-header is dropped silently in every mode: `Accept-Charset`,
+  `Accept-Encoding`, `Access-Control-Request-Headers`,
+  `Access-Control-Request-Method`, `Access-Control-Request-Private-Network`,
+  `Connection`, `Content-Length`, `Cookie`, `Cookie2`, `Date`, `DNT`, `Expect`,
+  `Host`, `Keep-Alive`, `Origin`, `Referer`, `Set-Cookie`, `TE`, `Trailer`,
+  `Transfer-Encoding`, `Upgrade`, `Via`, any `Proxy-*` or `Sec-*`, and
+  `X-HTTP-Method`, `X-HTTP-Method-Override`, `X-Method-Override` when the value
+  names `CONNECT`, `TRACE` or `TRACK`. `User-Agent` is not forbidden.
+- In `no-cors` mode only no-CORS-safelisted headers are sent: `Accept`,
+  `Accept-Language`, `Content-Language` and `Content-Type`, each with a value
+  that is CORS-safelisted (128-byte cap, the value rules of
+  `IsCorsSafelistedRequestHeader`). `Range` is not included. Everything else is
+  dropped silently, including `Authorization`.
+- In `no-cors` mode a method other than GET, HEAD or POST (case-insensitive)
+  rejects the op before anything is sent or recorded.
+- In `same-origin` mode, a hop (the first or a redirect target) whose origin is
+  not the page's returns the `corsBlocked` payload above, with a `corsError` of
+  `Request mode is 'same-origin' but the URL's origin is not same as the request
+  origin '<origin>'`, and is not sent.
+
+The filtered headers are what `Fetch.requestPaused` shows. Headers a CDP client
+supplies through `Fetch.continueRequest` are not filtered, and nor are the
+engine's own loads (`internal_load` true).
 
 ## Port-added ops (4)
 
