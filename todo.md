@@ -252,7 +252,11 @@ Decisions:
 
 - [ ] `d792bae` - keep every CDP page's isolate live; conflicts with "Page suspension
       stays". Measure memory, then decide (recommended: port, Chromium never suspends)
-- [ ] `343fdc7` `--font-dir` - conflicts with the embedded-fonts-only rule
+- [x] `343fdc7` `--font-dir` - ported as an opt-in: `serve --font-dir DIR` (repeatable,
+      forwarded to workers) and `BrowserConfig.FontDirectories` / `FontDirectory(...)`.
+      Unset, no file is read and layout is unchanged; set, it gives up identical output
+      across hosts, which is the operator's choice. See "Operator font directories" under
+      Known deviations
 
 Found during the review, not from upstream:
 
@@ -1146,6 +1150,26 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Operator font directories load per render pass, not into a cached base database
+
+Upstream 343fdc7 adds `serve --font-dir DIR`: `ttf/ttc/otf/otc` files found recursively
+(symlinks skipped, paths sorted, each file once) join the base font database, configured
+once per process before the first render. The port keeps all of that observable behaviour
+(`Obscura.Render/Inline/FontDirectories.cs`), with three differences:
+
+- The files are read once into memory and each `TextEngine` loads them after the embedded
+  faces, the way it loads the embedded faces, since upstream's cross-document database
+  cache is not ported yet (open item `343fdc7` (cache only) above).
+- C# has no `render` feature, so the flag is always available rather than render-only.
+- The library exposes it too (`BrowserConfig.FontDirectories`), where upstream only has the
+  CLI flag. A missing or non-directory path fails with upstream's CLI message,
+  `Font directory does not exist or is not a directory: <path>`, and a second, different
+  configuration after the first render is refused rather than silently ignored.
+
+This relaxes "the engine never uses host fonts" only on request: with nothing configured
+no file is read and output is byte-identical to before. Faces still load with
+`SKTypeface.FromData`, never `FromFamilyName`, and no fontconfig is involved.
 
 ### A linked stylesheet leaves no element in the DOM
 

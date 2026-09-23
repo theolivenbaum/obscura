@@ -18,6 +18,19 @@ public sealed class BrowserConfig
     /// </summary>
     public string? StorageDir { get; set; }
 
+    /// <summary>
+    /// Directories to load extra fonts from, recursively (TTF, TTC, OTF and OTC files). Empty
+    /// by default, which keeps rendering on the embedded faces only.
+    /// </summary>
+    /// <remarks>
+    /// The library counterpart of upstream's <c>serve --font-dir</c>. Like the CLI flag it is
+    /// process-wide and fixed before the first render: <see cref="Browser.Build"/> applies it,
+    /// and throws when a different set (or none) is already in effect. Faces load under their
+    /// own family names beside the embedded ones, so a page names them in <c>font-family</c>
+    /// and they also take part in glyph fallback.
+    /// </remarks>
+    public IList<string> FontDirectories { get; set; } = [];
+
     /// <summary>Start a fluent builder, matching <c>BrowserConfig::builder()</c>.</summary>
     public static BrowserConfigBuilder Builder() => new();
 }
@@ -52,6 +65,14 @@ public sealed class BrowserConfigBuilder
     public BrowserConfigBuilder StorageDir(string dir)
     {
         _config.StorageDir = dir;
+        return this;
+    }
+
+    /// <summary>Load fonts from this directory as well; repeat for several.</summary>
+    public BrowserConfigBuilder FontDirectory(string dir)
+    {
+        ArgumentNullException.ThrowIfNull(dir);
+        _config.FontDirectories.Add(dir);
         return this;
     }
 

@@ -72,6 +72,21 @@ public sealed class CliArgsTests
     }
 
     [Fact]
+    public void Parsed_serve_accepts_repeated_font_directories()
+    {
+        var args = Parse("obscura", "serve", "--font-dir", "/fonts/cjk", "--font-dir", "/fonts/brand");
+        var serve = Assert.IsType<CliCommand.Serve>(args.Command);
+        Assert.Equal(["/fonts/cjk", "/fonts/brand"], serve.FontDirs);
+    }
+
+    [Fact]
+    public void Parsed_serve_without_font_dir_has_none()
+    {
+        var serve = Assert.IsType<CliCommand.Serve>(Parse("obscura", "serve").Command);
+        Assert.Empty(serve.FontDirs);
+    }
+
+    [Fact]
     public void No_subcommand_is_not_quiet() => Assert.False(CliOptions.IsQuietCommand(null));
 
     [Fact]

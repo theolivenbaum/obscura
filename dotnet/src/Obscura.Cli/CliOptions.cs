@@ -36,6 +36,35 @@ public static class CliOptions
         _ => false,
     };
 
+    /// <summary>
+    /// Port of <c>configure_font_directories</c> in <c>main.rs</c> (upstream 343fdc7): check
+    /// every <c>--font-dir</c> is a directory, then hand the list to the renderer before the
+    /// first render. Nothing is configured when the list is empty.
+    /// </summary>
+    /// <remarks>
+    /// Rust also bails with "--font-dir requires a render-enabled build" when built without the
+    /// render feature; the port always carries the renderer, so that arm has no counterpart.
+    /// </remarks>
+    public static void ConfigureFontDirectories(IReadOnlyList<string> fontDirs)
+    {
+        if (fontDirs.Count == 0)
+        {
+            return;
+        }
+        foreach (var directory in fontDirs)
+        {
+            if (!Directory.Exists(directory))
+            {
+                throw new CliException(
+                    $"Font directory does not exist or is not a directory: {directory}");
+            }
+        }
+        if (!Obscura.Render.FontDirectories.Configure(fontDirs))
+        {
+            throw new CliException("Font directories must be configured before the first render");
+        }
+    }
+
     /// <summary>A subcommand's <c>--proxy</c> wins over the global one.</summary>
     public static string? MergeProxy(string? globalProxy, string? commandProxy) =>
         commandProxy ?? globalProxy;

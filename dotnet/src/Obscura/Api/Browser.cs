@@ -45,10 +45,48 @@ public sealed class Browser
     /// <summary>Create a browser from an explicit configuration.</summary>
     public static Browser Build(BrowserConfig config)
     {
+        ApplyFontDirectories(config.FontDirectories);
         var context = config.StorageDir is { } dir
             ? BrowserContext.WithStorageFull("api", config.Proxy, config.Stealth, config.UserAgent, dir)
             : BrowserContext.WithFullOptions("api", config.Proxy, config.Stealth, config.UserAgent);
         return new Browser(context);
+    }
+
+    /// <summary>
+    /// Hand <see cref="BrowserConfig.FontDirectories"/> to the renderer, with the checks
+    /// <c>configure_font_directories</c> in upstream's <c>main.rs</c> makes.
+    /// </summary>
+    /// <remarks>
+    /// The setting is process-wide and set once, as upstream's is. The CLI configures it once
+    /// per process, but an embedder may build several browsers, so asking again for exactly
+    /// the list already in effect is accepted rather than refused.
+    /// </remarks>
+    private static void ApplyFontDirectories(IList<string>? directories)
+    {
+        if (directories is null || directories.Count == 0)
+        {
+            return;
+        }
+
+        foreach (string directory in directories)
+        {
+            if (!Directory.Exists(directory))
+            {
+                throw new ObscuraException(
+                    ObscuraErrorKind.Internal,
+                    $"Font directory does not exist or is not a directory: {directory}");
+            }
+        }
+
+        string[] requested = [.. directories];
+        if (!Obscura.Render.FontDirectories.Configure(requested)
+            && !(Obscura.Render.FontDirectories.Configured is { } current
+                && current.SequenceEqual(requested, StringComparer.Ordinal)))
+        {
+            throw new ObscuraException(
+                ObscuraErrorKind.Internal,
+                "Font directories must be configured before the first render");
+        }
     }
 
     /// <summary>Start a fluent builder, matching <c>Browser::builder()</c>.</summary>
@@ -103,6 +141,14 @@ public sealed class BrowserBuilder
     public BrowserBuilder StorageDir(string dir)
     {
         _config.StorageDir = dir;
+        return this;
+    }
+
+    /// <summary>Load fonts from this directory as well; repeat for several.</summary>
+    public BrowserBuilder FontDirectory(string dir)
+    {
+        ArgumentNullException.ThrowIfNull(dir);
+        _config.FontDirectories.Add(dir);
         return this;
     }
 

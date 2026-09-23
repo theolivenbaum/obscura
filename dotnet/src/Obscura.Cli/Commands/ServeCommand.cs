@@ -22,6 +22,7 @@ public static class ServeCommand
         var proxy = CliOptions.MergeProxy(args.Proxy, serve.Proxy)
             ?? EnvOrNull("OBSCURA_PROXY");
 
+        CliOptions.ConfigureFontDirectories(serve.FontDirs);
         CliOptions.PrintBanner(serve.Port);
         if (serve.StorageDir is { } dir)
         {
@@ -35,6 +36,10 @@ public static class ServeCommand
         {
             Log.Info($"User-Agent: {ua}");
         }
+        foreach (var directory in serve.FontDirs)
+        {
+            Log.Info($"Font dir: {directory}");
+        }
         // Rust logs "Stealth mode enabled (...)" here, in the Serve arm only.
         // Program.cs already logs the port's equivalent line, with the TLS gap
         // named, for every subcommand; repeating it here would put two stealth
@@ -45,7 +50,8 @@ public static class ServeCommand
             Log.Info(string.Create(
                 CultureInfo.InvariantCulture, $"{serve.Workers} worker processes"));
             await RunMultiWorkerServeAsync(
-                serve.Port, serve.Host, serve.Workers, proxy, args.Stealth, serve.UserAgent)
+                serve.Port, serve.Host, serve.Workers, proxy, args.Stealth, serve.UserAgent,
+                serve.FontDirs)
                 .ConfigureAwait(false);
             return;
         }
@@ -90,7 +96,8 @@ public static class ServeCommand
         int workers,
         string? proxy,
         bool stealth,
-        string? userAgent)
+        string? userAgent,
+        IReadOnlyList<string>? fontDirs = null)
     {
         var exe = Environment.ProcessPath
             ?? throw new CliException("cannot locate the running executable to spawn workers");
@@ -120,6 +127,12 @@ public static class ServeCommand
             {
                 psi.ArgumentList.Add("--user-agent");
                 psi.ArgumentList.Add(ua);
+            }
+            // Each worker loads the fonts once for itself, as upstream passes the flags on.
+            foreach (var directory in fontDirs ?? [])
+            {
+                psi.ArgumentList.Add("--font-dir");
+                psi.ArgumentList.Add(directory);
             }
             if (stealth)
             {

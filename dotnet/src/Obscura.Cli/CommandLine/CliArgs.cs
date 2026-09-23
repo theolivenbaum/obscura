@@ -37,6 +37,9 @@ public abstract record CliCommand
         /// <summary><c>--storage-dir</c>.</summary>
         public string? StorageDir { get; init; }
 
+        /// <summary><c>--font-dir</c>, repeatable, in the order given.</summary>
+        public IReadOnlyList<string> FontDirs { get; init; } = [];
+
         /// <summary><c>--quiet</c>.</summary>
         public bool Quiet { get; init; }
     }
@@ -207,6 +210,7 @@ public sealed record CliArgs
                     MaxConnections = result.GetValue(CliDefinition.Serve.MaxConnections),
                     AllowFileAccess = result.GetValue(CliDefinition.Serve.AllowFileAccess),
                     StorageDir = Path(result.GetValue(CliDefinition.Serve.StorageDir)),
+                    FontDirs = result.GetValue(CliDefinition.Serve.FontDirs) ?? [],
                     Quiet = result.GetValue(CliDefinition.Serve.Quiet),
                 },
                 "fetch" => new CliCommand.Fetch

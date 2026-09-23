@@ -28,6 +28,7 @@ public sealed partial class TextEngine : IDisposable
     private readonly List<ReplacedItem> _replaced = [];
     private readonly TextShaper _shaper;
     private readonly WebFont[] _fonts;
+    private readonly FontDirectorySet _directoryFonts;
     private readonly GlyphRasterizer _rasterizer;
     private readonly VariableGlyphCache _variableCache;
 
@@ -42,10 +43,16 @@ public sealed partial class TextEngine : IDisposable
     }
 
     public TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji)
+        : this(fonts, loadEmoji, FontDirectories.Current)
+    {
+    }
+
+    internal TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji, FontDirectorySet directoryFonts)
     {
         // Build a database from embedded and page-provided faces. The host's font set is never
-        // consulted: it would make layout differ machine to machine and add a multi-millisecond
-        // startup scan.
+        // consulted implicitly: it would make layout differ machine to machine and add a
+        // multi-millisecond startup scan. The one exception is a font directory the operator
+        // configured (upstream `--font-dir`), which is empty unless asked for.
         List<(FontId Id, string? Family, (ushort Min, ushort Max)? Weight, bool? Italic)> declarations = [];
         foreach (string stem in FontAssets.BundledFaceFiles)
         {
@@ -54,6 +61,19 @@ public sealed partial class TextEngine : IDisposable
                 declarations.Add((id, null, null, null));
             }
         }
+
+        // Directory faces join the base set after the embedded faces and before the emoji face,
+        // the order upstream's base_font_database builds: they register under their own family
+        // names, and a name an embedded face already has gains them as later faces.
+        foreach (byte[] data in directoryFonts.Data)
+        {
+            foreach (FontId id in _database.LoadFontSource(data))
+            {
+                declarations.Add((id, null, null, null));
+            }
+        }
+
+        _directoryFonts = directoryFonts;
 
         if (loadEmoji)
         {
@@ -121,7 +141,9 @@ public sealed partial class TextEngine : IDisposable
             return;
         }
 
-        _shaper.Cache = previous?._shaper.Cache is { } inherited && inherited.MatchesFontSet(_fonts)
+        _shaper.Cache = previous?._shaper.Cache is { } inherited
+            && ReferenceEquals(previous._directoryFonts, _directoryFonts)
+            && inherited.MatchesFontSet(_fonts)
             ? inherited
             : new ShapeCache(_fonts);
     }

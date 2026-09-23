@@ -137,6 +137,15 @@ public static class CliDefinition
             Description = "Allow CDP clients to navigate to file:// URLs. Off by default so a CDP connection cannot read arbitrary local files.",
         };
         public static readonly Option<FileSystemInfo?> StorageDir = new("--storage-dir");
+        // Upstream 343fdc7: `#[arg(long = "font-dir", value_name = "DIR")] font_dirs: Vec<PathBuf>`,
+        // so the flag repeats and each occurrence takes exactly one directory.
+        public static readonly Option<string[]> FontDirs = new("--font-dir")
+        {
+            Description = "Recursively load TTF, TTC, OTF, and OTC files from this directory. Repeat for multiple directories. Requires a render-enabled build.",
+            HelpName = "DIR",
+            Arity = ArgumentArity.ZeroOrMore,
+            AllowMultipleArgumentsPerToken = false,
+        };
         public static readonly Option<bool> Quiet = new("--quiet");
     }
 
@@ -221,7 +230,7 @@ public static class CliDefinition
     private static Command BuildServe() => new("serve", "Run the Chrome DevTools Protocol server")
     {
         Serve.Port, Serve.Host, Serve.Proxy, Serve.UserAgent, Serve.Workers,
-        Serve.MaxConnections, Serve.AllowFileAccess, Serve.StorageDir, Serve.Quiet,
+        Serve.MaxConnections, Serve.AllowFileAccess, Serve.StorageDir, Serve.FontDirs, Serve.Quiet,
     };
 
     private static Command BuildFetch()
