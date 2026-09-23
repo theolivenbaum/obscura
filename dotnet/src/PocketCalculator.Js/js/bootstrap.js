@@ -4341,6 +4341,7 @@ class Element extends Node {
     }
     this._frameId = 0;
     this._iframeLoadingUrl = null;
+    this._iframeLoadedUrl = 'about:blank';
     this._iframeDoc = new _IframeDocument(
       '<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
     this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
@@ -4356,20 +4357,32 @@ class Element extends Node {
     this._resetIframeFrame();
     this._iframeLoadingUrl = fullUrl;
     const el = this;
-    fetch(fullUrl, {mode: 'no-cors'}).then(async resp => {
+    // Upstream 04418a5: the frame loads through the op directly rather than the
+    // page's own fetch(), and the document's origin is the response's final URL,
+    // not `src`. A same-origin src that redirected cross-origin used to leave a
+    // readable contentDocument of cross-origin content.
+    let pageOrigin = '';
+    try { pageOrigin = new URL(_domParse('document_url') || 'about:blank').origin; } catch (_) {}
+    Promise.resolve(__obscuraCore.ops.op_fetch_url(
+      fullUrl, 'GET', '{}', new Uint8Array(0), pageOrigin,
+      'no-cors', 'same-origin'
+    )).then(raw => {
       if (el._iframeLoadingUrl !== fullUrl) return;
-      if (resp.ok || resp.type === 'opaque') {
-        const html = await resp.text();
+      const response = JSON.parse(raw);
+      if (!response.blocked && response.status > 0 && response.status < 400) {
+        const html = response.body || '';
+        const loadedUrl = response.url || fullUrl;
+        el._iframeLoadedUrl = loadedUrl;
         // Hand the document to the host, which gives this frame a realm of its
         // own and runs the scripts that came with it (issue #600). The shim
         // document below stays: it is what the parent reads through
         // contentDocument.
         const box = el.getBoundingClientRect();
         el._frameId = __obscuraCore.ops.op_frame_document_ready(
-          fullUrl, html, Math.round(box.width) || 300, Math.round(box.height) || 150);
+          loadedUrl, html, Math.round(box.width) || 300, Math.round(box.height) || 150);
         if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
-        el._iframeDoc = new _IframeDocument(html, fullUrl, el);
-        el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
+        el._iframeDoc = new _IframeDocument(html, loadedUrl, el);
+        el._iframeWin = new _IframeWindow(el._iframeDoc, loadedUrl);
         // Bind the window to the realm the host just queued. This is what makes
         // posting into the frame reach the frame's own listeners, and makes a
         // message coming back out arrive with this window as its `source`.
@@ -4379,6 +4392,7 @@ class Element extends Node {
           globalThis.__obscura_frameElements[el._frameId] = el;
         }
       } else {
+        el._iframeLoadedUrl = fullUrl;
         el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
         el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
       }
@@ -4389,6 +4403,7 @@ class Element extends Node {
       el.dispatchEvent(new Event('load'));
     }).catch(() => {
       if (el._iframeLoadingUrl !== fullUrl) return;
+      el._iframeLoadedUrl = fullUrl;
       el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
       el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
 
@@ -4400,14 +4415,22 @@ class Element extends Node {
     const real = _frameObjectsFor(this);
     if (real?.document) return real.document;
     if (this._iframeDoc) {
+      // Upstream 04418a5: judged on the URL the frame's document actually came
+      // from (after redirects), and the "no :// in src" escape hatch is gone.
+      if (this.src === '' || this.src === 'about:blank' || this._iframeLoadedUrl === 'about:blank') {
+        return this._iframeDoc;
+      }
       const pageOrigin = (function(){ try { return new URL(_domParse("document_url")).origin; } catch(e) { return ''; } })();
-      const iframeOrigin = (function(url){ try { return new URL(url).origin; } catch(e) { return ''; } })(this.src);
-      if (pageOrigin === iframeOrigin || this.src === '' || this.src === 'about:blank' || !this.src.includes('://')) {
+      const iframeOrigin = (function(url){ try { return new URL(url).origin; } catch(e) { return ''; } })(this._iframeLoadedUrl);
+      // DEVIATION from upstream: an opaque origin ("null", e.g. a data: frame in
+      // an about:blank page) is never same-origin with anything, as in HTML.
+      if (pageOrigin !== '' && pageOrigin !== 'null' && pageOrigin === iframeOrigin) {
         return this._iframeDoc;
       }
       return null; // Cross-origin: blocked
     }
     if (!this._iframeDoc) {
+      this._iframeLoadedUrl = 'about:blank';
       this._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
       this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
     }

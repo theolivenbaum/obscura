@@ -15387,6 +15387,99 @@ public sealed class RuntimeTests
             result.Value);
     }
 
+    // Upstream 04418a5 (runtime.rs iframe_origin_follows_the_final_redirect_url): a
+    // same-origin src that redirects cross-origin does not yield a readable contentDocument.
+    [Fact]
+    public async Task IframeOriginFollowsTheFinalRedirectUrl()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><head></head><body></body></html>");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            """
+            async () => {
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
+                try {
+                    __obscura_test_ops.op_fetch_url = async () => JSON.stringify({
+                        status: 200,
+                        headers: { "content-type": "text/html" },
+                        body: "<!doctype html><title>secret</title>",
+                        url: "https://cross-origin.example/secret",
+                        redirected: true,
+                    });
+                    const frame = document.createElement("iframe");
+                    const loaded = new Promise(resolve => frame.onload = resolve);
+                    frame.src = "/same-origin-start";
+                    document.body.appendChild(frame);
+                    await loaded;
+                    return {
+                        readable: frame.contentDocument !== null,
+                        loadedUrl: frame._iframeLoadedUrl,
+                    };
+                } finally {
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
+                }
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals(
+            """
+            {
+                "readable": false,
+                "loadedUrl": "https://cross-origin.example/secret"
+            }
+            """,
+            result.Value);
+    }
+
+    // The converse: a same-origin final URL stays readable, and a relative src is no longer
+    // readable merely because it has no "://" (upstream 04418a5 removed that escape hatch).
+    [Fact]
+    public async Task IframeSameOriginFinalUrlStaysReadable()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><head></head><body></body></html>");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            """
+            async () => {
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
+                try {
+                    __obscura_test_ops.op_fetch_url = async (url) => JSON.stringify({
+                        status: 200,
+                        headers: { "content-type": "text/html" },
+                        body: "<!doctype html><title>mine</title>",
+                        url,
+                    });
+                    const frame = document.createElement("iframe");
+                    const loaded = new Promise(resolve => frame.onload = resolve);
+                    frame.src = "/child";
+                    document.body.appendChild(frame);
+                    await loaded;
+                    return {
+                        readable: frame.contentDocument !== null,
+                        loadedUrl: frame._iframeLoadedUrl,
+                    };
+                } finally {
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
+                }
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals(
+            """
+            {
+                "readable": true,
+                "loadedUrl": "http://example.com/child"
+            }
+            """,
+            result.Value);
+    }
+
     [Fact]
     public async Task UnsuccessfulDynamicScriptResponseFiresErrorWithoutEvaluatingBody()
     {
