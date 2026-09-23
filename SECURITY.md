@@ -1,18 +1,60 @@
 # Security
 
 This document describes PocketCalculator's security model, the protections it has
-and how to configure them, and the open issues found by the security review of
-September 2026 (at commit `6dae774`, after the upstream security ports in
-`todo.md` "Upstream sync 727cc46..1a3169d").
+and how to configure them, the issues found by the security review of September
+2026 (at commit `6dae774`, after the upstream security ports in `todo.md`
+"Upstream sync 727cc46..1a3169d"), and which of them are fixed.
 
 **Short version.** PocketCalculator is a browser engine that runs untrusted
-JavaScript from arbitrary web pages. As of this review it does **not** hold the
-same-origin policy against a hostile page, it lets a page read local files
-through ES module imports, and several page-supplied inputs crash the whole
-process. Until the Critical and High findings below are closed, treat every
-page as able to read anything the engine process can reach, and treat every
-process as able to be killed by any page it loads. Run it isolated (see
-[Deployment guidance](#deployment-guidance)).
+JavaScript from arbitrary web pages. The review found that it did not hold the
+same-origin policy against a hostile page, let a page read local files, and let
+page-supplied inputs crash the whole process. Every Critical and High finding is
+now fixed, with a regression test each (see [Fix status](#fix-status)); several
+Medium and Low items are partial or open. The engine still runs every page of a
+process in one address space with no cooperative cancellation of work inside
+ops, so the [Deployment guidance](#deployment-guidance) still applies: isolate
+tenants per process, keep secrets off its filesystem, and cap its resources from
+outside.
+
+## Fix status
+
+The fixes landed after the review, one finding (or a tight group) per commit,
+each with a regression test that reproduces the exploit. The summary table's
+**Fix** column gives the state of each finding. Behaviour that now differs from
+the Rust reference is recorded under "Known deviations" in `todo.md`
+("Security review fixes"). The finding sections below describe the problem as
+found at `6dae774` and are kept as the record.
+
+Still open after the fixes:
+
+- **No cooperative cancellation inside ops.** The V8 watchdog cannot stop C# work.
+  The worst known cases are budgeted (H8), but these remain slow on script-built
+  trees:
+  - 300 nested `float:left` blocks (over 40 s);
+  - thousands of nested inline spans;
+  - `repeat()` nested inside `repeat()` in `grid-template-*` (exponential);
+  - `innerText` and `Range.toString()` on a 10k-deep tree.
+
+  `POCKETCALCULATOR_HANG_EXIT_MS` is the opt-in backstop for `serve` and `mcp`.
+- **Deep markup parses in quadratic time** inside AngleSharp's tree builder
+  (M11): 50k nested `<div>`s take about 20 s.
+- **Memory outside the heap cap** (M7): DOM text, `ArrayBuffer` backing stores,
+  and no per-process budget. `op_fetch_url` still copies a body several times
+  (M4).
+- **CDP isolated worlds** share the main world (M6).
+- **Remaining page-writable surfaces:**
+  - `__virtualUrl` still moves the URL the page reports and the one CDP and MCP
+    show. Origin, cookie and initiator decisions no longer read it.
+  - The CDP object store and CDP/MCP host snippets use page globals (L10,
+    todo.md).
+  - MCP `browser_import_state` applies every origin's storage to the current page
+    (L9).
+- **Not changed:**
+  - the curated public suffix list (L6);
+  - no HSTS store and no mixed-content blocking (I7);
+  - custom-root EKU and revocation checks (I8);
+  - `EngineInternal` visible (I10: ClearScript defines it non-configurable);
+  - plaintext control planes (I1: terminate TLS in front).
 
 ## Reporting a vulnerability
 
@@ -29,6 +71,7 @@ upstream as well.
 - [Protections and configuration](#protections-and-configuration)
 - [Deployment guidance](#deployment-guidance)
 - [Findings](#findings)
+- [Fix status](#fix-status)
 - [Checked and holding](#checked-and-holding)
 - [Remediation plan](#remediation-plan)
 
@@ -125,9 +168,12 @@ Skia and HarfBuzz.
    `V8ScriptEngine.Interrupt()`. The CLI `fetch` command also arms a process-level
    hard deadline.
 
-### Where the model is weakest
+### Where the model was weakest
 
-Two design choices are behind most of the Critical findings:
+Two design choices were behind most of the Critical findings. Both are fixed:
+origin, frame-access and origin-clean decisions are now made by the host from
+the calling realm, and internal-load bodies stay host-side behind a token
+(C1 to C3, H4). The description below is kept as the record.
 
 - **The host trusts security decisions the shim computes in page-visible JS.**
   - The page origin that `op_fetch_url` uses for CORS, credentials and SameSite is
@@ -154,9 +200,9 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 | Setting | Default | Effect |
 |---|---|---|
 | `--allow-private-network`, `POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1`, `BrowserContext` `allowPrivateNetwork` | off | Turns the SSRF guard off entirely. Blocked ranges: loopback, RFC1918, link-local, CGNAT, `0/8`, `240/4`, multicast, documentation, ULA, v4-mapped / v4-compatible, NAT64, 6to4. |
-| `--proxy`, `POCKETCALCULATOR_PROXY` | none | Upstream proxy. **Also `HTTP_PROXY` / `HTTPS_PROXY` from the environment**, see M2. |
+| `--proxy`, `POCKETCALCULATOR_PROXY` | none | Upstream proxy. Environment proxies (`HTTP_PROXY`, `HTTPS_PROXY`) are ignored. With a proxy, the target name is resolved and vetted locally first (M2). |
 | `--obey-robots`, `POCKETCALCULATOR_OBEY_ROBOTS` | off | Honour robots.txt. |
-| `--stealth`, `POCKETCALCULATOR_STEALTH` | off | Tracker blocklist plus consistent fingerprint surfaces. The blocklist covers the main transport only (L7). |
+| `--stealth`, `POCKETCALCULATOR_STEALTH` | off | Tracker blocklist plus consistent fingerprint surfaces. The blocklist applies to every request and redirect hop (L7). |
 | `POCKETCALCULATOR_FETCH_TIMEOUT_MS` | 30000 | Time to response headers for `fetch()`/XHR. The body is not covered (M3). |
 | `POCKETCALCULATOR_FETCH_MAX_BODY_BYTES` | 100 MB | Decompressed body cap for `fetch()`/XHR. |
 | `POCKETCALCULATOR_NETWORK_BODY_BUFFER_BYTES` / `_ENTRIES` | 2 MB | Bodies retained for CDP `Network.getResponseBody`. |
@@ -172,7 +218,7 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 | `POCKETCALCULATOR_MCP_TOKEN` | none | Bearer token for MCP over HTTP (32+ bytes; required for a non-loopback bind). |
 | `POCKETCALCULATOR_MCP_ALLOWED_ORIGINS` | none | Browser Origins MCP accepts; any other Origin is refused. |
 | `POCKETCALCULATOR_CDP_FORWARDED_HOST` / `_PORT` | none | Public authority a CDP worker advertises behind `serve --workers` or a reverse proxy. |
-| `--allow-file-access` (`serve`) | off | Lets CDP navigate to `file://` and `DOM.setFileInputFiles` read host files. **Bypassed today, see H1.** |
+| `--allow-file-access` (`serve`) | off | Lets CDP navigate to `file://` and `DOM.setFileInputFiles` read host files. One gate covers every CDP navigation path (H1). A web page can never navigate to `file:` itself, even with this flag (H2, H3). |
 | `--max-connections` (`serve`) | 128 | Concurrent CDP connections. |
 | `--workers N` (`serve`) | 1 | Runs N worker processes behind a TCP balancer; one crashing page takes out one worker. |
 | `POCKETCALCULATOR_IO_STREAM_MAX_ENTRIES` / `_BYTES` | bounded | Per-connection CDP `IO` stream store. |
@@ -182,20 +228,22 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `--timeout`, `POCKETCALCULATOR_SCRIPT_DEADLINE_MS`, `POCKETCALCULATOR_NAV_TIMEOUT_MS` | 30 s | Watchdog on synchronous V8 work, and navigation deadlines. Neither reaches work inside a C# op (H8, M8). |
-| V8 flags `--max-old-space-size` | 4096 MB (CLI) | Enforced heap cap. **Library and CDP embedders get no cap unless they set one** (M7). |
+| `--timeout`, `POCKETCALCULATOR_SCRIPT_DEADLINE_MS`, `POCKETCALCULATOR_NAV_TIMEOUT_MS` | 30 s | Watchdog on synchronous V8 work, and navigation deadlines. Neither reaches work inside a C# op; the worst cases are budgeted (H8, M8). `POCKETCALCULATOR_HANG_EXIT_MS` (opt-in, `serve`/`mcp`) exits the process when an interrupted command does not return (L12). |
+| V8 flags `--max-old-space-size` | 4096 MB | Enforced heap cap, applied to every runtime, library and CDP included (M7). Memory outside the V8 heap is not counted. |
 | `--font-dir`, `BrowserConfig.FontDirectories` | none | Operator-chosen font directories, read once. With none set, no font file is read from disk. |
 | `POCKETCALCULATOR_FRAME_MESSAGE_QUEUE_BYTES` / `_ENTRIES`, `POCKETCALCULATOR_MAX_LIVE_FRAMES`, `POCKETCALCULATOR_NAV_CHAIN_LIMIT` | bounded | Cross-frame message queue, live frames, navigation chain length. |
 | Built-in caps (not configurable) | | Explicit-stack HTML adapter, iterative DOM walks and serialization with cycle guards; CSS 8 MB / 100k rules per sheet, `calc()` depth 64, `var()` depth 16; SVG depth 24, no DTD / external entities; capture 32768 px per side, 16M px, 128 MB; canvas 32767 px per side, 64M px, 256 MB per runtime; PDF 250 pages, 64 MB; PBKDF2 / HKDF / random sizes. |
 
 ## Deployment guidance
 
-Until the Critical and High findings are fixed:
+The Critical and High findings are fixed, but the engine has no per-page memory
+budget and no cooperative cancellation inside ops (see [Fix status](#fix-status)).
+For untrusted content:
 
 - **One trust domain per process.**
   - Do not load pages from different customers, or pages alongside secrets, in one
-    process. The same-origin policy does not hold (C1 to C3), and one page can
-    crash every other session (C5, C6, H5 to H8).
+    process. One page can still stall or exhaust memory for every other session
+    in it.
   - Prefer `scrape` (one worker process per URL) or `serve --workers N` with a
     small N.
   - Run each process under a supervisor that restarts it.
@@ -203,27 +251,29 @@ Until the Critical and High findings are fixed:
   - Run in a container or sandbox whose filesystem holds nothing secret: no cloud
     credentials, no SSH keys, no source trees, no cookie jars of other tenants.
   - Mount it read-only where possible, and run as an unprivileged user.
-  - `file://` gates exist but are bypassed today (C4, H1 to H3).
+  - `file:` is now served only to operator navigations and `file:` documents
+    (C4, H1 to H3), but a filesystem with nothing secret is the defence in depth.
 - **Enforce egress outside the process.**
-  - The SSRF guard is good, but a proxy, including one from `HTTP_PROXY` in the
-    environment, disables its hostname half (M2).
+  - The SSRF guard checks at connect time. Behind a configured proxy, the proxy
+    does its own DNS lookup, so rebinding between the local check and the
+    proxy's lookup remains (M2).
   - Block metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) and internal
     ranges at the network layer as well.
 - **Cap resources outside the process.** Set a cgroup/container memory limit and
-  a CPU limit. Several inputs allocate gigabytes outside the V8 heap cap (H6, H7,
-  M7, M10).
+  a CPU limit. DOM text and `ArrayBuffer`s are not counted against the V8 heap
+  cap (M7), and deep script-built trees can still cost minutes of CPU.
 - **Treat control planes as root on the process.**
   - Keep CDP and MCP on loopback.
   - On a shared host, remember that loopback has no token by default: any local
     user can connect. Set a token anyway.
   - For remote access, put TLS in front (the servers speak plaintext) and set a
     32+ byte token.
-- **Treat dumps as untrusted.** `--dump html` and `--dump markdown` can carry
-  markup a downstream renderer will execute (M9, M10). Sanitize before rendering,
-  and do not feed dumps to an agent with tool access without the usual
-  prompt-injection care.
-- **Launch `serve --workers` through the apphost** (`pocket-calculator`), not
-  `dotnet PocketCalculator.Cli.dll` (M1).
+- **Treat dumps as untrusted.** Serialization and the markdown dump now escape
+  what they must (M9, M10), but a dump is still the page's content. Sanitize it
+  before rendering, and do not feed it to an agent with tool access without the
+  usual prompt-injection care.
+- **Supervise `serve --workers`.** The balancer does not restart a worker that
+  exits, and `POCKETCALCULATOR_HANG_EXIT_MS` makes wedged workers exit.
 
 ## Findings
 
@@ -234,46 +284,46 @@ contradict an entry `todo.md` marks done say so.
 
 ### Summary
 
-| ID | Severity | Area | Finding | Status |
-|---|---|---|---|---|
-| C1 | Critical | JS/Net | Cross-origin reads with cookies: the host trusts a page-computed origin | tested |
-| C2 | Critical | JS | Cross-origin iframe documents readable through `contentWindow`, `_iframeDoc`, `_iframeLoadedUrl` | tested; contradicts `04418a5 D` done |
-| C3 | Critical | JS | Internal-load bodies pass through page-overridable `JSON.parse`; `originClean` computed in JS | tested |
-| C4 | Critical | Net/JS | Any page can `import()` local `file://` modules | tested; inherited |
-| C5 | Critical | Render | DOM ~1500 deep: layout StackOverflow kills the process | tested |
-| C6 | Critical | DOM | Nested selectors (`:not(`/`:is(`/`:has(`): parser StackOverflow kills the process, from a static stylesheet too | tested |
-| H1 | High | CDP | `Page.navigate` on a session skips the `--allow-file-access` gate | tested; contradicts todo.md |
-| H2 | High | CDP | Page-initiated navigation to `file://` is followed in CDP pages | tested |
-| H3 | High | MCP | `browser_tab_new` and clicks on `file://` links open local files | tested; contradicts `04418a5 G` done |
-| H4 | High | JS | `postMessage` `event.origin` can be spoofed | tested |
-| H5 | High | Render | `stackalloc char[text.Length]` on page text: StackOverflow | tested |
-| H6 | High | Render | WOFF / WOFF2 decompression bomb (1.5 MB gives 9 GB) | tested |
-| H7 | High | Render | Image decode and paint allocations unbounded (190 KB PNG gives 3.2 GB) | tested |
-| H8 | High | Render/DOM | Uninterruptible CPU hangs in native C#: SVG `<use>` fan-out, `var()` expansion, nested `:has()` | tested |
-| M1 | Medium | CLI | `serve --workers` under the `dotnet` host starts `dotnet serve` | tested; conditional |
-| M2 | Medium | Net | A proxy (including `HTTP_PROXY`) disables the hostname SSRF check | tested; inherited |
-| M3 | Medium | Net | No timeout on response body reads | tested |
-| M4 | Medium | Net | `op_fetch_url` copies each body about 5x, with no concurrency cap | read |
-| M5 | Medium | Net | `__Host-` / `__Secure-` cookie prefixes not enforced; cookie jar unbounded | read |
-| M6 | Medium | CDP | Isolated worlds share the main world; binding calls forgeable | read |
-| M7 | Medium | JS | Memory outside the V8 heap cap; no default cap for embedders | tested |
-| M8 | Medium | JS | PBKDF2 bomb runs synchronously and cannot be interrupted | tested (CLI) |
-| M9 | Medium | DOM | Serialization mXSS: `textarea`/`title`, foreign `style`/`script` emitted raw | tested; inherited |
-| M10 | Medium | CLI | Markdown dump passes raw HTML and `javascript:` links through | tested |
-| M11 | Medium | DOM | Quadratic parse and append cost on deep trees | tested |
-| L1 | Low | MCP | MCP HTTP has no `Host` check (DNS rebinding for SSE GETs) | tested |
-| L2 | Low | MCP | SSE streams do not count against the connection cap | read |
-| L3 | Low | CDP | CDP resource limits loose: 64 MiB messages x 128, unbounded queues/targets | read |
-| L4 | Low | CDP | Any message containing `"Browser.close"` closes the connection | tested |
-| L5 | Low | CI | Pipeline has no `pr:` section or branch condition on push; no lock files | read |
-| L6 | Low | Net | Public suffix list is curated (~450 rules) | read; in todo.md |
-| L7 | Low | Net | Tracker blocklist skips `op_fetch_url` and redirect hops | read; inherited |
-| L8 | Low | Net | `InterceptAction.ModifyHeaders` leaks headers into later requests | read |
-| L9 | Low | JS/MCP | Cross-origin `pushState` spoofs `location.origin`; MCP state export/import trusts it | tested |
-| L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md |
-| L11 | Low | Browser | Latent integer overflow in `RgbImage.Decode` | read; not reachable today |
-| L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read |
-| I1 to I10 | Info | various | See [Informational](#informational) | |
+| ID | Severity | Area | Finding | Review | Fix |
+|---|---|---|---|---|---|
+| C1 | Critical | JS/Net | Cross-origin reads with cookies: the host trusts a page-computed origin | tested | fixed |
+| C2 | Critical | JS | Cross-origin iframe documents readable through `contentWindow`, `_iframeDoc`, `_iframeLoadedUrl` | tested; contradicts `04418a5 D` done | fixed |
+| C3 | Critical | JS | Internal-load bodies pass through page-overridable `JSON.parse`; `originClean` computed in JS | tested | fixed |
+| C4 | Critical | Net/JS | Any page can `import()` local `file://` modules | tested; inherited | fixed |
+| C5 | Critical | Render | DOM ~1500 deep: layout StackOverflow kills the process | tested | fixed |
+| C6 | Critical | DOM | Nested selectors (`:not(`/`:is(`/`:has(`): parser StackOverflow kills the process, from a static stylesheet too | tested | fixed |
+| H1 | High | CDP | `Page.navigate` on a session skips the `--allow-file-access` gate | tested; contradicts todo.md | fixed |
+| H2 | High | CDP | Page-initiated navigation to `file://` is followed in CDP pages | tested | fixed |
+| H3 | High | MCP | `browser_tab_new` and clicks on `file://` links open local files | tested; contradicts `04418a5 G` done | fixed |
+| H4 | High | JS | `postMessage` `event.origin` can be spoofed | tested | fixed |
+| H5 | High | Render | `stackalloc char[text.Length]` on page text: StackOverflow | tested | fixed |
+| H6 | High | Render | WOFF / WOFF2 decompression bomb (1.5 MB gives 9 GB) | tested | fixed |
+| H7 | High | Render | Image decode and paint allocations unbounded (190 KB PNG gives 3.2 GB) | tested | fixed |
+| H8 | High | Render/DOM | Uninterruptible CPU hangs in native C#: SVG `<use>` fan-out, `var()` expansion, nested `:has()` | tested | fixed (budgets); general cancellation open |
+| M1 | Medium | CLI | `serve --workers` under the `dotnet` host starts `dotnet serve` | tested; conditional | fixed |
+| M2 | Medium | Net | A proxy (including `HTTP_PROXY`) disables the hostname SSRF check | tested; inherited | fixed; proxy-side rebinding remains |
+| M3 | Medium | Net | No timeout on response body reads | tested | fixed |
+| M4 | Medium | Net | `op_fetch_url` copies each body about 5x, with no concurrency cap | read | partial: concurrency capped, copies remain |
+| M5 | Medium | Net | `__Host-` / `__Secure-` cookie prefixes not enforced; cookie jar unbounded | read | fixed |
+| M6 | Medium | CDP | Isolated worlds share the main world; binding calls forgeable | read | partial: binding names checked, isolated worlds open |
+| M7 | Medium | JS | Memory outside the V8 heap cap; no default cap for embedders | tested | partial: binding queue capped, default heap cap; DOM, ArrayBuffer, process budgets open |
+| M8 | Medium | JS | PBKDF2 bomb runs synchronously and cannot be interrupted | tested (CLI) | fixed |
+| M9 | Medium | DOM | Serialization mXSS: `textarea`/`title`, foreign `style`/`script` emitted raw | tested; inherited | fixed |
+| M10 | Medium | CLI | Markdown dump passes raw HTML and `javascript:` links through | tested | fixed |
+| M11 | Medium | DOM | Quadratic parse and append cost on deep trees | tested | partial: append fixed, parse cost in AngleSharp open |
+| L1 | Low | MCP | MCP HTTP has no `Host` check (DNS rebinding for SSE GETs) | tested | fixed |
+| L2 | Low | MCP | SSE streams do not count against the connection cap | read | fixed |
+| L3 | Low | CDP | CDP resource limits loose: 64 MiB messages x 128, unbounded queues/targets | read | fixed; no idle timeout |
+| L4 | Low | CDP | Any message containing `"Browser.close"` closes the connection | tested | fixed |
+| L5 | Low | CI | Pipeline has no `pr:` section or branch condition on push; no lock files | read | fixed |
+| L6 | Low | Net | Public suffix list is curated (~450 rules) | read; in todo.md | open |
+| L7 | Low | Net | Tracker blocklist skips `op_fetch_url` and redirect hops | read; inherited | fixed |
+| L8 | Low | Net | `InterceptAction.ModifyHeaders` leaks headers into later requests | read | fixed |
+| L9 | Low | JS/MCP | Cross-origin `pushState` spoofs `location.origin`; MCP state export/import trusts it | tested | partial: `pushState` fixed; `__virtualUrl` and MCP state import/export open |
+| L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | partial: `Uint8Array` fixed; CDP/MCP snippets open |
+| L11 | Low | Browser | Latent integer overflow in `RgbImage.Decode` | read; not reachable today | fixed |
+| L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read | opt-in (`POCKETCALCULATOR_HANG_EXIT_MS`) |
+| I1 to I10 | Info | various | See [Informational](#informational) | | I2 to I6, I9 fixed; I1, I7, I8, I10 open |
 
 ### Critical
 
