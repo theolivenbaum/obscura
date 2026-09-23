@@ -57,17 +57,30 @@ internal static partial class Tools
 
     // ===== core tools =====
 
-    internal static async Task<string> NavigateAsync(JsonNode? args, BrowserState state)
+    /// <summary>
+    /// The scheme gate every MCP navigation takes: <c>browser_navigate</c>,
+    /// <c>browser_tab_new</c>, back, forward and reload.
+    /// </summary>
+    /// <remarks>
+    /// An MCP caller must not read local files through the browser session: navigate to
+    /// file:// and snapshot the text. Rust tests the scheme of <c>Url::parse</c>, so an
+    /// unparseable string falls through to the navigation and fails there with its own
+    /// error. Deviation from tools.rs, which gates <c>browser_navigate</c> only
+    /// (SECURITY.md H3): a new tab or a history step could open a local file too.
+    /// Clicks and scripts are covered in <c>Page.ProcessPendingNavigationOutcomeAsync</c>.
+    /// </remarks>
+    internal static void RefuseFileNavigation(string url)
     {
-        var url = RequireString(args, "url", "Missing url parameter");
-        // An MCP caller must not read local files through the browser session:
-        // navigate to file:// and snapshot the text. Rust tests the scheme of
-        // `Url::parse`, so an unparseable string falls through to the navigation
-        // and fails there with its own error.
         if (PocketCalculator.Js.Url.UrlRecord.Parse(url) is { Scheme: "file" })
         {
             throw new ToolException("file:// navigation is disabled for MCP");
         }
+    }
+
+    internal static async Task<string> NavigateAsync(JsonNode? args, BrowserState state)
+    {
+        var url = RequireString(args, "url", "Missing url parameter");
+        RefuseFileNavigation(url);
 
         var waitUntil = args.Get("waitUntil").AsString() ?? "load";
 
@@ -588,6 +601,7 @@ internal static partial class Tools
 
         var prevIdx = page.HistoryIndex - 1;
         var url = page.History[prevIdx];
+        RefuseFileNavigation(url);
         page.SetHistoryIndex(prevIdx);
         var stash = (History: new List<string>(page.History), Index: page.HistoryIndex);
         try
@@ -614,6 +628,7 @@ internal static partial class Tools
 
         var nextIdx = page.HistoryIndex + 1;
         var url = page.History[nextIdx];
+        RefuseFileNavigation(url);
         page.SetHistoryIndex(nextIdx);
         var stash = (History: new List<string>(page.History), Index: page.HistoryIndex);
         try
@@ -650,6 +665,7 @@ internal static partial class Tools
             throw new ToolException("Nothing to reload.");
         }
 
+        RefuseFileNavigation(url);
         try
         {
             await state.PageMut().NavigateWithWaitAsync(url, WaitUntil.DomContentLoaded)

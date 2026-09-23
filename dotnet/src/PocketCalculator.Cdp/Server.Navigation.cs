@@ -67,6 +67,29 @@ public static partial class CdpServer
         }
 
         var page = ctx.Pages[pageIndex];
+
+        // The scheme gate Page.navigate takes on the sessionless path (SECURITY.md H1):
+        // this path, which every flattened session and the autonomous pump of
+        // page-queued navigations (H2) use, used to skip it.
+        {
+            var gateUrl = req.Params.Get("url").AsStringOr(string.Empty);
+            var gateInitiator = Domains.Page.PageInitiator(
+                gateUrl,
+                req.Params.Get("__method").AsStringOr("GET"),
+                req.Params.Get("__body").AsStringOr(string.Empty),
+                req.Params);
+            if (Domains.Page.NavigationRefusal(gateUrl, gateInitiator, page.Context.AllowFileAccess) is { } refusal)
+            {
+                CdpLog.Warn("refused a navigation to file:");
+                if (sendCommandResponse)
+                {
+                    replyTx.TryWrite(CdpResponse.Failure(req.Id, -32601, refusal, req.SessionId).ToJson());
+                }
+
+                return;
+            }
+        }
+
         ctx.Pages.RemoveAt(pageIndex);
 
         // Issue #19 follow-up: only one of a connection's pages holds a live JS
