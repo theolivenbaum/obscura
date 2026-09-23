@@ -108,6 +108,9 @@ public sealed class PocketCalculatorState
     /// </summary>
     public List<(string Name, string Payload)> PendingBindingCalls { get; } = [];
 
+    /// <summary>UTF-16 length of the payloads in <see cref="PendingBindingCalls"/>.</summary>
+    public long PendingBindingCallBytes { get; set; }
+
     /// <summary>
     /// Console calls and uncaught script exceptions, in occurrence order. The CDP
     /// layer drains this after commands and autonomous event-loop turns.

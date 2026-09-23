@@ -380,12 +380,32 @@ public static class CoreOps
     /// <c>Runtime.bindingCalled</c> event per entry - that is how puppeteer's
     /// <c>page.exposeFunction</c> callbacks fire.
     /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, whose queue is unbounded: script can call a binding in a
+    /// synchronous loop while the host drains only between dispatches, and the queue lives
+    /// outside V8's heap where the heap cap cannot see it. It is capped like the frame
+    /// message queue, dropping the newest call over the cap.
+    /// </remarks>
     public static void OpBindingCalled(PocketCalculatorState page, string name, string payload) =>
         OpGuard.Run("op_binding_called", () =>
         {
             ArgumentNullException.ThrowIfNull(page);
+            long size = (long)name.Length + payload.Length;
+            if (page.PendingBindingCalls.Count >= BindingQueueEntryLimit()
+                || page.PendingBindingCallBytes + size > BindingQueueByteLimit())
+            {
+                return;
+            }
+
+            page.PendingBindingCallBytes += size;
             page.PendingBindingCalls.Add((name, payload));
         });
+
+    internal static int BindingQueueEntryLimit() =>
+        EnvInt("POCKETCALCULATOR_BINDING_QUEUE_ENTRIES", 4096);
+
+    internal static long BindingQueueByteLimit() =>
+        EnvInt("POCKETCALCULATOR_BINDING_QUEUE_BYTES", 8 * 1024 * 1024);
 
     /// <summary>Reads the owning realm's document generation, if it can be read at all.</summary>
     public static PostedTaskOwnerStatus PostedTaskOwnerStatusOf(WeakReference<PocketCalculatorState> owner)

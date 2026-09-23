@@ -250,6 +250,7 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         var calls = State.PendingBindingCalls.ToArray();
         State.PendingBindingCalls.Clear();
+        State.PendingBindingCallBytes = 0;
         return calls;
     }
 
