@@ -529,16 +529,4 @@ public sealed class UrlTests
         Assert.Equal("%zz", Encoding.UTF8.GetString(PercentEncoding.Decode("%zz")));
         Assert.Equal("\u00e9", Encoding.UTF8.GetString(PercentEncoding.Decode("%C3%A9")));
     }
-
-    [Fact]
-    public void RegistrableDomainFollowsThePublicSuffixRules()
-    {
-        Assert.Equal("example.com", PublicSuffixList.RegistrableDomain("www.example.com"));
-        Assert.Equal("example.co.uk", PublicSuffixList.RegistrableDomain("a.b.example.co.uk"));
-        Assert.Equal("user.github.io", PublicSuffixList.RegistrableDomain("x.user.github.io"));
-        Assert.Equal("example.unknown-tld", PublicSuffixList.RegistrableDomain("a.example.unknown-tld"));
-        Assert.Null(PublicSuffixList.RegistrableDomain("com"));
-        Assert.Null(PublicSuffixList.RegistrableDomain("co.uk"));
-        Assert.Null(PublicSuffixList.RegistrableDomain(""));
-    }
 }

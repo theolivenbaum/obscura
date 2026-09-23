@@ -1,7 +1,9 @@
-namespace Obscura.Js.Url;
+namespace Obscura.Net;
 
 /// <summary>
-/// The registrable-domain ("eTLD+1") lookup that <c>op_document_domain_candidate</c> needs.
+/// The public suffix and registrable-domain ("eTLD+1") lookups. <c>op_document_domain_candidate</c>
+/// uses the registrable domain; the cookie jar uses both, to reject a public-suffix Domain
+/// attribute and to decide whether a request is same-site.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -15,7 +17,13 @@ namespace Obscura.Js.Url;
 /// <para>
 /// A suffix that is missing from the table degrades in the permissive direction for
 /// <c>document.domain</c> (it would allow relaxing one label further than the real list does),
-/// so the table deliberately includes the private suffixes the Rust comment calls out.
+/// so the table deliberately includes the private suffixes the Rust comment calls out. For
+/// cookies the same gap means a missing multi-label suffix is accepted as a Domain attribute
+/// and two of its sites count as same-site, as they would with no list at all.
+/// </para>
+/// <para>
+/// It lives in <c>Obscura.Net</c> rather than beside the URL ops so the cookie jar can use it;
+/// <c>Obscura.Js</c> references this assembly, not the other way round.
 /// </para>
 /// </remarks>
 public static class PublicSuffixList
@@ -148,6 +156,14 @@ public static class PublicSuffixList
 
         return suffixLength >= labels.Length ? null : TakeLast(labels, suffixLength + 1);
     }
+
+    /// <summary>
+    /// True when <paramref name="host"/> is itself a public suffix (the <c>psl</c> crate's
+    /// <c>suffix_str(host) == host</c>). Every single-label name is one, through the implicit
+    /// <c>*</c> rule, which is why <c>localhost</c> and <c>com</c> both answer true.
+    /// </summary>
+    public static bool IsPublicSuffix(string host) =>
+        host.Length != 0 && RegistrableDomain(host) is null;
 
     private static string TakeLast(string[] labels, int count) =>
         string.Join('.', labels, labels.Length - count, count);

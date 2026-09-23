@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Obscura.Js.Ops;
+using Obscura.Net;
 
 namespace Obscura.Js.Url;
 
