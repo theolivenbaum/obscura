@@ -709,6 +709,11 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>resolve_length</c>: context-free functional length resolution.</summary>
     internal static float? ResolveLength(string value)
     {
+        if (!CssLength.CssMathNestingIsSafe(value))
+        {
+            return null;
+        }
+
         string trimmed = value.Trim();
         if (trimmed.StartsWith('('))
         {

@@ -26,8 +26,49 @@ public static class CssLength
         float percentBase) =>
         Resolve(value, new Context(font, remPx, vw, vh, percentBase));
 
+    /// <summary>
+    /// Rust <c>MAX_CSS_MATH_NESTING</c>. CSS math functions recurse through nested
+    /// <c>calc()</c>/<c>min()</c>/<c>max()</c>/<c>clamp()</c>, slicing a substring at
+    /// each level, so an unbounded nesting is quadratic (10,000 levels took 15 s) and
+    /// risks an uncatchable stack overflow. Real stylesheets stay shallow.
+    /// </summary>
+    internal const int MaxCssMathNesting = 64;
+
+    /// <summary>
+    /// Rust <c>css_math_nesting_is_safe</c>: false when parentheses nest deeper than
+    /// <see cref="MaxCssMathNesting"/>. An unmatched <c>)</c> does not go below zero.
+    /// </summary>
+    internal static bool CssMathNestingIsSafe(ReadOnlySpan<char> value)
+    {
+        int depth = 0;
+        int next;
+        while ((next = value.IndexOfAny('(', ')')) >= 0)
+        {
+            if (value[next] == '(')
+            {
+                if (++depth > MaxCssMathNesting)
+                {
+                    return false;
+                }
+            }
+            else if (depth > 0)
+            {
+                depth--;
+            }
+
+            value = value[(next + 1)..];
+        }
+
+        return true;
+    }
+
     private static float? Resolve(string value, in Context context)
     {
+        if (!CssMathNestingIsSafe(value))
+        {
+            return null;
+        }
+
         value = value.Trim();
         if (value.StartsWith('('))
         {

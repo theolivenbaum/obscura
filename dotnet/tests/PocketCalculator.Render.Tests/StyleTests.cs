@@ -1842,6 +1842,39 @@ public class ComputedStyleTests
     }
 
     [Fact]
+    public void DeeplyNestedCssMathIsRejectedWithoutRecursing()
+    {
+        string expression = "1px";
+        for (int i = 0; i < 5_000; i++)
+        {
+            expression = $"calc({expression})";
+        }
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        Assert.Null(ComputedStyle.ResolveLength(expression));
+        Assert.Null(ComputedStyle.ResolveContextualLength(expression, 16.0f, 16.0f, 10.0f, 10.0f, 100.0f));
+        Assert.True(started.ElapsedMilliseconds < 1_000, $"rejection took {started.ElapsedMilliseconds} ms");
+
+        string ordinary = "1px";
+        for (int i = 0; i < 8; i++)
+        {
+            ordinary = $"calc({ordinary})";
+        }
+
+        Assert.Equal(1.0f, ComputedStyle.ResolveLength(ordinary));
+
+        // The limit is 64 open parentheses, the same as upstream.
+        string atLimit = "1px";
+        for (int i = 0; i < 64; i++)
+        {
+            atLimit = $"calc({atLimit})";
+        }
+
+        Assert.Equal(1.0f, ComputedStyle.ResolveLength(atLimit));
+        Assert.Null(ComputedStyle.ResolveLength($"calc({atLimit})"));
+    }
+
+    [Fact]
     public void WidthPropertyResolvesCalcWithVar()
     {
         LayoutStyle style = Compute("div", "width: calc(var(--x, 10px) + 5px)");
