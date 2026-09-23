@@ -287,6 +287,53 @@ public sealed class OpsTests
         Assert.Contains("scheme", error.ToLowerInvariant(), StringComparison.Ordinal);
     }
 
+    // Upstream ebe5973 (#967): a redirect must not forward the caller's credentials
+    // to a different origin, and a GET downgrade drops the body headers.
+    [Fact]
+    public void Redirect_strips_credentials_cross_origin_and_body_headers_on_get()
+    {
+        static Dictionary<string, string> Base() => new(StringComparer.Ordinal)
+        {
+            ["Authorization"] = "Bearer secret",
+            ["Cookie"] = "sid=1",
+            ["Content-Type"] = "application/json",
+            ["X-Keep"] = "yes",
+        };
+
+        var cross = Base();
+        FetchOps.SanitizeRedirectHeaders(cross, crossesOrigin: true, downgradedToGet: false);
+        Assert.False(cross.ContainsKey("Authorization"));
+        Assert.False(cross.ContainsKey("Cookie"));
+        Assert.True(cross.ContainsKey("Content-Type"));
+        Assert.True(cross.ContainsKey("X-Keep"));
+
+        var downgrade = Base();
+        FetchOps.SanitizeRedirectHeaders(downgrade, crossesOrigin: false, downgradedToGet: true);
+        Assert.True(downgrade.ContainsKey("Authorization"));
+        Assert.False(downgrade.ContainsKey("Content-Type"));
+
+        var same = Base();
+        FetchOps.SanitizeRedirectHeaders(same, crossesOrigin: false, downgradedToGet: false);
+        Assert.Equal(4, same.Count);
+    }
+
+    // Deviation from Rust: Fetch and Chromium downgrade 301/302 only for POST, and
+    // 303 for anything but GET/HEAD.
+    [Fact]
+    public void Redirect_downgrade_follows_the_fetch_method_rules()
+    {
+        Assert.True(FetchOps.RedirectDowngradesToGet(301, HttpMethod.Post));
+        Assert.True(FetchOps.RedirectDowngradesToGet(302, HttpMethod.Post));
+        Assert.False(FetchOps.RedirectDowngradesToGet(302, HttpMethod.Put));
+        Assert.False(FetchOps.RedirectDowngradesToGet(301, HttpMethod.Delete));
+        Assert.True(FetchOps.RedirectDowngradesToGet(303, HttpMethod.Put));
+        Assert.True(FetchOps.RedirectDowngradesToGet(303, HttpMethod.Post));
+        Assert.False(FetchOps.RedirectDowngradesToGet(303, HttpMethod.Head));
+        Assert.False(FetchOps.RedirectDowngradesToGet(303, HttpMethod.Get));
+        Assert.False(FetchOps.RedirectDowngradesToGet(307, HttpMethod.Post));
+        Assert.False(FetchOps.RedirectDowngradesToGet(308, HttpMethod.Post));
+    }
+
     // Upstream 04f0475: the CORS request-header safelist checks values, not only names.
     [Fact]
     public void Cors_request_header_safelist_checks_values()

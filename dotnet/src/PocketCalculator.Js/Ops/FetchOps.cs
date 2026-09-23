@@ -513,6 +513,9 @@ public static partial class FetchOps
             var currentUrl = url;
             var currentMethod = reqMethod;
             var currentBody = body;
+            // A mutable copy applied per hop: credential headers are dropped when a
+            // redirect crosses origin, and body headers when the method downgrades.
+            var currentHeaders = new Dictionary<string, string>(customHeaders2, StringComparer.Ordinal);
             var redirectsFollowed = 0;
             List<Uri> redirectedFrom = [];
             var crossedOrigin = isCrossOrigin;
@@ -547,7 +550,7 @@ public static partial class FetchOps
                     // Send a default User-Agent on fetch()/XHR requests; UA-gated
                     // servers reject a request with none. Honor an explicit override.
                     var hasUserAgent = false;
-                    foreach (var key in customHeaders2.Keys)
+                    foreach (var key in currentHeaders.Keys)
                     {
                         if (key.Equals("user-agent", StringComparison.OrdinalIgnoreCase))
                         {
@@ -566,7 +569,7 @@ public static partial class FetchOps
                         request.Content = new ByteArrayContent(currentBody);
                     }
 
-                    foreach (var (key, value) in customHeaders2)
+                    foreach (var (key, value) in currentHeaders)
                     {
                         if (!request.Headers.TryAddWithoutValidation(key, value))
                         {
@@ -639,13 +642,23 @@ public static partial class FetchOps
                         return Blocked(nextUrl.Href, $"Too many redirects (>{FetchRedirectLimit})");
                     }
 
-                    // Browser semantics: 301/302/303 downgrade to GET with no body.
-                    // 307/308 preserve method and body.
-                    if (status is 301 or 302 or 303)
+                    // Deviation from Rust, which turns every 301/302/303 into a GET: Fetch
+                    // (HTTP-redirect fetch, step 12) and Chromium downgrade 301/302 only for
+                    // POST, and 303 for anything but GET/HEAD. A PUT that 302s stays a PUT
+                    // with its body, and a HEAD that 303s stays a HEAD. 307/308 always
+                    // preserve method and body.
+                    var downgradedToGet = RedirectDowngradesToGet(status, currentMethod);
+                    if (downgradedToGet)
                     {
                         currentMethod = HttpMethod.Get;
                         currentBody = [];
                     }
+
+                    // Do not forward the caller's credentials to a different origin, and
+                    // drop the body headers once the body is gone (upstream #967).
+                    var crossesOrigin = !string.Equals(
+                        baseUrl.AsciiOrigin, nextUrl.AsciiOrigin, StringComparison.Ordinal);
+                    SanitizeRedirectHeaders(currentHeaders, crossesOrigin, downgradedToGet);
 
                     if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var from))
                     {

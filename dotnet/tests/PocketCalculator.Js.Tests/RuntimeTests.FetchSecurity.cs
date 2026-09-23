@@ -77,4 +77,67 @@ public sealed partial class RuntimeTests
         Assert.StartsWith("DELETE /resource ", requests[1], StringComparison.Ordinal);
         Assert.Contains("X-Trace: 1\r\n", requests[1], StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Upstream ebe5973 (#967), end to end: a same-origin request with an
+    /// Authorization header that 302s to another origin reaches the target without
+    /// it. Chromium strips Authorization on a cross-origin redirect.
+    /// </summary>
+    [Fact]
+    public async Task CrossOriginRedirectDropsAuthorization()
+    {
+        using var target = new RawHttpServer(
+            _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        using var source = new RawHttpServer(
+            _ => $"HTTP/1.1 302 Found\r\nLocation: {target.Origin}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        using var fixture = RedirectRuntimeForOrigin(source.Origin);
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            """
+            async () => await fetch("/start", {
+                headers: { "Authorization": "Bearer secret", "X-Keep": "yes" },
+            }).then(() => "resolved", () => "rejected")
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+        Assert.NotNull(result.Value);
+
+        Assert.Contains("Authorization: Bearer secret", source.Requests[0], StringComparison.OrdinalIgnoreCase);
+        var hop = Assert.Single(target.Requests);
+        Assert.DoesNotContain("authorization:", hop, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("X-Keep: yes", hop, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Deviation from Rust (which downgrades every 301/302/303): a PUT that 302s
+    /// keeps its method, body and Content-Type, as in Chromium.
+    /// </summary>
+    [Fact]
+    public async Task PutThatRedirectsWith302KeepsItsMethodAndBody()
+    {
+        using var server = new RawHttpServer(request =>
+            RawHttpServer.RequestPath(request) == "/start"
+                ? "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                : "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        using var fixture = RedirectRuntimeForOrigin(server.Origin);
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            """
+            async () => (await fetch("/start", {
+                method: "PUT",
+                headers: { "Content-Type": "text/plain" },
+                body: "payload",
+            })).text()
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+        Assert.Equal("ok", result.Value!.GetValue<string>());
+        var requests = server.Requests;
+        Assert.Equal(2, requests.Count);
+        Assert.StartsWith("PUT /final ", requests[1], StringComparison.Ordinal);
+        Assert.Contains("Content-Type: text/plain", requests[1], StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("payload", requests[1], StringComparison.Ordinal);
+    }
 }

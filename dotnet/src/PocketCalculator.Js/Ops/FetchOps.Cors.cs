@@ -288,6 +288,61 @@ public static partial class FetchOps
     }
 
     /// <summary>
+    /// Whether a redirect with this status turns the request into a bodiless GET.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, which downgrades every 301/302/303: this follows Fetch's
+    /// HTTP-redirect fetch and Chromium, where 301/302 downgrade only a POST and 303
+    /// downgrades anything but GET and HEAD.
+    /// </remarks>
+    internal static bool RedirectDowngradesToGet(int status, HttpMethod method) => status switch
+    {
+        301 or 302 => method.Method == "POST",
+        303 => method.Method is not ("GET" or "HEAD"),
+        _ => false,
+    };
+
+    /// <summary>
+    /// Strips headers that must not survive a redirect (upstream #967). A redirect
+    /// that changes origin drops <c>Authorization</c>, <c>Proxy-Authorization</c> and
+    /// an explicit <c>Cookie</c>; a downgrade to GET drops the request-body headers.
+    /// Cookies from the jar are unaffected: they are added per hop for the hop's URL.
+    /// </summary>
+    internal static void SanitizeRedirectHeaders(
+        Dictionary<string, string> headers,
+        bool crossesOrigin,
+        bool downgradedToGet)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        if (!crossesOrigin && !downgradedToGet)
+        {
+            return;
+        }
+
+        List<string>? remove = null;
+        foreach (var name in headers.Keys)
+        {
+            var lower = name.ToLowerInvariant();
+            var strip = (crossesOrigin && lower is "authorization" or "proxy-authorization" or "cookie")
+                || (downgradedToGet
+                    && lower is "content-type" or "content-length" or "content-encoding"
+                        or "content-language" or "content-location");
+            if (strip)
+            {
+                (remove ??= []).Add(name);
+            }
+        }
+
+        if (remove is not null)
+        {
+            foreach (var name in remove)
+            {
+                headers.Remove(name);
+            }
+        }
+    }
+
+    /// <summary>
     /// A status as the http crate's <c>StatusCode</c> displays it: the code and its
     /// canonical reason phrase, never the one the server sent.
     /// </summary>
