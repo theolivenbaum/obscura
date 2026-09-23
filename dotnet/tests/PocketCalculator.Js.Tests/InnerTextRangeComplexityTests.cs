@@ -60,8 +60,8 @@ public sealed class InnerTextRangeComplexityTests
         })()
         """;
 
-    private static void AssertFast(JsonNode state, string what) =>
-        Assert.True(state["ms"]!.GetValue<double>() < BoundMs, $"{what} took {state["ms"]}ms");
+    private static void AssertFast(JsonNode state, string what, double boundMs = BoundMs) =>
+        Assert.True(state["ms"]!.GetValue<double>() < boundMs, $"{what} took {state["ms"]}ms");
 
     [Fact]
     public void InnerTextOfADeepChainIsLinear()
@@ -191,7 +191,9 @@ public sealed class InnerTextRangeComplexityTests
             })()
             """);
         var state = JsonNode.Parse(result!.GetValue<string>())!;
-        AssertFast(state, "50000 appends to one parent");
+        // About 1 s alone and up to 7 s under the full suite's load; the quadratic version
+        // took a minute, so a wider bound still catches it.
+        AssertFast(state, "50000 appends to one parent", boundMs: 20_000);
         Assert.Equal(50000, state["value"]!.GetValue<int>());
     }
 
