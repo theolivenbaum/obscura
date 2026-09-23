@@ -322,10 +322,14 @@ Found during the review, not from upstream:
   `--allow-file-access` gate, H1; upstream `04418a5 D` frame isolation, C2;
   `04418a5 G` file navigation from a web page, H3). The deviations are under
   "Security review fixes" in Known deviations. Still open (`SECURITY.md` "Fix status"):
-  - [ ] cooperative cancellation of C# work inside ops (the watchdog cannot stop it);
-    slow cases on script-built trees: 300 nested floats, thousands of nested
-    inline spans, nested `repeat()` in grid templates, `innerText` and
-    `Range.toString()` 10k deep
+  - [x] cooperative cancellation of C# work inside ops: watchdogs cancel the isolate's
+    `ScriptCancellation`, ops and captures run under it, render entry points take a
+    `CancellationToken`, MCP tool calls have a budget (`SECURITY.md` "Cancellation of
+    work inside ops")
+  - [ ] still slow, now bounded by the deadline: 300 nested floats (flex-mapped float
+    layout re-measures per ancestor), thousands of nested inline spans (line-edge
+    sums are linear per line), nested `repeat()` in grid templates (exponential
+    expansion), `innerText` and `Range.toString()` 10k deep
   - [ ] deep markup parses quadratically in AngleSharp (`IsInButtonScope` scans the
     open-element stack): 50k nested divs take ~20 s (M11)
   - [ ] per-page DOM byte budget, `ArrayBuffer` accounting, per-process memory
@@ -1225,6 +1229,28 @@ DEVIATION comment at the C# code that differs.
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
+
+- **Cancellation of work inside ops (H8, L12):** Rust's `terminate_execution` has the
+  same gap the port had: C# (or Rust) work inside an op runs to completion, and the
+  interrupt raised during it is lost. The port gives each isolate a
+  `ScriptCancellation` that every watchdog (`WatchdogScheduler`, `CdpWatchdog`)
+  cancels before interrupting, and `CancelTermination` or a settled watchdog resets.
+  - **Where it is observed:** sync ops (`FastOpBinding.WithCancellation`) and captures
+    (`WithSyncRenderLoadingDisabled`) run under it, through the thread-static
+    `WorkCancellation` scope. The render walks, taffy's dispatch, inline line-edge sums,
+    selector matching, `Descendants()` and serialization check it. The public
+    `RenderPaint` leaf overloads take a `CancellationToken`.
+  - **How a cancelled op ends:** it returns `undefined` rather than throwing (ClearScript
+    would clear the termination to raise the exception, and the shim's `try`/`catch`
+    would swallow it). It keeps re-interrupting until reset
+    (`ScriptCancellation.EnsureInterrupted`). An evaluation whose deadline passed
+    reports "execution terminated" instead of its result.
+  - **Callers and MCP:** `InterruptOnCancellation` lets a caller's token act as a
+    watchdog; the navigation script phase uses it with the navigation token. MCP tool
+    calls run under `POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS` (default 60 s); Rust's MCP
+    has no bound at all.
+  - **Other paths:** CDP `Dispatch` answers a watchdog-cancelled capture with an
+    ordinary error. The print-economy capture restores its styles in a `finally`.
 
 The fixes for `SECURITY.md`'s findings. Each is commented at its site. Where Rust
 and Chromium differ, Chromium wins.

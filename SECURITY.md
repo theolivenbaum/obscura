@@ -10,11 +10,11 @@ JavaScript from arbitrary web pages. The review found that it did not hold the
 same-origin policy against a hostile page, let a page read local files, and let
 page-supplied inputs crash the whole process. Every Critical and High finding is
 now fixed, with a regression test each (see [Fix status](#fix-status)); several
-Medium and Low items are partial or open. The engine still runs every page of a
-process in one address space with no cooperative cancellation of work inside
-ops, so the [Deployment guidance](#deployment-guidance) still applies: isolate
-tenants per process, keep secrets off its filesystem, and cap its resources from
-outside.
+Medium and Low items are partial or open. Work inside ops now stops at the
+watchdog's deadline, but the engine still runs every page of a process in one
+address space with no per-page memory budget, so the
+[Deployment guidance](#deployment-guidance) still applies: isolate tenants per
+process, keep secrets off its filesystem, and cap its resources from outside.
 
 ## Fix status
 
@@ -27,15 +27,19 @@ found at `6dae774` and are kept as the record.
 
 Still open after the fixes:
 
-- **No cooperative cancellation inside ops.** The V8 watchdog cannot stop C# work.
-  The worst known cases are budgeted (H8), but these remain slow on script-built
-  trees:
-  - 300 nested `float:left` blocks (over 40 s);
+- **Slow, but now bounded by the deadline.** C# work inside an op, a capture, or an
+  MCP tool call now stops when its watchdog fires (see
+  [Cancellation of work inside ops](#cancellation-of-work-inside-ops)). These inputs
+  are still slow, and a page that triggers them spends its budget rather than its
+  host's:
+  - 300 nested `float:left` blocks (over a minute uncancelled);
   - thousands of nested inline spans;
-  - `repeat()` nested inside `repeat()` in `grid-template-*` (exponential);
+  - `repeat()` nested inside `repeat()` in `grid-template-*` (exponential; 2^20
+    tracks take about 1.5 s);
   - `innerText` and `Range.toString()` on a 10k-deep tree.
 
-  `POCKETCALCULATOR_HANG_EXIT_MS` is the opt-in backstop for `serve` and `mcp`.
+  `POCKETCALCULATOR_HANG_EXIT_MS` stays as the opt-in backstop for `serve` and
+  `mcp`, for work outside any of these scopes.
 - **Deep markup parses in quadratic time** inside AngleSharp's tree builder
   (M11): 50k nested `<div>`s take about 20 s.
 - **Memory outside the heap cap** (M7): DOM text, `ArrayBuffer` backing stores,
@@ -56,6 +60,42 @@ Still open after the fixes:
   - `EngineInternal` visible (I10: ClearScript defines it non-configurable);
   - plaintext control planes (I1: terminate TLS in front).
 
+### Cancellation of work inside ops
+
+The V8 watchdog interrupts script with `V8ScriptEngine.Interrupt()`, which V8 only
+acts on in JavaScript. A single op that spent its time in C# (one
+`getBoundingClientRect()`, one `querySelectorAll`, one screenshot) held the thread
+until it finished, and the interrupt that fired during it was lost. A page could then
+catch the op's result and loop forever with the watchdog spent. Now:
+
+- **Tokens at the boundaries.** Each isolate has a cancellation source
+  (`ScriptCancellation`) that every watchdog cancels before it interrupts, and that
+  `CancelTermination` resets. The public render entry points (`RenderPaint.Prepare*`,
+  `Paint*`, `Screenshot*`) take a `CancellationToken`. Every sync op, and every
+  capture, runs under the isolate's token.
+- **Checks in the hot loops.** A synchronous pass keeps its token in a scope
+  (`WorkCancellation`) that it checks cheaply per node:
+  - every recursive render walk (through `StackGuard`), and taffy's child-layout
+    dispatch;
+  - the inline line-edge loops;
+  - selector matching, `Descendants()` and serialization.
+
+  The large-stack layout thread carries the scope across.
+- **Termination is guaranteed.** An op that observes the deadline returns normally
+  and keeps the interrupt coming until the script is gone, and the evaluation reports
+  "execution terminated" rather than a placeholder result.
+- **Callers' deadlines.** `PocketCalculatorJsRuntime.InterruptOnCancellation(token)`
+  treats a caller's token as a watchdog. The navigation's script phase uses it, so
+  `fetch --timeout` stops a stuck page instead of waiting for the 30 s script
+  watchdog or the hard exit.
+- **MCP.** Every tool call runs under `POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS`
+  (default 60 s, 0 disables), as every CDP command runs under
+  `POCKETCALCULATOR_CDP_COMMAND_TIMEOUT_MS`. Before, a `browser_evaluate` of an
+  infinite loop held the MCP server for good.
+
+The checks cost 2-3% on op-heavy, layout-heavy and query-heavy pages, inside the
+benchmark's noise floor.
+
 ## Reporting a vulnerability
 
 Please do not open a public issue for a vulnerability. Report it privately to
@@ -72,6 +112,7 @@ upstream as well.
 - [Deployment guidance](#deployment-guidance)
 - [Findings](#findings)
 - [Fix status](#fix-status)
+- [Cancellation of work inside ops](#cancellation-of-work-inside-ops)
 - [Checked and holding](#checked-and-holding)
 - [Remediation plan](#remediation-plan)
 
@@ -228,7 +269,8 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `--timeout`, `POCKETCALCULATOR_SCRIPT_DEADLINE_MS`, `POCKETCALCULATOR_NAV_TIMEOUT_MS` | 30 s | Watchdog on synchronous V8 work, and navigation deadlines. Neither reaches work inside a C# op; the worst cases are budgeted (H8, M8). `POCKETCALCULATOR_HANG_EXIT_MS` (opt-in, `serve`/`mcp`) exits the process when an interrupted command does not return (L12). |
+| `--timeout`, `POCKETCALCULATOR_SCRIPT_DEADLINE_MS`, `POCKETCALCULATOR_NAV_TIMEOUT_MS` | 30 s | Watchdog on synchronous V8 work, and navigation deadlines. The watchdog also cancels C# work inside ops and captures, and `--timeout` now stops the script phase too. `POCKETCALCULATOR_HANG_EXIT_MS` (opt-in, `serve`/`mcp`) exits the process when an interrupted command still does not return (L12). |
+| `POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS` | 60 s | Watchdog on each MCP tool call (0 disables), like `POCKETCALCULATOR_CDP_COMMAND_TIMEOUT_MS` for CDP commands. |
 | V8 flags `--max-old-space-size` | 4096 MB | Enforced heap cap, applied to every runtime, library and CDP included (M7). Memory outside the V8 heap is not counted. |
 | `--font-dir`, `BrowserConfig.FontDirectories` | none | Operator-chosen font directories, read once. With none set, no font file is read from disk. |
 | `POCKETCALCULATOR_FRAME_MESSAGE_QUEUE_BYTES` / `_ENTRIES`, `POCKETCALCULATOR_MAX_LIVE_FRAMES`, `POCKETCALCULATOR_NAV_CHAIN_LIMIT` | bounded | Cross-frame message queue, live frames, navigation chain length. |
@@ -237,7 +279,7 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 ## Deployment guidance
 
 The Critical and High findings are fixed, but the engine has no per-page memory
-budget and no cooperative cancellation inside ops (see [Fix status](#fix-status)).
+budget (see [Fix status](#fix-status)).
 For untrusted content:
 
 - **One trust domain per process.**
@@ -299,7 +341,7 @@ contradict an entry `todo.md` marks done say so.
 | H5 | High | Render | `stackalloc char[text.Length]` on page text: StackOverflow | tested | fixed |
 | H6 | High | Render | WOFF / WOFF2 decompression bomb (1.5 MB gives 9 GB) | tested | fixed |
 | H7 | High | Render | Image decode and paint allocations unbounded (190 KB PNG gives 3.2 GB) | tested | fixed |
-| H8 | High | Render/DOM | Uninterruptible CPU hangs in native C#: SVG `<use>` fan-out, `var()` expansion, nested `:has()` | tested | fixed (budgets); general cancellation open |
+| H8 | High | Render/DOM | Uninterruptible CPU hangs in native C#: SVG `<use>` fan-out, `var()` expansion, nested `:has()` | tested | fixed (budgets, and cancellation of work inside ops) |
 | M1 | Medium | CLI | `serve --workers` under the `dotnet` host starts `dotnet serve` | tested; conditional | fixed |
 | M2 | Medium | Net | A proxy (including `HTTP_PROXY`) disables the hostname SSRF check | tested; inherited | fixed; proxy-side rebinding remains |
 | M3 | Medium | Net | No timeout on response body reads | tested | fixed |
@@ -322,7 +364,7 @@ contradict an entry `todo.md` marks done say so.
 | L9 | Low | JS/MCP | Cross-origin `pushState` spoofs `location.origin`; MCP state export/import trusts it | tested | partial: `pushState` fixed; `__virtualUrl` and MCP state import/export open |
 | L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | partial: `Uint8Array` fixed; CDP/MCP snippets open |
 | L11 | Low | Browser | Latent integer overflow in `RgbImage.Decode` | read; not reachable today | fixed |
-| L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read | opt-in (`POCKETCALCULATOR_HANG_EXIT_MS`) |
+| L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read | fixed: work inside ops is cancelled; opt-in exit (`POCKETCALCULATOR_HANG_EXIT_MS`) remains the backstop |
 | I1 to I10 | Info | various | See [Informational](#informational) | | I2 to I6, I9 fixed; I1, I7, I8, I10 open |
 
 ### Critical

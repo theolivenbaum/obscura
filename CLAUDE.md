@@ -352,6 +352,14 @@ when C# layout drifts from Rust:
   isolate from a separate thread. The C# port uses `V8Runtime.Interrupt()` /
   `V8ScriptEngine.Interrupt()` from a watchdog thread for the same reason. The
   CLI keeps a process-level hard deadline as an absolute backstop.
+- **C# work observes the same deadline.** An interrupt cannot stop C# code inside an
+  op, so every watchdog also cancels the isolate's `ScriptCancellation`, and sync ops
+  and captures run under its token in a `WorkCancellation` scope. A new loop over
+  nodes, boxes, lines or selectors that can run long must call
+  `WorkCancellation.ThrowIfCancellationRequested()` (or sit behind `StackGuard`, which
+  does), and a public entry point that starts such a pass takes a `CancellationToken`.
+  Anything that mutates retained state and then paints or lays out restores it in a
+  `finally`, because a pass can now stop half-way.
 
 ## Porting workflow (per component)
 
