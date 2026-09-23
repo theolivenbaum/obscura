@@ -8,8 +8,20 @@ namespace PocketCalculator.Js.Runtime;
 /// Lives here rather than in either caller so the CDP and CLI layers can both
 /// use it without depending on each other. It is JavaScript rather than a
 /// managed DOM walk on purpose: it must see the same live DOM page script sees.
-/// Kept byte-identical to <c>crates/obscura-js/src/markdown.rs</c>, since both
-/// engines must produce the same markdown.
+/// Began as a byte-identical copy of <c>crates/obscura-js/src/markdown.rs</c>.
+/// <para>
+/// DEVIATION from that script, which copied text and URLs into the markdown
+/// verbatim (SECURITY.md M10): page text reading <c>&lt;script&gt;</c> came out as
+/// a literal tag, a <c>javascript:</c> link as a live link, and a <c>]</c> or
+/// <c>)</c> in link text or a URL could close the link early and spoof another.
+/// Now text escapes <c>&lt;</c> and <c>&gt;</c> as entities, inside code too (a backtick in
+/// the text could otherwise close the code span); link text and image
+/// alt text also backslash-escape <c>\</c>, <c>[</c> and <c>]</c>; a destination
+/// percent-encodes whitespace, parentheses and angle brackets; and a link or image
+/// whose URL has a scheme other than http, https or mailto keeps its text and drops
+/// the URL. Output for text and URLs without those characters is unchanged, so the
+/// two engines still agree on ordinary pages.
+/// </para>
 /// </remarks>
 public static class MarkdownScript
 {
@@ -19,15 +31,28 @@ public static class MarkdownScript
     /// </summary>
     public const string HtmlToMarkdown = """
         (function() {
+            function escText(s, inLink) {
+                s = s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return inLink ? s.replace(/[\\\[\]]/g, '\\$&') : s;
+            }
+            function safeUrl(url) {
+                var bare = url.replace(/[\u0000-\u0020\u007f]/g, '');
+                var scheme = /^([a-zA-Z][a-zA-Z0-9+.\-]*):/.exec(bare);
+                if (scheme && !/^(https?|mailto)$/i.test(scheme[1])) return null;
+                return url.trim().replace(/[\u0000-\u0020\u007f()<>]/g, function(c) {
+                    return '%' + ('0' + c.charCodeAt(0).toString(16).toUpperCase()).slice(-2);
+                });
+            }
             function toMd(el, depth) {
                 if (!el) return '';
                 var out = '';
-                if (el.nodeType === 3) return el.textContent || '';
+                if (el.nodeType === 3) return escText(el.textContent || '', depth > 0);
                 if (el.nodeType !== 1) return '';
                 var tag = (el.tagName || '').toLowerCase();
                 var children = '';
                 var cn = el.childNodes || [];
-                for (var i = 0; i < cn.length; i++) children += toMd(cn[i], depth);
+                var childDepth = tag === 'a' ? depth + 1 : depth;
+                for (var i = 0; i < cn.length; i++) children += toMd(cn[i], childDepth);
                 children = children.replace(/\n{3,}/g, '\n\n');
                 switch(tag) {
                     case 'h1': return '\n# ' + children.trim() + '\n\n';
@@ -45,12 +70,13 @@ public static class MarkdownScript
                     case 'pre': return '\n```\n' + children + '\n```\n\n';
                     case 'blockquote': return '\n> ' + children.trim().replace(/\n/g, '\n> ') + '\n\n';
                     case 'a':
-                        var href = el.getAttribute('href') || '';
+                        var href = safeUrl(el.getAttribute('href') || '');
                         if (href && children.trim()) return '[' + children.trim() + '](' + href + ')';
                         return children;
                     case 'img':
-                        var src = el.getAttribute('src') || '';
-                        var alt = el.getAttribute('alt') || '';
+                        var src = safeUrl(el.getAttribute('src') || '');
+                        var alt = escText(el.getAttribute('alt') || '', true);
+                        if (src === null) return alt;
                         return '![' + alt + '](' + src + ')';
                     case 'ul': case 'ol':
                         return '\n' + children + '\n';
