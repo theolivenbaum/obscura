@@ -467,6 +467,14 @@ public static partial class FetchOps
 
                 using (preflight)
                 {
+                    // Fetch spec: the preflight response's status must be an ok status
+                    // before its CORS headers are consulted (upstream #973).
+                    var preflightStatus = (int)preflight.StatusCode;
+                    if (preflightStatus is < 200 or > 299)
+                    {
+                        throw new OpException($"CORS preflight returned HTTP {StatusDisplay(preflightStatus)}");
+                    }
+
                     var preflightHeaders = CollectHeaders(preflight);
                     var allowedOrigin = preflightHeaders.GetValueOrDefault(
                         "access-control-allow-origin", string.Empty);
@@ -477,12 +485,6 @@ public static partial class FetchOps
                         throw new OpException(
                             $"CORS preflight: Origin '{pageOrigin}' not allowed by "
                             + $"Access-Control-Allow-Origin '{allowedOrigin}'");
-                    }
-
-                    var preflightStatus = (int)preflight.StatusCode;
-                    if (preflightStatus is < 200 or > 299)
-                    {
-                        throw new OpException($"CORS preflight returned HTTP {StatusDisplay(preflightStatus)}");
                     }
 
                     var allowedMethods = ParseCorsHeaderList(preflight, "Access-Control-Allow-Methods")
@@ -596,6 +598,31 @@ public static partial class FetchOps
                     {
                         response = hop;
                         break;
+                    }
+
+                    // Fetch spec: the CORS check applies to every response in cors mode,
+                    // not only the final one. A cross-origin redirect response must be
+                    // authorized before it is followed (upstream #973).
+                    if (isCors && currentIsCrossOrigin)
+                    {
+                        var hopHeaders = CollectHeaders(hop);
+                        var hopAllowed = hopHeaders.GetValueOrDefault("access-control-allow-origin", string.Empty);
+                        var hopAllowCredentials = hopHeaders.GetValueOrDefault(
+                            "access-control-allow-credentials", string.Empty);
+                        if (!CorsResponseAllows(credentialsMode, pageOrigin, hopAllowed, hopAllowCredentials))
+                        {
+                            hop.Dispose();
+                            var sb = new StringBuilder(256);
+                            sb.Append("{\"status\":0,\"body\":\"\",\"url\":");
+                            SerdeJson.AppendString(sb, currentUrl);
+                            sb.Append(",\"headers\":{},\"corsBlocked\":true,\"corsError\":");
+                            SerdeJson.AppendString(
+                                sb,
+                                $"CORS error: cross-origin redirect from '{currentUrl}' not allowed by "
+                                    + $"Access-Control-Allow-Origin '{hopAllowed}'");
+                            sb.Append('}');
+                            return sb.ToString();
+                        }
                     }
 
                     string? location = hop.Headers.Location?.OriginalString;

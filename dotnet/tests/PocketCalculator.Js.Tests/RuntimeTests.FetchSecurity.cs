@@ -79,6 +79,62 @@ public sealed partial class RuntimeTests
     }
 
     /// <summary>
+    /// Upstream 05846de (#973), <c>cors_mode_blocks_unauthorized_cross_origin_redirect_hop</c>:
+    /// in cors mode a cross-origin 302 without Access-Control-Allow-Origin is rejected
+    /// before it is followed, even though the final response would allow the request.
+    /// </summary>
+    [Fact]
+    public async Task CorsModeBlocksUnauthorizedCrossOriginRedirectHop()
+    {
+        using var redirector = new RawHttpServer(request => request.Contains("/final", StringComparison.Ordinal)
+            ? "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            : "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        using var fixture = RedirectRuntimeForOrigin("http://example.com");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                try {
+                    await fetch("{{redirector.Origin}}/start", { mode: "cors" });
+                    return "allowed";
+                } catch (e) {
+                    return "blocked: " + e.message;
+                }
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        var value = result.Value!.GetValue<string>();
+        Assert.StartsWith("blocked: ", value, StringComparison.Ordinal);
+        Assert.Contains("cross-origin redirect from", value, StringComparison.Ordinal);
+        Assert.Single(redirector.Requests);
+    }
+
+    /// <summary>
+    /// Upstream 05846de (#973): a non-ok preflight reports its HTTP status, not a
+    /// missing Access-Control-Allow-Origin.
+    /// </summary>
+    [Fact]
+    public async Task NonOkPreflightReportsItsStatusFirst()
+    {
+        using var server = new RawHttpServer(
+            _ => "HTTP/1.1 404 Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        using var fixture = RedirectRuntimeForOrigin("http://example.com");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => fetch("{{server.Origin}}/r", { method: "DELETE" })
+                .then(() => "resolved", e => String(e && e.message))
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+        Assert.Contains("CORS preflight returned HTTP 404 Not Found", result.Value!.GetValue<string>(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Upstream ebe5973 (#967), end to end: a same-origin request with an
     /// Authorization header that 302s to another origin reaches the target without
     /// it. Chromium strips Authorization on a cross-origin redirect.
