@@ -2237,7 +2237,14 @@ class Node {
     }
     return n;
   }
-  contains(o) { return o ? _dom("contains", this._nid, o._nid) === "true" : false; }
+  // DEVIATION from crates/obscura-js, which answers only for strict descendants: DOM's
+  // contains() is an inclusive-descendant test, and Chromium answers node.contains(node) with
+  // true. The op stays the strict test.
+  contains(o) {
+    if (!o) return false;
+    if (o === this || (o._nid != null && o._nid === this._nid)) return true;
+    return _dom("contains", this._nid, o._nid) === "true";
+  }
   hasChildNodes() { return _dom("has_child_nodes", this._nid) === "true"; }
   cloneNode(deep) {
     const t = this.nodeType;

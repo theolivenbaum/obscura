@@ -79,12 +79,12 @@ public sealed class InnerTextRangeComplexityTests
     [Fact]
     public void InnerTextOfManySiblingsIsLinear()
     {
-        using var fixture = RuntimeFixture.Setup(WideHtml(30000));
+        using var fixture = RuntimeFixture.Setup(WideHtml(50000));
         var state = Run(fixture, WideScript("const s = root.innerText; return [s.length, s.slice(0, 16), s.slice(-14)];"));
-        AssertFast(state, "innerText over 30000 siblings");
+        AssertFast(state, "innerText over 50000 siblings");
         var value = state["value"]!.AsArray();
         Assert.Equal("t0\n\nt1\n\nt2\n\nt3\n\n", value[1]!.GetValue<string>());
-        Assert.Equal("t29998\n\nt29999", value[2]!.GetValue<string>());
+        Assert.Equal("t49998\n\nt49999", value[2]!.GetValue<string>());
     }
 
     [Fact]
@@ -150,7 +150,24 @@ public sealed class InnerTextRangeComplexityTests
         var value = state["value"]!.AsArray();
         Assert.Equal(3000, value[0]!.GetValue<int>());
         Assert.False(value[1]!.GetValue<bool>());
+        Assert.True(value[2]!.GetValue<bool>());
         Assert.False(value[3]!.GetValue<bool>());
+    }
+
+    /// <summary>contains() is an inclusive-descendant test, as in Chromium.</summary>
+    [Fact]
+    public void ContainsIsInclusive()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><div id=\"a\"><b>x</b></div></body></html>");
+        var result = fixture.Runtime.Evaluate(
+            """
+            (() => {
+              const a = document.getElementById('a'), b = a.firstChild, t = b.firstChild;
+              return [a.contains(a), t.contains(t), document.contains(document), a.contains(t),
+                t.contains(a), a.contains(null), document.body.contains(a)].join();
+            })()
+            """);
+        Assert.Equal("true,true,true,true,false,false,true", result!.GetValue<string>());
     }
 
     [Fact]
