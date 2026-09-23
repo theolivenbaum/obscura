@@ -233,6 +233,48 @@ public sealed class InnerTextRangeComplexityTests
         Assert.Equal(".h{visibility:hidden}.v{visibility:visible}.n{display:none}.ib{display:inline-block}.f{display:flex}.g{display:grid}.t{display:table}.tr{display:table-row}.tc{display:table-cell}.pre{white-space:pre}.pw{white-space:pre-wrap}.nw{white-space:nowrap}.bs{white-space:break-spaces}.c{display:contents}.fr{display:flow-root}", value[3]!.GetValue<string>());
     }
 
+    /// <summary>
+    /// Line-break and white-space rules measured on Chromium 141 (the HTML rendered-text
+    /// collection steps): a &lt;br&gt; is a literal newline that neither vanishes at either end nor
+    /// merges into a block boundary, pre-line collapses spaces but keeps line breaks, a form feed
+    /// is not white space, and a hidden element adds no line breaks of its own.
+    /// </summary>
+    [Fact]
+    public void InnerTextFollowsChromiumLineBreakRules()
+    {
+        using var fixture = RuntimeFixture.Setup(
+            """
+            <html><body>
+            <div id=c1><br>x</div>
+            <div id=c2>x<br></div>
+            <div id=c3><div>a<br></div><div>b</div></div>
+            <div id=c4><p>a<br></p><p>b</p></div>
+            <div id=c5>a<br><div>b</div></div>
+            <div id=c6><div>a</div><br><div>b</div></div>
+            <div id=c7 style="white-space:pre-line">pl
+             b  c	d  
+              e</div>
+            <div id=c8>a&#12;b&#13;c&#9;d</div>
+            <div id=c9 style="white-space:pre">a&#12;b&#13;c</div>
+            <div id=c10>before<div style="visibility:hidden">h</div>after<div style="visibility:hidden"><span style="visibility:visible">v</span></div>z</div>
+            <div id=c11><br><br>x<br><br></div>
+            <div id=c12><div></div><br><div></div>x</div>
+            <div id=c13>a <br> b</div>
+            <div id=c14><span>a </span><div> b</div></div>
+            <div id=c15>x<p></p>y</div>
+            <div id=c16 style="white-space:pre-wrap">  a  
+             b </div>
+            <div id=c17>a<span style="white-space:pre"> </span>b</div>
+            <div id=c18>a<br style="visibility:hidden">x</div>
+            </body></html>
+            """);
+        var result = fixture.Runtime.Evaluate(
+            "(() => { const o = []; for (let i = 1; document.getElementById('c' + i); i++) o.push(document.getElementById('c' + i).innerText); return JSON.stringify(o); })()");
+        Assert.Equal(
+            """["\nx","x\n","a\n\nb","a\n\n\nb","a\n\nb","a\n\n\nb","pl\nb c d\ne","a\fb c d","a\fb\rc","beforeaftervz","\n\nx\n\n","\n\nx","a\nb","a\nb","x\n\ny","  a  \n b ","a b","ax"]""",
+            result!.GetValue<string>());
+    }
+
     [Fact]
     public void RangeToStringTakesPartialEndsAndSkipsComments()
     {

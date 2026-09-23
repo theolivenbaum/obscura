@@ -39,7 +39,7 @@ public sealed partial class PreparedRender
         }
 
         InnerTextJoiner joiner = new();
-        List<Frame> stack = [new(root, tree.GetNode(root)!.FirstChild, IsPre(rootStyle), !IsHidden(rootStyle), 0)];
+        List<Frame> stack = [new(root, tree.GetNode(root)!.FirstChild, SpaceMode(rootStyle), !IsHidden(rootStyle), 0)];
         int guard = 0;
         while (stack.Count > 0)
         {
@@ -76,7 +76,14 @@ public sealed partial class PreparedRender
             {
                 if (frame.Visible && text.Contents.Length > 0)
                 {
-                    joiner.Text(frame.Pre ? text.Contents : CollapseWhiteSpace(text.Contents), frame.Pre);
+                    joiner.Text(
+                        frame.Mode switch
+                        {
+                            WhiteSpaceMode.Preserve => text.Contents,
+                            WhiteSpaceMode.PreserveBreaks => CollapsePreLine(text.Contents),
+                            _ => CollapseWhiteSpace(text.Contents),
+                        },
+                        frame.Mode == WhiteSpaceMode.Preserve);
                 }
 
                 continue;
@@ -104,9 +111,18 @@ public sealed partial class PreparedRender
                 continue;
             }
 
+            // DEVIATION from crates/obscura-js (bootstrap's walk): an element whose visibility is
+            // not `visible` contributes its visible descendants and nothing of its own, no line
+            // break, tab or <br> newline, as in the HTML rendered-text collection steps and
+            // Chromium. The walk it ports added the breaks of a hidden block.
+            bool visible = !IsHidden(style);
             if (tag == "BR")
             {
-                joiner.ForcedBreak();
+                if (visible)
+                {
+                    joiner.LineFeed();
+                }
+
                 continue;
             }
 
@@ -114,12 +130,12 @@ public sealed partial class PreparedRender
             bool block = !cell && IsInnerTextBlock(display);
             int breaks = tag == "P" ? 2 : 1;
             byte close = 0;
-            if (cell)
+            if (visible && cell)
             {
                 joiner.Tab();
                 close = 1;
             }
-            else if (block)
+            else if (visible && block)
             {
                 joiner.Breaks(breaks);
                 close = 2;
@@ -131,13 +147,25 @@ public sealed partial class PreparedRender
                 return null;
             }
 
-            stack.Add(new Frame(childId, child.FirstChild, IsPre(style), !IsHidden(style), close, breaks));
+            stack.Add(new Frame(childId, child.FirstChild, SpaceMode(style), visible, close, breaks));
         }
 
         return joiner.Finish();
     }
 
-    private readonly record struct Frame(NodeId Node, NodeId? Next, bool Pre, bool Visible, byte Close, int Breaks = 1);
+    private readonly record struct Frame(NodeId Node, NodeId? Next, WhiteSpaceMode Mode, bool Visible, byte Close, int Breaks = 1);
+
+    private enum WhiteSpaceMode : byte
+    {
+        /// <summary><c>normal</c> and <c>nowrap</c>: white space collapses.</summary>
+        Collapse,
+
+        /// <summary><c>pre-line</c>: spaces collapse, segment breaks are kept.</summary>
+        PreserveBreaks,
+
+        /// <summary><c>pre</c>, <c>pre-wrap</c>, <c>break-spaces</c>: everything is kept.</summary>
+        Preserve,
+    }
 
     // Element.tagName, as the tag_name DOM op spells it.
     private static string InnerTextTagName(ElementData element) =>
@@ -160,16 +188,55 @@ public sealed partial class PreparedRender
         display is "block" or "flow-root" or "list-item" or "flex" or "grid"
         || (display.Length > 5 && display.StartsWith("table", StringComparison.Ordinal));
 
-    // bootstrap's _innerTextIsPre over the computed white-space, which is never empty.
-    private static bool IsPre(LayoutStyle style) =>
-        (style.WhiteSpace ?? WhiteSpace.Normal) is not (WhiteSpace.Normal or WhiteSpace.NoWrap);
+    // bootstrap's _innerTextSpaceMode over the computed white-space, which is never empty.
+    // DEVIATION from crates/obscura-js, whose walk kept every space of `pre-line` text: that
+    // value collapses spaces and tabs and keeps only the line breaks (CSS Text 3, Chromium).
+    private static WhiteSpaceMode SpaceMode(LayoutStyle style) =>
+        (style.WhiteSpace ?? WhiteSpace.Normal) switch
+        {
+            WhiteSpace.Normal or WhiteSpace.NoWrap => WhiteSpaceMode.Collapse,
+            WhiteSpace.PreLine => WhiteSpaceMode.PreserveBreaks,
+            _ => WhiteSpaceMode.Preserve,
+        };
 
     private static bool IsHidden(LayoutStyle style) => style.VisibilityHidden == true;
 
-    // data.replace(/[\t\n\f\r ]+/g, ' ')
-    private static string CollapseWhiteSpace(string data)
+
+    // data.replace(/[\t\n\r ]+/g, ' '). DEVIATION from crates/obscura-js, whose walk also
+    // collapsed U+000C: a form feed is not CSS white space, and Chromium keeps it.
+    private static string CollapseWhiteSpace(string data) => CollapseRuns(data, "\t\n\r ");
+
+    // data.replace(/[\t\r ]+/g, ' ').replace(/ ?\n ?/g, '\n'): `pre-line` collapses spaces
+    // and tabs and drops the spaces around each kept line break.
+    private static string CollapsePreLine(string data)
     {
-        int i = data.AsSpan().IndexOfAny("\t\n\f\r ");
+        string collapsed = CollapseRuns(data, "\t\r ");
+        if (!collapsed.Contains('\n', StringComparison.Ordinal))
+        {
+            return collapsed;
+        }
+
+        StringBuilder sb = new(collapsed.Length);
+        for (int i = 0; i < collapsed.Length; i++)
+        {
+            char c = collapsed[i];
+            if (c == ' '
+                && ((i + 1 < collapsed.Length && collapsed[i + 1] == '\n')
+                    || (i > 0 && collapsed[i - 1] == '\n')))
+            {
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString();
+    }
+
+    // Each run of `set` characters becomes one space.
+    private static string CollapseRuns(string data, string set)
+    {
+        int i = data.AsSpan().IndexOfAny(set);
         if (i < 0)
         {
             return data;
@@ -181,7 +248,7 @@ public sealed partial class PreparedRender
         for (; i < data.Length; i++)
         {
             char c = data[i];
-            if (c is '\t' or '\n' or '\f' or '\r' or ' ')
+            if (set.Contains(c, StringComparison.Ordinal))
             {
                 if (!inRun)
                 {
@@ -199,12 +266,18 @@ public sealed partial class PreparedRender
         return sb.ToString();
     }
 
-    /// <summary>bootstrap's <c>_innerTextJoin</c>, fed one segment at a time.</summary>
+    /// <summary>bootstrap's <c>_innerTextJoin</c>, fed one item at a time.</summary>
+    /// <remarks>
+    /// As in the HTML rendered-text collection steps, block boundaries are required line breaks
+    /// (dropped at either end, the widest of a run kept) and a <c>&lt;br&gt;</c> is a literal
+    /// newline. DEVIATION from crates/obscura-js, whose walk counted a <c>&lt;br&gt;</c> as a
+    /// required line break too, so one at the start or end of the text vanished and one next to
+    /// a block boundary merged into it; Chromium keeps both.
+    /// </remarks>
     private sealed class InnerTextJoiner
     {
         private readonly StringBuilder _result = new();
         private int _breaks;
-        private int _forced;
         private bool _tab;
         private bool _seen;
         private bool _lastPre;
@@ -227,19 +300,19 @@ public sealed partial class PreparedRender
             }
         }
 
-        public void ForcedBreak()
+        public void LineFeed()
         {
-            if (!_seen)
+            Flush();
+
+            // Collapsible spaces at the end of the line a <br> ends are removed.
+            if (!_lastPre)
             {
-                return;
+                TrimTrailingSpaces();
             }
 
-            // Consecutive <br> stack.
-            _forced++;
-            if (_forced > _breaks)
-            {
-                _breaks = _forced;
-            }
+            _result.Append('\n');
+            _lastPre = false;
+            _seen = true;
         }
 
         public void Text(string text, bool pre)
@@ -247,7 +320,7 @@ public sealed partial class PreparedRender
             ReadOnlySpan<char> span = text;
             if (!pre)
             {
-                if (!_seen || _breaks > 0 || _tab || EndsWithSpace())
+                if (!_seen || _breaks > 0 || _tab || AtLineStartOrAfterSpace())
                 {
                     span = span.TrimStart(' ');
                 }
@@ -258,6 +331,24 @@ public sealed partial class PreparedRender
                 }
             }
 
+            Flush();
+            _result.Append(span);
+            _lastPre = pre;
+            _seen = true;
+        }
+
+        public string Finish()
+        {
+            if (!_lastPre)
+            {
+                TrimTrailingSpaces();
+            }
+
+            return _result.ToString();
+        }
+
+        private void Flush()
+        {
             if (_breaks > 0)
             {
                 if (!_lastPre)
@@ -278,24 +369,11 @@ public sealed partial class PreparedRender
             }
 
             _breaks = 0;
-            _forced = 0;
             _tab = false;
-            _result.Append(span);
-            _lastPre = pre;
-            _seen = true;
         }
 
-        public string Finish()
-        {
-            if (!_lastPre)
-            {
-                TrimTrailingSpaces();
-            }
-
-            return _result.ToString();
-        }
-
-        private bool EndsWithSpace() => _result.Length > 0 && _result[^1] == ' ';
+        private bool AtLineStartOrAfterSpace() =>
+            _result.Length > 0 && _result[^1] is ' ' or '\n';
 
         private void TrimTrailingSpaces()
         {
