@@ -98,6 +98,7 @@ public static class WatchdogScheduler
         internal void Fire()
         {
             Volatile.Write(ref _fired, 1);
+            HangEscalation.Fired(this, "an interrupted script");
             try
             {
                 Engine.Interrupt();
@@ -160,6 +161,11 @@ public static class WatchdogScheduler
             }
 
             Monitor.Pulse(Gate);
+        }
+
+        if (entry.HasFired())
+        {
+            HangEscalation.Settled(entry);
         }
     }
 

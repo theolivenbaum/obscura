@@ -23,6 +23,7 @@ public static class ServeCommand
             ?? EnvOrNull("POCKETCALCULATOR_PROXY");
 
         CliOptions.ConfigureFontDirectories(serve.FontDirs);
+        HardDeadline.ArmHangExit();
         CliOptions.PrintBanner(serve.Port);
         if (serve.StorageDir is { } dir)
         {

@@ -3,6 +3,8 @@ using System.Runtime.CompilerServices;
 
 using Microsoft.ClearScript.V8;
 
+using PocketCalculator.Js.Runtime;
+
 namespace PocketCalculator.Js.Modules;
 
 /// <summary>
@@ -169,6 +171,11 @@ internal sealed class CdpWatchdogCore
             Monitor.Pulse(_gate);
         }
 
+        if (armed.Fired)
+        {
+            HangEscalation.Settled(armed);
+        }
+
         return armed.Fired;
     }
 
@@ -270,6 +277,7 @@ internal sealed class CdpWatchdogCore
                 }
 
                 Volatile.Write(ref slot.Armed.FiredFlag, 1);
+                HangEscalation.Fired(slot.Armed, "an interrupted CDP command");
                 try
                 {
                     slot.Handle.TerminateExecution();
