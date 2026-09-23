@@ -41,7 +41,8 @@ public sealed class FileNavigationGate : IDisposable
         CdpContext ctx,
         string session,
         JsonObject parameters,
-        bool sendCommandResponse = true)
+        bool sendCommandResponse = true,
+        bool hostInitiated = false)
     {
         var reply = Channel.CreateUnbounded<string>();
         var rx = Channel.CreateUnbounded<ServerMessage>();
@@ -54,7 +55,8 @@ public sealed class FileNavigationGate : IDisposable
             ["sessionId"] = session,
         }.ToJsonString();
         await CdpServer.ProcessWithInterceptionAsync(
-            text, ctx, reply.Writer, rx.Reader, interceptRx.Reader, [], new Queue<ServerMessage>(), sendCommandResponse);
+            text, ctx, reply.Writer, rx.Reader, interceptRx.Reader, [], new Queue<ServerMessage>(), sendCommandResponse,
+            hostInitiated);
         reply.Writer.Complete();
         await foreach (string message in reply.Reader.ReadAllAsync())
         {
@@ -104,8 +106,26 @@ public sealed class FileNavigationGate : IDisposable
         ctx.GetSessionPageMut(session)!.Context.AllowFileAccess = true;
         var queued = new PendingNavigation(secret, "GET", string.Empty) { Initiator = "https://attacker.example/" };
 
-        await SessionNavigateAsync(ctx, session, PageDomain.JsNavigationParams(queued), sendCommandResponse: false);
+        // The pump forwards as the host (Server.Processor), so the initiator survives
+        // the stripping of client-supplied internal params (I6).
+        await SessionNavigateAsync(
+            ctx, session, PageDomain.JsNavigationParams(queued), sendCommandResponse: false, hostInitiated: true);
 
+        Assert.NotEqual(secret, ctx.GetSessionPage(session)!.UrlString());
+    }
+
+    [Fact]
+    public async Task ClientCannotForgeAnInitiatorToGetPastTheGate()
+    {
+        // A client-sent __initiator is stripped (I6), so it is judged as a client
+        // navigation: refused without file access.
+        string secret = SecretFile();
+        (CdpContext ctx, string session) = CdpDomainFixtures.NewSession();
+        var queued = new PendingNavigation(secret, "GET", string.Empty) { Initiator = "file:///tmp/x.html" };
+
+        JsonNode? response = await SessionNavigateAsync(ctx, session, PageDomain.JsNavigationParams(queued));
+
+        Assert.Equal(PageDomain.FileNavigationDisabled, response?["error"]?["message"]?.GetValue<string>());
         Assert.NotEqual(secret, ctx.GetSessionPage(session)!.UrlString());
     }
 
