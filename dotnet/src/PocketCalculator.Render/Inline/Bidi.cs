@@ -33,6 +33,27 @@ internal static class Bidi
     }
 
     /// <summary>Level runs over one paragraph, plus whether the paragraph is right-to-left.</summary>
+    /// <summary>
+    /// Whether <see cref="LevelRuns"/> would leave its all-LTR fast path for any line cut from
+    /// <paramref name="text"/>: some character classifies as right-to-left.
+    /// </summary>
+    internal static bool AnyRightToLeft(string text)
+    {
+        int position = 0;
+        while (position < text.Length)
+        {
+            Rune.DecodeFromUtf16(text.AsSpan(position), out Rune rune, out int consumed);
+            if (Classify(rune.Value) is Strong.RightToLeft or Strong.ArabicLetter)
+            {
+                return true;
+            }
+
+            position += consumed;
+        }
+
+        return false;
+    }
+
     public static List<(int Start, int End, byte Level)> LevelRuns(string line, out bool rtl)
     {
         rtl = false;

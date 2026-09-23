@@ -227,18 +227,50 @@ internal sealed class Collector
     public bool LastWasSpace = true;
     public List<ClipTextFill> ClipFills = [];
     public List<ActiveInlineOwner> Owners = [];
-    public List<OwnerTextRange> OwnerRanges = [];
+    public List<OwnerTextChunk> OwnerChunks = [];
+    public List<OwnerChainNode> OwnerChain = [];
     public List<InlineOwnerBox> OwnerBoxes = [];
     public List<InlineBoundaryEvent> BoundaryEvents = [];
     public int TextLength;
 
+    // Text appended to output[^1] and not yet written back into it. Concatenating onto the
+    // last span's string for every run that shares its attributes copied the paragraph so far
+    // each time, quadratic for a paragraph of many alike sibling elements.
+    private StringBuilder? _lastSpanTail;
+
+    /// <summary>Append <paramref name="text"/> to the last span of <paramref name="output"/>.</summary>
+    public void AppendToLastSpan(List<(string Text, SpanAttrs Attrs)> output, StringBuilder text)
+    {
+        _lastSpanTail ??= new StringBuilder(output[^1].Text);
+        _lastSpanTail.Append(text);
+    }
+
+    /// <summary>
+    /// Write pending appends back into the last span. Must run before <paramref name="output"/>
+    /// grows or is read.
+    /// </summary>
+    public void FlushLastSpan(List<(string Text, SpanAttrs Attrs)> output)
+    {
+        if (_lastSpanTail is { } tail)
+        {
+            output[^1] = (tail.ToString(), output[^1].Attrs);
+            _lastSpanTail = null;
+        }
+    }
+
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, whose <c>record_text</c> pushes one
+    /// (owner, range) entry for every open owner: O(depth) per text run, and quadratic time and
+    /// memory for nested inline boxes (5000 nested spans made 12.5 million entries). The run
+    /// records only its innermost owner; the rest are that owner's parent chain.
+    /// </remarks>
     public void RecordText(int length)
     {
         int start = TextLength;
         TextLength += length;
-        foreach (ActiveInlineOwner owner in Owners)
+        if (Owners.Count > 0)
         {
-            OwnerRanges.Add(new OwnerTextRange(owner.Owner, start, TextLength));
+            OwnerChunks.Add(new OwnerTextChunk(start, TextLength, Owners[^1].ChainNode));
         }
     }
 
@@ -249,7 +281,9 @@ internal sealed class Collector
         var endEdge = new InlineEdge(style.Margin.Right, inlineBorder.Right, style.Padding.Right);
         int startEvent = BoundaryEvents.Count;
         BoundaryEvents.Add(new InlineBoundaryEvent(owner, TextLength, true, startEdge));
-        Owners.Add(new ActiveInlineOwner(owner, TextLength, startEdge, endEdge, startEvent));
+        int chainNode = OwnerChain.Count;
+        OwnerChain.Add(new OwnerChainNode(owner, Owners.Count > 0 ? Owners[^1].ChainNode : -1));
+        Owners.Add(new ActiveInlineOwner(owner, TextLength, startEdge, endEdge, startEvent, chainNode));
     }
 
     public void EndOwner(NodeId owner, InlineBoxExtent extent)
@@ -844,15 +878,15 @@ public static class Inline
             return;
         }
 
-        string text = buffer.ToString();
-        collector.RecordText(text.Length);
+        collector.RecordText(buffer.Length);
         if (output.Count > 0 && output[^1].Attrs == attrs)
         {
-            output[^1] = (output[^1].Text + text, output[^1].Attrs);
+            collector.AppendToLastSpan(output, buffer);
             return;
         }
 
-        output.Add((text, attrs));
+        collector.FlushLastSpan(output);
+        output.Add((buffer.ToString(), attrs));
     }
 
     /// <summary>

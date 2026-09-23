@@ -215,6 +215,12 @@ public sealed class TextShaper(FontDatabase database)
     /// </summary>
     internal ShapeCache? Cache { get; set; }
 
+    private const int WordCacheLimit = 1 << 16;
+
+    private readonly Dictionary<WordShapeKey, ShapeGlyph[]> _words = [];
+
+    private readonly record struct WordShapeKey(string Text, TextAttrs Attrs, bool Rtl);
+
     /// <summary>Shape one paragraph into spans and words.</summary>
     public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth)
     {
@@ -354,15 +360,33 @@ public sealed class TextShaper(FontDatabase database)
         return span;
     }
 
+    /// <summary>The offsets strictly inside (start, end).</summary>
+    /// <remarks>
+    /// <see cref="BuildBreakData"/> appends every list in increasing order, so the slice is
+    /// found by binary search; a scan per word was quadratic in a long break-all or
+    /// overflow-wrap paragraph.
+    /// </remarks>
     private static List<int> Slice(List<int> offsets, int start, int end)
     {
         List<int> result = [];
-        foreach (int offset in offsets)
+        int lo = 0;
+        int hi = offsets.Count;
+        while (lo < hi)
         {
-            if (offset > start && offset < end)
+            int mid = (lo + hi) >>> 1;
+            if (offsets[mid] <= start)
             {
-                result.Add(offset);
+                lo = mid + 1;
             }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        for (int i = lo; i < offsets.Count && offsets[i] < end; i++)
+        {
+            result.Add(offsets[i]);
         }
 
         return result;
@@ -506,6 +530,45 @@ public sealed class TextShaper(FontDatabase database)
     {
         var word = new ShapeWord { Blank = blank };
         bool spanRtl = (level & 1) != 0;
+
+        // A word under one set of attributes shapes as one run whose glyphs depend only on its
+        // text, those attributes and the direction, so it is shaped once per shaper. Measuring
+        // an IFC with inline owners reshapes the rest of the paragraph for every line it
+        // breaks, which made every word go through HarfBuzz once per line above it.
+        if (end > start && attrsList.UniformOver(start, end) is { } uniform)
+        {
+            var key = new WordShapeKey(line.Substring(start, end - start), uniform, spanRtl);
+            if (_words.TryGetValue(key, out ShapeGlyph[]? shaped))
+            {
+                word.Glyphs = new List<ShapeGlyph>(shaped.Length);
+                foreach (ShapeGlyph cached in shaped)
+                {
+                    ShapeGlyph glyph = cached;
+                    glyph.Start += start;
+                    glyph.End += start;
+                    word.Glyphs.Add(glyph);
+                }
+
+                return word;
+            }
+
+            ShapeRun(word.Glyphs, line, attrsList, start, end, spanRtl);
+            if (_words.Count < WordCacheLimit)
+            {
+                var relative = new ShapeGlyph[word.Glyphs.Count];
+                for (int i = 0; i < relative.Length; i++)
+                {
+                    ShapeGlyph glyph = word.Glyphs[i];
+                    glyph.Start -= start;
+                    glyph.End -= start;
+                    relative[i] = glyph;
+                }
+
+                _words[key] = relative;
+            }
+
+            return word;
+        }
         int startRun = start;
         TextAttrs attrs = attrsList.Defaults;
         foreach ((int clusterStart, int _) in LineBreaking.GraphemeClusters(line[start..end]))

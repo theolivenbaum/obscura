@@ -868,9 +868,10 @@ public static partial class RenderDom
             if (canonical.Count != 0)
             {
                 Dictionary<NodeId, (float X, float Y)> relativeOffsets = [];
+                Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
                 foreach (NodeId owner in canonical.Keys)
                 {
-                    if (FoldedInlineRelativeOffset(tree, owner, rects, styles) is { } offset
+                    if (FoldedInlineRelativeOffset(tree, owner, rects, styles, relativeMemo) is { } offset
                         && offset != (0f, 0f))
                     {
                         relativeOffsets[owner] = offset;
@@ -1053,6 +1054,8 @@ public static partial class RenderDom
         TextEngine engine)
     {
         Dictionary<NodeId, List<((int Item, int Line) Order, Rect Rect)>> fragments = [];
+        Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
+        Dictionary<NodeId, (float Ascent, float Descent)> fontBoxes = [];
         foreach (InlineOwnerLineFragment shaped in engine.InlineOwnerLineFragments())
         {
             if (!styles.TryGetValue(shaped.Owner, out LayoutStyle? style))
@@ -1060,8 +1063,15 @@ public static partial class RenderDom
                 continue;
             }
 
-            (float ascent, float descent) = engine.InlineFontBoxMetrics(style);
-            if (FoldedInlineRelativeOffset(tree, shaped.Owner, rects, styles) is not { } relative)
+            // Per owner, not per fragment: an owner open across many lines has one per line.
+            if (!fontBoxes.TryGetValue(shaped.Owner, out (float Ascent, float Descent) fontBox))
+            {
+                fontBox = engine.InlineFontBoxMetrics(style);
+                fontBoxes[shaped.Owner] = fontBox;
+            }
+
+            (float ascent, float descent) = fontBox;
+            if (FoldedInlineRelativeOffset(tree, shaped.Owner, rects, styles, relativeMemo) is not { } relative)
             {
                 // Keep the pre-existing Taffy surrogate geometry when an inset cannot be
                 // resolved faithfully.
@@ -1126,11 +1136,46 @@ public static partial class RenderDom
         return canonical;
     }
 
+    /// <remarks>
+    /// <paramref name="memo"/> caches results across calls with the same geometry. The walk up
+    /// the inline ancestors is O(depth), and callers ask for every owner fragment of every
+    /// line, which made nested inline boxes cubic. A node reached with nothing accumulated yet
+    /// continues exactly as its own walk would, so every such node on a walk shares its result.
+    /// </remarks>
     internal static (float X, float Y)? FoldedInlineRelativeOffset(
         DomTree tree,
         NodeId owner,
         IReadOnlyDictionary<NodeId, Rect> rects,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        Dictionary<NodeId, (float X, float Y)?>? memo = null)
+    {
+        if (memo is null)
+        {
+            return FoldedInlineRelativeOffsetWalk(tree, owner, rects, styles, null, null);
+        }
+
+        if (memo.TryGetValue(owner, out (float X, float Y)? cached))
+        {
+            return cached;
+        }
+
+        List<NodeId> path = [];
+        (float X, float Y)? result = FoldedInlineRelativeOffsetWalk(tree, owner, rects, styles, memo, path);
+        foreach (NodeId id in path)
+        {
+            memo[id] = result;
+        }
+
+        return result;
+    }
+
+    private static (float X, float Y)? FoldedInlineRelativeOffsetWalk(
+        DomTree tree,
+        NodeId owner,
+        IReadOnlyDictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        Dictionary<NodeId, (float X, float Y)?>? memo,
+        List<NodeId>? path)
     {
         (float Width, float Height)? ContainingBlockSize(NodeId from)
         {
@@ -1176,6 +1221,16 @@ public static partial class RenderDom
         NodeId? current = owner;
         while (current is { } id)
         {
+            if (path is not null && offset.X == 0f && offset.Y == 0f)
+            {
+                if (id != owner && memo!.TryGetValue(id, out (float X, float Y)? known))
+                {
+                    return known;
+                }
+
+                path.Add(id);
+            }
+
             if (!styles.TryGetValue(id, out LayoutStyle? style))
             {
                 return null;

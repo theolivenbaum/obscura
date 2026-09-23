@@ -480,6 +480,10 @@ public sealed class TextBuffer
         string source = whole.ToString();
         int lineStart = 0;
         int position = 0;
+
+        // The ranges are consecutive, so each line only needs the ones from the first that
+        // reaches it; scanning them all per line was O(lines x spans).
+        int firstRange = 0;
         while (true)
         {
             int newline = source.IndexOf('\n', position);
@@ -491,8 +495,14 @@ public sealed class TextBuffer
             }
 
             var attrsList = new AttrsList(defaults);
-            foreach ((int start, int end, TextAttrs attrs) in ranges)
+            while (firstRange < ranges.Count && ranges[firstRange].End <= lineStart)
             {
+                firstRange++;
+            }
+
+            for (int r = firstRange; r < ranges.Count && ranges[r].Start < textEnd; r++)
+            {
+                (int start, int end, TextAttrs attrs) = ranges[r];
                 int from = Math.Max(start, lineStart);
                 int to = Math.Min(end, textEnd);
                 if (from < to && !attrs.Equals(defaults))
