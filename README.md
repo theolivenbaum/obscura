@@ -157,6 +157,13 @@ todo.md              port status, open issues, and the list of known deviations
 `todo.md` is the ledger: what is ported, what is open, and every place this port
 deliberately differs from the original and why.
 
+## Security
+
+PocketCalculator runs untrusted page script. Read [SECURITY.md](SECURITY.md) before
+exposing it to untrusted content or to a network: it describes the security model,
+the protections and their settings, deployment guidance, and the open findings of
+the September 2026 review, several of them critical.
+
 ## License and credits
 
 PocketCalculator is Copyright (c) 2026 Curiosity GmbH and is licensed under the

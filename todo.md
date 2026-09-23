@@ -316,6 +316,13 @@ Found during the review, not from upstream:
 
 ## Open issues
 
+- **Security review, September 2026: see `SECURITY.md`.** 6 Critical, 8 High, 11
+  Medium and 12 Low findings, with a remediation plan grouped by root cause. Three
+  of them contradict items this file marks done: the CDP `--allow-file-access`
+  gate is skipped by sessioned `Page.navigate` (H1), and the upstream `04418a5 D`
+  (frame isolation, C2) and `04418a5 G` (file navigation from a web page, H3)
+  ports are incomplete. Track the fixes there and tick them here as they land.
+
 - **A forced geometry read after a style write that *does* change layout still
   re-lays out the whole document.** The half that does not is fixed: a retained
   restyle whose recomputed styles no layout pass can observe now keeps the
