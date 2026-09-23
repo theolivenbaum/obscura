@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Runtime;
 using PocketCalculator.Net;
 using Xunit;
 
@@ -127,5 +128,53 @@ public sealed partial class RuntimeTests
         }
 
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.Elapsed}");
+    }
+
+    private const string SpoofBankOrigin =
+        "const RealURL = URL; globalThis.URL = class extends RealURL {"
+        + " get origin() { return 'https://bank.example'; } };";
+
+    /// <summary>
+    /// H4: a frame that replaces <c>URL</c> still posts as its own origin. The host fills
+    /// <c>event.origin</c> in from the sending realm.
+    /// </summary>
+    [Fact]
+    public void PostMessageOriginIsTheSendersNotAPageComputedOne()
+    {
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        var parent = page.Runtime;
+        using var frame = FrameRealm.Create(parent, 1, 0, "https://evil.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
+
+        frame.ExecuteScript(SpoofBankOrigin + "parent.postMessage('hi', '*');");
+
+        var queued = Assert.Single(parent.TakePendingFrameMessages());
+        Assert.Equal("https://evil.example", queued.Origin);
+        Assert.Equal(1u, queued.SourceFrameId);
+    }
+
+    /// <summary>
+    /// H4, the receiving side: a frame that replaces <c>URL</c> to claim an origin does not
+    /// receive a message whose targetOrigin names that origin.
+    /// </summary>
+    [Fact]
+    public void PostMessageTargetOriginIsCheckedAgainstTheReceiversRealOrigin()
+    {
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        using var frame = FrameRealm.Create(
+            page.Runtime, 1, 0, "https://evil.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
+        frame.ExecuteScript(
+            SpoofBankOrigin
+            + "globalThis.got = []; addEventListener('message', (e) => globalThis.got.push(e.data));");
+
+        frame.DeliverMessage("{\"v\":\"secret\"}", "https://parent.example", 0, "https://bank.example");
+        frame.DeliverMessage("{\"v\":\"public\"}", "https://parent.example", 0, "*");
+
+        Assert.Equal("[\"public\"]", frame.Evaluate("globalThis.got")!.ToJsonString());
+        // And the shim's own check agrees with the host when called directly.
+        frame.ExecuteHostScript(
+            "__obscura_host.deliverMessage('{\"v\":\"direct\"}', 'https://parent.example', 0, 'https://bank.example');");
+        Assert.Equal("[\"public\"]", frame.Evaluate("globalThis.got")!.ToJsonString());
     }
 }

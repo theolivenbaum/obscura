@@ -206,11 +206,20 @@ public sealed class FrameRealm : IDisposable
     /// A host helper (<see cref="HostScript"/>). DEVIATION from the Rust engine, which calls
     /// the page-visible <c>globalThis.__obscura_deliverMessage</c>.
     /// </remarks>
-    public void DeliverMessage(string dataJson, string origin, uint sourceFrameId, string targetOrigin) =>
+    public void DeliverMessage(string dataJson, string origin, uint sourceFrameId, string targetOrigin)
+    {
+        // Port addition: targetOrigin is enforced here, against the origin the host knows
+        // this frame has, as well as by the shim (SECURITY.md H4).
+        if (!CoreOps.TargetOriginAllows(targetOrigin, StateHelpers.DocumentOrigin(State), origin))
+        {
+            return;
+        }
+
         ExecuteHostScript(
             $"__obscura_host.deliverMessage({EncodeJsonArgument(dataJson)}, "
             + $"{EncodeJsonArgument(origin)}, {sourceFrameId.ToString(CultureInfo.InvariantCulture)}, "
             + $"{EncodeJsonArgument(targetOrigin)});");
+    }
 
     /// <summary>Sets the frame document's viewport before any of its scripts run.</summary>
     public void SetViewport(double width, double height)

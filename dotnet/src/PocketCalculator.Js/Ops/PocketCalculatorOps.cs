@@ -181,9 +181,12 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             () => CoreOps.OpGetCookies(RealmState())));
         Bind(ops, "op_set_cookie", (Action<object?>)(
             cookie => CoreOps.OpSetCookie(RealmState(), S(cookie))));
-        Bind(ops, "op_post_frame_message", (Action<object?, object?, object?, object?, object?>)(
-            (target, source, origin, targetOrigin, data) => CoreOps.OpPostFrameMessage(
-                Page, U32(target), U32(source), S(origin), S(targetOrigin), S(data))));
+        BindPostFrameMessage(ops, Page);
+        // Port addition: the calling realm's origin as the host knows it, for the
+        // shim's postMessage targetOrigin checks (SECURITY.md H4).
+        Bind(ops, "op_realm_origin", (Func<object?, string>)(
+            frameId => OpGuard.Run(
+                "op_realm_origin", () => StateHelpers.DocumentOrigin(FrameState(U32(frameId))), "null")));
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, RealmState().FrameId, S(url), S(html), U64(width), U64(height))));
@@ -332,7 +335,24 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
         BindFetch(ops, state);
+        BindPostFrameMessage(ops, state);
     }
+
+    /// <summary>
+    /// <c>op_post_frame_message</c>, sent as <paramref name="sender"/>: the realm the op
+    /// table belongs to.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (ops.rs), which queues the source frame id and the
+    /// origin the shim passes. The shim computed the origin with the page's own
+    /// <c>URL</c> global, so a frame that replaced <c>URL</c> could post as any origin and
+    /// defeat every <c>event.origin</c> check (SECURITY.md H4). Both arguments are
+    /// accepted and ignored; the host fills them from the sending realm.
+    /// </remarks>
+    private void BindPostFrameMessage(ScriptObject ops, PocketCalculatorState sender) =>
+        Bind(ops, "op_post_frame_message", (Action<object?, object?, object?, object?, object?>)(
+            (target, _, _, targetOrigin, data) => CoreOps.OpPostFrameMessage(
+                Page, U32(target), sender.FrameId, StateHelpers.DocumentOrigin(sender), S(targetOrigin), S(data))));
 
     /// <summary>
     /// <c>op_fetch_url</c>, judged against <paramref name="document"/>: the realm the op

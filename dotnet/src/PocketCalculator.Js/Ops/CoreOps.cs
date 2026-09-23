@@ -308,6 +308,30 @@ public static class CoreOps
         });
 
     /// <summary>
+    /// Whether a <c>postMessage</c> restricted to <paramref name="targetOrigin"/> may be
+    /// delivered to a realm whose origin is <paramref name="receiverOrigin"/>: the shim's
+    /// <c>_targetOriginAllows</c>, evaluated by the host on origins it derived itself.
+    /// </summary>
+    /// <remarks>
+    /// Port addition. The shim's check runs in the receiving realm with that realm's own
+    /// <c>URL</c> global, so a receiver that replaced <c>URL</c> could accept a message
+    /// meant for another origin (SECURITY.md H4). The host checks before delivering.
+    /// </remarks>
+    public static bool TargetOriginAllows(string targetOrigin, string receiverOrigin, string senderOrigin)
+    {
+        ArgumentNullException.ThrowIfNull(targetOrigin);
+        if (targetOrigin.Length == 0 || string.Equals(targetOrigin, "*", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var expected = string.Equals(targetOrigin, "/", StringComparison.Ordinal)
+            ? senderOrigin
+            : Url.UrlRecord.Parse(targetOrigin)?.AsciiOrigin ?? targetOrigin;
+        return string.Equals(receiverOrigin, expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// <c>op_frame_document_ready</c>. Hands a fetched frame document to the host and
     /// returns the id the frame will have. The realm itself is built later, by whoever
     /// owns the runtime. A zero id means the bounded native queue refused the document.

@@ -13861,8 +13861,12 @@ function _forgetFrame(frameId) {
   delete globalThis.__obscura_frameWindows[frameId];
 }
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which computes this with the page's
+// own URL global: a realm that replaced URL could claim another origin and receive a
+// postMessage restricted to it. The host answers from the realm's committed document
+// (SECURITY.md H4).
 function _realmOrigin() {
-  try { return new URL(_domParse('document_url')).origin; } catch (_) { return 'null'; }
+  try { return String(__obscuraCore.ops.op_realm_origin(_realmFrameId)); } catch (_) { return 'null'; }
 }
 
 // Whether a postMessage restricted to `targetOrigin` may be delivered to a
@@ -13898,8 +13902,10 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
   // DEVIATION from crates/obscura-js/js/bootstrap.js, which sends the page-writable
   // globalThis.__obscura_frameId as the source: a frame could set it to a sibling's
   // id and have its message arrive with `event.source` naming that sibling.
+  // The source id and origin are filled in by the host from the calling realm and these
+  // two arguments are ignored (SECURITY.md H4); they stay to keep the op's shape.
   __obscuraCore.ops.op_post_frame_message(
-    targetFrameId >>> 0, _realmFrameId, _realmOrigin(), to, json);
+    targetFrameId >>> 0, _realmFrameId, '', to, json);
 }
 
 // The frame's own window and document, when this page is allowed to touch

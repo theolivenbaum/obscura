@@ -212,6 +212,13 @@ public sealed partial class Page
                 {
                     continue;
                 }
+                // Port addition: targetOrigin is checked against the page's host-known
+                // origin before delivery, not only by the receiving shim (SECURITY.md H4).
+                if (!CoreOps.TargetOriginAllows(
+                        message.TargetOrigin, StateHelpers.DocumentOrigin(page.State), message.Origin))
+                {
+                    continue;
+                }
                 // A host helper, not upstream's page-visible __obscura_deliverMessage global.
                 string script =
                     $"__obscura_host.deliverMessage({escapedData}, {escapedOrigin}, "
