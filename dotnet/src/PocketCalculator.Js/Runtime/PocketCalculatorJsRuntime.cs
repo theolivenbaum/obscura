@@ -103,6 +103,11 @@ public sealed partial class PocketCalculatorJsRuntime
         _ops.TaskSpawner = this;
         _ops.AsyncOps = this;
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
+        if (BootstrapLoader.ExposeOpsForTests)
+        {
+            // Main realm only, as upstream's expose_ops_for_tests.
+            _engine.Script.__obscura_test_ops = _shim.Ops;
+        }
         InitializeObjectStore(_engine);
     }
 

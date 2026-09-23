@@ -13,6 +13,15 @@ public static class BootstrapLoader
     /// Installs the shim and runs bootstrap.js. <paramref name="bindOps"/> is
     /// called with the ops object so the host can attach its op functions.
     /// </summary>
+    /// <summary>
+    /// Test-only seam, the counterpart of upstream's <c>#[cfg(test)]</c>
+    /// <c>expose_ops_for_tests</c>: when set, each new <see cref="PocketCalculatorJsRuntime"/>
+    /// republishes its page realm's op table as <c>globalThis.__obscura_test_ops</c>
+    /// so a test can wrap or stub an op. Only the PocketCalculator.Js test assembly sets it
+    /// (a module initializer); nothing in a production process does.
+    /// </summary>
+    internal static bool ExposeOpsForTests { get; set; }
+
     public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps)
     {
         ArgumentNullException.ThrowIfNull(engine);
@@ -81,23 +90,19 @@ public static class BootstrapLoader
             """);
         shim.AttachTo(engine, tracker);
 
-        // Drop the op-table handoff, exactly as `take_ops_handoff` does in
-        // runtime.rs: the host has the table already, and page script must never
-        // reach it through `__obscura_core_handoff`.
+        // Drop the op-table handoff and `Deno` itself, exactly as
+        // `take_ops_handoff` / `share_ops_with_realm` do in upstream runtime.rs
+        // (04418a5): the host has the table already, and bootstrap.js closes over
+        // `Deno.core` in a private const (`__obscuraCore`), so page script must
+        // never reach the ops through either global. This runs for the page realm
+        // and for every frame realm, since both are installed through here.
         //
-        // `globalThis.Deno` itself stays. bootstrap.js is one IIFE that resolves
-        // `Deno.core.ops.<op>` at *call* time on more than thirty lines
-        // (_scheduleAfter, the console bridge, every layout and image op), so
-        // deleting it does not hide the ops - it breaks setTimeout, console and
-        // CSSOM the first time page script touches them. It is made
-        // non-enumerable instead so it does not show up in Object.keys(window).
+        // This reverses the port's earlier decision to keep `globalThis.Deno`
+        // (non-enumerable), which left every op callable from page script.
         engine.Execute("bootstrap-postamble", """
             delete globalThis.__obscura_core_handoff;
             delete globalThis.__obscura_deno_core;
-            try {
-              Object.defineProperty(globalThis, 'Deno',
-                { value: globalThis.Deno, writable: false, enumerable: false, configurable: false });
-            } catch (_) {}
+            delete globalThis.Deno;
             """);
         return shim;
     }

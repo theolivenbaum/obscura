@@ -18,7 +18,11 @@ public sealed class DenoCoreShim
     /// <summary>Pending host timers. The embedder pumps them; they never fire on their own.</summary>
     public TimerQueue Timers { get; } = new();
 
-    /// <summary>The bound op table exposed as <c>Deno.core.ops</c>.</summary>
+    /// <summary>
+    /// The bound op table exposed as <c>Deno.core.ops</c> while bootstrap.js runs.
+    /// The shim captures it in a private const and <c>globalThis.Deno</c> is then
+    /// deleted, so page script cannot reach it.
+    /// </summary>
     public required object Ops { get; init; }
 
     /// <summary>Callback registered via <c>setUnhandledPromiseRejectionHandler</c>.</summary>

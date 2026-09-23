@@ -163,6 +163,36 @@ public sealed class RuntimeTests
         Assert.True(rejected!.GetValue<bool>(), "createObjectURL must throw TypeError for non-Blob input");
     }
 
+    // Upstream 04418a5: bootstrap captures Deno.core in a private const and the
+    // host deletes both public globals before page script runs.
+    [Fact]
+    public void PageScriptCannotReachDenoCoreOrBootstrapHandoff()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><p id='value'>safe</p></body></html>");
+        var rt = fixture.Runtime;
+        rt.Evaluate("delete globalThis.__obscura_test_ops");
+
+        Assert.Equal(
+            """["undefined","undefined","undefined","undefined"]""",
+            rt.Evaluate(
+                "[typeof Deno, typeof __obscuraCore, typeof __obscura_core_handoff, typeof __obscura_deno_core]")!
+                .ToJsonString());
+        Assert.Equal("safe", rt.Evaluate("document.getElementById('value').textContent")!.GetValue<string>());
+        // Timers, console and computed style resolve ops through the closure too.
+        Assert.Equal(
+            "function",
+            rt.Evaluate("(() => { setTimeout(() => {}, 0); console.log('x'); return typeof getComputedStyle(document.body).display === 'string' ? 'function' : 'no'; })()")!
+                .GetValue<string>());
+        // The Runtime.addBinding bridge is the only op-backed global left, and it
+        // cannot be replaced by page script.
+        Assert.Equal(
+            """["function",false,false]""",
+            rt.Evaluate(
+                "(() => { const d = Object.getOwnPropertyDescriptor(globalThis, '__obscura_binding_called');"
+                + " return [typeof d.value, d.writable, d.configurable]; })()")!
+                .ToJsonString());
+    }
+
     // SEC-301 / SEC-302 / #792 — the profile setters must embed values safely.
     // set_platform must not allow a backslash-before-quote to break out of the
     // JS string literal (injection), and set_user_agent must not silently fail
@@ -2596,7 +2626,7 @@ public sealed class RuntimeTests
         rt.ExecuteScript(
             "settle-pending-async-op",
             "globalThis.__opDelivered = false;"
-            + "Deno.core.ops.op_sleep(300).then(() => { globalThis.__opDelivered = true; });");
+            + "__obscura_test_ops.op_sleep(300).then(() => { globalThis.__opDelivered = true; });");
 
         var started = System.Diagnostics.Stopwatch.StartNew();
         await rt.RunEventLoopUntilQuiescentAsync(5_000, 1_000);
@@ -6252,19 +6282,19 @@ public sealed class RuntimeTests
             globalThis.__resizeBulkSizes = [];
             globalThis.__resizeLegacyGeometryCalls = 0;
             globalThis.__resizeComputedStyleCalls = 0;
-            const nativeBulk = Deno.core.ops.op_resize_observer_measurements;
-            const nativeGeometry = Deno.core.ops.op_layout_geometry;
-            const nativeComputedStyle = Deno.core.ops.op_computed_style;
-            Deno.core.ops.op_resize_observer_measurements = input => {
+            const nativeBulk = __obscura_test_ops.op_resize_observer_measurements;
+            const nativeGeometry = __obscura_test_ops.op_layout_geometry;
+            const nativeComputedStyle = __obscura_test_ops.op_computed_style;
+            __obscura_test_ops.op_resize_observer_measurements = input => {
                 __resizeBulkCalls++;
                 __resizeBulkSizes.push(JSON.parse(input).length);
                 return nativeBulk(input);
             };
-            Deno.core.ops.op_layout_geometry = (...args) => {
+            __obscura_test_ops.op_layout_geometry = (...args) => {
                 __resizeLegacyGeometryCalls++;
                 return nativeGeometry(...args);
             };
-            Deno.core.ops.op_computed_style = (...args) => {
+            __obscura_test_ops.op_computed_style = (...args) => {
                 __resizeComputedStyleCalls++;
                 return nativeComputedStyle(...args);
             };
@@ -6393,8 +6423,8 @@ public sealed class RuntimeTests
             "count-scroll-geometry-reads",
             """
             globalThis.__scrollGeometryReads = 0;
-            globalThis.__nativeLayoutGeometry = Deno.core.ops.op_layout_geometry;
-            Deno.core.ops.op_layout_geometry = (...args) => {
+            globalThis.__nativeLayoutGeometry = __obscura_test_ops.op_layout_geometry;
+            __obscura_test_ops.op_layout_geometry = (...args) => {
                 __scrollGeometryReads++;
                 return __nativeLayoutGeometry(...args);
             };
@@ -6404,7 +6434,7 @@ public sealed class RuntimeTests
         var result = rt.Evaluate("[scrollY, __scrollGeometryReads, __scrollResizeRecords]");
         rt.ExecuteScript(
             "restore-layout-geometry-op",
-            "Deno.core.ops.op_layout_geometry = __nativeLayoutGeometry;");
+            "__obscura_test_ops.op_layout_geometry = __nativeLayoutGeometry;");
         AssertJson("[50,0,1]", result);
     }
 
@@ -6572,19 +6602,19 @@ public sealed class RuntimeTests
             globalThis.__intersectionBulkSizes = [];
             globalThis.__intersectionLegacyGeometryCalls = 0;
             globalThis.__intersectionComputedStyleCalls = 0;
-            const nativeBulk = Deno.core.ops.op_intersection_observer_measurements;
-            const nativeGeometry = Deno.core.ops.op_layout_geometry;
-            const nativeComputedStyle = Deno.core.ops.op_computed_style;
-            Deno.core.ops.op_intersection_observer_measurements = input => {
+            const nativeBulk = __obscura_test_ops.op_intersection_observer_measurements;
+            const nativeGeometry = __obscura_test_ops.op_layout_geometry;
+            const nativeComputedStyle = __obscura_test_ops.op_computed_style;
+            __obscura_test_ops.op_intersection_observer_measurements = input => {
                 __intersectionBulkCalls++;
                 __intersectionBulkSizes.push(JSON.parse(input).length);
                 return nativeBulk(input);
             };
-            Deno.core.ops.op_layout_geometry = (...args) => {
+            __obscura_test_ops.op_layout_geometry = (...args) => {
                 __intersectionLegacyGeometryCalls++;
                 return nativeGeometry(...args);
             };
-            Deno.core.ops.op_computed_style = (...args) => {
+            __obscura_test_ops.op_computed_style = (...args) => {
                 __intersectionComputedStyleCalls++;
                 return nativeComputedStyle(...args);
             };
@@ -13967,10 +13997,10 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const seen = [];
                 try {
-                    Deno.core.ops.op_fetch_url = (url) => {
+                    __obscura_test_ops.op_fetch_url = (url) => {
                         seen.push(url);
                         return JSON.stringify({ status: 200, headers: {}, body: "{}", url });
                     };
@@ -13981,7 +14011,7 @@ public sealed class RuntimeTests
                     await new Promise((r) => setTimeout(r, 0));
                     return seen;
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -14049,9 +14079,9 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 try {
-                    Deno.core.ops.op_fetch_url = (url) => {
+                    __obscura_test_ops.op_fetch_url = (url) => {
                         globalThis.__capturedFetchUrl = url;
                         return JSON.stringify({
                             status: 200,
@@ -14064,7 +14094,7 @@ public sealed class RuntimeTests
                     const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
                     return { url: globalThis.__capturedFetchUrl, bytes };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -14167,10 +14197,10 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const calls = [];
                 try {
-                    Deno.core.ops.op_fetch_url =
+                    __obscura_test_ops.op_fetch_url =
                         (url, method, headers, body, origin, mode, credentials) => {
                             calls.push({ url, credentials });
                             return JSON.stringify({
@@ -14208,7 +14238,7 @@ public sealed class RuntimeTests
 
                     return { calls, invalidFetchRejected };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -14338,10 +14368,10 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const calls = [];
                 try {
-                    Deno.core.ops.op_fetch_url =
+                    __obscura_test_ops.op_fetch_url =
                         (url, method, headers, body) => {
                             calls.push({
                                 path: new URL(url).pathname,
@@ -14401,7 +14431,7 @@ public sealed class RuntimeTests
 
                     return calls;
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -14562,7 +14592,7 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const calls = [];
                 const includesBytes = (bytes, needle) => {
                     outer: for (let i = 0; i <= bytes.length - needle.length; i++) {
@@ -14574,7 +14604,7 @@ public sealed class RuntimeTests
                     return false;
                 };
                 try {
-                    Deno.core.ops.op_fetch_url =
+                    __obscura_test_ops.op_fetch_url =
                         (url, method, headers, body) => {
                             const bytes = Array.from(
                                 body instanceof Uint8Array
@@ -14650,7 +14680,7 @@ public sealed class RuntimeTests
                         },
                     };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -15198,9 +15228,9 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 try {
-                    Deno.core.ops.op_fetch_url = (url) => JSON.stringify({
+                    __obscura_test_ops.op_fetch_url = (url) => JSON.stringify({
                         status: 200,
                         headers: { "content-type": "text/css" },
                         body: url.endsWith("/assets/route.css")
@@ -15251,7 +15281,7 @@ public sealed class RuntimeTests
                             && list.length === 0,
                     };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -15336,9 +15366,9 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 try {
-                    Deno.core.ops.op_fetch_url = (url) => JSON.stringify({
+                    __obscura_test_ops.op_fetch_url = (url) => JSON.stringify({
                         status: 401,
                         headers: { "content-type": "application/json" },
                         body: "globalThis.__executedFailedScript = true",
@@ -15356,7 +15386,7 @@ public sealed class RuntimeTests
                         executed: globalThis.__executedFailedScript === true,
                     };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -15435,10 +15465,10 @@ public sealed class RuntimeTests
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const runPair = async (explicitlyInOrder) => {
                     globalThis.__dynamicOrder = [];
-                    Deno.core.ops.op_fetch_url = (url) => new Promise(resolve => {
+                    __obscura_test_ops.op_fetch_url = (url) => new Promise(resolve => {
                         const slow = url.includes("slow");
                         setTimeout(() => resolve(JSON.stringify({
                             status: 200,
@@ -15466,7 +15496,7 @@ public sealed class RuntimeTests
                         pending: globalThis.__obscura_hasPendingDynamicScripts(),
                     };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -18098,9 +18128,9 @@ public sealed class RuntimeTests
             document.body.appendChild(parsed.querySelector("script"));
 
             let externalFetches = 0;
-            const originalFetchOp = Deno.core.ops.op_fetch_url;
+            const originalFetchOp = __obscura_test_ops.op_fetch_url;
             try {
-                Deno.core.ops.op_fetch_url = () => {
+                __obscura_test_ops.op_fetch_url = () => {
                     externalFetches++;
                     return JSON.stringify({
                         status: 200,
@@ -18113,7 +18143,7 @@ public sealed class RuntimeTests
                 external.innerHTML = "<script src=/inert.js><\/script>";
                 document.head.appendChild(external.firstChild);
             } finally {
-                Deno.core.ops.op_fetch_url = originalFetchOp;
+                __obscura_test_ops.op_fetch_url = originalFetchOp;
             }
             return [globalThis.__fragmentScriptRuns, externalFetches];
             """);

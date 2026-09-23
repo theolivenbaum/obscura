@@ -290,8 +290,10 @@ public static class Runtime
                 string name = parameters.Get("name").AsString() ?? string.Empty;
                 if (IsValidBindingName(name))
                 {
-                    // The shim forwards every call back to the host through
-                    // op_binding_called; the CDP dispatcher then drains the queue and
+                    // The shim forwards every call back to the host through the
+                    // frozen globalThis.__obscura_binding_called bridge (upstream
+                    // 04418a5), which calls op_binding_called; page script cannot
+                    // reach the op table itself. The CDP dispatcher then drains the queue and
                     // emits Runtime.bindingCalled events the same way Chromium does.
                     // Chromium's V8InspectorImpl rejects calls without exactly one
                     // argument and ToString-coerces that argument before emitting it as
@@ -302,7 +304,7 @@ public static class Runtime
                         + "if (arguments.length !== 1) return;"
                         + "try {"
                         + "const payload = typeof arg === 'string' ? arg : String(arg);"
-                        + $"Deno.core.ops.op_binding_called('{name}', payload);"
+                        + $"globalThis.__obscura_binding_called('{name}', payload);"
                         + "} catch (e) { /* swallow: binding must not throw into page */ }"
                         + "};";
                     // Re-install on every navigation: globalThis is wiped on each new

@@ -433,7 +433,7 @@ public sealed class OpsTests
         runtime.RunPageInit();
         runtime.ExecuteScript("posted-task-from-op-resolution", """
             globalThis.__postedFromOp = 0;
-            Deno.core.ops.op_sleep(0).then(() => {
+            __obscura_test_ops.op_sleep(0).then(() => {
                 const rearm = () => scheduler.postTask(() => {
                     __postedFromOp++;
                     if (__postedFromOp < 250) rearm();

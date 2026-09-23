@@ -176,21 +176,13 @@ public static class Dom
                     throw new DomainError("nodeId or objectId required");
                 }
 
+                // Resolved through the shim's own wrapper cache (`_wrap`), which is
+                // what upstream does since 04418a5 hid `Deno.core` from page realms
+                // (the host-evaluated script runs in the page realm, so it can no
+                // longer call op_dom itself). `_wrap` also picks the element's own
+                // interface class, as upstream 94e857b does.
                 string jsCode =
-                    "(function() {"
-                    + $"var nid = {nodeId.ToString(CultureInfo.InvariantCulture)};"
-                    + "var node = null;"
-                    + "if (globalThis._cache && globalThis._cache.has(nid)) {"
-                    + "node = globalThis._cache.get(nid);"
-                    + "} else {"
-                    + "var t = +Deno.core.ops.op_dom('node_type', String(nid), '', globalThis.__obscura_frameId >>> 0);"
-                    + "if (t === 1) node = new Element(nid);"
-                    + "else if (t === 9) node = globalThis.document;"
-                    + "else node = new Node(nid);"
-                    + "if (globalThis._cache) globalThis._cache.set(nid, node);"
-                    + "}"
-                    + "return node;"
-                    + "})()";
+                    $"globalThis._wrap({nodeId.ToString(CultureInfo.InvariantCulture)})";
 
                 if (page.Js is not { } js)
                 {

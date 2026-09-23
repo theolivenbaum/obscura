@@ -32,13 +32,15 @@ internal static class FormStateMirror
         ArgumentNullException.ThrowIfNull(engine);
         engine.Execute("form-state-mirror", """
             (function () {
+              // Captured now: globalThis.Deno is deleted once bootstrap.js has run.
+              const ops = globalThis.Deno.core.ops;
               const mirror = (cmd, coerce) => new Proxy({}, {
                 set(target, key, value) {
                   target[key] = value;
                   const nid = typeof key === 'string' ? key : null;
                   if (nid !== null && /^[0-9]+$/.test(nid)) {
                     try {
-                      Deno.core.ops.op_dom(
+                      ops.op_dom(
                         cmd, nid, coerce(value), globalThis.__obscura_frameId >>> 0);
                     } catch (_) {}
                   }

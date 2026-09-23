@@ -67,12 +67,12 @@ public static class BootstrapSource
         // __runDynScriptTask: a fetched <script src> body.
         (
             "try { (0, eval)(body); }",
-            "try { Deno.core.ops.op_run_classic_script(body, task.url); }"
+            "try { __obscuraCore.ops.op_run_classic_script(body, task.url); }"
         ),
         // __prepareInsertedScript: an inserted script element's own text.
         (
             "try { (0, eval)(code); }",
-            "try { Deno.core.ops.op_run_classic_script(code, globalThis.location?.href || ''); }"
+            "try { __obscuraCore.ops.op_run_classic_script(code, globalThis.location?.href || ''); }"
         ),
     ];
 

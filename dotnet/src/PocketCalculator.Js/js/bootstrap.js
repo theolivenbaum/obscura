@@ -1,6 +1,14 @@
 "use strict";
 (function () {
 
+// deno_core installs its privileged bridge in the page's V8 context. Capture
+// it in this private bootstrap closure. The host removes the public global
+// after deno_core finishes binding ops and before any page script runs. All
+// browser APIs below close over this reference. (In the C# port the bridge is
+// DenoCoreShim, installed by BootstrapLoader.Install, which deletes
+// globalThis.Deno once this file has run.)
+const __obscuraCore = globalThis.Deno.core;
+
 // Pre-declare all internal globals as non-enumerable so they are invisible
 // to Object.keys(window) / for-in enumeration. Must run before any var
 // declarations or property assignments below: once a property is defined
@@ -73,11 +81,22 @@
 
 // Handoff for child frame realms. deno_core binds ops into the main context
 // only, so a realm restored from the snapshot arrives with its own empty
-// `Deno.core.ops`. The host reads this to take the main realm's bound op table
+// private core reference. The host reads this to take the main realm's bound op table
 // and to find each new realm's own table to fill, then deletes the global in
 // the same step, so page script never sees it (see runtime.rs
-// `take_ops_handoff` / `share_ops_with_realm`).
-globalThis.__obscura_core_handoff = Deno.core;
+// `take_ops_handoff` / `share_ops_with_realm`). The C# host already holds the
+// table it bound and only deletes this (BootstrapLoader.Install).
+globalThis.__obscura_core_handoff = __obscuraCore;
+
+// Runtime.addBinding installs a named page function which forwards through
+// this narrow bridge. Calling it grants no capability beyond calling the
+// installed binding itself; the full op table remains unreachable.
+Object.defineProperty(globalThis, "__obscura_binding_called", {
+  value: (name, payload) => __obscuraCore.ops.op_binding_called(String(name), String(payload)),
+  writable: false,
+  enumerable: false,
+  configurable: false,
+});
 
 globalThis.__obscura_errors = [];
 
@@ -125,7 +144,7 @@ const _DOM_TREE_MUTATION_COMMANDS = new Set([
 let _realmFrameId = 0;
 
 const _dom = (cmd, a1, a2) => {
-  const result = Deno.core.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
+  const result = __obscuraCore.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
   if (_DOM_MUTATION_COMMANDS.has(cmd)) {
     _domMutationEpoch++;
     // Resize observation is tied to rendering-invalidating DOM work. The
@@ -321,14 +340,14 @@ function _decodeDataScriptUrl(url) {
 // native per-document state so it survives wrapper churn, fragment parsing,
 // moves, and cloneNode().
 globalThis.__markParserScripts = function(nids) {
-  for (const nid of nids || []) Deno.core.ops.op_script_mark_started(+nid);
+  for (const nid of nids || []) __obscuraCore.ops.op_script_mark_started(+nid);
 };
 async function __fetchDynClassicScript(task) {
   let body;
   if (task.url.startsWith('data:')) {
     body = _decodeDataScriptUrl(task.url);
   } else {
-    const raw = await Deno.core.ops.op_fetch_url(
+    const raw = await __obscuraCore.ops.op_fetch_url(
       task.url, "GET", "{}", new Uint8Array(0), task.pageOrigin, "no-cors", "same-origin"
     );
     const parsed = JSON.parse(raw);
@@ -573,7 +592,7 @@ function _cssImportApplies(media) {
 async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
   if (depth > 4 || seen.has(url)) return "";
   seen.add(url);
-  const raw = await Deno.core.ops.op_fetch_url(
+  const raw = await __obscuraCore.ops.op_fetch_url(
     url, "GET", "{}", new Uint8Array(0), pageOrigin, "no-cors", "same-origin"
   );
   const parsed = JSON.parse(raw);
@@ -833,13 +852,13 @@ const _consoleFn = (level, args) => {
       }
       return String(a);
     }).join(" ");
-    const eventArgs = Deno.core.ops.op_runtime_events_enabled()
+    const eventArgs = __obscuraCore.ops.op_runtime_events_enabled()
       ? JSON.stringify(args.map(a => {
           try { return _consoleRemoteObject(a); }
           catch { return { type: typeof a, description: "<unavailable>" }; }
         }))
       : "";
-    Deno.core.ops.op_console_msg(level, text, eventArgs);
+    __obscuraCore.ops.op_console_msg(level, text, eventArgs);
   } catch {}
 };
 
@@ -888,7 +907,7 @@ const _scheduleAfter = (delay, fn) => {
   // tasks, so leave them pending instead of aborting or incorrectly turning a
   // task into a microtask. Normal browser and CDP execution always takes the
   // task-queue path below.
-  if (!Deno.core.ops.op_async_runtime_available()) {
+  if (!__obscuraCore.ops.op_async_runtime_available()) {
     return undefined;
   }
   // A child frame realm cannot use deno_core's timer queue: op_timer_queue
@@ -905,21 +924,21 @@ const _scheduleAfter = (delay, fn) => {
     const frameTimerId = -(++_frameTimerSeq);
     const state = { cancelled: false };
     _frameTimerStates.set(frameTimerId, state);
-    Deno.core.ops.op_sleep(d).then(() => {
+    __obscuraCore.ops.op_sleep(d).then(() => {
       _frameTimerStates.delete(frameTimerId);
       if (state.cancelled) return;
-      Deno.core.ops.op_begin_render_task?.();
+      __obscuraCore.ops.op_begin_render_task?.();
       fn();
     });
     return frameTimerId;
   }
   // The callback runs only when the embedder pumps the event loop, after the
   // current microtask checkpoint.
-  return Deno.core.queueUserTimer(0, false, d, () => {
+  return __obscuraCore.queueUserTimer(0, false, d, () => {
     // HTML timer/observer/rAF delivery starts a new task. Freeze animation
     // time lazily on that task's first style/layout read so a callback that
     // waited in the host queue samples its actual delivery instant.
-    Deno.core.ops.op_begin_render_task?.();
+    __obscuraCore.ops.op_begin_render_task?.();
     return fn();
   });
 };
@@ -930,7 +949,7 @@ const _cancelScheduled = (nativeId) => {
     if (state) state.cancelled = true;
     _frameTimerStates.delete(nativeId);
   }
-  else Deno.core.cancelTimer(nativeId);
+  else __obscuraCore.cancelTimer(nativeId);
 };
 
 // Timers accept a string first arg per the HTML spec (e.g. the Aliyun WAF
@@ -1146,7 +1165,7 @@ let _browserPostedTaskWakePending = false;
 const _invalidPostedTaskGeneration = -1;
 
 function _browserPostedTaskGeneration() {
-  return Deno.core.ops.op_posted_task_generation(_realmFrameId);
+  return __obscuraCore.ops.op_posted_task_generation(_realmFrameId);
 }
 
 function _browserPostedTaskDiscardQueue(queue) {
@@ -1160,8 +1179,8 @@ function _browserPostedTaskDiscardQueue(queue) {
 
 function _browserPostedTaskScheduleWake() {
   if (_browserPostedTaskWakePending) return;
-  if (!Deno.core.ops.op_async_runtime_available()) return;
-  const generation = Deno.core.ops.op_posted_task(
+  if (!__obscuraCore.ops.op_async_runtime_available()) return;
+  const generation = __obscuraCore.ops.op_posted_task(
     _realmFrameId, _browserPostedTaskRunOne);
   _browserPostedTaskWakePending = generation !== _invalidPostedTaskGeneration;
   if (!_browserPostedTaskWakePending) {
@@ -1203,7 +1222,7 @@ function _browserPostedTaskRunOne(currentGeneration = _invalidPostedTaskGenerati
   }
   if (!callback) return;
 
-  Deno.core.ops.op_begin_render_task?.();
+  __obscuraCore.ops.op_begin_render_task?.();
   try { callback(); }
   catch (error) { console.error("Posted task error:", error); }
   finally {
@@ -1903,7 +1922,7 @@ function _eventTargetDispatch(target, event) {
 const _customElementConstructionStack = [];
 
 function __prepareInsertedScript(script) {
-  if (!Deno.core.ops.op_script_try_start(script._nid)) return;
+  if (!__obscuraCore.ops.op_script_try_start(script._nid)) return;
   const scriptType = (script.getAttribute('type') || '').trim().toLowerCase();
   const isModule = scriptType === 'module';
   const isImportMap = scriptType === 'importmap';
@@ -1917,7 +1936,7 @@ function __prepareInsertedScript(script) {
         || globalThis.location?.href
         || 'about:blank';
       try {
-        error = Deno.core.ops.op_add_import_map(script.textContent || '', base) || '';
+        error = __obscuraCore.ops.op_add_import_map(script.textContent || '', base) || '';
       } catch (e) {
         error = e && e.message ? e.message : String(e);
       }
@@ -2632,7 +2651,7 @@ function _applyDocQueryEncoding(u) {
   let decoded;
   try { decoded = decodeURIComponent(u.search.slice(1)); } catch (e) { return u; }
   let reencoded;
-  try { reencoded = Deno.core.ops.op_url_encode_query(decoded, _docEncoding(), _isSpecialScheme(u.protocol)); }
+  try { reencoded = __obscuraCore.ops.op_url_encode_query(decoded, _docEncoding(), _isSpecialScheme(u.protocol)); }
   catch (e) { return u; }
   const newSearch = '?' + reencoded;
   if (newSearch === u.search) return u;
@@ -3131,7 +3150,7 @@ class Animation {
   }
   _native(action, value = 0) {
     try {
-      const changed = !!Deno.core.ops.op_waapi_control?.(this._nativeId, action, Number(value) || 0);
+      const changed = !!__obscuraCore.ops.op_waapi_control?.(this._nativeId, action, Number(value) || 0);
       if (changed) _domMutationEpoch++;
       return changed;
     }
@@ -3151,7 +3170,7 @@ class Animation {
         : this.effect._timing.iterations,
       iterationsInfinite: this.effect._timing.iterations === Infinity,
     };
-    try { this._registered = !!Deno.core.ops.op_waapi_create?.(JSON.stringify(input)); }
+    try { this._registered = !!__obscuraCore.ops.op_waapi_create?.(JSON.stringify(input)); }
     catch (_) { this._registered = false; }
     if (this._registered) {
       _waapiAnimations.add(this);
@@ -4321,7 +4340,7 @@ class Element extends Node {
         // document below stays: it is what the parent reads through
         // contentDocument.
         const box = el.getBoundingClientRect();
-        el._frameId = Deno.core.ops.op_frame_document_ready(
+        el._frameId = __obscuraCore.ops.op_frame_document_ready(
           fullUrl, html, Math.round(box.width) || 300, Math.round(box.height) || 150);
         if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
         el._iframeDoc = new _IframeDocument(html, fullUrl, el);
@@ -4538,10 +4557,10 @@ class Element extends Node {
 
     const encoded = pairs.join('&');
     if (method === 'POST') {
-      Deno.core.ops.op_navigate(targetUrl, 'POST', encoded);
+      __obscuraCore.ops.op_navigate(targetUrl, 'POST', encoded);
     } else {
       const sep = targetUrl.includes('?') ? '&' : '?';
-      Deno.core.ops.op_navigate(targetUrl + (encoded ? sep + encoded : ''), 'GET', '');
+      __obscuraCore.ops.op_navigate(targetUrl + (encoded ? sep + encoded : ''), 'GET', '');
     }
   }
   reset() {
@@ -4610,9 +4629,9 @@ class Element extends Node {
     return metrics ? metrics.height : 20;
   }
   _renderClientMetrics() {
-    if (typeof Deno.core.ops.op_layout_geometry !== 'function') return null;
+    if (typeof __obscuraCore.ops.op_layout_geometry !== 'function') return null;
     try {
-      const raw = Deno.core.ops.op_layout_geometry(String(this._nid | 0));
+      const raw = __obscuraCore.ops.op_layout_geometry(String(this._nid | 0));
       if (!raw) return { width: 0, height: 0 };
       const geometry = JSON.parse(raw);
       if (geometry
@@ -4635,9 +4654,9 @@ class Element extends Node {
   // CSSOM View returns an empty rect list for the latter, while the former
   // deliberately retains Obscura's compatibility geometry.
   _renderBoxGeometry() {
-    if (typeof Deno.core.ops.op_layout_geometry !== 'function') return undefined;
+    if (typeof __obscuraCore.ops.op_layout_geometry !== 'function') return undefined;
     try {
-      const raw = Deno.core.ops.op_layout_geometry(String(this._nid | 0));
+      const raw = __obscuraCore.ops.op_layout_geometry(String(this._nid | 0));
       if (!raw) return null;
       const geometry = JSON.parse(raw);
       if (geometry
@@ -4695,18 +4714,18 @@ class Element extends Node {
     return t === 'HTML' || t === 'BODY';
   }
   _renderScrollMetrics() {
-    if (typeof Deno.core.ops.op_layout_metrics !== 'function') return null;
+    if (typeof __obscuraCore.ops.op_layout_metrics !== 'function') return null;
     try {
-      const raw = Deno.core.ops.op_layout_metrics();
+      const raw = __obscuraCore.ops.op_layout_metrics();
       return raw ? JSON.parse(raw) : null;
     } catch (_e) {
       return null;
     }
   }
   _renderElementScrollMetrics() {
-    if (typeof Deno.core.ops.op_element_scroll_metrics !== 'function') return undefined;
+    if (typeof __obscuraCore.ops.op_element_scroll_metrics !== 'function') return undefined;
     try {
-      const raw = Deno.core.ops.op_element_scroll_metrics(String(this._nid | 0));
+      const raw = __obscuraCore.ops.op_element_scroll_metrics(String(this._nid | 0));
       if (!raw) return null;
       const metrics = JSON.parse(raw);
       return metrics && metrics.hasBox !== false ? metrics : null;
@@ -4715,27 +4734,27 @@ class Element extends Node {
     }
   }
   _renderScrollOffset() {
-    if (typeof Deno.core.ops.op_scroll_offset !== 'function') return null;
+    if (typeof __obscuraCore.ops.op_scroll_offset !== 'function') return null;
     try {
-      const raw = Deno.core.ops.op_scroll_offset();
+      const raw = __obscuraCore.ops.op_scroll_offset();
       return raw ? JSON.parse(raw) : null;
     } catch (_e) {
       return null;
     }
   }
   _setRenderScroll(x, y) {
-    if (typeof Deno.core.ops.op_scroll_to !== 'function') return null;
+    if (typeof __obscuraCore.ops.op_scroll_to !== 'function') return null;
     try {
-      const raw = Deno.core.ops.op_scroll_to(+x || 0, +y || 0);
+      const raw = __obscuraCore.ops.op_scroll_to(+x || 0, +y || 0);
       return raw ? JSON.parse(raw) : null;
     } catch (_e) {
       return null;
     }
   }
   _setRenderElementScroll(x, y) {
-    if (typeof Deno.core.ops.op_element_scroll_to !== 'function') return null;
+    if (typeof __obscuraCore.ops.op_element_scroll_to !== 'function') return null;
     try {
-      const raw = Deno.core.ops.op_element_scroll_to(String(this._nid | 0), +x || 0, +y || 0);
+      const raw = __obscuraCore.ops.op_element_scroll_to(String(this._nid | 0), +x || 0, +y || 0);
       return raw ? JSON.parse(raw) : null;
     } catch (_e) {
       return null;
@@ -5308,7 +5327,7 @@ class Document extends Node {
     if (this !== globalThis.document) _throwDocumentDomainSecurityError();
     const current = this.domain;
     if (!current) _throwDocumentDomainSecurityError();
-    const candidate = Deno.core.ops.op_document_domain_candidate(current, input);
+    const candidate = __obscuraCore.ops.op_document_domain_candidate(current, input);
     if (!candidate) _throwDocumentDomainSecurityError();
     // This runtime currently has one top-level browsing context and no
     // principal-backed same-origin-domain comparison.  Persisting the
@@ -5320,7 +5339,7 @@ class Document extends Node {
   }
   get referrer() { return _domParse("document_referrer") ?? ""; }
   get location() { return globalThis.location; }
-  set location(url) { Deno.core.ops.op_navigate(_resolveUrl(String(url)), 'GET', ''); }
+  set location(url) { __obscuraCore.ops.op_navigate(_resolveUrl(String(url)), 'GET', ''); }
   get defaultView() { return globalThis; }
   get nodeType() { return 9; }
   get nodeName() { return "#document"; }
@@ -5805,11 +5824,11 @@ class Document extends Node {
   get links() { return this.querySelectorAll("a[href], area[href]"); }
   get scripts() { return this.querySelectorAll("script"); }
   get cookie() {
-    return Deno.core.ops.op_get_cookies();
+    return __obscuraCore.ops.op_get_cookies();
   }
   set cookie(v) {
     if (!v) return;
-    Deno.core.ops.op_set_cookie(v);
+    __obscuraCore.ops.op_set_cookie(v);
   }
   // Inserts into the document's input stream, which the host keeps alive across calls.
   // Parsing each call on its own would lose every construct that spans two of them. This is
@@ -6068,7 +6087,7 @@ class HTMLImageElement extends Element {
     this._imageQueued = false;
     this._imageInitialized = false;
     this._imageCompletionDeferred = false;
-    this._imageComplete = typeof Deno.core.ops.op_image_metadata === "function"
+    this._imageComplete = typeof __obscuraCore.ops.op_image_metadata === "function"
       ? true
       : !this.getAttribute("src");
     this._imageDecoded = false;
@@ -6195,7 +6214,7 @@ class HTMLImageElement extends Element {
     // The lightweight build has no retained render-resource cache. It still
     // preserves the historical non-blocking Image lifecycle so preloaders do
     // not hang while rendering is disabled.
-    const hasMetadataLoader = typeof Deno.core.ops.op_load_image_metadata === "function";
+    const hasMetadataLoader = typeof __obscuraCore.ops.op_load_image_metadata === "function";
     this._adoptImageCandidate(hasMetadataLoader ? "" : this.src);
     this._imageCompletionDeferred = true;
     this._refreshImageFromCache(true);
@@ -6238,7 +6257,7 @@ class HTMLImageElement extends Element {
       this._applyImageMetadata(metadata, request, true);
     };
     try {
-      const op = Deno.core.ops.op_load_image_metadata;
+      const op = __obscuraCore.ops.op_load_image_metadata;
       if (typeof op === "function") {
         Promise.resolve(op(this._nid >>> 0)).then(
           raw => {
@@ -6262,7 +6281,7 @@ class HTMLImageElement extends Element {
 
   _refreshImageFromCache(deferCompletion) {
     try {
-      const op = Deno.core.ops.op_image_metadata;
+      const op = __obscuraCore.ops.op_image_metadata;
       if (typeof op !== "function") return;
       const metadata = JSON.parse(op(this._nid >>> 0, true));
       if (!metadata) return;
@@ -6315,7 +6334,7 @@ class HTMLImageElement extends Element {
     const width = Number(metadata && metadata.width);
     const height = Number(metadata && metadata.height);
     const loaded = !!(metadata && metadata.ok)
-      && (typeof Deno.core.ops.op_image_metadata !== "function"
+      && (typeof __obscuraCore.ops.op_image_metadata !== "function"
         || (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0));
     if (loaded) {
       this._imageDecoded = true;
@@ -6790,7 +6809,7 @@ function _locationNavigate(url, replace) {
     return;
   }
   globalThis.__virtualUrl = target;
-  Deno.core.ops.op_navigate(target, 'GET', '');
+  __obscuraCore.ops.op_navigate(target, 'GET', '');
 }
 // The host side asks whether a navigation it was handed is same-document, and
 // performs it here if so, so CDP's Page.navigate and location share one
@@ -6837,7 +6856,7 @@ globalThis.location = {
   toString() { return this.href; },
   assign(url) { _locationNavigate(url, false); },
   // A reload really re-fetches, fragment or not.
-  reload() { var r = _resolveUrl(this.href); globalThis.__virtualUrl = r; Deno.core.ops.op_navigate(r, 'GET', ''); },
+  reload() { var r = _resolveUrl(this.href); globalThis.__virtualUrl = r; __obscuraCore.ops.op_navigate(r, 'GET', ''); },
   replace(url) { _locationNavigate(url, true); },
 };
 const _locationObj = globalThis.location;
@@ -7519,7 +7538,7 @@ globalThis.fetch = async (input, init = {}) => {
     throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
   }
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await Deno.core.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials);
+  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -7833,14 +7852,14 @@ _markNative(XMLHttpRequest.prototype.getAllResponseHeaders);
 // the input is not a valid URL.
 function _urlParseOp(url, base) {
   try {
-    const s = Deno.core.ops.op_url_parse(String(url), (base === undefined || base === null) ? "" : String(base));
+    const s = __obscuraCore.ops.op_url_parse(String(url), (base === undefined || base === null) ? "" : String(base));
     const c = JSON.parse(s);
     return (c && c.ok) ? c : null;
   } catch (e) { return null; }
 }
 function _urlSetOp(href, part, value) {
   try {
-    const s = Deno.core.ops.op_url_set(String(href), part, String(value));
+    const s = __obscuraCore.ops.op_url_set(String(href), part, String(value));
     const c = JSON.parse(s);
     return (c && c.ok) ? c : null;
   } catch (e) { return null; }
@@ -7849,7 +7868,7 @@ function _urlSetOp(href, part, value) {
 // failure. Cheaper than _urlParseOp for callers that only need the href.
 function _urlResolveOp(href, base) {
   try {
-    const r = Deno.core.ops.op_url_resolve(String(href), (base === undefined || base === null) ? "" : String(base));
+    const r = __obscuraCore.ops.op_url_resolve(String(href), (base === undefined || base === null) ? "" : String(base));
     return r ? r : null;
   } catch (e) { return null; }
 }
@@ -8179,10 +8198,10 @@ function _roNodeDepth(target) {
 }
 function _roMeasurement(target, suppliedGeometry, suppliedByBatch = false) {
   let geometry = suppliedGeometry ?? null;
-  const hasRenderer = typeof Deno.core.ops.op_layout_geometry === "function";
+  const hasRenderer = typeof __obscuraCore.ops.op_layout_geometry === "function";
   if (!suppliedByBatch && hasRenderer && target?._nid != null) {
     try {
-      const raw = Deno.core.ops.op_layout_geometry(String(target._nid | 0));
+      const raw = __obscuraCore.ops.op_layout_geometry(String(target._nid | 0));
       geometry = raw ? JSON.parse(raw) : null;
     } catch (_error) {}
   }
@@ -8280,7 +8299,7 @@ function _roMeasurement(target, suppliedGeometry, suppliedByBatch = false) {
 function _roMeasurements(targets) {
   const measurements = new Map();
   if (!targets.length) return measurements;
-  const bulk = Deno.core.ops.op_resize_observer_measurements;
+  const bulk = __obscuraCore.ops.op_resize_observer_measurements;
   if (typeof bulk === "function"
       && targets.every(target => target?._nid != null)) {
     try {
@@ -8448,7 +8467,7 @@ if (typeof TextDecoder === 'undefined') {
       if (label === undefined) {
         name = 'utf-8';
       } else {
-        name = Deno.core.ops.op_encoding_for_label(String(label));
+        name = __obscuraCore.ops.op_encoding_for_label(String(label));
         if (!name) throw new RangeError("Failed to construct 'TextDecoder': The encoding label provided ('" + label + "') is invalid.");
       }
       const o = options || {};
@@ -8468,7 +8487,7 @@ if (typeof TextDecoder === 'undefined') {
         return _utf8DecodeBytes(bytes, off);
       }
       // Legacy encodings / fatal mode: encoding_rs via the op.
-      const r = JSON.parse(Deno.core.ops.op_text_decode(this.encoding, bytes, this.fatal, this.ignoreBOM));
+      const r = JSON.parse(__obscuraCore.ops.op_text_decode(this.encoding, bytes, this.fatal, this.ignoreBOM));
       if (!r.ok) throw new TypeError("Failed to execute 'decode' on 'TextDecoder': The encoded data was not valid.");
       return r.v;
     }
@@ -8719,8 +8738,8 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
       // op_computed_style keeps its one-argument shape; the pseudo-element snapshot is a
       // separate op so that op's payload stays byte-identical.
       const op = pseudo
-        ? Deno.core.ops.op_computed_style_pseudo
-        : Deno.core.ops.op_computed_style;
+        ? __obscuraCore.ops.op_computed_style_pseudo
+        : __obscuraCore.ops.op_computed_style;
       if (typeof op === 'function') {
         try {
           const raw = pseudo
@@ -9861,7 +9880,7 @@ function _ioClipsOverflow(value) {
 function _ioMeasurements(elements) {
   const measurements = new Map();
   if (!elements.length) return measurements;
-  const bulk = Deno.core.ops.op_intersection_observer_measurements;
+  const bulk = __obscuraCore.ops.op_intersection_observer_measurements;
   const nativeElements = elements.filter(element => element?._nid != null);
   if (typeof bulk !== "function" || !nativeElements.length) return measurements;
   try {
@@ -10392,7 +10411,7 @@ globalThis.PromiseRejectionEvent = class PromiseRejectionEvent extends Event {
 };
 _markNative(globalThis.PromiseRejectionEvent);
 
-Deno.core.setUnhandledPromiseRejectionHandler((promise, reason) => {
+__obscuraCore.setUnhandledPromiseRejectionHandler((promise, reason) => {
   const event = new PromiseRejectionEvent("unhandledrejection", {
     promise,
     reason,
@@ -10408,7 +10427,7 @@ Deno.core.setUnhandledPromiseRejectionHandler((promise, reason) => {
   return true;
 });
 
-Deno.core.setHandledPromiseRejectionHandler((promise, reason) => {
+__obscuraCore.setHandledPromiseRejectionHandler((promise, reason) => {
   const event = new PromiseRejectionEvent("rejectionhandled", { promise, reason });
   globalThis.dispatchEvent(event);
   if (typeof globalThis.onrejectionhandled === "function") {
@@ -11222,11 +11241,11 @@ function _resourceEntryFrom(record) {
   });
 }
 function _pullResourceTimings() {
-  if (typeof Deno === "undefined" || !Deno.core || !Deno.core.ops
-    || typeof Deno.core.ops.op_resource_timings !== "function") return;
+  if (!__obscuraCore.ops
+    || typeof __obscuraCore.ops.op_resource_timings !== "function") return;
   var records;
   try {
-    var raw = Deno.core.ops.op_resource_timings(_resourceTimingCursor);
+    var raw = __obscuraCore.ops.op_resource_timings(_resourceTimingCursor);
     if (!raw || raw === "[]") return;
     records = JSON.parse(raw);
   } catch (e) { return; }
@@ -11507,12 +11526,12 @@ globalThis.Crypto = class Crypto {
     if (arr.byteLength > 65536) {
       throw new DOMException("The requested length exceeds 65536 bytes", "QuotaExceededError");
     }
-    const bytes = Deno.core.ops.op_random_bytes(arr.byteLength);
+    const bytes = __obscuraCore.ops.op_random_bytes(arr.byteLength);
     new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength).set(bytes);
     return arr;
   }
   randomUUID() {
-    const b = Deno.core.ops.op_random_bytes(16);
+    const b = __obscuraCore.ops.op_random_bytes(16);
     b[6] = (b[6] & 0x0f) | 0x40; // version 4
     b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
     let s = "";
@@ -12001,8 +12020,8 @@ function _cssTopLevelComma(text) {
 function _cssSupportsDeclaration(name, value) {
   name = name.trim().toLowerCase();
   value = value.trim();
-  if (typeof Deno.core.ops.op_css_supports === "function") {
-    try { return !!Deno.core.ops.op_css_supports(name, value); }
+  if (typeof __obscuraCore.ops.op_css_supports === "function") {
+    try { return !!__obscuraCore.ops.op_css_supports(name, value); }
     catch (_) { return false; }
   }
   if (!value || _cssHasInvalidSupportsValueSyntax(value)) return false;
@@ -13562,7 +13581,7 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
   // An unspecified targetOrigin stays permissive (empty string); the receiver
   // enforces a specified one against its own origin in __obscura_deliverMessage.
   const to = (targetOrigin === undefined || targetOrigin === null) ? '' : String(targetOrigin);
-  Deno.core.ops.op_post_frame_message(
+  __obscuraCore.ops.op_post_frame_message(
     targetFrameId >>> 0, globalThis.__obscura_frameId >>> 0, _realmOrigin(), to, json);
 }
 
@@ -14197,7 +14216,7 @@ class _Canvas2D {
     this._h = valid ? requestedHeight : 0;
     this._buf = new Uint8ClampedArray(this._w * this._h * 4);
     this._resetDrawingState();
-    const register = Deno.core.ops.op_canvas_register_surface;
+    const register = __obscuraCore.ops.op_canvas_register_surface;
     if (typeof register === 'function') {
       // op2 accepts Uint8Array, while Canvas exposes Uint8ClampedArray. This
       // second view shares the exact backing store; no pixel copy is made.
@@ -14216,7 +14235,7 @@ class _Canvas2D {
     this._damageQueued = true;
     queueMicrotask(() => {
       this._damageQueued = false;
-      const damage = Deno.core.ops.op_canvas_paint_damage;
+      const damage = __obscuraCore.ops.op_canvas_paint_damage;
       if (typeof damage === 'function') damage(this.canvas._nid);
     });
   }
@@ -14949,10 +14968,10 @@ Element.prototype.attachShadow = function attachShadow(opts) {
   if (!globalThis.__obscura_shadowHostNames.has(_ln) && _ln.indexOf('-') === -1) {
     throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
   }
-  if (Deno.core.ops.op_shadow_root_info(this._nid)) {
+  if (__obscuraCore.ops.op_shadow_root_info(this._nid)) {
     throw new DOMException('Failed to execute attachShadow on Element: the element already hosts a shadow tree.', 'NotSupportedError');
   }
-  const rootNid = Deno.core.ops.op_shadow_attach(this._nid, _mode);
+  const rootNid = __obscuraCore.ops.op_shadow_attach(this._nid, _mode);
   if (rootNid < 0) {
     throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
   }
@@ -14971,7 +14990,7 @@ _markNative(Element.prototype.attachShadow);
 
 function _shadowRootForHost(host, includeClosed) {
   if (!host) return null;
-  const info = Deno.core.ops.op_shadow_root_info(host._nid);
+  const info = __obscuraCore.ops.op_shadow_root_info(host._nid);
   if (!info) return null;
   const parts = info.split('\0');
   if (!includeClosed && parts[1] !== 'open') return null;
@@ -15930,7 +15949,7 @@ if (!globalThis.crypto.subtle) {
           name !== "SHA-512/224" && name !== "SHA-512/256") {
         throw new DOMException("Unrecognized algorithm name", "NotSupportedError");
       }
-      return bufferOf(Deno.core.ops.op_subtle_digest(name, toBytes(data)));
+      return bufferOf(__obscuraCore.ops.op_subtle_digest(name, toBytes(data)));
     },
 
     async importKey(format, keyData, algorithm, extractable, keyUsages) {
@@ -15970,14 +15989,14 @@ if (!globalThis.crypto.subtle) {
       if (alg.name === "HMAC") {
         const hash = normalizeHash(alg.hash);
         const len = alg.length ? Math.ceil(alg.length / 8) : hashBlockSize(hash);
-        const bytes = Deno.core.ops.op_random_bytes(len);
+        const bytes = __obscuraCore.ops.op_random_bytes(len);
         return makeKey("secret", extractable, { name: "HMAC", hash: { name: hash }, length: len * 8 }, keyUsages, bytes);
       }
       if (alg.name === "AES-CTR" || alg.name === "AES-CBC" || alg.name === "AES-GCM" || alg.name === "AES-KW") {
         if (alg.length !== 128 && alg.length !== 192 && alg.length !== 256) {
           throw new DOMException("AES key length must be 128, 192, or 256 bits", "OperationError");
         }
-        const bytes = Deno.core.ops.op_random_bytes(alg.length / 8);
+        const bytes = __obscuraCore.ops.op_random_bytes(alg.length / 8);
         return makeKey("secret", extractable, { name: alg.name, length: alg.length }, keyUsages, bytes);
       }
       throw new DOMException("generateKey does not support " + alg.name, "NotSupportedError");
@@ -15988,7 +16007,7 @@ if (!globalThis.crypto.subtle) {
       const bytes = keyBytes(key);
       if (alg.name === "HMAC") {
         const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
-        return bufferOf(runOp(() => Deno.core.ops.op_subtle_hmac(hash, bytes, toBytes(data))));
+        return bufferOf(runOp(() => __obscuraCore.ops.op_subtle_hmac(hash, bytes, toBytes(data))));
       }
       throw new DOMException("sign does not support " + alg.name, "NotSupportedError");
     },
@@ -15998,7 +16017,7 @@ if (!globalThis.crypto.subtle) {
       const bytes = keyBytes(key);
       if (alg.name === "HMAC") {
         const hash = key.algorithm && key.algorithm.hash ? key.algorithm.hash.name : normalizeHash(alg.hash);
-        const mac = runOp(() => Deno.core.ops.op_subtle_hmac(hash, bytes, toBytes(data)));
+        const mac = runOp(() => __obscuraCore.ops.op_subtle_hmac(hash, bytes, toBytes(data)));
         const sig = toBytes(signature);
         if (sig.length !== mac.length) return false;
         let diff = 0;
@@ -16019,13 +16038,13 @@ if (!globalThis.crypto.subtle) {
         const hash = normalizeHash(alg.hash);
         const salt = toBytes(alg.salt);
         const iterations = alg.iterations >>> 0;
-        return bufferOf(runOp(() => Deno.core.ops.op_subtle_pbkdf2(hash, bytes, salt, iterations, lenBytes)));
+        return bufferOf(runOp(() => __obscuraCore.ops.op_subtle_pbkdf2(hash, bytes, salt, iterations, lenBytes)));
       }
       if (alg.name === "HKDF") {
         const hash = normalizeHash(alg.hash);
         const salt = alg.salt != null ? toBytes(alg.salt) : new Uint8Array(0);
         const info = alg.info != null ? toBytes(alg.info) : new Uint8Array(0);
-        return bufferOf(runOp(() => Deno.core.ops.op_subtle_hkdf(hash, bytes, salt, info, lenBytes)));
+        return bufferOf(runOp(() => __obscuraCore.ops.op_subtle_hkdf(hash, bytes, salt, info, lenBytes)));
       }
       throw new DOMException("deriveBits does not support " + alg.name, "NotSupportedError");
     },
@@ -16075,16 +16094,16 @@ if (!globalThis.crypto.subtle) {
       if (tagLength !== 128) {
         throw new DOMException("Only a 128-bit AES-GCM tag length is supported", "NotSupportedError");
       }
-      return bufferOf(runOp(() => Deno.core.ops.op_subtle_aes_gcm(encrypt, bytes, iv, aad, input)));
+      return bufferOf(runOp(() => __obscuraCore.ops.op_subtle_aes_gcm(encrypt, bytes, iv, aad, input)));
     }
     if (alg.name === "AES-CBC") {
       const iv = toBytes(alg.iv);
-      return bufferOf(runOp(() => Deno.core.ops.op_subtle_aes_cbc(encrypt, bytes, iv, input)));
+      return bufferOf(runOp(() => __obscuraCore.ops.op_subtle_aes_cbc(encrypt, bytes, iv, input)));
     }
     if (alg.name === "AES-CTR") {
       const counter = toBytes(alg.counter);
       const length = alg.length >>> 0;
-      return bufferOf(runOp(() => Deno.core.ops.op_subtle_aes_ctr(bytes, counter, length, input)));
+      return bufferOf(runOp(() => __obscuraCore.ops.op_subtle_aes_ctr(bytes, counter, length, input)));
     }
     throw new DOMException((encrypt ? "encrypt" : "decrypt") + " does not support " + alg.name, "NotSupportedError");
   }
@@ -16539,8 +16558,8 @@ if (typeof FontFace === 'undefined') {
   // decide whether to wait before measuring text, so that false negative makes a
   // page loop or mis-measure. The op is the renderer's own answer.
   const _fontSourceLoaded = source => {
-    if (typeof Deno === 'undefined' || !Deno.core || !Deno.core.ops
-      || typeof Deno.core.ops.op_font_resource_loaded !== 'function') return false;
+    if (!__obscuraCore.ops
+      || typeof __obscuraCore.ops.op_font_resource_loaded !== 'function') return false;
     const pattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/g;
     let match;
     while ((match = pattern.exec(source))) {
@@ -16555,7 +16574,7 @@ if (typeof FontFace === 'undefined') {
       // document base, and the host discovered these from the same stylesheets.
       try { absolute = new URL(raw, globalThis.document ? document.baseURI : undefined).href; }
       catch (e) { continue; }
-      try { if (Deno.core.ops.op_font_resource_loaded(absolute)) return true; } catch (e) {}
+      try { if (__obscuraCore.ops.op_font_resource_loaded(absolute)) return true; } catch (e) {}
     }
     return false;
   };
@@ -16769,7 +16788,7 @@ if (typeof FontFace === 'undefined') {
       }
     }
     _syncNative() {
-      if (!this._ownerDocument || typeof Deno.core.ops.op_set_dynamic_fonts !== 'function') return;
+      if (!this._ownerDocument || typeof __obscuraCore.ops.op_set_dynamic_fonts !== 'function') return;
       const registrations = [];
       for (const face of this._faces) registrations.push({
         ...(face._cssConnected ? { skip: true } : {}),
@@ -16779,7 +16798,7 @@ if (typeof FontFace === 'undefined') {
         weight: face.weight,
         unicodeRange: face.unicodeRange
       });
-      Deno.core.ops.op_set_dynamic_fonts(JSON.stringify(registrations.filter(face => !face.skip)));
+      __obscuraCore.ops.op_set_dynamic_fonts(JSON.stringify(registrations.filter(face => !face.skip)));
       _scheduleResizeRenderCheckpoint();
     }
     _faceChanged(face) {
