@@ -144,6 +144,11 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     {
         ArgumentNullException.ThrowIfNull(ops);
         var engine = ops.Engine;
+        // The realm's own Uint8Array constructor, taken now: the table is bound before
+        // bootstrap.js or any page script runs. DEVIATION from the port's earlier lookup of
+        // the global on every call, which ran whatever the page had put there by then
+        // inside the op (SECURITY.md L10).
+        var uint8Array = (ScriptObject)engine.Evaluate("Uint8Array");
 
         // --- DOM -----------------------------------------------------------
         Bind(ops, "op_dom", (Func<object?, object?, object?, object?, string>)(
@@ -222,27 +227,27 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
 
         // --- WebCrypto -----------------------------------------------------
         Bind(ops, "op_subtle_digest", (Func<object?, object?, object>)(
-            (algorithm, data) => Uint8Array(engine, CryptoOps.Digest(S(algorithm), Bytes(data)))));
+            (algorithm, data) => Uint8Array(uint8Array, CryptoOps.Digest(S(algorithm), Bytes(data)))));
         Bind(ops, "op_subtle_hmac", (Func<object?, object?, object?, object>)(
-            (hash, key, data) => Uint8Array(engine, CryptoOps.Hmac(S(hash), Bytes(key), Bytes(data)))));
+            (hash, key, data) => Uint8Array(uint8Array, CryptoOps.Hmac(S(hash), Bytes(key), Bytes(data)))));
         Bind(ops, "op_subtle_aes_gcm", (Func<object?, object?, object?, object?, object?, object>)(
             (encrypt, key, iv, aad, data) => Uint8Array(
-                engine, CryptoOps.AesGcm(B(encrypt), Bytes(key), Bytes(iv), Bytes(aad), Bytes(data)))));
+                uint8Array, CryptoOps.AesGcm(B(encrypt), Bytes(key), Bytes(iv), Bytes(aad), Bytes(data)))));
         Bind(ops, "op_subtle_aes_cbc", (Func<object?, object?, object?, object?, object>)(
             (encrypt, key, iv, data) => Uint8Array(
-                engine, CryptoOps.AesCbc(B(encrypt), Bytes(key), Bytes(iv), Bytes(data)))));
+                uint8Array, CryptoOps.AesCbc(B(encrypt), Bytes(key), Bytes(iv), Bytes(data)))));
         Bind(ops, "op_subtle_aes_ctr", (Func<object?, object?, object?, object?, object>)(
             (key, counter, counterLength, data) => Uint8Array(
-                engine, CryptoOps.AesCtr(Bytes(key), Bytes(counter), U32(counterLength), Bytes(data)))));
+                uint8Array, CryptoOps.AesCtr(Bytes(key), Bytes(counter), U32(counterLength), Bytes(data)))));
         Bind(ops, "op_subtle_pbkdf2", (Func<object?, object?, object?, object?, object?, object>)(
             (hash, password, salt, iterations, length) => Uint8Array(
-                engine,
+                uint8Array,
                 CryptoOps.Pbkdf2(S(hash), Bytes(password), Bytes(salt), U32(iterations), U32(length)))));
         Bind(ops, "op_subtle_hkdf", (Func<object?, object?, object?, object?, object?, object>)(
             (hash, ikm, salt, info, length) => Uint8Array(
-                engine, CryptoOps.Hkdf(S(hash), Bytes(ikm), Bytes(salt), Bytes(info), U32(length)))));
+                uint8Array, CryptoOps.Hkdf(S(hash), Bytes(ikm), Bytes(salt), Bytes(info), U32(length)))));
         Bind(ops, "op_random_bytes", (Func<object?, object>)(
-            length => Uint8Array(engine, CryptoOps.RandomBytes(U32(length)))));
+            length => Uint8Array(uint8Array, CryptoOps.RandomBytes(U32(length)))));
 
         // --- Render --------------------------------------------------------
         Bind(ops, "op_begin_render_task", (Action)(() => RenderOps.OpBeginRenderTask(Page)));
@@ -587,10 +592,9 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             ? new DocumentInfo("<dynamic-script>")
             : Uri.TryCreate(url, UriKind.Absolute, out var uri) ? new DocumentInfo(uri) : new DocumentInfo(url);
 
-    private static object Uint8Array(ScriptEngine engine, byte[] bytes)
+    private static object Uint8Array(ScriptObject constructor, byte[] bytes)
     {
-        var array = (ITypedArray<byte>)((ScriptObject)engine.Evaluate("Uint8Array"))
-            .Invoke(true, (double)bytes.Length);
+        var array = (ITypedArray<byte>)constructor.Invoke(true, (double)bytes.Length);
         if (bytes.Length != 0)
         {
             array.Write(bytes, 0, (ulong)bytes.Length, 0);

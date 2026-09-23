@@ -408,4 +408,30 @@ public sealed partial class RuntimeTests
             """,
             result);
     }
+
+    /// <summary>
+    /// L10: the crypto ops build their result with the realm's own <c>Uint8Array</c>, not
+    /// with whatever page script has put on the global by the time the op runs.
+    /// </summary>
+    [Fact]
+    public void CryptoOpsDoNotCallThePagesUint8Array()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var result = fixture.Runtime.Evaluate(
+            """
+            (() => {
+                const Real = Uint8Array;
+                let called = 0;
+                globalThis.Uint8Array = function (...args) { called++; return new Real(...args); };
+                try {
+                    const bytes = __obscura_test_ops.op_random_bytes(8);
+                    return { called, real: bytes instanceof Real, length: bytes.length };
+                } finally {
+                    globalThis.Uint8Array = Real;
+                }
+            })()
+            """);
+
+        AssertJsonEquals("""{ "called": 0, "real": true, "length": 8 }""", result);
+    }
 }
