@@ -31,9 +31,10 @@ public sealed class DomQuotaExceededException(long requested, long used, long bu
 /// script sees a <c>QuotaExceededError</c> DOMException, the parser stops adding content.
 /// </para>
 /// <para>
-/// A detached node stays charged: the arena never reclaims it (the JS side may still hold its
-/// wrapper), so it is still memory the page holds. Only <see cref="Remove"/>, which frees the
-/// slot, gives the bytes back. Host code that writes node data directly (not through
+/// A detached node stays charged while anything may still reach it (the JS side may hold its
+/// wrapper), because it is still memory the page holds. Freeing the slot gives the bytes
+/// back: <see cref="Remove"/>, or the collector in DomTree.Gc.cs once nothing holds the
+/// node's component; an op refused by the budget collects and retries once. Host code that writes node data directly (not through
 /// <see cref="NewNode"/>, <see cref="AppendText"/> or <see cref="ChargeGrowth"/>) is not
 /// counted until the node is freed; the count is clamped at zero.
 /// </para>
