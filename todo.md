@@ -287,7 +287,7 @@ Found during the review, not from upstream:
       reports its real width (seen writing the font-directory CDP test)
 - [ ] Render loads on CDP pages other than the first produce no Network events:
       `SyncLivePageNetworkEvents` forwards only the first live page
-- [ ] Timing-sensitive tests under heavy host load: the IntersectionObserver/ResizeObserver
+- [ ] Timing-sensitive tests under heavy host load (the two worst IntersectionObserver ones now wait for the event instead of a fixed window): the IntersectionObserver/ResizeObserver
       group in `RuntimeTests` (25/60 ms timer windows) and
       `ConcurrentConnectionsHeavyPageDoNotAbortV8`; both pass alone and fail on the
       unmodified base under the same load. `ForwardWaapiSampleUpdatesRetainedStyleAndPaint`
