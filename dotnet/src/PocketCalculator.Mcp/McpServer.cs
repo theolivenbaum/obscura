@@ -146,6 +146,12 @@ public static class McpServer
 
         var args = parameters.Get("arguments");
 
+        // Every tool call runs under a budget on the active page's isolate, as each CDP
+        // command does. DEVIATION from crates/obscura-mcp, which bounds none: a
+        // browser_evaluate of `while (true) {}`, or one pathological layout, held the
+        // server forever (SECURITY.md H8).
+        using var budget = ToolCallBudget.Start(name, state);
+
         // The render tools answer with binary MCP content rather than text, so they
         // are resolved before the text table.
         if (name is "browser_screenshot" or "browser_pdf")
@@ -155,17 +161,31 @@ public static class McpServer
                 var content = name == "browser_screenshot"
                     ? await Tools.ScreenshotAsync(args, state).ConfigureAwait(false)
                     : await Tools.PdfAsync(args, state).ConfigureAwait(false);
+                if (budget.Fired)
+                {
+                    return RpcResponse.Ok(id, ErrorContent(budget.Message));
+                }
+
                 return RpcResponse.Ok(id, new JsonObject { ["content"] = new JsonArray(content) });
             }
             catch (ToolException error)
             {
-                return RpcResponse.Ok(id, ErrorContent(error.Message));
+                return RpcResponse.Ok(id, ErrorContent(budget.Fired ? budget.Message : error.Message));
+            }
+            catch (Exception) when (budget.Fired)
+            {
+                return RpcResponse.Ok(id, ErrorContent(budget.Message));
             }
         }
 
         try
         {
             var content = await CallTextToolAsync(name, args, state).ConfigureAwait(false);
+            if (budget.Fired)
+            {
+                return RpcResponse.Ok(id, ErrorContent(budget.Message));
+            }
+
             return RpcResponse.Ok(id, new JsonObject
             {
                 ["content"] = new JsonArray(new JsonObject
@@ -177,7 +197,86 @@ public static class McpServer
         }
         catch (ToolException error)
         {
-            return RpcResponse.Ok(id, ErrorContent(error.Message));
+            return RpcResponse.Ok(id, ErrorContent(budget.Fired ? budget.Message : error.Message));
+        }
+        catch (Exception) when (budget.Fired)
+        {
+            return RpcResponse.Ok(id, ErrorContent(budget.Message));
+        }
+    }
+
+    /// <summary>
+    /// The watchdog around one tool call: armed on the active page's isolate, it
+    /// interrupts script and cancels C# work in ops and captures when the budget passes.
+    /// <c>POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS</c> sets it (0 disables); the default
+    /// matches the CDP command budget.
+    /// </summary>
+    internal sealed class ToolCallBudget : IDisposable
+    {
+        private readonly PocketCalculator.Js.Runtime.PocketCalculatorJsRuntime? _runtime;
+        private readonly PocketCalculator.Js.Runtime.WatchdogToken? _token;
+        private readonly string _name;
+        private readonly ulong _budgetMs;
+        private bool _disposed;
+
+        private ToolCallBudget(
+            string name,
+            ulong budgetMs,
+            PocketCalculator.Js.Runtime.PocketCalculatorJsRuntime? runtime)
+        {
+            _name = name;
+            _budgetMs = budgetMs;
+            _runtime = runtime;
+            _token = runtime?.ArmWatchdog(TimeSpan.FromMilliseconds(budgetMs));
+        }
+
+        internal static ToolCallBudget Start(string name, BrowserState state)
+        {
+            ulong budgetMs = BudgetMs();
+            var runtime = budgetMs != 0 && state.ActiveTab is { } tab && state.Tabs.TryGetValue(tab, out var page)
+                ? page.Js
+                : null;
+            return new ToolCallBudget(name, budgetMs, runtime);
+        }
+
+        /// <summary>Whether the budget ran out during the call.</summary>
+        internal bool Fired => _token?.HasFired ?? false;
+
+        internal string Message => $"{_name} exceeded its {_budgetMs}ms time budget";
+
+        /// <summary>A per-test budget, so a test need not set the process environment.</summary>
+        internal static readonly AsyncLocal<ulong?> BudgetOverrideMs = new();
+
+        internal static ulong BudgetMs() =>
+            BudgetOverrideMs.Value ?? (ulong.TryParse(
+                Environment.GetEnvironmentVariable("POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS"),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsed)
+                ? parsed
+                : 60_000);
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            if (_token is not null && _runtime is not null)
+            {
+                // Clears the interrupt when it fired, so the page is usable for the
+                // next call. A runtime the call replaced (a navigation) is disposed and
+                // has nothing to clear.
+                try
+                {
+                    _runtime.DisarmWatchdog(_token);
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
         }
     }
 
