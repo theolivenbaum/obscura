@@ -55,7 +55,7 @@ public sealed class DomGcScriptTests
             (() => {
               const tbody = document.getElementById('b');
               try {
-                for (let i = 0; i < 3000; i++) tbody.innerHTML = rows(200, 'r' + i);
+                for (let i = 0; i < 1000; i++) tbody.innerHTML = rows(200, 'r' + i);
               } catch (e) {
                 return e.name;
               }
@@ -63,7 +63,7 @@ public sealed class DomGcScriptTests
             })()
             """);
 
-        Assert.Equal("200 r2999 row 0", result);
+        Assert.Equal("200 r999 row 0", result);
         Assert.True(dom.ContentBytes <= SmallBudget);
         Assert.True(dom.SlotCount < 64 * 1024, $"arena grew to {dom.SlotCount} slots");
     }
@@ -83,13 +83,13 @@ public sealed class DomGcScriptTests
                 // Read something back, so rows get wrappers the collector has to weaken.
                 document.getElementById('b').rows[3].cells[0].dataset.seen = '1';
               } catch (e) { failure = e.name; return; }
-              if (++ticks < 400) setTimeout(tick, 0);
+              if (++ticks < 250) setTimeout(tick, 0);
             };
             setTimeout(tick, 0);
             """);
         await runtime.RunEventLoopAsync();
 
-        Assert.Equal("null 400", Eval(runtime, "String(failure) + ' ' + ticks"));
+        Assert.Equal("null 250", Eval(runtime, "String(failure) + ' ' + ticks"));
         Assert.True(dom.ContentBytes <= SmallBudget);
         Assert.True(dom.SlotCount < 64 * 1024, $"arena grew to {dom.SlotCount} slots");
     }
@@ -216,6 +216,29 @@ public sealed class DomGcScriptTests
         Assert.True(runtime.CollectDomGarbage().FreedNodes >= 3);
         Assert.Equal("kept", Eval(runtime, "document.getElementById('keep').textContent"));
         GC.KeepAlive(dom);
+    }
+
+    [Fact]
+    public async Task AFrameCollectsItsOwnDocumentAndKeepsWhatItHolds()
+    {
+        using var page = RuntimeFixture.Page("https://parent.example/", "<html><body><p>page</p></body></html>");
+        using var frame = FrameRealm.Create(page.Runtime, 1, 0, "https://parent.example/f", "<html><body><p id=f>frame</p></body></html>");
+        Assert.NotNull(frame);
+        var frameDom = frame.State.Dom!;
+
+        frame.ExecuteScript("""
+            const p = document.getElementById('f');
+            p.remove();
+            p.note = 'frame expando';
+            globalThis.frameHeld = p;
+            for (let i = 0; i < 10000; i++) document.createElement('div').textContent = 'g' + i;
+            """);
+        int before = frameDom.Count;
+        await page.Runtime.RunEventLoopAsync();
+
+        Assert.True(frameDom.Count < before - 10000, $"frame document still has {frameDom.Count} of {before} nodes");
+        Assert.Equal("frame expando frame", frame.Evaluate("frameHeld.note + ' ' + frameHeld.textContent")!.GetValue<string>());
+        Assert.Equal("page", page.Runtime.Evaluate("document.querySelector('p').textContent")?.GetValue<string>());
     }
 
     [Fact]

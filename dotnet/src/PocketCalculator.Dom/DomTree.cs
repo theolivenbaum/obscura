@@ -853,7 +853,6 @@ public sealed partial class DomTree
         // the entries do not outlive the node.
         ForgetDirtyFormState(id);
         _externalStylesheets?.Remove(id);
-        _pins?.ForgetNode(id);
     }
 
     /// <summary>

@@ -28,7 +28,7 @@ namespace PocketCalculator.Js.Runtime;
 internal sealed class RealmDomGc(
     PocketCalculatorJsRuntime runtime,
     PocketCalculatorState state,
-    Func<IReadOnlyList<ScriptObject>> realms) : IDomGcParticipant
+    Func<IReadOnlyList<ScriptObject>?> realms) : IDomGcParticipant
 {
     public PocketCalculatorState State => state;
 
@@ -41,6 +41,31 @@ internal sealed class RealmDomGc(
         }
 
         var helpers = realms();
+        if (helpers is null)
+        {
+            // A realm over this document cannot be asked yet (bootstrap has not handed
+            // over its helpers), so nothing it may hold can be told apart from garbage.
+            collection.KeepAll();
+            return;
+        }
+
+        try
+        {
+            MarkRealmRoots(collection, helpers);
+        }
+        catch (ScriptInterruptedException)
+        {
+            throw;
+        }
+        catch (ScriptEngineException)
+        {
+            // A realm that could not answer may hold anything.
+            collection.KeepAll();
+        }
+    }
+
+    private void MarkRealmRoots(DomCollection collection, IReadOnlyList<ScriptObject> helpers)
+    {
         if (collection.InOperation)
         {
             foreach (var realm in helpers)
@@ -86,6 +111,8 @@ internal sealed class RealmDomGc(
 
                 if (!any)
                 {
+                    // Drops the key list the realm kept for _gcWeaken.
+                    realm.InvokeMethod("gcWeaken", string.Empty);
                     continue;
                 }
 
@@ -114,8 +141,8 @@ internal sealed class RealmDomGc(
                 }
                 catch (ScriptEngineException)
                 {
-                    // A realm that cannot answer keeps nothing of its own; its wrappers of
-                    // these components are already gone from its cache.
+                    // It may still hold any of them: keep everything this time.
+                    collection.KeepAll();
                 }
             }
         }
@@ -133,6 +160,7 @@ internal sealed class RealmDomGc(
             }
             catch (ScriptEngineException)
             {
+                // Only the realm's form-state entries for freed nodes stay behind.
             }
         }
     }
@@ -242,7 +270,7 @@ public sealed partial class PocketCalculatorJsRuntime
 
     internal static RealmDomGc AttachFrameDomGc(PocketCalculatorJsRuntime runtime, PocketCalculatorState frame, Func<ScriptObject?> helpers)
     {
-        var gc = new RealmDomGc(runtime, frame, () => helpers() is { } h ? [h] : []);
+        var gc = new RealmDomGc(runtime, frame, () => helpers() is { } h ? [h] : null);
         if (frame.Dom is { } dom)
         {
             dom.AddGcParticipant(gc);
@@ -252,20 +280,22 @@ public sealed partial class PocketCalculatorJsRuntime
         return gc;
     }
 
-    private IReadOnlyList<ScriptObject> PageRealmHelpers()
+    private IReadOnlyList<ScriptObject>? PageRealmHelpers()
     {
-        var result = new List<ScriptObject>(1 + _worlds.Count);
-        if (_shim.HostHelpers is { } page)
+        if (_shim.HostHelpers is not { } page)
         {
-            result.Add(page);
+            return null;
         }
 
+        var result = new List<ScriptObject>(1 + _worlds.Count) { page };
         foreach (var world in _worlds.Values)
         {
-            if (world.HostHelpers is { } helpers)
+            if (world.HostHelpers is not { } helpers)
             {
-                result.Add(helpers);
+                return null;
             }
+
+            result.Add(helpers);
         }
 
         return result;

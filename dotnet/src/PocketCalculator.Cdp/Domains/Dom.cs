@@ -72,7 +72,10 @@ public static class Dom
                 JsonNode? root = null;
                 bool hasDom = page.WithDom(dom =>
                 {
-                    root = SerializeNode(dom, dom.Document, unchecked((uint)depth), 0);
+                    // Chromium's DOM agent drops its node bindings when the document is
+                    // requested again; so do the pins that stand for them.
+                    dom.UnpinAll(ctx);
+                    root = SerializeNode(dom, dom.Document, unchecked((uint)depth), 0, ctx);
                     return true;
                 });
                 if (!hasDom)
@@ -90,7 +93,7 @@ public static class Dom
                     ?? throw new DomainError("selector required");
                 ulong result = page.WithDom(dom =>
                     dom.TryQuerySelector(selector, out NodeId? found, out _) && found is { } id
-                        ? (ulong)id.Raw
+                        ? Pinned(dom, ctx, id)
                         : 0UL);
                 return DomainResult.Ok(new JsonObject { ["nodeId"] = result });
             }
@@ -102,7 +105,15 @@ public static class Dom
                     ?? throw new DomainError("selector required");
                 var ids = new JsonArray();
                 List<NodeId>? found = page.WithDom(dom =>
-                    dom.TryQuerySelectorAll(selector, out List<NodeId> results, out _) ? results : []);
+                {
+                    List<NodeId> results = dom.TryQuerySelectorAll(selector, out List<NodeId> all, out _) ? all : [];
+                    foreach (NodeId id in results)
+                    {
+                        Pinned(dom, ctx, id);
+                    }
+
+                    return results;
+                });
                 foreach (NodeId id in found ?? [])
                 {
                     ids.Add((ulong)id.Raw);
@@ -149,7 +160,7 @@ public static class Dom
                 JsonNode? node = null;
                 page.WithDom(dom =>
                 {
-                    node = SerializeNode(dom, NodeId.New((uint)nodeId), unchecked((uint)depth), 0);
+                    node = SerializeNode(dom, NodeId.New((uint)nodeId), unchecked((uint)depth), 0, ctx);
                     return true;
                 });
                 return DomainResult.Ok(new JsonObject { ["node"] = node });
@@ -243,6 +254,7 @@ public static class Dom
                 }
 
                 ulong nodeId = ResolveNodeId(page, parameters);
+                page.WithDom(dom => Pinned(dom, ctx, NodeId.New((uint)nodeId)));
                 return DomainResult.Ok(new JsonObject { ["nodeId"] = nodeId });
             }
 
@@ -568,12 +580,17 @@ public static class Dom
     /// Build the CDP Node object for a single node (without its <c>children</c> array),
     /// returning it together with that node's child ids. <c>null</c> for a missing node.
     /// </summary>
-    private static (JsonObject Value, List<NodeId> Children)? NodeValue(DomTree dom, NodeId nodeId)
+    private static (JsonObject Value, List<NodeId> Children)? NodeValue(DomTree dom, NodeId nodeId, object? pinOwner)
     {
         Node? node = dom.GetNode(nodeId);
         if (node is null)
         {
             return null;
+        }
+
+        if (pinOwner is not null)
+        {
+            dom.Pin(pinOwner, nodeId);
         }
 
         List<NodeId> childrenIds = dom.Children(nodeId);
@@ -644,6 +661,17 @@ public static class Dom
     }
 
     /// <summary>
+    /// Pins a node id handed to the client, as Chromium's DOM agent binds every node it
+    /// pushes to the frontend: the DOM collector keeps it until the next
+    /// <c>DOM.getDocument</c> (port addition, see DomTree.Gc.cs).
+    /// </summary>
+    private static ulong Pinned(DomTree dom, CdpContext ctx, NodeId id)
+    {
+        dom.Pin(ctx, id);
+        return id.Raw;
+    }
+
+    /// <summary>
     /// Serialize a node and its descendants into the CDP Node tree, iteratively.
     /// </summary>
     /// <remarks>
@@ -653,13 +681,13 @@ public static class Dom
     /// the stack when it is later serialized. An explicit heap worklist keeps the builder
     /// itself off the call stack.
     /// </remarks>
-    internal static JsonNode? SerializeNode(DomTree dom, NodeId nodeId, uint maxDepth, uint currentDepth)
+    internal static JsonNode? SerializeNode(DomTree dom, NodeId nodeId, uint maxDepth, uint currentDepth, object? pinOwner = null)
     {
         uint clamped = Math.Min(
             maxDepth,
             currentDepth > uint.MaxValue - MaxSerializeDepth ? uint.MaxValue : currentDepth + MaxSerializeDepth);
 
-        if (NodeValue(dom, nodeId) is not { } root)
+        if (NodeValue(dom, nodeId, pinOwner) is not { } root)
         {
             return null;
         }
@@ -690,7 +718,7 @@ public static class Dom
             if (nextChild is { } childId)
             {
                 uint childDepth = stack[^1].Depth + 1;
-                if (NodeValue(dom, childId) is { } child)
+                if (NodeValue(dom, childId, pinOwner) is { } child)
                 {
                     stack.Add(new Frame
                     {

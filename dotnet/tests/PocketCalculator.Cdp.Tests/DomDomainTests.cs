@@ -60,6 +60,52 @@ public sealed class DomDomainTests
             active.AsString());
     }
 
+    /// <summary>
+    /// A node id the DOM domain handed out stays valid after its node is detached and
+    /// the DOM collector runs, as Chromium's DOM agent keeps the nodes it bound; after
+    /// DOM.getDocument drops the bindings the id stops resolving rather than naming
+    /// whatever node reuses the slot (DomTree.Gc.cs).
+    /// </summary>
+    [Fact]
+    public async Task HandedOutNodeIdsSurviveTheDomCollector()
+    {
+        var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
+        string pageId = ctx.CreatePage();
+        string session = $"{pageId}-session";
+        ctx.Sessions[session] = pageId;
+
+        CdpDomainFixtures.Unwrap(await PageDomain.HandleAsync(
+            "navigate",
+            CdpDomainFixtures.Json("""{"url":"data:text/html,<div id=x><b>held</b></div><p>other</p>","waitUntil":"load"}"""),
+            ctx,
+            session));
+
+        JsonNode qs = CdpDomainFixtures.Unwrap(await DomDomain.HandleAsync(
+            "querySelector", new JsonObject { ["selector"] = "#x" }, ctx, session));
+        ulong nid = qs["nodeId"].AsU64()!.Value;
+
+        var page = ctx.GetSessionPageMut(session)!;
+        page.Evaluate("(function(){ document.getElementById('x').remove(); for (var i = 0; i < 500; i++) document.createElement('i'); return 1; })()");
+        var first = page.Js!.CollectDomGarbage();
+        Assert.True(first.FreedNodes >= 500, $"freed {first.FreedNodes}");
+
+        JsonNode outer = CdpDomainFixtures.Unwrap(await DomDomain.HandleAsync(
+            "getOuterHTML", new JsonObject { ["nodeId"] = nid }, ctx, session));
+        Assert.Equal("<div id=\"x\"><b>held</b></div>", outer["outerHTML"].AsString());
+        JsonNode described = CdpDomainFixtures.Unwrap(await DomDomain.HandleAsync(
+            "describeNode", new JsonObject { ["backendNodeId"] = nid, ["depth"] = 1 }, ctx, session));
+        Assert.Equal("DIV", described["node"]?["nodeName"].AsString());
+
+        // getDocument rebinds: the detached node is no longer held, and goes.
+        CdpDomainFixtures.Unwrap(await DomDomain.HandleAsync("getDocument", new JsonObject(), ctx, session));
+        Assert.True(page.Js!.CollectDomGarbage().FreedNodes >= 3);
+        page.Evaluate("(function(){ for (var i = 0; i < 50; i++) document.body.appendChild(document.createElement('span')); return 1; })()");
+        JsonNode gone = CdpDomainFixtures.Unwrap(await DomDomain.HandleAsync(
+            "describeNode", new JsonObject { ["backendNodeId"] = nid }, ctx, session));
+        Assert.Null(gone["node"]);
+    }
+
     [Fact]
     public async Task ScrollIntoViewIfNeededResolvesAllNodeIdentifiers()
     {

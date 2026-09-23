@@ -87,6 +87,12 @@ public sealed class DomCollection
         }
     }
 
+    /// <summary>
+    /// Keep everything: for a participant that cannot tell what it holds (a realm still
+    /// bootstrapping, say). Conservative by construction.
+    /// </summary>
+    public void KeepAll() => CandidateCount = 0;
+
     /// <summary>Keep a component <see cref="ComponentOf"/> returned.</summary>
     public void KeepComponent(int component)
     {
@@ -101,7 +107,7 @@ public sealed class DomCollection
         if (!_live[root])
         {
             _live[root] = true;
-            CandidateCount--;
+            CandidateCount = Math.Max(0, CandidateCount - 1);
         }
     }
 
@@ -247,6 +253,19 @@ public sealed partial class DomTree
         if (Slot(id) is not null)
         {
             (_pins ??= new DomPins()).Add(owner, id);
+        }
+    }
+
+    /// <summary>
+    /// Keep <paramref name="id"/> alive for as long as <paramref name="owner"/> is: a host
+    /// handle (the library's <c>Element</c>) that has no dispose to unpin it.
+    /// </summary>
+    public void PinWhileAlive(object owner, NodeId id)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        if (Slot(id) is not null)
+        {
+            (_pins ??= new DomPins()).AddWeak(owner, id);
         }
     }
 
@@ -471,6 +490,9 @@ public sealed partial class DomTree
 internal sealed class DomPins
 {
     private readonly Dictionary<object, HashSet<NodeId>> _byOwner = new(ReferenceEqualityComparer.Instance);
+    private readonly List<(WeakReference<object> Owner, NodeId Id)> _weak = [];
+
+    public void AddWeak(object owner, NodeId id) => _weak.Add((new WeakReference<object>(owner), id));
 
     public void Add(object owner, NodeId id)
     {
@@ -485,16 +507,14 @@ internal sealed class DomPins
 
     public void Clear(object owner) => _byOwner.Remove(owner);
 
-    public void ForgetNode(NodeId id)
-    {
-        foreach (var set in _byOwner.Values)
-        {
-            set.Remove(id);
-        }
-    }
-
     public void MarkRoots(DomCollection collection)
     {
+        _weak.RemoveAll(static pin => !pin.Owner.TryGetTarget(out _));
+        foreach (var (_, id) in _weak)
+        {
+            collection.Keep(id);
+        }
+
         foreach (var set in _byOwner.Values)
         {
             foreach (var id in set)

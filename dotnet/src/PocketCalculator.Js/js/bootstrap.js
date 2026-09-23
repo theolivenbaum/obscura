@@ -6741,6 +6741,8 @@ function _gcWeaken(components) {
   _gcKeys = null;
   const comps = String(components || "").split(",");
   const pending = new Map();
+  // Published first, so _gcSurvivors can put back what a failure part-way took out.
+  _gcPending = pending;
   const n = Math.min(keys.length, comps.length);
   for (let i = 0; i < n; i++) {
     const comp = comps[i];
@@ -6766,7 +6768,6 @@ function _gcWeaken(components) {
     _cache.delete(nid);
   }
   for (const entry of pending.values()) entry.keeper = null;
-  _gcPending = pending;
   return pending.size;
 }
 // Puts back every component some wrapper of which survived V8's collection, and answers
