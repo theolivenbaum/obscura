@@ -30,7 +30,7 @@ internal sealed class RgbImage
 
     internal static RgbImage FromPixel(uint width, uint height, (byte R, byte G, byte B) color)
     {
-        byte[] pixels = new byte[(int)(width * height * 3)];
+        byte[] pixels = new byte[BufferLength(width, height, 3)];
         for (int i = 0; i < pixels.Length; i += 3)
         {
             pixels[i] = color.R;
@@ -45,7 +45,7 @@ internal sealed class RgbImage
         uint height,
         Func<uint, uint, (byte R, byte G, byte B)> source)
     {
-        byte[] pixels = new byte[(int)(width * height * 3)];
+        byte[] pixels = new byte[BufferLength(width, height, 3)];
         int offset = 0;
         for (uint y = 0; y < height; y++)
         {
@@ -61,19 +61,54 @@ internal sealed class RgbImage
         return new RgbImage(width, height, pixels);
     }
 
+    /// <summary>The most pixels <see cref="Decode"/> accepts: four captures' worth.</summary>
+    internal const ulong MaxDecodePixels = 4 * PocketCalculator.Render.CaptureLimits.MaxCapturePixels;
+
+    /// <summary>
+    /// The byte length of a <paramref name="width"/>x<paramref name="height"/> buffer of
+    /// <paramref name="channels"/> bytes per pixel, in checked 64-bit arithmetic.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, whose <c>image</c> crate checks this itself: the first port computed
+    /// <c>(int)(width * height * 4)</c> in <c>uint</c>, which wraps above about 1.07G pixels and
+    /// then under-allocates the buffer <c>ReadPixels</c> writes into.
+    /// </remarks>
+    internal static int BufferLength(uint width, uint height, int channels)
+    {
+        ulong length = checked((ulong)width * height * (ulong)channels);
+        return length > (ulong)Array.MaxLength
+            ? throw new OverflowException($"{width}x{height} raster exceeds the largest buffer")
+            : (int)length;
+    }
+
     /// <summary>Decode encoded bytes (PNG or JPEG) into straight RGB.</summary>
     internal static RgbImage? Decode(ReadOnlySpan<byte> encoded)
     {
-        using SKBitmap? bitmap = SKBitmap.Decode(encoded.ToArray());
+        byte[] bytes = encoded.ToArray();
+
+        // The header is checked before anything is decoded.
+        using (SKData data = SKData.CreateCopy(bytes))
+        using (SKCodec? codec = SKCodec.Create(data))
+        {
+            if (codec is null
+                || codec.Info.Width <= 0
+                || codec.Info.Height <= 0
+                || (ulong)codec.Info.Width * (ulong)codec.Info.Height > MaxDecodePixels)
+            {
+                return null;
+            }
+        }
+
+        using SKBitmap? bitmap = SKBitmap.Decode(bytes);
         if (bitmap is null)
         {
             return null;
         }
         uint width = (uint)bitmap.Width;
         uint height = (uint)bitmap.Height;
-        byte[] pixels = new byte[(int)(width * height * 3)];
+        byte[] pixels = new byte[BufferLength(width, height, 3)];
         var info = new SKImageInfo((int)width, (int)height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
-        byte[] rgba = new byte[(int)(width * height * 4)];
+        byte[] rgba = new byte[BufferLength(width, height, 4)];
         using SKImage image = SKImage.FromBitmap(bitmap);
         unsafe
         {
@@ -98,7 +133,7 @@ internal sealed class RgbImage
     internal byte[]? EncodeJpeg(int quality)
     {
         var info = new SKImageInfo((int)Width, (int)Height, SKColorType.Rgba8888, SKAlphaType.Opaque);
-        byte[] rgba = new byte[(int)(Width * Height * 4)];
+        byte[] rgba = new byte[BufferLength(Width, Height, 4)];
         for (int i = 0, j = 0; i < Pixels.Length; i += 3, j += 4)
         {
             rgba[j] = Pixels[i];
