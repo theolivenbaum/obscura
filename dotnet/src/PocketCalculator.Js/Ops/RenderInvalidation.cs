@@ -33,8 +33,7 @@ internal static class RenderInvalidation
         "set_attribute" or "remove_attribute" or "set_attribute_ns" or "remove_attribute_ns"
             or "append_child" or "remove_child" or "insert_before" or "set_inner_html"
             or "set_inner_html_context" or "set_text_content"
-            or "set_form_value" or "set_form_checked"
-            or "set_external_stylesheet_css" => true,
+            or "set_form_value" or "set_form_checked" => true,
         _ => false,
     };
 
@@ -45,26 +44,6 @@ internal static class RenderInvalidation
     {
         switch (cmd)
         {
-            // A linked sheet's or an @import's bytes are cascade input held beside the node
-            // rather than in it, so a write is exactly as damaging as rewriting a <style>'s
-            // text and has to invalidate the same way.
-            case "set_external_stylesheet_css":
-            {
-                if (ParseNode(arg1) is not { } sheetTarget)
-                {
-                    return RenderMutationImpact.None;
-                }
-
-                string? wanted = arg2.Length == 0 ? null : arg2;
-                bool cssChanged = !string.Equals(
-                    dom.ExternalStylesheetCss(sheetTarget),
-                    wanted,
-                    StringComparison.Ordinal);
-                return new RenderMutationImpact(
-                    StateHelpers.NodeIsConnected(dom, sheetTarget),
-                    cssChanged);
-            }
-
             case "set_form_value":
             {
                 if (ParseNode(arg1) is not { } valueTarget)

@@ -47,8 +47,12 @@ public sealed partial class DomTree
     /// <c>document.styleSheets.length</c> is still 1, where Obscura reported META,LINK,STYLE
     /// and 1. Holding the bytes beside the node instead of in the tree keeps the cascade
     /// position and leaves the DOM as authored. See "Known deviations" in todo.md.
+    ///
+    /// Each entry also records whether the sheet is origin-clean (upstream 04418a5,
+    /// <c>ExternalStylesheet</c> in crates/obscura-dom/src/tree.rs), which is what decides
+    /// whether page script may read it back through CSSOM.
     /// </summary>
-    private Dictionary<NodeId, string>? _externalStylesheetCss;
+    private Dictionary<NodeId, ExternalStylesheet>? _externalStylesheets;
 
     /// <summary>
     /// Full-document HTML parsing enables declarative shadow roots. Fragment parsing (including
@@ -110,28 +114,74 @@ public sealed partial class DomTree
     }
 
     /// <summary>
-    /// Record the CSS an element contributes to the cascade ahead of its own text, or clear it
-    /// with <see langword="null"/>. Written for a <c>&lt;link rel=stylesheet&gt;</c> once its sheet
-    /// is fetched, and for a <c>&lt;style&gt;</c> whose <c>@import</c> rules were fetched.
+    /// Record the CSS an element contributes to the cascade ahead of its own text, replacing
+    /// what it had. Written for a <c>&lt;link rel=stylesheet&gt;</c> once its sheet is fetched,
+    /// and for a <c>&lt;style&gt;</c> whose <c>@import</c> rules were fetched.
+    /// <paramref name="originClean"/> says whether page script may read the bytes back
+    /// (upstream <c>replace_external_stylesheet</c>).
     /// </summary>
-    public void SetExternalStylesheetCss(NodeId id, string? css)
+    public void SetExternalStylesheet(NodeId id, string css, bool originClean)
     {
-        if (css is null)
+        ArgumentNullException.ThrowIfNull(css);
+        _externalStylesheets ??= [];
+        _externalStylesheets[id] = new ExternalStylesheet(css, originClean);
+    }
+
+    /// <summary>
+    /// Add CSS after what the element already contributes. The entry stays origin-clean only
+    /// if every part is (upstream <c>append_external_stylesheet</c>).
+    /// </summary>
+    public void AppendExternalStylesheet(NodeId id, string css, bool originClean)
+    {
+        ArgumentNullException.ThrowIfNull(css);
+        _externalStylesheets ??= [];
+        _externalStylesheets[id] = _externalStylesheets.TryGetValue(id, out ExternalStylesheet earlier)
+            ? new ExternalStylesheet(earlier.Css + "\n" + css, earlier.OriginClean && originClean)
+            : new ExternalStylesheet(css, originClean);
+    }
+
+    /// <summary>Forget the CSS an element contributes. Returns whether it had any.</summary>
+    public bool RemoveExternalStylesheet(NodeId id) => _externalStylesheets?.Remove(id) ?? false;
+
+    /// <summary>The stored sheet, whatever its origin, for host code.</summary>
+    public bool TryGetExternalStylesheet(NodeId id, out ExternalStylesheet sheet)
+    {
+        if (_externalStylesheets is { } sheets && sheets.TryGetValue(id, out sheet))
         {
-            _externalStylesheetCss?.Remove(id);
-            return;
+            return true;
         }
 
-        _externalStylesheetCss ??= [];
-        _externalStylesheetCss[id] = css;
+        sheet = default;
+        return false;
     }
 
     /// <summary>
     /// The CSS this element contributes to the cascade ahead of its own text, or
     /// <see langword="null"/> when it contributes none.
     /// </summary>
-    public string? ExternalStylesheetCss(NodeId id) =>
-        _externalStylesheetCss is { } css && css.TryGetValue(id, out string? text) ? text : null;
+    /// <remarks>
+    /// A <c>&lt;link disabled&gt;</c> contributes none but keeps its bytes, so enabling it
+    /// again restores the sheet. HTMLLinkElement.disabled reflects the content attribute in
+    /// Chromium, and upstream 04418a5's renderer checks the same attribute. The port used to
+    /// gate this in bootstrap.js by writing an empty sheet, which needed the bytes in JS.
+    /// </remarks>
+    public string? ExternalStylesheetCss(NodeId id)
+    {
+        if (_externalStylesheets is not { } sheets || !sheets.TryGetValue(id, out ExternalStylesheet sheet))
+        {
+            return null;
+        }
+
+        if (Slot(id) is { } node
+            && node.AsElement() is { } element
+            && string.Equals(element.Name.Local, "link", StringComparison.Ordinal)
+            && node.GetAttribute("disabled") is not null)
+        {
+            return null;
+        }
+
+        return sheet.Css;
+    }
 
     private void ForgetDirtyFormState(NodeId id)
     {
@@ -734,7 +784,7 @@ public sealed partial class DomTree
 
                 // Same reason: a fetched sheet is recorded against a node, not a node's
                 // identity, and must not be inherited by the next node in this slot.
-                _externalStylesheetCss?.Remove(id);
+                _externalStylesheets?.Remove(id);
             }
         }
     }

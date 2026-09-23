@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Url;
 using PocketCalculator.Net;
@@ -382,6 +383,50 @@ internal static partial class PageHelpers
         output.Append(RebaseCssUrls(sheet.Rules, sheet.ResponseUrl));
         active.Remove(actualKey);
         return output.ToString();
+    }
+
+    /// <summary>
+    /// Whether a fetched stylesheet graph is origin-clean for <paramref name="documentUrl"/>:
+    /// every sheet in it, judged on its response URL after redirects, is same-origin with the
+    /// document (upstream 04418a5, <c>stylesheet_graph_is_origin_clean</c>).
+    /// </summary>
+    /// <remarks>
+    /// A cross-origin <c>@import</c> taints the sheet that pulls it in, since its rules are
+    /// part of that sheet's text. An import that was never fetched contributes nothing and so
+    /// taints nothing; the active stack cuts cycles, as in expansion.
+    /// </remarks>
+    internal static bool StylesheetGraphIsOriginClean(
+        string key,
+        IReadOnlyDictionary<string, LoadedStylesheet> sheets,
+        IReadOnlyDictionary<string, string> aliases,
+        HashSet<string> active,
+        UrlRecord documentUrl)
+    {
+        string actualKey = aliases.TryGetValue(key, out string? alias) ? alias : key;
+        if (!active.Add(actualKey))
+        {
+            return true;
+        }
+        if (!sheets.TryGetValue(actualKey, out LoadedStylesheet? sheet))
+        {
+            active.Remove(actualKey);
+            return true;
+        }
+
+        string documentOrigin = documentUrl.AsciiOrigin;
+        bool clean = !string.Equals(documentOrigin, "null", StringComparison.Ordinal)
+            && string.Equals(sheet.ResponseUrl.AsciiOrigin, documentOrigin, StringComparison.Ordinal);
+        for (int i = 0; clean && i < sheet.Imports.Count; i++)
+        {
+            if (PageUrl.TryJoin(sheet.ResponseUrl, sheet.Imports[i].Url) is not { } importUrl)
+            {
+                continue;
+            }
+            (string importKey, _) = CanonicalStylesheetUrl(importUrl);
+            clean = StylesheetGraphIsOriginClean(importKey, sheets, aliases, active, documentUrl);
+        }
+        active.Remove(actualKey);
+        return clean;
     }
 
     /// <summary>
@@ -987,38 +1032,52 @@ internal static partial class PageHelpers
     /// run the element's load handler, and re-apply what that handler changed. See
     /// "Known deviations" in todo.md.
     ///
+    /// Upstream 04418a5 (<c>register_linked_stylesheet_script</c>): the script never sees the
+    /// bytes. The sheet is registered with its response URL, and <c>media</c> and
+    /// <c>disabled</c> assignments are reflected onto the content attributes the renderer
+    /// reads, rather than the script re-writing the CSS it had read out (which also needed the
+    /// page-visible <c>__obscura_linkedStylesheetCss</c> / <c>__obscura_setLinkedStylesheetCss</c>).
+    ///
     /// A non-matching sheet still loads and fires its event, which is what the common
-    /// <c>media="print" onload="this.media='all'"</c> async-CSS pattern relies on. The
-    /// renderer reads the link's <c>media</c> content attribute, so the handler's assignment
-    /// is written through to it - Chromium reflects <c>HTMLLinkElement.media</c>, and on
-    /// repro/ord/o5.html reports <c>getAttribute('media') === 'all'</c> afterwards, where
-    /// Obscura reported <c>print</c>.
+    /// <c>media="print" onload="this.media='all'"</c> async-CSS pattern relies on. Chromium
+    /// reflects <c>HTMLLinkElement.media</c>, and on repro/ord/o5.html reports
+    /// <c>getAttribute('media') === 'all'</c> afterwards, where Obscura reported <c>print</c>.
     /// </remarks>
-    internal static string LinkedStylesheetLoadScript(int linkIndex)
+    internal static string LinkedStylesheetLoadScript(int linkIndex, string? responseUrl = null)
     {
+        string response = responseUrl is null ? "undefined" : JsonSerializer.Serialize(responseUrl);
         return $$"""
             (function() {
                         var links = document.querySelectorAll('link[rel~="stylesheet"]');
                         var link = links[{{linkIndex.ToString(CultureInfo.InvariantCulture)}}];
                         if (!link) return;
-                        globalThis.__obscura_registerLinkedStylesheet(link, link);
-                        var css = globalThis.__obscura_linkedStylesheetCss(link);
                         function syncSheet() {
                             if (Object.prototype.hasOwnProperty.call(link, 'media')) {
                                 var wanted = String(link.media || '').trim();
                                 if (wanted) link.setAttribute('media', wanted);
                                 else link.removeAttribute('media');
                             }
-                            var enabled = !link.disabled && !link.hasAttribute('disabled');
-                            globalThis.__obscura_setLinkedStylesheetCss(link, enabled ? css : '');
+                            if (Object.prototype.hasOwnProperty.call(link, 'disabled')) {
+                                if (link.disabled) link.setAttribute('disabled', '');
+                                else link.removeAttribute('disabled');
+                            }
                         }
 
                         syncSheet();
+                        globalThis.__obscura_registerLinkedStylesheet(link, undefined, {{response}});
                         try { link.dispatchEvent(new Event('load')); }
                         finally { syncSheet(); }
                     })()
             """;
     }
+
+    /// <summary>
+    /// Removes the static-registration bridge once the document's own sheets are registered,
+    /// before any page script runs (upstream 04418a5). Dynamic loads use the closure-private
+    /// function directly.
+    /// </summary>
+    internal const string LinkedStylesheetRegistrationCleanupScript =
+        "delete globalThis.__obscura_registerLinkedStylesheet";
 
     internal static bool ScriptResponseIsExecutable(int status) => status is >= 200 and <= 299;
 

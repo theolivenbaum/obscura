@@ -27,8 +27,7 @@ const __obscuraCore = globalThis.Deno.core;
     '__obscura_frameId', '__obscura_parentFrameId', '__obscura_frameWindows',
     '__obscura_frameObjects', '__obscura_frameElements', '__obscura_deliverMessage',
     '__obscura_liveFrameIds', '__obscura_forgetFrame',
-    '__obscura_registerLinkedStylesheet', '__obscura_linkedStylesheetCss',
-    '__obscura_setLinkedStylesheetCss',
+    '__obscura_registerLinkedStylesheet',
     '__obscura_activateLabel',
     '__obscura_isDisabled', '__obscura_labeledControl', '__obscura_interactiveHost',
     '__obscura_tryFragmentNavigate', '_rawFragment',
@@ -461,50 +460,54 @@ const _linkElementSheets = new WeakMap();
 // <style> element inserted next to the link, so its bytes are node text. Chromium 141 creates
 // no element: repro/a.html reports head children META,LINK and
 // head.querySelectorAll('style').length 0 while document.styleSheets.length is still 1. The
-// bytes now live beside the node, and these two reach them. See "Known deviations" in todo.md.
-function _externalStylesheetCss(node) {
-  if (!node || node._nid == null) return "";
-  return _dom("get_external_stylesheet_css", node._nid) || "";
+// bytes live beside the node in the host's DomTree. See "Known deviations" in todo.md.
+//
+// Upstream 04418a5: the store also records whether the sheet is origin-clean, judged by the
+// host on the response URL (after redirects) and every @import in its graph, and the only way
+// back to the bytes is op_external_stylesheet_get, which returns them for a clean sheet only.
+// These helpers are closure-private; nothing page-visible reaches the bytes. They pass
+// _realmFrameId rather than upstream's page-writable globalThis.__obscura_frameId, so a frame's
+// script cannot aim them at another realm's document.
+function _externalStylesheetGet(node) {
+  if (!node || node._nid == null) return null;
+  try {
+    return JSON.parse(__obscuraCore.ops.op_external_stylesheet_get(node._nid, _realmFrameId));
+  } catch(e) { return null; }
 }
-function _setExternalStylesheetCss(node, css) {
-  if (!node || node._nid == null) return;
-  _dom("set_external_stylesheet_css", node._nid, css || "");
+function _externalStylesheetSet(node, css, responseUrl, importsOriginClean) {
+  if (!node || node._nid == null) return false;
+  return __obscuraCore.ops.op_external_stylesheet_set(
+    node._nid, String(css || ""), String(responseUrl || ""), importsOriginClean === true,
+    _realmFrameId);
 }
-globalThis.__obscura_linkedStylesheetCss = _externalStylesheetCss;
-globalThis.__obscura_setLinkedStylesheetCss = _setExternalStylesheetCss;
 
 function _linkedStylesheetHref(link, explicitHref) {
   const raw = explicitHref || link?.getAttribute?.("href") || link?.href || "";
   return raw ? _resolveResourceUrl(String(raw)) : "";
 }
 
-function _linkedStylesheetIsOriginClean(href) {
-  try {
-    const documentUrl = new URL(globalThis.document?.URL || globalThis.location?.href || "about:blank");
-    const stylesheetUrl = new URL(href, documentUrl.href);
-    return stylesheetUrl.origin === documentUrl.origin;
-  } catch(e) {
-    // An unresolved relative URL in an about:blank-style synthetic document
-    // has no distinct remote origin and is safe to expose.
-    return !/^[a-z][a-z0-9+.-]*:/i.test(String(href || ""));
-  }
-}
-
-// `sourceNode === link` means the sheet's text is held beside the link rather than in a
-// <style> element; any other source node is a style element, which is still how
-// adoptedStyleSheets works.
-function _registerLinkedStylesheet(link, sourceNode, explicitHref) {
-  if (!link || !sourceNode) return null;
+// Upstream 04418a5 drops the sourceNode argument (a linked sheet's bytes are never node text
+// now) and the origin judgement on the request href, which counted a same-origin URL that
+// redirects cross-origin as clean. The host store decides instead.
+//
+// DEVIATION from upstream, which binds the sheet with the response URL as `href`. CSSOM's
+// `href` is the URL of the first request, which is what Chromium reports for a redirected
+// sheet, so `href` stays the request URL and the response URL is kept privately for the
+// store writes CSSOM edits make.
+function _registerLinkedStylesheet(link, explicitHref, responseUrl) {
+  if (!link) return null;
   const href = _linkedStylesheetHref(link, explicitHref);
-  _linkedStylesheetNodes.set(link, sourceNode);
+  _linkedStylesheetNodes.set(link, true);
   let sheet = _linkElementSheets.get(link);
   if (!sheet) {
     sheet = new CSSStyleSheet();
     _linkElementSheets.set(link, sheet);
   }
-  sheet._bindLinkedOwner(link, sourceNode, href, _linkedStylesheetIsOriginClean(href));
+  sheet._bindLinkedOwner(link, href, responseUrl || href);
   return sheet;
 }
+// Static registration only: the host deletes this once the document's own sheets are
+// registered, before any page script runs (upstream 04418a5).
 globalThis.__obscura_registerLinkedStylesheet = _registerLinkedStylesheet;
 
 // A fetched sheet becomes an inline <style>, so relative url() references
@@ -589,8 +592,13 @@ function _cssImportApplies(media) {
   return true;
 }
 
+// Upstream 04418a5: returns {css, responseUrl, originClean}. A sheet is clean when its
+// response URL (after redirects) is same-origin with the page and every @import it pulls in
+// is clean as well.
 async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
-  if (depth > 4 || seen.has(url)) return "";
+  if (depth > 4 || seen.has(url)) {
+    return { css: "", responseUrl: url, originClean: true };
+  }
   seen.add(url);
   const raw = await __obscuraCore.ops.op_fetch_url(
     url, "GET", "{}", new Uint8Array(0), pageOrigin, "no-cors", "same-origin"
@@ -618,8 +626,21 @@ async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
   const imported = await Promise.all(imports.map(importUrl =>
     _fetchLinkedCss(importUrl, pageOrigin, depth + 1, new Set(seen))
   ));
-  imported.push(_rebaseCssUrls(css, url));
-  return imported.filter(Boolean).join("\n");
+  const responseUrl = parsed.url || url;
+  const parts = imported.map(result => result.css).filter(Boolean);
+  parts.push(_rebaseCssUrls(css, responseUrl));
+  // DEVIATION from upstream, which judges the final URL alone: an opaque (cross-origin
+  // no-cors) response is never clean, which also covers a redirect chain that left the
+  // page's origin and came back, as Fetch's response tainting does.
+  let ownOriginClean = false;
+  try {
+    ownOriginClean = parsed.opaque !== true && new URL(responseUrl).origin === pageOrigin;
+  } catch(e) {}
+  return {
+    css: parts.filter(Boolean).join("\n"),
+    responseUrl,
+    originClean: ownOriginClean && imported.every(result => result.originClean),
+  };
 }
 
 // A dynamically-inserted <link rel="stylesheet" href> must fetch, enter the
@@ -635,23 +656,33 @@ async function _loadLinkedStylesheet(c) {
   if (!rel.split(/\s+/).includes('stylesheet')) return;
   const href = c.getAttribute('href');
   if (!href) return;
+  // Upstream 04418a5: the renderer reads rel, media and disabled from content attributes,
+  // so property assignments made before insertion are reflected onto them. HTMLLinkElement
+  // reflects all three in Chromium.
+  if (!c.getAttribute('rel') && c.rel) c.setAttribute('rel', String(c.rel));
+  if (Object.prototype.hasOwnProperty.call(c, 'media')) {
+    if (c.media) c.setAttribute('media', String(c.media));
+    else c.removeAttribute('media');
+  }
+  if (Object.prototype.hasOwnProperty.call(c, 'disabled')) {
+    if (c.disabled) c.setAttribute('disabled', '');
+    else c.removeAttribute('disabled');
+  }
   const fullUrl = _resolveResourceUrl(href);
+  // Upstream 04418a5: the page's origin, not the sheet's own (which made every sheet
+  // "same-origin").
   let pageOrigin = "";
-  try { pageOrigin = new URL(fullUrl).origin; } catch(e) {}
+  try { pageOrigin = new URL(_domParse("document_url") || "about:blank").origin; } catch(e) {}
   try {
-    const css = await _fetchLinkedCss(fullUrl, pageOrigin);
+    const loaded = await _fetchLinkedCss(fullUrl, pageOrigin);
     // DEVIATION from crates/obscura-js, which inserts a <style data-obscura-linked> after the
     // link. Chromium 141 creates no element for a dynamically inserted stylesheet link either,
-    // so the bytes go beside the node. The media query is no longer evaluated here: the
-    // renderer applies the link's own media attribute, which also makes it track a viewport
-    // change instead of being frozen at fetch time. `disabled` still gates, because the
-    // renderer has no view of it. See "Known deviations" in todo.md.
-    const previous = _linkedStylesheetNodes.get(c);
-    if (previous && previous !== c && previous.parentNode) {
-      previous.parentNode.removeChild(previous);
-    }
-    _setExternalStylesheetCss(c, c.disabled ? "" : css);
-    _registerLinkedStylesheet(c, c, fullUrl);
+    // so the bytes go beside the node. The media query is not evaluated here: the renderer
+    // applies the link's own media attribute, which also makes it track a viewport change
+    // instead of being frozen at fetch time. A `disabled` link keeps its bytes and the
+    // renderer skips it (DomTree.ExternalStylesheetCss). See "Known deviations" in todo.md.
+    _externalStylesheetSet(c, loaded.css, loaded.responseUrl, loaded.originClean);
+    _registerLinkedStylesheet(c, fullUrl, loaded.responseUrl);
     try { c.dispatchEvent(new Event('load', { bubbles: true })); } catch(e) {}
   } catch(e) {
     try { c.dispatchEvent(new Event('error', { bubbles: true })); } catch(e) {}
@@ -2202,15 +2233,9 @@ class Node {
       );
     }
     const removedWindowNames = _windowNamedNamesInTree(c);
-    const linkedStyle = c instanceof Element
-      ? _linkedStylesheetNodes.get(c)
-      : null;
-    // A link that is its own sheet source has nothing extra to remove, and its entry is kept
-    // so re-appending the link restores its sheet, which is what Chromium does.
-    if (linkedStyle && linkedStyle !== c && linkedStyle.parentNode === this) {
-      _dom("remove_child", linkedStyle._nid);
-      _linkedStylesheetNodes.delete(c);
-    }
+    // A linked sheet has no element of its own to remove, and its entry is kept so
+    // re-appending the link restores its sheet, which is what Chromium does. DEVIATION from
+    // upstream 04418a5, which drops the stored bytes here (op_external_stylesheet_remove).
     const parentConnected = this.isConnected;
     const removed = _dom("remove_child", c._nid) === "true";
     if (!removed) {
@@ -9046,76 +9071,91 @@ class CSSRuleList {
   *[Symbol.iterator]() { for (let i = 0; i < this.length; i++) yield this.item(i); }
 }
 
+// Upstream 04418a5: a sheet's origin-clean flag, its href and its last-seen source live in a
+// WeakMap, so page script cannot flip `sheet._originClean` before reading cssRules, and a
+// cross-origin sheet's text is never copied onto the object.
+const _cssStyleSheetPrivate = new WeakMap();
+
 class CSSStyleSheet {
   constructor(_options) {
     this.ownerRule = null;
     this.disabled = false;
     this._ownerNode = null;
     this._sourceNode = null;
-    this._sourceExternal = false;
-    this._sourceText = "";
-    this._href = null;
-    this._originClean = true;
     this._rules = [];
     this._cssRules = new CSSRuleList(this);
     this._adopters = new Set();
+    _cssStyleSheetPrivate.set(this, {
+      linked: false,
+      href: null,
+      responseUrl: null,
+      originClean: true,
+      sourceText: "",
+    });
   }
   get type() { return "text/css"; }
   get ownerNode() { return this._ownerNode; }
   get parentStyleSheet() { return null; }
-  get href() { return this._href; }
+  get href() { return _cssStyleSheetPrivate.get(this)?.href || null; }
   get title() { return this._ownerNode?.getAttribute?.("title") || ""; }
   get cssRules() {
-    this._assertOriginClean();
     this._refreshFromOwner();
+    this._assertOriginClean();
     return this._cssRules;
   }
   get rules() { return this.cssRules; }
   _bindOwner(ownerNode, sourceNode = ownerNode) {
+    const state = _cssStyleSheetPrivate.get(this);
+    state.linked = false;
+    state.href = null;
+    state.responseUrl = null;
+    state.originClean = true;
+    state.sourceText = null;
     this._ownerNode = ownerNode;
     this._sourceNode = sourceNode;
-    this._sourceExternal = false;
-    this._sourceText = null;
     this._refreshFromOwner();
   }
-  _bindLinkedOwner(ownerNode, sourceNode, href, originClean) {
+  // A linked sheet's bytes are held beside the link in the host store, never in a <style>.
+  _bindLinkedOwner(ownerNode, href, responseUrl) {
+    const state = _cssStyleSheetPrivate.get(this);
+    state.linked = true;
+    state.href = href || null;
+    state.responseUrl = responseUrl || href || null;
+    state.originClean = false;
+    state.sourceText = null;
     this._ownerNode = ownerNode;
-    this._sourceNode = sourceNode;
-    // A link that is its own source keeps its bytes beside the node, not in a <style>.
-    this._sourceExternal = sourceNode === ownerNode;
-    this._sourceText = null;
-    this._href = href || null;
-    this._originClean = originClean !== false;
-    if (this._originClean) this._refreshFromOwner();
-    else {
-      this._setRules([]);
-      this._sourceText = this._readSourceText();
-    }
-  }
-  _readSourceText() {
-    if (!this._sourceNode) return "";
-    return this._sourceExternal
-      ? _externalStylesheetCss(this._sourceNode)
-      : (this._sourceNode.textContent || "");
-  }
-  _writeSourceText(text) {
-    if (!this._sourceNode) return;
-    if (this._sourceExternal) _setExternalStylesheetCss(this._sourceNode, text);
-    else if (this._sourceNode.textContent !== text) this._sourceNode.textContent = text;
+    this._sourceNode = null;
+    this._setRules([]);
+    this._refreshFromOwner();
   }
   _assertOriginClean() {
-    if (!this._originClean) {
+    if (!_cssStyleSheetPrivate.get(this)?.originClean) {
       throw new DOMException("Cannot access rules in a cross-origin stylesheet", "SecurityError");
     }
   }
   _refreshFromOwner() {
-    if (!this._sourceNode || !this._originClean) return;
-    const text = this._readSourceText();
-    if (text === this._sourceText) return;
+    const state = _cssStyleSheetPrivate.get(this);
+    if (!state) return;
+    let text;
+    if (state.linked) {
+      if (!this._ownerNode) return;
+      const loaded = _externalStylesheetGet(this._ownerNode);
+      state.originClean = loaded?.originClean === true;
+      if (!state.originClean) {
+        state.sourceText = "";
+        this._setRules([]);
+        return;
+      }
+      text = String(loaded.css || "");
+    } else {
+      if (!this._sourceNode) return;
+      text = this._sourceNode.textContent || "";
+    }
+    if (text === state.sourceText) return;
     const parsed = _splitTopLevelCssRules(text);
     const rules = parsed.rules.map(_cssRuleFromText).filter(Boolean);
     this._setRules(rules);
-    this._sourceText = text;
+    state.sourceText = text;
   }
   _setRules(rules) {
     for (const rule of this._rules) rule._parentStyleSheet = null;
@@ -9125,12 +9165,20 @@ class CSSStyleSheet {
   _serializeText() { return this._rules.map(rule => rule.cssText).join("\n"); }
   _ruleChanged() {
     const text = this._serializeText();
-    this._sourceText = text;
+    const state = _cssStyleSheetPrivate.get(this);
+    if (state) state.sourceText = text;
     // A <style>'s rules still live in its DOM text, which is what the renderer reads and what
-    // an author can observe. A linked sheet writes to the side table instead, so insertRule on
-    // a link-owned sheet no longer rewrites a phantom element's textContent - that rewrite is
-    // the "future native effective-source channel" the Rust comment here asked for.
-    this._writeSourceText(text);
+    // an author can observe. A linked sheet writes to the host store instead, so insertRule on
+    // a link-owned sheet does not rewrite a phantom element's textContent. Only a clean sheet
+    // gets here (every mutator asserts it first), and the host judges the response URL again.
+    if (state?.linked) {
+      if (this._ownerNode) {
+        _externalStylesheetSet(
+          this._ownerNode, text, state.responseUrl || globalThis.document?.URL || "about:blank", true);
+      }
+    } else if (this._sourceNode && this._sourceNode.textContent !== text) {
+      this._sourceNode.textContent = text;
+    }
     _syncAdoptedStyleSheet(this);
   }
   insertRule(rule, index = 0) {
@@ -9224,7 +9272,7 @@ function _sheetForLinkElement(link) {
   }
   let sheet = _linkElementSheets.get(link);
   if (!sheet) {
-    sheet = _registerLinkedStylesheet(link, _linkedStylesheetNodes.get(link));
+    sheet = _registerLinkedStylesheet(link);
   }
   return sheet;
 }

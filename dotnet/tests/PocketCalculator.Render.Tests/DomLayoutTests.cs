@@ -237,6 +237,29 @@ public class DomLayoutTests
         return incremental;
     }
 
+    // Upstream 04418a5: a host-fetched sheet cascades from the store beside its <link>, even
+    // when it is not origin-clean, and no <style> element is created for it.
+    [Fact]
+    public void HostFetchedStylesheetCascadesWithoutAVisibleStyleNode()
+    {
+        DomTree tree = Parse(
+            """<html><head><link rel="stylesheet" href="https://cdn.test/app.css"></head><body><div id="target"></div></body></html>""");
+        NodeId link = tree.QuerySelector("link") ?? throw new InvalidOperationException("stylesheet link");
+        tree.SetExternalStylesheet(link, "#target{width:37px;height:19px}", originClean: false);
+
+        DomLayout laid = RenderDom.LayoutDom(tree, (200f, 100f));
+        NodeId target = Id(tree, "target");
+        Assert.Equal(37f, laid.Rects[target].Width);
+        Assert.Equal(19f, laid.Rects[target].Height);
+        Assert.Empty(tree.QuerySelectorAll("style"));
+
+        // A disabled link keeps its bytes but contributes nothing (HTMLLinkElement.disabled
+        // reflects the content attribute in Chromium).
+        tree.GetNode(link)!.SetAttribute("disabled", string.Empty);
+        Assert.Null(tree.ExternalStylesheetCss(link));
+        Assert.True(tree.TryGetExternalStylesheet(link, out _));
+    }
+
     [Fact]
     public void ShadowRenderedChildrenDistributeNamedAndDefaultSlots()
     {

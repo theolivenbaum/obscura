@@ -15251,12 +15251,14 @@ public sealed class RuntimeTests
                     // link's nextSibling. Chromium 141 creates no element for a dynamically
                     // inserted stylesheet link, so the bytes are held beside the link and there
                     // is nothing to be anyone's sibling. Everything else - import order, both
-                    // rebased url()s, the link-owned CSSOM sheet - is asserted unchanged.
-                    const css = globalThis.__obscura_linkedStylesheetCss(link);
+                    // rebased url()s, the link-owned CSSOM sheet - is asserted unchanged. As in
+                    // upstream 04418a5 the text is read back through CSSOM, the only way page
+                    // script has to it.
                     const noElement = document.querySelectorAll("style").length === 0;
                     const list = document.styleSheets;
                     const sheet = link.sheet;
                     const rules = sheet.cssRules;
+                    const css = Array.from(rules, rule => rule.cssText).join("\n");
                     const cssom = {
                         listed: list.length === 1 && list[0] === sheet,
                         stable: link.sheet === sheet && sheet.cssRules === rules,
@@ -15268,7 +15270,8 @@ public sealed class RuntimeTests
                     return {
                         noElement,
                         importedBeforeRoute:
-                            css.indexOf("color:red") < css.indexOf("display:grid"),
+                            rules[0].cssText.includes("color")
+                            && rules[1].cssText.includes("display"),
                         importedUrl:
                             css.includes("http://example.com/assets/theme/grain.png"),
                         routeUrl:
@@ -15306,6 +15309,79 @@ public sealed class RuntimeTests
                     "selectors": [".card", ".card"]
                 },
                 "detachedCssom": true
+            }
+            """,
+            result.Value);
+    }
+
+    // Upstream 04418a5: a dynamic sheet is origin-clean only when its response URL (after
+    // redirects) and every @import it pulls in are same-origin with the page, and the flag is
+    // not a field page script can flip.
+    [Fact]
+    public async Task DynamicLinkedStylesheetOriginFollowsResponseUrlAndImports()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><head></head><body></body></html>");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            """
+            async () => {
+                const originalFetchOp = __obscura_test_ops.op_fetch_url;
+                const load = (href) => {
+                    const link = document.createElement("link");
+                    link.setAttribute("rel", "stylesheet");
+                    link.setAttribute("href", href);
+                    const loaded = new Promise(resolve => { link.onload = resolve; link.onerror = resolve; });
+                    document.head.appendChild(link);
+                    return loaded.then(() => link);
+                };
+                const read = (sheet) => {
+                    try { return Array.from(sheet.cssRules, rule => rule.selectorText); }
+                    catch (error) { return error.name; }
+                };
+                try {
+                    __obscura_test_ops.op_fetch_url = (url) => JSON.stringify({
+                        status: 200,
+                        headers: { "content-type": "text/css" },
+                        body: url.endsWith("/redirects.css") ? ".secret{color:red}"
+                            : url.endsWith("/imports.css") ? '@import "https://cdn.example/x.css"; .own{color:blue}'
+                            : url.endsWith("/x.css") ? ".imported{color:green}"
+                            : ".same{color:green}",
+                        url: url.endsWith("/redirects.css") ? "https://cross-origin.example/secret.css" : url,
+                        redirected: url.endsWith("/redirects.css"),
+                    });
+                    const redirected = await load("/redirects.css");
+                    const imports = await load("/imports.css");
+                    const same = await load("/same.css");
+                    const sheet = redirected.sheet;
+                    sheet._originClean = true;
+                    sheet._sourceText = ".forged{}";
+                    return {
+                        redirected: read(redirected.sheet),
+                        forged: read(sheet),
+                        href: sheet.href,
+                        imports: read(imports.sheet),
+                        same: read(same.sheet),
+                        globals: [typeof __obscura_linkedStylesheetCss,
+                                  typeof __obscura_setLinkedStylesheetCss],
+                    };
+                } finally {
+                    __obscura_test_ops.op_fetch_url = originalFetchOp;
+                }
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals(
+            """
+            {
+                "redirected": "SecurityError",
+                "forged": "SecurityError",
+                "href": "http://example.com/redirects.css",
+                "imports": "SecurityError",
+                "same": [".same"],
+                "globals": ["undefined", "undefined"]
             }
             """,
             result.Value);

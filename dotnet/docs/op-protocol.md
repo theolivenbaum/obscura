@@ -18,11 +18,18 @@ The shim touches exactly four non-op members. `DenoCoreShim` implements them.
 | `setUnhandledPromiseRejectionHandler` | `(handler) -> void` | Drives `unhandledrejection`. |
 | `setHandledPromiseRejectionHandler` | `(handler) -> void` | Drives `rejectionhandled`. |
 
-The op table is handed to the shim as `Deno.core.ops`. After bootstrap runs, the
-host deletes `globalThis.Deno` so page script can never reach the ops, exactly as
-deno_core does. The shim keeps its own captured reference.
+The op table is handed to the shim as `Deno.core.ops`. The shim captures
+`Deno.core` in a closure-private `const __obscuraCore` as its first statement, and
+once bootstrap has run `BootstrapLoader.Install` deletes `globalThis.Deno` and
+`__obscura_core_handoff` in every realm, so page script can never reach the ops
+(upstream 04418a5). Host-evaluated script runs in the page realm too, so it has no
+ops either: `Runtime.addBinding` forwards through the frozen
+`globalThis.__obscura_binding_called(name, payload)`, and `DOM.resolveNode` goes
+through `globalThis._wrap(nid)`. The PocketCalculator.Js test assembly alone republishes the
+page realm's table as `__obscura_test_ops` (`BootstrapLoader.ExposeOpsForTests`),
+as upstream's `#[cfg(test)]` `expose_ops_for_tests` does.
 
-## Ops (52)
+## Ops (55)
 
 `fast` marks ops deno_core binds on the fast path; in C# the distinction is
 informational, but a `fast` op must stay allocation-light. Argument types are
@@ -45,6 +52,9 @@ shown with the deno_core attribute markers stripped: `String` is a JS string,
 | `op_element_scroll_metrics` | sync | `nid_str: String` | `String` |
 | `op_element_scroll_to` | sync | `nid_str: String, x: f64, y: f64` | `String` |
 | `op_encoding_for_label` | sync | `label: &str` | `String` |
+| `op_external_stylesheet_get` | sync | `owner_nid: u32, frame_id: u32` | `String` |
+| `op_external_stylesheet_remove` | fast | `owner_nid: u32, frame_id: u32` | `bool` |
+| `op_external_stylesheet_set` | fast | `owner_nid: u32, css: String, response_url: String, imported_origin_clean: bool, frame_id: u32` | `bool` |
 | `op_fetch_url` | async | `url: String, method: String, headers_json: String, body: JsBuffer, origin: String, mode: String, credentials: String` | `String` |
 | `op_frame_document_ready` | fast | `url: &str, html: &str, viewport_width: u64, viewport_height: u64` | `u32` |
 | `op_get_cookies` | sync | `(none)` | `String` |
@@ -116,6 +126,18 @@ set_fragment_html_executable    set_inner_html                  set_inner_html_c
 set_text_content                tag_name                        template_contents
 text_content
 ```
+
+The three `op_external_stylesheet_*` ops (upstream 04418a5) hold a linked sheet's
+fetched CSS beside its `<link>` (or an `@import`'s beside its `<style>`) in the
+`DomTree`, with an origin-clean bit. `set` accepts only a `link` or `style` owner
+and stores the sheet as origin-clean only when `imported_origin_clean` is true and
+`response_url` is same-origin with the frame's document URL (opaque origins never
+are); it returns whether it stored. `get` returns `null` when the owner has no
+sheet, `{"originClean":false}` without the bytes when it is not origin-clean, and
+`{"originClean":true,"css":...}` otherwise, in that key order. A change to a
+connected owner discards the prepared render. They replace the port's own
+`op_dom` commands `get_external_stylesheet_css` / `set_external_stylesheet_css`,
+which returned any sheet's bytes and are gone.
 
 ## Rules for the C# implementation
 

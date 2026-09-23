@@ -463,6 +463,69 @@ public sealed class PageTests
     }
 
     /// <summary>
+    /// A same-origin stylesheet href that redirects cross-origin is judged on where the
+    /// response came from: it still renders, but CSSOM refuses its rules, and nothing
+    /// page-visible holds its bytes (upstream 04418a5).
+    /// </summary>
+    [Fact]
+    public async Task SameOriginStylesheetRedirectedCrossOriginIsNotOriginClean()
+    {
+        using TestHttpServer cdn = TestHttpServer.Start(request => request.Path switch
+        {
+            "/secret.css" => TestResponse.Css("#target{width:37px;height:19px}.secret{color:purple}"),
+            _ => TestResponse.Text("unexpected"),
+        });
+        using TestHttpServer site = TestHttpServer.Start(request => request.Path switch
+        {
+            "/" => TestResponse.Html("""
+                <!doctype html><html><head>
+                    <link id="redirected" rel="stylesheet" href="/start.css">
+                    <link id="same" rel="stylesheet" href="/same.css">
+                </head><body><div id="target"></div></body></html>
+                """),
+            "/start.css" => new TestResponse(
+                "text/plain",
+                [],
+                "302 Found",
+                [("Location", cdn.Origin + "/secret.css")]),
+            "/same.css" => TestResponse.Css(".same{color:green}"),
+            _ => TestResponse.Text("unexpected"),
+        });
+        using Page page = PageFixtures.NewPage("stylesheet-redirect-origin");
+
+        await page.NavigateAsync($"{site.Origin}/");
+
+        PageFixtures.AssertJson(
+            """
+            {
+                "globals": ["undefined", "undefined", "undefined", "undefined", "undefined"],
+                "redirected": "SecurityError",
+                "same": [".same"],
+                "width": 37,
+                "textHidden": true
+            }
+            """,
+            page.Evaluate(
+                """
+                (() => {
+                    let redirected = 'readable';
+                    try { document.getElementById('redirected').sheet.cssRules; }
+                    catch (error) { redirected = error.name; }
+                    return {
+                        globals: [typeof __obscura_css, typeof __obscura_linkedStylesheetCss,
+                                  typeof __obscura_setLinkedStylesheetCss,
+                                  typeof __obscura_registerLinkedStylesheet, typeof Deno],
+                        redirected,
+                        same: Array.from(document.getElementById('same').sheet.cssRules,
+                                         rule => rule.selectorText),
+                        width: document.getElementById('target').getBoundingClientRect().width,
+                        textHidden: !document.documentElement.outerHTML.includes('secret'),
+                    };
+                })()
+                """));
+    }
+
+    /// <summary>
     /// A linked sheet enters the cascade at the <c>&lt;link&gt;</c>'s own document position,
     /// and leaves no element behind.
     /// </summary>
@@ -2075,6 +2138,39 @@ public sealed class PageTests
         Assert.EndsWith(".root{color:red}", materialized, StringComparison.Ordinal);
     }
 
+    // Upstream 04418a5: a same-origin sheet that pulls in a cross-origin @import is not
+    // origin-clean, because the imported rules are part of its text.
+    [Fact]
+    public void CrossOriginImportTaintsTheMaterializedStylesheetCssom()
+    {
+        var documentUrl = UrlRecord.Parse("https://example.test/page")!;
+        var rootUrl = UrlRecord.Parse("https://example.test/root.css")!;
+        var importedUrl = UrlRecord.Parse("https://cdn.test/imported.css")!;
+        Dictionary<string, LoadedStylesheet> sheets = new(StringComparer.Ordinal)
+        {
+            [rootUrl.Href] = new LoadedStylesheet(rootUrl, [new StylesheetImport(importedUrl.Href, null)], string.Empty),
+            [importedUrl.Href] = new LoadedStylesheet(importedUrl, [], ".secret{}"),
+        };
+        Dictionary<string, string> aliases = new(StringComparer.Ordinal)
+        {
+            [rootUrl.Href] = rootUrl.Href,
+            [importedUrl.Href] = importedUrl.Href,
+        };
+
+        Assert.False(PageHelpers.StylesheetGraphIsOriginClean(rootUrl.Href, sheets, aliases, [], documentUrl));
+        // The same graph with a same-origin import is clean, and so is the import on its own
+        // when it is fetched from the document's origin.
+        var sameImport = UrlRecord.Parse("https://example.test/imported.css")!;
+        sheets[rootUrl.Href] = new LoadedStylesheet(rootUrl, [new StylesheetImport(sameImport.Href, null)], string.Empty);
+        sheets[sameImport.Href] = new LoadedStylesheet(sameImport, [], ".ok{}");
+        aliases[sameImport.Href] = sameImport.Href;
+        Assert.True(PageHelpers.StylesheetGraphIsOriginClean(rootUrl.Href, sheets, aliases, [], documentUrl));
+        // Judged on the response URL: a sheet requested same-origin that answered from
+        // another origin (a redirect) is not clean.
+        sheets[sameImport.Href] = new LoadedStylesheet(importedUrl, [], ".ok{}");
+        Assert.False(PageHelpers.StylesheetGraphIsOriginClean(rootUrl.Href, sheets, aliases, [], documentUrl));
+    }
+
     [Fact]
     public void StylesheetAssetUrlsKeepTheImportingSheetsBase()
     {
@@ -2144,7 +2240,7 @@ public sealed class PageTests
         // is what the navigation path does now that no <style> element is created.
         runtime.WithDom(dom =>
         {
-            dom.SetExternalStylesheetCss(dom.QuerySelector("#async")!.Value, ".target{color:red}");
+            dom.SetExternalStylesheet(dom.QuerySelector("#async")!.Value, ".target{color:red}", originClean: true);
             return 0;
         });
         runtime.ExecuteScript("<async-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
@@ -2182,7 +2278,7 @@ public sealed class PageTests
         runtime.RunPageInit();
         runtime.WithDom(dom =>
         {
-            dom.SetExternalStylesheetCss(dom.QuerySelector("#print")!.Value, "body{display:none}");
+            dom.SetExternalStylesheet(dom.QuerySelector("#print")!.Value, "body{display:none}", originClean: true);
             return 0;
         });
         runtime.ExecuteScript("<print-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
@@ -2221,16 +2317,24 @@ public sealed class PageTests
         runtime.RunPageInit();
         runtime.WithDom(dom =>
         {
-            dom.SetExternalStylesheetCss(
+            // The origin-clean bit is the host's judgement (FetchStylesheetsAsync, on the
+            // response URL and the import graph), not the shim's.
+            dom.SetExternalStylesheet(
                 dom.QuerySelector("#same")!.Value,
-                ".app { color: red } .wide { width: 20px }");
-            dom.SetExternalStylesheetCss(
+                ".app { color: red } .wide { width: 20px }",
+                originClean: true);
+            dom.SetExternalStylesheet(
                 dom.QuerySelector("#cross")!.Value,
-                ".secret { color: purple }");
+                ".secret { color: purple }",
+                originClean: false);
             return 0;
         });
-        runtime.ExecuteScript("<same-origin-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));
-        runtime.ExecuteScript("<cross-origin-sheet>", PageHelpers.LinkedStylesheetLoadScript(1));
+        runtime.ExecuteScript(
+            "<same-origin-sheet>",
+            PageHelpers.LinkedStylesheetLoadScript(0, "https://example.test/assets/app.css"));
+        runtime.ExecuteScript(
+            "<cross-origin-sheet>",
+            PageHelpers.LinkedStylesheetLoadScript(1, "https://cdn.example.test/theme.css"));
 
         JsonNode? result = runtime.Evaluate(
             """
@@ -2242,6 +2346,10 @@ public sealed class PageTests
                 const sameSheet = same.sheet;
                 const sameRules = sameSheet.cssRules;
                 const crossSheet = cross.sheet;
+                // Public-looking implementation fields must not be able to bypass the
+                // closure-private origin decision (upstream 04418a5).
+                crossSheet._originClean = true;
+                crossSheet._sourceText = '.forged { color: red }';
                 const security = [];
                 for (const operation of [
                     () => crossSheet.cssRules,
@@ -2254,10 +2362,6 @@ public sealed class PageTests
                     catch (error) { security.push(error && error.name); }
                 }
                 sameSheet.insertRule('.added { height: 9px }', sameRules.length);
-                // insertRule used to rewrite the phantom <style>'s textContent, which is how
-                // the rule reached the renderer. It now writes the bytes held beside the link,
-                // which is the same cascade input with no element in the DOM.
-                const source = globalThis.__obscura_linkedStylesheetCss(same);
                 return {
                     stableList: list === document.styleSheets,
                     length: list.length,
@@ -2269,9 +2373,10 @@ public sealed class PageTests
                     title: sameSheet.title,
                     rulesIdentity: sameSheet.cssRules === sameRules,
                     rules: Array.from(sameRules, rule => rule.selectorText),
-                    sourceUpdated: source.includes('.added'),
+                    bridgeTextHidden: !document.documentElement.textContent.includes('.secret'),
                     crossOwner: crossSheet.ownerNode === cross,
                     crossHref: crossSheet.href,
+                    privateRulesHidden: crossSheet._rules.length === 0,
                     // Chromium 141 creates no element for either link: on repro/a.html
                     // head.querySelectorAll('style').length is 0 with styleSheets.length 1.
                     // The only <style> here is the one the document authored.
@@ -2294,15 +2399,25 @@ public sealed class PageTests
                 "title": "app",
                 "rulesIdentity": true,
                 "rules": [".app", ".wide", ".added"],
-                "sourceUpdated": true,
+                "bridgeTextHidden": true,
                 "crossOwner": true,
                 "crossHref": "https://cdn.example.test/theme.css",
+                "privateRulesHidden": true,
                 "bridgeSheetsHidden": true,
                 "security": ["SecurityError", "SecurityError", "SecurityError",
                              "SecurityError", "SecurityError"]
             }
             """,
             result);
+
+        // insertRule used to rewrite the phantom <style>'s textContent, which is how the rule
+        // reached the renderer. It now writes the bytes held beside the link, which is the same
+        // cascade input with no element in the DOM. Read on the host side: page script no longer
+        // has a way to the store (upstream 04418a5).
+        Assert.Contains(
+            ".added",
+            runtime.WithDom(dom => dom.ExternalStylesheetCss(dom.QuerySelector("#same")!.Value)),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2321,8 +2436,8 @@ public sealed class PageTests
         runtime.WithDom(dom =>
         {
             List<NodeId> links = dom.QuerySelectorAll("""link[rel~="stylesheet"]""");
-            dom.SetExternalStylesheetCss(links[0], ".target{height:10px}");
-            dom.SetExternalStylesheetCss(links[1], ".target{height:30px}");
+            dom.SetExternalStylesheet(links[0], ".target{height:10px}", originClean: true);
+            dom.SetExternalStylesheet(links[1], ".target{height:30px}", originClean: true);
             return 0;
         });
         runtime.ExecuteScript("<first-sheet>", PageHelpers.LinkedStylesheetLoadScript(0));

@@ -78,7 +78,15 @@ internal static partial class PageHelpers
 
 public sealed partial class Page
 {
-    internal async Task<List<(AuthorStylesheetTarget Target, string Css)>> FetchStylesheetsAsync(
+    /// <summary>
+    /// Fetch the document's linked sheets and inline <c>@import</c>s, and expand each graph.
+    /// </summary>
+    /// <remarks>
+    /// Upstream 04418a5: each result also carries whether its graph is origin-clean for the
+    /// document (response URLs after redirects, every <c>@import</c> included) and the root
+    /// sheet's response URL, so CSSOM can refuse a cross-origin sheet's rules.
+    /// </remarks>
+    internal async Task<List<(AuthorStylesheetTarget Target, string Css, bool OriginClean, string ResponseUrl)>> FetchStylesheetsAsync(
         CancellationToken cancellationToken)
     {
         if (Js is not { } js)
@@ -245,15 +253,25 @@ public sealed partial class Page
             }
         }
 
-        List<(AuthorStylesheetTarget, string)> materialized = [];
+        List<(AuthorStylesheetTarget, string, bool, string)> materialized = [];
         foreach ((AuthorStylesheetTarget target, string key, string? media) in roots)
         {
+            string actualKey = aliases.TryGetValue(key, out string? alias) ? alias : key;
+            if (!sheets.TryGetValue(actualKey, out LoadedStylesheet? root))
+            {
+                continue;
+            }
             string? css = PageHelpers.MaterializeStylesheetGraph(key, sheets, aliases, []);
             if (css is null)
             {
                 continue;
             }
-            materialized.Add((target, media is null ? css : $"@media {media} {{\n{css}\n}}\n"));
+            bool originClean = PageHelpers.StylesheetGraphIsOriginClean(key, sheets, aliases, [], documentUrl);
+            materialized.Add((
+                target,
+                media is null ? css : $"@media {media} {{\n{css}\n}}\n",
+                originClean,
+                root.ResponseUrl.Href));
         }
         return materialized;
     }

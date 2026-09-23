@@ -323,53 +323,32 @@ public sealed partial class Page
         InitJs();
         var authorStylesheets = await FetchStylesheetsAsync(cancellationToken).ConfigureAwait(false);
 
-        // Inject CSS as a global so getComputedStyle and any CSS-aware shim can read
-        // it. This has to happen before scripts run, regardless of waitUntil, so
-        // handlers that read window.__obscura_css see it.
+        // Upstream 04418a5: fetched CSS goes into the DomTree store with its origin-clean bit,
+        // and nowhere page script can read it. The globalThis.__obscura_css global that used to
+        // hold every fetched sheet, cross-origin ones included, is gone.
         if (authorStylesheets.Count != 0 && Js is { } cssJs)
         {
-            string combinedCss = string.Join('\n', authorStylesheets.Select(entry => entry.Css));
-            // The thorough template-literal escape covers U+2028 / U+2029 and other
-            // control characters. An escaper that only handled ` \ and ${ let
-            // attacker-controlled CSS containing a raw U+2028 break out of the
-            // template literal and run arbitrary JS in the page's realm.
-            string escaped = PageHelpers.EscapeForJsTemplateLiteral(combinedCss);
-            TryExecute(cssJs, "<css>", $"globalThis.__obscura_css = `{escaped}`;");
-
             // DEVIATION from crates/obscura-browser, which runs one script per sheet to insert
             // a synthetic <style>. Chromium 141 inserts no element, so the bytes are recorded
             // against the <link> (or, for an @import, against the importing <style>) and the
             // renderer reads them from there. Several @import rules in one <style> contribute
-            // in source order, so they are joined before the single write per node. See
-            // "Known deviations" in todo.md.
-            Dictionary<NodeId, string> perNode = [];
-            List<int> linkedIndexes = [];
-            foreach ((AuthorStylesheetTarget target, string css) in authorStylesheets)
-            {
-                NodeId node;
-                switch (target)
-                {
-                    case AuthorStylesheetTarget.Linked linked:
-                        node = linked.Node;
-                        linkedIndexes.Add(linked.LinkIndex);
-                        break;
-                    case AuthorStylesheetTarget.InlineImport inline:
-                        node = inline.Node;
-                        break;
-                    default:
-                        continue;
-                }
-
-                perNode[node] = perNode.TryGetValue(node, out string? earlier)
-                    ? earlier + "\n" + css
-                    : css;
-            }
-
+            // in source order, so they are appended to one entry, which stays origin-clean only
+            // if all of them are. See "Known deviations" in todo.md.
+            List<(int LinkIndex, string ResponseUrl)> linked = [];
             cssJs.WithDom(dom =>
             {
-                foreach ((NodeId node, string css) in perNode)
+                foreach ((AuthorStylesheetTarget target, string css, bool originClean, string responseUrl) in authorStylesheets)
                 {
-                    dom.SetExternalStylesheetCss(node, css);
+                    switch (target)
+                    {
+                        case AuthorStylesheetTarget.Linked link:
+                            dom.AppendExternalStylesheet(link.Node, css, originClean);
+                            linked.Add((link.LinkIndex, responseUrl));
+                            break;
+                        case AuthorStylesheetTarget.InlineImport inline:
+                            dom.AppendExternalStylesheet(inline.Node, css, originClean);
+                            break;
+                    }
                 }
 
                 return 0;
@@ -377,13 +356,23 @@ public sealed partial class Page
 
             // An @import needs no script: it owns no CSSOM sheet and fires no event. A <link>
             // does both, and its load handler may still change what applies.
-            foreach (int linkIndex in linkedIndexes)
+            foreach ((int linkIndex, string responseUrl) in linked)
             {
                 TryExecute(
                     cssJs,
                     "<fetch_stylesheets>",
-                    PageHelpers.LinkedStylesheetLoadScript(linkIndex));
+                    PageHelpers.LinkedStylesheetLoadScript(linkIndex, responseUrl));
             }
+        }
+
+        // Static registration is complete before page script runs. Remove the temporary
+        // host bridge even when the document had no initial sheets (upstream 04418a5).
+        if (Js is { } cleanupJs)
+        {
+            TryExecute(
+                cleanupJs,
+                "<fetch_stylesheets-cleanup>",
+                PageHelpers.LinkedStylesheetRegistrationCleanupScript);
         }
 
         _documentTimelineOrigin = Stopwatch.GetTimestamp();

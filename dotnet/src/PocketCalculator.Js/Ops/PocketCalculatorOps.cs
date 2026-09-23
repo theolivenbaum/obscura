@@ -159,6 +159,14 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (nid, mode) => CoreOps.OpShadowAttach(Page, U32(nid), S(mode))));
         Bind(ops, "op_shadow_root_info", (Func<object?, string>)(
             nid => CoreOps.OpShadowRootInfo(Page, U32(nid))));
+        // Upstream 04418a5: host-held linked-sheet CSS and its origin-clean bit.
+        Bind(ops, "op_external_stylesheet_set", (Func<object?, object?, object?, object?, object?, bool>)(
+            (nid, css, responseUrl, originClean, frameId) => StylesheetOps.OpExternalStylesheetSet(
+                FrameState(U32(frameId)), U32(nid), S(css), S(responseUrl), B(originClean))));
+        Bind(ops, "op_external_stylesheet_remove", (Func<object?, object?, bool>)(
+            (nid, frameId) => StylesheetOps.OpExternalStylesheetRemove(FrameState(U32(frameId)), U32(nid))));
+        Bind(ops, "op_external_stylesheet_get", (Func<object?, object?, string>)(
+            (nid, frameId) => StylesheetOps.OpExternalStylesheetGet(FrameState(U32(frameId)), U32(nid))));
 
         // --- Runtime / page ------------------------------------------------
         Bind(ops, "op_runtime_events_enabled", (Func<bool>)(
