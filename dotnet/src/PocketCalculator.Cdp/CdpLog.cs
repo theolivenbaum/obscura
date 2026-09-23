@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Globalization;
+using System.Text;
 
 namespace PocketCalculator.Cdp;
 
@@ -43,7 +45,48 @@ public static class CdpLog
         }
 
         Console.Error.WriteLine(
-            string.Create(CultureInfo.InvariantCulture, $"obscura-cdp {label}: {message}"));
+            string.Create(CultureInfo.InvariantCulture, $"obscura-cdp {label}: {EscapeControl(message)}"));
+    }
+
+    private static readonly SearchValues<char> ControlChars = SearchValues.Create(
+        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000A\u000B\u000C\u000D\u000E\u000F"
+        + "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F"
+        + "\u007F\u0085\u2028\u2029");
+
+    /// <summary>
+    /// A log message with every control character (C0, DEL, NEL and the Unicode
+    /// line and paragraph separators) written as a <c>\uXXXX</c> escape.
+    /// </summary>
+    /// <remarks>
+    /// SECURITY.md I2: log lines carry client-controlled text (CDP method names,
+    /// URLs, selectors). A CR or LF in one forged whole log lines, and an ESC
+    /// could drive the operator's terminal. One record is one line now. A message
+    /// with nothing to escape is returned as is.
+    /// </remarks>
+    public static string EscapeControl(string message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var first = message.AsSpan().IndexOfAny(ControlChars);
+        if (first < 0)
+        {
+            return message;
+        }
+
+        var builder = new StringBuilder(message.Length + 16);
+        builder.Append(message.AsSpan(0, first));
+        foreach (var c in message.AsSpan(first))
+        {
+            if (ControlChars.Contains(c))
+            {
+                builder.Append(CultureInfo.InvariantCulture, $"\\u{(int)c:X4}");
+            }
+            else
+            {
+                builder.Append(c);
+            }
+        }
+
+        return builder.ToString();
     }
 
     private static CdpLogLevel ReadLevel()

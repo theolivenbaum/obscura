@@ -726,6 +726,35 @@ public static partial class Page
             }
             : null;
 
+    /// <summary>The operator's file-access switch refused this navigation.</summary>
+    internal const string FileNavigationDisabled =
+        "Page.navigate to file:// is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable.";
+
+    /// <summary>
+    /// The one scheme gate every CDP navigation takes: <c>Page.navigate</c> with or
+    /// without a session, <c>Page.reload</c>, history navigation and the navigations a
+    /// page queues itself. Null when the navigation may go ahead.
+    /// </summary>
+    /// <remarks>
+    /// A page-initiated navigation from a non-file: document into file: is refused
+    /// whatever <c>--allow-file-access</c> says (SECURITY.md H2, Chromium's rule); any
+    /// other file: navigation needs the switch (H1: the sessioned path used to skip it).
+    /// </remarks>
+    internal static string? NavigationRefusal(string url, PendingNavigation? initiator, bool allowFileAccess)
+    {
+        if (!CdpUtil.UrlIsFileScheme(url))
+        {
+            return null;
+        }
+
+        if (NavigationPolicy.RefusesPageInitiated(initiator, url))
+        {
+            return NavigationPolicy.LocalResourceRefusal(url);
+        }
+
+        return allowFileAccess ? null : FileNavigationDisabled;
+    }
+
     private static async Task<JsonNode?> DoNavigateAsync(
         string url,
         JsonNode? parameters,
@@ -743,10 +772,16 @@ public static partial class Page
         bool allowFileAccess = ctx.GetSessionPage(sessionId) is { } gate
             ? gate.Context.AllowFileAccess
             : ctx.DefaultContext.AllowFileAccess;
-        if (CdpUtil.UrlIsFileScheme(url) && !allowFileAccess)
+        if (NavigationRefusal(
+                url,
+                PageInitiator(
+                    url,
+                    parameters.Get("__method").AsString() ?? "GET",
+                    parameters.Get("__body").AsString() ?? string.Empty,
+                    parameters),
+                allowFileAccess) is { } refusal)
         {
-            throw new DomainError(
-                "Page.navigate to file:// is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable.");
+            throw new DomainError(refusal);
         }
 
         List<string> preloadScripts = [.. ctx.PreloadScripts.Select(entry => entry.Source)];
@@ -1176,6 +1211,14 @@ public static partial class Page
                 string? targetUrl = entryId >= 0 && entryId < page.History.Count
                     ? page.History[entryId]
                     : null;
+                // History entries can name a URL the page reported (a pushState), so a
+                // history navigation takes the same scheme gate as Page.navigate.
+                if (targetUrl is not null
+                    && NavigationRefusal(targetUrl, null, page.Context.AllowFileAccess) is { } refusal)
+                {
+                    throw new DomainError(refusal);
+                }
+
                 if (targetUrl is not null)
                 {
                     page.SetHistoryIndex(entryId);

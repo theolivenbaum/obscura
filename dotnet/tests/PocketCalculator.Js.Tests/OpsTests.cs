@@ -60,6 +60,26 @@ public sealed class OpsTests
         Assert.Contains("length", error.Message, StringComparison.Ordinal);
     }
 
+    // M8: each cap alone still allowed 10M iterations over a 1 MiB output, about 5e11
+    // HMACs, uninterruptible inside the op. The product is capped too.
+    [Fact]
+    public void Pbkdf2_rejects_excessive_total_work_before_deriving()
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var error = Assert.Throws<CryptoOperationException>(() => CryptoOps.Pbkdf2(
+            "SHA-1",
+            Encoding.ASCII.GetBytes("pw"),
+            Encoding.ASCII.GetBytes("salt"),
+            CryptoOps.Pbkdf2MaxIterations,
+            CryptoOps.Pbkdf2MaxOutputBytes));
+        Assert.Contains("cost", error.Message, StringComparison.Ordinal);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5));
+
+        // Many blocks at a low count, and the largest count for one block, both stay allowed.
+        Assert.Equal(64 * 1024, CryptoOps.Pbkdf2(
+            "SHA-256", Encoding.ASCII.GetBytes("pw"), Encoding.ASCII.GetBytes("salt"), 10, 64 * 1024).Length);
+    }
+
     [Fact]
     public void Pbkdf2_derives_within_limits()
     {

@@ -36,14 +36,28 @@ public static partial class CdpServer
         ChannelReader<InterceptedRequest> interceptRx,
         Dictionary<string, TaskCompletionSource<InterceptResolution>> interceptedPaused,
         Queue<ServerMessage> deferred,
-        bool sendCommandResponse)
+        bool sendCommandResponse,
+        bool hostInitiated = false)
     {
-        var req = CdpRequest.TryParse(text, out var parseError);
-        if (req is null)
+        var parsed = CdpRequest.TryParse(text, out var parseError);
+        if (parsed is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}");
             return;
         }
+
+        // Only the processor's own forwarded navigation may carry the internal
+        // parameters (SECURITY.md I6); a client's lose them here.
+        var req = hostInitiated
+            ? new CdpRequest
+            {
+                Id = parsed.Id,
+                Method = parsed.Method,
+                Params = parsed.Params,
+                SessionId = parsed.SessionId,
+                HostInitiated = true,
+            }
+            : parsed.WithoutInternalParams();
 
         CdpLog.Info($"INTERCEPTION navigate: {req.Method} (id={req.Id})");
 
@@ -55,18 +69,41 @@ public static partial class CdpServer
 
         if (pageId is null)
         {
-            await ProcessCdpMessageAsync(text, ctx, replyTx).ConfigureAwait(false);
+            await ProcessCdpRequestAsync(req, ctx, replyTx).ConfigureAwait(false);
             return;
         }
 
         var pageIndex = ctx.Pages.FindIndex(p => string.Equals(p.Id, pageId, StringComparison.Ordinal));
         if (pageIndex < 0)
         {
-            await ProcessCdpMessageAsync(text, ctx, replyTx).ConfigureAwait(false);
+            await ProcessCdpRequestAsync(req, ctx, replyTx).ConfigureAwait(false);
             return;
         }
 
         var page = ctx.Pages[pageIndex];
+
+        // The scheme gate Page.navigate takes on the sessionless path (SECURITY.md H1):
+        // this path, which every flattened session and the autonomous pump of
+        // page-queued navigations (H2) use, used to skip it.
+        {
+            var gateUrl = req.Params.Get("url").AsStringOr(string.Empty);
+            var gateInitiator = Domains.Page.PageInitiator(
+                gateUrl,
+                req.Params.Get("__method").AsStringOr("GET"),
+                req.Params.Get("__body").AsStringOr(string.Empty),
+                req.Params);
+            if (Domains.Page.NavigationRefusal(gateUrl, gateInitiator, page.Context.AllowFileAccess) is { } refusal)
+            {
+                CdpLog.Warn("refused a navigation to file:");
+                if (sendCommandResponse)
+                {
+                    replyTx.TryWrite(CdpResponse.Failure(req.Id, -32601, refusal, req.SessionId).ToJson());
+                }
+
+                return;
+            }
+        }
+
         ctx.Pages.RemoveAt(pageIndex);
 
         // Issue #19 follow-up: only one of a connection's pages holds a live JS
@@ -380,6 +417,15 @@ public static partial class CdpServer
             return;
         }
 
+        await ProcessCdpRequestAsync(req, ctx, replyTx).ConfigureAwait(false);
+    }
+
+    /// <summary>Dispatch one parsed request and forward its events, response and any navigation it queued.</summary>
+    private static async Task ProcessCdpRequestAsync(
+        CdpRequest req,
+        CdpContext ctx,
+        ChannelWriter<string> replyTx)
+    {
         CdpLog.Debug($"CDP: {req.Method} (id={req.Id}, s={req.SessionId ?? "None"})");
 
         ServiceLivePageRenderResources(ctx);
@@ -406,6 +452,7 @@ public static partial class CdpServer
                 Method = "Page.navigate",
                 Params = Domains.Page.JsNavigationParams(pending),
                 SessionId = req.SessionId,
+                HostInitiated = true,
             };
             _ = await Dispatcher.DispatchAsync(navRequest, ctx).ConfigureAwait(false);
             ForwardPendingEvents(ctx, replyTx);

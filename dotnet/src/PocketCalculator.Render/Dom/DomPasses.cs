@@ -285,6 +285,11 @@ internal static class DomPasses
         IReadOnlyDictionary<TaffyNodeId, int> generatedNodes,
         Rect?[] generatedRects)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         TaffyLayout layout = taffyTree.GetLayout(taffyId);
         float x = absX + layout.Location.X;
         float y = absY + layout.Location.Y;
@@ -451,6 +456,11 @@ internal static class DomPasses
         float parentY,
         Dictionary<TaffyNodeId, Rect> rects)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         TaffyLayout layout = taffyTree.GetLayout(node);
         float x = parentX + layout.Location.X;
         float y = parentY + layout.Location.Y;
@@ -580,6 +590,11 @@ internal static class DomPasses
         IReadOnlyDictionary<TaffyNodeId, Rect> preliminaryRects,
         FloatBand band)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return false;
+        }
+
         if (!reverse.TryGetValue(id, out TaffyNodeId node))
         {
             return false;

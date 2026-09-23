@@ -13,6 +13,13 @@ public sealed class CookieJar
 {
     private const string DefaultSameSite = "Lax";
 
+    // Chromium's limits (net/cookies/cookie_monster.h and parsed_cookie.h).
+    private const int MaxCookieNameValueBytes = 4096;
+    private const int MaxCookiesPerDomain = 180;
+    private const int PurgedCookiesPerDomain = 150;
+    private const int MaxCookiesTotal = 3300;
+    private const int PurgedCookiesTotal = 3000;
+
     /// <summary>
     /// domain -> (name, path) -> entry. RFC 6265 section 5.3 identifies a cookie by
     /// (name, domain, path); the outer map scopes by domain and the inner key
@@ -23,6 +30,9 @@ public sealed class CookieJar
         new(StringComparer.Ordinal);
 
     private readonly System.Threading.Lock _lock = new();
+
+    /// <summary>Monotonic use counter behind the least-recently-used eviction order.</summary>
+    private long _accessClock;
 
     private sealed class CookieEntry
     {
@@ -41,6 +51,9 @@ public sealed class CookieJar
         public bool HttpOnly { get; init; }
         public long? Expires { get; init; }
         public required string SameSite { get; init; }
+
+        /// <summary>When the cookie was last stored or sent, on the jar's use counter.</summary>
+        public long LastAccess { get; set; }
     }
 
     /// <summary>
@@ -106,9 +119,18 @@ public sealed class CookieJar
         var name = rawName.Trim();
         var value = rawValue.Trim();
 
+        // Deviation from cookies.rs, which stores a cookie of any size (SECURITY.md M5):
+        // Chromium drops one whose name and value together exceed 4096 bytes.
+        if (System.Text.Encoding.UTF8.GetByteCount(name) + System.Text.Encoding.UTF8.GetByteCount(value)
+            > MaxCookieNameValueBytes)
+        {
+            return;
+        }
+
         var requestHost = HostOf(url).ToLowerInvariant();
         string? domainAttr = null;
         var path = DefaultCookiePath(url.AbsolutePath);
+        var hasPathAttr = false;
         var secure = false;
         var httpOnly = false;
         long? expires = null;
@@ -128,6 +150,7 @@ public sealed class CookieJar
                             break;
                         case "path":
                             path = val.Trim();
+                            hasPathAttr = true;
                             break;
                         case "expires":
                             if (TryParseHttpDate(val.Trim(), out var ts))
@@ -183,6 +206,11 @@ public sealed class CookieJar
         // SameSite=None is only accepted together with Secure.
         var sourceIsSecure = string.Equals(url.Scheme, "https", StringComparison.Ordinal);
         if ((secure && !sourceIsSecure) || (sameSite == "None" && !secure))
+        {
+            return;
+        }
+
+        if (!PrefixRulesHold(name, value, secure, sourceIsSecure, domainAttr, hasPathAttr ? path : null))
         {
             return;
         }
@@ -249,7 +277,111 @@ public sealed class CookieJar
             return;
         }
 
+        entry.LastAccess = ++_accessClock;
+        var added = !domainCookies.ContainsKey((name, path));
         domainCookies[(name, path)] = entry;
+        if (added)
+        {
+            EnforceLimitsLocked(domainCookies);
+        }
+    }
+
+    /// <summary>
+    /// The cookie-prefix rules of RFC 6265bis section 4.1.3, matched case-insensitively
+    /// as Chromium does: <c>__Secure-</c> needs the Secure attribute from a secure
+    /// origin, and <c>__Host-</c> additionally needs no Domain attribute and
+    /// <c>Path=/</c>. A nameless cookie whose value carries a prefix is refused too, so
+    /// it cannot pose as one in the <c>Cookie</c> header.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from cookies.rs, which does not enforce prefixes (SECURITY.md M5): a
+    /// sibling subdomain could plant <c>__Host-session</c> with <c>Domain=parent</c>.
+    /// </remarks>
+    private static bool PrefixRulesHold(
+        string name,
+        string value,
+        bool secure,
+        bool sourceIsSecure,
+        string? domainAttr,
+        string? pathAttr)
+    {
+        var subject = name.Length == 0 ? value : name;
+        var isHost = subject.StartsWith("__Host-", StringComparison.OrdinalIgnoreCase);
+        var isSecure = isHost || subject.StartsWith("__Secure-", StringComparison.OrdinalIgnoreCase);
+        if (name.Length == 0)
+        {
+            return !isSecure;
+        }
+
+        if (isSecure && !(secure && sourceIsSecure))
+        {
+            return false;
+        }
+
+        return !isHost || (domainAttr is null && string.Equals(pathAttr, "/", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Chromium's jar limits, applied after a new cookie lands. A domain over
+    /// <see cref="MaxCookiesPerDomain"/> is purged to <see cref="PurgedCookiesPerDomain"/>,
+    /// and the jar over <see cref="MaxCookiesTotal"/> to <see cref="PurgedCookiesTotal"/>:
+    /// expired cookies go first, then the least recently used. Caller holds the lock.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from cookies.rs, whose jar is unbounded (SECURITY.md M5). Chromium
+    /// counts per registrable domain and weighs priority and secureness; this counts
+    /// per jar domain and orders by expiry and last use only, which the global cap
+    /// backstops against a page spreading cookies over many subdomains.
+    /// </remarks>
+    private void EnforceLimitsLocked(Dictionary<(string Name, string Path), CookieEntry> domainCookies)
+    {
+        if (domainCookies.Count > MaxCookiesPerDomain)
+        {
+            Purge([domainCookies], PurgedCookiesPerDomain);
+        }
+
+        var total = 0;
+        foreach (var entries in _cookies.Values)
+        {
+            total += entries.Count;
+        }
+
+        if (total > MaxCookiesTotal)
+        {
+            Purge([.. _cookies.Values], PurgedCookiesTotal);
+        }
+    }
+
+    private static void Purge(
+        List<Dictionary<(string Name, string Path), CookieEntry>> scopes,
+        int keep)
+    {
+        var now = Now();
+        var candidates = new List<(Dictionary<(string Name, string Path), CookieEntry> Scope, CookieEntry Entry)>();
+        foreach (var scope in scopes)
+        {
+            foreach (var entry in scope.Values)
+            {
+                candidates.Add((scope, entry));
+            }
+        }
+
+        // Expired first, then least recently used.
+        candidates.Sort((a, b) =>
+        {
+            var aExpired = a.Entry.Expires is { } ae && ae <= now;
+            var bExpired = b.Entry.Expires is { } be && be <= now;
+            return aExpired != bExpired
+                ? (aExpired ? -1 : 1)
+                : a.Entry.LastAccess.CompareTo(b.Entry.LastAccess);
+        });
+
+        var excess = candidates.Count - keep;
+        for (var i = 0; i < excess; i++)
+        {
+            var (scope, entry) = candidates[i];
+            scope.Remove((entry.Name, entry.Path));
+        }
     }
 
     /// <summary>
@@ -404,6 +536,7 @@ public sealed class CookieJar
                         continue;
                     }
 
+                    entry.LastAccess = ++_accessClock;
                     matching.Add($"{entry.Name}={entry.Value}");
                 }
             }
@@ -631,8 +764,25 @@ public sealed class CookieJar
     }
 
     /// <summary>
+    /// Create <paramref name="directory"/> (and any missing parents) owner-only
+    /// (0700) on Unix. An existing directory keeps the mode it has.
+    /// </summary>
+    public static void CreateOwnerOnlyDirectory(string directory)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(directory);
+        }
+        else
+        {
+            Directory.CreateDirectory(
+                directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    /// <summary>
     /// Serialize all non-expired cookies to a JSON file. Writes atomically via a
-    /// temp file then rename.
+    /// temp file then rename. The file is owner-only on Unix.
     /// </summary>
     public void SaveToFile(string path)
     {
@@ -646,13 +796,31 @@ public sealed class CookieJar
         var parent = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrEmpty(parent))
         {
-            Directory.CreateDirectory(parent);
+            CreateOwnerOnlyDirectory(parent);
         }
 
         var tmp = Path.Combine(
             string.IsNullOrEmpty(parent) ? "." : parent,
             $".obscura-cookies-{Guid.NewGuid():N}.tmp");
-        File.WriteAllText(tmp, json, new UTF8Encoding(false));
+        // Deviation (SECURITY.md I4): Rust writes the jar with the process umask,
+        // which on most systems leaves every session cookie readable by other
+        // local users. The port creates the file owner-only (0600) on Unix; the
+        // rename keeps that mode. Windows files inherit the directory's ACL.
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+        };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+        using (var stream = new FileStream(tmp, options))
+        {
+            stream.Write(new UTF8Encoding(false).GetBytes(json));
+        }
+
         File.Move(tmp, path, overwrite: true);
     }
 

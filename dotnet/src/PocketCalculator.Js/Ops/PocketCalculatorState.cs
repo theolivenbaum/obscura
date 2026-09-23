@@ -38,6 +38,16 @@ public sealed class PocketCalculatorState
     public string Url { get; set; } = "about:blank";
 
     /// <summary>
+    /// Whether the document has an opaque origin whatever its URL says, as a frame
+    /// sandboxed without <c>allow-same-origin</c> does. Port addition: Rust derives
+    /// no origin host-side at all (see <see cref="StateHelpers.DocumentOrigin"/>).
+    /// </summary>
+    public bool OpaqueOrigin { get; set; }
+
+    /// <summary>Bodies of this document's internal loads, held for the host (see <see cref="InternalLoads"/>).</summary>
+    public InternalLoadStore InternalLoadStore { get; } = new();
+
+    /// <summary>
     /// WHATWG canonical name of the document's character encoding (e.g. "UTF-8",
     /// "EUC-JP"). Backs <c>document.characterSet</c> and the URL query encoding
     /// override for <c>&lt;a&gt;</c>/<c>&lt;area&gt;</c> hrefs in legacy-charset documents.
@@ -107,6 +117,9 @@ public sealed class PocketCalculatorState
     /// emitted as <c>Runtime.bindingCalled</c> events.
     /// </summary>
     public List<(string Name, string Payload)> PendingBindingCalls { get; } = [];
+
+    /// <summary>UTF-16 length of the payloads in <see cref="PendingBindingCalls"/>.</summary>
+    public long PendingBindingCallBytes { get; set; }
 
     /// <summary>
     /// Console calls and uncaught script exceptions, in occurrence order. The CDP
@@ -539,6 +552,12 @@ public sealed class PendingFrame
 
     /// <summary>The frame that holds this one; 0 when the page does.</summary>
     public required uint ParentFrameId { get; init; }
+
+    /// <summary>
+    /// Whether the frame's document gets an opaque origin whatever its URL, as an iframe
+    /// sandboxed without <c>allow-same-origin</c> does. Port addition.
+    /// </summary>
+    public bool OpaqueOrigin { get; init; }
 }
 
 /// <summary>One <c>postMessage</c> in flight between two realms.</summary>

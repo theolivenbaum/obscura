@@ -15277,21 +15277,18 @@ public sealed partial class RuntimeTests
                 );
             }
         */
-        using var fixture = RuntimeFixture.Setup(
-            """<html><head></head><body><div class="card"></div></body></html>""");
+        // DEVIATION from the Rust body above, which stubs op_fetch_url: the host fetches a
+        // dynamic sheet and its imports itself (op_load_stylesheet, SECURITY.md C3), so the
+        // sheets come from a server. Everything asserted is unchanged.
+        using var server = new RawHttpServer(request => CssResponse(
+            RawHttpServer.RequestPath(request).EndsWith("/assets/route.css", StringComparison.Ordinal)
+                ? "@import \"./theme/base.css\"; .card { display:grid; background-image:url(\"../img/card.png\") }"
+                : ".card { color:red; background-image:url(\"./grain.png\") }"));
+        using var fixture = RedirectRuntimeForOrigin(server.Origin);
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = __obscura_test_ops.op_fetch_url;
-                try {
-                    __obscura_test_ops.op_fetch_url = (url) => JSON.stringify({
-                        status: 200,
-                        headers: { "content-type": "text/css" },
-                        body: url.endsWith("/assets/route.css")
-                            ? '@import "./theme/base.css"; .card { display:grid; background-image:url("../img/card.png") }'
-                            : '.card { color:red; background-image:url("./grain.png") }',
-                        url,
-                    });
+                {
                     const link = document.createElement("link");
                     link.setAttribute("rel", "stylesheet");
                     link.setAttribute("href", "/assets/route.css");
@@ -15327,9 +15324,9 @@ public sealed partial class RuntimeTests
                             rules[0].cssText.includes("color")
                             && rules[1].cssText.includes("display"),
                         importedUrl:
-                            css.includes("http://example.com/assets/theme/grain.png"),
+                            css.includes(location.origin + "/assets/theme/grain.png"),
                         routeUrl:
-                            css.includes("http://example.com/img/card.png"),
+                            css.includes(location.origin + "/img/card.png"),
                         removedWithLink:
                             !link.isConnected && document.querySelectorAll("style").length === 0,
                         cssom,
@@ -15337,8 +15334,6 @@ public sealed partial class RuntimeTests
                             && link.sheet === null
                             && list.length === 0,
                     };
-                } finally {
-                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -15348,7 +15343,7 @@ public sealed partial class RuntimeTests
             awaitPromise: true);
 
         AssertJsonEquals(
-            """
+            $$"""
             {
                 "noElement": true,
                 "importedBeforeRoute": true,
@@ -15359,7 +15354,7 @@ public sealed partial class RuntimeTests
                     "listed": true,
                     "stable": true,
                     "owner": true,
-                    "href": "http://example.com/assets/route.css",
+                    "href": "{{server.Origin}}/assets/route.css",
                     "selectors": [".card", ".card"]
                 },
                 "detachedCssom": true
@@ -15374,11 +15369,25 @@ public sealed partial class RuntimeTests
     [Fact]
     public async Task DynamicLinkedStylesheetOriginFollowsResponseUrlAndImports()
     {
-        using var fixture = RuntimeFixture.Setup("<html><head></head><body></body></html>");
+        // The host fetches a dynamic sheet itself (op_load_stylesheet, SECURITY.md C3), so a
+        // stubbed op_fetch_url no longer reaches it: two servers stand for the two origins.
+        using var cross = new RawHttpServer(request => CssResponse(
+            RawHttpServer.RequestPath(request).EndsWith("/x.css", StringComparison.Ordinal)
+                ? ".imported{color:green}"
+                : ".secret{color:red}"));
+        using var site = new RawHttpServer(request =>
+        {
+            var path = RawHttpServer.RequestPath(request);
+            return path.EndsWith("/redirects.css", StringComparison.Ordinal)
+                ? $"HTTP/1.1 302 Found\r\nLocation: {cross.Origin}/secret.css\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                : CssResponse(path.EndsWith("/imports.css", StringComparison.Ordinal)
+                    ? $"@import \"{cross.Origin}/x.css\"; .own{{color:blue}}"
+                    : ".same{color:green}");
+        });
+        using var fixture = RedirectRuntimeForOrigin(site.Origin);
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
-                const originalFetchOp = __obscura_test_ops.op_fetch_url;
                 const load = (href) => {
                     const link = document.createElement("link");
                     link.setAttribute("rel", "stylesheet");
@@ -15391,17 +15400,7 @@ public sealed partial class RuntimeTests
                     try { return Array.from(sheet.cssRules, rule => rule.selectorText); }
                     catch (error) { return error.name; }
                 };
-                try {
-                    __obscura_test_ops.op_fetch_url = (url) => JSON.stringify({
-                        status: 200,
-                        headers: { "content-type": "text/css" },
-                        body: url.endsWith("/redirects.css") ? ".secret{color:red}"
-                            : url.endsWith("/imports.css") ? '@import "https://cdn.example/x.css"; .own{color:blue}'
-                            : url.endsWith("/x.css") ? ".imported{color:green}"
-                            : ".same{color:green}",
-                        url: url.endsWith("/redirects.css") ? "https://cross-origin.example/secret.css" : url,
-                        redirected: url.endsWith("/redirects.css"),
-                    });
+                {
                     const redirected = await load("/redirects.css");
                     const imports = await load("/imports.css");
                     const same = await load("/same.css");
@@ -15417,8 +15416,6 @@ public sealed partial class RuntimeTests
                         globals: [typeof __obscura_linkedStylesheetCss,
                                   typeof __obscura_setLinkedStylesheetCss],
                     };
-                } finally {
-                    __obscura_test_ops.op_fetch_url = originalFetchOp;
                 }
             }
             """,
@@ -15428,11 +15425,11 @@ public sealed partial class RuntimeTests
             awaitPromise: true);
 
         AssertJsonEquals(
-            """
+            $$"""
             {
                 "redirected": "SecurityError",
                 "forged": "SecurityError",
-                "href": "http://example.com/redirects.css",
+                "href": "{{site.Origin}}/redirects.css",
                 "imports": "SecurityError",
                 "same": [".same"],
                 "globals": ["undefined", "undefined"]
@@ -15466,7 +15463,10 @@ public sealed partial class RuntimeTests
                     await loaded;
                     return {
                         readable: frame.contentDocument !== null,
-                        loadedUrl: frame._iframeLoadedUrl,
+                        // The frame's state is closure-private now (SECURITY.md C2), and a
+                        // cross-origin window has no document to reach through.
+                        expando: frame._iframeLoadedUrl === undefined && frame._iframeDoc === undefined,
+                        windowDocument: frame.contentWindow.document === undefined,
                     };
                 } finally {
                     __obscura_test_ops.op_fetch_url = originalFetchOp;
@@ -15482,7 +15482,8 @@ public sealed partial class RuntimeTests
             """
             {
                 "readable": false,
-                "loadedUrl": "https://cross-origin.example/secret"
+                "expando": true,
+                "windowDocument": true
             }
             """,
             result.Value);
@@ -15504,6 +15505,8 @@ public sealed partial class RuntimeTests
                         headers: { "content-type": "text/html" },
                         body: "<!doctype html><title>mine</title>",
                         url,
+                        // The host's verdict, which the shim now relies on (SECURITY.md C2).
+                        sameOrigin: true,
                     });
                     const frame = document.createElement("iframe");
                     const loaded = new Promise(resolve => frame.onload = resolve);
@@ -15512,7 +15515,7 @@ public sealed partial class RuntimeTests
                     await loaded;
                     return {
                         readable: frame.contentDocument !== null,
-                        loadedUrl: frame._iframeLoadedUrl,
+                        loadedUrl: frame.contentDocument.URL,
                     };
                 } finally {
                     __obscura_test_ops.op_fetch_url = originalFetchOp;
@@ -20671,6 +20674,11 @@ public sealed partial class RuntimeTests
         runtime.SetHttpClient(new PocketCalculatorHttpClient(jar, null, allowPrivateNetwork: true));
         return runtime;
     }
+
+    /// <summary>A <c>text/css</c> response for <see cref="RawHttpServer"/>.</summary>
+    private static string CssResponse(string css) =>
+        "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: "
+            + System.Text.Encoding.UTF8.GetByteCount(css) + "\r\nConnection: close\r\n\r\n" + css;
 
     /// <summary>The Rust tests' <c>redirect_runtime_for_origin</c> helper.</summary>
     private static RuntimeFixture RedirectRuntimeForOrigin(string origin)

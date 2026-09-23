@@ -226,4 +226,105 @@ public sealed class HttpTransportGuardsTests
             "127.0.0.1", 0, null, null, false, null, "short", TestContext.Current.CancellationToken));
         Assert.Equal("POCKETCALCULATOR_MCP_TOKEN must be at least 32 bytes", shortToken.Message);
     }
+
+    /// <summary>
+    /// SECURITY.md L1: a DNS-rebound <c>Host</c> is refused with 403, for a tool
+    /// call and for an SSE stream alike, while an IP literal and a localhost name
+    /// are served on any port, as the CDP server's rule has it.
+    /// </summary>
+    [Fact]
+    public async Task ReboundHostIsRefused()
+    {
+        var rebound = await WithServerAsync(
+            null, null, Post(ToolsList).Replace("Host: 127.0.0.1", "Host: rebind.example:3000", StringComparison.Ordinal));
+        Assert.StartsWith("HTTP/1.1 403 Forbidden\r\n", rebound, StringComparison.Ordinal);
+        Assert.EndsWith("\r\n\r\n{\"error\":\"host not allowed\"}", rebound, StringComparison.Ordinal);
+
+        var sse = await WithServerAsync(
+            null, null, "GET /mcp HTTP/1.1\r\nHost: rebind.example\r\nAccept: text/event-stream\r\n\r\n");
+        Assert.StartsWith("HTTP/1.1 403 Forbidden\r\n", sse, StringComparison.Ordinal);
+
+        foreach (var host in new[] { "localhost:3000", "app.localhost", "[::1]:9", "127.0.0.1:1" })
+        {
+            var served = await WithServerAsync(
+                null, null, Post(ToolsList).Replace("Host: 127.0.0.1", $"Host: {host}", StringComparison.Ordinal));
+            Assert.StartsWith("HTTP/1.1 200 OK\r\n", served, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void HostRuleMatchesTheCdpServer()
+    {
+        var loopback = IPAddress.Loopback;
+        Assert.True(Http.HostAllowed(null, loopback));
+        Assert.True(Http.HostAllowed("LOCALHOST.", loopback));
+        Assert.True(Http.HostAllowed("10.0.0.1:80", loopback));
+        Assert.False(Http.HostAllowed("evil.example", loopback));
+        Assert.False(Http.HostAllowed("localhost.evil.example", loopback));
+        Assert.True(Http.HostAllowed("mcp.example.test", IPAddress.Any));
+        Assert.True(Http.HostAllowed("mcp.example.test", IPAddress.IPv6Any));
+        Assert.False(Http.HostAllowed("mcp.example.test", IPAddress.Parse("192.0.2.1")));
+    }
+
+    /// <summary>
+    /// SECURITY.md L2: open SSE streams are capped, and a closed one frees its
+    /// place. They used to detach from the connection cap and pile up without
+    /// limit.
+    /// </summary>
+    [Fact]
+    public async Task SseStreamsAreCapped()
+    {
+        var port = SseStreamDoesNotWedgeTests.PickFreePort();
+        using var cts = new CancellationTokenSource();
+        var server = Task.Run(() => Http.RunAsync(
+            "127.0.0.1", port, null, null, false, null, null, cts.Token));
+        var streams = new List<TcpClient>();
+        try
+        {
+            await SseStreamDoesNotWedgeTests.WaitForListenerAsync(port);
+            const string get = "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n";
+
+            async Task<string> OpenAsync()
+            {
+                var client = new TcpClient();
+                streams.Add(client);
+                await client.ConnectAsync(IPAddress.Loopback, port);
+                var stream = client.GetStream();
+                await stream.WriteAsync(Encoding.UTF8.GetBytes(get));
+                return await SseStreamDoesNotWedgeTests.ReadOnceAsync(
+                    stream, TimeSpan.FromSeconds(5), "SSE response timed out");
+            }
+
+            for (var i = 0; i < Http.MaxSseStreams; i++)
+            {
+                Assert.StartsWith("HTTP/1.1 200 OK\r\n", await OpenAsync(), StringComparison.Ordinal);
+            }
+
+            var refused = await OpenAsync();
+            Assert.StartsWith("HTTP/1.1 503 Service Unavailable\r\n", refused, StringComparison.Ordinal);
+
+            // Closing one stream frees a place; the server notices at its next write.
+            streams[0].Client.Shutdown(SocketShutdown.Both);
+            streams[0].Dispose();
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
+            string reopened;
+            do
+            {
+                await Task.Delay(500);
+                reopened = await OpenAsync();
+            }
+            while (!reopened.StartsWith("HTTP/1.1 200 OK\r\n", StringComparison.Ordinal) && DateTime.UtcNow < deadline);
+            Assert.StartsWith("HTTP/1.1 200 OK\r\n", reopened, StringComparison.Ordinal);
+        }
+        finally
+        {
+            foreach (var client in streams)
+            {
+                client.Dispose();
+            }
+
+            await cts.CancelAsync();
+            await Task.WhenAny(server, Task.Delay(2000));
+        }
+    }
 }

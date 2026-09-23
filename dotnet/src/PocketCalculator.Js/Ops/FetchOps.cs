@@ -183,7 +183,10 @@ public static partial class FetchOps
     /// chunked server). Streaming keeps a multi-GB response from ever being fully
     /// allocated.
     /// </summary>
-    internal static async Task<byte[]> ReadBodyCappedAsync(HttpResponseMessage response, int max)
+    internal static async Task<byte[]> ReadBodyCappedAsync(
+        HttpResponseMessage response,
+        int max,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(response);
         if (response.Content.Headers.ContentLength is { } length && length > max)
@@ -191,26 +194,33 @@ public static partial class FetchOps
             throw new OpException($"response body of {length} bytes exceeds the maximum of {max}");
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[64 * 1024];
-        while (true)
+        try
         {
-            var read = await stream.ReadAsync(chunk).ConfigureAwait(false);
-            if (read == 0)
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[64 * 1024];
+            while (true)
             {
-                break;
+                var read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                if (buffer.Length + read > max)
+                {
+                    throw new OpException($"response body exceeds the maximum of {max} bytes");
+                }
+
+                buffer.Write(chunk, 0, read);
             }
 
-            if (buffer.Length + read > max)
-            {
-                throw new OpException($"response body exceeds the maximum of {max} bytes");
-            }
-
-            buffer.Write(chunk, 0, read);
+            return buffer.ToArray();
         }
-
-        return buffer.ToArray();
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OpException("operation timed out");
+        }
     }
 
     internal static int ResponseBodyEntryLimit() => EnvInt("POCKETCALCULATOR_NETWORK_BODY_BUFFER_ENTRIES", 128);
@@ -229,7 +239,11 @@ public static partial class FetchOps
     internal static int FetchMaxBodyBytes() => EnvInt("POCKETCALCULATOR_FETCH_MAX_BODY_BYTES", 100 * 1024 * 1024);
 
     internal static TimeSpan FetchTimeout() =>
-        TimeSpan.FromMilliseconds(EnvInt("POCKETCALCULATOR_FETCH_TIMEOUT_MS", 30_000));
+        FetchTimeoutOverride.Value
+        ?? TimeSpan.FromMilliseconds(EnvInt("POCKETCALCULATOR_FETCH_TIMEOUT_MS", 30_000));
+
+    /// <summary>Test seam: a per-flow <see cref="FetchTimeout"/> that parallel tests cannot see.</summary>
+    internal static readonly AsyncLocal<TimeSpan?> FetchTimeoutOverride = new();
 
     private static int EnvInt(string name, int fallback) =>
         int.TryParse(
@@ -257,12 +271,15 @@ public static partial class FetchOps
         string origin,
         string mode,
         string credentials,
-        bool internalLoad = false)
+        bool internalLoad = false,
+        PocketCalculatorState? document = null)
     {
         try
         {
+            // `origin` is the shim's argument slot and is ignored: see FetchUrlAsync.
+            _ = origin;
             return await FetchUrlAsync(
-                    state, url, method, headersJson, body, origin, mode, credentials, internalLoad)
+                    state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad)
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -279,18 +296,29 @@ public static partial class FetchOps
         }
     }
 
-    private static async Task<string> FetchUrlAsync(
+    internal static async Task<string> FetchUrlAsync(
         PocketCalculatorState gs,
+        PocketCalculatorState document,
         string url,
         string method,
         string headersJson,
         byte[] body,
-        string origin,
         string mode,
         string credentials,
-        bool internalLoad)
+        bool internalLoad,
+        bool hostConsumesBody = false)
     {
         ArgumentNullException.ThrowIfNull(gs);
+        ArgumentNullException.ThrowIfNull(document);
+
+        // DEVIATION from crates/obscura-js (ops.rs), which takes the request origin from
+        // the op's `origin` argument. The shim computed it with the page's own `URL`
+        // global, so a page that replaced `URL` could claim any origin and read another
+        // site's credentialed responses. The origin is the calling realm's document
+        // origin as the host knows it, and the argument is accepted and ignored so the
+        // op keeps its shape.
+        var origin = StateHelpers.DocumentOrigin(document);
+        using FetchConcurrency.Slot slot = await FetchConcurrency.EnterAsync(gs).ConfigureAwait(false);
 
         // Page-script requests run under the Fetch request guards; the engine's own
         // loads do not. Rust applies neither (see FilterScriptRequestHeaders).
@@ -377,6 +405,22 @@ public static partial class FetchOps
                     var resolution = await intercepted.Resolver.Task.ConfigureAwait(false);
                     switch (resolution)
                     {
+                        case InterceptResolution.Fulfill fulfill when internalLoad:
+                            return InternalLoadResponse(
+                                document,
+                                mode,
+                                fulfill.Status,
+                                url,
+                                url,
+                                fulfill.Body,
+                                tainted: RequestOrigin(url) is not { } fulfilledOrigin
+                                    || !string.Equals(fulfilledOrigin, origin, StringComparison.Ordinal)
+                                    || string.Equals(origin, "null", StringComparison.Ordinal),
+                                redirected: false,
+                                requestId: null,
+                                fulfill.Headers,
+                                hostConsumesBody);
+
                         case InterceptResolution.Fulfill fulfill:
                             return InterceptFulfillResponse(
                                 fulfill.Status,
@@ -428,7 +472,7 @@ public static partial class FetchOps
             var client = httpClient?.RequestClient ?? SharedRequestClient(allowPrivateNetwork);
 
             var initialRequestOrigin = RequestOrigin(url) ?? string.Empty;
-            var pageOrigin = origin.Length == 0 ? initialRequestOrigin : origin;
+            var pageOrigin = origin;
             var isCrossOrigin = pageOrigin.Length != 0
                 && !string.Equals(initialRequestOrigin, pageOrigin, StringComparison.Ordinal);
             var credentialsMode = ParseCredentials(credentials);
@@ -451,6 +495,12 @@ public static partial class FetchOps
                     ResourceType = ResourceType.Fetch,
                 });
             }
+
+            // One deadline for the whole exchange: the preflight, every redirect hop and
+            // the body. DEVIATION from crates/obscura-js (ops.rs), whose timeout covered
+            // each hop's headers only, so a server that trickled the body one byte at a
+            // time held the fetch, and the page's in-flight count, forever (SECURITY.md M3).
+            using var deadline = new CancellationTokenSource(FetchTimeout());
 
             var isCors = string.Equals(mode, "cors", StringComparison.Ordinal);
             var unsafeHeaderNames = isCrossOrigin && isCors
@@ -475,7 +525,7 @@ public static partial class FetchOps
                             string.Join(',', unsafeHeaderNames));
                     }
 
-                    preflight = await SendAsync(client, preflightRequest).ConfigureAwait(false);
+                    preflight = await SendAsync(client, preflightRequest, deadline.Token).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OpException)
                 {
@@ -548,7 +598,7 @@ public static partial class FetchOps
             // Referer, no Origin on a GET, and SameSite=None cookies only when it is
             // cross-site with the embedding document.
             var frameNavigation = string.Equals(mode, "navigate", StringComparison.Ordinal)
-                && Uri.TryCreate(gs.Url, UriKind.Absolute, out var frameInitiator)
+                && Uri.TryCreate(document.Url, UriKind.Absolute, out var frameInitiator)
                     ? ResourceRequest.FrameNavigation(frameInitiator)
                     : null;
 
@@ -638,7 +688,7 @@ public static partial class FetchOps
                         }
                     }
 
-                    var hop = await SendAsync(client, request).ConfigureAwait(false);
+                    var hop = await SendAsync(client, request, deadline.Token).ConfigureAwait(false);
 
                     if (credentialsAllowed
                         && jar is not null
@@ -780,9 +830,9 @@ public static partial class FetchOps
                     }
                 }
 
-                var respBytes = await ReadBodyCappedAsync(response, FetchMaxBodyBytes()).ConfigureAwait(false);
+                var respBytes = await ReadBodyCappedAsync(response, FetchMaxBodyBytes(), deadline.Token)
+                    .ConfigureAwait(false);
                 var respBody = Encoding.UTF8.GetString(respBytes);
-                var respBodyBase64 = Convert.ToBase64String(respBytes);
 
                 if (callbacks is not null && callbacks.HasResponseCallbacks())
                 {
@@ -858,6 +908,24 @@ public static partial class FetchOps
                         ContentType = respHeaders.GetValueOrDefault("content-type", string.Empty),
                     });
 
+                if (internalLoad)
+                {
+                    return InternalLoadResponse(
+                        document,
+                        mode,
+                        finalStatus,
+                        url,
+                        currentUrl,
+                        respBody,
+                        tainted: crossedOrigin || string.Equals(pageOrigin, "null", StringComparison.Ordinal),
+                        redirected,
+                        requestId,
+                        VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
+                        hostConsumesBody);
+                }
+
+                var respBodyBase64 = Convert.ToBase64String(respBytes);
+
                 // Page script sees an opaque no-cors response as status 0 with no body
                 // and no headers; the engine's own subresource loads (internalLoad) still
                 // get the body. Set-Cookie and unexposed cross-origin headers never
@@ -899,16 +967,18 @@ public static partial class FetchOps
         }
     }
 
-    private static async Task<HttpResponseMessage> SendAsync(HttpClient client, HttpRequestMessage request)
+    private static async Task<HttpResponseMessage> SendAsync(
+        HttpClient client,
+        HttpRequestMessage request,
+        CancellationToken deadline)
     {
-        using var timeout = new CancellationTokenSource(FetchTimeout());
         try
         {
             return await client
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline)
                 .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
             throw new OpException("operation timed out");
         }
@@ -916,6 +986,59 @@ public static partial class FetchOps
         {
             throw new OpException(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// What an internal load (<c>internalLoad</c>: a dynamic script, a frame document, a
+    /// stylesheet) returns to the shim.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (ops.rs), which returns every internal load's body,
+    /// cross-origin ones included, to page-reachable JSON. Here the body is kept host-side
+    /// behind <c>bodyToken</c> (see <see cref="InternalLoads"/>) and appears in the JSON only
+    /// for a frame document that is same-origin with the requesting document, which page
+    /// script could have fetched itself. A cross-origin response also keeps its redirect target and
+    /// headers to itself. <c>sameOrigin</c> is the host's own verdict. <c>bodyBase64</c> is
+    /// never sent: nothing that reads an internal load uses it.
+    /// </remarks>
+    private static string InternalLoadResponse(
+        PocketCalculatorState document,
+        string mode,
+        int status,
+        string requestUrl,
+        string finalUrl,
+        string bodyText,
+        bool tainted,
+        bool redirected,
+        string? requestId,
+        IReadOnlyDictionary<string, string> headers,
+        bool hostConsumesBody)
+    {
+        var token = InternalLoads.Put(
+            document, new InternalLoad(mode, status, requestUrl, finalUrl, bodyText, tainted));
+        // Only a frame document is read back by the shim (its parent-side copy for a
+        // same-origin contentDocument); a script or a sheet is run or installed by the host.
+        var visible = !tainted && !hostConsumesBody && string.Equals(mode, "navigate", StringComparison.Ordinal);
+        var result = new StringBuilder((visible ? bodyText.Length : 0) + 256);
+        result.Append("{\"status\":").Append(status.ToString(CultureInfo.InvariantCulture));
+        result.Append(",\"body\":");
+        SerdeJson.AppendString(result, visible ? bodyText : string.Empty);
+        if (requestId is not null)
+        {
+            result.Append(",\"requestId\":");
+            SerdeJson.AppendString(result, requestId);
+        }
+
+        result.Append(",\"url\":");
+        SerdeJson.AppendString(result, tainted ? requestUrl : finalUrl);
+        result.Append(",\"redirected\":").Append(!tainted && redirected ? "true" : "false");
+        result.Append(",\"opaque\":false");
+        result.Append(",\"sameOrigin\":").Append(tainted ? "false" : "true");
+        result.Append(",\"bodyToken\":").Append(token.ToString(CultureInfo.InvariantCulture));
+        result.Append(",\"headers\":");
+        AppendHeaders(result, tainted ? new Dictionary<string, string>(StringComparer.Ordinal) : headers);
+        result.Append('}');
+        return result.ToString();
     }
 
     private static string CorsBlocked(string url, string error)

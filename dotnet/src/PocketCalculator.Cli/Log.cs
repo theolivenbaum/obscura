@@ -55,6 +55,8 @@ public static class Log
             return;
         }
         var stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ", CultureInfo.InvariantCulture);
-        Console.Error.WriteLine($"{stamp} {label,5} pocket_calculator_cli: {message}");
+        // SECURITY.md I2: control characters in client-supplied text cannot split a record.
+        Console.Error.WriteLine(
+            $"{stamp} {label,5} pocket_calculator_cli: {PocketCalculator.Cdp.CdpLog.EscapeControl(message)}");
     }
 }

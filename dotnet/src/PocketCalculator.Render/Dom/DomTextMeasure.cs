@@ -4,6 +4,7 @@
 // RECONCILIATION NOTE: paint.rs is not ported yet, and this pair is the only part of it the
 // render-tree build needs (native control label widths and the static-font word fallback).
 // When paint.rs lands, it should call these rather than adding a second copy.
+using System.Buffers;
 using SkiaSharp;
 
 namespace PocketCalculator.Render;
@@ -60,7 +61,27 @@ internal static class DomTextMeasure
 
     private static float MeasureAdvances(SKFont font, string text, float size, out int glyphCount)
     {
-        Span<char> buffer = stackalloc char[text.Length];
+        // Page text sizes this buffer, so only a short label goes on the stack: a <select>
+        // option holding megabytes of text overflowed it and killed the process (SECURITY.md H5).
+        char[]? rented = text.Length > MaxStackChars ? ArrayPool<char>.Shared.Rent(text.Length) : null;
+        try
+        {
+            Span<char> buffer = rented is null ? stackalloc char[MaxStackChars] : rented;
+            return MeasureAdvances(font, text, size, buffer, out glyphCount);
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                ArrayPool<char>.Shared.Return(rented);
+            }
+        }
+    }
+
+    private const int MaxStackChars = 256;
+
+    private static float MeasureAdvances(SKFont font, string text, float size, Span<char> buffer, out int glyphCount)
+    {
         int length = 0;
         // Rust advances one glyph per Unicode scalar value; C# strings are UTF-16, so the
         // scalar count is taken over runes while the shaped buffer keeps its code units.

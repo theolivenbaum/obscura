@@ -257,6 +257,9 @@ public sealed class CdpContext
         return id;
     }
 
+    /// <summary>The most pages (targets) one connection may hold at once.</summary>
+    public const int MaxPagesPerConnection = 512;
+
     public string CreatePage() =>
         CreatePageInContext(null, out var pageId, out var error)
             ? pageId!
@@ -269,6 +272,16 @@ public sealed class CdpContext
     /// </summary>
     public bool CreatePageInContext(string? contextId, out string? pageId, out string? error)
     {
+        // Deviation (SECURITY.md L3): upstream creates targets without limit, and
+        // each one is a page with its own isolate. One connection may hold at
+        // most MaxPagesPerConnection.
+        if (Pages.Count >= MaxPagesPerConnection)
+        {
+            pageId = null;
+            error = $"Too many targets: this connection already has {MaxPagesPerConnection}";
+            return false;
+        }
+
         BrowserContext context;
         if (contextId is null)
         {

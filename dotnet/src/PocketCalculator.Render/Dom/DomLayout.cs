@@ -480,6 +480,11 @@ public sealed class DomLayout
         ScrollId?[] nodeContainer,
         ScrollId?[] movementOwner)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         bool isFixed = viewportFixed.Contains(id);
         bool parentFixed = DomTraversal.RenderedParent(tree, id) is { } parent
             && viewportFixed.Contains(parent);
@@ -582,6 +587,11 @@ public sealed class DomLayout
         ref float right,
         ref float bottom)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         if (fixedNodes.Contains(id))
         {
             return;

@@ -817,9 +817,36 @@ internal static class PaintImages
 
         uint dw = (uint)F32.Max(F32.Round(dest.Width), 1f);
         uint dh = (uint)F32.Max(F32.Round(dest.Height), 1f);
-        Pixmap? content = svg
-            ? SvgRenderer.Render(bytes, dw, dh)
-            : PaintResources.RasterToPixmap(bytes, dw, dh);
+        int drawX = (int)dest.X;
+        int drawY = (int)dest.Y;
+        Pixmap? content;
+        if (svg)
+        {
+            content = SvgRenderer.Render(bytes, dw, dh);
+        }
+        else if ((transform is null || transform.Value == Affine2.Identity)
+            && SurfaceWindow(drawX, dw, pixmap.Width) is { } windowX
+            && SurfaceWindow(drawY, dh, pixmap.Height) is { } windowY)
+        {
+            // Deviation from Rust: the reference rasterizes the whole destination box, so a
+            // 68-byte PNG styled 20000px square allocated 1.6 GB. Untransformed, only the part
+            // of the box on the surface is rasterized; the pixels are the same ones.
+            content = PaintResources.RasterToPixmap(
+                bytes, dw, dh, windowX.Start, windowY.Start, windowX.Length, windowY.Length);
+            drawX += (int)windowX.Start;
+            drawY += (int)windowY.Start;
+        }
+        else if (transform is null || transform.Value == Affine2.Identity)
+        {
+            // Entirely off the surface: nothing to rasterize, and the result is what a full
+            // raster drawn off the surface would have reported.
+            return PaintResources.ImageDimensions(bytes) is not null;
+        }
+        else
+        {
+            content = PaintResources.RasterToPixmap(bytes, dw, dh);
+        }
+
         if (content is null)
         {
             return false;
@@ -829,14 +856,26 @@ internal static class PaintImages
         Mask? clip = BuildBoxClip(pixmap, dest, visibleRect, clipRadius, extraClip);
         Surface.DrawPixmap(
             pixmap,
-            (int)dest.X,
-            (int)dest.Y,
+            drawX,
+            drawY,
             owned,
             1f,
             false,
             transform ?? Affine2.Identity,
             clip);
         return true;
+    }
+
+    /// <summary>
+    /// The span of a <paramref name="length"/>-pixel run drawn at <paramref name="origin"/>
+    /// that lands on a surface <paramref name="surface"/> pixels wide, relative to the run;
+    /// null when none of it does.
+    /// </summary>
+    private static (uint Start, uint Length)? SurfaceWindow(int origin, uint length, uint surface)
+    {
+        long start = Math.Max(0L, -(long)origin);
+        long end = Math.Min((long)length, (long)surface - origin);
+        return end > start ? ((uint)start, (uint)(end - start)) : null;
     }
 
     /// <summary>The destination sub-rect for replaced image content within its box.</summary>

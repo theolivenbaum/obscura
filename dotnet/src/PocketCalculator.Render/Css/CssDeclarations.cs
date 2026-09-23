@@ -266,7 +266,36 @@ public static class CssVariables
         IReadOnlyDictionary<string, string> properties,
         int depth)
     {
-        if (depth > MaxSubstitutionDepth)
+        long budget = MaxSubstitutionWork;
+        return SubstituteVarValue(input, properties, depth, ref budget);
+    }
+
+    /// <summary>
+    /// The longest value substitution may produce, in UTF-16 code units. Longer is the
+    /// guaranteed-invalid value.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: the reference caps only the depth, so 16 levels of ten references
+    /// each substituted to 10^16 characters (one <c>&lt;style&gt;</c> reached 4 GB). Chromium
+    /// treats a substitution over 2 MiB as invalid at computed-value time
+    /// (<c>CSSVariableData::kMaxVariableBytes</c>); this matches it.
+    /// </remarks>
+    internal const int MaxSubstitutedLength = 2 * 1024 * 1024;
+
+    /// <summary>
+    /// Characters one top-level substitution may copy, across every nested reference. The
+    /// length cap bounds each result; this bounds the time spent re-expanding the same
+    /// references, which the length cap alone does not.
+    /// </summary>
+    private const long MaxSubstitutionWork = 4L * MaxSubstitutedLength;
+
+    private static string? SubstituteVarValue(
+        string input,
+        IReadOnlyDictionary<string, string> properties,
+        int depth,
+        ref long budget)
+    {
+        if (depth > MaxSubstitutionDepth || budget < 0)
         {
             return null;
         }
@@ -328,7 +357,7 @@ public static class CssVariables
             string? resolved = null;
             if (properties.TryGetValue(name, out var stored))
             {
-                resolved = SubstituteVarValue(stored, properties, depth + 1);
+                resolved = SubstituteVarValue(stored, properties, depth + 1, ref budget);
             }
 
             string replacement;
@@ -343,7 +372,7 @@ public static class CssVariables
                     return null;
                 }
 
-                var expanded = SubstituteVarValue(fallback, properties, depth + 1);
+                var expanded = SubstituteVarValue(fallback, properties, depth + 1, ref budget);
                 if (expanded is null)
                 {
                     return null;
@@ -364,6 +393,11 @@ public static class CssVariables
             }
 
             output.Append(replacement);
+            budget -= position + replacement.Length;
+            if (output.Length > MaxSubstitutedLength || budget < 0)
+            {
+                return null;
+            }
 
             var tail = after[(end + 1)..];
             if (replacement.Length != 0 && tail.Length != 0
@@ -376,7 +410,7 @@ public static class CssVariables
         }
 
         output.Append(rest);
-        return output.ToString();
+        return output.Length > MaxSubstitutedLength ? null : output.ToString();
     }
 
     internal static bool BoundaryMerges(char left, char right)

@@ -105,6 +105,13 @@ public sealed partial class Page
         PendingNavigation? initiator,
         CancellationToken cancellationToken = default)
     {
+        // A document may not navigate from a non-file: URL into file: (SECURITY.md H2),
+        // however the navigation reached here. The page is left as it was.
+        if (NavigationPolicy.RefusesPageInitiated(initiator, url))
+        {
+            throw PageException.Network(NavigationPolicy.LocalResourceRefusal(url));
+        }
+
         TimeSpan navTimeout = NavigationTimeout;
         ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
 
@@ -850,6 +857,14 @@ public sealed partial class Page
             return SyncVirtualUrl();
         }
         (string url, string method, string body) = pending;
+        // Deviation from page.rs, which follows any queued navigation here (SECURITY.md
+        // H3): a link or script on a non-file: document cannot take the page to file:.
+        // Chromium drops the navigation and the page stays where it is.
+        if (NavigationPolicy.RefusesPageInitiated(pending, url))
+        {
+            return PageNavigationOutcome.None;
+        }
+
         ResourceRequest profile = NavigationProfile(pending);
         string sourceUrl = DocumentReferrer(profile, url);
         TimeSpan navTimeout = NavigationTimeout;

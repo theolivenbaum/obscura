@@ -553,6 +553,11 @@ public static class Inline
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         ref bool hasText)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return false;
+        }
+
         Node? node = tree.GetNode(cid);
         if (node is null)
         {

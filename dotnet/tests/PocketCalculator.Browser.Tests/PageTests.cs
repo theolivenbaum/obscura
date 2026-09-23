@@ -956,9 +956,9 @@ public sealed class PageTests
             uint attachedId = page._pendingFrameWork.First!.Value.FrameId;
             PageFixtures.AssertJson(
                 "1",
-                page.Js!.Evaluate(
+                page.Js!.EvaluateHost(
                     "(function(){ for (const frame of document.querySelectorAll('iframe')) {"
-                    + $" if (frame._frameId === {attachedId}) {{ frame.remove(); return 1; }} }} return 0; }})()"));
+                    + $" if (__obscura_host.frameIdOf(frame) === {attachedId}) {{ frame.remove(); return 1; }} }} return 0; }})()"));
 
             page.ReleaseDetachedFrames();
             Assert.Empty(page.Frames);

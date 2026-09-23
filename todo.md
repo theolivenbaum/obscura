@@ -316,6 +316,28 @@ Found during the review, not from upstream:
 
 ## Open issues
 
+- **Security review, September 2026: see `SECURITY.md`.** 6 Critical, 8 High, 11
+  Medium and 12 Low findings. All Critical and High are fixed with regression tests,
+  including the three that contradicted items this file had marked done (the CDP
+  `--allow-file-access` gate, H1; upstream `04418a5 D` frame isolation, C2;
+  `04418a5 G` file navigation from a web page, H3). The deviations are under
+  "Security review fixes" in Known deviations. Still open (`SECURITY.md` "Fix status"):
+  - [ ] cooperative cancellation of C# work inside ops (the watchdog cannot stop it);
+    slow cases on script-built trees: 300 nested floats, thousands of nested
+    inline spans, nested `repeat()` in grid templates, `innerText` and
+    `Range.toString()` 10k deep
+  - [ ] deep markup parses quadratically in AngleSharp (`IsInButtonScope` scans the
+    open-element stack): 50k nested divs take ~20 s (M11)
+  - [ ] per-page DOM byte budget, `ArrayBuffer` accounting, per-process memory
+    budget (M7); `op_fetch_url` still copies a body several times (M4)
+  - [ ] CDP isolated worlds as separate realms (M6); CDP idle timeout (L3)
+  - [ ] `__virtualUrl` is page-writable and moves `Page.Url` (cosmetic now: origin,
+    cookie and initiator decisions use the host-side document URL); MCP
+    `browser_import_state` applies every origin's storage to the current page (L9)
+  - [ ] CDP/MCP host snippets use page globals (L10)
+  - [ ] full public suffix list (L6), HSTS and mixed content (I7), custom-root EKU
+    and revocation (I8), ClearScript's non-configurable `EngineInternal` (I10)
+
 - **A forced geometry read after a style write that *does* change layout still
   re-lays out the whole document.** The half that does not is fixed: a retained
   restyle whose recomputed styles no layout pass can observe now keeps the
@@ -1201,6 +1223,57 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Security review fixes (September 2026)
+
+The fixes for `SECURITY.md`'s findings. Each is commented at its site. Where Rust
+and Chromium differ, Chromium wins.
+
+- **C1 (host-derived request origin):** Rust `op_fetch_url` uses the origin the shim passes, computed with the page's `URL`. The port ignores the argument and uses the calling realm's committed document origin (`"null"` for opaque or sandboxed documents); each realm's op table is bound to its own document.
+- **M3 (fetch deadline):** Rust's timeout covered each hop's headers only. The port has one deadline (`POCKETCALCULATOR_FETCH_TIMEOUT_MS`) for preflight, all hops and the body.
+- **H4 (postMessage origins):** Rust queues the source frame and origin the shim sends. The port fills both from the sending realm and checks targetOrigin against the receiver's host-known origin before delivery; the shim's `_realmOrigin()` asks the host (`op_realm_origin`).
+- **C3 (internal-load bodies):** Rust returns every internal-load body, cross-origin included, to the shim as JSON. The port keeps it host-side behind a `bodyToken`; only a same-origin frame document is returned. The host runs dynamic scripts (`op_run_fetched_script`), builds frames (`op_frame_document_from_load`) and fetches, rebases and installs dynamic stylesheets with a host-computed origin-clean bit (`op_load_stylesheet`, `LinkedStylesheetLoader`). An `@import` media query naming a width or `prefers-` feature is evaluated with `CssMediaQuery` against the viewport, where the shim used `matchMedia`.
+- **C2 (frame isolation):** Rust keeps frame state in element expandos and judges same-origin with the page's `URL`. The port keeps it in closure WeakMaps, asks the host (`op_frame_same_origin`), returns a cross-origin-only window for cross-origin frames, and gives `sandbox` without `allow-same-origin` an opaque origin (Rust has no frame sandboxing).
+- **L9 (history):** Rust `pushState`/`replaceState` accept any URL. The port throws Chromium's SecurityError for a URL that cannot rewrite the document URL.
+- **L10 (Uint8Array):** op results use the realm's `Uint8Array` captured at bind time, not the global looked up per call.
+- **C4:** `SsrfGuard.ValidateUrl` refuses `file:` unless the caller allows it. The transport allows it only for a top-level navigation with no initiator, or a request whose initiator is `file:`; a redirect never reaches `file:`. The module loader lets a graph reach `file:` only when both the document and the importer are `file:`, and reports every `file:` module failure as "Failed to fetch dynamically imported module: <url>". Rust (`client.rs`, `module_loader.rs`) serves `file:` to every caller.
+- **H1/H2:** every CDP navigation (`Page.navigate` with or without a session, the autonomous pump, reload, `navigateToHistoryEntry`) takes one gate, `NavigationRefusal`. A page-initiated navigation from a non-`file:` document into `file:` is refused even with `--allow-file-access`. Rust gates only the sessionless `Page.navigate`.
+- **H3:** `Page.ProcessPendingNavigationOutcomeAsync` and `NavigateWithWaitPostAsync` (when given an initiator) refuse a navigation from a non-`file:` document into `file:` (Chromium's rule). MCP `browser_tab_new`, back, forward and reload refuse `file:` like `browser_navigate`. Rust gates only `browser_navigate`.
+- **M2:** the transport ignores `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and uses only a configured proxy. Unless private network is allowed, a proxied target is resolved and vetted locally first; a forbidden address or an unresolvable name is refused. Residual gap: the proxy does its own lookup (rebinding). reqwest honours ambient proxies and never checks the target behind one.
+- **M3 (transport):** one deadline, `Timeout` (30 s default), spans each hop's headers and body. Rust bounded only the headers.
+- **M5:** `CookieJar.Store` enforces `__Secure-`/`__Host-` case-insensitively and refuses a nameless cookie whose value carries a prefix; drops cookies over 4096 bytes of name plus value; caps a domain at 180 (purged to 150) and the jar at 3300 (purged to 3000), expired first then least recently used. Counts per jar domain, not per registrable domain; no priority. `cookies.rs` has no prefixes or limits.
+- **L7:** the tracker blocklist applies to every redirect hop (status-0 response) and every request on `RequestClient`, including op_fetch_url (`net::ERR_BLOCKED_BY_CLIENT`). Rust checks only the first URL of the main transport.
+- **L8:** `InterceptAction.ModifyHeaders` applies to that request only. Rust merges into the client-wide extra headers permanently.
+- **I9:** the SSRF deny-set adds `fec0::/10` and `2001::/32` (Teredo).
+- **C5 (parser depth cap):** `HtmlParsing.Adapt` mirrors Chromium's `kMaximumHTMLParserDOMTreeDepth` (512): past that open-element depth an element or comment is attached to its intended parent's parent, so parsed content nests at most 513 deep. Rust nests as deep as the markup says, and 3000 unclosed divs overflowed the stack in layout.
+- **C5 (box-tree depth and stack policy):** `BuildContext.MaxBoxDepth = 768`: deeper elements get no box (as display:none); only script-built trees reach it, and Chromium would still lay them out. A DOM deeper than 256 is laid out and painted on a 256 MB-stack thread (`StackGuard.RunWithStackFor`). Recursive Render walks and nested paint layers stop when the stack runs low (`StackGuard.CanDescend`); taffy's child-layout dispatch throws `InsufficientExecutionStackException` as a last resort. Nested CSS style rules and at-rules past what the stack holds are dropped. Rust recurses without bound; a 1500-deep chain aborted the process.
+- **C6 (selector nesting):** more than 64 nested functional pseudo-classes make a selector invalid (the query finds nothing, the style rule is dropped), not relaxed by forgiving `:is()`/`:where()`. `:has()` inside `:has()` is invalid, as in Chromium. Matching reports no match instead of overflowing on very long combinator chains. Invalid selectors still do not throw SyntaxError (inherited). Rust's `selectors` crate recursed without limit.
+- **H5:** `DomTextMeasure.MeasureAdvances` stackallocs at most 256 chars and rents beyond; Rust has no equivalent buffer.
+- **M9 (serialization raw-text set):** text is raw only under HTML style, script, xmp, iframe, noembed, noframes, plaintext and noscript (scripting on), per the HTML fragment serialization algorithm and Chromium. Rust `serialize.rs` emitted script/style/textarea/title text raw in any namespace (mXSS).
+- **M10 (markdown escaping):** `MarkdownScript` no longer matches `markdown.rs` byte for byte: text escapes `<`/`>` (code too); link and alt text backslash-escape `\`, `[`, `]`; destinations percent-encode whitespace, controls, `()`, `<>`; links and images with a scheme other than http/https/mailto (relative allowed) emit only their text. Parity `Dump_html_matches`/`Dump_markdown_matches` differ on such fixtures.
+- **M11 (mutation bookkeeping, no observable change):** the retained-style classification runs only for mutations that invalidate rendering; `ContainingShadowRoot` and `node_root` short-circuit when the tree has no shadow roots.
+- **H6:** Rust calls `wuff` with no size limit. C# holds each WOFF1 table to its declared origLength (rejecting a mismatch, or compLength > origLength), bounds WOFF2 Brotli output to the sum of table lengths, and caps the decoded font at 30 MiB (`Woff.MaxSfntSize`, google/woff2's default). A refused WOFF is a failed load; its raw bytes are not passed to the font backend.
+- **H7:** Rust decodes at full intrinsic size and allocates the whole CSS box. C# checks the header against 64M decoded pixels (`MaxDecodedImagePixels`): over it, decode at a reduced scale where the codec can, else broken image. Untransformed raster images rasterize only the on-surface part of the destination. `Pixmap.New`/`Mask.New` refuse more than 4x `CaptureLimits.MaxCapturePixels` (64M px; was 512M).
+- **H8 `<use>`:** resvg/Rust caps only depth; C# also caps each SVG render at 250,000 element visits (`SvgDocument.MaxElementVisits`), the rest is not painted.
+- **H8 `var()`:** Rust caps only depth; C# treats a substitution over 2 MiB as guaranteed-invalid (Chromium `kMaxVariableBytes`), with a 4x work budget per substitution.
+- **H8 `:has()`:** Rust recomputes `:has()` at every anchor; C# caches results per (argument, tree, anchor) for one query or cascade.
+- **M4:** Rust starts every `op_fetch_url` at once; C# allows 6 in flight per page and queues the rest (`POCKETCALCULATOR_FETCH_MAX_CONCURRENT`).
+- **M7:** `PendingBindingCalls` capped at 4096 entries / 8 MiB, newest dropped (`POCKETCALCULATOR_BINDING_QUEUE_ENTRIES`/`_BYTES`). Every `PocketCalculatorJsRuntime` without `--max-old-space-size` gets a 4 GiB heap cap (1 GiB on 32-bit), replacing "heap cap only exists once configured".
+- **M8:** Rust caps PBKDF2 iterations and length separately; C# also caps their product (4 x 10M iteration-blocks), `CryptoOperationException` over it.
+- **L11:** `RgbImage` uses checked 64-bit size math and refuses a header over 4x the capture budget.
+- **L12:** opt-in `POCKETCALCULATOR_HANG_EXIT_MS` (`HangEscalation`) exits serve/mcp with 124 when a watchdog-interrupted command does not return within that many ms. `HardDeadline` exits through `ProcessExit.Immediately(124)`.
+- **M1:** Rust starts workers as `current_exe() serve ...`. Under the `dotnet` host the port passes the entry assembly first (and refuses when there is none), and the balancer verifies each worker is a CDP server that enforces the token (401 without it) before serving.
+- **I5:** Rust passes workers only proxy, user agent, font dirs and `--stealth`. The port also passes `--allow-file-access`, `--storage-dir` (shared: atomic rename, last save wins), `--max-connections`, `--allow-private-network` and `--v8-flags`.
+- **L3:** Rust accepts 64 MiB per CDP message and has unbounded reply queues, targets and balancer connections. The port: 16 MiB per message by default (`POCKETCALCULATOR_CDP_MAX_MESSAGE_BYTES` raises it), a 128 Mi-char reply queue per connection (overflow closes it), 512 targets per connection ("Too many targets"), balancer capped at `--max-connections` (503, `X-Obscura-Reason: max-connections`).
+- **L4:** Rust closes a CDP connection on any message containing `"Browser.close"`; the port only when the parsed method is `Browser.close`.
+- **M6:** Rust reports `Runtime.bindingCalled` for any name page script passes to `__obscura_binding_called`; the port only for names with a live `Runtime.addBinding` in the context. Isolated worlds are still the main world.
+- **L1:** Rust MCP HTTP never reads `Host`; the port applies CDP's Chromium rule (403 `{"error":"host not allowed"}`).
+- **L2:** Rust detaches SSE streams from the connection permit; the port counts them against `MaxConnections` and caps streams at 16 (503 `{"error":"too many event streams"}`).
+- **I2:** CDP and CLI log records escape control characters and line separators as `\uXXXX`.
+- **I3:** `Using proxy:` logs the URL with user info replaced by `***`.
+- **I4:** the cookie jar file is written 0600 and a storage dir the save creates 0700 on Unix; Rust uses the umask.
+- **I6:** Rust reads `__method`/`__body` from any client `Page.navigate`. The port strips `__method`, `__body`, `__initiator`, `__userActivated` from every client request; only the server's own forwarded navigations carry them.
+- **I10 (open):** ClearScript defines `EngineInternal` non-configurable on the global; it cannot be deleted or hidden without a new tell. Pinned by `EngineInternalHidden` (skipped test with reason).
 
 ### Upstream security ports 727cc46..1a3169d
 

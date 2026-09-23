@@ -554,6 +554,11 @@ internal static class PaintSvg
         NodeId? suppressOpacityFor,
         StringBuilder buffer)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         Node? node = tree.GetNode(nid);
         if (node is null)
         {

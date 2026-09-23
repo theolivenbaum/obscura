@@ -1063,6 +1063,11 @@ internal static class DomCascade
         Dictionary<NodeId, LayoutStyle> styles,
         CssCounterState counters)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return [];
+        }
+
         if (tree.GetNode(id) is null)
         {
             return [];

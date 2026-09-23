@@ -411,6 +411,11 @@ public sealed partial class PreparedRender
         OverflowClip? inherited,
         List<OverflowClip?> output)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         // A fixed-position box whose containing block is the viewport escapes clips
         // established by ancestors in document space. Only reset at the boundary.
         bool startsViewportFixed = viewportFixed.Contains(id)

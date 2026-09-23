@@ -96,8 +96,13 @@ public static class SsrfGuard
             return IsForbiddenIpv4(v4);
         }
 
-        // Discard-only, local-use NAT64, and documentation prefixes.
+        // Discard-only, local-use NAT64, and documentation prefixes, plus two the Rust
+        // deny-set lacks (deviation, SECURITY.md I9): fec0::/10, the deprecated
+        // site-local range some networks still route internally, and Teredo
+        // 2001::/32, whose tunnelled IPv4 endpoint is obfuscated and cannot be vetted.
         return (s[0] == 0x100 && s[1] == 0 && s[2] == 0 && s[3] == 0)
+            || (s[0] & 0xffc0) == 0xfec0
+            || (s[0] == 0x2001 && s[1] == 0)
             || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
             || (s[0] == 0x2001 && s[1] == 0x0db8)
             || (s[0] == 0x3fff && (s[1] & 0xf000) == 0);
@@ -161,23 +166,39 @@ public static class SsrfGuard
     }
 
     /// <summary>
-    /// Reject a URL whose scheme is not http/https/file, or whose literal host is in
-    /// the SSRF deny-set. Hostnames are additionally checked at DNS-resolution time
-    /// by <see cref="SsrfGuardResolver"/>.
+    /// Reject a URL whose scheme is not http/https, or whose literal host is in the
+    /// SSRF deny-set. Hostnames are additionally checked at DNS-resolution time by
+    /// <see cref="SsrfGuardResolver"/>.
     /// </summary>
-    public static void ValidateUrl(Uri url, bool allowPrivateNetwork)
+    /// <remarks>
+    /// Deviation from <c>client.rs</c>, which lets <c>file:</c> through for every caller
+    /// (SECURITY.md C4): a <c>file:</c> URL is refused here unless the caller passes
+    /// <paramref name="allowFile"/>, which the transport does only for a request whose
+    /// initiator may read local files (<see cref="FileAccessAllowed"/>). A redirect hop
+    /// never does, since Chromium never follows a redirect into <c>file:</c>.
+    /// </remarks>
+    public static void ValidateUrl(Uri url, bool allowPrivateNetwork, bool allowFile = false)
     {
         allowPrivateNetwork = allowPrivateNetwork || EnvAllowsPrivateNetwork();
         var scheme = url.Scheme;
+        if (string.Equals(scheme, "file", StringComparison.Ordinal))
+        {
+            if (!allowFile)
+            {
+                throw LocalResourceRefused(url);
+            }
+
+            return;
+        }
+
         if (!string.Equals(scheme, "http", StringComparison.Ordinal)
-            && !string.Equals(scheme, "https", StringComparison.Ordinal)
-            && !string.Equals(scheme, "file", StringComparison.Ordinal))
+            && !string.Equals(scheme, "https", StringComparison.Ordinal))
         {
             throw PocketCalculatorNetException.Network(
                 $"Forbidden URL scheme '{scheme}' - only http, https, and file are allowed");
         }
 
-        if (string.Equals(scheme, "file", StringComparison.Ordinal) || allowPrivateNetwork)
+        if (allowPrivateNetwork)
         {
             return;
         }
@@ -220,6 +241,26 @@ public static class SsrfGuard
                 break;
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="request"/> may read a <c>file:</c> URL: a top-level
+    /// navigation the operator started (no initiator: the CLI's URL, host code calling
+    /// <c>Page.NavigateAsync</c>, a CDP or MCP navigation its own gate admitted), or any
+    /// request whose initiating document is itself <c>file:</c>. That is Chromium's
+    /// rule: a web, <c>data:</c> or <c>about:</c> document never loads a local resource.
+    /// </summary>
+    public static bool FileAccessAllowed(ResourceRequest request) =>
+        request.Initiator is { } initiator
+            ? string.Equals(initiator.Scheme, "file", StringComparison.OrdinalIgnoreCase)
+            : request.Mode == RequestMode.Navigate && !request.NestedDocument;
+
+    /// <summary>
+    /// The refusal for a <c>file:</c> URL the caller may not read. It is raised before
+    /// the file system is touched, so it is the same whether or not the file exists.
+    /// The text is Chromium's console message for the same refusal.
+    /// </summary>
+    public static PocketCalculatorNetException LocalResourceRefused(Uri url) =>
+        PocketCalculatorNetException.Network($"Not allowed to load local resource: {url}");
 }
 
 /// <summary>

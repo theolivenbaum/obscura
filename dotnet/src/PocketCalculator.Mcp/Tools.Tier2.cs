@@ -367,6 +367,12 @@ internal static partial class Tools
     internal static async Task<string> TabNewAsync(JsonNode? args, BrowserState state)
     {
         var url = args.Get("url").AsString();
+        if (url is not null)
+        {
+            // Before the tab opens, so a refused URL leaves no stray tab behind.
+            RefuseFileNavigation(url);
+        }
+
         var id = state.NewTab();
         if (url is null)
         {

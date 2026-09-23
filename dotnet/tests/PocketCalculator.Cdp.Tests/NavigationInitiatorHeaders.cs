@@ -156,4 +156,88 @@ public sealed class NavigationInitiatorHeaders
         Assert.Equal(CrossSite(server, string.Empty), Header(request, "origin"));
         Assert.Equal(CrossSite(server, "/"), Header(request, "referer"));
     }
+
+    private static JsonObject ForgedNavigate(CdpTestServer server, string path) => new()
+    {
+        ["url"] = server.Url + path.TrimStart('/'),
+        ["__method"] = "POST",
+        ["__body"] = "forged=1",
+        ["__initiator"] = CrossSite(server, "/evil"),
+        ["__userActivated"] = true,
+    };
+
+    private static void AssertAddressBar(CdpTestServer server, string path)
+    {
+        string request = Request(server, path);
+        Assert.StartsWith("GET ", request, StringComparison.Ordinal);
+        Assert.DoesNotContain("forged=1", request, StringComparison.Ordinal);
+        Assert.Equal("lax=1; strict=1", Cookies(request));
+        Assert.Equal("none", Header(request, "sec-fetch-site"));
+        Assert.Null(Header(request, "referer"));
+    }
+
+    /// <summary>
+    /// SECURITY.md I6: the internal parameters the server uses to forward a page
+    /// navigation are the server's alone. A client's Page.navigate that sets them
+    /// is still an address-bar GET, through the dispatcher.
+    /// </summary>
+    [Fact]
+    public async Task ClientCannotSetInternalNavigateParams()
+    {
+        using var server = CdpTestServer.ServeHtml(Body);
+        (CdpContext ctx, string session) = Session(server);
+
+        var response = await Dispatcher.DispatchAsync(
+            new CdpRequest
+            {
+                Id = 1,
+                Method = "Page.navigate",
+                Params = ForgedNavigate(server, "/dispatched"),
+                SessionId = session,
+            },
+            ctx);
+        Assert.Null(response.Error);
+        AssertAddressBar(server, "/dispatched");
+    }
+
+    /// <summary>SECURITY.md I6, over the wire, where Page.navigate takes the spawned-navigation path.</summary>
+    [Fact]
+    public async Task ClientCannotSetInternalNavigateParamsOverTheWire()
+    {
+        using var server = CdpTestServer.ServeHtml(Body);
+        await using var cdp = await CdpServerHandle.StartAsync();
+        using var ws = await CdpTestClient.ConnectAsync(cdp.Port, TestContext.Current.CancellationToken);
+        var timeout = TimeSpan.FromSeconds(30);
+
+        await CdpTestClient.SendAsync(ws, new JsonObject
+        {
+            ["id"] = 1,
+            ["method"] = "Target.createTarget",
+            ["params"] = new JsonObject { ["url"] = "about:blank" },
+        }, TestContext.Current.CancellationToken);
+        var targetId = (await CdpTestClient.AwaitResponseAsync(ws, 1, timeout))!["result"]!["targetId"]!.GetValue<string>();
+        await CdpTestClient.SendAsync(ws, new JsonObject
+        {
+            ["id"] = 2,
+            ["method"] = "Target.attachToTarget",
+            ["params"] = new JsonObject { ["targetId"] = targetId, ["flatten"] = true },
+        }, TestContext.Current.CancellationToken);
+        var sessionId = (await CdpTestClient.AwaitResponseAsync(ws, 2, timeout))!["result"]!["sessionId"]!.GetValue<string>();
+
+        await CdpTestClient.SendAsync(ws, new JsonObject
+        {
+            ["id"] = 3,
+            ["method"] = "Page.navigate",
+            ["params"] = ForgedNavigate(server, "/wire"),
+            ["sessionId"] = sessionId,
+        }, TestContext.Current.CancellationToken);
+        var navigated = await CdpTestClient.AwaitResponseAsync(ws, 3, timeout);
+        Assert.Null(navigated?["error"]);
+
+        string request = Request(server, "/wire");
+        Assert.StartsWith("GET ", request, StringComparison.Ordinal);
+        Assert.DoesNotContain("forged=1", request, StringComparison.Ordinal);
+        Assert.Equal("none", Header(request, "sec-fetch-site"));
+        Assert.Null(Header(request, "referer"));
+    }
 }

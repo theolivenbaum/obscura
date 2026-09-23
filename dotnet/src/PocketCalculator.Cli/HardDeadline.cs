@@ -64,6 +64,36 @@ public static class HardDeadline
     private static ulong SaturatingMul(ulong a, ulong b) =>
         a == 0 || b == 0 ? 0 : a > ulong.MaxValue / b ? ulong.MaxValue : a * b;
 
+    /// <summary>
+    /// For <c>serve</c> and <c>mcp</c>: when <c>POCKETCALCULATOR_HANG_EXIT_MS</c> is a
+    /// positive number of milliseconds, a command the V8 watchdog interrupted that still
+    /// has not returned that long afterwards exits the process with 124, so a supervisor
+    /// can restart it. Unset or zero leaves the process running, as before. See
+    /// <c>HangEscalation</c>.
+    /// </summary>
+    public static bool ArmHangExit()
+    {
+        if (!long.TryParse(
+                Environment.GetEnvironmentVariable("POCKETCALCULATOR_HANG_EXIT_MS"),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out long milliseconds)
+            || milliseconds <= 0)
+        {
+            return false;
+        }
+
+        PocketCalculator.Js.Runtime.HangEscalation.Grace = TimeSpan.FromMilliseconds(milliseconds);
+        PocketCalculator.Js.Runtime.HangEscalation.Handler = what =>
+        {
+            Console.Error.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"pocket-calculator: {what} did not return {milliseconds}ms after the watchdog fired; forcing exit"));
+            ProcessExit.Immediately(124);
+        };
+        return true;
+    }
+
     /// <summary>Arm the backstop. The thread is a daemon, so it never keeps the process alive.</summary>
     public static void Arm(TimeSpan budget)
     {
@@ -77,9 +107,9 @@ public static class HardDeadline
             Console.Error.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"pocket-calculator: hard timeout exceeded ({(long)budget.TotalSeconds}s); forcing exit"));
-            Console.Error.Flush();
-            Console.Out.Flush();
-            Environment.Exit(124);
+            // ProcessExit flushes both streams and skips the native atexit chain, which
+            // ProcessExit.cs documents as crash-prone once an isolate exists.
+            ProcessExit.Immediately(124);
         })
         {
             IsBackground = true,

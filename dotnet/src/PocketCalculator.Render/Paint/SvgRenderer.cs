@@ -194,6 +194,26 @@ internal sealed class SvgDocument
 
     internal Dictionary<string, XElement> ById { get; }
 
+    /// <summary>
+    /// The most elements one render of this document visits, counting every instance a
+    /// <c>&lt;use&gt;</c> expands to.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: resvg and the first port cap only <c>&lt;use&gt;</c> depth, so ten
+    /// references per level eleven levels deep expanded to 10^11 elements and pinned the page's
+    /// thread inside one op. Past this budget the rest of the document is not painted. A
+    /// document is parsed per render, so the budget is per render.
+    /// </remarks>
+    internal const int MaxElementVisits = 250_000;
+
+    private int _visits;
+
+    /// <summary>Spend one element visit; false once the render's budget is gone.</summary>
+    internal bool TryVisit() => ++_visits <= MaxElementVisits;
+
+    /// <summary>Start a new pass (the bounds walk and the paint each get the full budget).</summary>
+    internal void ResetVisits() => _visits = 0;
+
     internal static SvgDocument? Parse(byte[] bytes)
     {
         if (bytes.Length == 0)
@@ -335,6 +355,7 @@ internal static class SvgRenderer
             }
 
             SvgPaintState state = initial.Inherit(document.Root);
+            document.ResetVisits();
             foreach (XElement child in document.Root.Elements())
             {
                 RenderElement(canvas, child, state, document, fonts);
@@ -406,7 +427,12 @@ internal static class SvgRenderer
         ref SKRect      bounds,
         int             depth)
     {
-        if (depth > 24)
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
+        if (depth > 24 || !document.TryVisit())
         {
             return;
         }
@@ -630,7 +656,12 @@ internal static class SvgRenderer
         SvgFontDatabase fonts,
         int depth = 0)
     {
-        if (depth > 24)
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
+        if (depth > 24 || !document.TryVisit())
         {
             return;
         }
@@ -1069,6 +1100,11 @@ internal static class SvgRenderer
 
     private static string TextContent(XElement element)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return string.Empty;
+        }
+
         StringBuilder buffer = new();
         foreach (XNode node in element.Nodes())
         {

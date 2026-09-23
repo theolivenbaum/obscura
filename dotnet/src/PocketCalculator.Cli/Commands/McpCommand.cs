@@ -10,6 +10,7 @@ public static class McpCommand
     public static async Task RunAsync(CliArgs args, CliCommand.Mcp mcp)
     {
         var proxy = CliOptions.MergeProxy(args.Proxy, mcp.Proxy);
+        HardDeadline.ArmHangExit();
         if (mcp.Http)
         {
             // The option is a u16 in Rust and its parser enforces that here too,

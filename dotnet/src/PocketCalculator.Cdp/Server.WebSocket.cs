@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -8,7 +9,31 @@ namespace PocketCalculator.Cdp;
 public static partial class CdpServer
 {
     private const int MaxHandshakeBytes = 16 * 1024;
-    private const int MaxFrameBytes = 64 << 20;
+
+    /// <summary>The default cap on one inbound message.</summary>
+    internal const int DefaultMaxMessageBytes = 16 << 20;
+
+    /// <summary>
+    /// The largest inbound message a connection accepts, from
+    /// <c>POCKETCALCULATOR_CDP_MAX_MESSAGE_BYTES</c> or <see cref="DefaultMaxMessageBytes"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md L3): upstream accepts 64 MiB per message, which at
+    /// 128 connections is 8 GiB buffered and then copied into a string. The port
+    /// defaults to 16 MiB, far above any command a client normally sends, and
+    /// the variable raises it for a client that uploads large files as base64
+    /// (Playwright's <c>setInputFiles</c> against a remote browser).
+    /// </remarks>
+    internal static readonly int MaxMessageBytes = ReadMaxMessageBytes();
+
+    private static int ReadMaxMessageBytes()
+    {
+        var configured = Environment.GetEnvironmentVariable("POCKETCALCULATOR_CDP_MAX_MESSAGE_BYTES");
+        return int.TryParse(configured, System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0
+            ? value
+            : DefaultMaxMessageBytes;
+    }
 
     /// <summary>
     /// Complete the WebSocket upgrade and pump frames between the socket and this
@@ -48,8 +73,7 @@ public static partial class CdpServer
             new WebSocketCreationOptions { IsServer = true, KeepAliveInterval = TimeSpan.Zero });
         CdpLog.Info("WebSocket connected");
 
-        var replies = Channel.CreateUnbounded<string>(
-            new UnboundedChannelOptions { SingleReader = true });
+        var replies = new ReplyQueue();
 
         msgTx.TryWrite(new ServerMessage.NewConnection(replies.Writer));
         try
@@ -76,14 +100,20 @@ public static partial class CdpServer
         try
         {
             var buffer = new byte[16 * 1024];
-            var frame = new List<byte>(1024);
+            var frame = new ArrayBufferWriter<byte>(1024);
             while (ws.State is WebSocketState.Open or WebSocketState.CloseSent)
             {
                 ValueWebSocketReceiveResult result;
                 try
                 {
-                    result = await ws.ReceiveAsync(buffer.AsMemory(), CancellationToken.None)
+                    // The overflow token ends the read when this client has stopped
+                    // taking its replies (ReplyQueue), which closes the connection.
+                    result = await ws.ReceiveAsync(buffer.AsMemory(), replies.Overflowed)
                         .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
                 catch (Exception e) when (e is WebSocketException or IOException or ObjectDisposedException)
                 {
@@ -102,35 +132,46 @@ public static partial class CdpServer
                     // Binary and control frames are ignored, as they are upstream.
                     if (result.EndOfMessage)
                     {
-                        frame.Clear();
+                        frame.ResetWrittenCount();
                     }
 
                     continue;
                 }
 
-                if (frame.Count + result.Count > MaxFrameBytes)
+                if ((long)frame.WrittenCount + result.Count > MaxMessageBytes)
                 {
                     CdpLog.Warn("WS read error: frame exceeds the maximum message size");
                     break;
                 }
 
-                frame.AddRange(buffer.AsSpan(0, result.Count));
+                frame.Write(buffer.AsSpan(0, result.Count));
                 if (!result.EndOfMessage)
                 {
                     continue;
                 }
 
-                var text = Encoding.UTF8.GetString(frame.ToArray());
-                frame.Clear();
-
-                if (text.Contains("\"Browser.close\"", StringComparison.Ordinal))
+                // Decoded straight from the frame buffer, not from a copy of it.
+                var text = Encoding.UTF8.GetString(frame.WrittenSpan);
+                if (frame.Capacity > 1 << 20)
                 {
-                    if (CdpRequest.TryParse(text) is { } close)
-                    {
-                        replies.Writer.TryWrite(
-                            CdpResponse.Success(close.Id, new JsonObject(), null).ToJson());
-                    }
+                    // Do not keep a large message's buffer for the life of the connection.
+                    frame = new ArrayBufferWriter<byte>(1024);
+                }
+                else
+                {
+                    frame.ResetWrittenCount();
+                }
 
+                // Deviation: Rust closes the connection on any message whose text
+                // contains "Browser.close", a string argument included, and so did
+                // the port. The substring is now only a cheap prefilter: the
+                // message closes the connection when its parsed method is
+                // Browser.close, and anything else takes the ordinary path.
+                if (text.Contains("\"Browser.close\"", StringComparison.Ordinal)
+                    && CdpRequest.TryParse(text) is { Method: "Browser.close" } close)
+                {
+                    replies.Writer.TryWrite(
+                        CdpResponse.Success(close.Id, new JsonObject(), null).ToJson());
                     break;
                 }
 
@@ -177,7 +218,7 @@ public static partial class CdpServer
     /// rather than throwing, so a processor still finishing a command is
     /// unaffected.
     /// </remarks>
-    private static async Task FlushRepliesAsync(Channel<string> replies, Task sendTask)
+    private static async Task FlushRepliesAsync(ReplyQueue replies, Task sendTask)
     {
         replies.Writer.TryComplete();
         await Task.WhenAny(sendTask, Task.Delay(250)).ConfigureAwait(false);

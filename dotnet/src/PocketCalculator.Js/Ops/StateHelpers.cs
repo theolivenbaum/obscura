@@ -30,6 +30,22 @@ public static class StateHelpers
         }
     }
 
+    /// <summary>
+    /// The serialized origin of the document a realm holds, as the host knows it:
+    /// <c>"null"</c> for an opaque origin (a data:, about:blank or file: document, or a
+    /// sandboxed frame).
+    /// </summary>
+    /// <remarks>
+    /// Port addition. The Rust shim computes every origin it hands an op with the page's
+    /// own <c>URL</c> global, which page script can replace; the host decides instead,
+    /// from the URL it committed (history.pushState does not move it).
+    /// </remarks>
+    public static string DocumentOrigin(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        return state.OpaqueOrigin ? "null" : UrlRecord.Parse(state.Url)?.AsciiOrigin ?? "null";
+    }
+
     public static bool NodeIsScript(DomTree dom, NodeId nodeId)
     {
         var element = dom.GetNode(nodeId)?.AsElement();

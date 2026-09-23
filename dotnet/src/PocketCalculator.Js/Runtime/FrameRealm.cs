@@ -111,7 +111,8 @@ public sealed class FrameRealm : IDisposable
         uint frameId,
         uint parentFrameId,
         string url,
-        string html)
+        string html,
+        bool opaqueOrigin = false)
     {
         ArgumentNullException.ThrowIfNull(parent);
 
@@ -120,6 +121,9 @@ public sealed class FrameRealm : IDisposable
             Dom = HtmlParsing.ParseHtml(html),
             Url = url,
             FrameId = frameId,
+            // A sandboxed frame without allow-same-origin: its document's origin is opaque
+            // whatever its URL (port addition; the Rust engine has no frame sandboxing).
+            OpaqueOrigin = opaqueOrigin,
         };
         parent.ShareResourcesWith(state);
 
@@ -144,7 +148,7 @@ public sealed class FrameRealm : IDisposable
 
         // Only a same-origin frame is reachable from the page. A cross-origin
         // frame is opaque, and nothing about it is published.
-        var origin = OriginOf(url);
+        var origin = opaqueOrigin ? "null" : OriginOf(url);
         var sameOrigin = !string.Equals(origin, "null", StringComparison.Ordinal)
             && string.Equals(origin, parent.PageOrigin, StringComparison.Ordinal);
 
@@ -206,11 +210,20 @@ public sealed class FrameRealm : IDisposable
     /// A host helper (<see cref="HostScript"/>). DEVIATION from the Rust engine, which calls
     /// the page-visible <c>globalThis.__obscura_deliverMessage</c>.
     /// </remarks>
-    public void DeliverMessage(string dataJson, string origin, uint sourceFrameId, string targetOrigin) =>
+    public void DeliverMessage(string dataJson, string origin, uint sourceFrameId, string targetOrigin)
+    {
+        // Port addition: targetOrigin is enforced here, against the origin the host knows
+        // this frame has, as well as by the shim (SECURITY.md H4).
+        if (!CoreOps.TargetOriginAllows(targetOrigin, StateHelpers.DocumentOrigin(State), origin))
+        {
+            return;
+        }
+
         ExecuteHostScript(
             $"__obscura_host.deliverMessage({EncodeJsonArgument(dataJson)}, "
             + $"{EncodeJsonArgument(origin)}, {sourceFrameId.ToString(CultureInfo.InvariantCulture)}, "
             + $"{EncodeJsonArgument(targetOrigin)});");
+    }
 
     /// <summary>Sets the frame document's viewport before any of its scripts run.</summary>
     public void SetViewport(double width, double height)

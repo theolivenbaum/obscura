@@ -62,7 +62,8 @@ public sealed partial class Page
             }
 
             FrameRealm? realm = Js is { } parent
-                ? FrameRealm.Create(parent, frame.FrameId, frame.ParentFrameId, frame.Url, frame.Html)
+                ? FrameRealm.Create(
+                    parent, frame.FrameId, frame.ParentFrameId, frame.Url, frame.Html, frame.OpaqueOrigin)
                 : null;
             if (realm is null)
             {
@@ -212,6 +213,13 @@ public sealed partial class Page
                 {
                     continue;
                 }
+                // Port addition: targetOrigin is checked against the page's host-known
+                // origin before delivery, not only by the receiving shim (SECURITY.md H4).
+                if (!CoreOps.TargetOriginAllows(
+                        message.TargetOrigin, StateHelpers.DocumentOrigin(page.State), message.Origin))
+                {
+                    continue;
+                }
                 // A host helper, not upstream's page-visible __obscura_deliverMessage global.
                 string script =
                     $"__obscura_host.deliverMessage({escapedData}, {escapedOrigin}, "
@@ -253,16 +261,9 @@ public sealed partial class Page
     private void ForgetFrameReferences(uint frameId, uint parentFrameId)
     {
         string id = frameId.ToString(CultureInfo.InvariantCulture);
-        string script =
-            $"if (globalThis.__obscura_frameElements[{id}] &&"
-            + $" globalThis.__obscura_frameElements[{id}]._frameId === {id}) {{"
-            + $" globalThis.__obscura_frameElements[{id}]._frameId = 0;"
-            + $" if (globalThis.__obscura_frameElements[{id}]._iframeWin)"
-            + $" globalThis.__obscura_frameElements[{id}]._iframeWin._frameId = 0;"
-            + " }"
-            + $" delete globalThis.__obscura_frameObjects[{id}];"
-            + $" delete globalThis.__obscura_frameWindows[{id}];"
-            + $" delete globalThis.__obscura_frameElements[{id}];";
+        // The element's frame binding is closure state now (SECURITY.md C2), so the unbinding
+        // goes through the host helper rather than through `_frameId` expandos.
+        string script = $"__obscura_host.forgetFrame({id});";
         ExecuteFrameOwnerScript(parentFrameId, script);
         if (parentFrameId != 0 && Js is { } js)
         {
@@ -280,7 +281,7 @@ public sealed partial class Page
         {
             if (Js is { } js)
             {
-                TryExecute(js, "<frame-detach>", script);
+                TryExecuteHost(js, "<frame-detach>", script);
             }
             return;
         }
@@ -292,7 +293,7 @@ public sealed partial class Page
         }
         try
         {
-            Frames[index].ExecuteScript(script);
+            Frames[index].ExecuteHostScript(script);
         }
         catch (JsRuntimeException)
         {

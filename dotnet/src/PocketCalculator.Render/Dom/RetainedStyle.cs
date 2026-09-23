@@ -208,6 +208,11 @@ public static class RetainedStylePlanner
         bool selectedAncestor,
         HashSet<NodeId> dirty)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         bool isElement = tree.GetNode(id)?.IsElement == true;
         bool canQueryHere = insideActiveContainer || activeContainers.Contains(id);
         bool selectedHere = !selectedAncestor

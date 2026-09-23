@@ -172,4 +172,38 @@ public sealed class BindingCalledSessionTests
         Assert.Equal("undefined", gone.Get("result").Get("value").AsString());
         Assert.Empty(BindingCalls(ctx));
     }
+
+    /// <summary>
+    /// SECURITY.md M6: page script can call the frozen bridge itself. A name no
+    /// client registered, or one that was removed, is not reported, so a page
+    /// cannot fire <c>Runtime.bindingCalled</c> for a handler of its choosing.
+    /// </summary>
+    [Fact]
+    public async Task PageScriptCannotReportAnUnregisteredBinding()
+    {
+        var ctx = CdpContext.New();
+        var (_, session) = await CreatedAndAttachedAsync(ctx);
+
+        await CdpAsync(ctx, 1, "Runtime.enable", new JsonObject(), session);
+        await CdpAsync(
+            ctx, 2, "Runtime.addBinding", new JsonObject { ["name"] = "obscuraProbe" }, session);
+        await CdpAsync(
+            ctx, 3, "Runtime.addBinding", new JsonObject { ["name"] = "obscuraGone" }, session);
+        await CdpAsync(
+            ctx, 4, "Runtime.removeBinding", new JsonObject { ["name"] = "obscuraGone" }, session);
+        await CdpAsync(
+            ctx,
+            5,
+            "Runtime.evaluate",
+            new JsonObject
+            {
+                ["expression"] = "globalThis.__obscura_binding_called('__playwright__binding__controller__', '{}');"
+                    + "globalThis.__obscura_binding_called('obscuraGone', 'x');"
+                    + "globalThis.__obscura_binding_called('obscuraProbe', 'direct');",
+            },
+            session);
+
+        var called = BindingCalls(ctx);
+        Assert.Equal(["obscuraProbe"], called.Select(c => c.Params.Get("name").AsString()));
+    }
 }

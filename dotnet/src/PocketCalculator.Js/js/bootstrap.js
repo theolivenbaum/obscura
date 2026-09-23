@@ -8,6 +8,10 @@
 // DenoCoreShim, installed by BootstrapLoader.Install, which deletes
 // globalThis.Deno once this file has run.)
 const __obscuraCore = globalThis.Deno.core;
+// DEVIATION from crates/obscura-js/js/bootstrap.js: the privileged paths that read an op's
+// JSON (internal loads, frames) use JSON.parse as it was before any page script ran, not
+// whatever the page has put on the global since (SECURITY.md C3).
+const _JSONparse = JSON.parse;
 
 // Pre-declare all internal globals as non-enumerable so they are invisible
 // to Object.keys(window) / for-in enumeration. Must run before any var
@@ -354,9 +358,9 @@ async function __fetchDynClassicScript(task) {
     // internalLoad: the engine's own script load gets the body of a no-cors
     // cross-origin response, which page fetch() only sees as opaque (04418a5).
     const raw = await __obscuraCore.ops.op_fetch_url(
-      task.url, "GET", "{}", new Uint8Array(0), task.pageOrigin, "no-cors", "same-origin", true
+      task.url, "GET", "{}", new Uint8Array(0), "", "no-cors", "same-origin", true
     );
-    const parsed = JSON.parse(raw);
+    const parsed = _JSONparse(raw);
     // The HTML script-fetch algorithm treats an unsuccessful HTTP response
     // as a network error. Evaluating its response body is both observably
     // unlike browsers and dangerous: JSON error payloads and diagnostic HTML
@@ -364,6 +368,11 @@ async function __fetchDynClassicScript(task) {
     if (!(parsed.status >= 200 && parsed.status <= 299)) {
       throw new Error('HTTP ' + (parsed.status || 0));
     }
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, which evaluates parsed.body: the
+    // host keeps the source (a cross-origin one never reaches this realm at all) and runs
+    // it itself through op_run_fetched_script, named by this token (SECURITY.md C3). A
+    // response without a token (only a stubbed op produces one) keeps the old path.
+    if (typeof parsed.bodyToken === 'number') return { token: parsed.bodyToken };
     body = parsed.body;
   }
   return body;
@@ -386,7 +395,20 @@ async function __runDynScriptTask(task) {
       const fetched = await task.fetchResult;
       if (fetched.error) throw fetched.error;
       const body = fetched.body;
-      if (body) {
+      if (body && typeof body === 'object') {
+        // Host-held source (see __fetchDynClassicScript), run by a ScriptRunner task for
+        // the same reason as below.
+        await new Promise(resolve => {
+          const execute = () => {
+            globalThis.__currentScriptNid = task.nid;
+            try { __obscuraCore.ops.op_run_fetched_script(body.token, task.url); }
+            catch(e) { console.error('Dynamic script error (' + task.url + '):', e.message); }
+            finally { globalThis.__currentScriptNid = task.prevNid || 0; }
+            resolve();
+          };
+          if (_scheduleAfter(0, execute) === undefined) execute();
+        });
+      } else if (body) {
         // A fetched async script is executed by a ScriptRunner task, not by
         // the fetch promise's microtask continuation. Besides matching event
         // loop ordering, this prevents a batch of concurrently completed
@@ -519,140 +541,13 @@ function _registerLinkedStylesheet(link, explicitHref, responseUrl) {
 // document's own sheets are registered. That delete never ran in a frame realm, so a
 // frame's script could bind any <link> to a response URL of its choosing.
 
-// A fetched sheet becomes an inline <style>, so relative url() references
-// must keep resolving against the stylesheet URL rather than document.URL.
-// Scan instead of using a regexp: data URLs and quoted URLs can contain
-// parentheses, quotes, and whitespace.
-function _rebaseCssUrls(css, baseUrl) {
-  let out = "";
-  let i = 0;
-  let quote = "";
-  let comment = false;
-  while (i < css.length) {
-    if (comment) {
-      if (css[i] === "*" && css[i + 1] === "/") {
-        out += "*/"; i += 2; comment = false;
-      } else {
-        out += css[i++];
-      }
-      continue;
-    }
-    if (quote) {
-      const ch = css[i++];
-      out += ch;
-      if (ch === "\\" && i < css.length) out += css[i++];
-      else if (ch === quote) quote = "";
-      continue;
-    }
-    if (css[i] === "/" && css[i + 1] === "*") {
-      out += "/*"; i += 2; comment = true; continue;
-    }
-    if (css[i] === '"' || css[i] === "'") {
-      quote = css[i]; out += css[i++]; continue;
-    }
-    if (css.slice(i, i + 4).toLowerCase() !== "url(") {
-      out += css[i++]; continue;
-    }
-    let end = i + 4;
-    let innerQuote = "";
-    while (end < css.length) {
-      const ch = css[end];
-      if (innerQuote) {
-        if (ch === "\\") { end += 2; continue; }
-        if (ch === innerQuote) innerQuote = "";
-      } else if (ch === '"' || ch === "'") {
-        innerQuote = ch;
-      } else if (ch === ")") {
-        break;
-      }
-      end++;
-    }
-    if (end >= css.length) {
-      out += css.slice(i);
-      break;
-    }
-    const raw = css.slice(i + 4, end).trim();
-    const value = raw.length >= 2
-      && ((raw[0] === '"' && raw[raw.length - 1] === '"')
-        || (raw[0] === "'" && raw[raw.length - 1] === "'"))
-      ? raw.slice(1, -1)
-      : raw;
-    let resolved = value;
-    if (value && !/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(value)) {
-      try { resolved = new URL(value, baseUrl).href; } catch(e) {}
-    }
-    out += `url("${resolved.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`;
-    i = end + 1;
-  }
-  return out;
-}
-
-function _cssImportApplies(media) {
-  const compact = media.replace(/\s+/g, "").toLowerCase();
-  if (!compact) return true;
-  if (compact.includes("prefers-color-scheme:dark")) return false;
-  if (compact.includes("print")
-    && !compact.includes("screen")
-    && !compact.includes("all")) return false;
-  if (compact.includes("min-width") || compact.includes("max-width")
-      || compact.includes("prefers-")) {
-    try { return matchMedia(media).matches; } catch(e) {}
-  }
-  return true;
-}
-
-// Upstream 04418a5: returns {css, responseUrl, originClean}. A sheet is clean when its
-// response URL (after redirects) is same-origin with the page and every @import it pulls in
-// is clean as well.
-async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
-  if (depth > 4 || seen.has(url)) {
-    return { css: "", responseUrl: url, originClean: true };
-  }
-  seen.add(url);
-  // internalLoad (04418a5): the engine reads the stylesheet bytes; page script
-  // never sees them, and the origin-clean flag still follows the response URL.
-  const raw = await __obscuraCore.ops.op_fetch_url(
-    url, "GET", "{}", new Uint8Array(0), pageOrigin, "no-cors", "same-origin", true
-  );
-  const parsed = JSON.parse(raw);
-  if (parsed.blocked || parsed.status >= 400 || parsed.status === 0) {
-    throw new Error("Stylesheet fetch failed: " + url);
-  }
-  let css = parsed.body || "";
-  const imports = [];
-  // @import is only valid before ordinary rules. Removing it here lets the
-  // renderer consume the imported rules from the materialized <style>.
-  css = css.replace(
-    /@import\s+(?:url\(\s*)?(?:"([^"]+)"|'([^']+)'|([^'"\s;)]+))\s*\)?\s*([^;]*);/gi,
-    (statement, doubleQuoted, singleQuoted, bare, media) => {
-      const target = doubleQuoted || singleQuoted || bare || "";
-      if (_cssImportApplies(media || "")) {
-        try {
-          imports.push(new URL(target, url).href);
-        } catch(e) {}
-      }
-      return "";
-    }
-  );
-  const imported = await Promise.all(imports.map(importUrl =>
-    _fetchLinkedCss(importUrl, pageOrigin, depth + 1, new Set(seen))
-  ));
-  const responseUrl = parsed.url || url;
-  const parts = imported.map(result => result.css).filter(Boolean);
-  parts.push(_rebaseCssUrls(css, responseUrl));
-  // DEVIATION from upstream, which judges the final URL alone: an opaque (cross-origin
-  // no-cors) response is never clean, which also covers a redirect chain that left the
-  // page's origin and came back, as Fetch's response tainting does.
-  let ownOriginClean = false;
-  try {
-    ownOriginClean = parsed.opaque !== true && new URL(responseUrl).origin === pageOrigin;
-  } catch(e) {}
-  return {
-    css: parts.filter(Boolean).join("\n"),
-    responseUrl,
-    originClean: ownOriginClean && imported.every(result => result.originClean),
-  };
-}
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose _fetchLinkedCss,
+// _rebaseCssUrls and _cssImportApplies fetched a dynamic sheet, walked its @import graph,
+// rebased its url()s and judged it origin-clean here, in the page realm, with the page's own
+// JSON.parse, String.prototype.replace and URL. A page that replaced any of them read every
+// cross-origin sheet. The host does all of it now (op_load_stylesheet,
+// LinkedStylesheetLoader.cs), and the bytes go straight into the stylesheet store
+// (SECURITY.md C3).
 
 // A dynamically-inserted <link rel="stylesheet" href> must fetch, enter the
 // live cascade, and then fire load. Framework route chunks commonly await this
@@ -680,20 +575,17 @@ async function _loadLinkedStylesheet(c) {
     else c.removeAttribute('disabled');
   }
   const fullUrl = _resolveResourceUrl(href);
-  // Upstream 04418a5: the page's origin, not the sheet's own (which made every sheet
-  // "same-origin").
-  let pageOrigin = "";
-  try { pageOrigin = new URL(_domParse("document_url") || "about:blank").origin; } catch(e) {}
   try {
-    const loaded = await _fetchLinkedCss(fullUrl, pageOrigin);
     // DEVIATION from crates/obscura-js, which inserts a <style data-obscura-linked> after the
     // link. Chromium 141 creates no element for a dynamically inserted stylesheet link either,
     // so the bytes go beside the node. The media query is not evaluated here: the renderer
     // applies the link's own media attribute, which also makes it track a viewport change
     // instead of being frozen at fetch time. A `disabled` link keeps its bytes and the
     // renderer skips it (DomTree.ExternalStylesheetCss). See "Known deviations" in todo.md.
-    _externalStylesheetSet(c, loaded.css, loaded.responseUrl, loaded.originClean);
-    _registerLinkedStylesheet(c, fullUrl, loaded.responseUrl);
+    // The host fetches and installs the sheet itself; see the note above _loadLinkedStylesheet.
+    const loaded = _JSONparse(await __obscuraCore.ops.op_load_stylesheet(c._nid, fullUrl));
+    if (!loaded || loaded.ok !== true) throw new Error("Stylesheet fetch failed: " + fullUrl);
+    _registerLinkedStylesheet(c, fullUrl, String(loaded.responseUrl || fullUrl));
     try { c.dispatchEvent(new Event('load', { bubbles: true })); } catch(e) {}
   } catch(e) {
     try { c.dispatchEvent(new Event('error', { bubbles: true })); } catch(e) {}
@@ -4343,17 +4235,12 @@ class Element extends Node {
     this.setAttribute("src", v);
   }
   _resetIframeFrame() {
-    const oldId = this._frameId;
-    if (oldId) {
-      delete globalThis.__obscura_frameElements[oldId];
-      delete globalThis.__obscura_frameWindows[oldId];
+    const old = _iframeStates.get(this);
+    if (old && old.frameId) {
+      delete globalThis.__obscura_frameElements[old.frameId];
+      delete globalThis.__obscura_frameWindows[old.frameId];
     }
-    this._frameId = 0;
-    this._iframeLoadingUrl = null;
-    this._iframeLoadedUrl = 'about:blank';
-    this._iframeDoc = new _IframeDocument(
-      '<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
-    this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
+    return _blankIframeState(this);
   }
   _loadIframeSrc(url) {
     let fullUrl = url;
@@ -4362,52 +4249,63 @@ class Element extends Node {
     }
     // Both the src setter and the parser sweep in __obscura_init reach here, so
     // a frame the page assigned before init must not be fetched a second time.
-    if (this._iframeLoadingUrl === fullUrl) return;
-    this._resetIframeFrame();
-    this._iframeLoadingUrl = fullUrl;
+    const previous = _iframeStates.get(this);
+    if (previous && previous.loadingUrl === fullUrl) return;
+    const st = this._resetIframeFrame();
+    st.loadingUrl = fullUrl;
     const el = this;
+    // A sandbox without allow-same-origin gives the frame an opaque origin. Sandboxing
+    // only ever takes access away, so the host can take the flag from here.
+    const sandboxed = el.hasAttribute('sandbox')
+      && !String(el.getAttribute('sandbox') || '').toLowerCase().split(/\s+/).includes('allow-same-origin');
     // Upstream 04418a5: the frame loads through the op directly rather than the
     // page's own fetch(), and the document's origin is the response's final URL,
     // not `src`. A same-origin src that redirected cross-origin used to leave a
     // readable contentDocument of cross-origin content.
-    let pageOrigin = '';
-    try { pageOrigin = new URL(_domParse('document_url') || 'about:blank').origin; } catch (_) {}
     // Deviation: upstream fetches the frame as 'no-cors' with 'same-origin'
     // credentials, which sent a cross-origin frame no cookies and no navigation
     // headers. Chromium loads it as a nested navigation with credentials; the op
     // applies the iframe's SameSite and Sec-Fetch-* rules for mode 'navigate'.
+    //
+    // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md C2): the op judges the
+    // response against this realm's host-known origin and returns a cross-origin frame's
+    // document to the host only, never to this realm. The host builds the frame's realm
+    // from its own record of the load (op_frame_document_from_load), so neither the URL
+    // the frame runs as nor its HTML passes through anything page script can reach. The
+    // frame's state lives in _iframeStates, not in expandos a page could read or rewrite.
     Promise.resolve(__obscuraCore.ops.op_fetch_url(
-      fullUrl, 'GET', '{}', new Uint8Array(0), pageOrigin,
+      fullUrl, 'GET', '{}', new Uint8Array(0), '',
       'navigate', 'include', true
     )).then(raw => {
-      if (el._iframeLoadingUrl !== fullUrl) return;
-      const response = JSON.parse(raw);
+      if (_iframeStates.get(el) !== st) return;
+      const response = _JSONparse(raw);
       if (!response.blocked && response.status > 0 && response.status < 400) {
-        const html = response.body || '';
-        const loadedUrl = response.url || fullUrl;
-        el._iframeLoadedUrl = loadedUrl;
+        const sameOrigin = response.sameOrigin === true && !sandboxed;
+        const html = sameOrigin ? String(response.body || '') : '';
+        const loadedUrl = String(response.url || fullUrl);
+        st.loadedUrl = loadedUrl;
+        st.sameOrigin = sameOrigin;
         // Hand the document to the host, which gives this frame a realm of its
         // own and runs the scripts that came with it (issue #600). The shim
         // document below stays: it is what the parent reads through
-        // contentDocument.
+        // contentDocument, and it is empty unless the frame is same-origin.
         const box = el.getBoundingClientRect();
-        el._frameId = __obscuraCore.ops.op_frame_document_ready(
-          loadedUrl, html, Math.round(box.width) || 300, Math.round(box.height) || 150);
-        if (el._frameId) globalThis.__obscura_frameElements[el._frameId] = el;
-        el._iframeDoc = new _IframeDocument(html, loadedUrl, el);
-        el._iframeWin = new _IframeWindow(el._iframeDoc, loadedUrl);
+        st.frameId = typeof response.bodyToken === 'number'
+          ? (__obscuraCore.ops.op_frame_document_from_load(
+              response.bodyToken, Math.round(box.width) || 300, Math.round(box.height) || 150,
+              sandboxed) >>> 0)
+          : 0;
+        st.doc = new _IframeDocument(html, loadedUrl, el);
+        st.win = _makeIframeWindow(el, st.doc, loadedUrl);
         // Bind the window to the realm the host just queued. This is what makes
         // posting into the frame reach the frame's own listeners, and makes a
         // message coming back out arrive with this window as its `source`.
-        if (el._frameId) {
-          el._iframeWin._frameId = el._frameId;
-          globalThis.__obscura_frameWindows[el._frameId] = el._iframeWin;
-          globalThis.__obscura_frameElements[el._frameId] = el;
+        if (st.frameId) {
+          globalThis.__obscura_frameWindows[st.frameId] = sameOrigin ? st.win : _crossOriginWindowFor(el);
+          globalThis.__obscura_frameElements[st.frameId] = el;
         }
       } else {
-        el._iframeLoadedUrl = fullUrl;
-        el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
-        el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
+        _failIframeLoad(el, st, fullUrl, sandboxed);
       }
 
       // Dispatch through the element so the onload property/attribute and any
@@ -4415,51 +4313,36 @@ class Element extends Node {
       // directly bypasses listeners registered via addEventListener.
       el.dispatchEvent(new Event('load'));
     }).catch(() => {
-      if (el._iframeLoadingUrl !== fullUrl) return;
-      el._iframeLoadedUrl = fullUrl;
-      el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
-      el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
-
+      if (_iframeStates.get(el) !== st) return;
+      _failIframeLoad(el, st, fullUrl, sandboxed);
       el.dispatchEvent(new Event('load'));
     });
   }
   get contentDocument() {
     if (this.localName !== 'iframe') return undefined;
+    const st = _iframeStates.get(this) || _blankIframeState(this);
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, which judges this with the page's
+    // URL global against a page-writable _iframeLoadedUrl expando (SECURITY.md C2).
+    if (!_iframeSameOrigin(st)) return null;
     const real = _frameObjectsFor(this);
     if (real?.document) return real.document;
-    if (this._iframeDoc) {
-      // Upstream 04418a5: judged on the URL the frame's document actually came
-      // from (after redirects), and the "no :// in src" escape hatch is gone.
-      if (this.src === '' || this.src === 'about:blank' || this._iframeLoadedUrl === 'about:blank') {
-        return this._iframeDoc;
-      }
-      const pageOrigin = (function(){ try { return new URL(_domParse("document_url")).origin; } catch(e) { return ''; } })();
-      const iframeOrigin = (function(url){ try { return new URL(url).origin; } catch(e) { return ''; } })(this._iframeLoadedUrl);
-      // DEVIATION from upstream: an opaque origin ("null", e.g. a data: frame in
-      // an about:blank page) is never same-origin with anything, as in HTML.
-      if (pageOrigin !== '' && pageOrigin !== 'null' && pageOrigin === iframeOrigin) {
-        return this._iframeDoc;
-      }
-      return null; // Cross-origin: blocked
-    }
-    if (!this._iframeDoc) {
-      this._iframeLoadedUrl = 'about:blank';
-      this._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', 'about:blank', this);
-      this._iframeWin = new _IframeWindow(this._iframeDoc, 'about:blank');
-    }
-    return this._iframeDoc;
+    return st.doc;
   }
   get contentWindow() {
     if (this.localName !== 'iframe') return undefined;
+    let st = _iframeStates.get(this);
+    if (!st) {
+      if (this.parentNode === null) return null;
+      st = _blankIframeState(this);
+    }
+    // A cross-origin frame's window offers only the cross-origin surface (postMessage,
+    // closed, length, frames, parent, top), never its document (SECURITY.md C2).
+    if (!_iframeSameOrigin(st)) return _crossOriginWindowFor(this);
     if (_frameObjectsFor(this)) {
-      const win = _frameWindowFor(this._frameId);
+      const win = _frameWindowFor(st.frameId);
       if (win) return win;
     }
-    if (!this._iframeWin) {
-      if (this.parentNode === null) return null;
-      this.contentDocument;
-    }
-    return this._iframeWin;
+    return st.win;
   }
   get action() {
     // A missing action falls back to the document URL, a present one resolves against the base.
@@ -7629,8 +7512,10 @@ globalThis.fetch = async (input, init = {}) => {
   if (fetchCredentials !== "omit" && fetchCredentials !== "same-origin" && fetchCredentials !== "include") {
     throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
   }
-  const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, false);
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which passes an origin computed
+  // with the page's own URL global: op_fetch_url derives the requesting origin from the
+  // calling realm's document host-side and ignores this argument (SECURITY.md C1).
+  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, "", fetchMode, fetchCredentials, false);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -12032,6 +11917,34 @@ globalThis.atob = globalThis.atob || ((s) => {
     if (url === null || url === undefined) return __currentUrl();
     try { return new URL(String(url), __currentUrl()).href; } catch (e) { return String(url); }
   };
+  // HTML's "can have its URL rewritten": a history entry may not change the scheme,
+  // credentials, host or port, and outside http(s) it may change only the query and
+  // fragment (file:) or the fragment. DEVIATION from crates/obscura-js/js/bootstrap.js,
+  // which accepted any URL, so location.origin then reported a foreign origin
+  // (SECURITY.md L9). Chromium throws this SecurityError, message included.
+  const urlParts = (href) => {
+    try {
+      const c = _JSONparse(__obscuraCore.ops.op_url_parse(String(href), ''));
+      return (c && c.ok) ? c : null;
+    } catch (e) { return null; }
+  };
+  const assertRewritable = (method, target) => {
+    const documentUrl = __currentUrl();
+    const a = urlParts(target);
+    const b = urlParts(documentUrl);
+    let ok = !!a && !!b && a.protocol === b.protocol && a.username === b.username
+      && a.password === b.password && a.hostname === b.hostname && a.port === b.port;
+    if (ok && a.protocol !== 'http:' && a.protocol !== 'https:') {
+      ok = a.pathname === b.pathname && (a.protocol === 'file:' || a.search === b.search);
+    }
+    if (!ok) {
+      throw new DOMException(
+        "Failed to execute '" + method + "' on 'History': A history state object with URL '"
+          + target + "' cannot be created in a document with origin '" + _realmOrigin()
+          + "' and URL '" + documentUrl + "'.",
+        'SecurityError');
+    }
+  };
   const applyVirtual = () => {
     const entry = stack[idx];
     globalThis.__virtualUrl = entry.url ?? null;
@@ -12069,6 +11982,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     }
     pushState(state, _title, url) {
       const resolved = resolveOrFallback(url);
+      assertRewritable('pushState', resolved);
       // Truncate forward entries (real Chrome drops the forward stack on a
       // new push) then append + advance.
       stack.length = idx + 1;
@@ -12078,6 +11992,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     }
     replaceState(state, _title, url) {
       const resolved = resolveOrFallback(url);
+      assertRewritable('replaceState', resolved);
       stack[idx] = {state: state ?? null, url: resolved};
       applyVirtual();
     }
@@ -12179,8 +12094,18 @@ globalThis.atob = globalThis.atob || ((s) => {
     const old = entry;
     const state = options && Object.prototype.hasOwnProperty.call(options, "state")
       ? options.state : null;
-    if (options && options.history === "replace") history.replaceState(state, "", url);
-    else history.pushState(state, "", url);
+    const replace = !!(options && options.history === "replace");
+    try {
+      if (replace) history.replaceState(state, "", url);
+      else history.pushState(state, "", url);
+    } catch (e) {
+      // A URL the history API may not rewrite to (another origin) is a real
+      // navigation, as Navigation.navigate() performs one in Chromium.
+      if (!(e instanceof DOMException) || e.name !== "SecurityError") throw e;
+      _locationNavigate(String(url), replace);
+      const pending = Promise.resolve(entry);
+      return { committed: pending, finished: pending };
+    }
     const next = changed(old);
     const done = Promise.resolve(next);
     return { committed: done, finished: done };
@@ -13815,6 +13740,104 @@ const _iframeWindowProxyHandler = {
   },
 };
 
+// Per-<iframe> frame state: the frame's id, the URL it is loading and loaded, whether the
+// host judged it same-origin, and the parent-side document and window standing for it.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which keeps all of it in expandos on the
+// element (_frameId, _iframeDoc, _iframeWin, _iframeLoadedUrl, _iframeLoadingUrl). Page script
+// could read a cross-origin frame's document straight out of _iframeDoc, or rewrite
+// _iframeLoadedUrl to pass the same-origin check (SECURITY.md C2).
+const _iframeStates = new WeakMap();
+// A parent-side _IframeWindow -> the iframe element it stands for.
+const _iframeWindowOwners = new WeakMap();
+// An iframe element -> its cross-origin window, one per element so that
+// `event.source === iframe.contentWindow` holds across navigations of the frame.
+const _crossOriginWindows = new WeakMap();
+const _BLANK_FRAME_HTML = '<!DOCTYPE html><html><head></head><body></body></html>';
+
+function _makeIframeWindow(el, doc, url) {
+  const win = new _IframeWindow(doc, url);
+  _iframeWindowOwners.set(win, el);
+  return win;
+}
+
+// The initial about:blank document, which inherits the embedder's origin.
+function _blankIframeState(el) {
+  const doc = new _IframeDocument(_BLANK_FRAME_HTML, 'about:blank', el);
+  const st = {
+    frameId: 0, loadingUrl: null, loadedUrl: 'about:blank', sameOrigin: true,
+    doc, win: null,
+  };
+  st.win = _makeIframeWindow(el, doc, 'about:blank');
+  _iframeStates.set(el, st);
+  return st;
+}
+
+function _urlOriginOp(url) {
+  try {
+    const c = _JSONparse(__obscuraCore.ops.op_url_parse(String(url), ''));
+    return (c && c.ok) ? String(c.origin) : 'null';
+  } catch (_) { return 'null'; }
+}
+
+// A load that failed or was refused: an empty document, same-origin only when its URL is.
+function _failIframeLoad(el, st, url, sandboxed) {
+  const own = _realmOrigin();
+  st.loadedUrl = url;
+  st.sameOrigin = !sandboxed && own !== 'null' && own === _urlOriginOp(url);
+  st.doc = new _IframeDocument(_BLANK_FRAME_HTML, url, el);
+  st.win = _makeIframeWindow(el, st.doc, url);
+}
+
+// Whether this realm may reach into the frame's document. Asked of the host once the frame
+// has a realm (or a queued one); until then, the host's verdict on the load itself.
+function _iframeSameOrigin(st) {
+  if (st.frameId) {
+    const verdict = __obscuraCore.ops.op_frame_same_origin(st.frameId);
+    if (verdict === 1) return true;
+    if (verdict === 0) return false;
+  }
+  return st.sameOrigin === true;
+}
+
+// A cross-origin frame's window, as its embedder sees it: postMessage into the frame and
+// the handful of members HTML exposes across origins. Location writes are accepted and,
+// as in _IframeWindow, do nothing.
+class _CrossOriginFrameWindow {
+  postMessage(data, targetOrigin, _transfer) {
+    const el = _crossOriginWindowElements.get(this);
+    const st = el && _iframeStates.get(el);
+    if (st && st.frameId) _sendRealmMessage(st.frameId, data, targetOrigin);
+  }
+  get self() { return this; }
+  get window() { return this; }
+  get frames() { return this; }
+  get parent() { return globalThis; }
+  get top() { return globalThis.top || globalThis; }
+  get opener() { return null; }
+  get closed() { return !(_crossOriginWindowElements.get(this)?.isConnected); }
+  get length() { return 0; }
+  get location() { return _crossOriginLocation; }
+  set location(_v) {}
+  focus() {}
+  blur() {}
+  close() {}
+}
+_markNative(_CrossOriginFrameWindow.prototype.postMessage);
+const _crossOriginWindowElements = new WeakMap();
+const _crossOriginLocation = Object.freeze({
+  assign() {}, replace() {}, reload() {},
+  set href(_v) {},
+});
+function _crossOriginWindowFor(el) {
+  let win = _crossOriginWindows.get(el);
+  if (!win) {
+    win = new _CrossOriginFrameWindow();
+    _crossOriginWindowElements.set(win, el);
+    _crossOriginWindows.set(el, win);
+  }
+  return win;
+}
+
 // Cross-realm messaging.
 //
 // A realm cannot reach another realm's context on its own, so postMessage is
@@ -13854,13 +13877,20 @@ function _liveFrameIds() {
 // surviving reference keeps the frame's context and DOM tree alive.
 // Host-only (__obscura_host.forgetFrame); upstream's global __obscura_forgetFrame.
 function _forgetFrame(frameId) {
+  const element = globalThis.__obscura_frameElements[frameId];
+  const st = element && _iframeStates.get(element);
+  if (st && st.frameId === frameId) st.frameId = 0;
   delete globalThis.__obscura_frameElements[frameId];
   delete globalThis.__obscura_frameObjects[frameId];
   delete globalThis.__obscura_frameWindows[frameId];
 }
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which computes this with the page's
+// own URL global: a realm that replaced URL could claim another origin and receive a
+// postMessage restricted to it. The host answers from the realm's committed document
+// (SECURITY.md H4).
 function _realmOrigin() {
-  try { return new URL(_domParse('document_url')).origin; } catch (_) { return 'null'; }
+  try { return String(__obscuraCore.ops.op_realm_origin(_realmFrameId)); } catch (_) { return 'null'; }
 }
 
 // Whether a postMessage restricted to `targetOrigin` may be delivered to a
@@ -13896,8 +13926,10 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
   // DEVIATION from crates/obscura-js/js/bootstrap.js, which sends the page-writable
   // globalThis.__obscura_frameId as the source: a frame could set it to a sibling's
   // id and have its message arrive with `event.source` naming that sibling.
+  // The source id and origin are filled in by the host from the calling realm and these
+  // two arguments are ignored (SECURITY.md H4); they stay to keep the op's shape.
   __obscuraCore.ops.op_post_frame_message(
-    targetFrameId >>> 0, _realmFrameId, _realmOrigin(), to, json);
+    targetFrameId >>> 0, _realmFrameId, '', to, json);
 }
 
 // The frame's own window and document, when this page is allowed to touch
@@ -13909,7 +13941,7 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
 // public interface is visible to anything that walks it, and real Chrome has no
 // such member.
 function _frameObjectsFor(element) {
-  const frameId = element._frameId;
+  const frameId = _iframeStates.get(element)?.frameId;
   if (!frameId) return null;
   const entry = globalThis.__obscura_frameObjects[frameId];
   return entry || null;
@@ -14079,8 +14111,10 @@ class _IframeWindow {
     // event on the *parent's* window, so a page could never actually talk to
     // the document inside its iframe. A frame that has not loaded yet has no
     // browsing context to receive anything.
-    if (!this._frameId) return;
-    _sendRealmMessage(this._frameId, data, targetOrigin);
+    const owner = _iframeWindowOwners.get(this);
+    const st = owner && _iframeStates.get(owner);
+    if (!st || st.win !== this || !st.frameId) return;
+    _sendRealmMessage(st.frameId, data, targetOrigin);
   }
 
   setTimeout(fn, ms) { return globalThis.setTimeout(fn, ms); }
@@ -18003,6 +18037,9 @@ globalThis.__obscura_host_handoff = Object.freeze({
   setScreenOverride: _setScreenOverride,
   liveFrameIds: _liveFrameIds,
   forgetFrame: _forgetFrame,
+  // The frame id an iframe element is bound to; 0 when none. Closure state, see
+  // _iframeStates.
+  frameIdOf: (element) => (_iframeStates.get(element)?.frameId || 0),
   // The CDP pointer's pressed state, which the mouseReleased snippet turns into a
   // trusted click. Upstream keeps it in page-writable globalThis.__obscura_mouse_down,
   // so a page could aim the click a real mouseup produces.

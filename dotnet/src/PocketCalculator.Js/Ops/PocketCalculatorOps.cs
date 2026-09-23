@@ -144,6 +144,11 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     {
         ArgumentNullException.ThrowIfNull(ops);
         var engine = ops.Engine;
+        // The realm's own Uint8Array constructor, taken now: the table is bound before
+        // bootstrap.js or any page script runs. DEVIATION from the port's earlier lookup of
+        // the global on every call, which ran whatever the page had put there by then
+        // inside the op (SECURITY.md L10).
+        var uint8Array = (ScriptObject)engine.Evaluate("Uint8Array");
 
         // --- DOM -----------------------------------------------------------
         Bind(ops, "op_dom", (Func<object?, object?, object?, object?, string>)(
@@ -181,9 +186,11 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             () => CoreOps.OpGetCookies(RealmState())));
         Bind(ops, "op_set_cookie", (Action<object?>)(
             cookie => CoreOps.OpSetCookie(RealmState(), S(cookie))));
-        Bind(ops, "op_post_frame_message", (Action<object?, object?, object?, object?, object?>)(
-            (target, source, origin, targetOrigin, data) => CoreOps.OpPostFrameMessage(
-                Page, U32(target), U32(source), S(origin), S(targetOrigin), S(data))));
+        // Port addition: the calling realm's origin as the host knows it, for the
+        // shim's postMessage targetOrigin checks (SECURITY.md H4).
+        Bind(ops, "op_realm_origin", (Func<object?, string>)(
+            frameId => OpGuard.Run(
+                "op_realm_origin", () => StateHelpers.DocumentOrigin(FrameState(U32(frameId))), "null")));
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, RealmState().FrameId, S(url), S(html), U64(width), U64(height))));
@@ -197,10 +204,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (source, baseUrl) => CoreOps.OpAddImportMap(Page, S(source), S(baseUrl))));
 
         // --- Network -------------------------------------------------------
-        Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
-            (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
-                RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
-                B(internalLoad))));
+        BindDocumentOps(ops, Page);
 
         // --- Encoding ------------------------------------------------------
         Bind(ops, "op_encoding_for_label", (Func<object?, string>)(
@@ -223,27 +227,27 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
 
         // --- WebCrypto -----------------------------------------------------
         Bind(ops, "op_subtle_digest", (Func<object?, object?, object>)(
-            (algorithm, data) => Uint8Array(engine, CryptoOps.Digest(S(algorithm), Bytes(data)))));
+            (algorithm, data) => Uint8Array(uint8Array, CryptoOps.Digest(S(algorithm), Bytes(data)))));
         Bind(ops, "op_subtle_hmac", (Func<object?, object?, object?, object>)(
-            (hash, key, data) => Uint8Array(engine, CryptoOps.Hmac(S(hash), Bytes(key), Bytes(data)))));
+            (hash, key, data) => Uint8Array(uint8Array, CryptoOps.Hmac(S(hash), Bytes(key), Bytes(data)))));
         Bind(ops, "op_subtle_aes_gcm", (Func<object?, object?, object?, object?, object?, object>)(
             (encrypt, key, iv, aad, data) => Uint8Array(
-                engine, CryptoOps.AesGcm(B(encrypt), Bytes(key), Bytes(iv), Bytes(aad), Bytes(data)))));
+                uint8Array, CryptoOps.AesGcm(B(encrypt), Bytes(key), Bytes(iv), Bytes(aad), Bytes(data)))));
         Bind(ops, "op_subtle_aes_cbc", (Func<object?, object?, object?, object?, object>)(
             (encrypt, key, iv, data) => Uint8Array(
-                engine, CryptoOps.AesCbc(B(encrypt), Bytes(key), Bytes(iv), Bytes(data)))));
+                uint8Array, CryptoOps.AesCbc(B(encrypt), Bytes(key), Bytes(iv), Bytes(data)))));
         Bind(ops, "op_subtle_aes_ctr", (Func<object?, object?, object?, object?, object>)(
             (key, counter, counterLength, data) => Uint8Array(
-                engine, CryptoOps.AesCtr(Bytes(key), Bytes(counter), U32(counterLength), Bytes(data)))));
+                uint8Array, CryptoOps.AesCtr(Bytes(key), Bytes(counter), U32(counterLength), Bytes(data)))));
         Bind(ops, "op_subtle_pbkdf2", (Func<object?, object?, object?, object?, object?, object>)(
             (hash, password, salt, iterations, length) => Uint8Array(
-                engine,
+                uint8Array,
                 CryptoOps.Pbkdf2(S(hash), Bytes(password), Bytes(salt), U32(iterations), U32(length)))));
         Bind(ops, "op_subtle_hkdf", (Func<object?, object?, object?, object?, object?, object>)(
             (hash, ikm, salt, info, length) => Uint8Array(
-                engine, CryptoOps.Hkdf(S(hash), Bytes(ikm), Bytes(salt), Bytes(info), U32(length)))));
+                uint8Array, CryptoOps.Hkdf(S(hash), Bytes(ikm), Bytes(salt), Bytes(info), U32(length)))));
         Bind(ops, "op_random_bytes", (Func<object?, object>)(
-            length => Uint8Array(engine, CryptoOps.RandomBytes(U32(length)))));
+            length => Uint8Array(uint8Array, CryptoOps.RandomBytes(U32(length)))));
 
         // --- Render --------------------------------------------------------
         Bind(ops, "op_begin_render_task", (Action)(() => RenderOps.OpBeginRenderTask(Page)));
@@ -334,7 +338,130 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
+        BindDocumentOps(ops, state);
     }
+
+    /// <summary>
+    /// The ops whose answer depends on which document is asking, bound to
+    /// <paramref name="document"/>: the realm the op table belongs to. Nothing the shim passes
+    /// can name another realm, and nothing page script computes decides an origin.
+    /// </summary>
+    private void BindDocumentOps(ScriptObject ops, PocketCalculatorState document)
+    {
+        var engine = ops.Engine;
+        BindFetch(ops, document);
+        BindPostFrameMessage(ops, document);
+
+        // Port additions (SECURITY.md C2, C3): the consumers of an internal load's host-held
+        // body. See InternalLoads.
+        Bind(ops, "op_run_fetched_script", (Action<object?, object?>)(
+            (token, url) => RunFetchedScript(engine, document, D(token), S(url))));
+        Bind(ops, "op_frame_document_from_load", (Func<object?, object?, object?, object?, double>)(
+            (token, width, height, sandboxed) => CoreOps.OpFrameDocumentFromLoad(
+                Page, document, D(token), U64(width), U64(height), B(sandboxed))));
+        Bind(ops, "op_load_stylesheet", (Func<object?, object?, Task<string>>)(
+            (nid, url) => LinkedStylesheetLoader.OpLoadStylesheetAsync(RealmState(), document, U32(nid), S(url))));
+        Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
+            frameId => OpGuard.Run("op_frame_same_origin", () => FrameSameOrigin(document, U32(frameId)), -1d)));
+    }
+
+    /// <summary>
+    /// <c>op_frame_same_origin</c>: 1 when child frame <paramref name="frameId"/> is
+    /// same-origin with <paramref name="document"/>, 0 when it is not, and -1 when the host
+    /// has no record of the frame yet (its document is still queued for a realm).
+    /// </summary>
+    private double FrameSameOrigin(PocketCalculatorState document, uint frameId)
+    {
+        if (frameId == 0)
+        {
+            return -1d;
+        }
+
+        string? frameOrigin = null;
+        if (Realms.ByFrameId(frameId) is { } frame)
+        {
+            frameOrigin = StateHelpers.DocumentOrigin(frame);
+        }
+        else
+        {
+            foreach (var pending in Page.PendingFrames)
+            {
+                if (pending.FrameId == frameId)
+                {
+                    frameOrigin = pending.OpaqueOrigin ? "null" : UrlRecord.Parse(pending.Url)?.AsciiOrigin ?? "null";
+                    break;
+                }
+            }
+        }
+
+        if (frameOrigin is null)
+        {
+            return -1d;
+        }
+
+        var own = StateHelpers.DocumentOrigin(document);
+        return !string.Equals(own, "null", StringComparison.Ordinal)
+            && string.Equals(own, frameOrigin, StringComparison.Ordinal)
+                ? 1d
+                : 0d;
+    }
+
+    /// <summary>
+    /// <c>op_run_fetched_script</c>: runs a dynamically inserted classic script whose source
+    /// the host holds, as <see cref="RunClassicScript"/> does for source the shim holds.
+    /// </summary>
+    /// <remarks>
+    /// Only a successful (2xx) <c>no-cors</c> load of this realm runs; anything else is the
+    /// network error the HTML script-fetch algorithm makes of it. The script is named by the
+    /// URL the host requested, not by what the shim passes. Not wrapped in
+    /// <see cref="OpGuard"/>, for the reason <see cref="RunClassicScript"/> gives.
+    /// </remarks>
+    private static void RunFetchedScript(ScriptEngine engine, PocketCalculatorState document, double token, string url)
+    {
+        _ = url;
+        if (InternalLoads.Take(document, token, "no-cors") is not { } load)
+        {
+            throw new InvalidOperationException("script body unavailable");
+        }
+
+        if (load.Status is < 200 or > 299)
+        {
+            throw new InvalidOperationException("HTTP " + load.Status.ToString(CultureInfo.InvariantCulture));
+        }
+
+        RunClassicScript(engine, load.Body, load.RequestUrl);
+    }
+
+    /// <summary>
+    /// <c>op_post_frame_message</c>, sent as <paramref name="sender"/>: the realm the op
+    /// table belongs to.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (ops.rs), which queues the source frame id and the
+    /// origin the shim passes. The shim computed the origin with the page's own
+    /// <c>URL</c> global, so a frame that replaced <c>URL</c> could post as any origin and
+    /// defeat every <c>event.origin</c> check (SECURITY.md H4). Both arguments are
+    /// accepted and ignored; the host fills them from the sending realm.
+    /// </remarks>
+    private void BindPostFrameMessage(ScriptObject ops, PocketCalculatorState sender) =>
+        Bind(ops, "op_post_frame_message", (Action<object?, object?, object?, object?, object?>)(
+            (target, _, _, targetOrigin, data) => CoreOps.OpPostFrameMessage(
+                Page, U32(target), sender.FrameId, StateHelpers.DocumentOrigin(sender), S(targetOrigin), S(data))));
+
+    /// <summary>
+    /// <c>op_fetch_url</c>, judged against <paramref name="document"/>: the realm the op
+    /// table belongs to, never an origin the shim passes.
+    /// </summary>
+    /// <remarks>
+    /// The transport state (cookie jar, client, interception) is still the running realm's,
+    /// as before; only the document the request is made <em>by</em> is pinned, because that
+    /// is what decides CORS, credentials and SameSite.
+    /// </remarks>
+    private void BindFetch(ScriptObject ops, PocketCalculatorState document) =>
+        Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
+            (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
+                RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
+                B(internalLoad), document)));
 
     private void Bind(ScriptObject ops, string name, object function)
     {
@@ -465,10 +592,9 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             ? new DocumentInfo("<dynamic-script>")
             : Uri.TryCreate(url, UriKind.Absolute, out var uri) ? new DocumentInfo(uri) : new DocumentInfo(url);
 
-    private static object Uint8Array(ScriptEngine engine, byte[] bytes)
+    private static object Uint8Array(ScriptObject constructor, byte[] bytes)
     {
-        var array = (ITypedArray<byte>)((ScriptObject)engine.Evaluate("Uint8Array"))
-            .Invoke(true, (double)bytes.Length);
+        var array = (ITypedArray<byte>)constructor.Invoke(true, (double)bytes.Length);
         if (bytes.Length != 0)
         {
             array.Write(bytes, 0, (ulong)bytes.Length, 0);

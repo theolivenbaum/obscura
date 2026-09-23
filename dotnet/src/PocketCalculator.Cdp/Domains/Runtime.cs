@@ -318,7 +318,7 @@ public static class Runtime
                     // Re-install on every navigation: globalThis is wiped on each new
                     // document, and puppeteer registers bindings once-per-page rather
                     // than once-per-document.
-                    string key = $"__obscura_binding__{name}";
+                    string key = Dispatcher.BindingPreloadPrefix + name;
                     ctx.PreloadScripts.RemoveAll(entry =>
                         string.Equals(entry.Identifier, key, StringComparison.Ordinal));
                     ctx.PreloadScripts.Add((key, shim));
@@ -354,7 +354,7 @@ public static class Runtime
                 string name = parameters.Get("name").AsString() ?? string.Empty;
                 if (IsValidBindingName(name))
                 {
-                    string key = $"__obscura_binding__{name}";
+                    string key = Dispatcher.BindingPreloadPrefix + name;
                     ctx.PreloadScripts.RemoveAll(entry =>
                         string.Equals(entry.Identifier, key, StringComparison.Ordinal));
                     if (sessionId is not null

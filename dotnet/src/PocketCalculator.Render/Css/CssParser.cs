@@ -87,6 +87,14 @@ public static class CssParser
         LayerOrder? currentLayer)
     {
         var rules = new List<ParsedRule>();
+
+        // Nested at-rules recurse through here once per level; past what the stack holds the
+        // deeper blocks are dropped instead of overflowing (SECURITY.md C5).
+        if (!StackGuard.CanDescend())
+        {
+            return rules;
+        }
+
         var currentSelector = default(Chunk);
         var currentDeclarations = default(Chunk);
         var blockDepth = 0;
@@ -449,6 +457,12 @@ public static class CssParser
         LayerRegistry layers,
         LayerOrder? currentLayer)
     {
+        // CSS nesting recurses once per nested block, as above.
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         var length = body.Length;
         var index = 0;
         var segment = 0;
@@ -666,6 +680,11 @@ public static class CssParser
         LayerRegistry layers,
         LayerOrder? currentLayer)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         // A nested at-rule keeps the enclosing selector for its body.
         if (CssAtRules.Prelude(at, "media") is { } mediaPrelude)
         {

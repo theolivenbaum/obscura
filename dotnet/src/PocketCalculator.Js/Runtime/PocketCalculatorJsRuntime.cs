@@ -235,20 +235,32 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Rust callback performs. See <see cref="RecoverHeapLimit"/>.
     /// </para>
     /// <para>
-    /// The difference that remains: Rust's callback fires at V8's *own* default
-    /// heap limit with no configuration, so an unconfigured Rust page is still
-    /// protected. Here the ceiling only exists once <c>--max-old-space-size</c>
-    /// is supplied (or <see cref="SetHeapLimit"/> is called); with no limit set,
-    /// V8's internal OOM still aborts the process.
+    /// Rust's callback fires at V8's *own* default heap limit with no
+    /// configuration, so an unconfigured Rust page is still protected. ClearScript
+    /// has no such callback, so a runtime with no <c>--max-old-space-size</c> gets
+    /// <see cref="DefaultHeapLimitBytes"/>, the same ceiling the CLI's default flags
+    /// set. Without it a library or CDP embedder that configured nothing had no cap
+    /// at all, and V8's internal OOM aborted the process. <see cref="SetHeapLimit"/>
+    /// with zero removes it.
     /// </para>
     /// </remarks>
     private void ApplyHeapLimit(V8RuntimeConstraints constraints)
     {
-        if (constraints.MaxOldSpaceSize > 0)
-        {
-            SetHeapLimit((long)constraints.MaxOldSpaceSize * 1024 * 1024);
-        }
+        SetHeapLimit(constraints.MaxOldSpaceSize > 0
+            ? (long)constraints.MaxOldSpaceSize * 1024 * 1024
+            : DefaultHeapLimitBytes);
     }
+
+    /// <summary>
+    /// The heap ceiling a runtime gets when no <c>--max-old-space-size</c> is given:
+    /// 4 GiB on 64-bit hosts and 1 GiB on 32-bit ones, matching
+    /// <c>CliOptions.DefaultV8Flags</c> and headless Chrome.
+    /// </summary>
+    public static long DefaultHeapLimitBytes { get; } =
+        (IntPtr.Size == 8 ? 4096L : 1024L) * 1024 * 1024;
+
+    /// <summary>The heap ceiling in force, in bytes; zero when there is none.</summary>
+    public long HeapLimitBytes => _heapLimitBytes;
 
     /// <summary>
     /// Caps the isolate's heap. Exceeding it terminates the running script with

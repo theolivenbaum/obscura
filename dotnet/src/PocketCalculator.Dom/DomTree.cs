@@ -305,6 +305,9 @@ public sealed partial class DomTree
 
     public bool IsShadowRoot(NodeId node) => _shadowRoots.ContainsKey(node);
 
+    /// <summary>Whether any shadow root is registered in this tree, attached or not.</summary>
+    public bool HasShadowRoots => _shadowRoots.Count != 0;
+
     /// <summary>
     /// Return the root of <paramref name="node"/>'s local tree scope. This follows ordinary parent
     /// links only, so a shadow descendant resolves to its ShadowRoot and a light descendant
@@ -336,6 +339,13 @@ public sealed partial class DomTree
 
     public NodeId? ContainingShadowRoot(NodeId node)
     {
+        // With no shadow root anywhere there is nothing to find, and the ancestor walk below is
+        // O(depth) on a path every connected mutation takes (SECURITY.md M11).
+        if (_shadowRoots.Count == 0)
+        {
+            return null;
+        }
+
         var root = TreeScopeRoot(node);
         return root is { } id && IsShadowRoot(id) ? id : null;
     }

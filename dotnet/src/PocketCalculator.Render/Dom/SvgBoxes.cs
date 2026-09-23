@@ -335,6 +335,11 @@ internal static class SvgBoxes
     /// <summary>The rendered character data of a text element, skipping non-rendered children.</summary>
     private static void AppendTextContent(DomTree tree, NodeId id, System.Text.StringBuilder buffer, int depth)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         if (depth > MAX_DEPTH || tree.GetNode(id) is not { } node)
         {
             return;

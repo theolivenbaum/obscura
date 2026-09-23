@@ -165,6 +165,25 @@ public static class CryptoOps
     /// <inheritdoc cref="Pbkdf2MaxIterations"/>
     public const uint Pbkdf2MaxOutputBytes = 1024 * 1024;
 
+    /// <summary>
+    /// The most HMAC chains one derivation may run: iterations times output blocks (one block
+    /// per hash length of output).
+    /// </summary>
+    /// <remarks>
+    /// The two caps above bound each factor, but the cost is their product: 10M iterations
+    /// over a 1 MiB SHA-1 output is about 5e11 HMACs, run synchronously in the op where the
+    /// watchdog cannot interrupt it. This allows the largest iteration count for up to four
+    /// blocks (a 64-byte SHA-256 key needs two). Deviation from Rust, which caps only the two
+    /// factors (upstream #580).
+    /// </remarks>
+    public const long Pbkdf2MaxWork = 4L * Pbkdf2MaxIterations;
+
+    private static int HashLength(HashAlgorithmName name) =>
+        name == HashAlgorithmName.SHA1 ? 20
+        : name == HashAlgorithmName.SHA384 ? 48
+        : name == HashAlgorithmName.SHA512 ? 64
+        : 32;
+
     /// <summary>PBKDF2. <paramref name="length"/> is the output in bytes.</summary>
     public static byte[] Pbkdf2(string hash, byte[] password, byte[] salt, uint iterations, uint length)
     {
@@ -180,8 +199,16 @@ public static class CryptoOps
                 $"PBKDF2 output length {length} bytes exceeds the supported maximum of {Pbkdf2MaxOutputBytes}");
         }
 
+        HashAlgorithmName name = HashName(hash, "PBKDF2");
+        long blocks = (length + (long)HashLength(name) - 1) / HashLength(name);
+        if (iterations * Math.Max(blocks, 1L) > Pbkdf2MaxWork)
+        {
+            throw new CryptoOperationException(
+                $"PBKDF2 cost of {iterations} iterations over {blocks} output blocks exceeds the supported maximum of {Pbkdf2MaxWork}");
+        }
+
         return Rfc2898DeriveBytes.Pbkdf2(
-            password, salt, (int)iterations, HashName(hash, "PBKDF2"), (int)length);
+            password, salt, (int)iterations, name, (int)length);
     }
 
     /// <summary>

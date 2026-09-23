@@ -65,6 +65,36 @@ public static class CliOptions
         }
     }
 
+    /// <summary>
+    /// A proxy URL fit for a log line: any credentials in its authority are
+    /// replaced with <c>***</c>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md I3): Rust logs <c>Using proxy: {url}</c> verbatim, so
+    /// <c>-v</c> wrote the proxy's user name and password to stderr and from there
+    /// into whatever collects the logs. The port logs the URL with its user info
+    /// redacted. Plain string work rather than <see cref="Uri"/>, so the rest of
+    /// the URL is logged exactly as given, and a URL that does not parse is still
+    /// redacted.
+    /// </remarks>
+    public static string RedactProxy(string proxy)
+    {
+        ArgumentNullException.ThrowIfNull(proxy);
+        var scheme = proxy.IndexOf("://", StringComparison.Ordinal);
+        var start = scheme < 0 ? 0 : scheme + 3;
+        var end = proxy.IndexOfAny(['/', '?', '#'], start);
+        if (end < 0)
+        {
+            end = proxy.Length;
+        }
+        if (end == start)
+        {
+            return proxy;
+        }
+        var at = proxy.LastIndexOf('@', end - 1, end - start);
+        return at < 0 ? proxy : string.Concat(proxy.AsSpan(0, start), "***", proxy.AsSpan(at));
+    }
+
     /// <summary>A subcommand's <c>--proxy</c> wins over the global one.</summary>
     public static string? MergeProxy(string? globalProxy, string? commandProxy) =>
         commandProxy ?? globalProxy;

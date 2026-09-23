@@ -26,7 +26,36 @@ internal static class PaintApi
         CssMediaType mediaType,
         AnimationSample animationSample,
         AnimationTimelineState animationTimeline,
-        PreparedRender? reusable = null)
+        PreparedRender? reusable = null) =>
+        StackGuard.RunWithStackFor(
+            tree,
+            () => PrepareInternalCore(
+                tree,
+                viewport,
+                baseUrl,
+                resources,
+                dynamicFonts,
+                stylesheetCache,
+                retained,
+                mutations,
+                mediaType,
+                animationSample,
+                animationTimeline,
+                reusable));
+
+    private static PreparedRender? PrepareInternalCore(
+        DomTree tree,
+        (float Width, float Height) viewport,
+        string? baseUrl,
+        RenderResourceCache resources,
+        IReadOnlyList<DynamicFontFace> dynamicFonts,
+        StylesheetCache stylesheetCache,
+        RetainedStyleMaps? retained,
+        IReadOnlyList<RetainedStyleMutation>? mutations,
+        CssMediaType mediaType,
+        AnimationSample animationSample,
+        AnimationTimelineState animationTimeline,
+        PreparedRender? reusable)
     {
         if (!float.IsFinite(viewport.Width) || !float.IsFinite(viewport.Height)
             || viewport.Width <= 0f || viewport.Height <= 0f)

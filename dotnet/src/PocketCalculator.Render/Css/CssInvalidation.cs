@@ -796,8 +796,22 @@ public static class CssInvalidationBuilder
         }
     }
 
-    public static void NoteSelectorForInvalidation(InvalidationMap map, string selector, int ruleOrder) =>
+    public static void NoteSelectorForInvalidation(InvalidationMap map, string selector, int ruleOrder)
+    {
+        // The text-level walk below recurses into every functional pseudo-class and slices the
+        // argument out each time, so `:has(` nested 20000 deep never finished. A selector nested
+        // past the parser's cap is invalid and its rule is dropped (SECURITY.md C6); anything
+        // that reaches here that deep is only kept conservatively.
+        if (PocketCalculator.Dom.Selectors.SelectorParser.NestsDeeperThan(
+                selector,
+                PocketCalculator.Dom.Selectors.SelectorParser.MaxNestingDepth))
+        {
+            map.MarkConservative(ruleOrder);
+            return;
+        }
+
         NoteSelectorDependencies(map, selector, InvalidationReaches.Self, ruleOrder, true);
+    }
 
     /// <summary>
     /// Record element attributes read from declaration values.
