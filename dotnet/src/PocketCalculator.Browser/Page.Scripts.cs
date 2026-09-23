@@ -123,6 +123,15 @@ public sealed partial class Page
         // the isolate if cumulative synchronous script work overruns.
         WatchdogToken? execWatchdog = Js?.ArmWatchdog(TimeSpan.FromMilliseconds(scriptDeadlineMs + 1000));
 
+        // Disarmed however the phase ends: a watchdog left armed past a cancelled or
+        // failed phase would fire later and cancel C# work on this page that has
+        // nothing to do with it (ScriptCancellation).
+        using WatchdogDisarm execDisarm = new(Js, execWatchdog);
+
+        // The caller's deadline stops the phase too, including a script stuck inside
+        // one long op, rather than only once the phase next awaits.
+        using IDisposable? interruptOnCancel = Js?.InterruptOnCancellation(cancellationToken);
+
         List<ScriptInfo> allScripts;
         if (Js is { } discoveryRuntime)
         {
@@ -520,10 +529,7 @@ public sealed partial class Page
                 + "} catch(e) {}");
         }
 
-        if (execWatchdog is { } token)
-        {
-            Js?.DisarmWatchdog(token);
-        }
+        execDisarm.Dispose();
 
         static (string Url, string Code, Response Response)? Take(
             Dictionary<int, (string Url, string Code, Response Response)> map,
@@ -714,5 +720,20 @@ public sealed partial class Page
             }
         }
         return scripts;
+    }
+
+    /// <summary>Disarms a page watchdog once, on whichever path leaves its scope first.</summary>
+    private sealed class WatchdogDisarm(PocketCalculator.Js.Runtime.PocketCalculatorJsRuntime? runtime, WatchdogToken? token)
+        : IDisposable
+    {
+        private int _done;
+
+        public void Dispose()
+        {
+            if (token is not null && runtime is not null && Interlocked.Exchange(ref _done, 1) == 0)
+            {
+                runtime.DisarmWatchdog(token);
+            }
+        }
     }
 }

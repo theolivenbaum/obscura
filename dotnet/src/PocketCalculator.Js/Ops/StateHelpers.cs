@@ -201,6 +201,147 @@ public static class StateHelpers
         return NodeChildIndex(dom, aa[i]) < NodeChildIndex(dom, bb[i]) ? -1 : 1;
     }
 
+    /// <summary>
+    /// Whether <paramref name="ancestor"/> is a strict ancestor of <paramref name="node"/> in the
+    /// light tree, by walking the parents of <paramref name="node"/>: O(depth), where collecting
+    /// the descendants of <paramref name="ancestor"/> was O(size of its subtree) on every call.
+    /// A shadow root's parent is null, so, as before, the walk does not cross into a host.
+    /// </summary>
+    internal static bool IsStrictAncestor(DomTree dom, NodeId ancestor, NodeId node)
+    {
+        if (dom.GetNode(ancestor) is null)
+        {
+            return false;
+        }
+
+        var bound = dom.NodeSlotCount;
+        var current = dom.GetNode(node)?.Parent;
+        for (var i = 0; current is { } parent && i <= bound; i++)
+        {
+            if (parent == ancestor)
+            {
+                return true;
+            }
+
+            current = dom.GetNode(parent)?.Parent;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// <c>Range.toString()</c>: the start Text node's data from the start offset, the data of
+    /// every Text node contained in the range in tree order, and the end Text node's data up to
+    /// the end offset (DOM "Range stringifier").
+    /// </summary>
+    /// <remarks>
+    /// The Text nodes contained in a range are exactly the ones that lie, in tree order, after
+    /// the start boundary and before the end boundary, so this is one forward walk between the
+    /// two. bootstrap used to walk the whole common-ancestor subtree and compare both boundary
+    /// points against every Text node in it, two O(depth) ops per node. Offsets are clamped the
+    /// way <c>String.prototype.slice</c> clamps them, because a Range here does not follow
+    /// mutations and can hold an offset past the end of a node that has since shrunk.
+    /// </remarks>
+    internal static string RangeText(DomTree dom, NodeId sc, int so, NodeId ec, int eo)
+    {
+        var startNode = dom.GetNode(sc);
+        var endNode = dom.GetNode(ec);
+        if (startNode is null || endNode is null)
+        {
+            return string.Empty;
+        }
+
+        if (sc == ec && startNode.Data is TextData same)
+        {
+            return Slice(same.Contents, so, eo);
+        }
+
+        var sb = new System.Text.StringBuilder();
+        if (startNode.Data is TextData startText)
+        {
+            sb.Append(Slice(startText.Contents, so, int.MaxValue));
+        }
+
+        var root = sc;
+        var bound = dom.NodeSlotCount;
+        for (var i = 0; dom.GetNode(root)?.Parent is { } parent && i <= bound; i++)
+        {
+            root = parent;
+        }
+
+        // First node after the start boundary, and the node the end boundary sits before
+        // (null: the end of the tree).
+        var first = startNode.IsElement || startNode.IsDocument
+            ? ChildAt(dom, sc, so) ?? dom.NextAfterSubtree(root, sc)
+            : dom.NextAfterSubtree(root, sc);
+        NodeId? stop = endNode.IsElement || endNode.IsDocument
+            ? ChildAt(dom, ec, eo) ?? dom.NextAfterSubtree(root, ec)
+            : ec;
+
+        // A Range here does not follow mutations, so a boundary can be left past the other one
+        // by a later move; the old whole-subtree filter then found nothing contained, and nor
+        // does this.
+        var endRoot = ec;
+        for (var i = 0; dom.GetNode(endRoot)?.Parent is { } parent && i <= bound; i++)
+        {
+            endRoot = parent;
+        }
+
+        if (endRoot != root || (first is { } f && stop is { } s && CompareNodeOrder(dom, f, s) > 0))
+        {
+            first = null;
+        }
+
+        var steps = 0;
+        for (var node = first; node is { } id && id != stop; node = dom.NextInSubtree(root, id))
+        {
+            if ((++steps & 1023) == 0)
+            {
+                WorkCancellation.ThrowIfCancellationRequested();
+            }
+
+            if (steps > bound)
+            {
+                break;
+            }
+
+            if (id != sc && id != ec && dom.GetNode(id)?.Data is TextData text)
+            {
+                sb.Append(text.Contents);
+            }
+        }
+
+        if (endNode.Data is TextData endText)
+        {
+            sb.Append(Slice(endText.Contents, 0, eo));
+        }
+
+        return sb.ToString();
+
+        static string Slice(string s, int from, int to)
+        {
+            from = Math.Clamp(from, 0, s.Length);
+            to = Math.Clamp(to, 0, s.Length);
+            return to > from ? s[from..to] : string.Empty;
+        }
+    }
+
+    private static NodeId? ChildAt(DomTree dom, NodeId parent, int index)
+    {
+        if (index < 0)
+        {
+            return null;
+        }
+
+        var child = dom.GetNode(parent)?.FirstChild;
+        for (var i = 0; child is { } id && i < index; i++)
+        {
+            child = dom.GetNode(id)?.NextSibling;
+        }
+
+        return child;
+    }
+
     internal static bool NodeIsConnected(DomTree dom, NodeId node) => dom.IsConnected(node);
 
     /// <summary>Every node reachable from the document through light and shadow trees.</summary>

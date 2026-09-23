@@ -34,13 +34,29 @@ internal static class StackGuard
     [ThreadStatic]
     private static bool _onDeepStack;
 
-    /// <summary>True while there is stack left for one more level of a recursive walk.</summary>
+    /// <summary>
+    /// True while there is stack left for one more level of a recursive walk. Also where
+    /// those walks observe the pass's deadline: it throws
+    /// <see cref="OperationCanceledException"/> once <see cref="WorkCancellation.Current"/>
+    /// is cancelled, so every recursive walk that guards its depth also stops on time.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static bool CanDescend() => RuntimeHelpers.TryEnsureSufficientExecutionStack();
+    internal static bool CanDescend()
+    {
+        WorkCancellation.ThrowIfCancellationRequested();
+        return RuntimeHelpers.TryEnsureSufficientExecutionStack();
+    }
 
-    /// <summary>Throw <see cref="InsufficientExecutionStackException"/> when the stack is low.</summary>
+    /// <summary>
+    /// Throw <see cref="InsufficientExecutionStackException"/> when the stack is low, or
+    /// <see cref="OperationCanceledException"/> when the pass has been cancelled.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void Ensure() => RuntimeHelpers.EnsureSufficientExecutionStack();
+    internal static void Ensure()
+    {
+        WorkCancellation.ThrowIfCancellationRequested();
+        RuntimeHelpers.EnsureSufficientExecutionStack();
+    }
 
     /// <summary>
     /// Run <paramref name="body"/> here, or, when <paramref name="tree"/> is deeper than
@@ -55,10 +71,15 @@ internal static class StackGuard
 
         T result = default!;
         ExceptionDispatchInfo? failure = null;
+
+        // The pass's cancellation scope is thread-static; the layout thread has to
+        // observe the same deadline as the thread that is waiting for it.
+        CancellationToken cancellation = WorkCancellation.Current;
         var thread = new Thread(
             () =>
             {
                 _onDeepStack = true;
+                using var scope = WorkCancellation.Enter(cancellation);
                 try
                 {
                     result = body();

@@ -40,11 +40,19 @@ internal static class FastOpBinding
     /// Sets <paramref name="name"/> on <paramref name="ops"/>, using the fast-proxy
     /// path when <paramref name="function"/> has a shape it supports.
     /// </summary>
-    public static void Bind(ScriptObject ops, string name, object function)
+    public static void Bind(
+        ScriptObject ops,
+        string name,
+        object function,
+        PocketCalculator.Js.Runtime.ScriptCancellation? cancellation = null)
     {
         if (Wrap(function) is { } fast)
         {
             var invoke = OpProfile.Enabled ? OpProfile.Wrap(name, fast.Invoke) : fast.Invoke;
+            if (cancellation is not null)
+            {
+                invoke = WithCancellation(invoke, cancellation);
+            }
             ops.SetProperty(name, new V8FastHostFunction(name, fast.Arity, invoke));
             return;
         }
@@ -64,6 +72,38 @@ internal static class FastOpBinding
     /// ~24,000 <c>op_dom</c> calls around them. Off, it costs one environment read
     /// at bind time and nothing per call.
     /// </remarks>
+    /// <summary>
+    /// Run the op under the isolate's cancellation token, so a watchdog that fires while
+    /// the op is in C# stops it at the next check instead of waiting for it to return to
+    /// V8 (SECURITY.md H8).
+    /// </summary>
+    /// <remarks>
+    /// The cancellation surfaces as <see cref="OperationCanceledException"/>, which
+    /// <see cref="OpGuard"/> lets through. It is not rethrown into V8: ClearScript clears a
+    /// pending termination in order to raise a host exception as a JS error, and the
+    /// shim's own <c>try</c>/<c>catch</c> around most ops would then swallow it and let
+    /// the script run on, unbounded, with the watchdog spent. Instead the op returns
+    /// <c>undefined</c> normally and keeps the isolate's interrupt coming
+    /// (<see cref="PocketCalculator.Js.Runtime.ScriptCancellation.EnsureInterrupted"/>),
+    /// so V8 terminates the script once control is back in it, which is what the
+    /// watchdog asked for.
+    /// </remarks>
+    private static V8FastHostFunctionInvoker WithCancellation(
+        V8FastHostFunctionInvoker inner,
+        PocketCalculator.Js.Runtime.ScriptCancellation cancellation) =>
+        (bool ctor, in V8FastArgs a, in V8FastResult r) =>
+        {
+            using var scope = PocketCalculator.Dom.WorkCancellation.Enter(cancellation.Token);
+            try
+            {
+                inner(ctor, in a, in r);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                cancellation.EnsureInterrupted();
+            }
+        };
+
     internal static class OpProfile
     {
         public static readonly bool Enabled =

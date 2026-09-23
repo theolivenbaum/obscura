@@ -2741,9 +2741,12 @@ public static partial class ComputedStyle
 
             case "grid-template-columns":
             {
-                (List<Layout.GridTemplateComponent> tracks,
-                    List<(string Name, short Line)> names,
-                    List<object> calcExpressions) = ParseTrackListNamed(value);
+                // An invalid track list (nested repeat()) is dropped, keeping the previous winner.
+                if (!TryParseTrackListNamed(value, out var tracks, out var names, out var calcExpressions))
+                {
+                    return true;
+                }
+
                 style.GridTemplateColumnsSubgrid = IsSubgridTrackList(value);
                 style.GridTemplateColumns = tracks;
                 GridCalcBuckets(style)[0] = calcExpressions;
@@ -2753,9 +2756,11 @@ public static partial class ComputedStyle
 
             case "grid-template-rows":
             {
-                (List<Layout.GridTemplateComponent> tracks,
-                    List<(string Name, short Line)> names,
-                    List<object> calcExpressions) = ParseTrackListNamed(value);
+                if (!TryParseTrackListNamed(value, out var tracks, out var names, out var calcExpressions))
+                {
+                    return true;
+                }
+
                 style.GridTemplateRows = tracks;
                 GridCalcBuckets(style)[1] = calcExpressions;
                 style.GridRowLineNames = names.Count != 0 ? BuildLineMap(names) : null;

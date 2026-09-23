@@ -310,6 +310,29 @@ public static class RenderOps
     public static string OpComputedStylePseudo(PocketCalculatorState state, string nidStr, string pseudo) =>
         ComputedStyleSnapshot(state, nidStr, pseudo, "op_computed_style_pseudo");
 
+    /// <summary>
+    /// <c>op_inner_text</c>. The <c>innerText</c> of a rendered element as a JSON string, or the
+    /// empty string when the script path has to answer (no render, an unstyled element, a root
+    /// that is not rendered).
+    /// </summary>
+    /// <remarks>
+    /// Additive, like <c>op_computed_style_pseudo</c>: crates/obscura-js has no such op, and
+    /// computes innerText in bootstrap.js from one getComputedStyle() per element. See
+    /// <see cref="PreparedRender.InnerText"/> for why that moved here.
+    /// </remarks>
+    public static string OpInnerText(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_inner_text",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            return RenderState.EnsurePreparedRender(state)?.InnerText(nid) is { } text
+                ? SerdeJson.String(text)
+                : string.Empty;
+        },
+        string.Empty);
+
     private static string ComputedStyleSnapshot(
         PocketCalculatorState state,
         string nidStr,

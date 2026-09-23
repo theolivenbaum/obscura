@@ -146,11 +146,11 @@ internal static class RenderInvalidation
                     return RenderMutationImpact.None;
                 }
 
+                // The parent's last-child link, not a snapshot of its children: collecting them
+                // on every append made building a wide list O(n^2) (50k appends took a minute).
                 var oldParent = dom.GetNode(child)?.Parent;
-                var children = dom.Children(parent);
                 var alreadyLast = oldParent == parent
-                    && children.Count > 0
-                    && children[^1] == child;
+                    && dom.GetNode(parent)?.LastChild == child;
                 return new RenderMutationImpact(
                     // Moving a connected node into a detached subtree removes its old
                     // box, while attaching a detached node creates a new one.
@@ -241,15 +241,15 @@ internal static class RenderInvalidation
 
     private static bool ElementTextContentChanges(DomTree dom, NodeId target, string text)
     {
-        var children = dom.Children(target);
-        return children.Count switch
+        // Only whether there are zero, one or more children matters, so read the links rather
+        // than collecting every child.
+        if (dom.GetNode(target)?.FirstChild is not { } first)
         {
-            0 => text.Length != 0,
-            1 => dom.GetNode(children[0])?.Data is TextData child
-                ? !string.Equals(child.Contents, text, StringComparison.Ordinal)
-                : true,
-            _ => true,
-        };
+            return text.Length != 0;
+        }
+
+        return dom.GetNode(first) is not { NextSibling: null, Data: TextData child }
+            || !string.Equals(child.Contents, text, StringComparison.Ordinal);
     }
 
     private static (string Namespace, string Local) SplitOnceNul(string value)

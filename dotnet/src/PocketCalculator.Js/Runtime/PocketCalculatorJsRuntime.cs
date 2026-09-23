@@ -95,7 +95,28 @@ public sealed partial class PocketCalculatorJsRuntime
         // Rc<RefCell<ImportMap>> for exactly this reason.
         _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
         _engine = CreateRealmEngine();
-        _isolateHandle = new V8IsolateHandle(_engine);
+        _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
+        _ops.Cancellation.Interrupter = () =>
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            try
+            {
+                _engine.Interrupt();
+                return true;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        };
         ApplyHeapLimit(constraints);
 
         // The ops layer supplies the op table; a build without it still boots
@@ -321,7 +342,70 @@ public sealed partial class PocketCalculatorJsRuntime
     /// error and hand control back. Always balance with
     /// <see cref="DisarmWatchdog"/>.
     /// </remarks>
-    public WatchdogToken ArmWatchdog(TimeSpan budget) => Watchdog.Spawn(_engine, budget);
+    public WatchdogToken ArmWatchdog(TimeSpan budget) => Watchdog.Spawn(_engine, budget, _ops.Cancellation);
+
+    /// <summary>
+    /// Cancelled when a watchdog on this isolate fires, and reset by
+    /// <see cref="CancelTermination"/>. Host code that lays out, paints or walks this
+    /// page's DOM outside an op passes <see cref="WorkCancellationToken"/> so the same
+    /// deadline stops it.
+    /// </summary>
+    public ScriptCancellation WorkCancellation => _ops.Cancellation;
+
+    /// <summary>The token for work on this page started now.</summary>
+    public CancellationToken WorkCancellationToken => _ops.Cancellation.Token;
+
+    /// <summary>
+    /// Treat <paramref name="cancellationToken"/> as a watchdog: when it is cancelled,
+    /// cancel the C# work running on this isolate and interrupt its script. Disposing
+    /// the returned handle clears that interrupt again, so the runtime is usable
+    /// afterwards.
+    /// </summary>
+    /// <remarks>
+    /// A caller's token is otherwise only observed at its own <c>await</c>s, which a
+    /// page stuck in one synchronous script or one long op never reaches: a navigation
+    /// cancelled by its deadline waited for the script watchdog instead.
+    /// </remarks>
+    public IDisposable InterruptOnCancellation(CancellationToken cancellationToken) =>
+        cancellationToken.CanBeCanceled ? new CancellationInterrupt(this, cancellationToken) : NoInterrupt.Instance;
+
+    private sealed class CancellationInterrupt : IDisposable
+    {
+        private readonly PocketCalculatorJsRuntime _runtime;
+        private readonly CancellationTokenRegistration _registration;
+        private int _fired;
+
+        internal CancellationInterrupt(PocketCalculatorJsRuntime runtime, CancellationToken token)
+        {
+            _runtime = runtime;
+            _registration = token.Register(static state =>
+            {
+                var self = (CancellationInterrupt)state!;
+                Volatile.Write(ref self._fired, 1);
+                self._runtime._isolateHandle.TerminateExecution();
+            }, this);
+        }
+
+        public void Dispose()
+        {
+            // Waits for a callback already running, so the interrupt cannot land after
+            // it has been cleared.
+            _registration.Dispose();
+            if (Volatile.Read(ref _fired) != 0 && !_runtime._disposed)
+            {
+                _runtime.CancelTermination();
+            }
+        }
+    }
+
+    private sealed class NoInterrupt : IDisposable
+    {
+        internal static readonly NoInterrupt Instance = new();
+
+        public void Dispose()
+        {
+        }
+    }
 
     /// <summary>
     /// Stop a watchdog armed by <see cref="ArmWatchdog"/>. If it had already
@@ -346,6 +430,10 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     public void CancelTermination()
     {
+        // First: once the deadline is reset, nothing re-raises the interrupt this clears
+        // (ScriptCancellation.EnsureInterrupted), so C# work started from here on runs
+        // under a fresh deadline and the next script is not killed by a stray interrupt.
+        _ops.Cancellation.Reset();
         try
         {
             _engine.CancelInterrupt();
@@ -385,9 +473,12 @@ public sealed partial class PocketCalculatorJsRuntime
 
     private object? ExecuteRuntimeScript(string name, string source)
     {
+        CancellationToken deadline = _ops.Cancellation.Token;
         try
         {
-            return _engine.Evaluate(new DocumentInfo(name), source);
+            object? result = _engine.Evaluate(new DocumentInfo(name), source);
+            ThrowIfDeadlinePassed(deadline);
+            return result;
         }
         catch (ScriptInterruptedException)
         {
@@ -404,6 +495,23 @@ public sealed partial class PocketCalculatorJsRuntime
         }
     }
 
+    /// <summary>
+    /// Report a run that a watchdog cut short as terminated, even if V8 finished it first.
+    /// </summary>
+    /// <remarks>
+    /// A cancelled op returns a placeholder (see <c>FastOpBinding.WithCancellation</c>) and
+    /// the interrupt that follows lands a few milliseconds later; a short script can end
+    /// in between and would otherwise hand back a result computed from the placeholder.
+    /// Only a deadline that passed during this run counts.
+    /// </remarks>
+    private static void ThrowIfDeadlinePassed(CancellationToken deadline)
+    {
+        if (deadline.IsCancellationRequested)
+        {
+            throw new JsRuntimeException("JS error: Uncaught Error: execution terminated");
+        }
+    }
+
     /// <summary>Runs a classic script, reporting a script error as a throw.</summary>
     /// <remarks>
     /// <paramref name="name"/> is the script URL, and V8 uses it as
@@ -413,9 +521,11 @@ public sealed partial class PocketCalculatorJsRuntime
     public void ExecuteScript(string name, string source)
     {
         BeginJavaScriptTask();
+        CancellationToken deadline = _ops.Cancellation.Token;
         try
         {
             _engine.Execute(DocumentInfoFor(name), source);
+            ThrowIfDeadlinePassed(deadline);
         }
         catch (ScriptInterruptedException)
         {

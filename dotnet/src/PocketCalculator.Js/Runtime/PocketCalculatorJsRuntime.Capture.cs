@@ -36,10 +36,15 @@ public sealed partial class PocketCalculatorJsRuntime
     /// network phase; the browser layer seeds resources ahead of time through
     /// the page transport.
     /// </remarks>
-    internal static T WithSyncRenderLoadingDisabled<T>(PocketCalculatorState state, Func<PocketCalculatorState, T> capture)
+    internal T WithSyncRenderLoadingDisabled<T>(PocketCalculatorState state, Func<PocketCalculatorState, T> capture)
     {
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(capture);
+
+        // A capture lays out and paints outside any op, so it opens the isolate's work
+        // scope itself: the CDP command watchdog, or a caller's token passed to
+        // InterruptOnCancellation, then stops it as it stops script (SECURITY.md H8).
+        using var cancellationScope = PocketCalculator.Dom.WorkCancellation.Enter(WorkCancellationToken);
         bool previous = state.RenderResources.SetSyncLoadingEnabled(false);
         try
         {

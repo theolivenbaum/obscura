@@ -97,6 +97,12 @@ public sealed class AttrsList
 {
     private readonly List<(int Start, int End, TextAttrs Attrs)> _spans = [];
 
+    // Whether the spans are in order and do not overlap, which is how a buffer builds them.
+    // GetSpan then has at most one match and can binary search for it; the scan it replaces
+    // is O(spans) per shaped cluster, quadratic for a paragraph of many differently styled
+    // inline elements.
+    private bool _ordered = true;
+
     public AttrsList(TextAttrs defaults) => Defaults = defaults;
 
     public TextAttrs Defaults { get; private set; }
@@ -110,11 +116,41 @@ public sealed class AttrsList
             return;
         }
 
+        if (_spans.Count > 0 && start < _spans[^1].End)
+        {
+            _ordered = false;
+        }
+
         _spans.Add((start, end, attrs));
     }
 
     public TextAttrs GetSpan(int index)
     {
+        if (_ordered)
+        {
+            int lo = 0;
+            int hi = _spans.Count - 1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >>> 1;
+                (int start, int end, TextAttrs attrs) = _spans[mid];
+                if (index < start)
+                {
+                    hi = mid - 1;
+                }
+                else if (index >= end)
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    return attrs;
+                }
+            }
+
+            return Defaults;
+        }
+
         for (int i = _spans.Count - 1; i >= 0; i--)
         {
             (int start, int end, TextAttrs attrs) = _spans[i];
@@ -127,9 +163,66 @@ public sealed class AttrsList
         return Defaults;
     }
 
+    /// <summary>
+    /// The attributes every offset in [<paramref name="start"/>, <paramref name="end"/>) has,
+    /// or null when they vary (or the spans are not ordered, so it is not cheap to tell).
+    /// </summary>
+    internal TextAttrs? UniformOver(int start, int end)
+    {
+        if (!_ordered)
+        {
+            return null;
+        }
+
+        // First span ending after start.
+        int lo = 0;
+        int hi = _spans.Count;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (_spans[mid].End <= start)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        if (lo == _spans.Count || _spans[lo].Start >= end)
+        {
+            return Defaults;
+        }
+
+        return _spans[lo].Start <= start && _spans[lo].End >= end ? _spans[lo].Attrs : null;
+    }
+
+    /// <summary>The spans over [0, <paramref name="end"/>), as a new list.</summary>
+    internal AttrsList Prefix(int end)
+    {
+        var prefix = new AttrsList(Defaults) { _ordered = _ordered };
+        foreach ((int start, int spanEnd, TextAttrs attrs) in _spans)
+        {
+            if (start >= end)
+            {
+                if (_ordered)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            prefix._spans.Add((start, Math.Min(spanEnd, end), attrs));
+        }
+
+        return prefix;
+    }
+
     public AttrsList Clone()
     {
-        var copy = new AttrsList(Defaults);
+        var copy = new AttrsList(Defaults) { _ordered = _ordered };
         copy._spans.AddRange(_spans);
         return copy;
     }
@@ -137,12 +230,18 @@ public sealed class AttrsList
     /// <summary>Split this list at <paramref name="index"/>, returning the tail.</summary>
     public AttrsList SplitOff(int index)
     {
-        var tail = new AttrsList(Defaults);
+        var tail = new AttrsList(Defaults) { _ordered = _ordered };
         for (int i = _spans.Count - 1; i >= 0; i--)
         {
             (int start, int end, TextAttrs attrs) = _spans[i];
             if (end <= index)
             {
+                if (_ordered)
+                {
+                    // Every earlier span ends earlier still.
+                    break;
+                }
+
                 continue;
             }
 
@@ -166,5 +265,6 @@ public sealed class AttrsList
     {
         Defaults = defaults;
         _spans.Clear();
+        _ordered = true;
     }
 }

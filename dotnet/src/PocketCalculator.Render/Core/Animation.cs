@@ -209,22 +209,68 @@ public sealed class AnimationTimelineState
         }
     }
 
+    /// <summary>The start time noted for <paramref name="node"/>, if any (for tests).</summary>
+    internal bool TryGetStartCandidate(NodeId node, out float startMs) =>
+        _startCandidates.TryGetValue(node, out startMs);
+
     public void MaterializeStartCandidates(DomTree tree)
     {
         ArgumentNullException.ThrowIfNull(tree);
         KeyValuePair<NodeId, float>[] pending = [.. _subtreeStartCandidates];
         _subtreeStartCandidates.Clear();
+
+        // DEVIATION from crates/obscura-render/src/lib.rs materialize_start_candidates, which
+        // walks every root's descendants; the candidates are the same.
+        // Every subtree walked in this call is complete, so a later root's walk can stop at a
+        // node an earlier walk already reached: all its descendants already hold a candidate,
+        // and TryAdd would leave them alone. Walking each root in full made a script-built
+        // chain of N nested elements, which notes every one of them as a root, O(N^2).
+        HashSet<NodeId> expanded = [];
+        List<NodeId> stack = [];
+        int budget = tree.Count;
         foreach ((NodeId root, float startMs) in pending)
         {
-            if (tree.GetNode(root) is null)
+            if (tree.GetNode(root) is not { } rootNode)
             {
                 continue;
             }
 
             _startCandidates[root] = startMs;
-            foreach (NodeId node in tree.Descendants(root))
+            if (!expanded.Add(root))
             {
+                continue;
+            }
+
+            stack.Clear();
+            for (NodeId? child = rootNode.FirstChild; child is { } id; child = tree.GetNode(id)?.NextSibling)
+            {
+                stack.Add(id);
+                if (--budget < 0)
+                {
+                    return;
+                }
+            }
+
+            while (stack.Count > 0)
+            {
+                NodeId node = stack[^1];
+                stack.RemoveAt(stack.Count - 1);
+                if (!expanded.Add(node))
+                {
+                    continue;
+                }
+
                 _startCandidates.TryAdd(node, startMs);
+                for (NodeId? child = tree.GetNode(node)?.FirstChild; child is { } id; child = tree.GetNode(id)?.NextSibling)
+                {
+                    stack.Add(id);
+
+                    // Defense in depth against a cyclic graph, as DomTree.Descendants has.
+                    if (--budget < 0)
+                    {
+                        return;
+                    }
+                }
             }
         }
     }

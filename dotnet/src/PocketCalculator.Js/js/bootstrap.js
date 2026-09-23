@@ -2237,7 +2237,14 @@ class Node {
     }
     return n;
   }
-  contains(o) { return o ? _dom("contains", this._nid, o._nid) === "true" : false; }
+  // DEVIATION from crates/obscura-js, which answers only for strict descendants: DOM's
+  // contains() is an inclusive-descendant test, and Chromium answers node.contains(node) with
+  // true. The op stays the strict test.
+  contains(o) {
+    if (!o) return false;
+    if (o === this || (o._nid != null && o._nid === this._nid)) return true;
+    return _dom("contains", this._nid, o._nid) === "true";
+  }
   hasChildNodes() { return _dom("has_child_nodes", this._nid) === "true"; }
   cloneNode(deep) {
     const t = this.nodeType;
@@ -6470,23 +6477,27 @@ function _innerTextIsBlock(display) {
       || display === 'flex' || display === 'grid'
       || (display.length > 5 && display.slice(0, 5) === 'table');
 }
-function _innerTextIsPre(whiteSpace, inherited) {
+// White-space mode of a text run: 0 collapses (normal, nowrap), 1 collapses spaces but keeps
+// line breaks (pre-line), 2 keeps everything (pre, pre-wrap, break-spaces).
+// DEVIATION from crates/obscura-js, which kept every space of pre-line text; CSS Text 3 and
+// Chromium collapse them. PreparedRender.InnerText mirrors this walk and must stay in step.
+function _innerTextSpaceMode(whiteSpace, inherited) {
   if (!whiteSpace) return inherited;
-  return whiteSpace === 'pre' || whiteSpace === 'pre-wrap'
-      || whiteSpace === 'pre-line' || whiteSpace === 'break-spaces';
+  if (whiteSpace === 'pre-line') return 1;
+  return whiteSpace === 'pre' || whiteSpace === 'pre-wrap' || whiteSpace === 'break-spaces' ? 2 : 0;
 }
-function _innerTextCollect(node, segments, pre, visible) {
+function _innerTextCollect(node, segments, mode, visible) {
   for (const child of node.childNodes) {
     const type = child.nodeType;
     if (type === 3) {
       if (!visible) continue;
       let data = child.data != null ? child.data : (child.textContent || '');
       if (!data) continue;
-      if (!pre) {
-        data = data.replace(/[\t\n\f\r ]+/g, ' ');
-        if (!data) continue;
-      }
-      segments.push({ text: data, pre: pre });
+      // DEVIATION from crates/obscura-js, which also collapsed U+000C: a form feed is not
+      // CSS white space, and Chromium keeps it.
+      if (mode === 0) data = data.replace(/[\t\n\r ]+/g, ' ');
+      else if (mode === 1) data = data.replace(/[\t\r ]+/g, ' ').replace(/ ?\n ?/g, '\n');
+      segments.push({ text: data, pre: mode === 2 });
       continue;
     }
     if (type !== 1) continue;
@@ -6495,57 +6506,42 @@ function _innerTextCollect(node, segments, pre, visible) {
     const style = _innerTextStyle(child);
     const display = style ? String(style.display || 'inline') : 'inline';
     if (display === 'none') continue;
-    if (tag === 'BR') { segments.push({ breaks: 1, forced: true }); continue; }
-    const childPre = _innerTextIsPre(style ? String(style.whiteSpace || '') : '', pre);
     const childVisible = style && style.visibility
       ? String(style.visibility) === 'visible'
       : visible;
+    // DEVIATION from crates/obscura-js: an element whose visibility is not `visible`
+    // contributes its visible descendants and nothing of its own (no line break, tab or <br>
+    // newline), as in the HTML rendered-text collection steps and Chromium.
+    if (tag === 'BR') { if (childVisible) segments.push({ lf: 1 }); continue; }
+    const childMode = _innerTextSpaceMode(style ? String(style.whiteSpace || '') : '', mode);
     // A table cell is separated from its siblings by a tab, not a line break;
     // the row around it supplies the break. Obscura's computed style reports a
     // default-styled <td>/<th> as display:block rather than table-cell, so the
     // tag is what identifies a cell in that case; an author who really did set
     // display:block on a cell gets the block treatment, same as Chromium.
-    const cell = display === 'table-cell'
-      || ((tag === 'TD' || tag === 'TH') && display === 'block');
-    const block = !cell && _innerTextIsBlock(display);
+    const cell = childVisible && (display === 'table-cell'
+      || ((tag === 'TD' || tag === 'TH') && display === 'block'));
+    const block = childVisible && !cell && _innerTextIsBlock(display);
     // A <p> is the one element that contributes two required line breaks.
     const breaks = tag === 'P' ? 2 : 1;
     if (cell) segments.push({ tab: 1 });
     else if (block) segments.push({ breaks: breaks });
-    _innerTextCollect(child, segments, childPre, childVisible);
+    _innerTextCollect(child, segments, childMode, childVisible);
     if (cell) segments.push({ tab: 1 });
     else if (block) segments.push({ breaks: breaks });
   }
 }
+// Block boundaries are required line breaks (dropped at either end, the widest of a run
+// kept) and a <br> is a literal newline, as in the HTML rendered-text collection steps.
+// DEVIATION from crates/obscura-js, which counted a <br> as a required line break too, so one
+// at the start or end of the text vanished and one next to a block boundary merged into it.
 function _innerTextJoin(segments) {
   let result = '';
   let breaks = 0;
-  let forced = 0;
   let tabs = 0;
   let seen = false;
   let lastPre = false;
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
-    if (segment.tab !== undefined) {
-      if (seen) tabs = 1;
-      continue;
-    }
-    if (segment.breaks !== undefined) {
-      // Line breaks before any text at all are dropped, which is what keeps
-      // innerText from starting with a blank line. Consecutive <br> stack;
-      // block boundaries that meet each other collapse to the widest one.
-      if (!seen) continue;
-      if (segment.forced) { forced++; if (forced > breaks) breaks = forced; }
-      else if (segment.breaks > breaks) breaks = segment.breaks;
-      continue;
-    }
-    let text = segment.text;
-    if (!segment.pre) {
-      if (!seen || breaks > 0 || tabs > 0 || result.charAt(result.length - 1) === ' ') {
-        text = text.replace(/^ +/, '');
-      }
-      if (!text) continue;
-    }
+  const flush = () => {
     if (breaks > 0) {
       if (!lastPre) result = result.replace(/ +$/, '');
       for (let n = 0; n < breaks; n++) result += '\n';
@@ -6554,8 +6550,40 @@ function _innerTextJoin(segments) {
       result += '\t';
     }
     breaks = 0;
-    forced = 0;
     tabs = 0;
+  };
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (segment.tab !== undefined) {
+      if (seen) tabs = 1;
+      continue;
+    }
+    if (segment.breaks !== undefined) {
+      // Line breaks before any text at all are dropped, which is what keeps
+      // innerText from starting with a blank line. Block boundaries that meet
+      // each other collapse to the widest one.
+      if (!seen) continue;
+      if (segment.breaks > breaks) breaks = segment.breaks;
+      continue;
+    }
+    if (segment.lf !== undefined) {
+      flush();
+      // Collapsible spaces at the end of the line a <br> ends are removed.
+      if (!lastPre) result = result.replace(/ +$/, '');
+      result += '\n';
+      lastPre = false;
+      seen = true;
+      continue;
+    }
+    let text = segment.text;
+    if (!segment.pre) {
+      const last = result.charAt(result.length - 1);
+      if (!seen || breaks > 0 || tabs > 0 || last === ' ' || last === '\n') {
+        text = text.replace(/^ +/, '');
+      }
+      if (!text) continue;
+    }
+    flush();
     result += text;
     lastPre = !!segment.pre;
     seen = true;
@@ -6570,13 +6598,26 @@ function _innerTextOf(el) {
   if (el.isConnected === false) return el.textContent;
   const tag = el.tagName;
   if (tag && _innerTextSkipTags[tag]) return el.textContent;
+  // DEVIATION from crates/obscura-js: render builds answer the whole subtree in one op over
+  // the retained cascade (PreparedRender.InnerText), byte-identical to the walk below. The
+  // walk calls getComputedStyle() per element and recurses per level, which took over 40 s
+  // on a 10k-deep tree (and overflowed the stack) and 18 s on 50k siblings. The walk stays
+  // for non-render builds and for what the op declines (an unstyled element, a root that is
+  // not rendered); an XML document is left to it because its CDATA sections are Text in the
+  // native tree but are skipped here.
+  const innerTextOp = __obscuraCore.ops.op_inner_text;
+  if (typeof innerTextOp === 'function' && el._nid != null && !_isXMLDocument(el.ownerDocument)) {
+    let raw = '';
+    try { raw = innerTextOp(String(el._nid | 0)); } catch (e) { raw = ''; }
+    if (raw) return JSON.parse(raw);
+  }
   const style = _innerTextStyle(el);
   const display = style ? String(style.display || 'block') : 'block';
   if (display === 'none') return el.textContent;
-  const pre = _innerTextIsPre(style ? String(style.whiteSpace || '') : '', false);
+  const mode = _innerTextSpaceMode(style ? String(style.whiteSpace || '') : '', 0);
   const visible = style && style.visibility ? String(style.visibility) === 'visible' : true;
   const segments = [];
-  _innerTextCollect(el, segments, pre, visible);
+  _innerTextCollect(el, segments, mode, visible);
   return _innerTextJoin(segments);
 }
 var _htmlTagClasses = null;
@@ -13375,6 +13416,14 @@ globalThis.Range = class Range {
     const sc = this._sc, ec = this._ec;
     if (!sc) return "";
     if (_rngSame(sc, ec) && (sc.nodeType === 3 || sc.nodeType === 4)) return (sc.data || "").slice(this._so, this._eo);
+    // DEVIATION from crates/obscura-js: one native walk between the two boundary points
+    // (StateHelpers.RangeText). The walk below visits the whole common-ancestor subtree and
+    // makes two O(depth) boundary comparisons per node, 28 s over a 10k-deep tree. It stays
+    // as the fallback for a boundary without a native node.
+    if (sc._nid != null && ec._nid != null) {
+      const text = _domParse("range_text", `${sc._nid | 0},${this._so | 0},${ec._nid | 0},${this._eo | 0}`);
+      if (typeof text === 'string') return text;
+    }
     let s = "";
     if (sc.nodeType === 3 || sc.nodeType === 4) s += (sc.data || "").slice(this._so);
     const cac = this.commonAncestorContainer;

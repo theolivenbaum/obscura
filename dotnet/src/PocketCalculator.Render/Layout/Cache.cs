@@ -40,7 +40,31 @@ public sealed class Cache
 
     private CacheEntry<LayoutOutput>? _finalLayoutEntry;
     private readonly CacheEntry<MeasureOutput>?[] _measureEntries = new CacheEntry<MeasureOutput>?[CacheSize];
+
+    /// <summary>
+    /// Measurements evicted from <see cref="_measureEntries"/>, kept so an alternating pair of
+    /// inputs that share a slot does not thrash it. Allocated on the first eviction only.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from taffy, which keeps one entry per slot and drops the old one. A
+    /// shrink-to-fit box (a float, which the port lays out as a flex row) is measured at both
+    /// its min-content and its max-content width, and each of those measures its child at
+    /// definite widths that land in the same slot (known width, unknown height). The two
+    /// evict each other, so every level re-measures its whole subtree once per request from
+    /// its parent and 300 nested floats took minutes. Keeping the evicted entries makes the
+    /// number of distinct measurements per node the bound instead. The cache is keyed on the
+    /// full input either way, so what a hit returns is unchanged: only how often it hits.
+    /// </remarks>
+    private CacheEntry<MeasureOutput>[]? _overflow;
+    private int _overflowCount;
+    private int _overflowNext;
     private bool _isEmpty = true;
+
+    /// <summary>The most evicted measurements a node keeps (a ring: the oldest is replaced).</summary>
+    private const int OverflowSize = 16;
+
+    /// <summary>The size of the overflow ring when a node first evicts a measurement.</summary>
+    private const int InitialOverflowSize = 2;
 
     /// <summary>Space-optimised cache key that packs bits into as small a size as possible.</summary>
     private readonly record struct CacheKey(ulong KdAvailableSpace, ulong ParentSize)
@@ -156,6 +180,31 @@ public sealed class Cache
         };
     }
 
+    /// <summary>Whether a stored measurement answers a request with this key.</summary>
+    private static bool Matches(in CacheEntry<MeasureOutput> measure, in CacheKey key, byte marginKey)
+    {
+        // Deviation from taffy: taffy masks the requested-axis bits out of the key on
+        // both sides here, so any stored measurement answers a request for either axis.
+        // That is unsound for an entry produced by a horizontal-only run, because
+        // BlockLayout / FlexboxLayout / GridLayout all short-circuit such a run to
+        // `(known width, 0)` without laying the box out - its height is a placeholder,
+        // not a measurement, and its collapsible margins are unset. taffy then reuses
+        // that zero as the box's block-axis contribution: a grid whose row track is
+        // sized from a lone item that was first measured horizontally (which happens as
+        // soon as any column track is intrinsically sized, e.g. an unoccupied `1fr`)
+        // collapses the row to 0. Chromium sizes the row to the item's content, so keep
+        // a horizontal-only entry for horizontal-only requests. Vertical and both-axis
+        // runs never short-circuit, so their entries stay shareable.
+        if (measure.Key.AxisBits() == SignBit1 && key.AxisBits() != SignBit1)
+        {
+            return false;
+        }
+
+        return measure.Key.KdAvailableSpace == key.KdAvailableSpace
+            && measure.Key.XAxisParentSize() == key.XAxisParentSize()
+            && measure.Content.VerticalMarginsAreCollapsible == marginKey;
+    }
+
     /// <summary>Try to retrieve a cached result from the cache.</summary>
     public LayoutOutput? Get(in LayoutInput input)
     {
@@ -179,28 +228,20 @@ public sealed class Cache
                         continue;
                     }
 
-                    // Deviation from taffy: taffy masks the requested-axis bits out of the key on
-                    // both sides here, so any stored measurement answers a request for either axis.
-                    // That is unsound for an entry produced by a horizontal-only run, because
-                    // BlockLayout / FlexboxLayout / GridLayout all short-circuit such a run to
-                    // `(known width, 0)` without laying the box out - its height is a placeholder,
-                    // not a measurement, and its collapsible margins are unset. taffy then reuses
-                    // that zero as the box's block-axis contribution: a grid whose row track is
-                    // sized from a lone item that was first measured horizontally (which happens as
-                    // soon as any column track is intrinsically sized, e.g. an unoccupied `1fr`)
-                    // collapses the row to 0. Chromium sizes the row to the item's content, so keep
-                    // a horizontal-only entry for horizontal-only requests. Vertical and both-axis
-                    // runs never short-circuit, so their entries stay shareable.
-                    if (measure.Key.AxisBits() == SignBit1 && key.AxisBits() != SignBit1)
-                    {
-                        continue;
-                    }
-
-                    if (measure.Key.KdAvailableSpace == key.KdAvailableSpace
-                        && measure.Key.XAxisParentSize() == key.XAxisParentSize()
-                        && measure.Content.VerticalMarginsAreCollapsible == marginKey)
+                    if (Matches(measure, key, marginKey))
                     {
                         return measure.Content.IntoLayoutOutput();
+                    }
+                }
+
+                if (_overflow is { } overflow)
+                {
+                    for (int i = 0; i < _overflowCount; i++)
+                    {
+                        if (Matches(overflow[i], key, marginKey))
+                        {
+                            return overflow[i].Content.IntoLayoutOutput();
+                        }
                     }
                 }
 
@@ -225,12 +266,42 @@ public sealed class Cache
             case RunMode.ComputeSize:
                 _isEmpty = false;
                 int cacheSlot = ComputeCacheSlot(input.KnownDimensions, input.AvailableSpace);
+                if (_measureEntries[cacheSlot] is { } evicted)
+                {
+                    KeepEvicted(evicted);
+                }
+
                 _measureEntries[cacheSlot] =
                     new CacheEntry<MeasureOutput>(key, MeasureOutput.New(input, layoutOutput));
                 break;
 
             default:
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Keep a measurement a slot is about to drop. The ring starts small and doubles up to
+    /// <see cref="OverflowSize"/>, since most nodes only ever evict one or two, and once full
+    /// replaces its oldest entry.
+    /// </summary>
+    private void KeepEvicted(in CacheEntry<MeasureOutput> evicted)
+    {
+        if (_overflow is null)
+        {
+            _overflow = new CacheEntry<MeasureOutput>[InitialOverflowSize];
+        }
+        else if (_overflowCount == _overflow.Length && _overflow.Length < OverflowSize)
+        {
+            Array.Resize(ref _overflow, _overflow.Length * 2);
+            _overflowNext = _overflowCount;
+        }
+
+        _overflow[_overflowNext] = evicted;
+        _overflowNext = (_overflowNext + 1) % _overflow.Length;
+        if (_overflowCount < _overflow.Length)
+        {
+            _overflowCount++;
         }
     }
 
@@ -245,6 +316,8 @@ public sealed class Cache
         _isEmpty = true;
         _finalLayoutEntry = null;
         Array.Clear(_measureEntries);
+        _overflowCount = 0;
+        _overflowNext = 0;
         return ClearState.Cleared;
     }
 
@@ -264,6 +337,6 @@ public sealed class Cache
             }
         }
 
-        return true;
+        return _overflowCount == 0;
     }
 }

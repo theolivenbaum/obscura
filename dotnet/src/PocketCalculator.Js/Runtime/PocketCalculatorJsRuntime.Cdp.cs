@@ -44,9 +44,12 @@ public sealed partial class PocketCalculatorJsRuntime
 
     private object? InvokeHostScript(string name, string functionSource)
     {
+        CancellationToken deadline = _ops.Cancellation.Token;
         try
         {
-            return HostScript.Invoke(_engine, _shim.HostHelpers, name, functionSource);
+            object? result = HostScript.Invoke(_engine, _shim.HostHelpers, name, functionSource);
+            ThrowIfDeadlinePassed(deadline);
+            return result;
         }
         catch (ScriptInterruptedException)
         {

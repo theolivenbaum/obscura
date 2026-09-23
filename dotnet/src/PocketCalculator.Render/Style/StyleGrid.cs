@@ -282,56 +282,109 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>parse_track_list_named</c>.</summary>
+    /// <remarks>An invalid list (see <see cref="TryParseTrackListNamed"/>) yields no tracks.</remarks>
     internal static (List<Layout.GridTemplateComponent> Tracks,
         List<(string Name, short Line)> Names,
-        List<object> CalcExpressions) ParseTrackListNamed(string value)
+        List<object> CalcExpressions) ParseTrackListNamed(string value) =>
+        TryParseTrackListNamed(value, out var tracks, out var names, out var calcExpressions)
+            ? (tracks, names, calcExpressions)
+            : ([], [], []);
+
+    /// <summary>
+    /// Rust <c>parse_track_list_named</c>, reporting whether the declaration is valid.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, which accepts <c>repeat()</c> inside <c>repeat()</c> and expands it,
+    /// capping each level at 1000 repetitions: nesting three levels deep already makes 10^9
+    /// tracks, and twenty levels of <c>repeat(2, ...)</c> took seconds. css-grid's
+    /// <c>&lt;track-repeat&gt;</c> admits only line names and track sizes, so Chromium drops the
+    /// whole declaration, and so does the port (<c>false</c>). The same holds for a repeat
+    /// count of zero. A valid list is expanded up to <see cref="Layout.GridLimits.MaxTracks"/>
+    /// tracks and then truncated, as Chromium truncates at <c>kGridMaxTracks</c>, instead of
+    /// Rust's per-<c>repeat()</c> cap of 1000.
+    /// </remarks>
+    internal static bool TryParseTrackListNamed(
+        string value,
+        out List<Layout.GridTemplateComponent> tracks,
+        out List<(string Name, short Line)> names,
+        out List<object> calcExpressions)
     {
         List<string> tokens = TokenizeTracks(value);
-        List<Layout.GridTemplateComponent> tracks = [];
-        List<(string Name, short Line)> names = [];
-        List<object> calcExpressions = [];
+        tracks = [];
+        names = [];
+        calcExpressions = [];
         short line = 1;
         // A subgridded axis owns line names but no sizing functions.
         bool isSubgrid = tokens.Count > 0 && CssText.EqualsAscii(tokens[0], "subgrid");
         for (int index = isSubgrid ? 1 : 0; index < tokens.Count; index++)
         {
-            ExpandTrackToken(tokens[index], tracks, names, calcExpressions, ref line);
+            if (!ExpandTrackToken(tokens[index], tracks, names, calcExpressions, ref line, nested: false))
+            {
+                tracks = [];
+                names = [];
+                calcExpressions = [];
+                return false;
+            }
         }
 
-        return (tracks, names, calcExpressions);
+        return true;
     }
 
-    private static void ExpandTrackToken(
+    private static bool IsRepeatToken(string token) =>
+        token.TrimStart().StartsWith("repeat(", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ExpandTrackToken(
         string token,
         List<Layout.GridTemplateComponent> tracks,
         List<(string Name, short Line)> names,
         List<object> calcExpressions,
-        ref short line)
+        ref short line,
+        bool nested)
     {
+        const int maxTracks = Layout.GridLimits.MaxTracks;
         string trimmed = token.Trim();
         if (trimmed.StartsWith('['))
         {
+            // Line names past the track limit name lines that do not exist.
+            if (names.Count >= maxTracks)
+            {
+                return true;
+            }
+
             string inner = trimmed.TrimStart('[').TrimEnd(']');
             foreach (string name in SplitWhitespace(inner))
             {
                 names.Add((name, line));
             }
 
-            return;
+            return true;
         }
 
         string lower = CssText.AsciiLower(trimmed);
         if (lower.StartsWith("repeat(", StringComparison.Ordinal) && trimmed.EndsWith(')'))
         {
+            if (nested)
+            {
+                return false;
+            }
+
             string inner = trimmed["repeat(".Length..^1];
             int comma = inner.IndexOf(',');
             if (comma < 0)
             {
-                return;
+                return true;
             }
 
             string countText = inner[..comma];
             List<string> subTokens = TokenizeTracks(inner[(comma + 1)..].Trim());
+            foreach (string subToken in subTokens)
+            {
+                if (IsRepeatToken(subToken))
+                {
+                    return false;
+                }
+            }
+
             Layout.RepetitionCount? repetition = CssText.AsciiLower(countText.Trim()) switch
             {
                 "auto-fill" => Layout.RepetitionCount.AutoFill,
@@ -358,23 +411,45 @@ public static partial class ComputedStyle
                     LineNames = [],
                 }));
                 line++;
-                return;
+                return true;
             }
 
-            int repeatCount = Math.Min(ParseUsize(countText.Trim()) ?? 1, 1000);
+            // A count that is not a plain integer (calc(), say) keeps Rust's fallback of one
+            // repetition; an integer past the limit saturates rather than failing to parse.
+            int repeatCount = ParseIntegerClamped(countText.Trim(), maxTracks) is { } parsedCount
+                ? (int)parsedCount
+                : 1;
+            if (repeatCount <= 0)
+            {
+                return false;
+            }
+
             for (int iteration = 0; iteration < repeatCount; iteration++)
             {
+                if (tracks.Count >= maxTracks || names.Count >= maxTracks)
+                {
+                    break;
+                }
+
                 foreach (string subToken in subTokens)
                 {
-                    ExpandTrackToken(subToken, tracks, names, calcExpressions, ref line);
+                    if (!ExpandTrackToken(subToken, tracks, names, calcExpressions, ref line, nested: true))
+                    {
+                        return false;
+                    }
                 }
             }
 
-            return;
+            return true;
         }
 
-        tracks.Add(Layout.GridTemplateComponent.FromSingle(Track(trimmed, calcExpressions)));
-        line++;
+        if (tracks.Count < maxTracks)
+        {
+            tracks.Add(Layout.GridTemplateComponent.FromSingle(Track(trimmed, calcExpressions)));
+            line++;
+        }
+
+        return true;
     }
 
     /// <summary>Rust <c>track</c>.</summary>
@@ -687,35 +762,53 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>parse_grid_template</c>.</summary>
+    /// <remarks>
+    /// Both track lists are parsed before either is applied, so an invalid one (nested
+    /// <c>repeat()</c>) drops the whole shorthand, as it does in Chromium.
+    /// </remarks>
     internal static void ParseGridTemplate(LayoutStyle style, string value)
     {
         int slash = value.IndexOf('/');
         string rowsPart = slash >= 0 ? value[..slash].Trim() : value.Trim();
         string? columnsPart = slash >= 0 ? value[(slash + 1)..].Trim() : null;
 
-        if (rowsPart.Contains('\'') || rowsPart.Contains('"'))
+        bool rowsAreAreas = rowsPart.Contains('\'') || rowsPart.Contains('"');
+        List<Layout.GridTemplateComponent> rowTracks = [];
+        List<(string Name, short Line)> rowNames = [];
+        List<object> rowCalc = [];
+        if (!rowsAreAreas
+            && rowsPart.Length != 0
+            && !TryParseTrackListNamed(rowsPart, out rowTracks, out rowNames, out rowCalc))
+        {
+            return;
+        }
+
+        List<Layout.GridTemplateComponent> columnTracks = [];
+        List<(string Name, short Line)> columnNames = [];
+        List<object> columnCalc = [];
+        if (columnsPart is { } columnsText
+            && !TryParseTrackListNamed(columnsText, out columnTracks, out columnNames, out columnCalc))
+        {
+            return;
+        }
+
+        if (rowsAreAreas)
         {
             style.GridAreas = ParseGridAreas(rowsPart);
         }
         else if (rowsPart.Length != 0)
         {
-            (List<Layout.GridTemplateComponent> tracks,
-                List<(string Name, short Line)> names,
-                List<object> calcExpressions) = ParseTrackListNamed(rowsPart);
-            style.GridTemplateRows = tracks;
-            GridCalcBuckets(style)[1] = calcExpressions;
-            style.GridRowLineNames = names.Count != 0 ? BuildLineMap(names) : null;
+            style.GridTemplateRows = rowTracks;
+            GridCalcBuckets(style)[1] = rowCalc;
+            style.GridRowLineNames = rowNames.Count != 0 ? BuildLineMap(rowNames) : null;
         }
 
         if (columnsPart is { } columns)
         {
-            (List<Layout.GridTemplateComponent> tracks,
-                List<(string Name, short Line)> names,
-                List<object> calcExpressions) = ParseTrackListNamed(columns);
             style.GridTemplateColumnsSubgrid = IsSubgridTrackList(columns);
-            style.GridTemplateColumns = tracks;
-            GridCalcBuckets(style)[0] = calcExpressions;
-            style.GridColLineNames = names.Count != 0 ? BuildLineMap(names) : null;
+            style.GridTemplateColumns = columnTracks;
+            GridCalcBuckets(style)[0] = columnCalc;
+            style.GridColLineNames = columnNames.Count != 0 ? BuildLineMap(columnNames) : null;
         }
     }
 
@@ -733,11 +826,13 @@ public static partial class ComputedStyle
         string columns = value[(slash + 1)..].Trim();
         if (CssText.AsciiLower(rows).Contains("auto-flow", StringComparison.Ordinal))
         {
+            if (!TryParseTrackListNamed(columns, out var tracks, out var names, out var calcExpressions))
+            {
+                return;
+            }
+
             style.ClearGridTemplateRows();
             GridCalcBuckets(style)[1].Clear();
-            (List<Layout.GridTemplateComponent> tracks,
-                List<(string Name, short Line)> names,
-                List<object> calcExpressions) = ParseTrackListNamed(columns);
             style.GridTemplateColumnsSubgrid = IsSubgridTrackList(columns);
             style.GridTemplateColumns = tracks;
             GridCalcBuckets(style)[0] = calcExpressions;
@@ -748,12 +843,14 @@ public static partial class ComputedStyle
         }
         else if (CssText.AsciiLower(columns).Contains("auto-flow", StringComparison.Ordinal))
         {
+            if (!TryParseTrackListNamed(rows, out var tracks, out var names, out var calcExpressions))
+            {
+                return;
+            }
+
             style.ClearGridTemplateColumns();
             GridCalcBuckets(style)[0].Clear();
             style.GridTemplateColumnsSubgrid = false;
-            (List<Layout.GridTemplateComponent> tracks,
-                List<(string Name, short Line)> names,
-                List<object> calcExpressions) = ParseTrackListNamed(rows);
             style.GridTemplateRows = tracks;
             GridCalcBuckets(style)[1] = calcExpressions;
             style.GridRowLineNames = names.Count != 0 ? BuildLineMap(names) : null;
@@ -997,19 +1094,27 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>parse_grid_placement</c>.</summary>
+    /// <remarks>
+    /// Deviation from Rust, which parses the integer as <c>i16</c>/<c>u16</c> and turns anything
+    /// larger into <c>auto</c>: Chromium keeps the declaration and clamps the integer to
+    /// <c>kGridMaxTracks</c>, so <c>grid-column: 1 / 99999999</c> spans the whole grid rather
+    /// than being auto-placed. The port clamps to <see cref="Layout.GridLimits.MaxTracks"/>.
+    /// </remarks>
     internal static Layout.GridPlacement ParseGridPlacement(string value)
     {
+        const int maxTracks = Layout.GridLimits.MaxTracks;
         string trimmed = value.Trim();
         string lower = CssText.AsciiLower(trimmed);
         if (lower.StartsWith("span", StringComparison.Ordinal)
-            && ParseU16(lower[4..].Trim()) is { } span)
+            && ParseIntegerClamped(lower[4..].Trim(), maxTracks) is { } span
+            && span >= 0)
         {
-            return Layout.GridPlacement.FromSpan(span);
+            return Layout.GridPlacement.FromSpan((ushort)span);
         }
 
-        if (ParseI16(trimmed) is { } line)
+        if (ParseIntegerClamped(trimmed, maxTracks) is { } line)
         {
-            return Layout.GridPlacement.FromLineIndex(line);
+            return Layout.GridPlacement.FromLineIndex((short)line);
         }
 
         return Layout.GridPlacement.Auto;

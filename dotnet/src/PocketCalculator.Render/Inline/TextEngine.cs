@@ -399,9 +399,10 @@ public sealed partial class TextEngine : IDisposable
         List<(string Text, SpanAttrs Attrs)> spans,
         Collector collector)
     {
+        collector.FlushLastSpan(spans);
         float lineHeight = strut.LineHeight;
         List<ClipTextFill> clipFills = collector.ClipFills;
-        List<OwnerTextRange> ownerRanges = collector.OwnerRanges;
+        List<OwnerTextChunk> ownerChunks = collector.OwnerChunks;
         List<InlineOwnerBox> ownerBoxes = collector.OwnerBoxes;
         List<InlineBoundaryEvent> boundaryEvents = collector.BoundaryEvents;
 
@@ -455,22 +456,22 @@ public sealed partial class TextEngine : IDisposable
             textLength += text.Length;
         }
 
-        for (int i = ownerRanges.Count - 1; i >= 0; i--)
+        // Clamp to the trimmed text and drop what became empty, in one ordered pass.
+        int keptChunks = 0;
+        for (int i = 0; i < ownerChunks.Count; i++)
         {
-            OwnerTextRange range = ownerRanges[i] with
+            OwnerTextChunk chunk = ownerChunks[i] with
             {
-                Start = Math.Min(ownerRanges[i].Start, textLength),
-                End = Math.Min(ownerRanges[i].End, textLength),
+                Start = Math.Min(ownerChunks[i].Start, textLength),
+                End = Math.Min(ownerChunks[i].End, textLength),
             };
-            if (range.Start < range.End)
+            if (chunk.Start < chunk.End)
             {
-                ownerRanges[i] = range;
-            }
-            else
-            {
-                ownerRanges.RemoveAt(i);
+                ownerChunks[keptChunks++] = chunk;
             }
         }
+
+        ownerChunks.RemoveRange(keptChunks, ownerChunks.Count - keptChunks);
 
         for (int i = 0; i < ownerBoxes.Count; i++)
         {
@@ -662,7 +663,8 @@ public sealed partial class TextEngine : IDisposable
             MarkerBuffer = markerBuffer,
             Marker = null,
             OwnerText = ownerText,
-            OwnerRanges = ownerRanges,
+            OwnerChunks = ownerChunks,
+            OwnerChain = collector.OwnerChain,
             OwnerBoxes = ownerBoxes,
             BoundaryEvents = boundaryEvents,
             RelativeOwnerRanges = [],
@@ -1019,12 +1021,36 @@ public sealed partial class TextEngine : IDisposable
         foreach (InlineItem item in _items)
         {
             List<RelativeOwnerTextRange> ranges = [];
-            foreach (OwnerTextRange range in item.OwnerRanges)
+            if (offsets.Count > 0 && item.OwnerChunks.Count > 0)
             {
-                if (offsets.TryGetValue(range.Owner, out (float X, float Y) offset)
-                    && offset != (0f, 0f))
+                // Paint takes the last range overlapping a glyph, and the old flat list held
+                // one range per open owner per run, outermost first, so the innermost open
+                // owner with an offset won. Resolve that owner once per chain node (a parent
+                // always precedes its children) and emit one range per run.
+                List<OwnerChainNode> chain = item.OwnerChain;
+                var nearest = new int[chain.Count];
+                var nodeOffsets = new (float X, float Y)[chain.Count];
+                for (int i = 0; i < chain.Count; i++)
                 {
-                    ranges.Add(new RelativeOwnerTextRange(range.Start, range.End, offset));
+                    if (offsets.TryGetValue(chain[i].Owner, out (float X, float Y) offset)
+                        && offset != (0f, 0f))
+                    {
+                        nearest[i] = i;
+                        nodeOffsets[i] = offset;
+                    }
+                    else
+                    {
+                        nearest[i] = chain[i].Parent >= 0 ? nearest[chain[i].Parent] : -1;
+                    }
+                }
+
+                foreach (OwnerTextChunk chunk in item.OwnerChunks)
+                {
+                    int owner = chunk.Node >= 0 ? nearest[chunk.Node] : -1;
+                    if (owner >= 0)
+                    {
+                        ranges.Add(new RelativeOwnerTextRange(chunk.Start, chunk.End, nodeOffsets[owner]));
+                    }
                 }
             }
 
@@ -1059,6 +1085,8 @@ public sealed partial class TextEngine : IDisposable
     public List<InlineOwnerLineFragment> InlineOwnerLineFragments()
     {
         List<InlineOwnerLineFragment> output = [];
+        Dictionary<(NodeId Owner, int Line), int> existingByOwner = [];
+        Dictionary<int, float> cursorByOffset = [];
         for (int itemIndex = 0; itemIndex < _items.Count; itemIndex++)
         {
             InlineItem item = _items[itemIndex];
@@ -1069,6 +1097,7 @@ public sealed partial class TextEngine : IDisposable
 
             List<int> lineStarts = InlineGeometry.SourceLineStarts(item.Buffer, source);
             List<LayoutRun> runs = [.. item.Buffer.LayoutRuns()];
+            existingByOwner.Clear();
             int lineIndex = 0;
             for (int runIndex = 0; runIndex < runs.Count; runIndex++)
             {
@@ -1089,6 +1118,22 @@ public sealed partial class TextEngine : IDisposable
                     || runs[runIndex + 1].LineIndex != run.LineIndex;
                 float firstLineOffset = lineIndex == 0 ? item.FirstLineOffset : 0f;
                 float alignmentShift = InlineGeometry.LineEdgeAlignmentShift(item, lineStart, lineEnd);
+                float lineRight = run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
+
+                // RunCursorX scans the run's glyphs, and every owner open across the line asks
+                // for the same few offsets, so it is memoized per run.
+                cursorByOffset.Clear();
+                float CursorX(int offset)
+                {
+                    if (!cursorByOffset.TryGetValue(offset, out float x))
+                    {
+                        x = InlineGeometry.RunCursorX(run, offset);
+                        cursorByOffset[offset] = x;
+                    }
+
+                    return x;
+                }
+
                 foreach (InlineOwnerBox owner in item.OwnerBoxes)
                 {
                     bool empty = owner.Start == owner.End;
@@ -1104,32 +1149,22 @@ public sealed partial class TextEngine : IDisposable
                     bool first = (owner.Start >= lineStart && owner.Start < lineEnd) || empty;
                     bool last = (owner.End > lineStart && owner.End <= lineEnd) || empty;
                     float rawLeft = first
-                        ? InlineGeometry.RunCursorX(run, Math.Max(0, owner.Start - lineStart))
+                        ? CursorX(Math.Max(0, owner.Start - lineStart))
                             + InlineGeometry.LineAdvanceBeforeEvent(item, owner.StartEvent, lineStart, lineEnd)
                             + owner.StartEdge.Margin
-                        : InlineGeometry.RunCursorX(run, 0);
+                        : CursorX(0);
                     float rawRight = last
-                        ? InlineGeometry.RunCursorX(run, Math.Max(0, owner.End - lineStart))
+                        ? CursorX(Math.Max(0, owner.End - lineStart))
                             + InlineGeometry.LineAdvanceBeforeEvent(item, owner.EndEvent, lineStart, lineEnd)
                             + owner.EndEdge.BorderPadding
-                        : run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
+                        : lineRight;
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
                     float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
 
-                    int existing = -1;
-                    for (int i = 0; i < output.Count; i++)
-                    {
-                        if (output[i].Owner == owner.Owner
-                            && output[i].ItemIndex == itemIndex
-                            && output[i].LineIndex == lineIndex)
-                        {
-                            existing = i;
-                            break;
-                        }
-                    }
-
-                    if (existing >= 0)
+                    // Keyed lookup: a linear search of the output made nested inline boxes,
+                    // which put every open owner on every line, quadratic in fragments.
+                    if (existingByOwner.TryGetValue((owner.Owner, lineIndex), out int existing))
                     {
                         InlineOwnerLineFragment fragment = output[existing];
                         float left = F32.Min(fragment.X, x);
@@ -1138,6 +1173,7 @@ public sealed partial class TextEngine : IDisposable
                     }
                     else
                     {
+                        existingByOwner[(owner.Owner, lineIndex)] = output.Count;
                         output.Add(new InlineOwnerLineFragment(
                             owner.Owner,
                             itemIndex,
@@ -1153,6 +1189,126 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return output;
+    }
+
+    /// <summary>Lines at most this long are always probed whole.</summary>
+    private const int ProbeWindowMinLine = 2048;
+
+    private const int ProbeInitialWindow = 256;
+
+    /// <summary>
+    /// Lay out the first visual line of <paramref name="line"/> at <paramref name="available"/>,
+    /// shaping only a prefix of it when that provably gives the same first line.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs <c>shape_with_text_indent</c>, which
+    /// shapes and wraps all of a line to learn where its first visual line ends; the remainder
+    /// becomes the next line to probe, so a long paragraph with inline owners was shaped once
+    /// per line: quadratic in its length, 12s for 20000 sibling spans. The result is the same.
+    /// For a long line this shapes a window instead, cut between two printable ASCII characters so
+    /// that the grapheme clusters, bidi levels (the caller checked there is no right-to-left
+    /// text) and break opportunities before the cut are the ones the whole line has, and
+    /// shaping (which is per word) agrees on every word that ends before the window's last
+    /// one. Wrapping is greedy and looks back only, so when the second visual line ends before
+    /// that last word, the first line is exactly the first line of the whole. Otherwise the
+    /// window grows, up to the whole line.
+    /// </remarks>
+    private List<LayoutLine> ProbeFirstLine(
+        BufferLine line,
+        ref BufferLine? probe,
+        ref int probeChars,
+        float fontSize,
+        float available,
+        Wrap wrap,
+        float? mono,
+        int tabWidth)
+    {
+        string text = line.Text;
+        if (text.Length <= ProbeWindowMinLine)
+        {
+            return line.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
+        }
+
+        while (true)
+        {
+            if (probe is null)
+            {
+                int cut = SafeProbeCut(text, probeChars);
+                if (cut < 0)
+                {
+                    return line.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
+                }
+
+                probe = new BufferLine(text[..cut], line.AttrsList.Prefix(cut)) { Align = line.Align };
+            }
+
+            List<LayoutLine> layouts = probe.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
+            if (FirstLineSettled(probe, layouts))
+            {
+                return layouts;
+            }
+
+            probeChars = Math.Max(probeChars, probe.Text.Length) * 4;
+            probe = null;
+        }
+    }
+
+    /// <summary>
+    /// The first offset at or after <paramref name="from"/> that sits between two printable
+    /// ASCII characters, the first of them not a space, or -1 when there is none in reach
+    /// before the end of the text.
+    /// </summary>
+    private static int SafeProbeCut(string text, int from)
+    {
+        int limit = Math.Min(text.Length - 1, from + 256);
+        for (int cut = Math.Max(from, 1); cut <= limit; cut++)
+        {
+            char before = text[cut - 1];
+            char after = text[cut];
+            if (before > ' ' && before < '\u007f' && after >= ' ' && after < '\u007f')
+            {
+                return cut;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Whether a window's first visual line is final: its second line has a glyph, and ends
+    /// before the window's last word (the only one the cut can have changed) begins.
+    /// </summary>
+    private static bool FirstLineSettled(BufferLine probe, List<LayoutLine> layouts)
+    {
+        if (layouts.Count < 2 || layouts[1].Glyphs.Count == 0 || probe.ShapeOpt is not { } shape)
+        {
+            return false;
+        }
+
+        if (shape.Rtl || shape.Spans.Count != 1 || shape.Spans[0].IsRtl || shape.Spans[0].Words.Count == 0)
+        {
+            return false;
+        }
+
+        ShapeWord last = shape.Spans[0].Words[^1];
+        if (last.Blank || last.Glyphs.Count == 0)
+        {
+            return false;
+        }
+
+        int lastStart = int.MaxValue;
+        foreach (ShapeGlyph glyph in last.Glyphs)
+        {
+            lastStart = Math.Min(lastStart, glyph.Start);
+        }
+
+        int secondEnd = 0;
+        foreach (LayoutGlyph glyph in layouts[1].Glyphs)
+        {
+            secondEnd = Math.Max(secondEnd, glyph.End);
+        }
+
+        return secondEnd <= lastStart;
     }
 
     /// <summary>
@@ -1191,11 +1347,19 @@ public sealed partial class TextEngine : IDisposable
             TextMetrics metrics = item.Buffer.Metrics;
             float? mono = item.Buffer.MonospaceWidth;
             int tabWidth = item.Buffer.TabWidth;
+            bool windowable = !Bidi.AnyRightToLeft(sourceText);
+            int probeChars = ProbeInitialWindow;
             int lineIndex = 0;
+
+            // SourceLineStarts, kept incrementally: lines before lineIndex no longer change.
+            int sourceOffset = 0;
+            bool sourceAfterBreak = false;
             while (lineIndex < item.Buffer.Lines.Count)
             {
-                List<int> starts = InlineGeometry.SourceLineStarts(item.Buffer, sourceText);
-                int globalStart = lineIndex < starts.Count ? starts[lineIndex] : 0;
+                int lineOffset = sourceOffset;
+                bool lineAfterBreak = sourceAfterBreak;
+                int globalStart = InlineGeometry.NextSourceLineStart(
+                    item.Buffer.Lines[lineIndex].Text, sourceText, ref sourceOffset, ref sourceAfterBreak);
                 float firstIndent = lineIndex == 0 ? indent : 0f;
                 float baseAvailable = F32.Max(fullWidth - firstIndent, 0f);
 
@@ -1203,22 +1367,20 @@ public sealed partial class TextEngine : IDisposable
                 // probe. Begin at the widest possible candidate and retain the same monotonic
                 // decrease used for positive padding/border advances.
                 int lineSourceEnd = globalStart + item.Buffer.Lines[lineIndex].Text.Length;
-                float negativeEdges = 0f;
-                foreach (InlineBoundaryEvent evt in item.BoundaryEvents)
-                {
-                    if (evt.Position >= globalStart && evt.Position <= lineSourceEnd)
-                    {
-                        negativeEdges += F32.Min(evt.Edge.Advance, 0f);
-                    }
-                }
+                float negativeEdges = item.BoundaryEvents.Count == 0
+                    ? 0f
+                    : item.EdgeIndex.NegativeEdges(globalStart, lineSourceEnd);
 
                 float available = F32.Max(baseAvailable - negativeEdges, 0f);
                 int? split = null;
+                BufferLine? probe = null;
 
                 for (int attempt = 0; attempt <= item.BoundaryEvents.Count; attempt++)
                 {
                     BufferLine line = item.Buffer.Lines[lineIndex];
-                    List<LayoutLine> layouts = line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
+                    List<LayoutLine> layouts = windowable
+                        ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
+                        : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
                     if (layouts.Count == 0)
                     {
                         break;
@@ -1248,6 +1410,7 @@ public sealed partial class TextEngine : IDisposable
 
                     available = requiredAvailable;
                     item.Buffer.Lines[lineIndex].ResetLayout();
+                    probe?.ResetLayout();
                 }
 
                 if (split is not { } splitAt)
@@ -1262,6 +1425,13 @@ public sealed partial class TextEngine : IDisposable
                 {
                     BufferLine tail = item.Buffer.Lines[lineIndex].SplitOff(splitAt);
                     item.Buffer.Lines.Insert(lineIndex + 1, tail);
+
+                    // The next line's start follows this line's new text.
+                    sourceOffset = lineOffset;
+                    sourceAfterBreak = lineAfterBreak;
+                    InlineGeometry.NextSourceLineStart(
+                        item.Buffer.Lines[lineIndex].Text, sourceText, ref sourceOffset, ref sourceAfterBreak);
+                    probeChars = Math.Max(ProbeInitialWindow, splitAt * 4);
                 }
 
                 lineIndex++;
@@ -1557,6 +1727,7 @@ public sealed partial class TextEngine : IDisposable
                     new InlineBoxExtent(context.Above, context.Below, context.Align, context.BaselineShift));
             }
 
+            collector.FlushLastSpan(output);
             output.Add(("\n", context.ToSpanAttrs()));
             collector.TextLength += 1;
             collector.LastWasSpace = true;

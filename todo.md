@@ -322,10 +322,32 @@ Found during the review, not from upstream:
   `--allow-file-access` gate, H1; upstream `04418a5 D` frame isolation, C2;
   `04418a5 G` file navigation from a web page, H3). The deviations are under
   "Security review fixes" in Known deviations. Still open (`SECURITY.md` "Fix status"):
-  - [ ] cooperative cancellation of C# work inside ops (the watchdog cannot stop it);
-    slow cases on script-built trees: 300 nested floats, thousands of nested
-    inline spans, nested `repeat()` in grid templates, `innerText` and
-    `Range.toString()` 10k deep
+  - [x] cooperative cancellation of C# work inside ops: watchdogs cancel the isolate's
+    `ScriptCancellation`, ops and captures run under it, render entry points take a
+    `CancellationToken`, MCP tool calls have a budget (`SECURITY.md` "Cancellation of
+    work inside ops")
+  - [x] pathological-but-legal inputs made fast (see "Security review fixes" in Known
+    deviations): nested floats (the layout cache kept evicting a shrink-to-fit
+    parent's two measurements; 77 s to 1.8 s at 300), nested and sibling inline
+    boxes (edge sums, owner ranges, per-line reshaping; minutes to ~1.5 s at 5000),
+    grid track counts (Chromium's `kGridMaxTracks` rules at 10,000 tracks; nested
+    `repeat()` is invalid), `innerText`/`Range.toString()`/`contains()` (native,
+    linear; 30 s to 12 ms)
+  - [ ] still slow: nested `display:table` is quadratic (`ApplyTableUsedWidths` lays
+    out each table's subtree and dirties every ancestor; ~1.7 s at 300); the first
+    style and layout pass on a 10k-deep or 50k-wide tree (4.7 s / 7 s); `innerHTML`
+    with many top-level nodes is quadratic inside AngleSharp's `ParseFragment` +
+    `AppendNodes` (50k siblings ~100 s); RTL, CJK and short lines still reshape the
+    rest of the line per line; `DomTree.AppendChild` from C# on deep chains
+  - [ ] a grid item spanning the whole 10,000 x 10,000 track limit fills an occupancy
+    matrix of 100M cells (~80 ms, 100-400 MB transient); more than 32,767 auto-placed
+    items in one grid still overflow taffy's 16-bit lines
+  - [ ] found on the way, not fixed: computed `visibility` does not inherit (innerText
+    shows text inside a hidden subtree's children); closed `<details>`/`<dialog>`
+    content is not `display:none`; `getComputedStyle` does not serialize grid tracks;
+    a float after inline text starts a new line where Chromium keeps it on the line
+    (y/height differ); nested `padding:0 3px;margin:0 2px` spans land far from
+    Chromium's y
   - [ ] deep markup parses quadratically in AngleSharp (`IsInButtonScope` scans the
     open-element stack): 50k nested divs take ~20 s (M11)
   - [ ] per-page DOM byte budget, `ArrayBuffer` accounting, per-process memory
@@ -1225,6 +1247,47 @@ DEVIATION comment at the C# code that differs.
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
+
+- **Cancellation of work inside ops (H8, L12):** Rust's `terminate_execution` has the
+  same gap the port had: C# (or Rust) work inside an op runs to completion, and the
+  interrupt raised during it is lost. The port gives each isolate a
+  `ScriptCancellation` that every watchdog (`WatchdogScheduler`, `CdpWatchdog`)
+  cancels before interrupting, and `CancelTermination` or a settled watchdog resets.
+  - **Where it is observed:** sync ops (`FastOpBinding.WithCancellation`) and captures
+    (`WithSyncRenderLoadingDisabled`) run under it, through the thread-static
+    `WorkCancellation` scope. The render walks, taffy's dispatch, inline line-edge sums,
+    selector matching, `Descendants()` and serialization check it. The public
+    `RenderPaint` leaf overloads take a `CancellationToken`.
+  - **How a cancelled op ends:** it returns `undefined` rather than throwing (ClearScript
+    would clear the termination to raise the exception, and the shim's `try`/`catch`
+    would swallow it). It keeps re-interrupting until reset
+    (`ScriptCancellation.EnsureInterrupted`). An evaluation whose deadline passed
+    reports "execution terminated" instead of its result.
+  - **Callers and MCP:** `InterruptOnCancellation` lets a caller's token act as a
+    watchdog; the navigation script phase uses it with the navigation token. MCP tool
+    calls run under `POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS` (default 60 s); Rust's MCP
+    has no bound at all.
+  - **Other paths:** CDP `Dispatch` answers a watchdog-cancelled capture with an
+    ordinary error. The print-economy capture restores its styles in a `finally`.
+- **Layout cache keeps evicted measurements (`Layout/Cache.cs`):** taffy's cache (`vendor/taffy/src/tree/cache.rs`) keeps one measurement per slot and drops the old entry. The port moves an evicted entry into a per-node ring of up to 16, allocated on the first eviction, and checks it after the 9 slots. A shrink-to-fit parent (a float laid out as a flex row) measures its child at its min-content and max-content widths, which share a slot and evicted each other, so every level re-measured its subtree: 300 nested floats took over a minute, now about 1.8 s. Lookups still match the full key, so a hit returns exactly what a recompute would; only the hit rate changes.
+- **Grid track limit (`GridLimits.MaxTracks = 10000`):** Rust/taffy has no bound (it caps each `repeat()` at 1000 and uses 16-bit lines that wrap). The port follows Chromium's `kGridMaxTracks` rules with a limit of 10,000 instead of 10,000,000, because taffy's lines are `i16`.
+  - `repeat()` nested in `repeat()`, and `repeat(0, ...)`, make the whole `grid-template-*`/`grid-template`/`grid` declaration invalid, so the previous winner is kept. Rust expanded them.
+  - Track lists are truncated at 10,000 tracks; Rust's per-`repeat()` 1000 cap is gone (`repeat(1001, 1px)` gives 1001 tracks, as in Chromium).
+  - Line numbers and spans clamp to ±10,000 at parse time; Rust turned out-of-range values into `auto`.
+  - auto-fill/auto-fit floors each repeated track at 1px and stops at the limit; Rust divided by zero for 0px tracks and cast the float to `u16`, which hung.
+  - Placement pulls every item into a window of at most 10,000 tracks per axis (past the end an item lands in the last track, as in Chromium), and the occupancy estimate is clamped the same way. Auto-placement jumps over occupied runs; the positions found are the same.
+  - `grid-template-areas` line indexes and named-placement integers are clamped instead of wrapping in `short` casts.
+- **`column-count`:** any positive integer is accepted and saturates; Rust rejected values above `u32`. The used count keeps Rust's 64-column cap (Chromium's computed value caps at 65535).
+- **innerText is computed natively (`op_inner_text` -> `PreparedRender.InnerText`):** crates/obscura-js walks the subtree in bootstrap.js with one getComputedStyle() per element and recursion per level, O(n x depth), and overflows the stack on deep trees. The script walk stays as the fallback (unstyled element, unrendered root, XML document); the two must stay in step. The op is an addition; no existing op payload changed.
+- **Range.toString() walks natively (`op_dom` `range_text`)** instead of the bootstrap walk over the whole common-ancestor subtree with two boundary comparisons per node. An additive op_dom command.
+- **`op_dom` `contains` walks up from the candidate** instead of collecting the subtree, and `node.contains(node)` is true (inclusive, as in the spec and Chromium); crates/obscura-js tests strict descendants only.
+- **innerText follows Chromium's rules:** `<br>` is a literal newline, `pre-line` collapses spaces, U+000C is not collapsed, and a hidden element contributes no line breaks or tabs of its own. crates/obscura-js treats `<br>` as a required break, keeps `pre-line` spaces, collapses form feeds and adds breaks for hidden blocks.
+- **appendChild's "already last child" check reads `LastChild`** instead of copying the parent's child list, and `InheritedBorderSpacing` is cached per prepared render: both were O(children) / O(depth) per call.
+- **Inline edge sums (`InlineEdgeIndex`):** inline.rs `line_edge_advance`/`line_advance_before_event`/`line_advance_before_text` scan every boundary event, and `boundary_event_on_line` scans every owner box per event. C# precomputes emptiness per event and, above 32 events, answers from per-line running f32 sums kept in the scan's order. Same bits; cost goes from O(events x owners) per query to linear per shaping.
+- **Owner text ranges:** Rust `record_text` pushes an (owner, range) per open owner per text run. C# records the innermost owner per run plus a parent chain, and `SetInlineOwnerOffsets` emits one range per run for the innermost owner with a relative offset. Painted offsets are unchanged; this removes quadratic memory for nested inlines.
+- **Windowed first-line probe:** Rust `shape_with_text_indent` shapes and wraps the whole remaining line for every line it breaks. For lines over 2048 characters with no right-to-left text, C# shapes a window cut between two printable ASCII characters and accepts it only when line 2 ends before the window's last word, which provably gives the same first line; otherwise the window grows to the whole line.
+- **Word shaping cache:** each TextShaper reuses glyphs for a word under a single attribute span, keyed on text, attributes and direction. Shaping is per word with no context, so the result is identical.
+- **`materialize_start_candidates`:** Rust walks each root's full subtree; C# stops at nodes already visited in the same call. The candidates are the same.
 
 The fixes for `SECURITY.md`'s findings. Each is commented at its site. Where Rust
 and Chromium differ, Chromium wins.

@@ -28,7 +28,7 @@ public interface IIsolateHandle
 /// <c>terminate_execution</c>: it raises <c>ScriptInterruptedException</c> out of
 /// the running script from any thread.
 /// </summary>
-public sealed class V8IsolateHandle(V8ScriptEngine engine) : IIsolateHandle
+public sealed class V8IsolateHandle(V8ScriptEngine engine, ScriptCancellation? cancellation = null) : IIsolateHandle
 {
     private readonly V8ScriptEngine _engine =
         engine ?? throw new ArgumentNullException(nameof(engine));
@@ -36,6 +36,8 @@ public sealed class V8IsolateHandle(V8ScriptEngine engine) : IIsolateHandle
     /// <inheritdoc/>
     public void TerminateExecution()
     {
+        // Before the interrupt, for C# work inside an op (see WatchdogScheduler.Entry.Fire).
+        cancellation?.Cancel();
         try
         {
             _engine.Interrupt();
@@ -49,16 +51,23 @@ public sealed class V8IsolateHandle(V8ScriptEngine engine) : IIsolateHandle
             // Same race, reported differently by some ClearScript builds.
         }
     }
+
+    /// <summary>A fired command has settled: later work gets a fresh deadline.</summary>
+    internal void Settled() => cancellation?.Reset();
 }
 
 /// <summary>Handle to an armed command; pass to <see cref="CdpWatchdog.Disarm"/>.</summary>
 public sealed class ArmedWatchdog
 {
-    internal ArmedWatchdog(CdpWatchdogCore owner, ulong generation)
+    internal ArmedWatchdog(CdpWatchdogCore owner, ulong generation, IIsolateHandle? handle = null)
     {
         Owner = owner;
         Generation = generation;
+        Handle = handle;
     }
+
+    /// <summary>The isolate this command was armed on.</summary>
+    internal IIsolateHandle? Handle { get; }
 
     internal CdpWatchdogCore Owner { get; }
 
@@ -154,7 +163,7 @@ internal sealed class CdpWatchdogCore
         {
             EnsureWorker();
             _generation++;
-            var armed = new ArmedWatchdog(this, _generation);
+            var armed = new ArmedWatchdog(this, _generation, handle);
             _slots[_generation] = new Slot(Deadline(budget), handle, armed);
             Monitor.Pulse(_gate);
             return armed;
@@ -174,6 +183,7 @@ internal sealed class CdpWatchdogCore
         if (armed.Fired)
         {
             HangEscalation.Settled(armed);
+            (armed.Handle as V8IsolateHandle)?.Settled();
         }
 
         return armed.Fired;

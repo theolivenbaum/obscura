@@ -116,6 +116,9 @@ public static class SelectorMatching
         // One frame per combinator step: `div~div~...~div` over thousands of siblings recursed
         // as deep as the selector was long, and an overflow cannot be caught (SECURITY.md C6).
         // Out of stack, the selector simply does not match.
+        // Also where matching observes its deadline: one query or one cascade can match
+        // an expensive selector against every element (SECURITY.md H8).
+        WorkCancellation.ThrowIfCancellationRequested();
         if (!System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
         {
             return SelectorMatchingResult.NotMatchedGlobally;

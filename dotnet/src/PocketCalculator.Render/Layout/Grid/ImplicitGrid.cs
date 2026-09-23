@@ -48,10 +48,13 @@ internal static class ImplicitGrid
                 (ushort)(rowMaxSpan - explicitBlockTracks - negativeImplicitBlockTracks);
         }
 
-        var columnCounts = TrackCounts.FromRaw(
-            negativeImplicitInlineTracks, explicitInlineTracks, positiveImplicitInlineTracks);
-        var rowCounts = TrackCounts.FromRaw(
-            negativeImplicitBlockTracks, explicitBlockTracks, positiveImplicitBlockTracks);
+        // Deviation from taffy: the estimate sizes the occupancy matrix, so it is held to the
+        // same per-axis limit placement enforces (GridLimits), or an item at a far line would
+        // allocate rows x columns cells for tracks placement then refuses to create.
+        var columnCounts = GridLimits.ClampCounts(TrackCounts.FromRaw(
+            negativeImplicitInlineTracks, explicitInlineTracks, positiveImplicitInlineTracks));
+        var rowCounts = GridLimits.ClampCounts(TrackCounts.FromRaw(
+            negativeImplicitBlockTracks, explicitBlockTracks, positiveImplicitBlockTracks));
 
         return (columnCounts, rowCounts);
     }
@@ -103,10 +106,10 @@ internal static class ImplicitGrid
 
             colMin = OriginZeroLine.Min(colMin, childColMin);
             colMax = OriginZeroLine.Max(colMax, childColMax);
-            colMaxSpan = Math.Max(colMaxSpan, childColSpan);
+            colMaxSpan = Math.Max(colMaxSpan, GridLimits.ClampSpan(childColSpan));
             rowMin = OriginZeroLine.Min(rowMin, childRowMin);
             rowMax = OriginZeroLine.Max(rowMax, childRowMax);
-            rowMaxSpan = Math.Max(rowMaxSpan, childRowSpan);
+            rowMaxSpan = Math.Max(rowMaxSpan, GridLimits.ClampSpan(childRowSpan));
         }
 
         return (colMin, colMax, colMaxSpan, rowMin, rowMax, rowMaxSpan);

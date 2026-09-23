@@ -612,7 +612,11 @@ internal static class DomCascade
 
             List<ShadowSlottedScope> slottedScopes = [];
             NodeId? assignedSlot = tree.AssignedSlot(id);
-            for (int guard = 0; guard < tree.Count; guard++)
+
+            // DomTree.Count walks the node arena, so it is read once, and only for a slotted
+            // node: as the loop condition it made the cascade O(nodes) per node.
+            int slotGuard = assignedSlot is null ? 0 : tree.Count;
+            for (int guard = 0; guard < slotGuard; guard++)
             {
                 if (assignedSlot is not { } slot)
                 {

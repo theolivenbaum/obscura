@@ -6,8 +6,15 @@ namespace PocketCalculator.Render;
 /// <summary>A <c>-webkit-background-clip: text</c> fill: a gradient angle and its stops.</summary>
 public readonly record struct ClipTextFill(float Angle, List<(RgbaColor Color, float? Position)> Stops);
 
-/// <summary>A shaped byte range owned by one ordinary inline DOM element.</summary>
-internal readonly record struct OwnerTextRange(NodeId Owner, int Start, int End);
+/// <summary>
+/// One run of collected text and the innermost inline owner open around it, as an index into
+/// <see cref="InlineItem.OwnerChain"/> (-1 for none). The owners around a run are that node and
+/// its <see cref="OwnerChainNode.Parent"/> chain, so a run costs O(1) however deep it sits.
+/// </summary>
+internal readonly record struct OwnerTextChunk(int Start, int End, int Node);
+
+/// <summary>An inline owner and the owner open around it (an index, -1 for none).</summary>
+internal readonly record struct OwnerChainNode(NodeId Owner, int Parent);
 
 /// <summary>One inline-axis edge (margin, border, padding) of an inline box.</summary>
 internal readonly record struct InlineEdge(float Margin, float Border, float Padding)
@@ -38,7 +45,8 @@ internal readonly record struct ActiveInlineOwner(
     int Start,
     InlineEdge StartEdge,
     InlineEdge EndEdge,
-    int StartEvent);
+    int StartEvent,
+    int ChainNode);
 
 internal readonly record struct RelativeOwnerTextRange(int Start, int End, (float X, float Y) Offset);
 
@@ -151,11 +159,23 @@ public sealed class InlineItem
     /// </summary>
     internal string? OwnerText { get; init; }
 
-    internal List<OwnerTextRange> OwnerRanges { get; init; } = [];
+    /// <summary>
+    /// Collected text runs with the owners open around them. Replaces a flat list of one
+    /// (owner, range) entry per open owner per run, which was O(depth) per run and quadratic in
+    /// memory for nested inline boxes.
+    /// </summary>
+    internal List<OwnerTextChunk> OwnerChunks { get; init; } = [];
+
+    internal List<OwnerChainNode> OwnerChain { get; init; } = [];
 
     internal List<InlineOwnerBox> OwnerBoxes { get; init; } = [];
 
     internal List<InlineBoundaryEvent> BoundaryEvents { get; init; } = [];
+
+    private InlineEdgeIndex? _edgeIndex;
+
+    /// <summary>Query structure over <see cref="BoundaryEvents"/>, built on first use.</summary>
+    internal InlineEdgeIndex EdgeIndex => _edgeIndex ??= new InlineEdgeIndex(this);
 
     /// <summary>
     /// Nonzero used relative-position offsets, projected onto text ranges. Empty for ordinary
@@ -196,43 +216,8 @@ internal static class InlineGeometry
         return value == 0 ? null : (int)(value - 1);
     }
 
-    public static bool BoundaryEventOnLine(InlineItem item, InlineBoundaryEvent evt, int lineStart, int lineEnd)
-    {
-        int sourceEnd = item.OwnerText?.Length ?? 0;
-        bool empty = false;
-        foreach (InlineOwnerBox owner in item.OwnerBoxes)
-        {
-            if (owner.Owner == evt.Owner)
-            {
-                empty = owner.Start == owner.End;
-                break;
-            }
-        }
-
-        if (empty)
-        {
-            return (evt.Position >= lineStart && evt.Position < lineEnd)
-                || (lineEnd == sourceEnd && evt.Position == lineEnd);
-        }
-
-        return evt.IsStart
-            ? evt.Position >= lineStart && evt.Position < lineEnd
-            : evt.Position > lineStart && evt.Position <= lineEnd;
-    }
-
-    public static float LineEdgeAdvance(InlineItem item, int lineStart, int lineEnd)
-    {
-        float sum = 0f;
-        foreach (InlineBoundaryEvent evt in item.BoundaryEvents)
-        {
-            if (BoundaryEventOnLine(item, evt, lineStart, lineEnd))
-            {
-                sum += evt.Edge.Advance;
-            }
-        }
-
-        return sum;
-    }
+    public static float LineEdgeAdvance(InlineItem item, int lineStart, int lineEnd) =>
+        item.BoundaryEvents.Count == 0 ? 0f : item.EdgeIndex.Advance(lineStart, lineEnd, int.MaxValue);
 
     public static float LineEdgeAlignmentShift(InlineItem item, int lineStart, int lineEnd) =>
         -LineEdgeAdvance(item, lineStart, lineEnd) * item.Align switch
@@ -242,34 +227,11 @@ internal static class InlineGeometry
             _ => 0f,
         };
 
-    public static float LineAdvanceBeforeEvent(InlineItem item, int eventIndex, int lineStart, int lineEnd)
-    {
-        float sum = 0f;
-        for (int i = 0; i < eventIndex && i < item.BoundaryEvents.Count; i++)
-        {
-            InlineBoundaryEvent evt = item.BoundaryEvents[i];
-            if (BoundaryEventOnLine(item, evt, lineStart, lineEnd))
-            {
-                sum += evt.Edge.Advance;
-            }
-        }
+    public static float LineAdvanceBeforeEvent(InlineItem item, int eventIndex, int lineStart, int lineEnd) =>
+        item.BoundaryEvents.Count == 0 ? 0f : item.EdgeIndex.Advance(lineStart, lineEnd, eventIndex);
 
-        return sum;
-    }
-
-    public static float LineAdvanceBeforeText(InlineItem item, int globalPosition, int lineStart, int lineEnd)
-    {
-        float sum = 0f;
-        foreach (InlineBoundaryEvent evt in item.BoundaryEvents)
-        {
-            if (BoundaryEventOnLine(item, evt, lineStart, lineEnd) && evt.Position <= globalPosition)
-            {
-                sum += evt.Edge.Advance;
-            }
-        }
-
-        return sum;
-    }
+    public static float LineAdvanceBeforeText(InlineItem item, int globalPosition, int lineStart, int lineEnd) =>
+        item.BoundaryEvents.Count == 0 ? 0f : item.EdgeIndex.AdvanceBeforeText(globalPosition, lineStart, lineEnd);
 
     /// <summary>Total shaped size of a buffer: widest line, and the bottom of the last line.</summary>
     public static (float Width, float Height, bool Clamped) BufferSize(InlineItem item)
@@ -316,37 +278,46 @@ internal static class InlineGeometry
         bool afterBreak = false;
         foreach (BufferLine line in buffer.Lines)
         {
-            // Exactly one newline separates two buffer lines, and none precedes the first.
-            // DEVIATION from crates/obscura-render/src/inline.rs, which had no equivalent
-            // mapping at all; the C# version skipped a *run* of newlines before *every* line,
-            // so `<div><br>x</div>` put line 0 at offset 1 instead of 0 and `a\n\nb` put the
-            // empty line at 3 instead of 2. Nothing read those offsets until `<br>` started
-            // reporting a rect, which is what exposed it.
-            if (afterBreak && offset < source.Length && source[offset] == '\n')
-            {
-                offset++;
-            }
-
-            afterBreak = true;
-            string text = line.Text;
-            int start;
-            if (offset <= source.Length && source.AsSpan(offset).StartsWith(text, StringComparison.Ordinal))
-            {
-                start = offset;
-            }
-            else
-            {
-                int relative = offset <= source.Length
-                    ? source.IndexOf(text, offset, StringComparison.Ordinal)
-                    : -1;
-                start = relative < 0 ? offset : relative;
-            }
-
-            starts.Add(start);
-            offset = Math.Min(start + text.Length, source.Length);
+            starts.Add(NextSourceLineStart(line.Text, source, ref offset, ref afterBreak));
         }
 
         return starts;
+    }
+
+    /// <summary>
+    /// One step of <see cref="SourceLineStarts"/>: the start of the next buffer line, given the
+    /// state the previous lines left. Lets a caller that splits lines as it goes keep the
+    /// mapping incrementally instead of recomputing it for every line.
+    /// </summary>
+    public static int NextSourceLineStart(string text, string source, ref int offset, ref bool afterBreak)
+    {
+        // Exactly one newline separates two buffer lines, and none precedes the first.
+        // DEVIATION from crates/obscura-render/src/inline.rs, which had no equivalent
+        // mapping at all; the C# version skipped a *run* of newlines before *every* line,
+        // so `<div><br>x</div>` put line 0 at offset 1 instead of 0 and `a\n\nb` put the
+        // empty line at 3 instead of 2. Nothing read those offsets until `<br>` started
+        // reporting a rect, which is what exposed it.
+        if (afterBreak && offset < source.Length && source[offset] == '\n')
+        {
+            offset++;
+        }
+
+        afterBreak = true;
+        int start;
+        if (offset <= source.Length && source.AsSpan(offset).StartsWith(text, StringComparison.Ordinal))
+        {
+            start = offset;
+        }
+        else
+        {
+            int relative = offset <= source.Length
+                ? source.IndexOf(text, offset, StringComparison.Ordinal)
+                : -1;
+            start = relative < 0 ? offset : relative;
+        }
+
+        offset = Math.Min(start + text.Length, source.Length);
+        return start;
     }
 
     public static float RunCursorX(LayoutRun run, int offset)

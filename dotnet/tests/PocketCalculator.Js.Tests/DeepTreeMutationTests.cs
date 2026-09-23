@@ -57,6 +57,36 @@ public sealed class DeepTreeMutationTests
         Assert.True(state["ms"]!.GetValue<double>() < 8000, $"30000 detached appends took {state["ms"]}ms");
     }
 
+    /// <summary>
+    /// The render-invalidation check for <c>append_child</c> listed the parent's children to see
+    /// whether the node was already last, so a paragraph built of N sibling spans cost O(N^2):
+    /// 20000 bordered spans spent 8 s appending before layout started.
+    /// </summary>
+    [Fact]
+    public void AppendingManySiblingsIsLinear()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><p id=\"p\"></p></body></html>");
+        var result = fixture.Runtime.Evaluate(
+            """
+            (() => {
+              const p = document.getElementById('p');
+              const t0 = Date.now();
+              for (let i = 0; i < 40000; i++) {
+                const s = document.createElement('span');
+                s.textContent = 'x ';
+                p.appendChild(s);
+              }
+              // Re-appending the last child is a no-op move; the one before it is a real move.
+              p.appendChild(p.lastChild);
+              p.appendChild(p.children[p.children.length - 2]);
+              return JSON.stringify({ ms: Date.now() - t0, count: p.children.length });
+            })()
+            """);
+        var state = System.Text.Json.Nodes.JsonNode.Parse(result!.GetValue<string>())!;
+        Assert.Equal(40000, state["count"]!.GetValue<int>());
+        Assert.True(state["ms"]!.GetValue<double>() < 8000, $"40000 sibling appends took {state["ms"]}ms");
+    }
+
     [Fact]
     public void GetRootNodeStillFindsAShadowRoot()
     {
