@@ -184,6 +184,15 @@ public sealed class CookieJar
             {
                 if (_cookies.TryGetValue(domain, out var domainCookies))
                 {
+                    // RFC 6265 5.3: a non-HTTP API (document.cookie) must not delete
+                    // an existing HttpOnly cookie.
+                    if (fromJavaScript
+                        && domainCookies.TryGetValue((name, path), out var existing)
+                        && existing.HttpOnly)
+                    {
+                        return;
+                    }
+
                     domainCookies.Remove((name, path));
                 }
             }
@@ -210,6 +219,15 @@ public sealed class CookieJar
             {
                 domainCookies = [];
                 _cookies[domain] = domainCookies;
+            }
+
+            // RFC 6265 5.3: a non-HTTP API (document.cookie) must not overwrite an
+            // existing HttpOnly cookie set by the server.
+            if (fromJavaScript
+                && domainCookies.TryGetValue((name, path), out var existing)
+                && existing.HttpOnly)
+            {
+                return;
             }
 
             domainCookies[(name, path)] = entry;

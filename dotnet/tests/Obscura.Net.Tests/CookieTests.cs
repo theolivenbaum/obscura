@@ -18,6 +18,45 @@ public class CookieTests
         Assert.Contains("session=abc123", header, StringComparison.Ordinal);
     }
 
+    // RFC 6265 5.3: document.cookie (a non-HTTP API) must not overwrite or delete a
+    // server-set HttpOnly cookie. See upstream #915.
+    [Fact]
+    public void JsCannotOverwriteHttponlyCookie()
+    {
+        var jar = new CookieJar();
+        var url = new Uri("https://example.com/");
+        jar.SetCookie("session=server_secret; Path=/; HttpOnly", url);
+
+        jar.SetCookieFromJs("session=attacker_value", url);
+
+        Assert.Contains("session=server_secret", jar.GetCookieHeader(url), StringComparison.Ordinal);
+        Assert.DoesNotContain("attacker_value", jar.GetCookieHeader(url), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JsCannotDeleteHttponlyCookie()
+    {
+        var jar = new CookieJar();
+        var url = new Uri("https://example.com/");
+        jar.SetCookie("session=server_secret; Path=/; HttpOnly", url);
+
+        jar.SetCookieFromJs("session=; Max-Age=0", url);
+
+        Assert.Contains("session=server_secret", jar.GetCookieHeader(url), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JsCanStillOverwriteNonHttponlyCookie()
+    {
+        var jar = new CookieJar();
+        var url = new Uri("https://example.com/");
+        jar.SetCookie("pref=light; Path=/", url);
+
+        jar.SetCookieFromJs("pref=dark", url);
+
+        Assert.Contains("pref=dark", jar.GetCookieHeader(url), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TestCookieDomainMatching()
     {
