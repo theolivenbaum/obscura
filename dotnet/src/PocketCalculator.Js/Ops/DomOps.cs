@@ -743,6 +743,16 @@ public static class DomOps
             case "node_root":
             {
                 var current = ParseNodeOrZero(arg1);
+
+                // A connected node in a tree with no shadow roots has the document as its root,
+                // and the walk below is O(depth) on every appendChild of a connected node
+                // (_registerWindowNamedTree calls getRootNode), which made building a deep chain
+                // quadratic (SECURITY.md M11).
+                if (!dom.HasShadowRoots && dom.IsConnected(current))
+                {
+                    return Index(dom.Document);
+                }
+
                 while (dom.GetNode(current)?.Parent is { } parent)
                 {
                     current = parent;
@@ -825,9 +835,6 @@ public static class DomOps
         var impact = state.Dom is { } dom
             ? RenderInvalidation.MutationImpact(dom, cmd, arg1, arg2)
             : RenderMutationImpact.None;
-        var retainedStyleMutation = state.Dom is { } styleDom
-            ? RenderInvalidation.RetainedMutation(styleDom, cmd, arg1, arg2)
-            : null;
         var invalidate = impact.Connected && impact.ActualChange;
         if (invalidate)
         {
@@ -894,6 +901,13 @@ public static class DomOps
             state.AnimationTimeline.NoteSubtreeStartCandidate(scope, mutationTimeMs);
         }
 
+        // Only an invalidating mutation reads the retained-style classification, and computing it
+        // walks the node's ancestors (ContainingShadowRoot). Doing that for every detached
+        // append made building a deep subtree off-document quadratic (SECURITY.md M11). Nothing
+        // above mutates the tree, so this still sees the pre-mutation state.
+        var retainedStyleMutation = state.Dom is { } styleDom
+            ? RenderInvalidation.RetainedMutation(styleDom, cmd, arg1, arg2)
+            : null;
         if (retainedStyleMutation is { } mutation)
         {
             var retained = state.PreparedRender is not null
