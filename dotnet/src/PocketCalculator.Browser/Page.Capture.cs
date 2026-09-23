@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Runtime;
 using PocketCalculator.Js.Url;
 using PocketCalculator.Net;
 using PocketCalculator.Render;
@@ -11,44 +12,45 @@ namespace PocketCalculator.Browser;
 public sealed partial class Page
 {
     /// <summary>
-    /// Concurrently seed the synchronous renderer cache through the owning page
-    /// transport.
+    /// Render resources the retained document references but the renderer cache does
+    /// not know yet, found by scanning the light DOM for <c>&lt;img&gt;</c>,
+    /// <c>&lt;video poster&gt;</c>, <c>&lt;style&gt;</c>, fetched stylesheets,
+    /// <c>style</c> attributes and <c>&lt;use&gt;</c>. This is only the navigation
+    /// warmup: everything layout or paint actually asks for later is reported by the
+    /// renderer itself (<see cref="PocketCalculatorJsRuntime.TakeRenderResourceRequests"/>).
+    /// Blocked or disallowed URLs come back separately so they can be remembered as
+    /// missing. Rust <c>render_resource_candidates</c>.
     /// </summary>
-    /// <remarks>
-    /// This removes serial image/font HTTP from the first screenshot while retaining
-    /// cookies, proxy policy, interception, CORS, response limits and connection
-    /// pooling. Returns how many resources loaded successfully.
-    /// </remarks>
-    public async Task<int> PrepareScreenshotResourcesAsync(
-        ulong maxMs,
-        CancellationToken cancellationToken = default)
+    internal (List<RenderResourceMiss> Loadable, List<RenderResourceMiss> Rejected) RenderResourceCandidates()
     {
-        long started = Stopwatch.GetTimestamp();
-        if (maxMs == 0 || Js is not { } js)
+        if (Js is not { } js || Url is not { } documentUrl)
         {
-            return 0;
-        }
-        if (Url is not { } documentUrl)
-        {
-            return 0;
+            return ([], []);
         }
         UrlRecord baseUrl = ResolveBaseUrl() ?? documentUrl;
 
-        // A BTreeMap in Rust: ordered by (url, profile) so the request order is
-        // deterministic and the 128-entry truncation always keeps the same set.
-        var candidates = new SortedDictionary<(string Url, int Profile), ResourceType>(
-            Comparer<(string Url, int Profile)>.Create((left, right) =>
+        // A BTreeSet in Rust: ordered by (url, profile, is_font) so the request order is
+        // deterministic and the truncation always keeps the same set.
+        var candidates = new SortedSet<RenderResourceMiss>(Comparer<RenderResourceMiss>.Create(
+            static (left, right) =>
             {
                 int byUrl = string.CompareOrdinal(left.Url, right.Url);
-                return byUrl != 0 ? byUrl : left.Profile.CompareTo(right.Profile);
+                if (byUrl != 0)
+                {
+                    return byUrl;
+                }
+                int leftProfile = left.Profile is { } lp ? (int)lp + 1 : 0;
+                int rightProfile = right.Profile is { } rp ? (int)rp + 1 : 0;
+                return leftProfile != rightProfile
+                    ? leftProfile.CompareTo(rightProfile)
+                    : left.IsFont.CompareTo(right.IsFont);
             }));
 
         foreach ((string raw, ImageRequestProfile profile) in js.PendingRenderImageUrls())
         {
             if (PageUrl.TryParse(raw) is { } url)
             {
-                candidates[(PageUrl.WithoutFragment(url).Href, (int)profile + 1)] =
-                    ResourceType.Image;
+                candidates.Add(new RenderResourceMiss(PageUrl.WithoutFragment(url).Href, profile, false));
             }
         }
 
@@ -99,129 +101,205 @@ public sealed partial class Page
             {
                 if (PageUrl.TryParse(raw) is { } url)
                 {
-                    ResourceType kind = PageHelpers.RenderResourceType(url);
-                    candidates[(PageUrl.WithoutFragment(url).Href, 0)] = kind;
+                    bool isFont = PageHelpers.RenderResourceType(url) == ResourceType.Font;
+                    candidates.Add(new RenderResourceMiss(PageUrl.WithoutFragment(url).Href, null, isFont));
                 }
             }
         }
 
-        foreach ((string Url, int Profile) key in candidates.Keys.ToList())
+        List<RenderResourceMiss> loadable = [];
+        List<RenderResourceMiss> rejected = [];
+        int taken = 0;
+        foreach (RenderResourceMiss candidate in candidates)
         {
-            bool known = key.Profile == 0
-                ? js.RenderResourceIsKnown(key.Url)
-                : js.RenderImageResourceIsKnown(key.Url, (ImageRequestProfile)(key.Profile - 1));
+            // The renderer decodes data: URLs inline and never asks the cache for them.
+            if (candidate.Url.StartsWith("data:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            bool known = candidate.Profile is { } profile
+                ? js.RenderImageResourceIsKnown(candidate.Url, profile)
+                : js.RenderResourceIsKnown(candidate.Url);
             if (known)
             {
-                candidates.Remove(key);
+                continue;
             }
-        }
-
-        foreach ((string Url, int Profile) key in candidates.Keys.ToList())
-        {
-            if (!PageHelpers.SubresourceAllowed(documentUrl, key.Url) || ShouldBlockUrl(key.Url))
+            // Preserve the historical warmup bound. Anything beyond this batch is
+            // reported again by a later cache-only layout.
+            if (taken++ >= PageHelpers.MaxStylesheetResources)
             {
-                candidates.Remove(key);
+                break;
+            }
+            if (PageHelpers.SubresourceAllowed(documentUrl, candidate.Url) && !ShouldBlockUrl(candidate.Url))
+            {
+                loadable.Add(candidate);
+            }
+            else
+            {
+                rejected.Add(candidate);
             }
         }
+        return (loadable, rejected);
+    }
 
-        List<((string Url, int Profile) Key, ResourceType Kind)> requested =
-            [.. candidates.Select(entry => (entry.Key, entry.Value)).Take(128)];
-        if (requested.Count == 0)
+    /// <summary>
+    /// Abandon every background render-resource load of the current document, so a
+    /// response that belongs to a previous document can neither seed the next one's
+    /// cache nor be mistaken for its own request of the same URL.
+    /// </summary>
+    public void RetireRenderResources() => Js?.AbandonRenderResources();
+
+    /// <summary>
+    /// Apply every finished background load without waiting and report the responses
+    /// as Network events. Returns the number of loads that stored usable bytes.
+    /// </summary>
+    public int DrainRenderResourceResults()
+    {
+        if (Js is not { } js)
         {
             return 0;
         }
-
-        var factories =
-            new List<Func<Task<(string Raw, int Profile, ResourceType Kind, Response? Response)>>>(requested.Count);
-        foreach (((string url, int profile) key, ResourceType kind) in requested)
-        {
-            factories.Add(async () =>
-            {
-                UrlRecord parsed = PageUrl.TryParse(key.url)!;
-                ResourceRequest request = ResourceRequest.Subresource(kind, NetUrl.From(documentUrl));
-                switch (key.profile)
-                {
-                    case (int)ImageRequestProfile.CorsSameOrigin + 1:
-                        request.Mode = RequestMode.Cors;
-                        request.Credentials = RequestCredentials.SameOrigin;
-                        break;
-                    case (int)ImageRequestProfile.CorsInclude + 1:
-                        request.Mode = RequestMode.Cors;
-                        request.Credentials = RequestCredentials.Include;
-                        break;
-                    default:
-                        break;
-                }
-                double startedAt = PerformanceOps.UnixMilliseconds();
-                try
-                {
-                    Response response = await HttpClient
-                        .FetchResourceWithCallbacksAsync(NetUrl.From(parsed), request, _callbacks, cancellationToken)
-                        .ConfigureAwait(false);
-                    // These are the render resources, discovered from CSS and from DOM
-                    // attributes rather than requested by script: a font or image
-                    // named by a stylesheet is "css", one named by <img>/<video> is
-                    // its element.
-                    RecordResourceTiming(
-                        response.Url.AbsoluteUri,
-                        kind == ResourceType.Font ? "css" : "img",
-                        response,
-                        startedAt,
-                        PerformanceOps.UnixMilliseconds());
-                    return (key.url, key.profile, kind, (Response?)response);
-                }
-                catch (Exception error) when (error is not OperationCanceledException)
-                {
-                    return (key.url, key.profile, kind, null);
-                }
-            });
-        }
-
-        int loaded = 0;
-        // A deadline abandons unfinished work without negative-caching it, so a later
-        // warmup can retry slow resources.
-        await Buffered.UnorderedUntilAsync(
-            factories,
-            16,
-            DateTime.UtcNow.AddMilliseconds(maxMs),
-            result =>
-            {
-                byte[]? outcome = null;
-                if (result.Response is { } response)
-                {
-                    RecordNetworkEventWithBody(
-                        response.Url.AbsoluteUri,
-                        "GET",
-                        result.Kind == ResourceType.Font ? "Font" : "Image",
-                        response.Status,
-                        response.Headers,
-                        response.Body,
-                        base64Encoded: true);
-                    if (response.Status is >= 200 and < 300)
-                    {
-                        loaded += 1;
-                        outcome = response.Body;
-                    }
-                }
-                if (Js is { } runtime)
-                {
-                    if (result.Profile == 0)
-                    {
-                        runtime.SeedRenderResource(result.Raw, outcome);
-                    }
-                    else
-                    {
-                        runtime.SeedRenderImageResource(
-                            result.Raw,
-                            (ImageRequestProfile)(result.Profile - 1),
-                            outcome);
-                    }
-                }
-                return Task.CompletedTask;
-            }).ConfigureAwait(false);
-
-        _ = started;
+        int loaded = js.ApplyRenderResourceResults();
+        RecordRenderResourceEvents(js);
         return loaded;
+    }
+
+    /// <summary>
+    /// Apply finished loads and start transport loads for the resources cache-only
+    /// layout or paint missed since the last call, and report the Network events.
+    /// Returns the number of loads that stored usable bytes.
+    /// </summary>
+    public int QueuePendingRenderResources()
+    {
+        if (Js is not { } js)
+        {
+            return 0;
+        }
+        int loaded = js.ServiceRenderResources();
+        RecordRenderResourceEvents(js);
+        return loaded;
+    }
+
+    /// <summary>Whether background render-resource loads are still running.</summary>
+    public bool HasPendingRenderResources => Js?.HasPendingRenderResources ?? false;
+
+    /// <summary>
+    /// Start loads for everything the light-DOM scan finds, plus the renderer's own
+    /// misses. Returns the number of loads started.
+    /// </summary>
+    public int SpawnPendingRenderResources()
+    {
+        if (Js is not { } js)
+        {
+            return 0;
+        }
+        // A runtime attached without InitJs loads through the page transport all the same.
+        if (!js.HasPageTransport)
+        {
+            js.SetHttpClient(HttpClient);
+            js.SetCallbacks(_callbacks);
+        }
+        (List<RenderResourceMiss> loadable, List<RenderResourceMiss> rejected) = RenderResourceCandidates();
+        foreach (RenderResourceMiss miss in rejected)
+        {
+            if (miss.Profile is { } profile)
+            {
+                js.SeedRenderImageResource(miss.Url, profile, null);
+            }
+            else
+            {
+                js.SeedRenderResource(miss.Url, null);
+            }
+        }
+        List<RenderResourceMiss> requests = [.. js.MarkRenderResourcesInFlight(loadable)];
+        requests.AddRange(js.TakeRenderResourceRequests());
+        return js.StartRenderResourceLoads(requests);
+    }
+
+    /// <summary>
+    /// Seed the renderer cache through the owning page transport and wait up to
+    /// <paramref name="maxMs"/> for the results.
+    /// </summary>
+    /// <remarks>
+    /// This removes serial image/font HTTP from the first screenshot while retaining
+    /// cookies, proxy policy, SSRF policy, the tracker blocklist, interception, CORS,
+    /// response limits and connection pooling. Loads that miss the deadline keep running
+    /// in the background and are applied by a later drain; they are neither cancelled nor
+    /// negative-cached. Returns how many resources loaded successfully.
+    /// </remarks>
+    public async Task<int> PrepareScreenshotResourcesAsync(
+        ulong maxMs,
+        CancellationToken cancellationToken = default)
+    {
+        if (maxMs == 0 || Js is not { } js)
+        {
+            return 0;
+        }
+        long started = Stopwatch.GetTimestamp();
+        SpawnPendingRenderResources();
+        int loaded = 0;
+        while (ReferenceEquals(Js, js))
+        {
+            loaded += DrainRenderResourceResults();
+            if (!js.HasPendingRenderResources)
+            {
+                break;
+            }
+            double remaining = maxMs - Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            if (remaining <= 0
+                || !await js.WaitForRenderResourceLoadAsync(TimeSpan.FromMilliseconds(remaining), cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                if (ReferenceEquals(Js, js))
+                {
+                    loaded += DrainRenderResourceResults();
+                }
+                break;
+            }
+        }
+        return loaded;
+    }
+
+    /// <summary>
+    /// Load what the last capture missed, waiting up to <paramref name="maxMs"/>. True
+    /// when new bytes arrived, so capturing again shows them.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-browser: upstream reports these misses to the
+    /// transport but leaves the capture that found them without the bytes. Chromium
+    /// would have loaded them before painting, so the CLI and MCP screenshot paths call
+    /// this and capture once more. Before 97ff86d the C# compatibility loader fetched
+    /// them synchronously during the capture, so this keeps what those pages showed.
+    /// </remarks>
+    public async Task<bool> LoadCaptureMissesAsync(ulong maxMs, CancellationToken cancellationToken = default)
+    {
+        QueuePendingRenderResources();
+        return HasPendingRenderResources
+            && await PrepareScreenshotResourcesAsync(maxMs, cancellationToken).ConfigureAwait(false) > 0;
+    }
+
+    private void RecordRenderResourceEvents(PocketCalculatorJsRuntime js)
+    {
+        foreach (RenderResourceEvent ev in js.TakeRenderResourceEvents())
+        {
+            Response response = ev.Response;
+            RecordNetworkEventWithBody(
+                response.Url.AbsoluteUri,
+                "GET",
+                ev.IsFont ? "Font" : "Image",
+                response.Status,
+                response.Headers,
+                response.Body,
+                base64Encoded: true);
+            // These are render resources, discovered from CSS, DOM attributes or layout
+            // rather than requested by script: a font is "css", an image "img".
+            RecordResourceTiming(
+                response.Url.AbsoluteUri,
+                ev.IsFont ? "css" : "img",
+                response,
+                ev.StartedAtUnixMs,
+                ev.EndedAtUnixMs);
+        }
     }
 
     /// <summary>

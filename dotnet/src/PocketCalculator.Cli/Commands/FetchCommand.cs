@@ -360,6 +360,13 @@ public static class FetchCommand
                 "}))()");
 
         var png = Capture() ?? throw new CliException("screenshot failed: page has no DOM to render");
+        // The capture's own layout can miss resources the warmup scan cannot see (a
+        // script FontFace, shadow-root styles, a CSS content image). Load them through
+        // the page transport and capture once more; see Page.LoadCaptureMissesAsync.
+        if (await page.LoadCaptureMissesAsync(resourceDeadlineMs).ConfigureAwait(false))
+        {
+            png = Capture() ?? png;
+        }
         await File.WriteAllBytesAsync(path, png).ConfigureAwait(false);
 
         // A screenshot+eval command used to ignore the expression completely.

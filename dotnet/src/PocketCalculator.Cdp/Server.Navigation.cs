@@ -378,7 +378,9 @@ public static partial class CdpServer
 
         CdpLog.Debug($"CDP: {req.Method} (id={req.Id}, s={req.SessionId ?? "None"})");
 
+        ServiceLivePageRenderResources(ctx);
         var response = await Dispatcher.DispatchAsync(req, ctx).ConfigureAwait(false);
+        ServiceLivePageRenderResources(ctx);
 
         // Chromium CDP semantics: events emitted as a side-effect of a command
         // (for example Target.targetCreated + Target.attachedToTarget from

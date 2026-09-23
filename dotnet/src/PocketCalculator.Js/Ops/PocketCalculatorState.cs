@@ -275,6 +275,26 @@ public sealed class PocketCalculatorState
     public object AsyncResourceGate { get; } = new();
 
     /// <summary>
+    /// Page-transport loads for resources that cache-only layout or paint missed
+    /// (upstream 97ff86d). The owning runtime applies results at its own event-loop
+    /// turns and promise waits; a new document retires the set.
+    /// </summary>
+    public RenderResourceLoads RenderResourceLoads { get; set; } = new();
+
+    /// <summary>
+    /// One page-wide concurrency limit shared by every render-resource load, however
+    /// many scans or layout misses queue them.
+    /// </summary>
+    public SemaphoreSlim RenderResourceLimiter { get; } = new(RenderResourceLoads.Concurrency);
+
+    /// <summary>
+    /// <c>Fetch.enable</c> URL patterns mirrored from the owning page, so the renderer's
+    /// resource loads follow the same interception policy as the page's own
+    /// subresource fetches (a matching URL is not fetched behind the client's back).
+    /// </summary>
+    public List<string> InterceptBlockPatterns { get; } = [];
+
+    /// <summary>
     /// One exact-key compiled author stylesheet for this document. Connected
     /// mutations still discard <see cref="PreparedRender"/>; the next prepare reuses
     /// only parsing/indexing when ordered CSS source and viewport stay identical.

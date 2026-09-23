@@ -226,7 +226,7 @@ internal static class PaintFonts
 
     internal static byte[]? FetchAndDecodeFont(string src, string? baseUrl, RenderResourceCache cache)
     {
-        byte[]? compressed = PaintResources.FetchBytes(src, baseUrl, cache);
+        byte[]? compressed = PaintResources.FetchFontBytes(src, baseUrl, cache);
         if (compressed is null || compressed.Length > 8 * 1024 * 1024 || compressed.Length < 4)
         {
             return null;

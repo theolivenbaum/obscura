@@ -474,6 +474,7 @@ public sealed partial class Page : IDisposable
         // not exist yet, so a new runtime would otherwise start with interception
         // disabled and op_fetch_url would never intercept.
         rt.SetInterceptEnabled(InterceptEnabled);
+        rt.SetInterceptBlockPatterns(InterceptBlockPatterns);
         rt.SetRuntimeEventsEnabled(_runtimeEventsEnabled);
 
         if (Dom is { } dom)

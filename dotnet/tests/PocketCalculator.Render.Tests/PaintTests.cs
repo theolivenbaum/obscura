@@ -695,6 +695,53 @@ public class PaintTests
     }
 
     [Fact]
+    public void CacheOnlyMissesAreReportedWithTheirRequestIdentity()
+    {
+        RenderResourceCache cache = RenderResourceCache.WithLoader(_ => new byte[] { 1, 2, 3 });
+        const string Font = "https://example.test/font?id=late";
+        const string Image = "https://example.test/late.png#fragment";
+        Assert.False(cache.HasSyncMisses);
+
+        cache.SetSyncLoadingEnabled(false);
+        Assert.Null(cache.GetOrLoad(Font, isFont: true));
+        Assert.Null(cache.GetOrLoad(Font, isFont: true));
+        Assert.Null(cache.GetOrLoadImage(Image, ImageRequestProfile.CorsInclude));
+        Assert.True(cache.HasSyncMisses);
+        Assert.Equal(
+            [
+                new RenderResourceMiss(Font, null, true),
+                new RenderResourceMiss("https://example.test/late.png", ImageRequestProfile.CorsInclude, false),
+            ],
+            cache.TakeSyncMisses());
+        Assert.False(cache.HasSyncMisses, "take clears the report");
+
+        cache.Seed(Font, [9]);
+        Assert.NotNull(cache.GetOrLoad(Font, isFont: true));
+        Assert.False(cache.HasSyncMisses, "a hit is not a miss");
+
+        cache.SetSyncLoadingEnabled(true);
+        Assert.NotNull(cache.GetOrLoad("https://example.test/other.png", isFont: false));
+        Assert.False(cache.HasSyncMisses, "the synchronous compatibility loader never reports a miss");
+    }
+
+    [Fact]
+    public void CacheOnlyMissQueueRespectsTheCacheEntryLimit()
+    {
+        RenderResourceCache cache = RenderResourceCache.WithLoaderAndLimits(
+            _ => null,
+            1,
+            RenderResourceCache.DefaultResourceCacheBytes);
+        cache.SetSyncLoadingEnabled(false);
+
+        Assert.Null(cache.GetOrLoad("https://example.test/first.png", isFont: false));
+        Assert.Null(cache.GetOrLoad("https://example.test/second.png", isFont: false));
+        Assert.Single(cache.TakeSyncMisses());
+
+        Assert.Null(cache.GetOrLoad("https://example.test/second.png", isFont: false));
+        Assert.Single(cache.TakeSyncMisses());
+    }
+
+    [Fact]
     public void HtmlImageProfilesKeepIntrinsicGeometryAndPaintSeparate()
     {
         const string NetworkUrl = "https://assets.test/shared.svg";

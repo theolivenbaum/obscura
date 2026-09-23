@@ -180,6 +180,8 @@ public sealed partial class Page
         }
         UrlRecord url = parsed;
 
+        // The previous document's background render-resource loads end with it.
+        RetireRenderResources();
         Lifecycle = LifecycleState.Loading;
         Referrer = referrer;
         Url = url;
@@ -615,6 +617,7 @@ public sealed partial class Page
                     // Settling degrades rather than throwing on a broken page.
                 }
             }
+            QueuePendingRenderResources();
             if (!await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false))
             {
                 break;
@@ -671,6 +674,7 @@ public sealed partial class Page
     /// </remarks>
     public async Task<bool> RunAutonomousEventLoopTurnAsync(CancellationToken cancellationToken = default)
     {
+        QueuePendingRenderResources();
         bool reachedIdle = Js is { } js
             ? await js.RunAutonomousEventLoopTurnAsync().ConfigureAwait(false)
             : true;
@@ -679,6 +683,22 @@ public sealed partial class Page
         // generic frame path as settle, so a client that stays attached can observe
         // and run child documents as they arrive.
         bool frameWork = await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false);
+        // Geometry this turn produced may have missed resources; start their loads now.
+        QueuePendingRenderResources();
+        if (reachedIdle && !frameWork && Js is { } live && live.HasPendingRenderResources)
+        {
+            // A finished transport load is page work too: the next layout, paint or
+            // lifecycle read must see the real bytes without waiting for a protocol
+            // command. Upstream parks on the load's notification inside a select the
+            // connection processor cancels when a command arrives; this turn is awaited
+            // to completion instead, so the park is capped and the pump stays armed.
+            if (await live.WaitForRenderResourceLoadAsync(TimeSpan.FromMilliseconds(50), cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                DrainRenderResourceResults();
+            }
+            return false;
+        }
         return reachedIdle && !frameWork;
     }
 

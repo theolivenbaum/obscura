@@ -355,7 +355,13 @@ public sealed partial class PocketCalculatorJsRuntime
     /// update at task/rendering boundaries, not on each forced style or layout
     /// read.
     /// </summary>
-    private void BeginJavaScriptTask() => BeginAnimationTask();
+    private void BeginJavaScriptTask()
+    {
+        BeginAnimationTask();
+        // Script observes the resources that landed since the last task, and misses the
+        // last task created start loading (upstream 97ff86d). Two field reads when idle.
+        ServiceRenderResources();
+    }
 
     partial void BeginAnimationTask();
 
@@ -609,6 +615,9 @@ public sealed partial class PocketCalculatorJsRuntime
             return;
         }
         _disposed = true;
+        // Background render-resource loads belong to this document; a closed page must
+        // not keep fetching for a document nobody can observe any more.
+        AbandonRenderResources();
         foreach (var realm in _realms.ToArray())
         {
             realm.Dispose();

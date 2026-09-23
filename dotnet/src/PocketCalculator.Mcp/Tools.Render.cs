@@ -83,6 +83,12 @@ internal static partial class Tools
         _ = await page.PrepareScreenshotResourcesAsync(1_000).ConfigureAwait(false);
         var png = page.Screenshot(viewport)
             ?? throw new ToolException("the current page has no renderable viewport");
+        // Load what the capture's own layout missed and capture again; see
+        // Page.LoadCaptureMissesAsync.
+        if (await page.LoadCaptureMissesAsync(1_000).ConfigureAwait(false))
+        {
+            png = page.Screenshot(viewport) ?? png;
+        }
         return new JsonObject
         {
             ["type"] = "image",

@@ -78,6 +78,8 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         taskError = null;
         ranTimers = false;
+        // Timer-driven page script observes bytes that landed during a wait.
+        ServiceRenderResources();
         PerformMicrotaskCheckpoint();
 
         // HTML fires unhandledrejection at the microtask checkpoint, not at the

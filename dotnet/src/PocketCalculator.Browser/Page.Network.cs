@@ -300,6 +300,9 @@ public sealed partial class Page
     {
         InterceptEnabled = enabled;
         Js?.SetInterceptEnabled(enabled);
+        // Fetch.enable assigns the patterns right before this call; the renderer's
+        // loads follow the same interception policy (upstream 97ff86d).
+        Js?.SetInterceptBlockPatterns(InterceptBlockPatterns);
     }
 
     /// <summary>

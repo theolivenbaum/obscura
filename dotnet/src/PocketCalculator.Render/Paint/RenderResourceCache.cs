@@ -46,6 +46,13 @@ public sealed record DynamicFontFace
     public required string UnicodeRange { get; init; }
 }
 
+/// <summary>
+/// One resource a cache-only layout or paint asked for and did not have: the network
+/// URL, the image request profile (none for CSS images and fonts) and whether a font
+/// consumes it.
+/// </summary>
+public readonly record struct RenderResourceMiss(string Url, ImageRequestProfile? Profile, bool IsFont);
+
 /// <summary>The exact responsive image candidate chosen during preparation.</summary>
 public sealed record SelectedImage(string ResolvedUrl, float Density, ImageRequestProfile Profile);
 
@@ -131,6 +138,16 @@ public sealed class RenderResourceCache
     private readonly int _maxContentImageIntrinsics;
     private long _retainedBytes;
     private bool _syncLoadingEnabled = true;
+
+    /// <summary>
+    /// Resources a cache-only lookup missed since the last <see cref="TakeSyncMisses"/>,
+    /// with the request identity layout used (image CORS profile, or none for CSS images
+    /// and fonts) and whether the consumer is a font. Deduplicated so repeated layouts do
+    /// not grow the list (upstream 97ff86d).
+    /// </summary>
+    private readonly List<RenderResourceMiss> _syncMisses = [];
+    private readonly HashSet<string> _syncMissKeys = new(StringComparer.Ordinal);
+    private volatile int _syncMissCount;
     private IRenderResourceLoader _loader;
 
     private RenderResourceCache(IRenderResourceLoader loader, int maxEntries, int maxBytes)
@@ -224,6 +241,67 @@ public sealed class RenderResourceCache
             bool previous = _syncLoadingEnabled;
             _syncLoadingEnabled = enabled;
             return previous;
+        }
+    }
+
+    /// <summary>
+    /// Whether layout and paint may still open synchronous compatibility requests.
+    /// Page-owned caches disable this permanently and are fed by the page transport.
+    /// </summary>
+    public bool SyncLoadingEnabled
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _syncLoadingEnabled;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Take the resources that cache-only layout or paint asked for and did not have,
+    /// exactly as they were resolved (network URL plus the image request profile, or
+    /// none for CSS images and fonts). The owning page loads them through its
+    /// asynchronous transport; nothing is reconstructed from the DOM, so
+    /// script-registered fonts, shadow roots and every other renderer-only source are
+    /// covered.
+    /// </summary>
+    public IReadOnlyList<RenderResourceMiss> TakeSyncMisses()
+    {
+        lock (_gate)
+        {
+            _syncMissKeys.Clear();
+            if (_syncMisses.Count == 0)
+            {
+                return [];
+            }
+
+            RenderResourceMiss[] taken = [.. _syncMisses];
+            _syncMisses.Clear();
+            _syncMissCount = 0;
+            return taken;
+        }
+    }
+
+    /// <summary>Whether any cache-only miss is waiting to be taken. Lock-free.</summary>
+    public bool HasSyncMisses => _syncMissCount != 0;
+
+    // Callers hold _gate.
+    private void RecordSyncMiss(string key, string url, ImageRequestProfile? profile, bool isFont)
+    {
+        // Bound a hostile document's per-layout queue to the number of entries this
+        // cache could retain. A later layout reports skipped misses again after the
+        // current batch has been drained.
+        if (_syncMisses.Count >= _maxEntries)
+        {
+            return;
+        }
+
+        if (_syncMissKeys.Add(key))
+        {
+            _syncMisses.Add(new RenderResourceMiss(url, profile, isFont));
+            _syncMissCount = _syncMisses.Count;
         }
     }
 
@@ -496,7 +574,9 @@ public sealed class RenderResourceCache
     // The compatibility loader runs under the gate: it is only reachable from the
     // synchronous render path, and letting a seed interleave with the remove/insert pair
     // around it is what the gate exists to prevent.
-    internal byte[]? GetOrLoad(string url)
+    internal byte[]? GetOrLoad(string url) => GetOrLoad(url, isFont: false);
+
+    internal byte[]? GetOrLoad(string url, bool isFont)
     {
         string key = NetworkResourceUrl(url);
         lock (_gate)
@@ -514,6 +594,7 @@ public sealed class RenderResourceCache
 
             if (!_syncLoadingEnabled)
             {
+                RecordSyncMiss(key, key, null, isFont);
                 return null;
             }
 
@@ -548,6 +629,7 @@ public sealed class RenderResourceCache
 
             if (!_syncLoadingEnabled)
             {
+                RecordSyncMiss(key, NetworkResourceUrl(url), profile, false);
                 return null;
             }
 
@@ -811,7 +893,14 @@ internal static class PaintResources
     /// Resolve <paramref name="src"/> (a <c>data:</c> URI, or an absolute/relative URL against
     /// <paramref name="baseUrl"/>) to raw bytes, fetching at most once per distinct URL.
     /// </summary>
-    internal static byte[]? FetchBytes(string src, string? baseUrl, RenderResourceCache cache)
+    internal static byte[]? FetchBytes(string src, string? baseUrl, RenderResourceCache cache) =>
+        FetchBytesWithKind(src, baseUrl, cache, isFont: false);
+
+    /// <summary>As <see cref="FetchBytes"/>, but a cache-only miss is reported as a font.</summary>
+    internal static byte[]? FetchFontBytes(string src, string? baseUrl, RenderResourceCache cache) =>
+        FetchBytesWithKind(src, baseUrl, cache, isFont: true);
+
+    private static byte[]? FetchBytesWithKind(string src, string? baseUrl, RenderResourceCache cache, bool isFont)
     {
         if (src.StartsWith("data:", StringComparison.Ordinal))
         {
@@ -840,7 +929,7 @@ internal static class PaintResources
         }
 
         string? resolved = ResolveResourceUrl(src, baseUrl);
-        return resolved is null ? null : cache.GetOrLoad(resolved);
+        return resolved is null ? null : cache.GetOrLoad(resolved, isFont);
     }
 
     internal static byte[]? FetchProfiledImageBytes(

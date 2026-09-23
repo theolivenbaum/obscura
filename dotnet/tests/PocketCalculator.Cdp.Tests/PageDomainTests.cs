@@ -584,6 +584,16 @@ public sealed class PageDomainTests
     /// resource-loading phase, which used to add up to three seconds to every
     /// screenshot/PDF/screencast start.
     /// </summary>
+    /// <remarks>
+    /// Since upstream 97ff86d a capture's cache-only misses are loaded in the
+    /// background through the page transport once the page next runs a JavaScript
+    /// task, the way Chromium loads a background image it has just discovered. The
+    /// upstream form of this test counted every request after all three captures,
+    /// which only held because its current-thread Tokio runtime never ran those
+    /// background loads before the count. The port's loads are real tasks, so the
+    /// check is per asset: nothing may request an asset between the capture that
+    /// discovered it and the next JavaScript task.
+    /// </remarks>
     [Fact]
     public async Task CaptureMethodsDoNotStartDefaultResourceWarmups()
     {
@@ -591,7 +601,7 @@ public sealed class PageDomainTests
             System.Net.IPAddress.Loopback, 0);
         listener.Start();
         int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
-        int requests = 0;
+        var requested = new System.Collections.Concurrent.ConcurrentQueue<string>();
         using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         Task accepting = Task.Run(async () =>
         {
@@ -609,15 +619,18 @@ public sealed class PageDomainTests
 
                 using (client)
                 {
-                    Interlocked.Increment(ref requests);
-                    const string body =
-                        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
-                    byte[] response = System.Text.Encoding.UTF8.GetBytes(
-                        "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: "
-                        + body.Length.ToString(CultureInfo.InvariantCulture)
-                        + "\r\nConnection: close\r\n\r\n" + body);
                     try
                     {
+                        byte[] head = new byte[2048];
+                        int read = await client.GetStream().ReadAsync(head, stopping.Token);
+                        string line = System.Text.Encoding.ASCII.GetString(head, 0, read).Split("\r\n")[0];
+                        requested.Enqueue(line);
+                        const string body =
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>";
+                        byte[] response = System.Text.Encoding.UTF8.GetBytes(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: "
+                            + body.Length.ToString(CultureInfo.InvariantCulture)
+                            + "\r\nConnection: close\r\n\r\n" + body);
                         await client.GetStream().WriteAsync(response, stopping.Token);
                     }
                     catch (Exception)
@@ -646,9 +659,8 @@ public sealed class PageDomainTests
         string[] methods = ["captureScreenshot", "startScreencast", "printToPDF"];
         for (int index = 0; index < methods.Length; index++)
         {
-            string asset = "http://127.0.0.1:"
-                + port.ToString(CultureInfo.InvariantCulture)
-                + "/capture-" + index.ToString(CultureInfo.InvariantCulture) + ".svg";
+            string path = "/capture-" + index.ToString(CultureInfo.InvariantCulture) + ".svg";
+            string asset = "http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture) + path;
             string script =
                 "(function(){const box=document.createElement('div');"
                 + "box.setAttribute('style','width:10px;height:10px;background-image:url('+"
@@ -657,13 +669,13 @@ public sealed class PageDomainTests
             DomainResult result = await PageDomain.HandleAsync(
                 methods[index], new JsonObject(), ctx, session);
             Assert.True(result.IsOk, $"{methods[index]} failed: {result.Error}");
+            await Task.Delay(75, TestContext.Current.CancellationToken);
+            Assert.DoesNotContain(requested, line => line.Contains(path, StringComparison.Ordinal));
         }
 
-        await Task.Delay(75, TestContext.Current.CancellationToken);
         await stopping.CancelAsync();
         listener.Stop();
         await accepting;
-        Assert.Equal(0, Volatile.Read(ref requests));
     }
 
     [Fact]

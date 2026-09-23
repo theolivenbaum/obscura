@@ -119,6 +119,7 @@ public static partial class CdpServer
                         await Task.Yield();
                     }
 
+                    ServiceLivePageRenderResources(ctx);
                     SyncLivePageNetworkEvents(ctx);
                     Dispatcher.DrainRuntimeEvents(ctx);
                     Dispatcher.DrainBindingCalls(ctx);
@@ -275,6 +276,24 @@ public static partial class CdpServer
         else
         {
             request.Resolver.TrySetResult(new InterceptResolution.Fail("Aborted"));
+        }
+    }
+
+    /// <summary>
+    /// Apply finished background render-resource loads and start loads for the
+    /// resources the last layout or paint missed, for every live page (upstream
+    /// 97ff86d). Runs before a command, so it observes bytes that landed while the
+    /// client was silent; after a command, so its layout misses start loading at once;
+    /// and after each autonomous pump turn.
+    /// </summary>
+    internal static void ServiceLivePageRenderResources(CdpContext ctx)
+    {
+        foreach (var page in ctx.Pages)
+        {
+            if (page.HasJs)
+            {
+                page.QueuePendingRenderResources();
+            }
         }
     }
 

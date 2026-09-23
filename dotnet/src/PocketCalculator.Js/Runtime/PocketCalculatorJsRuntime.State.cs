@@ -137,7 +137,13 @@ public sealed partial class PocketCalculatorJsRuntime
 
     public void SetCookieJar(CookieJar jar) => State.CookieJar = jar;
 
-    public void SetHttpClient(PocketCalculatorHttpClient client) => State.HttpClient = client;
+    public void SetHttpClient(PocketCalculatorHttpClient client)
+    {
+        State.HttpClient = client;
+        // A page transport makes the renderer cache-only; see FreshRenderResources for
+        // why layout must not fetch by itself (upstream 97ff86d).
+        State.RenderResources.SetSyncLoadingEnabled(false);
+    }
 
     /// <summary>
     /// Install the owning page's passive on_request/on_response callback
@@ -149,7 +155,14 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Install the stealth HTTP client so scripted fetch()/XHR is routed
     /// through it in stealth mode.
     /// </summary>
-    public void SetStealthClient(IStealthHttpClient client) => State.StealthClient = client;
+    public void SetStealthClient(IStealthHttpClient client)
+    {
+        State.StealthClient = client;
+        if (client.IsAvailable)
+        {
+            State.RenderResources.SetSyncLoadingEnabled(false);
+        }
+    }
 
     /// <summary>Install a fresh document. A new document owns fresh page state.</summary>
     public void SetDom(DomTree dom)
@@ -170,8 +183,9 @@ public sealed partial class PocketCalculatorJsRuntime
         State.AnimationTaskGeneration = 0;
         State.AnimationSampledTaskGeneration = 0;
         State.PendingStyleMutations.Clear();
-        State.RenderResources = PocketCalculator.Render.RenderResourceCache.Default();
+        State.RenderResources = FreshRenderResources(State);
         State.RenderImageInFlight.Clear();
+        AbandonRenderResources();
         State.StylesheetCache = new PocketCalculator.Render.Css.StylesheetCache();
         State.DynamicFonts.Clear();
         State.CanvasSurfaces.Clear();
@@ -479,7 +493,8 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         State.PreparedRender = null;
         State.PendingStyleMutations.Clear();
-        State.RenderResources = PocketCalculator.Render.RenderResourceCache.Default();
+        State.RenderResources = FreshRenderResources(State);
+        AbandonRenderResources();
         State.StylesheetCache = new PocketCalculator.Render.Css.StylesheetCache();
         State.DynamicFonts.Clear();
         State.ElementScrollOffsets.Clear();
@@ -563,6 +578,13 @@ public sealed partial class PocketCalculatorJsRuntime
         frame.InterceptEnabled = State.InterceptEnabled;
         frame.PageInFlight = State.PageInFlight;
         frame.StealthClient = State.StealthClient;
+        // A frame realm shares the page transport, so its renderer cache must not open
+        // synchronous requests either (upstream 97ff86d). Frame geometry resolves
+        // against the main document's renderer state, so no frame-scoped loading.
+        if (HasTransport(State))
+        {
+            frame.RenderResources.SetSyncLoadingEnabled(false);
+        }
     }
 
     // -------------------------------------------------------------- render state
