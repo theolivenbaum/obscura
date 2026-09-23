@@ -55,6 +55,7 @@ public sealed partial class DomTree
 
         while (stack.Count > 0)
         {
+            WorkCancellation.ThrowIfCancellationRequested();
             var work = stack.Pop();
             steps++;
             if (steps > maxSteps)

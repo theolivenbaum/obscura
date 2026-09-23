@@ -897,6 +897,7 @@ public sealed partial class DomTree
 
         while (stack.Count > 0)
         {
+            WorkCancellation.ThrowIfCancellationRequested();
             var current = stack.Pop();
             result.Add(current);
             // Defense in depth: a well-formed subtree has at most nodes.Count descendants.
