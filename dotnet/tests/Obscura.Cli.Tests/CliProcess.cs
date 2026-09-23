@@ -28,7 +28,7 @@ public static class CliProcess
         var dir = AppContext.BaseDirectory;
         while (dir is not null)
         {
-            if (Directory.Exists(Path.Combine(dir, ".git")) && Directory.Exists(Path.Combine(dir, "dotnet")))
+            if (Path.Exists(Path.Combine(dir, ".git")) && Directory.Exists(Path.Combine(dir, "dotnet")))
             {
                 foreach (var configuration in new[] { "Release", "Debug" })
                 {
