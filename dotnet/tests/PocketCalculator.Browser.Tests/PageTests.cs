@@ -2169,6 +2169,10 @@ public sealed class PageTests
         // another origin (a redirect) is not clean.
         sheets[sameImport.Href] = new LoadedStylesheet(importedUrl, [], ".ok{}");
         Assert.False(PageHelpers.StylesheetGraphIsOriginClean(rootUrl.Href, sheets, aliases, [], documentUrl));
+        // A chain that left the origin and came back is tainted all the same (port deviation:
+        // Fetch's response tainting).
+        sheets[sameImport.Href] = new LoadedStylesheet(sameImport, [], ".ok{}", RedirectLeftOrigin: true);
+        Assert.False(PageHelpers.StylesheetGraphIsOriginClean(rootUrl.Href, sheets, aliases, [], documentUrl));
     }
 
     [Fact]

@@ -221,7 +221,19 @@ public sealed partial class Page
                 }
                 aliases[key] = key;
                 aliases[responseKey] = key;
-                sheets[key] = new LoadedStylesheet(canonicalResponseUrl, imports, rules);
+                bool redirectLeftOrigin = false;
+                foreach (Uri hop in response.RedirectedFrom)
+                {
+                    if (!string.Equals(
+                        UrlRecord.Parse(hop.AbsoluteUri)?.AsciiOrigin,
+                        documentUrl.AsciiOrigin,
+                        StringComparison.Ordinal))
+                    {
+                        redirectLeftOrigin = true;
+                        break;
+                    }
+                }
+                sheets[key] = new LoadedStylesheet(canonicalResponseUrl, imports, rules, redirectLeftOrigin);
 
                 if (depth >= PageHelpers.MaxStylesheetImportDepth)
                 {

@@ -11,7 +11,18 @@ namespace PocketCalculator.Browser;
 internal sealed record StylesheetImport(string Url, string? Media);
 
 /// <summary>A fetched stylesheet plus the imports it declares.</summary>
-internal sealed record LoadedStylesheet(UrlRecord ResponseUrl, IReadOnlyList<StylesheetImport> Imports, string Rules);
+/// <remarks>
+/// <paramref name="RedirectLeftOrigin"/> records that a redirect hop on the way to
+/// <paramref name="ResponseUrl"/> was on another origin than the document's. Fetch taints a
+/// no-cors response opaque once a hop crosses origins, even if a later hop comes back, so
+/// such a sheet is never origin-clean. DEVIATION from upstream 04418a5, which judges the
+/// final URL alone.
+/// </remarks>
+internal sealed record LoadedStylesheet(
+    UrlRecord ResponseUrl,
+    IReadOnlyList<StylesheetImport> Imports,
+    string Rules,
+    bool RedirectLeftOrigin = false);
 
 /// <summary>
 /// Which element a fetched author sheet belongs to.
@@ -414,7 +425,8 @@ internal static partial class PageHelpers
         }
 
         string documentOrigin = documentUrl.AsciiOrigin;
-        bool clean = !string.Equals(documentOrigin, "null", StringComparison.Ordinal)
+        bool clean = !sheet.RedirectLeftOrigin
+            && !string.Equals(documentOrigin, "null", StringComparison.Ordinal)
             && string.Equals(sheet.ResponseUrl.AsciiOrigin, documentOrigin, StringComparison.Ordinal);
         for (int i = 0; clean && i < sheet.Imports.Count; i++)
         {
