@@ -252,7 +252,23 @@ public sealed class FontDatabase : IDisposable
     public List<FontId> LoadFontSource(byte[] data)
     {
         List<FontId> ids = [];
-        byte[] decoded = Woff.TryDecode(data, out byte[]? sfnt) ? sfnt! : data;
+        byte[] decoded;
+        if (Woff.TryDecode(data, out byte[]? sfnt))
+        {
+            decoded = sfnt!;
+        }
+        else if (Woff.IsWoff(data))
+        {
+            // A WOFF container the decoder refused (malformed, or over Woff.MaxSfntSize) is a
+            // failed load. Handing its raw bytes on would let the font backend inflate it
+            // itself, without the bounds the refusal was for.
+            return ids;
+        }
+        else
+        {
+            decoded = data;
+        }
+
         using SKData skData = SKData.CreateCopy(decoded);
         for (int index = 0; ; index++)
         {

@@ -18,6 +18,23 @@ internal static class Woff
     private const uint Woff1Signature = 0x774F4646; // 'wOFF'
     private const uint Woff2Signature = 0x774F4632; // 'wOF2'
 
+    /// <summary>
+    /// The largest decoded font this accepts, in bytes: the sum of the declared table lengths,
+    /// the decompressed WOFF2 stream, and the rebuilt glyf table are each held to it.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: the reference hands the bytes to <c>wuff</c>, and the first port
+    /// inflated into unbounded streams, so a 1.5 MB WOFF grew past 9 GB. Chromium decodes
+    /// webfonts through OTS and google/woff2, whose default ceiling is 30 MiB
+    /// (<c>woff2::kDefaultMaxSize</c>); a font over it fails to load there, and here it fails the
+    /// same way: a failed load, and the fallback font.
+    /// </remarks>
+    internal const int MaxSfntSize = 30 * 1024 * 1024;
+
+    /// <summary>Whether <paramref name="data"/> carries a WOFF or WOFF2 signature.</summary>
+    public static bool IsWoff(ReadOnlySpan<byte> data) =>
+        data.Length >= 4 && BinaryPrimitives.ReadUInt32BigEndian(data) is Woff1Signature or Woff2Signature;
+
     private static readonly string[] KnownTags =
     [
         "cmap", "head", "hhea", "hmtx", "maxp", "name", "OS/2", "post", "cvt ", "fpgm",
@@ -63,21 +80,41 @@ internal static class Woff
         ushort numTables = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(12));
         uint flavor = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(4));
         var tables = new List<(uint Tag, byte[] Data)>(numTables);
+        long declaredTotal = 12 + (16L * numTables);
         for (int i = 0; i < numTables; i++)
         {
             int entry = 44 + (i * 20);
             uint tag = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry));
-            int offset = (int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry + 4));
-            int compLength = (int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry + 8));
-            int origLength = (int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry + 12));
+            uint rawOffset = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry + 4));
+            uint rawCompLength = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry + 8));
+            uint rawOrigLength = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(entry + 12));
+
+            // Every declared length is checked before anything is allocated from it: the
+            // table has to lie inside the resource, and the tables together inside the cap.
+            declaredTotal += (rawOrigLength + 3L) & ~3L;
+            // A compLength over origLength is invalid in WOFF 1.0 and OTS refuses it.
+            if (declaredTotal > MaxSfntSize
+                || rawCompLength > rawOrigLength
+                || (ulong)rawOffset + rawCompLength > (ulong)data.Length)
+            {
+                throw new InvalidDataException("WOFF table exceeds the resource or the size cap");
+            }
+
+            int offset = (int)rawOffset;
+            int compLength = (int)rawCompLength;
+            int origLength = (int)rawOrigLength;
             byte[] payload;
             if (compLength < origLength)
             {
                 using var input = new MemoryStream(data, offset, compLength, writable: false);
                 using var inflate = new ZLibStream(input, CompressionMode.Decompress);
-                var output = new MemoryStream(origLength);
-                inflate.CopyTo(output);
-                payload = output.ToArray();
+                payload = new byte[origLength];
+                if (ReadBounded(inflate, payload) != origLength)
+                {
+                    // OTS rejects a table whose inflated length is not its origLength, and
+                    // this stops reading one byte past it rather than inflating the rest.
+                    throw new InvalidDataException("WOFF table length mismatch");
+                }
             }
             else
             {
@@ -97,6 +134,7 @@ internal static class Woff
         int totalCompressedSize = (int)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(20));
 
         int cursor = 48;
+        long uncompressedSize = 0;
         var entries = new List<Woff2Entry>(numTables);
         for (int i = 0; i < numTables; i++)
         {
@@ -124,15 +162,23 @@ internal static class Woff
             }
 
             entries.Add(new Woff2Entry(tag, transformed, originalLength, transformLength));
+            uncompressedSize += transformLength;
+            if (uncompressedSize > MaxSfntSize)
+            {
+                throw new InvalidDataException("WOFF2 tables exceed the size cap");
+            }
         }
 
-        byte[] decompressed;
+        // The Brotli stream holds exactly the tables' transformed lengths back to back, as
+        // google/woff2 requires; its output is bounded to that sum rather than read to the end.
+        byte[] decompressed = new byte[uncompressedSize];
         using (var input = new MemoryStream(data, cursor, totalCompressedSize, writable: false))
         using (var brotli = new BrotliStream(input, CompressionMode.Decompress))
         {
-            var output = new MemoryStream();
-            brotli.CopyTo(output);
-            decompressed = output.ToArray();
+            if (ReadBounded(brotli, decompressed) != decompressed.Length)
+            {
+                throw new InvalidDataException("WOFF2 decompressed size mismatch");
+            }
         }
 
         var tables = new List<(uint Tag, byte[] Data)>(numTables);
@@ -225,6 +271,11 @@ internal static class Woff
         var loca = new byte[(numGlyphs + 1) * 4];
         for (int glyphIndex = 0; glyphIndex < numGlyphs; glyphIndex++)
         {
+            if (glyf.Length > MaxSfntSize)
+            {
+                throw new InvalidDataException("reconstructed glyf exceeds the size cap");
+            }
+
             BinaryPrimitives.WriteUInt32BigEndian(loca.AsSpan(glyphIndex * 4), (uint)glyf.Length);
             short contours = nContour.ReadInt16();
             bool hasBbox = (bboxBitmap.Peek(glyphIndex / 8) & (1 << (7 - (glyphIndex % 8)))) != 0;
@@ -268,6 +319,13 @@ internal static class Woff
         {
             total += nPoints.Read255UInt16();
             endPoints[i] = total - 1;
+        }
+
+        // A glyph's end points are 16-bit, so no legal glyph has more points than this; the
+        // streams read as zeros past their end, so an unchecked count would amplify freely.
+        if (total > ushort.MaxValue)
+        {
+            throw new InvalidDataException("glyph has too many points");
         }
 
         var xs = new int[total];
@@ -550,6 +608,23 @@ internal static class Woff
         }
 
         throw new InvalidDataException("malformed UIntBase128");
+    }
+
+    /// <summary>
+    /// Fill <paramref name="buffer"/> from <paramref name="stream"/> and report how many bytes
+    /// the stream held, up to one past the buffer: a longer stream reads as
+    /// <c>buffer.Length + 1</c>, so the caller sees the mismatch without inflating the rest.
+    /// </summary>
+    private static int ReadBounded(Stream stream, byte[] buffer)
+    {
+        int filled = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+        if (filled < buffer.Length)
+        {
+            return filled;
+        }
+
+        Span<byte> probe = stackalloc byte[1];
+        return stream.Read(probe) == 0 ? filled : filled + 1;
     }
 
     private static uint Tag(string tag) =>
