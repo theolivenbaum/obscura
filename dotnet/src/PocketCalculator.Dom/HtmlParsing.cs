@@ -160,19 +160,35 @@ public static class HtmlParsing
 
     // ------------------------------------------------------------------ the walk
 
+    /// <summary>
+    /// Chromium's <c>kMaximumHTMLParserDOMTreeDepth</c>: once the stack of open elements is deeper
+    /// than this, <c>HTMLConstructionSite::AttachLater</c> attaches a new element or comment to the
+    /// parent of the current node instead of the current node, so parsed content never nests
+    /// deeper than 513 elements however the markup is written.
+    /// </summary>
+    internal const int MaxParserTreeDepth = 512;
+
+    // DEVIATION from crates/obscura-dom/src/tree_sink.rs, which nests parsed content as deep as the
+    // markup says. Three thousand unclosed `<div>`s then overflowed the stack in layout and killed
+    // the process (SECURITY.md C5). Chromium caps parser depth at 512 and flattens beyond it;
+    // this mirrors that rule over AngleSharp's tree. `Depth` is the open-element stack depth the
+    // tree builder had when it inserted the node (the element depth of its AngleSharp parent,
+    // counting the root <html> as 1), which keeps growing past the cap exactly as Chromium's stack
+    // does; only the attachment point is clamped. Text is not moved, as in Chromium.
     private static void Adapt(DomTree tree, NodeId destParent, INodeList nodes)
     {
         // Explicit stack: a deeply nested source document must not overflow the thread stack.
-        var stack = new Stack<(NodeId Parent, INode Node)>();
-        PushAll(stack, destParent, nodes);
+        var stack = new Stack<(NodeId Parent, INode Node, int Depth)>();
+        var rootDepth = tree.GetNode(destParent)?.IsElement == true ? 1 : 0;
+        PushAll(stack, destParent, nodes, rootDepth);
 
         while (stack.Count > 0)
         {
-            var (parent, node) = stack.Pop();
+            var (parent, node, depth) = stack.Pop();
             switch (node)
             {
                 case IElement element:
-                    AdaptElement(tree, parent, element, stack);
+                    AdaptElement(tree, AttachPoint(tree, parent, depth), element, depth, stack);
                     break;
 
                 case IText text:
@@ -181,7 +197,9 @@ public static class HtmlParsing
                     break;
 
                 case IComment comment:
-                    tree.AppendChild(parent, tree.NewNode(NodeData.Comment(comment.Data)));
+                    tree.AppendChild(
+                        AttachPoint(tree, parent, depth),
+                        tree.NewNode(NodeData.Comment(comment.Data)));
                     break;
 
                 case IDocumentType doctype:
@@ -200,11 +218,25 @@ public static class HtmlParsing
         }
     }
 
-    private static void PushAll(Stack<(NodeId Parent, INode Node)> stack, NodeId parent, INodeList nodes)
+    /// <summary>
+    /// Where a node the tree builder inserted at open-element depth <paramref name="depth"/> goes:
+    /// its intended parent, or that parent's parent once the depth passes the cap. A parent with
+    /// no parent of its own (template contents, a fragment root) keeps the node, as in Chromium.
+    /// </summary>
+    private static NodeId AttachPoint(DomTree tree, NodeId parent, int depth) =>
+        depth > MaxParserTreeDepth && tree.GetNode(parent)?.Parent is { } grandparent
+            ? grandparent
+            : parent;
+
+    private static void PushAll(
+        Stack<(NodeId Parent, INode Node, int Depth)> stack,
+        NodeId parent,
+        INodeList nodes,
+        int depth)
     {
         for (var i = nodes.Length - 1; i >= 0; i--)
         {
-            stack.Push((parent, nodes[i]));
+            stack.Push((parent, nodes[i], depth));
         }
     }
 
@@ -212,7 +244,8 @@ public static class HtmlParsing
         DomTree tree,
         NodeId parent,
         IElement element,
-        Stack<(NodeId Parent, INode Node)> stack)
+        int depth,
+        Stack<(NodeId Parent, INode Node, int Depth)> stack)
     {
         var name = ElementName(element);
         var attrs = ElementAttributes(element);
@@ -244,9 +277,10 @@ public static class HtmlParsing
             tree.AppendChild(parent, id);
         }
 
+        var childDepth = depth + 1;
         if (isTemplate && element is IHtmlTemplateElement template && contents is { } contentsId)
         {
-            PushAll(stack, contentsId, template.Content.ChildNodes);
+            PushAll(stack, contentsId, template.Content.ChildNodes, childDepth);
             return;
         }
 
@@ -260,11 +294,11 @@ public static class HtmlParsing
             var rootId = tree.NewNode(NodeData.Document);
             if (tree.AttachShadowRootNode(id, rootId, mode) == AttachShadowError.None)
             {
-                PushAll(stack, rootId, shadow.ChildNodes);
+                PushAll(stack, rootId, shadow.ChildNodes, childDepth);
             }
         }
 
-        PushAll(stack, id, element.ChildNodes);
+        PushAll(stack, id, element.ChildNodes, childDepth);
     }
 
     private static QualName ElementName(IElement element)
