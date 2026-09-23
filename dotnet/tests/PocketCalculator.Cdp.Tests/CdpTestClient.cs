@@ -129,14 +129,19 @@ internal static class CdpTestClient
     }
 
     /// <summary>Issue one plain HTTP GET and return the whole response.</summary>
-    internal static async Task<string> HttpGetAsync(int port, string path, TimeSpan timeout)
+    internal static Task<string> HttpGetAsync(int port, string path, TimeSpan timeout) =>
+        HttpRawAsync(
+            port,
+            $"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
+            timeout);
+
+    /// <summary>Send <paramref name="request"/> verbatim and return the whole response.</summary>
+    internal static async Task<string> HttpRawAsync(int port, string request, TimeSpan timeout)
     {
         using var socket = new TcpClient();
         await socket.ConnectAsync(IPAddress.Loopback, port).ConfigureAwait(false);
         var stream = socket.GetStream();
-        var request = Encoding.ASCII.GetBytes(
-            $"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-        await stream.WriteAsync(request).ConfigureAwait(false);
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(request)).ConfigureAwait(false);
 
         using var deadline = new CancellationTokenSource(timeout);
         var sb = new StringBuilder();

@@ -701,7 +701,7 @@ public static partial class CdpServer
             try
             {
                 socket.Blocking = true;
-                HandleHttpJsonBlocking(socket, port, endpoint);
+                HandleHttpJsonBlocking(socket, port, endpoint, head);
             }
             catch (SocketException e)
             {
@@ -741,10 +741,11 @@ public static partial class CdpServer
     }
 
     /// <summary>Serve an HTTP <c>/json/*</c> endpoint with blocking I/O on the accept thread.</summary>
-    private static void HandleHttpJsonBlocking(Socket socket, int port, string endpoint)
+    private static void HandleHttpJsonBlocking(Socket socket, int port, string endpoint, string requestHead)
     {
         var scratch = new byte[4096];
         _ = socket.Receive(scratch, 0, scratch.Length, SocketFlags.None);
+        var authority = WebSocketAuthority(requestHead, port);
 
         var body = endpoint switch
         {
@@ -756,7 +757,7 @@ public static partial class CdpServer
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
                 ["V8-Version"] = "14.5.0.0",
                 ["WebKit-Version"] = "537.36",
-                ["webSocketDebuggerUrl"] = $"ws://127.0.0.1:{port}/devtools/browser",
+                ["webSocketDebuggerUrl"] = $"ws://{authority}/devtools/browser",
             }),
             "list" => CdpJson.SerializePretty(new JsonArray
             {
@@ -768,7 +769,7 @@ public static partial class CdpServer
                     ["title"] = "",
                     ["type"] = "page",
                     ["url"] = "about:blank",
-                    ["webSocketDebuggerUrl"] = $"ws://127.0.0.1:{port}/devtools/page/page-1",
+                    ["webSocketDebuggerUrl"] = $"ws://{authority}/devtools/page/page-1",
                 },
             }),
             "protocol" => CdpJson.SerializePretty(new JsonObject

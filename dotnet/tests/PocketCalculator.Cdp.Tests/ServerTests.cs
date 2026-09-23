@@ -118,6 +118,16 @@ public sealed class ServerTests
     }
 
     [Fact]
+    public void DiscoveryUsesTheClientFacingHttpAuthority()
+    {
+        const string request = "GET /json/version HTTP/1.1\r\nhOsT: cdp.example.test:9222\r\n\r\n";
+        Assert.Equal("cdp.example.test:9222", CdpServer.WebSocketAuthority(request, 9223));
+
+        const string malformed = "GET /json/version HTTP/1.1\r\nHost: attacker.test/path\r\n\r\n";
+        Assert.Equal("127.0.0.1:9223", CdpServer.WebSocketAuthority(malformed, 9223));
+    }
+
+    [Fact]
     public void CookieDeltaMergesChangesWithoutRevertingOtherConnections()
     {
         var destination = new CookieJar();
@@ -563,6 +573,18 @@ public sealed class ServerTests
         Assert.EndsWith(
             "{\n  \"version\": {\n    \"major\": \"1\",\n    \"minor\": \"3\"\n  }\n}",
             protocol,
+            StringComparison.Ordinal);
+
+        // Upstream 0671d94: the advertised endpoint is the one the client used, so
+        // a client that came in through localhost (or a forwarded port) is sent
+        // back the same way rather than to 127.0.0.1.
+        var viaLocalhost = await CdpTestClient.HttpRawAsync(
+            server.Port,
+            $"GET /json/version HTTP/1.1\r\nHost: localhost:{server.Port}\r\nConnection: close\r\n\r\n",
+            timeout);
+        Assert.EndsWith(
+            $"  \"webSocketDebuggerUrl\": \"ws://localhost:{server.Port}/devtools/browser\"\n}}",
+            viaLocalhost,
             StringComparison.Ordinal);
     }
 
