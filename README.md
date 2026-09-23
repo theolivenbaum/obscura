@@ -113,6 +113,12 @@ const browser = await puppeteer.connect({ browserWSEndpoint: "ws://127.0.0.1:922
 const browser = await chromium.connectOverCDP("http://127.0.0.1:9222");
 ```
 
+On loopback no credentials are needed. Binding the CDP or MCP server anywhere else
+(`--host 0.0.0.0`) requires a bearer token of at least 32 bytes in
+`POCKETCALCULATOR_CDP_TOKEN` or `POCKETCALCULATOR_MCP_TOKEN`. Requests carrying a
+browser `Origin`, and CDP requests with a foreign `Host`, are refused. MCP callers
+from a browser can be allowed with `POCKETCALCULATOR_MCP_ALLOWED_ORIGINS`.
+
 ## Build, test and publish
 
 ```bash

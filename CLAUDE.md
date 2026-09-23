@@ -333,7 +333,16 @@ when C# layout drifts from Rust:
 - **Multi-statement `--eval` starting with `const` returns `null`** (V8 gives
   `const` an empty completion value). This is V8 behavior and must be preserved.
 - **SSRF:** loopback / RFC1918 / link-local fetches are blocked by default. Use
-  `--allow-private-network` (or `POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1`).
+  `--allow-private-network` (or `POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1`). Render
+  resource loads (images, SVG, fonts found during layout) go through the page's
+  transport too, never a side channel; synchronous layout is cache-only and records
+  misses for the transport to load.
+- **Page script never reaches the engine.** `globalThis.Deno` is deleted after
+  bootstrap; the shim holds the ops in a closure. Do not add a page-visible global that
+  exposes an op, the stylesheet store, or response bytes an internal load fetched.
+- **Control planes are gated.** A non-loopback CDP or MCP bind needs a 32+ byte token
+  (`POCKETCALCULATOR_CDP_TOKEN`, `POCKETCALCULATOR_MCP_TOKEN`); browser `Origin`s are
+  refused, and so are foreign `Host`s on CDP.
 - **Watchdog:** synchronous V8 work runs unbounded, so a timeout that only
   cancels at await points cannot interrupt it. The Rust engine terminates the
   isolate from a separate thread. The C# port uses `V8Runtime.Interrupt()` /

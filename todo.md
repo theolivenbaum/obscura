@@ -210,24 +210,42 @@ Reviewed 2026-09-23; detail per commit in `dotnet/docs/upstream-review-2026-09.m
 `.reference/obscura/` stays at `727cc46` until these are ported or declined. Ordered
 by severity; one upstream fix per commit, citing the upstream sha.
 
-Security (the C# port is exposed today):
+Security - all ported (2026-09-23; deviations under "Known deviations", "Upstream security
+ports 727cc46..1a3169d"):
 
-- [ ] `04418a5` G - MCP HTTP: origin allowlist, Content-Type, token, limits, no `file://`
-- [ ] `04418a5` A - hide `Deno.core.ops` from page script
-- [ ] `97ff86d` + `99647b4` - route render resource loads through the page transport
+- [x] `04418a5` G - MCP HTTP: origin allowlist, Content-Type, token, limits, no `file://`
+- [x] `04418a5` A - hide `Deno.core.ops` from page script
+- [x] `97ff86d` + `99647b4` - route render resource loads through the page transport
       (SSRF guard, blocklist, cookies, proxy); DOM-only screenshots stay network-free
-- [ ] `04418a5` C - fetch/XHR response confidentiality (`Set-Cookie`, unexposed
+- [x] `04418a5` C - fetch/XHR response confidentiality (`Set-Cookie`, unexposed
       headers, `no-cors`); `op_fetch_url` gains the `internalLoad` argument
-- [ ] `04f0475` + `05846de` - CORS preflight enforcement, CORS check per redirect hop
-- [ ] `ebe5973` - drop credentials on cross-origin redirects; only POST downgrades on 301/302
-- [ ] `04418a5` D - iframe same-origin check against the final URL
-- [ ] `4778192` - `op_navigate` must not move the page URL before commit
-- [ ] `b369f78` - `document.cookie` cannot write or delete HttpOnly cookies
-- [ ] `04418a5` B - cross-origin stylesheet confidentiality
-- [ ] `04418a5` F + `0671d94` - CDP token, Origin refusal, Host check; endpoint from Host
-- [ ] `04418a5` E - cookie jar RFC 6265bis rules, host-only persistence (`hostOnly` key)
-- [ ] `04418a5` H, `c2e6fb2`, `8395f29` - calc() nesting guard, random-bytes cap,
+- [x] `04f0475` + `05846de` - CORS preflight enforcement, CORS check per redirect hop
+- [x] `ebe5973` - drop credentials on cross-origin redirects; only POST downgrades on 301/302
+- [x] `04418a5` D - iframe same-origin check against the final URL
+- [x] `4778192` - `op_navigate` must not move the page URL before commit
+- [x] `b369f78` - `document.cookie` cannot write or delete HttpOnly cookies
+- [x] `04418a5` B - cross-origin stylesheet confidentiality
+- [x] `04418a5` F + `0671d94` - CDP token, Origin refusal, Host check; endpoint from Host
+- [x] `04418a5` E - cookie jar RFC 6265bis rules, host-only persistence (`hostOnly` key)
+- [x] `04418a5` H, `c2e6fb2`, `8395f29` - calc() nesting guard, random-bytes cap,
       oversized transform layer skipped rather than failing the capture
+
+Security follow-ups found while porting (not upstream fixes):
+
+- [ ] `__obscura_markTrusted` and the other `__obscura_*` helpers stay page-visible, as
+      upstream has them; page script can mark its own events trusted
+- [ ] Page-initiated navigations carry no initiator, so a cross-site one still sends
+      SameSite=Strict cookies (upstream behaves the same; Chromium withholds them).
+      Fixing it also changes `Referer` and `sec-fetch-site`
+- [ ] `no-cors` requests may carry `Authorization`; Chromium refuses non-safelisted
+      request headers in `no-cors` mode
+- [ ] `ImageAgent` has no SSRF check; it is reachable only from standalone `RenderPaint`
+      callers with no page (as upstream), since `Obscura.Render` cannot see `SsrfGuard`
+- [ ] `serve --workers` behind a DNS Host name: the loopback-bound workers refuse it until
+      a156914's `OBSCURA_CDP_FORWARDED_HOST/PORT` is ported
+- [ ] A `serve` process with stdin closed may still hit the fd-0 close at shutdown in
+      code paths other than the accept thread fixed here; audit `Socket.Dispose` under a
+      blocked call
 
 Correctness:
 
@@ -265,6 +283,15 @@ Found during the review, not from upstream:
 
 - [ ] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
       caller, around line 796); repro in the review document
+- [ ] An inline `<span>` reports width 0 from `getBoundingClientRect()`; an `inline-block`
+      reports its real width (seen writing the font-directory CDP test)
+- [ ] Render loads on CDP pages other than the first produce no Network events:
+      `SyncLivePageNetworkEvents` forwards only the first live page
+- [ ] Timing-sensitive tests under heavy host load: the IntersectionObserver/ResizeObserver
+      group in `RuntimeTests` (25/60 ms timer windows) and
+      `ConcurrentConnectionsHeavyPageDoNotAbortV8`; both pass alone and fail on the
+      unmodified base under the same load. `ForwardWaapiSampleUpdatesRetainedStyleAndPaint`
+      was reported failing on the base at low load once; it passes in full runs here
 
 ## Open issues
 
@@ -1153,6 +1180,70 @@ DEVIATION comment at the C# code that differs.
 ## Known deviations
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Upstream security ports 727cc46..1a3169d
+
+Each is commented at its site. Where upstream and Chromium differ, Chromium wins.
+
+Page script and the shim:
+
+- `globalThis.Deno` is deleted after bootstrap in every realm (upstream 04418a5 A). The shim
+  closes over `__obscuraCore`; host script reaches the page through `__obscura_binding_called`
+  and `_wrap`. Only `PocketCalculator.Js.Tests` get `__obscura_test_ops`, through
+  `BootstrapLoader.ExposeOpsForTests` (upstream's cfg(test) `expose_ops_for_tests`).
+- Stylesheet ops use the closure-private `_realmFrameId`, not page-writable
+  `globalThis.__obscura_frameId`, so one realm's script cannot aim them at another's document.
+- `sheet.href` stays the request URL (CSSOM); upstream binds it to the response URL. The
+  response URL is kept privately for origin-clean writes.
+- A stylesheet is tainted when any redirect hop left the origin, not only the final URL
+  (Fetch response tainting): the dynamic path treats an opaque response as unclean, the static
+  path checks `Response.RedirectedFrom`.
+- Removing a linked `<link>` keeps its stored bytes, so re-appending restores the sheet as in
+  Chromium; upstream deletes them. `DomTree.ExternalStylesheetCss` skips a `<link disabled>`
+  instead of the shim writing an empty sheet. The store joins text on write, and
+  `op_external_stylesheet_set` invalidates the render only when the CSS changed.
+- `contentDocument` never treats the opaque origin `"null"` as same-origin. An iframe loads
+  through `op_fetch_url(..., internalLoad=true)`, since a public no-cors fetch() is now opaque.
+- The fallback `Response` keeps `status: 0` rather than reading it as 200.
+
+Network:
+
+- A redirect downgrades to GET only where Fetch says so: 301/302 for POST, 303 for anything but
+  GET/HEAD (`FetchOps.RedirectDowngradesToGet`). Rust downgrades every 301/302/303.
+- The `Fetch.fulfillRequest` result for `op_fetch_url` omits `bodyBase64` (Rust has it since
+  #912, not ported); the C# fulfill body is text only.
+- Cookies: an empty `Domain=` is ignored (host-only), not rejected; on an IP host only the exact
+  address is accepted, as a host cookie; `CookieJar.IsSameSite` treats an IP as its own site
+  (Rust's psl groups IPs by their last two octets). The CDP server's cookie delta merge keeps
+  host-only scope, which Rust widens. The curated public suffix list (see "The public suffix
+  list is curated") now also governs cookies.
+
+Rendering:
+
+- After a capture, the CLI and MCP screenshot paths load what that capture's own layout missed
+  through the transport and capture again (`Page.LoadCaptureMissesAsync`); upstream leaves those
+  bytes out of that capture. Chromium would have loaded them, and the port used to fetch them
+  synchronously, so this keeps what those pages showed.
+- The autonomous CDP turn awaits to completion instead of being cancelled by an arriving
+  command, so waiting on a pending render load is capped at 50 ms and the pump stays armed.
+- A runtime with no transport drops the misses a capture records (its next synchronous layout
+  loads them) instead of marking them missing. Each document's loads are one object, retired
+  and replaced on a new document (upstream swaps an mpsc channel); the applied-event backlog is
+  capped at 1024; `data:` URLs are skipped in the warm-up scan.
+
+Servers:
+
+- CDP Host check (`Server.Control.cs` `HostAllowed`) follows Chromium's
+  `RequestIsSafeToServe`: no Host, any IP literal, or `localhost` / `*.localhost` on any port;
+  a wildcard bind accepts any Host. Upstream requires the bind IP and port and refuses a
+  missing Host, which breaks tunnels, port forwards and the multi-worker balancer.
+- Multi-worker `serve` refuses a non-loopback balancer bind without `POCKETCALCULATOR_CDP_TOKEN`
+  (32+ bytes). Upstream 04418a5 left it open; a156914 closed it another way.
+- CDP refusals drain the unread request and half-close before closing, so the client reads the
+  401/403/431 rather than a reset; Rust drops the stream.
+- CDP shutdown stops the accept thread before disposing the listener: disposing it under a
+  blocked `Accept()` made .NET close fd 0, which in a process with stdin closed is some other
+  live handle.
 
 ### Operator font directories load per render pass, not into a cached base database
 
