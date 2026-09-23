@@ -53,10 +53,14 @@ Still open after the fixes:
   `mcp`, for work outside any of these scopes.
 - **Deep markup parses in quadratic time** inside AngleSharp's tree builder
   (M11): 50k nested `<div>`s take about 20 s.
-- **Memory outside the heap cap** (M7): DOM text, `ArrayBuffer` backing stores,
-  and no per-process budget. `op_fetch_url` still copies a body several times
-  (M4).
-- **CDP isolated worlds** share the main world (M6).
+- **Memory** (M7, M4): `ArrayBuffer`s are capped per isolate (1 GiB) and DOM data per
+  document (512 MiB), detached DOM nothing holds is garbage-collected, and
+  `op_fetch_url` writes its result once. WebAssembly memory is still not counted, and
+  the per-process limit (`POCKETCALCULATOR_MAX_PROCESS_BYTES`) is opt-in.
+- **CDP isolated worlds** (M6): main-frame worlds are separate realms now, so page
+  tampering no longer reaches Playwright's or Puppeteer's utility-world results.
+  Child-frame worlds still share the frame's realm, and main-world CDP snippets still
+  use page-visible built-ins (L10).
 - **Remaining page-writable surfaces:**
   - `__virtualUrl` still moves the URL the page reports and the one CDP and MCP
     show. Origin, cookie and initiator decisions no longer read it.
@@ -281,6 +285,9 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 | Setting | Default | Effect |
 |---|---|---|
 | `--timeout`, `POCKETCALCULATOR_SCRIPT_DEADLINE_MS`, `POCKETCALCULATOR_NAV_TIMEOUT_MS` | 30 s | Watchdog on synchronous V8 work, and navigation deadlines. The watchdog also cancels C# work inside ops and captures, and `--timeout` now stops the script phase too. `POCKETCALCULATOR_HANG_EXIT_MS` (opt-in, `serve`/`mcp`) exits the process when an interrupted command still does not return (L12). |
+| `POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES` | 1 GiB | `ArrayBuffer` backing stores per isolate (0 for none). Over it: `RangeError`. |
+| `POCKETCALCULATOR_MAX_DOM_BYTES` | 512 MiB | DOM node and text/attribute data per document (0 disables). Over it, after a collection: `QuotaExceededError`. |
+| `POCKETCALCULATOR_MAX_PROCESS_BYTES` | off | Process working-set limit: over it, running page work is terminated and new pages are refused. |
 | `POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS` | 60 s | Watchdog on each MCP tool call (0 disables), like `POCKETCALCULATOR_CDP_COMMAND_TIMEOUT_MS` for CDP commands. |
 | V8 flags `--max-old-space-size` | 4096 MB | Enforced heap cap, applied to every runtime, library and CDP included (M7). Memory outside the V8 heap is not counted. |
 | `--font-dir`, `BrowserConfig.FontDirectories` | none | Operator-chosen font directories, read once. With none set, no font file is read from disk. |
@@ -356,10 +363,10 @@ contradict an entry `todo.md` marks done say so.
 | M1 | Medium | CLI | `serve --workers` under the `dotnet` host starts `dotnet serve` | tested; conditional | fixed |
 | M2 | Medium | Net | A proxy (including `HTTP_PROXY`) disables the hostname SSRF check | tested; inherited | fixed; proxy-side rebinding remains |
 | M3 | Medium | Net | No timeout on response body reads | tested | fixed |
-| M4 | Medium | Net | `op_fetch_url` copies each body about 5x, with no concurrency cap | read | partial: concurrency capped, copies remain |
+| M4 | Medium | Net | `op_fetch_url` copies each body about 5x, with no concurrency cap | read | fixed: concurrency capped, result written once |
 | M5 | Medium | Net | `__Host-` / `__Secure-` cookie prefixes not enforced; cookie jar unbounded | read | fixed |
-| M6 | Medium | CDP | Isolated worlds share the main world; binding calls forgeable | read | partial: binding names checked, isolated worlds open |
-| M7 | Medium | JS | Memory outside the V8 heap cap; no default cap for embedders | tested | partial: binding queue capped, default heap cap; DOM, ArrayBuffer, process budgets open |
+| M6 | Medium | CDP | Isolated worlds share the main world; binding calls forgeable | read | fixed: binding names checked, main-frame worlds are realms; child-frame worlds open |
+| M7 | Medium | JS | Memory outside the V8 heap cap; no default cap for embedders | tested | fixed: heap, ArrayBuffer and DOM budgets, DOM collector, opt-in process limit; WebAssembly memory open |
 | M8 | Medium | JS | PBKDF2 bomb runs synchronously and cannot be interrupted | tested (CLI) | fixed |
 | M9 | Medium | DOM | Serialization mXSS: `textarea`/`title`, foreign `style`/`script` emitted raw | tested; inherited | fixed |
 | M10 | Medium | CLI | Markdown dump passes raw HTML and `javascript:` links through | tested | fixed |
