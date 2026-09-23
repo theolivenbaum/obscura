@@ -4367,9 +4367,13 @@ class Element extends Node {
     // readable contentDocument of cross-origin content.
     let pageOrigin = '';
     try { pageOrigin = new URL(_domParse('document_url') || 'about:blank').origin; } catch (_) {}
+    // Deviation: upstream fetches the frame as 'no-cors' with 'same-origin'
+    // credentials, which sent a cross-origin frame no cookies and no navigation
+    // headers. Chromium loads it as a nested navigation with credentials; the op
+    // applies the iframe's SameSite and Sec-Fetch-* rules for mode 'navigate'.
     Promise.resolve(__obscuraCore.ops.op_fetch_url(
       fullUrl, 'GET', '{}', new Uint8Array(0), pageOrigin,
-      'no-cors', 'same-origin', true
+      'navigate', 'include', true
     )).then(raw => {
       if (el._iframeLoadingUrl !== fullUrl) return;
       const response = JSON.parse(raw);

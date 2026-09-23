@@ -233,7 +233,13 @@ public sealed partial class PocketCalculatorJsRuntime
         State.BlockedUrls.AddRange(patterns);
     }
 
-    public (string Url, string Method, string Body)? TakePendingNavigation()
+    /// <summary>
+    /// Record that the host just dispatched activation-triggering user input, which gives
+    /// the page transient activation for navigations it starts next.
+    /// </summary>
+    public void NoteUserActivation() => State.UserActivationTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    public PendingNavigation? TakePendingNavigation()
     {
         var pending = State.PendingNavigation;
         State.PendingNavigation = null;

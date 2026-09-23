@@ -191,6 +191,9 @@ public static class Input
                 {
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
+                        // A mouse press is activation-triggering input (HTML "user
+                        // activation"), so a navigation it causes is user-activated.
+                        page.NoteUserActivation();
                         page.Evaluate(MousePressedJs(
                             x, y, buttonCode, buttons, clickCount, altKey, ctrlKey, metaKey, shiftKey));
                     }
@@ -201,6 +204,7 @@ public static class Input
                         movedFrame = null;
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
+                        page.NoteUserActivation();
                         page.Evaluate(MouseReleasedJs(
                             x, y, buttonCode, clickCount, altKey, ctrlKey, metaKey, shiftKey));
                         PocketCalculator.Browser.PageNavigationOutcome moved;
@@ -299,6 +303,12 @@ public static class Input
                         case "keyDown":
                         case "rawKeyDown":
                         {
+                            // Chromium: every keydown but Escape gives the page activation.
+                            if (key != "Escape")
+                            {
+                                page.NoteUserActivation();
+                            }
+
                             // Escape backslash BEFORE single-quote (as the text path below does) so
                             // a key like "\" - Chrome's backslash key - doesn't escape the closing
                             // quote and produce a syntax error that drops the event.

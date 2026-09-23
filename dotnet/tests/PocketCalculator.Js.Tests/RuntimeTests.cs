@@ -11964,7 +11964,7 @@ public sealed partial class RuntimeTests
         var rt = fixture.Runtime;
         var href = rt.Evaluate("const next = '/next'; location.href = next; return location.href;");
         Assert.Equal("http://example.com/next", href!.GetValue<string>());
-        Assert.Equal(("http://example.com/next", "GET", ""), rt.TakePendingNavigation());
+        Assert.Equal(("http://example.com/next", "GET", ""), rt.TakePendingNavigation() is { } pending ? (pending.Url, pending.Method, pending.Body) : default);
     }
 
     [Fact]
@@ -12026,7 +12026,7 @@ public sealed partial class RuntimeTests
             ]
             """,
             hrefs);
-        Assert.Equal(("http://example.com/from-replace", "GET", ""), rt.TakePendingNavigation());
+        Assert.Equal(("http://example.com/from-replace", "GET", ""), rt.TakePendingNavigation() is { } pending ? (pending.Url, pending.Method, pending.Body) : default);
     }
 
     [Fact]
@@ -12075,7 +12075,7 @@ public sealed partial class RuntimeTests
             return location.href;
             """);
         Assert.Equal("http://example.com/submitted", href!.GetValue<string>());
-        Assert.Equal(("http://example.com/submitted", "GET", ""), rt.TakePendingNavigation());
+        Assert.Equal(("http://example.com/submitted", "GET", ""), rt.TakePendingNavigation() is { } pending ? (pending.Url, pending.Method, pending.Body) : default);
     }
 
     [Fact]

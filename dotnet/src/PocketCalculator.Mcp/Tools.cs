@@ -127,6 +127,9 @@ internal static partial class Tools
             })()
             """;
 
+        // The agent's click stands for a user's, so it gives the page user activation:
+        // a link it follows reports Sec-Fetch-User: ?1, as a real click in Chromium does.
+        state.PageMut().NoteUserActivation();
         var result = state.PageMut().Evaluate(js);
         if (result.AsString() == "error:element not found")
         {
@@ -210,6 +213,7 @@ internal static partial class Tools
             })()
             """;
 
+        state.PageMut().NoteUserActivation();
         state.PageMut().Evaluate(js);
         await state.SettleSyntheticNavigationAsync().ConfigureAwait(false);
         return $"Pressed key '{key}'";

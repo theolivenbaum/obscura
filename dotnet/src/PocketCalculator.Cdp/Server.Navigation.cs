@@ -90,6 +90,7 @@ public static partial class CdpServer
         var waitUntil = Domains.Page.ParseWaitUntil(req.Params);
         var navMethod = req.Params.Get("__method").AsStringOr("GET");
         var navBody = req.Params.Get("__body").AsStringOr(string.Empty);
+        var navInitiator = Domains.Page.PageInitiator(url, navMethod, navBody, req.Params);
 
         List<string> preloadScripts = [];
         foreach (var (_, source) in ctx.PreloadScripts)
@@ -179,7 +180,8 @@ public static partial class CdpServer
             }
         }
 
-        var navigation = NavigateTaskAsync(ctx, page, url, waitUntil, navMethod, navBody, preloadScripts);
+        var navigation = NavigateTaskAsync(
+            ctx, page, url, waitUntil, navMethod, navBody, navInitiator, preloadScripts);
 
         while (true)
         {
@@ -332,6 +334,7 @@ public static partial class CdpServer
         WaitUntil waitUntil,
         string navMethod,
         string navBody,
+        PendingNavigation? navInitiator,
         List<string> preloadScripts)
     {
         await ctx.V8Lock.WaitAsync().ConfigureAwait(false);
@@ -344,12 +347,13 @@ public static partial class CdpServer
             page.SetPreloadScripts(preloadScripts);
             if (string.Equals(navMethod, "POST", StringComparison.Ordinal) && navBody.Length != 0)
             {
-                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody)
+                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody, navInitiator)
                     .ConfigureAwait(false);
             }
             else
             {
-                await page.NavigateWithWaitAsync(url, waitUntil).ConfigureAwait(false);
+                await page.NavigateWithWaitPostAsync(url, waitUntil, "GET", string.Empty, navInitiator)
+                    .ConfigureAwait(false);
             }
 
             return null;
@@ -400,12 +404,7 @@ public static partial class CdpServer
             {
                 Id = 0,
                 Method = "Page.navigate",
-                Params = new JsonObject
-                {
-                    ["url"] = navUrl,
-                    ["__method"] = navMethod,
-                    ["__body"] = navBody,
-                },
+                Params = Domains.Page.JsNavigationParams(pending),
                 SessionId = req.SessionId,
             };
             _ = await Dispatcher.DispatchAsync(navRequest, ctx).ConfigureAwait(false);
@@ -413,7 +412,7 @@ public static partial class CdpServer
         }
     }
 
-    private static (string Url, string Method, string Body)? CheckPendingNavigation(
+    private static PendingNavigation? CheckPendingNavigation(
         CdpContext ctx,
         string? sessionId)
     {

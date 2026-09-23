@@ -208,7 +208,14 @@ public sealed partial class Page
 
     public bool HasJs => Js is not null;
 
-    public (string Url, string Method, string Body)? TakePendingNavigation() => Js?.TakePendingNavigation();
+    public PendingNavigation? TakePendingNavigation() => Js?.TakePendingNavigation();
+
+    /// <summary>
+    /// Give the page transient user activation, as a real mouse press or key press does.
+    /// The host input paths (CDP <c>Input</c>, MCP click and type) call this before they
+    /// dispatch, so a navigation the input causes reports <c>Sec-Fetch-User: ?1</c>.
+    /// </summary>
+    public void NoteUserActivation() => Js?.NoteUserActivation();
 
     public IReadOnlyList<(string Name, string Payload)> TakePendingBindingCalls() =>
         Js?.TakePendingBindingCalls() ?? [];

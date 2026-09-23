@@ -540,6 +540,18 @@ public static partial class FetchOps
             var crossedOrigin = isCrossOrigin;
             HttpResponseMessage? response = null;
 
+            // An iframe's document load reaches this transport with mode "navigate".
+            // Deviation: upstream loads the frame as a no-cors, same-origin-credentials
+            // fetch, so a cross-origin frame got no cookies at all, even a same-site one,
+            // and none of the navigation headers. Chromium sends it as a nested
+            // navigation: fetch metadata with Sec-Fetch-Dest: iframe, the default
+            // Referer, no Origin on a GET, and SameSite=None cookies only when it is
+            // cross-site with the embedding document.
+            var frameNavigation = string.Equals(mode, "navigate", StringComparison.Ordinal)
+                && Uri.TryCreate(gs.Url, UriKind.Absolute, out var frameInitiator)
+                    ? ResourceRequest.FrameNavigation(frameInitiator)
+                    : null;
+
             try
             {
                 while (true)
@@ -560,9 +572,19 @@ public static partial class FetchOps
                                 + $"the request origin '{pageOrigin}'");
                     }
 
-                    if (currentIsCrossOrigin)
+                    if (currentIsCrossOrigin && frameNavigation is null)
                     {
                         request.Headers.TryAddWithoutValidation("Origin", pageOrigin);
+                    }
+
+                    if (frameNavigation is not null
+                        && Uri.TryCreate(currentUrl, UriKind.Absolute, out var frameTarget))
+                    {
+                        foreach (var (name, value) in PocketCalculatorHttpClient.NavigationHeaders(
+                                     frameNavigation, frameTarget, redirectedFrom))
+                        {
+                            request.Headers.TryAddWithoutValidation(name, value);
+                        }
                     }
 
                     var credentialsAllowed = credentialsMode.Allows(pageOrigin, currentUrl);
@@ -571,7 +593,14 @@ public static partial class FetchOps
                         && Uri.TryCreate(currentUrl, UriKind.Absolute, out var cookieUri))
                     {
                         var cookieHeader = jar.GetCookieHeaderInContext(
-                            cookieUri, CookieJar.ContextForInitiator(pageOrigin, cookieUri));
+                            cookieUri,
+                            frameNavigation is not null
+                                ? PocketCalculatorHttpClient.NavigationSameSiteContext(
+                                    frameNavigation,
+                                    cookieUri,
+                                    currentMethod == HttpMethod.Get || currentMethod == HttpMethod.Head,
+                                    redirectedFrom)
+                                : CookieJar.ContextForInitiator(pageOrigin, cookieUri));
                         if (cookieHeader.Length != 0)
                         {
                             request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);

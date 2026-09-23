@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 
 using PocketCalculator.Browser;
+using PocketCalculator.Js.Ops;
 using PocketCalculator.Js.Runtime;
 using PocketCalculator.Js.Url;
 using PocketCalculator.Render;
@@ -696,6 +697,35 @@ public static partial class Page
     /// be answered without fetching. True for <c>Page.navigate</c>; false for
     /// <c>Page.reload</c>, which is handed the current URL and means the document literally.
     /// </param>
+    /// <summary>
+    /// The internal <c>Page.navigate</c> parameters the server synthesizes for a
+    /// navigation the page queued, so the dispatch that performs it knows the document
+    /// that asked.
+    /// </summary>
+    /// <remarks>
+    /// Deviation: upstream forwards only <c>__method</c> and <c>__body</c>, so the
+    /// forwarded navigation went out as though typed into the address bar. A client's
+    /// own <c>Page.navigate</c> carries no <c>__initiator</c> and stays browser-initiated.
+    /// </remarks>
+    internal static JsonObject JsNavigationParams(PendingNavigation pending) => new()
+    {
+        ["url"] = pending.Url,
+        ["__method"] = pending.Method,
+        ["__body"] = pending.Body,
+        ["__initiator"] = pending.Initiator,
+        ["__userActivated"] = pending.UserActivated,
+    };
+
+    /// <summary>The page initiator <see cref="JsNavigationParams"/> recorded, if any.</summary>
+    internal static PendingNavigation? PageInitiator(string url, string method, string body, JsonNode? parameters) =>
+        parameters.Get("__initiator").AsString() is { } initiator
+            ? new PendingNavigation(url, method, body)
+            {
+                Initiator = initiator,
+                UserActivated = parameters.Get("__userActivated").AsBool() ?? false,
+            }
+            : null;
+
     private static async Task<JsonNode?> DoNavigateAsync(
         string url,
         JsonNode? parameters,
@@ -762,16 +792,18 @@ public static partial class Page
 
         string navMethod = parameters.Get("__method").AsString() ?? "GET";
         string navBody = parameters.Get("__body").AsString() ?? string.Empty;
+        PendingNavigation? initiator = PageInitiator(url, navMethod, navBody, parameters);
         try
         {
             if (string.Equals(navMethod, "POST", StringComparison.Ordinal) && navBody.Length != 0)
             {
-                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody)
+                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody, initiator)
                     .ConfigureAwait(false);
             }
             else
             {
-                await page.NavigateWithWaitAsync(url, waitUntil).ConfigureAwait(false);
+                await page.NavigateWithWaitPostAsync(url, waitUntil, "GET", string.Empty, initiator)
+                    .ConfigureAwait(false);
             }
         }
         catch (PageException exception)
