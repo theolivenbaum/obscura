@@ -177,4 +177,198 @@ public sealed partial class RuntimeTests
             "__obscura_host.deliverMessage('{\"v\":\"direct\"}', 'https://parent.example', 0, 'https://bank.example');");
         Assert.Equal("[\"public\"]", frame.Evaluate("globalThis.got")!.ToJsonString());
     }
+
+    private static string TextResponse(string contentType, string body) =>
+        $"HTTP/1.1 200 OK\r\nContent-Type: {contentType}\r\nContent-Length: "
+            + Encoding.UTF8.GetByteCount(body) + "\r\nConnection: close\r\n\r\n" + body;
+
+    /// <summary>
+    /// Page-side hooks that record any string carrying <c>SECRET</c> passing through
+    /// <c>JSON.parse</c>, <c>String.prototype.replace</c> or a promise reaction, and a
+    /// <c>URL</c> that claims <paramref name="origin"/> for every URL.
+    /// </summary>
+    private static string LeakHooks(string origin) =>
+        "globalThis.__leak = [];"
+        + "const note = (v) => { if (typeof v === 'string' && v.includes('SECRET')) __leak.push(v); };"
+        + "const realParse = JSON.parse; JSON.parse = function (s, r) { note(s); return realParse(s, r); };"
+        + "const realReplace = String.prototype.replace;"
+        + "String.prototype.replace = function (...a) { note(String(this)); return realReplace.apply(this, a); };"
+        + "const realThen = Promise.prototype.then;"
+        + "Promise.prototype.then = function (ok, bad) {"
+        + "  return realThen.call(this, (v) => { note(v); return typeof ok === 'function' ? ok(v) : v; }, bad); };"
+        + "const RealURL = URL; globalThis.URL = class extends RealURL {"
+        + $"  get origin() {{ return '{origin}'; }} }};";
+
+    /// <summary>
+    /// C3: a cross-origin dynamic script still runs, but its source never passes through
+    /// anything page script can hook.
+    /// </summary>
+    [Fact]
+    public async Task CrossOriginScriptSourceNeverReachesPageHooks()
+    {
+        using var server = new RawHttpServer(_ => TextResponse(
+            "text/javascript", "globalThis.__crossRan = true; /* SECRET-SCRIPT */"));
+        using var fixture = RedirectRuntimeForOrigin("http://example.com");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                {{LeakHooks(server.Origin)}}
+                const script = document.createElement("script");
+                script.src = "{{server.Origin}}/app.js";
+                const outcome = await new Promise(resolve => {
+                    script.onload = () => resolve("load");
+                    script.onerror = () => resolve("error");
+                    document.head.appendChild(script);
+                });
+                Promise.prototype.then = realThen;
+                return { outcome, ran: globalThis.__crossRan === true, leaked: __leak.length };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals("""{ "outcome": "load", "ran": true, "leaked": 0 }""", result.Value);
+    }
+
+    /// <summary>
+    /// C3: a cross-origin dynamic stylesheet is judged not origin-clean by the host even when
+    /// page script replaces <c>URL</c> to claim the sheet's origin, and its text never passes
+    /// through a page hook. It still applies.
+    /// </summary>
+    [Fact]
+    public async Task CrossOriginStylesheetStaysUnreadableUnderPageHooks()
+    {
+        using var server = new RawHttpServer(_ => TextResponse(
+            "text/css", ".secret-rule { color: red } /* SECRET-SHEET */"));
+        using var fixture = RedirectRuntimeForOrigin("http://example.com");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                {{LeakHooks(server.Origin)}}
+                const link = document.createElement("link");
+                link.setAttribute("rel", "stylesheet");
+                link.setAttribute("href", "{{server.Origin}}/site.css");
+                const outcome = await new Promise(resolve => {
+                    link.onload = () => resolve("load");
+                    link.onerror = () => resolve("error");
+                    document.head.appendChild(link);
+                });
+                Promise.prototype.then = realThen;
+                let rules;
+                try { rules = Array.from(link.sheet.cssRules, r => r.selectorText); }
+                catch (e) { rules = e.name; }
+                return { outcome, rules, leaked: __leak.length };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals(
+            """{ "outcome": "load", "rules": "SecurityError", "leaked": 0 }""",
+            result.Value);
+    }
+
+    /// <summary>
+    /// C2: a cross-origin iframe's document is unreachable: not through
+    /// <c>contentDocument</c>, not through <c>contentWindow.document</c>, not through an
+    /// expando, and not by rewriting one. Its window keeps the cross-origin surface, and the
+    /// host has the frame queued with its real URL.
+    /// </summary>
+    [Fact]
+    public async Task CrossOriginIframeDocumentIsUnreachable()
+    {
+        using var server = new RawHttpServer(_ => TextResponse(
+            "text/html", "<!doctype html><title>victim</title><p id=s>SECRET-FRAME</p>"));
+        using var fixture = RedirectRuntimeForOrigin("http://example.com");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                {{LeakHooks(server.Origin)}}
+                const frame = document.createElement("iframe");
+                const loaded = new Promise(resolve => frame.onload = resolve);
+                frame.src = "{{server.Origin}}/account";
+                document.body.appendChild(frame);
+                await loaded;
+                Promise.prototype.then = realThen;
+                frame._iframeLoadedUrl = "about:blank";
+                const win = frame.contentWindow;
+                return {
+                    contentDocument: frame.contentDocument === null,
+                    windowDocument: win.document === undefined,
+                    expando: frame._iframeDoc === undefined && frame._iframeWin === undefined,
+                    postMessage: typeof win.postMessage,
+                    parent: win.parent === window,
+                    stable: frame.contentWindow === win,
+                    leaked: __leak.length,
+                };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals(
+            """
+            {
+                "contentDocument": true,
+                "windowDocument": true,
+                "expando": true,
+                "postMessage": "function",
+                "parent": true,
+                "stable": true,
+                "leaked": 0
+            }
+            """,
+            result.Value);
+        var pending = Assert.Single(fixture.Runtime.TakePendingFrames());
+        Assert.Equal(server.Origin + "/account", pending.Url);
+        Assert.Contains("SECRET-FRAME", pending.Html, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// C2: a same-origin frame stays readable, and a sandboxed one without
+    /// <c>allow-same-origin</c> gets an opaque origin, in the parent's view and in the realm
+    /// the host builds for it.
+    /// </summary>
+    [Fact]
+    public async Task SameOriginIframeIsReadableUnlessSandboxed()
+    {
+        using var server = new RawHttpServer(_ => TextResponse(
+            "text/html", "<!doctype html><title>mine</title><p id=s>own</p>"));
+        using var fixture = RedirectRuntimeForOrigin(server.Origin);
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            """
+            async () => {
+                const load = (sandbox) => {
+                    const frame = document.createElement("iframe");
+                    if (sandbox !== null) frame.setAttribute("sandbox", sandbox);
+                    const loaded = new Promise(resolve => frame.onload = resolve);
+                    frame.src = "/child";
+                    document.body.appendChild(frame);
+                    return loaded.then(() => frame);
+                };
+                const plain = await load(null);
+                const sandboxed = await load("allow-scripts");
+                return {
+                    plain: plain.contentDocument?.getElementById("s")?.textContent ?? null,
+                    sandboxed: sandboxed.contentDocument === null,
+                };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals("""{ "plain": "own", "sandboxed": true }""", result.Value);
+        var pending = fixture.Runtime.TakePendingFrames();
+        Assert.Equal(2, pending.Count);
+        Assert.False(pending[0].OpaqueOrigin);
+        Assert.True(pending[1].OpaqueOrigin);
+    }
 }

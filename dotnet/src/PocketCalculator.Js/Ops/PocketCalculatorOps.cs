@@ -181,7 +181,6 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             () => CoreOps.OpGetCookies(RealmState())));
         Bind(ops, "op_set_cookie", (Action<object?>)(
             cookie => CoreOps.OpSetCookie(RealmState(), S(cookie))));
-        BindPostFrameMessage(ops, Page);
         // Port addition: the calling realm's origin as the host knows it, for the
         // shim's postMessage targetOrigin checks (SECURITY.md H4).
         Bind(ops, "op_realm_origin", (Func<object?, string>)(
@@ -200,7 +199,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (source, baseUrl) => CoreOps.OpAddImportMap(Page, S(source), S(baseUrl))));
 
         // --- Network -------------------------------------------------------
-        BindFetch(ops, Page);
+        BindDocumentOps(ops, Page);
 
         // --- Encoding ------------------------------------------------------
         Bind(ops, "op_encoding_for_label", (Func<object?, string>)(
@@ -334,8 +333,98 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
-        BindFetch(ops, state);
-        BindPostFrameMessage(ops, state);
+        BindDocumentOps(ops, state);
+    }
+
+    /// <summary>
+    /// The ops whose answer depends on which document is asking, bound to
+    /// <paramref name="document"/>: the realm the op table belongs to. Nothing the shim passes
+    /// can name another realm, and nothing page script computes decides an origin.
+    /// </summary>
+    private void BindDocumentOps(ScriptObject ops, PocketCalculatorState document)
+    {
+        var engine = ops.Engine;
+        BindFetch(ops, document);
+        BindPostFrameMessage(ops, document);
+
+        // Port additions (SECURITY.md C2, C3): the consumers of an internal load's host-held
+        // body. See InternalLoads.
+        Bind(ops, "op_run_fetched_script", (Action<object?, object?>)(
+            (token, url) => RunFetchedScript(engine, document, D(token), S(url))));
+        Bind(ops, "op_frame_document_from_load", (Func<object?, object?, object?, object?, double>)(
+            (token, width, height, sandboxed) => CoreOps.OpFrameDocumentFromLoad(
+                Page, document, D(token), U64(width), U64(height), B(sandboxed))));
+        Bind(ops, "op_load_stylesheet", (Func<object?, object?, Task<string>>)(
+            (nid, url) => LinkedStylesheetLoader.OpLoadStylesheetAsync(RealmState(), document, U32(nid), S(url))));
+        Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
+            frameId => OpGuard.Run("op_frame_same_origin", () => FrameSameOrigin(document, U32(frameId)), -1d)));
+    }
+
+    /// <summary>
+    /// <c>op_frame_same_origin</c>: 1 when child frame <paramref name="frameId"/> is
+    /// same-origin with <paramref name="document"/>, 0 when it is not, and -1 when the host
+    /// has no record of the frame yet (its document is still queued for a realm).
+    /// </summary>
+    private double FrameSameOrigin(PocketCalculatorState document, uint frameId)
+    {
+        if (frameId == 0)
+        {
+            return -1d;
+        }
+
+        string? frameOrigin = null;
+        if (Realms.ByFrameId(frameId) is { } frame)
+        {
+            frameOrigin = StateHelpers.DocumentOrigin(frame);
+        }
+        else
+        {
+            foreach (var pending in Page.PendingFrames)
+            {
+                if (pending.FrameId == frameId)
+                {
+                    frameOrigin = pending.OpaqueOrigin ? "null" : UrlRecord.Parse(pending.Url)?.AsciiOrigin ?? "null";
+                    break;
+                }
+            }
+        }
+
+        if (frameOrigin is null)
+        {
+            return -1d;
+        }
+
+        var own = StateHelpers.DocumentOrigin(document);
+        return !string.Equals(own, "null", StringComparison.Ordinal)
+            && string.Equals(own, frameOrigin, StringComparison.Ordinal)
+                ? 1d
+                : 0d;
+    }
+
+    /// <summary>
+    /// <c>op_run_fetched_script</c>: runs a dynamically inserted classic script whose source
+    /// the host holds, as <see cref="RunClassicScript"/> does for source the shim holds.
+    /// </summary>
+    /// <remarks>
+    /// Only a successful (2xx) <c>no-cors</c> load of this realm runs; anything else is the
+    /// network error the HTML script-fetch algorithm makes of it. The script is named by the
+    /// URL the host requested, not by what the shim passes. Not wrapped in
+    /// <see cref="OpGuard"/>, for the reason <see cref="RunClassicScript"/> gives.
+    /// </remarks>
+    private static void RunFetchedScript(ScriptEngine engine, PocketCalculatorState document, double token, string url)
+    {
+        _ = url;
+        if (InternalLoads.Take(document, token, "no-cors") is not { } load)
+        {
+            throw new InvalidOperationException("script body unavailable");
+        }
+
+        if (load.Status is < 200 or > 299)
+        {
+            throw new InvalidOperationException("HTTP " + load.Status.ToString(CultureInfo.InvariantCulture));
+        }
+
+        RunClassicScript(engine, load.Body, load.RequestUrl);
     }
 
     /// <summary>

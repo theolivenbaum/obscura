@@ -64,6 +64,37 @@ public static class StylesheetOps
             return true;
         }, false);
 
+    /// <summary>
+    /// Installs CSS the host fetched itself (<see cref="LinkedStylesheetLoader"/>), with the
+    /// origin-clean bit the host computed from the responses. Nothing the shim passes decides it.
+    /// </summary>
+    internal static bool SetLoadedExternalStylesheet(
+        PocketCalculatorState state, uint ownerNid, string css, bool originClean) =>
+        OpGuard.Run("op_load_stylesheet", () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (state.Dom is not { } dom)
+            {
+                return false;
+            }
+
+            NodeId owner = NodeId.New(ownerNid);
+            if (dom.GetNode(owner)?.AsElement() is not { } element
+                || element.Name.Local is not ("link" or "style"))
+            {
+                return false;
+            }
+
+            bool cssChanged = !string.Equals(dom.ExternalStylesheetCss(owner), css, StringComparison.Ordinal);
+            dom.SetExternalStylesheet(owner, css, originClean);
+            if (cssChanged)
+            {
+                Invalidate(state, dom, owner);
+            }
+
+            return true;
+        }, false);
+
     /// <summary>Forgets a sheet's host-held CSS.</summary>
     public static bool OpExternalStylesheetRemove(PocketCalculatorState state, uint ownerNid) =>
         OpGuard.Run("op_external_stylesheet_remove", () =>

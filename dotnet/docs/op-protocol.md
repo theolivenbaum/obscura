@@ -191,9 +191,10 @@ which returned any sheet's bytes and are gone.
 
 The eighth argument, `internal_load`, came with upstream 04418a5. The public
 `fetch()` (and XHR, which goes through it) passes `false`; the shim's own
-subresource loads pass `true`: `__fetchDynClassicScript`, `_fetchLinkedCss` and
-the iframe loader. The result keys are unchanged (`status, body, bodyBase64,
-requestId, url, redirected, opaque, headers`); only the values are filtered:
+subresource loads pass `true`: `__fetchDynClassicScript`, the iframe loader and
+(host-side, see below) the linked-stylesheet loader. For `internal_load` false the
+result keys are unchanged (`status, body, bodyBase64, requestId, url, redirected,
+opaque, headers`); only the values are filtered:
 
 - `set-cookie` / `set-cookie2` are never in `headers`.
 - For a response whose final URL is cross-origin to the page, `headers` holds
@@ -250,11 +251,32 @@ the result keys are unchanged; the op filters its inputs:
   `Request mode is 'same-origin' but the URL's origin is not same as the request
   origin '<origin>'`, and is not sent.
 
+### Host-decided origins (port deviation, SECURITY.md C1-C3, H4)
+
+Rust takes every origin it judges by from the shim, which computed them with page
+script's own `URL` global and read internal-load bodies with page script's own
+`JSON.parse`. The port keeps every op signature and decides these host-side:
+
+- `op_fetch_url`'s `origin` argument is ignored. The request origin is the calling
+  realm's committed document origin (`StateHelpers.DocumentOrigin`: `"null"` for
+  an opaque document or a sandboxed frame), and each realm's op table is bound to
+  its own document.
+- An `internal_load` result is `{status, body, requestId, url, redirected,
+  opaque: false, sameOrigin, bodyToken, headers}`. The body stays host-side behind
+  `bodyToken`; `body` carries it only for a frame document (`mode` `navigate`)
+  whose response never left the document's origin (`sameOrigin` true, the host's
+  verdict). A cross-origin
+  result reports the request URL, `redirected` false and empty `headers`.
+  `bodyBase64` is not sent.
+- `op_post_frame_message` ignores `source_frame_id` and `origin` and fills both
+  from the sending realm; `targetOrigin` is checked against the receiver's
+  host-known origin before delivery as well as in the shim.
+
 The filtered headers are what `Fetch.requestPaused` shows. Headers a CDP client
 supplies through `Fetch.continueRequest` are not filtered, and nor are the
 engine's own loads (`internal_load` true).
 
-## Port-added ops (4)
+## Port-added ops (9)
 
 These have no counterpart in `ops.rs`. For `op_run_classic_script` the shim as
 shipped does not call it; `BootstrapSource.EngineText` rewrites a call site onto
@@ -270,6 +292,26 @@ not bind them.
 | `op_resource_timings` | fast | `since_index: f64` | `String` (JSON array) |
 | `op_resource_timing_count` | fast | `(none)` | `f64` |
 | `op_font_resource_loaded` | fast | `url: &str` | `bool` |
+
+Added with the host-decided origins above. `bootstrap.js` is the port's own now,
+so these are called unguarded:
+
+| Op | Kind | Arguments | Returns |
+|---|---|---|---|
+| `op_realm_origin` | fast | `frame_id: u32` | `String` (the realm's origin, `"null"` when opaque) |
+| `op_run_fetched_script` | sync | `body_token: f64, url: String` | `(void)`; throws like `op_run_classic_script` |
+| `op_frame_document_from_load` | fast | `body_token: f64, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
+| `op_load_stylesheet` | async | `owner_nid: u32, url: String` | `String`: `{"ok":true,"responseUrl":...}` or `{"ok":false}` |
+| `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
+
+`op_run_fetched_script` runs the host-held body of a 2xx `no-cors` internal load
+of the calling realm, named by its request URL. `op_frame_document_from_load`
+queues a frame from the host-held body and final URL of a `navigate` internal load
+(what `op_frame_document_ready` did from shim-supplied values; the shim no longer
+calls that op). `op_load_stylesheet` fetches a dynamic `<link rel=stylesheet>` and
+its `@import` graph host-side, rebases its `url()`s, computes origin-clean from the
+responses and installs the result in the stylesheet store. A token is taken once,
+only by the realm that loaded it and only in the mode it was loaded with.
 
 `op_resource_timings` returns the subresources the host fetched for the current
 document at index >= `since_index`, as a JSON array of

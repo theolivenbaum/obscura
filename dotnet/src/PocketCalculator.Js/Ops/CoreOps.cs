@@ -342,7 +342,53 @@ public static class CoreOps
         string url,
         string html,
         ulong viewportWidth,
-        ulong viewportHeight) => OpGuard.Run(
+        ulong viewportHeight) =>
+        QueueFrameDocument(page, parentFrameId, url, html, viewportWidth, viewportHeight, opaqueOrigin: false);
+
+    /// <summary>
+    /// <c>op_frame_document_from_load</c>. <see cref="OpFrameDocumentReady"/> for a document
+    /// the host itself loaded for <paramref name="document"/> (a <c>navigate</c> internal load),
+    /// named by its token.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (SECURITY.md C2, C3). <c>op_frame_document_ready</c> takes the frame's
+    /// URL and HTML from the shim, which read them out of page-reachable JSON; a page that
+    /// hooked <c>JSON.parse</c> saw every cross-origin frame document and could hand the host
+    /// any HTML under any URL, which is the origin the frame's realm then runs as. Here both
+    /// come from the host's own record of the load, and a frame the embedder sandboxed
+    /// without <c>allow-same-origin</c> gets an opaque origin (a sandbox can only take
+    /// privilege away, so trusting the shim for it is safe). A failed load makes no realm.
+    /// </remarks>
+    public static uint OpFrameDocumentFromLoad(
+        PocketCalculatorState page,
+        PocketCalculatorState document,
+        double token,
+        ulong viewportWidth,
+        ulong viewportHeight,
+        bool sandboxed) => OpGuard.Run(
+        "op_frame_document_from_load",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(document);
+            if (InternalLoads.Take(document, token, "navigate") is not { } load
+                || load.Status is <= 0 or >= 400)
+            {
+                return 0u;
+            }
+
+            return QueueFrameDocument(
+                page, document.FrameId, load.FinalUrl, load.Body, viewportWidth, viewportHeight, sandboxed);
+        },
+        0u);
+
+    private static uint QueueFrameDocument(
+        PocketCalculatorState page,
+        uint parentFrameId,
+        string url,
+        string html,
+        ulong viewportWidth,
+        ulong viewportHeight,
+        bool opaqueOrigin) => OpGuard.Run(
         "op_frame_document_ready",
         () =>
         {
@@ -370,6 +416,7 @@ public static class CoreOps
                 ViewportWidth = viewportWidth,
                 ViewportHeight = viewportHeight,
                 ParentFrameId = parentFrameId,
+                OpaqueOrigin = opaqueOrigin,
             });
             return frameId;
         },

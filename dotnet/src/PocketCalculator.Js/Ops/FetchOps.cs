@@ -296,7 +296,7 @@ public static partial class FetchOps
         }
     }
 
-    private static async Task<string> FetchUrlAsync(
+    internal static async Task<string> FetchUrlAsync(
         PocketCalculatorState gs,
         PocketCalculatorState document,
         string url,
@@ -305,7 +305,8 @@ public static partial class FetchOps
         byte[] body,
         string mode,
         string credentials,
-        bool internalLoad)
+        bool internalLoad,
+        bool hostConsumesBody = false)
     {
         ArgumentNullException.ThrowIfNull(gs);
         ArgumentNullException.ThrowIfNull(document);
@@ -404,6 +405,22 @@ public static partial class FetchOps
                     var resolution = await intercepted.Resolver.Task.ConfigureAwait(false);
                     switch (resolution)
                     {
+                        case InterceptResolution.Fulfill fulfill when internalLoad:
+                            return InternalLoadResponse(
+                                document,
+                                mode,
+                                fulfill.Status,
+                                url,
+                                url,
+                                fulfill.Body,
+                                tainted: RequestOrigin(url) is not { } fulfilledOrigin
+                                    || !string.Equals(fulfilledOrigin, origin, StringComparison.Ordinal)
+                                    || string.Equals(origin, "null", StringComparison.Ordinal),
+                                redirected: false,
+                                requestId: null,
+                                fulfill.Headers,
+                                hostConsumesBody);
+
                         case InterceptResolution.Fulfill fulfill:
                             return InterceptFulfillResponse(
                                 fulfill.Status,
@@ -816,7 +833,6 @@ public static partial class FetchOps
                 var respBytes = await ReadBodyCappedAsync(response, FetchMaxBodyBytes(), deadline.Token)
                     .ConfigureAwait(false);
                 var respBody = Encoding.UTF8.GetString(respBytes);
-                var respBodyBase64 = Convert.ToBase64String(respBytes);
 
                 if (callbacks is not null && callbacks.HasResponseCallbacks())
                 {
@@ -892,6 +908,24 @@ public static partial class FetchOps
                         ContentType = respHeaders.GetValueOrDefault("content-type", string.Empty),
                     });
 
+                if (internalLoad)
+                {
+                    return InternalLoadResponse(
+                        document,
+                        mode,
+                        finalStatus,
+                        url,
+                        currentUrl,
+                        respBody,
+                        tainted: crossedOrigin || string.Equals(pageOrigin, "null", StringComparison.Ordinal),
+                        redirected,
+                        requestId,
+                        VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
+                        hostConsumesBody);
+                }
+
+                var respBodyBase64 = Convert.ToBase64String(respBytes);
+
                 // Page script sees an opaque no-cors response as status 0 with no body
                 // and no headers; the engine's own subresource loads (internalLoad) still
                 // get the body. Set-Cookie and unexposed cross-origin headers never
@@ -952,6 +986,59 @@ public static partial class FetchOps
         {
             throw new OpException(ex.Message);
         }
+    }
+
+    /// <summary>
+    /// What an internal load (<c>internalLoad</c>: a dynamic script, a frame document, a
+    /// stylesheet) returns to the shim.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (ops.rs), which returns every internal load's body,
+    /// cross-origin ones included, to page-reachable JSON. Here the body is kept host-side
+    /// behind <c>bodyToken</c> (see <see cref="InternalLoads"/>) and appears in the JSON only
+    /// for a frame document that is same-origin with the requesting document, which page
+    /// script could have fetched itself. A cross-origin response also keeps its redirect target and
+    /// headers to itself. <c>sameOrigin</c> is the host's own verdict. <c>bodyBase64</c> is
+    /// never sent: nothing that reads an internal load uses it.
+    /// </remarks>
+    private static string InternalLoadResponse(
+        PocketCalculatorState document,
+        string mode,
+        int status,
+        string requestUrl,
+        string finalUrl,
+        string bodyText,
+        bool tainted,
+        bool redirected,
+        string? requestId,
+        IReadOnlyDictionary<string, string> headers,
+        bool hostConsumesBody)
+    {
+        var token = InternalLoads.Put(
+            document, new InternalLoad(mode, status, requestUrl, finalUrl, bodyText, tainted));
+        // Only a frame document is read back by the shim (its parent-side copy for a
+        // same-origin contentDocument); a script or a sheet is run or installed by the host.
+        var visible = !tainted && !hostConsumesBody && string.Equals(mode, "navigate", StringComparison.Ordinal);
+        var result = new StringBuilder((visible ? bodyText.Length : 0) + 256);
+        result.Append("{\"status\":").Append(status.ToString(CultureInfo.InvariantCulture));
+        result.Append(",\"body\":");
+        SerdeJson.AppendString(result, visible ? bodyText : string.Empty);
+        if (requestId is not null)
+        {
+            result.Append(",\"requestId\":");
+            SerdeJson.AppendString(result, requestId);
+        }
+
+        result.Append(",\"url\":");
+        SerdeJson.AppendString(result, tainted ? requestUrl : finalUrl);
+        result.Append(",\"redirected\":").Append(!tainted && redirected ? "true" : "false");
+        result.Append(",\"opaque\":false");
+        result.Append(",\"sameOrigin\":").Append(tainted ? "false" : "true");
+        result.Append(",\"bodyToken\":").Append(token.ToString(CultureInfo.InvariantCulture));
+        result.Append(",\"headers\":");
+        AppendHeaders(result, tainted ? new Dictionary<string, string>(StringComparer.Ordinal) : headers);
+        result.Append('}');
+        return result.ToString();
     }
 
     private static string CorsBlocked(string url, string error)
