@@ -30,7 +30,7 @@ public static class ServeCommand
         }
         if (proxy is { } configured)
         {
-            Log.Info($"Using proxy: {configured}");
+            Log.Info($"Using proxy: {CliOptions.RedactProxy(configured)}");
         }
         if (serve.UserAgent is { } ua)
         {
@@ -84,7 +84,7 @@ public static class ServeCommand
         CliOptions.PrintBanner(args.Port);
         if (args.Proxy is { } proxy)
         {
-            Log.Info($"Using proxy: {proxy}");
+            Log.Info($"Using proxy: {CliOptions.RedactProxy(proxy)}");
         }
         await CdpServer.StartWithOptionsAsync(args.Port, args.Proxy, args.Stealth).ConfigureAwait(false);
     }

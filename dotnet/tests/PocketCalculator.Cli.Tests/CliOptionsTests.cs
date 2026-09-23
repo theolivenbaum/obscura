@@ -99,4 +99,27 @@ public sealed class CliOptionsTests
     }
 
     private static string BuildVersionValue => PocketCalculator.Cli.CommandLine.BuildVersion.Value;
+
+    /// <summary>SECURITY.md I3: `-v` logs the proxy without its credentials.</summary>
+    [Theory]
+    [InlineData("http://user:secret@proxy.example:8080", "http://***@proxy.example:8080")]
+    [InlineData("socks5://user:p%40ss@10.0.0.1:1080/", "socks5://***@10.0.0.1:1080/")]
+    [InlineData("user:secret@proxy.example:8080", "***@proxy.example:8080")]
+    [InlineData("http://proxy.example:8080/path@x", "http://proxy.example:8080/path@x")]
+    [InlineData("http://proxy.example:8080", "http://proxy.example:8080")]
+    [InlineData("http://", "http://")]
+    [InlineData("", "")]
+    public void ProxyCredentialsAreRedacted(string proxy, string logged) =>
+        Assert.Equal(logged, CliOptions.RedactProxy(proxy));
+
+    [Fact]
+    public void ServeLogsTheProxyWithoutCredentials()
+    {
+        Assert.True(CliProcess.SkipReason is null, CliProcess.SkipReason ?? string.Empty);
+        // A port nothing can bind, so serve logs its startup lines and then fails.
+        var run = CliProcess.Run(
+            "-v", "serve", "--host", "not-an-ip", "--port", "1", "--proxy", "http://user:hunter2@127.0.0.1:9");
+        Assert.Contains("Using proxy: http://***@127.0.0.1:9", run.StdErr, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", run.StdErr, StringComparison.Ordinal);
+    }
 }
