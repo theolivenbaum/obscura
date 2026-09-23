@@ -24,6 +24,46 @@ public sealed class CdpRequest
     public string? SessionId { get; init; }
 
     /// <summary>
+    /// True for a request the server built itself (a navigation page script
+    /// queued), false for anything parsed off the wire. Only a host-initiated
+    /// request may carry <see cref="InternalParamNames"/>.
+    /// </summary>
+    internal bool HostInitiated { get; init; }
+
+    /// <summary>
+    /// The <c>Page.navigate</c> parameters the server uses to forward a navigation
+    /// page script started: its method, body, initiating document and user
+    /// activation.
+    /// </summary>
+    internal static readonly string[] InternalParamNames = ["__method", "__body", "__initiator", "__userActivated"];
+
+    /// <summary>
+    /// This request with the internal parameters removed, unless the server built it.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md I6): upstream reads <c>__method</c> and
+    /// <c>__body</c> from any <c>Page.navigate</c>, so a CDP client could send a
+    /// POST navigation, and in the port also claim a page initiator and user
+    /// activation (which decide <c>Sec-Fetch-*</c>, <c>Referer</c> and the
+    /// cookies a navigation sends). A client's request now arrives without them;
+    /// only the server's own forwarded navigation keeps them. Client requests own
+    /// their parameters (<see cref="TryParse(string, out string?)"/> clones them),
+    /// so they are removed in place.
+    /// </remarks>
+    internal CdpRequest WithoutInternalParams()
+    {
+        if (!HostInitiated && Params is JsonObject parameters)
+        {
+            foreach (var name in InternalParamNames)
+            {
+                parameters.Remove(name);
+            }
+        }
+
+        return this;
+    }
+
+    /// <summary>
     /// Parse a frame, returning null where <c>serde_json::from_str</c> returns
     /// <c>Err</c>. <paramref name="error"/> carries a serde-shaped reason for the
     /// warn-level logs the Rust code emits.

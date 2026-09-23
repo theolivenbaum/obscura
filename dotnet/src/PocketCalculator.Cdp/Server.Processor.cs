@@ -138,7 +138,7 @@ public static partial class CdpServer
                         });
                         await ProcessWithInterceptionAsync(
                             navigation, ctx, pumpReply, rx, interceptRx, interceptedPaused,
-                            deferred, false).ConfigureAwait(false);
+                            deferred, false, hostInitiated: true).ConfigureAwait(false);
                         runtimePumpArmed = AnyPageHasJs(ctx);
                     }
 

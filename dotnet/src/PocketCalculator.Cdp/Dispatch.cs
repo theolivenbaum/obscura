@@ -88,6 +88,7 @@ public static class Dispatcher
     {
         ArgumentNullException.ThrowIfNull(req);
         ArgumentNullException.ThrowIfNull(ctx);
+        req = req.WithoutInternalParams();
 
         // headless_chrome (and older Puppeteer) wrap every CDP call inside
         // Target.sendMessageToTarget. Unwrap and recurse BEFORE acquiring the
