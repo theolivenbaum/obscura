@@ -291,6 +291,24 @@ public static partial class FetchOps
         bool internalLoad)
     {
         ArgumentNullException.ThrowIfNull(gs);
+
+        // Page-script requests run under the Fetch request guards; the engine's own
+        // loads do not. Rust applies neither (see FilterScriptRequestHeaders).
+        if (!internalLoad)
+        {
+            mode = ScriptRequestMode(mode);
+            if (string.Equals(mode, "no-cors", StringComparison.Ordinal) && !NoCorsAllowsMethod(method))
+            {
+                throw new OpException($"'{method}' is unsupported in no-cors mode.");
+            }
+        }
+
+        var requestHeaders = internalLoad
+            ? ParseHeaders(headersJson)
+            : FilterScriptRequestHeaders(
+                ParseHeaders(headersJson),
+                noCors: string.Equals(mode, "no-cors", StringComparison.Ordinal));
+
         var startedAtUnixMs = PerformanceOps.UnixMilliseconds();
         foreach (var pattern in gs.BlockedUrls)
         {
@@ -345,7 +363,7 @@ public static partial class FetchOps
 
             if (intercept is { } channel)
             {
-                var customHeaders = ParseHeaders(headersJson);
+                var customHeaders = new Dictionary<string, string>(requestHeaders, StringComparer.Ordinal);
                 var intercepted = new InterceptedRequest
                 {
                     RequestId = channel.RequestId,
@@ -417,7 +435,7 @@ public static partial class FetchOps
             var reqMethod = ParseMethod(method);
             var customHeaders2 = overrideHeaders is not null
                 ? new Dictionary<string, string>(overrideHeaders, StringComparer.Ordinal)
-                : ParseHeaders(headersJson);
+                : requestHeaders;
 
             // Passive request observation (non-blocking). Fires for every request that
             // reaches the network; Fulfill/Fail from the interception channel
@@ -530,6 +548,18 @@ public static partial class FetchOps
                     var currentIsCrossOrigin = RequestOrigin(currentUrl) is { } hopOrigin
                         && !string.Equals(hopOrigin, pageOrigin, StringComparison.Ordinal);
                     crossedOrigin |= currentIsCrossOrigin;
+
+                    // Fetch main fetch: a same-origin request, or any hop of one, to
+                    // another origin is a network error. Rust sent it and showed page
+                    // script the response unfiltered.
+                    if (currentIsCrossOrigin && string.Equals(mode, "same-origin", StringComparison.Ordinal))
+                    {
+                        return CorsBlocked(
+                            currentUrl,
+                            $"Request mode is 'same-origin' but the URL's origin is not same as "
+                                + $"the request origin '{pageOrigin}'");
+                    }
+
                     if (currentIsCrossOrigin)
                     {
                         request.Headers.TryAddWithoutValidation("Origin", pageOrigin);
@@ -857,6 +887,17 @@ public static partial class FetchOps
         {
             throw new OpException(ex.Message);
         }
+    }
+
+    private static string CorsBlocked(string url, string error)
+    {
+        var sb = new StringBuilder(256);
+        sb.Append("{\"status\":0,\"body\":\"\",\"url\":");
+        SerdeJson.AppendString(sb, url);
+        sb.Append(",\"headers\":{},\"corsBlocked\":true,\"corsError\":");
+        SerdeJson.AppendString(sb, error);
+        sb.Append('}');
+        return sb.ToString();
     }
 
     private static string Blocked(string url, string? error)

@@ -164,6 +164,152 @@ public static partial class FetchOps
         return false;
     }
 
+    /// <summary>The forbidden request-header names (Fetch), matched case-insensitively.</summary>
+    /// <remarks>
+    /// <c>access-control-request-private-network</c> is not in the Fetch list; Chromium
+    /// forbids it too (<c>net::HttpUtil::IsSafeHeader</c>). <c>user-agent</c> is not
+    /// forbidden: Fetch dropped it from the list, and the transport already honours an
+    /// explicit override.
+    /// </remarks>
+    private static readonly string[] ForbiddenRequestHeaderNames =
+    [
+        "accept-charset",
+        "accept-encoding",
+        "access-control-request-headers",
+        "access-control-request-method",
+        "access-control-request-private-network",
+        "connection",
+        "content-length",
+        "cookie",
+        "cookie2",
+        "date",
+        "dnt",
+        "expect",
+        "host",
+        "keep-alive",
+        "origin",
+        "referer",
+        "set-cookie",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "via",
+    ];
+
+    /// <summary>
+    /// Fetch's forbidden request-header: a name in the list above, a <c>proxy-</c> or
+    /// <c>sec-</c> prefix, or one of the method-override headers naming a forbidden
+    /// method (<c>CONNECT</c>, <c>TRACE</c>, <c>TRACK</c>). Page script can never set one.
+    /// </summary>
+    internal static bool IsForbiddenRequestHeader(string name, string value)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(value);
+        if (ContainsIgnoreCase(ForbiddenRequestHeaderNames, name)
+            || name.StartsWith("proxy-", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("sec-", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (name.Equals("x-http-method", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("x-http-method-override", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("x-method-override", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var raw in value.Split(','))
+            {
+                var method = raw.Trim([' ', '\t']);
+                if (method.Equals("CONNECT", StringComparison.OrdinalIgnoreCase)
+                    || method.Equals("TRACE", StringComparison.OrdinalIgnoreCase)
+                    || method.Equals("TRACK", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Fetch's no-CORS-safelisted request-header: <c>Accept</c>, <c>Accept-Language</c>,
+    /// <c>Content-Language</c> or <c>Content-Type</c>, with a value that is also
+    /// CORS-safelisted. <c>Range</c> is CORS-safelisted but not no-CORS-safelisted.
+    /// </summary>
+    internal static bool IsNoCorsSafelistedRequestHeader(string name, string value)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(value);
+        return (name.Equals("accept", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("accept-language", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("content-language", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("content-type", StringComparison.OrdinalIgnoreCase))
+            && IsCorsSafelistedRequestHeader(name, value);
+    }
+
+    /// <summary>
+    /// The request headers page script may send: never a forbidden request-header,
+    /// and in <c>no-cors</c> mode only the no-CORS-safelisted ones. The rest are
+    /// dropped silently, as a Headers object with the "request" or "request-no-cors"
+    /// guard ignores them.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, which forwards every header the shim hands it, so a
+    /// cross-origin no-cors fetch() carried <c>Authorization</c>, and any fetch could
+    /// set <c>Cookie</c>, <c>Host</c>, <c>Origin</c> or <c>Sec-*</c>. The shim applies the
+    /// same guard; this is the host-side check, since page script controls what
+    /// reaches the op. The engine's own loads (<c>internal_load</c>) are not filtered.
+    /// </remarks>
+    internal static Dictionary<string, string> FilterScriptRequestHeaders(
+        IReadOnlyDictionary<string, string> headers,
+        bool noCors)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        Dictionary<string, string> allowed = new(StringComparer.Ordinal);
+        foreach (var (name, value) in headers)
+        {
+            if (IsForbiddenRequestHeader(name, value)
+                || (noCors && !IsNoCorsSafelistedRequestHeader(name, value)))
+            {
+                continue;
+            }
+
+            allowed[name] = value;
+        }
+
+        return allowed;
+    }
+
+    /// <summary>
+    /// The request mode a page-script fetch runs under. <c>no-cors</c> and
+    /// <c>same-origin</c> keep their meaning; anything else, including a value the
+    /// shim should have refused, is treated as <c>cors</c>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, where any mode other than <c>cors</c> skipped both the
+    /// CORS check and the opaque filter, so <c>mode: "same-origin"</c> or an unknown
+    /// value read a cross-origin body with no CORS check at all.
+    /// </remarks>
+    internal static string ScriptRequestMode(string mode) => mode switch
+    {
+        "no-cors" => "no-cors",
+        "same-origin" => "same-origin",
+        _ => "cors",
+    };
+
+    /// <summary>
+    /// The method check Fetch's Request constructor makes for <c>no-cors</c>: only a
+    /// CORS-safelisted method (after method normalization) is allowed.
+    /// </summary>
+    internal static bool NoCorsAllowsMethod(string method)
+    {
+        ArgumentNullException.ThrowIfNull(method);
+        return method.Equals("GET", StringComparison.OrdinalIgnoreCase)
+            || method.Equals("HEAD", StringComparison.OrdinalIgnoreCase)
+            || method.Equals("POST", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// The sorted, lower-case names of the request headers a CORS preflight has to
     /// authorize. Once the safelisted values exceed 1024 bytes together, they count
