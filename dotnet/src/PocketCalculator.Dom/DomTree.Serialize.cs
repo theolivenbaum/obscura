@@ -131,7 +131,7 @@ public sealed partial class DomTree
                 {
                     var parentIsRaw = node.Parent is { } parentId
                         && GetNode(parentId)?.ElementName is { } parentName
-                        && IsRawTextElement(parentName.Local);
+                        && IsRawTextParent(parentName);
 
                     if (parentIsRaw)
                     {
@@ -208,9 +208,25 @@ public sealed partial class DomTree
         _ => false,
     };
 
-    private static bool IsRawTextElement(string tag) => tag switch
-    {
-        "script" or "style" or "textarea" or "title" => true,
-        _ => false,
-    };
+    /// <summary>
+    /// Whether text under <paramref name="parent"/> is emitted without escaping: HTML's fragment
+    /// serialization algorithm lists style, script, xmp, iframe, noembed, noframes and plaintext,
+    /// and noscript when scripting is enabled, which it always is here. Only HTML elements.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-dom/src/serialize.rs, which emits the text of every
+    /// <c>script</c>, <c>style</c>, <c>textarea</c> and <c>title</c> raw, in any namespace. The
+    /// last two are RCDATA and the spec escapes them, as Chromium does: raw, an escaped
+    /// <c>&amp;lt;/title&amp;gt;&amp;lt;img onerror&amp;gt;</c> inside a title round-tripped
+    /// through innerHTML into a live <c>img</c>, and so did the text of an SVG <c>style</c>
+    /// (SECURITY.md M9).
+    /// </remarks>
+    private static bool IsRawTextParent(QualName parent) =>
+        string.Equals(parent.Ns, Namespaces.Html, StringComparison.Ordinal)
+        && parent.Local switch
+        {
+            "style" or "script" or "xmp" or "iframe" or "noembed" or "noframes" or "plaintext"
+                or "noscript" => true,
+            _ => false,
+        };
 }
