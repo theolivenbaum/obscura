@@ -15031,18 +15031,35 @@ public sealed partial class RuntimeTests
         using var source = new RawHttpServer(
             _ => $"HTTP/1.1 302 Found\r\nLocation: {target.Origin}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         using var fixture = RedirectRuntimeForOrigin(source.Origin);
+        // Upstream 04418a5 extends the assertion: an opaque response has status 0,
+        // a null body and no headers.
         var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
             """
             async () => {
                 const response = await fetch("/start", { mode: "no-cors" });
-                return { type: response.type, url: response.url, redirected: response.redirected };
+                return {
+                    type: response.type,
+                    url: response.url,
+                    redirected: response.redirected,
+                    status: response.status,
+                    body: await response.text(),
+                    bodyIsNull: response.body === null,
+                    headerCount: Array.from(response.headers).length,
+                };
             }
             """,
             null,
             [],
             returnByValue: true,
             awaitPromise: true);
-        AssertJsonEquals("""{ "type": "opaque", "url": "", "redirected": false }""", result.Value);
+        AssertJsonEquals(
+            """
+            {
+                "type": "opaque", "url": "", "redirected": false,
+                "status": 0, "body": "", "bodyIsNull": true, "headerCount": 0
+            }
+            """,
+            result.Value);
     }
 
     [Fact(Skip = "blocked: the stealth transport has no managed implementation, so PocketCalculator.Js never routes op_fetch_url through IStealthHttpClient and the only in-tree client (UnavailableStealthHttpClient) fails every request; see the TLS-impersonation gap in todo.md")]

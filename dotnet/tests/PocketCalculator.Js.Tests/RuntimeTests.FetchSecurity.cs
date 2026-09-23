@@ -79,6 +79,112 @@ public sealed partial class RuntimeTests
     }
 
     /// <summary>
+    /// Upstream 04418a5, <c>cross_origin_dynamic_script_loads_without_exposing_fetch_body</c>:
+    /// the dynamic classic-script loader is an internal load, so a cross-origin
+    /// script still runs although a no-cors fetch() of it is opaque.
+    /// </summary>
+    [Fact]
+    public async Task CrossOriginDynamicScriptLoadsWithoutExposingFetchBody()
+    {
+        const string body = "globalThis.__crossOriginScriptLoaded = true";
+        using var server = new RawHttpServer(_ =>
+            "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: "
+                + body.Length + "\r\nConnection: close\r\n\r\n" + body);
+        using var fixture = RedirectRuntimeForOrigin("http://example.com");
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                const script = document.createElement("script");
+                script.src = "{{server.Origin}}/script.js";
+                const outcome = await new Promise(resolve => {
+                    script.onload = () => resolve("load");
+                    script.onerror = () => resolve("error");
+                    document.head.appendChild(script);
+                });
+                const opaque = await fetch("{{server.Origin}}/script.js", { mode: "no-cors" });
+                return {
+                    outcome,
+                    loaded: globalThis.__crossOriginScriptLoaded === true,
+                    fetchStatus: opaque.status,
+                    fetchBody: await opaque.text(),
+                };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+
+        AssertJsonEquals(
+            """{ "outcome": "load", "loaded": true, "fetchStatus": 0, "fetchBody": "" }""",
+            result.Value);
+    }
+
+    /// <summary>
+    /// Upstream 04418a5: Set-Cookie never reaches script, and a cross-origin CORS
+    /// response shows only the safelisted and exposed headers.
+    /// </summary>
+    [Fact]
+    public async Task FetchResponseHeadersHideCookiesAndUnexposedFields()
+    {
+        const string response = "HTTP/1.1 200 OK\r\n"
+            + "Content-Type: text/plain\r\n"
+            + "Set-Cookie: sid=secret; HttpOnly\r\n"
+            + "X-Secret: hidden\r\n"
+            + "X-Visible: shown\r\n"
+            + "Access-Control-Allow-Origin: *\r\n"
+            + "Access-Control-Expose-Headers: X-Visible, Set-Cookie\r\n"
+            + "Content-Length: 2\r\nConnection: close\r\n\r\nok";
+        using var server = new RawHttpServer(_ => response);
+        using var fixture = RedirectRuntimeForOrigin(server.Origin);
+        var result = await fixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                const same = await fetch("/same");
+                const xhr = new XMLHttpRequest();
+                const xhrHeaders = await new Promise(resolve => {
+                    xhr.onload = () => resolve(xhr.getAllResponseHeaders());
+                    xhr.open("GET", "/xhr");
+                    xhr.send();
+                });
+                return {
+                    sameCookie: same.headers.get("set-cookie"),
+                    sameSecret: same.headers.get("x-secret"),
+                    xhrCookie: /^set-cookie:/im.test(xhrHeaders),
+                };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+        AssertJsonEquals(
+            """{ "sameCookie": null, "sameSecret": "hidden", "xhrCookie": false }""",
+            result.Value);
+
+        using var crossFixture = RedirectRuntimeForOrigin("http://example.com");
+        var cross = await crossFixture.Runtime.CallFunctionOnForCdpAsync(
+            $$"""
+            async () => {
+                const r = await fetch("{{server.Origin}}/cross");
+                return {
+                    type: r.headers.get("content-type"),
+                    visible: r.headers.get("x-visible"),
+                    secret: r.headers.get("x-secret"),
+                    cookie: r.headers.get("set-cookie"),
+                };
+            }
+            """,
+            null,
+            [],
+            returnByValue: true,
+            awaitPromise: true);
+        AssertJsonEquals(
+            """{ "type": "text/plain", "visible": "shown", "secret": null, "cookie": null }""",
+            cross.Value);
+    }
+
+    /// <summary>
     /// Upstream 4778192 (#940), <c>queued_navigation_does_not_expose_another_origins_cookies</c>:
     /// a queued navigation must not move document.cookie's jar scope before it commits.
     /// </summary>

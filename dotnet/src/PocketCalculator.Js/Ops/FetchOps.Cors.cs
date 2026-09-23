@@ -287,6 +287,145 @@ public static partial class FetchOps
         return wildcard && !credentialed && !name.Equals("authorization", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>The CORS-safelisted response header names (Fetch).</summary>
+    private static readonly string[] SafelistedResponseHeaders =
+    [
+        "cache-control",
+        "content-language",
+        "content-length",
+        "content-type",
+        "expires",
+        "last-modified",
+        "pragma",
+    ];
+
+    /// <summary>
+    /// The response headers page script may read (upstream 04418a5). Set-Cookie and
+    /// Set-Cookie2 never; for a cross-origin response only the safelisted names and
+    /// those in Access-Control-Expose-Headers, where <c>*</c> counts only for a
+    /// request without <c>credentials: "include"</c>.
+    /// </summary>
+    internal static Dictionary<string, string> VisibleResponseHeaders(
+        IReadOnlyDictionary<string, string> headers,
+        bool crossOrigin,
+        FetchCredentials credentials)
+    {
+        ArgumentNullException.ThrowIfNull(headers);
+        var exposeAll = false;
+        List<string>? exposed = null;
+        if (crossOrigin && TryGetHeader(headers, "access-control-expose-headers", out var exposeValue))
+        {
+            foreach (var raw in exposeValue.Split(','))
+            {
+                var name = raw.Trim();
+                if (name.Length == 0)
+                {
+                    continue;
+                }
+
+                if (name == "*" && credentials != FetchCredentials.Include)
+                {
+                    exposeAll = true;
+                }
+                else
+                {
+                    (exposed ??= []).Add(name);
+                }
+            }
+        }
+
+        Dictionary<string, string> visible = new(StringComparer.Ordinal);
+        foreach (var (name, value) in headers)
+        {
+            if (name.Equals("set-cookie", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("set-cookie2", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!crossOrigin || exposeAll || ContainsIgnoreCase(SafelistedResponseHeaders, name)
+                || (exposed is not null && ContainsIgnoreCase(exposed, name)))
+            {
+                visible[name] = value;
+            }
+        }
+
+        return visible;
+    }
+
+    private static bool ContainsIgnoreCase(IReadOnlyList<string> names, string name)
+    {
+        foreach (var candidate in names)
+        {
+            if (candidate.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryGetHeader(IReadOnlyDictionary<string, string> headers, string name, out string value)
+    {
+        if (headers.TryGetValue(name, out value!))
+        {
+            return true;
+        }
+
+        foreach (var (key, candidate) in headers)
+        {
+            if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = candidate;
+                return true;
+            }
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// The JS-facing result for a request a CDP client fulfilled
+    /// (<c>Fetch.fulfillRequest</c>), under the same confidentiality rules as a
+    /// network response: opaque for a public no-cors cross-origin load, and only the
+    /// visible headers otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Rust also emits <c>bodyBase64</c> here (upstream #912). The C# fulfill carries
+    /// the body as text only, so the key is left out, as it was before.
+    /// </remarks>
+    internal static string InterceptFulfillResponse(
+        int status,
+        IReadOnlyDictionary<string, string> headers,
+        string body,
+        string url,
+        string pageOrigin,
+        string mode,
+        FetchCredentials credentials,
+        bool internalLoad)
+    {
+        var crossOrigin = RequestOrigin(url) is { } requestOrigin
+            && !string.Equals(requestOrigin, pageOrigin, StringComparison.Ordinal);
+        var opaque = !internalLoad && string.Equals(mode, "no-cors", StringComparison.Ordinal) && crossOrigin;
+        var sb = new StringBuilder(256 + body.Length);
+        sb.Append("{\"status\":").Append(opaque ? "0" : status.ToString(CultureInfo.InvariantCulture));
+        sb.Append(",\"body\":");
+        SerdeJson.AppendString(sb, opaque ? string.Empty : body);
+        sb.Append(",\"url\":");
+        SerdeJson.AppendString(sb, url);
+        sb.Append(",\"headers\":");
+        AppendHeaders(
+            sb,
+            opaque
+                ? new Dictionary<string, string>(StringComparer.Ordinal)
+                : VisibleResponseHeaders(headers, crossOrigin, credentials));
+        sb.Append(",\"opaque\":").Append(opaque ? "true" : "false");
+        sb.Append('}');
+        return sb.ToString();
+    }
+
     /// <summary>
     /// Whether a redirect with this status turns the request into a bodiless GET.
     /// </summary>

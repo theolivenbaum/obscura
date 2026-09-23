@@ -256,11 +256,13 @@ public static partial class FetchOps
         byte[] body,
         string origin,
         string mode,
-        string credentials)
+        string credentials,
+        bool internalLoad = false)
     {
         try
         {
-            return await FetchUrlAsync(state, url, method, headersJson, body, origin, mode, credentials)
+            return await FetchUrlAsync(
+                    state, url, method, headersJson, body, origin, mode, credentials, internalLoad)
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -285,7 +287,8 @@ public static partial class FetchOps
         byte[] body,
         string origin,
         string mode,
-        string credentials)
+        string credentials,
+        bool internalLoad)
     {
         ArgumentNullException.ThrowIfNull(gs);
         var startedAtUnixMs = PerformanceOps.UnixMilliseconds();
@@ -357,19 +360,15 @@ public static partial class FetchOps
                     switch (resolution)
                     {
                         case InterceptResolution.Fulfill fulfill:
-                        {
-                            var sb = new StringBuilder(256);
-                            sb.Append("{\"status\":")
-                                .Append(fulfill.Status.ToString(CultureInfo.InvariantCulture));
-                            sb.Append(",\"body\":");
-                            SerdeJson.AppendString(sb, fulfill.Body);
-                            sb.Append(",\"url\":");
-                            SerdeJson.AppendString(sb, url);
-                            sb.Append(",\"headers\":");
-                            AppendHeaders(sb, fulfill.Headers);
-                            sb.Append('}');
-                            return sb.ToString();
-                        }
+                            return InterceptFulfillResponse(
+                                fulfill.Status,
+                                fulfill.Headers,
+                                fulfill.Body,
+                                url,
+                                origin,
+                                mode,
+                                ParseCredentials(credentials),
+                                internalLoad);
 
                         case InterceptResolution.Fail fail:
                             return Blocked(url, fail.Reason);
@@ -800,23 +799,33 @@ public static partial class FetchOps
                         ContentType = respHeaders.GetValueOrDefault("content-type", string.Empty),
                     });
 
+                // Page script sees an opaque no-cors response as status 0 with no body
+                // and no headers; the engine's own subresource loads (internalLoad) still
+                // get the body. Set-Cookie and unexposed cross-origin headers never
+                // reach script (upstream 04418a5). The CDP-facing records above keep
+                // the full response.
+                var opaque = !internalLoad
+                    && string.Equals(mode, "no-cors", StringComparison.Ordinal)
+                    && crossedOrigin;
+                var scriptHeaders = opaque
+                    ? new Dictionary<string, string>(StringComparer.Ordinal)
+                    : VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode);
+
                 var result = new StringBuilder(respBody.Length + respBodyBase64.Length + 256);
-                result.Append("{\"status\":").Append(finalStatus.ToString(CultureInfo.InvariantCulture));
+                result.Append("{\"status\":").Append(
+                    opaque ? "0" : finalStatus.ToString(CultureInfo.InvariantCulture));
                 result.Append(",\"body\":");
-                SerdeJson.AppendString(result, respBody);
+                SerdeJson.AppendString(result, opaque ? string.Empty : respBody);
                 result.Append(",\"bodyBase64\":");
-                SerdeJson.AppendString(result, respBodyBase64);
+                SerdeJson.AppendString(result, opaque ? string.Empty : respBodyBase64);
                 result.Append(",\"requestId\":");
                 SerdeJson.AppendString(result, requestId);
                 result.Append(",\"url\":");
                 SerdeJson.AppendString(result, currentUrl);
                 result.Append(",\"redirected\":").Append(redirected ? "true" : "false");
-                result.Append(",\"opaque\":").Append(
-                    string.Equals(mode, "no-cors", StringComparison.Ordinal) && crossedOrigin
-                        ? "true"
-                        : "false");
+                result.Append(",\"opaque\":").Append(opaque ? "true" : "false");
                 result.Append(",\"headers\":");
-                AppendHeaders(result, respHeaders);
+                AppendHeaders(result, scriptHeaders);
                 result.Append('}');
                 return result.ToString();
             }

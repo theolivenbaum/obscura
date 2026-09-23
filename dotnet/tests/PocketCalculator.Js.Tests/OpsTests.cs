@@ -287,6 +287,58 @@ public sealed class OpsTests
         Assert.Contains("scheme", error.ToLowerInvariant(), StringComparison.Ordinal);
     }
 
+    // Upstream 04418a5: a fulfilled no-cors cross-origin request is opaque to page
+    // script, but the engine's own internal load still gets the body.
+    [Fact]
+    public void Intercepted_internal_load_keeps_cross_origin_body_private_but_usable()
+    {
+        var empty = new Dictionary<string, string>();
+        var pub = System.Text.Json.Nodes.JsonNode.Parse(FetchOps.InterceptFulfillResponse(
+            200, empty, "script body", "https://cdn.example/script.js", "https://page.example",
+            "no-cors", FetchCredentials.SameOrigin, internalLoad: false))!;
+        Assert.Equal(0, pub["status"]!.GetValue<int>());
+        Assert.Equal(string.Empty, pub["body"]!.GetValue<string>());
+        Assert.True(pub["opaque"]!.GetValue<bool>());
+
+        var internalLoad = System.Text.Json.Nodes.JsonNode.Parse(FetchOps.InterceptFulfillResponse(
+            200, empty, "script body", "https://cdn.example/script.js", "https://page.example",
+            "no-cors", FetchCredentials.SameOrigin, internalLoad: true))!;
+        Assert.Equal(200, internalLoad["status"]!.GetValue<int>());
+        Assert.Equal("script body", internalLoad["body"]!.GetValue<string>());
+        Assert.False(internalLoad["opaque"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Response_headers_hide_cookies_and_unexposed_cross_origin_fields()
+    {
+        var headers = new Dictionary<string, string>
+        {
+            ["content-type"] = "text/plain",
+            ["set-cookie"] = "sid=secret; HttpOnly",
+            ["x-secret"] = "hidden",
+            ["x-visible"] = "shown",
+            ["access-control-expose-headers"] = "X-Visible, Set-Cookie",
+        };
+
+        var sameOrigin = FetchOps.VisibleResponseHeaders(headers, false, FetchCredentials.SameOrigin);
+        Assert.False(sameOrigin.ContainsKey("set-cookie"));
+        Assert.Equal("hidden", sameOrigin["x-secret"]);
+
+        var crossOrigin = FetchOps.VisibleResponseHeaders(headers, true, FetchCredentials.SameOrigin);
+        Assert.Equal("text/plain", crossOrigin["content-type"]);
+        Assert.Equal("shown", crossOrigin["x-visible"]);
+        Assert.False(crossOrigin.ContainsKey("x-secret"));
+        Assert.False(crossOrigin.ContainsKey("set-cookie"));
+
+        // "*" exposes everything but Set-Cookie, and only for an uncredentialed request.
+        headers["access-control-expose-headers"] = "*";
+        var wildcard = FetchOps.VisibleResponseHeaders(headers, true, FetchCredentials.SameOrigin);
+        Assert.Equal("hidden", wildcard["x-secret"]);
+        Assert.False(wildcard.ContainsKey("set-cookie"));
+        var credentialed = FetchOps.VisibleResponseHeaders(headers, true, FetchCredentials.Include);
+        Assert.False(credentialed.ContainsKey("x-secret"));
+    }
+
     // Upstream ebe5973 (#967): a redirect must not forward the caller's credentials
     // to a different origin, and a GET downgrade drops the body headers.
     [Fact]

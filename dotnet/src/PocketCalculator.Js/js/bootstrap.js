@@ -346,8 +346,10 @@ async function __fetchDynClassicScript(task) {
   if (task.url.startsWith('data:')) {
     body = _decodeDataScriptUrl(task.url);
   } else {
+    // internalLoad: the engine's own script load gets the body of a no-cors
+    // cross-origin response, which page fetch() only sees as opaque (04418a5).
     const raw = await __obscuraCore.ops.op_fetch_url(
-      task.url, "GET", "{}", new Uint8Array(0), task.pageOrigin, "no-cors", "same-origin"
+      task.url, "GET", "{}", new Uint8Array(0), task.pageOrigin, "no-cors", "same-origin", true
     );
     const parsed = JSON.parse(raw);
     // The HTML script-fetch algorithm treats an unsuccessful HTTP response
@@ -600,8 +602,10 @@ async function _fetchLinkedCss(url, pageOrigin, depth = 0, seen = new Set()) {
     return { css: "", responseUrl: url, originClean: true };
   }
   seen.add(url);
+  // internalLoad (04418a5): the engine reads the stylesheet bytes; page script
+  // never sees them, and the origin-clean flag still follows the response URL.
   const raw = await __obscuraCore.ops.op_fetch_url(
-    url, "GET", "{}", new Uint8Array(0), pageOrigin, "no-cors", "same-origin"
+    url, "GET", "{}", new Uint8Array(0), pageOrigin, "no-cors", "same-origin", true
   );
   const parsed = JSON.parse(raw);
   if (parsed.blocked || parsed.status >= 400 || parsed.status === 0) {
@@ -4365,7 +4369,7 @@ class Element extends Node {
     try { pageOrigin = new URL(_domParse('document_url') || 'about:blank').origin; } catch (_) {}
     Promise.resolve(__obscuraCore.ops.op_fetch_url(
       fullUrl, 'GET', '{}', new Uint8Array(0), pageOrigin,
-      'no-cors', 'same-origin'
+      'no-cors', 'same-origin', true
     )).then(raw => {
       if (el._iframeLoadingUrl !== fullUrl) return;
       const response = JSON.parse(raw);
@@ -7586,7 +7590,7 @@ globalThis.fetch = async (input, init = {}) => {
     throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
   }
   const pageOrigin = (function() { try { const u = new URL(_domParse("document_url") || "about:blank"); return u.origin; } catch(e) { return ""; } })();
-  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials);
+  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, pageOrigin, fetchMode, fetchCredentials, false);
   const parsed = JSON.parse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -7599,7 +7603,9 @@ globalThis.fetch = async (input, init = {}) => {
   }
   const respType = parsed.status === 0 || parsed.opaque ? "opaque" : "basic";
   const exposeRedirectMetadata = respType !== "opaque" && fetchRedirect === "follow";
-  const responseBody = parsed.bodyBase64 ? _base64ToUint8Array(parsed.bodyBase64) : (parsed.body || "");
+  const responseBody = respType === "opaque"
+    ? null
+    : (parsed.bodyBase64 ? _base64ToUint8Array(parsed.bodyBase64) : (parsed.body || ""));
   const response = new Response(responseBody, {
     status: parsed.status,
     statusText: "",
@@ -8049,7 +8055,7 @@ function _decodeBodyWithCharset(bytes, headers) {
 if (typeof Response === 'undefined') {
   globalThis.Response = class Response {
     constructor(body, init = {}) {
-      this._bodyBytes = _bodyToUint8Array(body); this.status = init.status || 200; this.statusText = init.statusText || '';
+      this._bodyBytes = _bodyToUint8Array(body); this.status = init.status === undefined ? 200 : Number(init.status); this.statusText = init.statusText || '';
       this.ok = this.status >= 200 && this.status < 300;
       this.headers = new Headers(init.headers);
       this.type = init.type || 'basic'; this.url = init.url || ''; this.redirected = !!init.redirected;

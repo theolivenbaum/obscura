@@ -197,9 +197,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (source, baseUrl) => CoreOps.OpAddImportMap(Page, S(source), S(baseUrl))));
 
         // --- Network -------------------------------------------------------
-        Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
-            (url, method, headers, body, origin, mode, credentials) => FetchOps.OpFetchUrlAsync(
-                RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials))));
+        Bind(ops, "op_fetch_url", (Func<object?, object?, object?, object?, object?, object?, object?, object?, Task<string>>)(
+            (url, method, headers, body, origin, mode, credentials, internalLoad) => FetchOps.OpFetchUrlAsync(
+                RealmState(), S(url), S(method), S(headers), Bytes(body), S(origin), S(mode), S(credentials),
+                B(internalLoad))));
 
         // --- Encoding ------------------------------------------------------
         Bind(ops, "op_encoding_for_label", (Func<object?, string>)(
