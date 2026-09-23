@@ -201,6 +201,64 @@ The largest component. Split into stages; each stage is independently testable.
       differ are both outside the CLI: the ClearScript script-name suffix in a
       thrown error's stack, and the platform io error string for a missing file.
 
+## Upstream sync 727cc46..1a3169d
+
+Reviewed 2026-09-23; detail per commit in `dotnet/docs/upstream-review-2026-09.md`.
+`.reference/obscura/` stays at `727cc46` until these are ported or declined. Ordered
+by severity; one upstream fix per commit, citing the upstream sha.
+
+Security (the C# port is exposed today):
+
+- [ ] `04418a5` G - MCP HTTP: origin allowlist, Content-Type, token, limits, no `file://`
+- [ ] `04418a5` A - hide `Deno.core.ops` from page script
+- [ ] `97ff86d` + `99647b4` - route render resource loads through the page transport
+      (SSRF guard, blocklist, cookies, proxy); DOM-only screenshots stay network-free
+- [ ] `04418a5` C - fetch/XHR response confidentiality (`Set-Cookie`, unexposed
+      headers, `no-cors`); `op_fetch_url` gains the `internalLoad` argument
+- [ ] `04f0475` + `05846de` - CORS preflight enforcement, CORS check per redirect hop
+- [ ] `ebe5973` - drop credentials on cross-origin redirects; only POST downgrades on 301/302
+- [ ] `04418a5` D - iframe same-origin check against the final URL
+- [ ] `4778192` - `op_navigate` must not move the page URL before commit
+- [ ] `b369f78` - `document.cookie` cannot write or delete HttpOnly cookies
+- [ ] `04418a5` B - cross-origin stylesheet confidentiality
+- [ ] `04418a5` F + `0671d94` - CDP token, Origin refusal, Host check; endpoint from Host
+- [ ] `04418a5` E - cookie jar RFC 6265bis rules, host-only persistence (`hostOnly` key)
+- [ ] `04418a5` H, `c2e6fb2`, `8395f29` - calc() nesting guard, random-bytes cap,
+      oversized transform layer skipped rather than failing the capture
+
+Correctness:
+
+- [ ] `a156914` - CDP mouse/pointer/focus order, event path phases, event classes,
+      window named properties, `:scope`, renderer hit test (on the port's paint order)
+- [ ] `2b07b76` - `document.write` script ordering
+- [ ] `6aef52d`, `61ec5b3`, `dc5e60e` - id index on removeAttribute, node identity,
+      CharacterData ranges
+- [ ] `729c264`, `00dd6c7`, `2e752b9` (Chromium casing), `25af144`, `f645df2`,
+      `88d2174` - URL setters, btoa, fetch method, parsererror text, enumerable IDL
+      operations, HTMLSlotElement
+- [ ] `ec62004`, `a161a8d`, `f81c296`, `403356f`, `94e857b`/`b0ccbbe`, `dfc546d`,
+      `20a3e02`, `4383793`, `dc88742`, `fa0362b` - CDP input, accessibility, sessions,
+      handles, by-value undefined, Fetch domain, history navigation
+- [ ] `af955b3` - release memory after the last CDP client disconnects
+- [ ] `d1e3e77`, `9ced496`, `61f8e68`, `bf11721`, `d6c9ef5` - multi-valued headers,
+      `OBSCURA_BLOCK_TRACKERS`, MCP network and console history, navigator plugin interfaces
+- [ ] `aaf189f` - float boundary subdivide throw; `c68fa2b` - overline and line-through
+- [ ] `88998d6`, `deef294` (partial) - `indeterminate`, live `:checked`, cloneNode form
+      state, `form.reset()`
+- [ ] `d579bdd`, `343fdc7` (cache only) - redundant layout/shaping, shared font set;
+      benchmark before and after
+
+Decisions:
+
+- [ ] `d792bae` - keep every CDP page's isolate live; conflicts with "Page suspension
+      stays". Measure memory, then decide (recommended: port, Chromium never suspends)
+- [ ] `343fdc7` `--font-dir` - conflicts with the embedded-fonts-only rule
+
+Found during the review, not from upstream:
+
+- [ ] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
+      caller, around line 796); repro in the review document
+
 ## Open issues
 
 - **A forced geometry read after a style write that *does* change layout still
