@@ -27,16 +27,27 @@ found at `6dae774` and are kept as the record.
 
 Still open after the fixes:
 
-- **Slow, but now bounded by the deadline.** C# work inside an op, a capture, or an
-  MCP tool call now stops when its watchdog fires (see
-  [Cancellation of work inside ops](#cancellation-of-work-inside-ops)). These inputs
-  are still slow, and a page that triggers them spends its budget rather than its
-  host's:
-  - 300 nested `float:left` blocks (over a minute uncancelled);
-  - thousands of nested inline spans;
-  - `repeat()` nested inside `repeat()` in `grid-template-*` (exponential; 2^20
-    tracks take about 1.5 s);
-  - `innerText` and `Range.toString()` on a 10k-deep tree.
+- **Slow inputs.** C# work inside an op, a capture, or an MCP tool call stops when its
+  watchdog fires (see [Cancellation of work inside ops](#cancellation-of-work-inside-ops)).
+  The worst known inputs are now fast as well:
+
+  | Input | Before | After |
+  |---|---|---|
+  | 300 nested floats | 77 s | 1.8 s |
+  | 5000 nested inline spans | minutes | 1.5 s |
+  | 20000 sibling bordered spans | minutes | 1.8 s |
+  | nested grid `repeat()` (now invalid, as in Chromium) | exponential | 1.2 s |
+  | `innerText`, 10k deep | JS stack overflow | 41 ms |
+  | `Range.toString()`, 10k deep | 29 s | 12 ms |
+
+  Grid track counts follow Chromium's `kGridMaxTracks` rules at 10,000 tracks per
+  axis. Still slow, but bounded by the deadline:
+  - nested `display:table` (quadratic, about 1.7 s at 300);
+  - the first layout of a 10k-deep or 50k-wide tree (5-7 s);
+  - `innerHTML` with tens of thousands of top-level nodes (quadratic inside
+    AngleSharp);
+  - a grid item spanning the whole track limit, which allocates up to 400 MB for one
+    layout.
 
   `POCKETCALCULATOR_HANG_EXIT_MS` stays as the opt-in backstop for `serve` and
   `mcp`, for work outside any of these scopes.
