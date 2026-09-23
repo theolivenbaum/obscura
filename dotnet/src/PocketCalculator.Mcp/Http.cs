@@ -44,8 +44,14 @@ public static class Http
     /// <summary>Largest serialized JSON-RPC <c>id</c>.</summary>
     internal const int MaxIdBytes = 1024;
 
-    /// <summary>Live connections. One more is closed at accept.</summary>
+    /// <summary>Live connections, open SSE streams included. One more is closed at accept.</summary>
     internal const int MaxConnections = 128;
+
+    /// <summary>
+    /// Open SSE streams. A stream holds its connection slot for as long as the
+    /// client keeps it open, so this keeps streams from taking every slot.
+    /// </summary>
+    internal const int MaxSseStreams = 16;
 
     /// <summary>Requests queued for the single dispatcher that owns the browser session.</summary>
     internal const int MaxPendingRequests = 32;
@@ -59,6 +65,9 @@ public static class Http
     /// cannot keep a connection slot occupied by slowly dribbling data.
     /// </summary>
     internal static readonly TimeSpan RequestReadTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>How often an open SSE stream is sent a keep-alive comment.</summary>
+    internal static readonly TimeSpan SsePingInterval = TimeSpan.FromSeconds(15);
 
     internal enum RequestBodyKind
     {
@@ -85,7 +94,11 @@ public static class Http
         string? Origin,
         bool Authorized,
         bool ContentTypeIsJson,
-        RequestBody Body);
+        RequestBody Body)
+    {
+        /// <summary>The <c>Host</c> header, or null when the request carried none.</summary>
+        public string? Host { get; init; }
+    }
 
     internal enum RequestReadKind
     {
@@ -185,6 +198,7 @@ public static class Http
         var keepAlive = false;
         string? origin = null;
         string? authorization = null;
+        string? hostHeader = null;
         var contentTypeIsJson = false;
         var headerBytes = 0;
 
@@ -234,6 +248,11 @@ public static class Http
                 {
                     origin = trimmed[(idx + 1)..].Trim();
                 }
+            }
+
+            if (lower.StartsWith("host:", StringComparison.Ordinal))
+            {
+                hostHeader = trimmed["host:".Length..].Trim();
             }
 
             if (lower.StartsWith("authorization:", StringComparison.Ordinal))
@@ -301,7 +320,10 @@ public static class Http
         }
 
         return RequestRead.Of(new HttpRequestLine(
-            method, path, acceptSse, keepAlive, origin, authorized, contentTypeIsJson, body));
+            method, path, acceptSse, keepAlive, origin, authorized, contentTypeIsJson, body)
+        {
+            Host = hostHeader,
+        });
     }
 
     internal static async Task<RequestRead> ReadRequestWithTimeoutAsync(
@@ -377,6 +399,49 @@ public static class Http
     }
 
     /// <summary>
+    /// DNS-rebinding protection: whether a request's <c>Host</c> may be served by a
+    /// server bound to <paramref name="bindIp"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md L1): upstream's MCP transport never reads
+    /// <c>Host</c>. A DNS-rebound page cannot call tools, since its POSTs carry an
+    /// <c>Origin</c> the Origin gate refuses, but it could open same-origin SSE
+    /// streams. The port applies the CDP server's rule (<c>CdpServer.HostAllowed</c>,
+    /// which is Chromium's <c>RequestIsSafeToServe</c>), as the MCP specification
+    /// recommends: no Host, an IP literal, or <c>localhost</c> / <c>*.localhost</c>,
+    /// on any port; and any Host at all for an unspecified bind, which is reached by
+    /// whatever name the network gives it and cannot start without a token. The
+    /// two copies are kept apart because this assembly does not reference the CDP
+    /// one; keep them in step.
+    /// </remarks>
+    internal static bool HostAllowed(string? hostHeader, IPAddress bindIp)
+    {
+        if (hostHeader is null || hostHeader.Length == 0)
+        {
+            return true;
+        }
+
+        if (bindIp.Equals(IPAddress.Any) || bindIp.Equals(IPAddress.IPv6Any))
+        {
+            return true;
+        }
+
+        if (!Uri.TryCreate("http://" + hostHeader + "/", UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        if (uri.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
+        {
+            return true;
+        }
+
+        var name = uri.IdnHost.EndsWith('.') ? uri.IdnHost[..^1] : uri.IdnHost;
+        return name.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// CORS response headers for an already-authorized browser caller: its origin
     /// echoed back plus <c>Vary: Origin</c>. A wildcard is never emitted for this
     /// privileged endpoint, and a native client with no <c>Origin</c> needs no CORS
@@ -445,6 +510,7 @@ public static class Http
         var stopping = stop.Token;
         var dispatcher = DispatchAsync(requests.Reader, state, stopping);
         using var slots = new SemaphoreSlim(MaxConnections, MaxConnections);
+        using var sseSlots = new SemaphoreSlim(MaxSseStreams, MaxSseStreams);
 
         try
         {
@@ -475,7 +541,8 @@ public static class Http
                 {
                     try
                     {
-                        await HandleConnectionAsync(client, requests.Writer, allowedOrigins, authToken, stopping)
+                        await HandleConnectionAsync(
+                                client, requests.Writer, address, sseSlots, allowedOrigins, authToken, stopping)
                             .ConfigureAwait(false);
                     }
                     catch (Exception)
@@ -541,13 +608,14 @@ public static class Http
     private static async Task HandleConnectionAsync(
         TcpClient client,
         ChannelWriter<PendingRequest> requests,
+        IPAddress bindAddress,
+        SemaphoreSlim sseSlots,
         string? allowedOrigins,
         string? authToken,
         CancellationToken cancellationToken)
     {
         var stream = client.GetStream();
         var reader = new LineReader(stream);
-        var detached = false;
 
         try
         {
@@ -566,6 +634,15 @@ public static class Http
                 if (!string.Equals(request.Path, "/mcp", StringComparison.Ordinal))
                 {
                     await RespondAsync(stream, 404, "{\"error\":\"not found\"}").ConfigureAwait(false);
+                    break;
+                }
+
+                // Host gate (SECURITY.md L1): a DNS-rebound name is refused before
+                // anything else, as the CDP server refuses it.
+                if (!HostAllowed(request.Host, bindAddress))
+                {
+                    await RespondAsync(stream, 403, "{\"error\":\"host not allowed\"}")
+                        .ConfigureAwait(false);
                     break;
                 }
 
@@ -606,40 +683,66 @@ public static class Http
                 else if (string.Equals(request.Method, "GET", StringComparison.Ordinal) && request.AcceptSse)
                 {
                     // SSE stream: hold open and send periodic keep-alive comments.
-                    // The keep-alive touches no browser state, so detach the ping
-                    // loop onto its own task and return, releasing the connection
-                    // slot the way the Rust server drops its permit.
-                    var header =
-                        "HTTP/1.1 200 OK\r\n"
-                        + "Content-Type: text/event-stream\r\n"
-                        + "Cache-Control: no-cache\r\n"
-                        + "Connection: keep-alive\r\n"
-                        + cors
-                        + "\r\n";
-                    await WriteAsync(stream, Encoding.UTF8.GetBytes(header)).ConfigureAwait(false);
-                    detached = true;
-                    _ = Task.Run(async () =>
+                    // Deviation (SECURITY.md L2): upstream detaches the ping loop and
+                    // drops its connection permit, so streams were never counted and
+                    // any admitted client could open them without limit. The port
+                    // keeps the stream on this connection's task, which holds its
+                    // slot until the client goes away, and caps open streams at
+                    // MaxSseStreams. Connections are served concurrently, so a held
+                    // stream does not block the accept loop.
+                    if (!sseSlots.Wait(0))
+                    {
+                        await RespondAsync(stream, 503, "{\"error\":\"too many event streams\"}")
+                            .ConfigureAwait(false);
+                        break;
+                    }
+
+                    try
+                    {
+                        var header =
+                            "HTTP/1.1 200 OK\r\n"
+                            + "Content-Type: text/event-stream\r\n"
+                            + "Cache-Control: no-cache\r\n"
+                            + "Connection: keep-alive\r\n"
+                            + cors
+                            + "\r\n";
+                        await WriteAsync(stream, Encoding.UTF8.GetBytes(header)).ConfigureAwait(false);
+                        // A read that completes means the client closed (or sent
+                        // something it should not): either way the stream ends, and
+                        // its slot is free at once rather than at the next ping.
+                        var hangup = stream.ReadAsync(new byte[1], cancellationToken).AsTask();
+                        while (true)
+                        {
+                            var ping = Task.Delay(SsePingInterval, cancellationToken);
+                            if (await Task.WhenAny(hangup, ping).ConfigureAwait(false) == hangup)
+                            {
+                                Observe(hangup);
+                                break;
+                            }
+
+                            await ping.ConfigureAwait(false);
+                            await stream.WriteAsync(": ping\n\n"u8.ToArray(), cancellationToken)
+                                .ConfigureAwait(false);
+                            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception error) when (error is IOException or ObjectDisposedException
+                        or OperationCanceledException or SocketException)
+                    {
+                        // The client went away, or the server stopped.
+                    }
+                    finally
                     {
                         try
                         {
-                            while (true)
-                            {
-                                await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken)
-                                    .ConfigureAwait(false);
-                                await stream.WriteAsync(": ping\n\n"u8.ToArray(), cancellationToken)
-                                    .ConfigureAwait(false);
-                                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                            }
+                            sseSlots.Release();
                         }
-                        catch (Exception)
+                        catch (ObjectDisposedException)
                         {
-                            // The client went away; the stream closes with the client.
+                            // The server already stopped.
                         }
-                        finally
-                        {
-                            client.Dispose();
-                        }
-                    }, CancellationToken.None);
+                    }
+
                     return;
                 }
                 else if (string.Equals(request.Method, "POST", StringComparison.Ordinal))
@@ -688,10 +791,7 @@ public static class Http
         }
         finally
         {
-            if (!detached)
-            {
-                client.Dispose();
-            }
+            client.Dispose();
         }
     }
 
@@ -799,6 +899,7 @@ public static class Http
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
             415 => "Unsupported Media Type",
+            503 => "Service Unavailable",
             _ => "OK",
         };
         var payload = Encoding.UTF8.GetBytes(body);
