@@ -68,7 +68,7 @@ public sealed partial class DomTree
 
     public DomTree()
     {
-        var doc = new Node(new NodeId(0), NodeData.Document) { Connected = true };
+        var doc = new Node(new NodeId(0), NodeData.Document) { Connected = true, EverConnected = true };
         _nodes.Add(doc);
         Document = new NodeId(0);
     }
@@ -212,7 +212,15 @@ public sealed partial class DomTree
     private Node? Slot(NodeId id)
     {
         var index = id.Index;
-        return (uint)index < (uint)_nodes.Count ? _nodes[index] : null;
+        if ((uint)index >= (uint)_nodes.Count)
+        {
+            return null;
+        }
+
+        // The generation check is what makes slot reuse safe: an id minted for an earlier
+        // occupant of this slot names nothing (see NodeId).
+        var node = _nodes[index];
+        return node is not null && node.Id.Value == id.Value ? node : null;
     }
 
     // ---------------------------------------------------------------- shadow roots
@@ -396,6 +404,15 @@ public sealed partial class DomTree
         if (rootNode is { FirstChild: null } && !_shadowRootsByHost.ContainsKey(root))
         {
             rootNode.Connected = connected;
+            if (connected)
+            {
+                rootNode.EverConnected = true;
+            }
+            else
+            {
+                _gcDisconnectedSinceSweep++;
+            }
+
             return;
         }
 
@@ -417,6 +434,15 @@ public sealed partial class DomTree
             }
 
             node.Connected = connected;
+            if (connected)
+            {
+                node.EverConnected = true;
+            }
+            else
+            {
+                _gcDisconnectedSinceSweep++;
+            }
+
             var child = node.FirstChild;
             if (_shadowRootsByHost.TryGetValue(nodeId, out var hosted))
             {
@@ -496,14 +522,27 @@ public sealed partial class DomTree
         NodeId id;
         if (_freeList.Count > 0)
         {
+            // The free list holds the id the slot's next occupant gets: its generation was
+            // already advanced when the slot was freed.
             id = new NodeId(_freeList[^1]);
             _freeList.RemoveAt(_freeList.Count - 1);
         }
         else
         {
+            if ((uint)_nodes.Count > NodeId.IndexMask)
+            {
+                // The index space is exhausted (16M live or retired slots). Refused like a
+                // budget overrun, before anything changed.
+                _contentBytes -= size;
+                throw new DomQuotaExceededException(size, _contentBytes, Math.Max(ContentByteBudget, _contentBytes));
+            }
+
             id = new NodeId((uint)_nodes.Count);
             _nodes.Add(null);
         }
+
+        _gcCreatedSinceSweep++;
+        _gcBytesSinceSweep += size;
 
         if (data is ElementData element)
         {
@@ -790,19 +829,31 @@ public sealed partial class DomTree
         {
             if (Slot(id) is { } freed)
             {
-                _contentBytes = Math.Max(0, _contentBytes - SizeOf(freed.Data));
-                _nodes[id.Index] = null;
-                _freeList.Add(id.Value);
-
-                // The slot is handed out again, so dirty form state recorded against it must
-                // not survive onto whatever node lands there next.
-                ForgetDirtyFormState(id);
-
-                // Same reason: a fetched sheet is recorded against a node, not a node's
-                // identity, and must not be inherited by the next node in this slot.
-                _externalStylesheets?.Remove(id);
+                FreeSlot(freed);
             }
         }
+    }
+
+    /// <summary>
+    /// Release one live slot: credit the budget, drop the side tables keyed by it, and put
+    /// the slot's next id on the free list. The caller has already unlinked the node from
+    /// everything outside the set it is freeing.
+    /// </summary>
+    private void FreeSlot(Node freed)
+    {
+        var id = freed.Id;
+        _contentBytes = Math.Max(0, _contentBytes - SizeOf(freed.Data));
+        _nodes[id.Index] = null;
+        if (id.Generation < NodeId.MaxGeneration)
+        {
+            _freeList.Add(NodeId.FromParts(id.Index, id.Generation + 1).Value);
+        }
+
+        // Keyed by the full id, so a later occupant could not see these anyway; dropped so
+        // the entries do not outlive the node.
+        ForgetDirtyFormState(id);
+        _externalStylesheets?.Remove(id);
+        _pins?.ForgetNode(id);
     }
 
     /// <summary>

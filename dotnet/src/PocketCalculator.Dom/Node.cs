@@ -11,6 +11,20 @@ public sealed class Node
     /// </summary>
     public bool Connected;
 
+    /// <summary>
+    /// Whether the node was ever connected. Read by the in-operation DOM collector, which
+    /// only frees subtrees that left the document: a node that was never connected may be
+    /// one an op has just created and handed to script as a bare id (DomTree.Gc.cs).
+    /// </summary>
+    internal bool EverConnected;
+
+    /// <summary>
+    /// The <see cref="DomTree.ExposureEpoch"/> in which an op last returned this node's id to
+    /// script. Script may hold that id without a wrapper until it next yields, so the
+    /// in-operation collector keeps such a node's subtree (DomTree.Gc.cs).
+    /// </summary>
+    internal uint ExposedEpoch;
+
     public NodeId? Parent;
     public NodeId? FirstChild;
     public NodeId? LastChild;
