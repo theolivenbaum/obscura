@@ -306,7 +306,7 @@ internal sealed class WorldMutationForwarder(PocketCalculatorJsRuntime runtime) 
         {
             if (childrenOf is { } target)
             {
-                pending = pending with { Added = Csv(dom.Children(target)) };
+                pending = pending with { Added = Csv(dom, dom.Children(target)) };
             }
             try
             {
@@ -391,7 +391,7 @@ internal sealed class WorldMutationForwarder(PocketCalculatorJsRuntime runtime) 
                     return new WorldMutationRecord("characterData", raw, string.Empty, string.Empty, null, null);
                 }
                 childrenOf = NodeId.New(raw);
-                return new WorldMutationRecord("childList", raw, string.Empty, Csv(dom.Children(NodeId.New(raw))), null, null);
+                return new WorldMutationRecord("childList", raw, string.Empty, Csv(dom, dom.Children(NodeId.New(raw))), null, null);
             }
             case "set_inner_html" or "set_inner_html_context" or "set_fragment_html_executable":
             {
@@ -400,7 +400,7 @@ internal sealed class WorldMutationForwarder(PocketCalculatorJsRuntime runtime) 
                     return null;
                 }
                 childrenOf = NodeId.New(raw);
-                return new WorldMutationRecord("childList", raw, string.Empty, Csv(dom.Children(NodeId.New(raw))), null, null);
+                return new WorldMutationRecord("childList", raw, string.Empty, Csv(dom, dom.Children(NodeId.New(raw))), null, null);
             }
             case "document_write":
                 return new WorldMutationRecord("childList", dom.Document.Raw, string.Empty, string.Empty, null, null);
@@ -411,8 +411,18 @@ internal sealed class WorldMutationForwarder(PocketCalculatorJsRuntime runtime) 
 
     private static string Id(uint raw) => raw.ToString(CultureInfo.InvariantCulture);
 
-    private static string Csv(List<NodeId> ids)
+    /// <summary>
+    /// The ids as a record carries them. Stamped as exposed: a record names nodes a
+    /// command is about to detach, and the collector must not free them before the
+    /// record reaches a realm (DomTree.Gc.cs); once queued, a record is a root.
+    /// </summary>
+    private static string Csv(DomTree dom, List<NodeId> ids)
     {
+        foreach (var id in ids)
+        {
+            dom.NoteExposed(id);
+        }
+
         if (ids.Count == 0)
         {
             return string.Empty;

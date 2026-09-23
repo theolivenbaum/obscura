@@ -3326,7 +3326,11 @@ class Element extends Node {
     for (const style of this.querySelectorAll("style")) _detachStyleSheet(style);
     let oldChildren = [];
     let newChildren = [];
-    if (globalThis.__mutationObservers?.length) {
+    // Only when an observer can see this element's child list: the ids read here are held
+    // across the parse, so the DOM collector keeps those nodes until the task ends
+    // (DomTree.Gc.cs). Port addition; the Rust shim reads them for any observer anywhere.
+    const observed = _childListObserved(this);
+    if (observed) {
       oldChildren = _domParse("child_nodes", this._nid) || [];
     }
     _dom("set_inner_html", this._nid, String(v ?? ""));
@@ -3335,7 +3339,7 @@ class Element extends Node {
     // before script can synchronously read `window.someId`.
     _registerWindowNamedTree(this);
     _reconcileWindowNamedProperties(previousWindowNames);
-    if (globalThis.__mutationObservers?.length) {
+    if (observed) {
       newChildren = _domParse("child_nodes", this._nid) || [];
       globalThis.__notifyMutation('childList', this._nid, newChildren, oldChildren);
     }
@@ -6712,6 +6716,99 @@ function _wrapEl(nid) {
   return n;
 }
 
+// DOM collection (port addition; see DomTree.Gc.cs and PocketCalculatorJsRuntime.DomGc.cs).
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose _cache keeps every wrapper, and
+// with it every node, for the life of the page. The cache stays strong between collections,
+// so wrapper identity and expandos behave exactly as before. At a task boundary the host
+// hands this realm the detached components nothing else holds; their wrappers leave the
+// cache and are reachable only through WeakRefs, each wrapper holding (through the ephemeron
+// _gcKeepers) a keeper array with every wrapper of its component, so script that holds any
+// one of them keeps all of them. The host then runs V8's collector: a component whose
+// WeakRefs all cleared is garbage, and the others go back in the cache untouched. Listener
+// lists keyed by nid move into the keeper too, since a listener closing over its own element
+// would otherwise hold the element forever. Chromium ties a wrapper's lifetime to its node's
+// the same way (a node is alive while its tree is reachable from the document or from any
+// wrapper), so a detached node that script still holds survives with its expandos.
+let _gcKeys = null;
+let _gcPending = null;
+const _gcKeepers = new WeakMap();
+function _gcCachedNids() {
+  _gcKeys = Array.from(_cache.keys());
+  return _gcKeys.join(",");
+}
+function _gcWeaken(components) {
+  const keys = _gcKeys || [];
+  _gcKeys = null;
+  const comps = String(components || "").split(",");
+  const pending = new Map();
+  const n = Math.min(keys.length, comps.length);
+  for (let i = 0; i < n; i++) {
+    const comp = comps[i];
+    if (comp === "" || comp === "-1") continue;
+    const nid = keys[i];
+    const wrapper = _cache.get(nid);
+    if (wrapper === undefined) continue;
+    let entry = pending.get(comp);
+    if (!entry) {
+      // Only weak references and plain numbers here: anything strong would keep the
+      // component alive through _gcPending itself.
+      entry = { keeper: [], refs: [], nids: [] };
+      pending.set(comp, entry);
+    }
+    entry.keeper.push({ nid, wrapper });
+    entry.refs.push(new WeakRef(wrapper));
+    entry.nids.push(nid);
+    _gcKeepers.set(wrapper, entry.keeper);
+    if (Object.prototype.hasOwnProperty.call(_eventRegistry, nid)) {
+      entry.keeper.push({ nid, listeners: _eventRegistry[nid] });
+      delete _eventRegistry[nid];
+    }
+    _cache.delete(nid);
+  }
+  for (const entry of pending.values()) entry.keeper = null;
+  _gcPending = pending;
+  return pending.size;
+}
+// Puts back every component some wrapper of which survived V8's collection, and answers
+// their ids. Must follow every _gcWeaken, or the cache would stay without its entries.
+function _gcSurvivors() {
+  const pending = _gcPending;
+  if (!pending) return "";
+  const alive = [];
+  for (const [comp, entry] of pending) {
+    let keeper = null;
+    for (const ref of entry.refs) {
+      const wrapper = ref.deref();
+      if (wrapper !== undefined) { keeper = _gcKeepers.get(wrapper) || null; break; }
+    }
+    if (!keeper) continue;
+    alive.push(comp);
+    for (const item of keeper) {
+      if (item.wrapper === undefined) {
+        _eventRegistry[item.nid] = item.listeners;
+      } else {
+        _gcKeepers.delete(item.wrapper);
+        if (!_cache.has(item.nid)) _cache.set(item.nid, item.wrapper);
+      }
+    }
+    pending.delete(comp);
+  }
+  return alive.join(",");
+}
+// The components the host freed after all: drop the node state this realm keeps by nid.
+function _gcForget() {
+  const pending = _gcPending;
+  _gcPending = null;
+  if (!pending) return;
+  for (const entry of pending.values()) {
+    for (const nid of entry.nids) {
+      delete _formValues[nid];
+      delete _formChecked[nid];
+      delete _formIndeterminate[nid];
+    }
+  }
+}
+
 globalThis._wrap = _wrap;
 globalThis.self = globalThis;
 
@@ -9742,6 +9839,23 @@ globalThis.MutationObserver = class MutationObserver {
     _queueMutationObserverMicrotask();
   }
 };
+// Whether some observer registration would see a childList mutation of `node`.
+function _childListObserved(node) {
+  const observers = globalThis.__mutationObservers;
+  if (!observers || !observers.length) return false;
+  for (const obs of observers) {
+    for (const t of obs._targets) {
+      if (!t.target || !t.options.childList) continue;
+      if (t.target === node || t.target._nid === node._nid) return true;
+      if (t.options.subtree) {
+        for (let cur = node.parentNode; cur; cur = cur.parentNode) {
+          if (cur._nid === t.target._nid) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
   if (!globalThis.__mutationObservers.length) return;
   // Use `_wrap` (the canonical node-id → wrapper resolver) instead of a
@@ -9754,7 +9868,12 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   // `set innerHTML`), which we need for record.target/added/removed.
   const target = _wrap(target_nid);
   if (!target) return;
-  const record = {
+  // Built on the first match only. DEVIATION from crates/obscura-js/js/bootstrap.js, which
+  // wraps every added and removed node whenever any observer exists anywhere: each wrapper
+  // is a strong cache entry, so one unrelated observer kept every node a replace loop
+  // detached alive until the next task boundary (see _gcWeaken).
+  let record = null;
+  const makeRecord = () => record || (record = {
     type: type, // 'childList', 'attributes', 'characterData'
     target: target,
     addedNodes: (addedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
@@ -9763,7 +9882,7 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
     oldValue: oldValue ?? null,
     previousSibling: null,
     nextSibling: null,
-  };
+  });
   // Walk target → ancestors so a subtree-mode observer rooted at any
   // ancestor matches. The previous implementation just checked that
   // `target.contains` and `target.closest` were defined (always true on
@@ -9797,7 +9916,7 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
         if (matched) break;
       }
     }
-    if (matched) obs._notify([record]);
+    if (matched) obs._notify([makeRecord()]);
   }
 };
 
@@ -18415,6 +18534,11 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // A world's: pick up another realm's mutations now (before host-initiated script), or
   // at the next microtask checkpoint (a batch of records for its observers).
   worldSync: () => _worldSyncEpochs(),
+  // Port additions: the DOM collector's half in this realm (see _gcWeaken).
+  gcCachedNids: _gcCachedNids,
+  gcWeaken: _gcWeaken,
+  gcSurvivors: _gcSurvivors,
+  gcForget: _gcForget,
   worldScheduleDrain: () => queueMicrotask(_worldDrainMutations),
   externalMutation: (tree, type, nid, added, removed, attributeName, oldValue) => {
     _domMutationEpoch++;

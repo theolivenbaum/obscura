@@ -63,6 +63,24 @@ public sealed class DocumentWriteStream
     private NodeId? _staging;
 
     /// <summary>
+    /// Keeps the document nodes the stream still maps to: a later write inserts under
+    /// them, so the DOM collector must not free them while detached (DomTree.Gc.cs).
+    /// </summary>
+    public void MarkRoots(DomCollection collection)
+    {
+        ArgumentNullException.ThrowIfNull(collection);
+        if (_staging is { } staging)
+        {
+            collection.Keep(staging);
+        }
+
+        foreach (var node in _handedOver.Values)
+        {
+            collection.Keep(node);
+        }
+    }
+
+    /// <summary>
     /// Pushes a call's arguments into the input stream and mirrors what the parser
     /// made of them. Returns the nodes to insert, parents before children.
     /// </summary>

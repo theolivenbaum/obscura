@@ -828,6 +828,7 @@ public sealed partial class PocketCalculatorJsRuntime
         }
         _disposed = true;
         _memoryRegistration.Dispose();
+        DetachDomGc();
         // Background render-resource loads belong to this document; a closed page must
         // not keep fetching for a document nobody can observe any more.
         AbandonRenderResources();

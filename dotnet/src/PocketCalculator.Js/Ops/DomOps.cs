@@ -37,14 +37,40 @@ public static class DomOps
     public static string OpDom(PocketCalculatorState state, string cmd, string arg1, string arg2) =>
         OpGuard.Run("op_dom", () =>
         {
+            string result;
             try
             {
-                return Inner(state, cmd, arg1, arg2);
+                result = Inner(state, cmd, arg1, arg2);
             }
             catch (DomQuotaExceededException)
             {
-                return QuotaExceeded;
+                // A refused mutation changed nothing (M7), so it can run again once the
+                // collector has given detached garbage back to the budget. Port addition:
+                // Rust has neither the budget nor the collector (DomTree.Gc.cs).
+                if (state.Dom is not { AutomaticCollection: true } full
+                    || full.CollectGarbage(inOperation: true).FreedNodes == 0)
+                {
+                    return QuotaExceeded;
+                }
+
+                try
+                {
+                    result = Inner(state, cmd, arg1, arg2);
+                }
+                catch (DomQuotaExceededException)
+                {
+                    return QuotaExceeded;
+                }
             }
+
+            // Amortized: due only once the work since the last collection reaches the live
+            // size, so a synchronous replace loop stays flat without a per-mutation walk.
+            if (state.Dom is { AutomaticCollection: true } dom && dom.CollectionDue(inOperation: true))
+            {
+                dom.CollectGarbage(inOperation: true);
+            }
+
+            return result;
         }, "null");
 
     /// <summary>
@@ -83,7 +109,7 @@ public static class DomOps
         switch (cmd)
         {
             case "document_node_id":
-                return Index(dom.Document);
+                return Expose(dom, dom.Document);
 
             case "document_title":
             {
@@ -128,7 +154,7 @@ public static class DomOps
                     var element = dom.GetNode(cid)?.AsElement();
                     if (element is not null && string.Equals(element.Name.Local, "html", StringComparison.Ordinal))
                     {
-                        return Index(cid);
+                        return Expose(dom, cid);
                     }
                 }
 
@@ -149,7 +175,7 @@ public static class DomOps
                         sb.Append(",\"systemId\":");
                         SerdeJson.AppendString(sb, doctype.SystemId);
                         sb.Append(",\"nodeId\":");
-                        sb.Append(cid.Index.ToString(CultureInfo.InvariantCulture));
+                        sb.Append(Expose(dom, cid));
                         sb.Append('}');
                         return sb.ToString();
                     }
@@ -168,33 +194,33 @@ public static class DomOps
                 var nid = dom.GetElementById(arg1);
                 if (nid is { } indexed && dom.Ancestors(indexed).Contains(doc))
                 {
-                    return Index(indexed);
+                    return Expose(dom, indexed);
                 }
 
                 // Fall back to full scan for the live document.
                 var selector = "[id=\"" + arg1.Replace("\\", "\\\\", StringComparison.Ordinal)
                     .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"]";
                 return dom.TryQuerySelector(selector, out var scanned, out _) && scanned is { } hit
-                    ? Index(hit)
+                    ? Expose(dom, hit)
                     : "-1";
             }
 
             case "query_selector":
                 return dom.TryQuerySelector(arg1, out var queried, out _) && queried is { } one
-                    ? Index(one)
+                    ? Expose(dom, one)
                     : "-1";
 
             case "query_selector_all":
             {
                 dom.TryQuerySelectorAll(arg1, out var all, out _);
-                return SerdeJson.IntArray(Indices(all));
+                return SerdeJson.IntArray(ExposeAll(dom, all));
             }
 
             case "query_selector_scoped":
             {
                 var rootNid = ParseNodeOrZero(arg1);
                 return dom.TryQuerySelectorFrom(rootNid, arg2, out var scoped, out _) && scoped is { } scopedHit
-                    ? Index(scopedHit)
+                    ? Expose(dom, scopedHit)
                     : "-1";
             }
 
@@ -202,7 +228,7 @@ public static class DomOps
             {
                 var rootNid = ParseNodeOrZero(arg1);
                 dom.TryQuerySelectorAllFrom(rootNid, arg2, out var scopedAll, out _);
-                return SerdeJson.IntArray(Indices(scopedAll));
+                return SerdeJson.IntArray(ExposeAll(dom, scopedAll));
             }
 
             case "matches_selector":
@@ -262,13 +288,13 @@ public static class DomOps
                     "prev_sibling" => node.PrevSibling,
                     _ => null,
                 };
-                return target is { } id ? Index(id) : "-1";
+                return target is { } id ? Expose(dom, id) : "-1";
             }
 
             case "next_in_subtree":
             {
                 var found = dom.NextInSubtree(ParseNodeOrZero(arg1), ParseNodeOrZero(arg2));
-                return found is { } id ? Index(id) : "-1";
+                return found is { } id ? Expose(dom, id) : "-1";
             }
 
             // Reverse document order within a subtree, for NodeIterator's backward
@@ -276,7 +302,7 @@ public static class DomOps
             case "prev_in_subtree":
             {
                 var found = dom.PrevInSubtree(ParseNodeOrZero(arg1), ParseNodeOrZero(arg2));
-                return found is { } id ? Index(id) : "-1";
+                return found is { } id ? Expose(dom, id) : "-1";
             }
 
             // Step past a whole subtree rather than into it: NodeFilter.FILTER_REJECT
@@ -284,11 +310,11 @@ public static class DomOps
             case "next_after_subtree":
             {
                 var found = dom.NextAfterSubtree(ParseNodeOrZero(arg1), ParseNodeOrZero(arg2));
-                return found is { } id ? Index(id) : "-1";
+                return found is { } id ? Expose(dom, id) : "-1";
             }
 
             case "child_nodes":
-                return SerdeJson.IntArray(Indices(dom.Children(ParseNodeOrZero(arg1))));
+                return SerdeJson.IntArray(ExposeAll(dom, dom.Children(ParseNodeOrZero(arg1))));
 
             case "tag_name":
             {
@@ -643,9 +669,9 @@ public static class DomOps
                     }
 
                     sb.Append('[');
-                    sb.Append((placements[i].Parent?.Index ?? 0).ToString(CultureInfo.InvariantCulture));
+                    sb.Append(placements[i].Parent is { } placedParent ? Expose(dom, placedParent) : "0");
                     sb.Append(',');
-                    sb.Append(placements[i].Node.Index.ToString(CultureInfo.InvariantCulture));
+                    sb.Append(Expose(dom, placements[i].Node));
                     sb.Append(']');
                 }
 
@@ -694,11 +720,11 @@ public static class DomOps
             case "template_contents":
             {
                 var contents = dom.TemplateContents(ParseNodeOrZero(arg1));
-                return contents is { } id ? Index(id) : "-1";
+                return contents is { } id ? Expose(dom, id) : "-1";
             }
 
             case "create_document_fragment":
-                return Index(dom.NewNode(NodeData.Document));
+                return Expose(dom, dom.NewNode(NodeData.Document));
 
             case "clone_node":
             {
@@ -715,11 +741,11 @@ public static class DomOps
                 }
 
                 StateHelpers.PropagateScriptStartState(dom, source, copy, gs.AlreadyStartedScripts);
-                return Index(copy);
+                return Expose(dom, copy);
             }
 
             case "create_element":
-                return Index(dom.NewNode(NodeData.Element(QualName.Html(arg1))));
+                return Expose(dom, dom.NewNode(NodeData.Element(QualName.Html(arg1))));
 
             case "create_element_ns":
             {
@@ -742,23 +768,23 @@ public static class DomOps
                     return "-1";
                 }
 
-                return Index(dom.NewNode(NodeData.Element(new QualName(prefix, ns, local))));
+                return Expose(dom, dom.NewNode(NodeData.Element(new QualName(prefix, ns, local))));
             }
 
             case "create_text_node":
-                return Index(dom.NewNode(NodeData.Text(arg1)));
+                return Expose(dom, dom.NewNode(NodeData.Text(arg1)));
 
             case "create_comment_node":
-                return Index(dom.NewNode(NodeData.Comment(arg1)));
+                return Expose(dom, dom.NewNode(NodeData.Comment(arg1)));
 
             // arg1 = target, arg2 = data
             case "create_processing_instruction":
-                return Index(dom.NewNode(NodeData.ProcessingInstruction(arg1, arg2)));
+                return Expose(dom, dom.NewNode(NodeData.ProcessingInstruction(arg1, arg2)));
 
             // arg1 = name, arg2 = public_id. system_id is stored only in the JS
             // wrapper, since neither current WPT test reads it back from the tree.
             case "create_doctype":
-                return Index(dom.NewNode(NodeData.Doctype(arg1, arg2, string.Empty)));
+                return Expose(dom, dom.NewNode(NodeData.Doctype(arg1, arg2, string.Empty)));
 
             case "pi_target":
             {
@@ -785,7 +811,8 @@ public static class DomOps
                 {
                     if (dom.GetNode(id)?.IsElement == true)
                     {
-                        ids.Add(id.Index);
+                        dom.NoteExposed(id);
+                        ids.Add((int)id.Raw);
                     }
                 }
 
@@ -847,7 +874,7 @@ public static class DomOps
                 // quadratic (SECURITY.md M11).
                 if (!dom.HasShadowRoots && dom.IsConnected(current))
                 {
-                    return Index(dom.Document);
+                    return Expose(dom, dom.Document);
                 }
 
                 while (dom.GetNode(current)?.Parent is { } parent)
@@ -855,7 +882,7 @@ public static class DomOps
                     current = parent;
                 }
 
-                return Index(current);
+                return Expose(dom, current);
             }
 
             default:
@@ -1027,16 +1054,26 @@ public static class DomOps
     private static NodeId ParseNodeOrZero(string value) =>
         NodeId.New(uint.TryParse(value, out var raw) ? raw : 0);
 
-    private static string Index(NodeId id) => id.Index.ToString(CultureInfo.InvariantCulture);
+    /// <summary>
+    /// A node id as op_dom returns it: the full wire value, generation included (see
+    /// <see cref="NodeId"/>), stamped so an in-operation collection keeps the node while
+    /// script may hold the bare id (DomTree.Gc.cs).
+    /// </summary>
+    private static string Expose(DomTree dom, NodeId id)
+    {
+        dom.NoteExposed(id);
+        return id.Raw.ToString(CultureInfo.InvariantCulture);
+    }
 
     private static string Bool(bool value) => value ? "true" : "false";
 
-    private static List<int> Indices(List<NodeId> ids)
+    private static List<int> ExposeAll(DomTree dom, List<NodeId> ids)
     {
         var result = new List<int>(ids.Count);
         foreach (var id in ids)
         {
-            result.Add(id.Index);
+            dom.NoteExposed(id);
+            result.Add((int)id.Raw);
         }
 
         return result;

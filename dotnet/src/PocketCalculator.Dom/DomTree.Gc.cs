@@ -206,6 +206,9 @@ public sealed partial class DomTree
     /// </summary>
     public uint ExposureEpoch { get; private set; } = 1;
 
+    /// <summary>Arena slots: live, free and retired. What a leak grows.</summary>
+    public int SlotCount => _nodes.Count;
+
     /// <summary>How many collections freed something, for tests and diagnostics.</summary>
     public int CollectionCount { get; private set; }
 
