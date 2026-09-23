@@ -553,62 +553,7 @@ public sealed partial class PreparedRender
         }
         Dictionary<string, string> output = new(StringComparer.Ordinal);
 
-        bool activeWebkitClamp = style.WebkitBoxDisplay is not null
-            && style.WebkitBoxOrientVertical
-            && style.WebkitLineClamp is not null;
-        string display;
-        if (style.DisplayContents)
-        {
-            display = "contents";
-        }
-        else if (style.Display == Display.None)
-        {
-            display = "none";
-        }
-        else if (activeWebkitClamp && style.WebkitBoxDisplay == false)
-        {
-            display = "flow-root";
-        }
-        else if (style.WebkitBoxDisplay == false && !activeWebkitClamp)
-        {
-            display = "-webkit-box";
-        }
-        else if (style.WebkitBoxDisplay == true && !activeWebkitClamp)
-        {
-            display = "-webkit-inline-box";
-        }
-        else if (TableDisplay(id, style, isPseudo) is { } tableDisplay)
-        {
-            display = tableDisplay;
-        }
-        else if (style.InternalFlexContainer)
-        {
-            display = "block";
-        }
-        else
-        {
-            display = (style.Display, style.IsInlineBlock) switch
-            {
-                (Display.Flex, true) => "inline-flex",
-                (Display.Grid, true) => "inline-grid",
-                (Display.Block, true) => "inline-block",
-                (Display.Flex, false) => "flex",
-                (Display.Grid, false) => "grid",
-                (Display.Inline, true) => "inline-block",
-                (Display.Inline, false) => "inline",
-
-                // `display: flow-root` reported as `block`, which is what this switch did for
-                // every element a plain `<div>` included. Chromium 141 reports `flow-root`.
-                // Only `flow-root`, `table`, `inline-table`, the `-webkit-line-clamp`
-                // adjustment and the anonymous table box set `FlowRoot`, and the four others
-                // are all answered by an arm above this one - the two table displays and the
-                // anonymous box through `IsTableBox`, the clamp through `activeWebkitClamp` -
-                // so a block box still carrying the flag was declared `flow-root`, or
-                // inherited that declaration through `display: inherit`.
-                (Display.Block, false) when style.FlowRoot => "flow-root",
-                _ => "block",
-            };
-        }
+        string display = ComputedDisplay(id, style, isPseudo);
 
         output["display"] = display;
 
@@ -1056,6 +1001,73 @@ public sealed partial class PreparedRender
             : PaintCssValues.DimensionCss(value, "auto");
 
     /// <summary>
+    /// The computed <c>display</c> keyword for a box, as <see cref="ComputedStyle(NodeId, string?)"/>
+    /// reports it. Shared with <see cref="InnerText"/>, which needs it for every element of a
+    /// subtree without building the rest of the snapshot.
+    /// </summary>
+    private string ComputedDisplay(NodeId id, LayoutStyle style, bool isPseudo)
+    {
+        bool activeWebkitClamp = style.WebkitBoxDisplay is not null
+            && style.WebkitBoxOrientVertical
+            && style.WebkitLineClamp is not null;
+        string display;
+        if (style.DisplayContents)
+        {
+            display = "contents";
+        }
+        else if (style.Display == Display.None)
+        {
+            display = "none";
+        }
+        else if (activeWebkitClamp && style.WebkitBoxDisplay == false)
+        {
+            display = "flow-root";
+        }
+        else if (style.WebkitBoxDisplay == false && !activeWebkitClamp)
+        {
+            display = "-webkit-box";
+        }
+        else if (style.WebkitBoxDisplay == true && !activeWebkitClamp)
+        {
+            display = "-webkit-inline-box";
+        }
+        else if (TableDisplay(id, style, isPseudo) is { } tableDisplay)
+        {
+            display = tableDisplay;
+        }
+        else if (style.InternalFlexContainer)
+        {
+            display = "block";
+        }
+        else
+        {
+            display = (style.Display, style.IsInlineBlock) switch
+            {
+                (Display.Flex, true) => "inline-flex",
+                (Display.Grid, true) => "inline-grid",
+                (Display.Block, true) => "inline-block",
+                (Display.Flex, false) => "flex",
+                (Display.Grid, false) => "grid",
+                (Display.Inline, true) => "inline-block",
+                (Display.Inline, false) => "inline",
+
+                // `display: flow-root` reported as `block`, which is what this switch did for
+                // every element a plain `<div>` included. Chromium 141 reports `flow-root`.
+                // Only `flow-root`, `table`, `inline-table`, the `-webkit-line-clamp`
+                // adjustment and the anonymous table box set `FlowRoot`, and the four others
+                // are all answered by an arm above this one - the two table displays and the
+                // anonymous box through `IsTableBox`, the clamp through `activeWebkitClamp` -
+                // so a block box still carrying the flag was declared `flow-root`, or
+                // inherited that declaration through `display: inherit`.
+                (Display.Block, false) when style.FlowRoot => "flow-root",
+                _ => "block",
+            };
+        }
+
+        return display;
+    }
+
+    /// <summary>
     /// The computed CSS <c>display</c> of a table box, or <c>null</c> when this box is not one.
     /// </summary>
     /// <remarks>
@@ -1253,19 +1265,50 @@ public sealed partial class PreparedRender
 
         // A pseudo-element inherits from its originating element, so its walk starts there.
         NodeId? ancestor = isPseudo ? id : DomTraversal.RenderedParent(tree, id);
-        while (ancestor is { } ancestorId)
+
+        // The answer for every ancestor the walk passes is memoized, so reading the snapshot for
+        // each element of a deep chain is O(n) in total rather than O(n * depth): the unmemoized
+        // walk made getComputedStyle() over every element of a 10k-deep tree spend seconds here.
+        // The styles and the tree are fixed for the lifetime of this prepared render.
+        lock (_inheritedBorderSpacingLock)
         {
-            if (Layout.Styles.TryGetValue(ancestorId, out LayoutStyle? ancestorStyle)
-                && ancestorStyle.BorderSpacing is { } inherited)
+            _inheritedBorderSpacing ??= [];
+            List<NodeId>? visited = null;
+            (float, float) result = (0f, 0f);
+            while (ancestor is { } ancestorId)
             {
-                return inherited;
+                if (_inheritedBorderSpacing.TryGetValue(ancestorId, out (float, float) cached))
+                {
+                    result = cached;
+                    break;
+                }
+
+                if (Layout.Styles.TryGetValue(ancestorId, out LayoutStyle? ancestorStyle)
+                    && ancestorStyle.BorderSpacing is { } inherited)
+                {
+                    result = inherited;
+                    _inheritedBorderSpacing[ancestorId] = inherited;
+                    break;
+                }
+
+                (visited ??= []).Add(ancestorId);
+                ancestor = DomTraversal.RenderedParent(tree, ancestorId);
             }
 
-            ancestor = DomTraversal.RenderedParent(tree, ancestorId);
-        }
+            if (visited is not null)
+            {
+                foreach (NodeId passed in visited)
+                {
+                    _inheritedBorderSpacing[passed] = result;
+                }
+            }
 
-        return (0f, 0f);
+            return result;
+        }
     }
+
+    private readonly Lock _inheritedBorderSpacingLock = new();
+    private Dictionary<NodeId, (float, float)>? _inheritedBorderSpacing;
 
     /// <summary>
     /// Whether an <c>auto</c> minimum size on this box means the automatic minimum size, which

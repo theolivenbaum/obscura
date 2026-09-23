@@ -717,8 +717,27 @@ public static class DomOps
             case "has_child_nodes":
                 return Bool(dom.GetNode(ParseNodeOrZero(arg1))?.FirstChild is not null);
 
+            // Strict descendant, found by walking up from arg2: O(depth) rather than collecting
+            // arg1's whole subtree on every call, which made document.contains(node) O(n).
             case "contains":
-                return Bool(dom.Descendants(ParseNodeOrZero(arg1)).Contains(ParseNodeOrZero(arg2)));
+                return Bool(StateHelpers.IsStrictAncestor(dom, ParseNodeOrZero(arg1), ParseNodeOrZero(arg2)));
+
+            // Range.toString() in one walk between the boundary points. arg1 is
+            // "startNid,startOffset,endNid,endOffset". Additive: crates/obscura-js walks the
+            // range in bootstrap.js.
+            case "range_text":
+            {
+                var parts = arg1.Split(',');
+                if (parts.Length != 4
+                    || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var so)
+                    || !int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out var eo))
+                {
+                    return "null";
+                }
+
+                return SerdeJson.String(StateHelpers.RangeText(
+                    dom, ParseNodeOrZero(parts[0]), so, ParseNodeOrZero(parts[2]), eo));
+            }
 
             // Connectivity is maintained incrementally by DomTree. Exposing the cached
             // bit avoids an ancestor op crossing for every level when JS builds a deep

@@ -6570,6 +6570,19 @@ function _innerTextOf(el) {
   if (el.isConnected === false) return el.textContent;
   const tag = el.tagName;
   if (tag && _innerTextSkipTags[tag]) return el.textContent;
+  // DEVIATION from crates/obscura-js: render builds answer the whole subtree in one op over
+  // the retained cascade (PreparedRender.InnerText), byte-identical to the walk below. The
+  // walk calls getComputedStyle() per element and recurses per level, which took over 40 s
+  // on a 10k-deep tree (and overflowed the stack) and 18 s on 50k siblings. The walk stays
+  // for non-render builds and for what the op declines (an unstyled element, a root that is
+  // not rendered); an XML document is left to it because its CDATA sections are Text in the
+  // native tree but are skipped here.
+  const innerTextOp = __obscuraCore.ops.op_inner_text;
+  if (typeof innerTextOp === 'function' && el._nid != null && !_isXMLDocument(el.ownerDocument)) {
+    let raw = '';
+    try { raw = innerTextOp(String(el._nid | 0)); } catch (e) { raw = ''; }
+    if (raw) return JSON.parse(raw);
+  }
   const style = _innerTextStyle(el);
   const display = style ? String(style.display || 'block') : 'block';
   if (display === 'none') return el.textContent;
@@ -13375,6 +13388,14 @@ globalThis.Range = class Range {
     const sc = this._sc, ec = this._ec;
     if (!sc) return "";
     if (_rngSame(sc, ec) && (sc.nodeType === 3 || sc.nodeType === 4)) return (sc.data || "").slice(this._so, this._eo);
+    // DEVIATION from crates/obscura-js: one native walk between the two boundary points
+    // (StateHelpers.RangeText). The walk below visits the whole common-ancestor subtree and
+    // makes two O(depth) boundary comparisons per node, 28 s over a 10k-deep tree. It stays
+    // as the fallback for a boundary without a native node.
+    if (sc._nid != null && ec._nid != null) {
+      const text = _domParse("range_text", `${sc._nid | 0},${this._so | 0},${ec._nid | 0},${this._eo | 0}`);
+      if (typeof text === 'string') return text;
+    }
     let s = "";
     if (sc.nodeType === 3 || sc.nodeType === 4) s += (sc.data || "").slice(this._so);
     const cac = this.commonAncestorContainer;

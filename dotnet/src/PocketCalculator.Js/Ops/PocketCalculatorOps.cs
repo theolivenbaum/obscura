@@ -285,6 +285,9 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         // is given a pseudo-element.
         Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
             (nid, pseudo) => RenderOps.OpComputedStylePseudo(Page, S(nid), S(pseudo))));
+        // Additive as well: innerText for a whole subtree in one call (RenderOps.OpInnerText).
+        Bind(ops, "op_inner_text", (Func<object?, string>)(
+            nid => RenderOps.OpInnerText(Page, S(nid))));
         Bind(ops, "op_layout_metrics", (Func<string>)(() => RenderOps.OpLayoutMetrics(Page)));
         Bind(ops, "op_element_scroll_metrics", (Func<object?, string>)(
             nid => RenderOps.OpElementScrollMetrics(Page, S(nid))));
