@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Browser</RootNamespace>
     <AssemblyName>Obscura.Browser</AssemblyName>
+    <Description>Obscura browser: pages, navigation, lifecycle, screenshots and PDF export.</Description>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 

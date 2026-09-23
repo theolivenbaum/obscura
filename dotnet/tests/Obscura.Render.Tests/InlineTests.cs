@@ -26,9 +26,14 @@ public class InlineTests
 
     private static byte[] SansRegular => FontAssets.Load("liberation-sans");
 
-    /// <summary>The repository root, derived from this file's compile-time path.</summary>
-    private static string RepositoryRoot([CallerFilePath] string path = "") =>
-        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path)!, "..", "..", ".."));
+    /// <summary>
+    /// The test fonts, next to this file. They are copies of
+    /// <c>crates/obscura-render/tests/fonts/</c> and <c>vendor/cosmic-text/fonts/</c>
+    /// in the reference tree, held here so the port's tests do not read across
+    /// into <c>.reference/</c>.
+    /// </summary>
+    private static string FontFixtures([CallerFilePath] string path = "") =>
+        Path.Combine(Path.GetDirectoryName(path)!, "Fixtures", "fonts");
 
     private static (TextEngine Engine, int Item) SurfaceCullFixture()
     {
@@ -494,9 +499,7 @@ public class InlineTests
 
     private static byte[] VariableFontFixture()
     {
-        string path = Path.Combine(
-            RepositoryRoot(),
-            "crates", "obscura-render", "tests", "fonts", "obscura-vf-test.woff2.b64");
+        string path = Path.Combine(FontFixtures(), "obscura-vf-test.woff2.b64");
         string encoded = new(File.ReadAllText(path).Where(ch => !char.IsWhiteSpace(ch)).ToArray());
         byte[] compressed = Convert.FromBase64String(encoded);
         Assert.True(Woff.TryDecode(compressed, out byte[]? sfnt), "decompress variable-font fixture");
@@ -549,7 +552,7 @@ public class InlineTests
 
     private static (TextEngine Engine, FontId StaticId, FontId VariableId) IsolatedFallbackEngine()
     {
-        string arabic = Path.Combine(RepositoryRoot(), "vendor", "cosmic-text", "fonts", "NotoSansArabic.ttf");
+        string arabic = Path.Combine(FontFixtures(), "NotoSansArabic.ttf");
         var engine = new TextEngine(
             [
                 new WebFont

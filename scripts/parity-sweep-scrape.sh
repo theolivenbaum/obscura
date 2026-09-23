@@ -18,13 +18,13 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUST="${1:-${OBSCURA_RUST_BIN:-$REPO/target/release/obscura}}"
+RUST="${1:-${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}}"
 CS="${2:-${OBSCURA_PORT_BIN:-$REPO/dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura}}"
 
 for bin in "$RUST" "$CS"; do
   if [[ ! -x "$bin" ]]; then
     echo "not executable: $bin" >&2
-    echo "build the reference with: cargo build --release -p obscura-cli --bins --features render" >&2
+    echo "build the reference with: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render" >&2
     echo "build the port with:      cd dotnet && dotnet build -c Release" >&2
     exit 1
   fi

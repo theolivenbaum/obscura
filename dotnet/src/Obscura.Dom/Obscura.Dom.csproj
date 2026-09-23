@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Dom</RootNamespace>
     <AssemblyName>Obscura.Dom</AssemblyName>
+    <Description>Obscura DOM: an arena DOM tree, HTML parsing, CSS selectors and serialization.</Description>
   </PropertyGroup>
 
   <ItemGroup>

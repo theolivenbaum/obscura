@@ -27,7 +27,7 @@ shift || true
 WIDTHS=("$@")
 [[ ${#WIDTHS[@]} -eq 0 ]] && WIDTHS=(1280 900 640)
 
-RUST="${OBSCURA_RUST_BIN:-$REPO/target/release/obscura}"
+RUST="${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}"
 CS="${OBSCURA_PORT_BIN:-$REPO/dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura}"
 OUT="${RENDER_COMPARE_OUT:-$REPO/target/render-compare}"
 PORT="${RENDER_COMPARE_PORT:-8099}"
@@ -35,19 +35,19 @@ SETTLE="${RENDER_COMPARE_SETTLE:-3}"
 
 for bin in "$RUST" "$CS"; do
   [[ -x "$bin" ]] || { echo "not executable: $bin" >&2
-    echo "  reference: cargo build --release -p obscura-cli --bins --features render" >&2
+    echo "  reference: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render" >&2
     echo "  port:      cd dotnet && dotnet build -c Release" >&2; exit 1; }
 done
 command -v node >/dev/null || { echo "node is required for the Chromium lane" >&2; exit 1; }
 
 # A `cargo test --release -p obscura-cli` run (no --features render) rewrites
-# target/release/obscura with a default-features binary, whose --screenshot only
+# .reference/obscura/target/release/obscura with a default-features binary, whose --screenshot only
 # prints an error. Left unchecked that shows up here as a blank reference lane
 # and a 100% pixel difference that has nothing to do with rendering.
 if "$RUST" fetch "data:text/html,<b>x</b>" --screenshot /dev/null --quiet --timeout 20 2>&1 \
     | grep -q "requires a build with the render feature"; then
   echo "the reference was built without the render feature: $RUST" >&2
-  echo "rebuild it with: cargo build --release -p obscura-cli --bins --features render" >&2
+  echo "rebuild it with: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render" >&2
   echo "(a plain 'cargo test --release -p obscura-cli' overwrites it)" >&2
   exit 1
 fi

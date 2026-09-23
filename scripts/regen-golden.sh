@@ -10,12 +10,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${1:-${OBSCURA_RUST_BIN:-$REPO/target/release/obscura}}"
+BIN="${1:-${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}}"
 OUT="$REPO/dotnet/tests/Obscura.Parity.Tests/golden"
 
 if [[ ! -x "$BIN" ]]; then
   echo "reference binary not found: $BIN" >&2
-  echo "build it with: cargo build --release -p obscura-cli --bins --features render" >&2
+  echo "build it with: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render" >&2
   exit 1
 fi
 

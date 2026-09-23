@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Cdp</RootNamespace>
     <AssemblyName>Obscura.Cdp</AssemblyName>
+    <Description>Obscura Chrome DevTools Protocol server, for driving the engine with Puppeteer or Playwright.</Description>
   </PropertyGroup>
 
   <ItemGroup>

@@ -12,20 +12,20 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUST="${1:-${OBSCURA_RUST_BIN:-$REPO/target/release/obscura}}"
+RUST="${1:-${OBSCURA_RUST_BIN:-$REPO/.reference/obscura/target/release/obscura}}"
 CS="${2:-${OBSCURA_PORT_BIN:-$REPO/dotnet/src/Obscura.Cli/bin/Release/net10.0/obscura}}"
 
 for bin in "$RUST" "$CS"; do
   if [[ ! -x "$bin" ]]; then
     echo "not executable: $bin" >&2
-    echo "build the reference with: cargo build --release -p obscura-cli --bins --features render" >&2
+    echo "build the reference with: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render" >&2
     echo "build the port with:      cd dotnet && dotnet build -c Release" >&2
     exit 1
   fi
 done
 
 # A `cargo test --release -p obscura-cli` run (no --features render) rewrites
-# target/release/obscura with a default-features binary, which then reports
+# .reference/obscura/target/release/obscura with a default-features binary, which then reports
 # nothing for every screenshot and silently turns this sweep's render lanes into
 # noise. Catch that here rather than in the results.
 require_render() {
@@ -33,7 +33,7 @@ require_render() {
   if "$bin" fetch "data:text/html,<b>x</b>" --screenshot /dev/null --quiet --timeout 20 2>&1 \
       | grep -q "requires a build with the render feature"; then
     echo "$label was built without the render feature: $bin" >&2
-    echo "rebuild it with: cargo build --release -p obscura-cli --bins --features render" >&2
+    echo "rebuild it with: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render" >&2
     echo "(a plain 'cargo test --release -p obscura-cli' overwrites it)" >&2
     exit 1
   fi

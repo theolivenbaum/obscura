@@ -8,6 +8,8 @@
          library project. The launcher below still produces an `obscura` binary
          so CLI invocations match the Rust build. -->
     <AssemblyName>Obscura.Cli</AssemblyName>
+    <!-- The executable is published as a binary, not as a NuGet package. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <!-- Cold start is dominated by JIT: on a trivial page the port spends about

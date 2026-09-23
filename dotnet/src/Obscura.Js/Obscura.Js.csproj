@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Js</RootNamespace>
     <AssemblyName>Obscura.Js</AssemblyName>
+    <Description>Obscura JavaScript runtime: V8 through ClearScript, the op layer and the Web API shim.</Description>
   </PropertyGroup>
 
   <ItemGroup>

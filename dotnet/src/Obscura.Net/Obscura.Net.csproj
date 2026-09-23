@@ -3,6 +3,7 @@
   <PropertyGroup>
     <RootNamespace>Obscura.Net</RootNamespace>
     <AssemblyName>Obscura.Net</AssemblyName>
+    <Description>Obscura networking: HTTP transport, cookies, robots.txt, tracker blocklist and encoding detection.</Description>
   </PropertyGroup>
 
   <!-- Tracker blocklist. Copied from crates/obscura-net/src/pgl_domains.txt

@@ -30,11 +30,11 @@ public class FontRelativeUnitTests
     private const float SansExPerEm = 1082f / 2048f;
     private const float SerifExPerEm = 940f / 2048f;
 
-    private static string RepositoryRoot([CallerFilePath] string path = "") =>
-        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(path)!, "..", "..", ".."));
+    private static string FontFixtures([CallerFilePath] string path = "") =>
+        Path.Combine(Path.GetDirectoryName(path)!, "Fixtures", "fonts");
 
     private static byte[] VariableFace() => File.ReadAllBytes(
-        Path.Combine(RepositoryRoot(), "vendor", "cosmic-text", "fonts", "NotoSansArabic.ttf"));
+        Path.Combine(FontFixtures(), "NotoSansArabic.ttf"));
 
     private static float ResolvedWidth(string css, string id = "probe")
     {

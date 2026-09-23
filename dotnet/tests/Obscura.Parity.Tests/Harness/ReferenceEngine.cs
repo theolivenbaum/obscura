@@ -31,7 +31,7 @@ public static class ReferenceEngine
     /// <summary>Why parity tests are skipping, or null when they can run.</summary>
     public static string? SkipReason =>
         RustBinary is null
-            ? "Rust reference binary not found. Build it with: cargo build --release -p obscura-cli --bins --features render, or set OBSCURA_RUST_BIN."
+            ? "Rust reference binary not found. Build it with: cd .reference/obscura && cargo build --release -p obscura-cli --bins --features render, or set OBSCURA_RUST_BIN."
             : PortBinary is null
                 ? "C# CLI not built. Run: dotnet build -c Release."
                 : null;
@@ -51,7 +51,7 @@ public static class ReferenceEngine
         {
             return null;
         }
-        var candidate = Path.Combine(repo, "target", "release", "obscura");
+        var candidate = Path.Combine(repo, ".reference", "obscura", "target", "release", "obscura");
         return File.Exists(candidate) ? candidate : null;
     }
 
@@ -84,7 +84,7 @@ public static class ReferenceEngine
         var dir = AppContext.BaseDirectory;
         while (dir is not null)
         {
-            if (Directory.Exists(Path.Combine(dir, ".git")) && Directory.Exists(Path.Combine(dir, "crates")))
+            if (Directory.Exists(Path.Combine(dir, ".git")) && Directory.Exists(Path.Combine(dir, "dotnet")))
             {
                 return dir;
             }

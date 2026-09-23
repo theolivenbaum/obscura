@@ -1,0 +1,95 @@
+# Builds the Obscura C# port and publishes its library packages to NuGet.
+#
+# This is the only thing that publishes, and it is the only build definition in the
+# repository: the upstream GitHub workflows live, disabled, under .reference/obscura/.github/.
+# A push to main packs and pushes, and nothing else releases anything.
+#
+# The version is CalVer, computed here rather than committed: yy.M.<build id>, the same
+# scheme every other package from this organisation uses. The 0.1.0 in
+# dotnet/Directory.Build.props is only the local default; the /p:Version below overrides it.
+
+variables:
+  solution: 'dotnet/Obscura.slnx'
+  buildConfiguration: 'Release'
+  targetVersion: yy.M.$(build.buildId)
+
+trigger:
+- main
+
+# Linux: the engine's native set (ClearScript V8, SkiaSharp, HarfBuzzSharp) ships for
+# linux-x64, the fonts are embedded rather than read from the host, and the CLI tests rely
+# on the `obscura` launcher the Cli project only emits off Windows.
+pool:
+  vmImage: 'ubuntu-22.04'
+
+steps:
+- task: Bash@3
+  displayName: 'Create CalVer Version'
+  inputs:
+    targetType: 'inline'
+    script: |
+      set -euo pipefail
+      dottedDate=$(date +%y.%-m)
+      modBuildID=$(( BUILD_BUILDID % 65536 ))   # ensure fits in int16
+      newTargetVersion="$dottedDate.$modBuildID"
+      echo "##vso[task.setvariable variable=targetVersion;]$newTargetVersion"
+      echo "Updated targetVersion to '$newTargetVersion'"
+
+# There is no global.json to read from: the solution targets net10.0 in
+# dotnet/Directory.Build.props and nothing pins an SDK band below that.
+- task: UseDotNet@2
+  displayName: 'Use the .NET 10 SDK'
+  inputs:
+    packageType: sdk
+    version: '10.0.x'
+
+- task: DotNetCoreCLI@2
+  displayName: 'restore nuget'
+  inputs:
+    command: 'restore'
+    projects: '$(solution)'
+
+- task: DotNetCoreCLI@2
+  displayName: 'build'
+  inputs:
+    command: 'build'
+    projects: '$(solution)'
+    arguments: '-c $(buildConfiguration) --no-restore /p:Version=$(targetVersion)'
+
+# Everything. Obscura.Parity.Tests skips itself here: it needs the Rust reference binary
+# (OBSCURA_RUST_BIN), and building V8 from source on every release is not worth it.
+# Parity is a porting check, run by hand; the area suites are the release gate.
+- task: DotNetCoreCLI@2
+  displayName: 'test'
+  inputs:
+    command: 'test'
+    projects: '$(solution)'
+    arguments: '-c $(buildConfiguration) --no-build'
+    publishTestResults: true
+
+# Packs the solution: the eight library projects pack, the CLI and the test projects opt
+# out with IsPackable.
+- task: DotNetCoreCLI@2
+  displayName: 'pack'
+  inputs:
+    command: 'pack'
+    packagesToPack: '$(solution)'
+    versioningScheme: 'off'
+    configuration: '$(buildConfiguration)'
+    buildProperties: 'Version="$(targetVersion)"'
+    nobuild: true
+    packDirectory: '$(Build.ArtifactStagingDirectory)'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'publish the packages as build artifacts'
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'packages'
+
+- task: NuGetCommand@2
+  displayName: 'push nuget'
+  inputs:
+    command: 'push'
+    packagesToPush: '$(Build.ArtifactStagingDirectory)/*.nupkg'
+    nuGetFeedType: 'external'
+    publishFeedCredentials: 'nuget-curiosity-org'
