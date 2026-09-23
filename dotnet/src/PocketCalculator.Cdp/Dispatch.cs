@@ -214,11 +214,25 @@ public static class Dispatcher
                 _ => DomainResult.Err($"Unknown domain: {domain}"),
             };
         }
+        catch (OperationCanceledException) when (watchdog is { Fired: true })
+        {
+            // The command watchdog cancelled C# work the handler was doing outside
+            // script (a capture's layout or paint): the same outcome as the script
+            // it interrupts, not a connection shutdown (SECURITY.md H8).
+            result = DomainResult.Err($"{req.Method} exceeded its {budgetMs}ms time budget");
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // A handler fault is still a protocol outcome; Rust's `Result` has no
             // third arm and a panic here would take the connection down.
             result = DomainResult.Err(ex.Message);
+        }
+        catch (OperationCanceledException) when (watchdog is not null)
+        {
+            // Shutting down: the command's watchdog must not outlive it, or it fires
+            // later and cancels C# work on this page that is not this command's.
+            CdpWatchdog.Disarm(watchdog);
+            throw;
         }
 
         if (result.IsOk && Domains.Page.CommandCanChangeScreencastFrame(req.Method))

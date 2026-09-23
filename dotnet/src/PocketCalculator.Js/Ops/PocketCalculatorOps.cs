@@ -61,6 +61,13 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     public IAsyncOpTracker? AsyncOps { get; set; }
 
     /// <summary>
+    /// Cancelled by the isolate's watchdogs alongside the V8 interrupt. Every sync op
+    /// runs under its token (<see cref="PocketCalculator.Dom.WorkCancellation"/>), so
+    /// C# work inside an op stops when the deadline passes (SECURITY.md H8).
+    /// </summary>
+    public PocketCalculator.Js.Runtime.ScriptCancellation Cancellation { get; } = new();
+
+    /// <summary>
     /// The document of the realm a DOM call came from, named rather than inferred.
     /// </summary>
     /// <remarks>
@@ -472,7 +479,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             return;
         }
 
-        FastOpBinding.Bind(ops, name, function);
+        FastOpBinding.Bind(ops, name, function, Cancellation);
     }
 
     /// <summary>

@@ -73,5 +73,16 @@ public static class OpGuard
         Microsoft.ClearScript.ScriptInterruptedException or
         StackOverflowException or
         OutOfMemoryException or
-        System.Threading.ThreadAbortException;
+        System.Threading.ThreadAbortException
+        || IsDeadline(ex);
+
+    /// <summary>
+    /// The op's own deadline passed (SECURITY.md H8): a watchdog cancelled the work scope
+    /// the op runs in. That propagates like the interrupt it accompanies rather than
+    /// becoming the op's failure value, because V8 may finish a short script before it
+    /// acts on the interrupt, and the script would then carry on with a made-up result.
+    /// Unwinding as an exception makes the evaluation fail instead.
+    /// </summary>
+    private static bool IsDeadline(Exception ex) =>
+        ex is OperationCanceledException && PocketCalculator.Dom.WorkCancellation.IsCancellationRequested;
 }

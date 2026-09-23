@@ -23,6 +23,9 @@ public sealed class WatchdogToken : IDisposable
 
     internal Func<bool> FiredProbe => _entry.HasFired;
 
+    /// <summary>Whether the watchdog has fired, without stopping it.</summary>
+    public bool HasFired => _entry.HasFired();
+
     /// <summary>
     /// Stop the watchdog. Returns true if it had already fired (interrupted the
     /// engine). The caller must then clear any lingering interrupt through
@@ -83,13 +86,17 @@ public static class WatchdogScheduler
     {
         private int _fired;
 
-        internal Entry(V8ScriptEngine engine, long deadline)
+        internal Entry(V8ScriptEngine engine, long deadline, ScriptCancellation? cancellation)
         {
             Engine = engine;
             Deadline = deadline;
+            Cancellation = cancellation;
         }
 
         internal V8ScriptEngine Engine { get; }
+
+        /// <summary>Cancelled before the interrupt, for C# work inside an op.</summary>
+        internal ScriptCancellation? Cancellation { get; }
 
         internal long Deadline { get; }
 
@@ -99,6 +106,10 @@ public static class WatchdogScheduler
         {
             Volatile.Write(ref _fired, 1);
             HangEscalation.Fired(this, "an interrupted script");
+
+            // First, so an op that is in C# when the deadline passes stops at its next
+            // check: V8 acts on the interrupt only once control is back in script.
+            Cancellation?.Cancel();
             try
             {
                 Engine.Interrupt();
@@ -122,12 +133,12 @@ public static class WatchdogScheduler
 
     private static Thread? _worker;
 
-    internal static Entry Arm(V8ScriptEngine engine, TimeSpan budget)
+    internal static Entry Arm(V8ScriptEngine engine, TimeSpan budget, ScriptCancellation? cancellation = null)
     {
         long milliseconds = budget <= TimeSpan.Zero
             ? 0
             : (long)Math.Min(budget.TotalMilliseconds, int.MaxValue);
-        Entry entry = new(engine, Environment.TickCount64 + milliseconds);
+        Entry entry = new(engine, Environment.TickCount64 + milliseconds, cancellation);
         lock (Gate)
         {
             Armed.Add(entry);
@@ -166,6 +177,10 @@ public static class WatchdogScheduler
         if (entry.HasFired())
         {
             HangEscalation.Settled(entry);
+
+            // The interrupted work has unwound (or the token was dropped without a
+            // disarm): later work on this isolate gets a fresh deadline.
+            entry.Cancellation?.Reset();
         }
     }
 
@@ -285,10 +300,17 @@ public static class Watchdog
     /// <summary>
     /// Arms an interrupt on <paramref name="engine"/> after <paramref name="budget"/>.
     /// </summary>
-    public static WatchdogToken Spawn(V8ScriptEngine engine, TimeSpan budget)
+    public static WatchdogToken Spawn(V8ScriptEngine engine, TimeSpan budget) =>
+        Spawn(engine, budget, null);
+
+    /// <summary>
+    /// Arms an interrupt on <paramref name="engine"/> after <paramref name="budget"/> that
+    /// also cancels <paramref name="cancellation"/>, for C# work running inside an op.
+    /// </summary>
+    public static WatchdogToken Spawn(V8ScriptEngine engine, TimeSpan budget, ScriptCancellation? cancellation)
     {
         ArgumentNullException.ThrowIfNull(engine);
 
-        return new WatchdogToken(WatchdogScheduler.Arm(engine, budget));
+        return new WatchdogToken(WatchdogScheduler.Arm(engine, budget, cancellation));
     }
 }
