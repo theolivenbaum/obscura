@@ -72,7 +72,7 @@ public sealed partial class PocketCalculatorJsRuntime
         // SetV8Flags call must be refused rather than changing nothing silently.
         V8Flags.MarkPlatformStarted();
 
-        var constraints = V8Flags.Constraints ?? new V8RuntimeConstraints();
+        var constraints = WithArrayBufferLimit(V8Flags.Constraints);
         _v8 = new V8Runtime("obscura", constraints, V8RuntimeFlags.EnableDynamicModuleImports)
         {
             // A watchdog interrupt must reach every realm of this isolate, the
@@ -227,6 +227,73 @@ public sealed partial class PocketCalculatorJsRuntime
 
     private static void InitializeObjectStore(V8ScriptEngine engine) =>
         engine.Execute("<obscura:init>", "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;");
+
+    // ------------------------------------------------------ array buffers
+
+    /// <summary>
+    /// The per-isolate ceiling on <c>ArrayBuffer</c> backing stores a runtime gets when
+    /// <c>POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES</c> is unset: 1 GiB on 64-bit hosts and
+    /// 256 MiB on 32-bit ones. Zero in the variable removes the ceiling.
+    /// </summary>
+    public static long DefaultArrayBufferLimitBytes { get; } =
+        (IntPtr.Size == 8 ? 1024L : 256L) * 1024 * 1024;
+
+    /// <summary>The <c>ArrayBuffer</c> ceiling new runtimes get, in bytes; zero for none.</summary>
+    /// <remarks>
+    /// Read per runtime, so an embedder (or a test) can set the variable before creating a
+    /// page. A malformed or negative value keeps the default.
+    /// </remarks>
+    public static long ArrayBufferLimitBytes()
+    {
+        if (ArrayBufferLimitForTests.Value is { } overridden)
+        {
+            return overridden;
+        }
+
+        string? raw = Environment.GetEnvironmentVariable("POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES");
+        return long.TryParse(raw, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out long bytes) && bytes >= 0
+            ? bytes
+            : DefaultArrayBufferLimitBytes;
+    }
+
+    /// <summary>Test seam: a ceiling for runtimes created on this async flow only.</summary>
+    internal static readonly AsyncLocal<long?> ArrayBufferLimitForTests = new();
+
+    /// <summary>
+    /// A copy of the flag-derived constraints carrying the <c>ArrayBuffer</c> ceiling.
+    /// </summary>
+    /// <remarks>
+    /// Backing stores live outside the V8 heap, so <see cref="SetHeapLimit"/> never sees
+    /// them: six 512 MB <c>Uint8Array</c>s succeeded under a 4 GiB heap cap (SECURITY.md
+    /// M7). ClearScript's allocator refuses an allocation past
+    /// <see cref="V8RuntimeConstraints.MaxArrayBufferAllocation"/>, which V8 reports to
+    /// script as <c>RangeError: Array buffer allocation failed</c>, the error Chromium
+    /// gives when its partition allocator refuses one. Rust (deno_core) sets no such
+    /// limit. The shared flag object is copied, never mutated, because every runtime of
+    /// the process starts from it.
+    /// </remarks>
+    private static V8RuntimeConstraints WithArrayBufferLimit(V8RuntimeConstraints? shared)
+    {
+        var constraints = new V8RuntimeConstraints();
+        if (shared is not null)
+        {
+            constraints.MaxNewSpaceSize = shared.MaxNewSpaceSize;
+            constraints.MaxOldSpaceSize = shared.MaxOldSpaceSize;
+            constraints.MaxYoungSpaceSize = shared.MaxYoungSpaceSize;
+            constraints.MaxExecutableSize = shared.MaxExecutableSize;
+            constraints.HeapExpansionMultiplier = shared.HeapExpansionMultiplier;
+            constraints.MaxArrayBufferAllocation = shared.MaxArrayBufferAllocation;
+        }
+
+        long limit = ArrayBufferLimitBytes();
+        if (limit > 0)
+        {
+            constraints.MaxArrayBufferAllocation = (ulong)limit;
+        }
+
+        return constraints;
+    }
 
     // ------------------------------------------------------------- heap cap
 
