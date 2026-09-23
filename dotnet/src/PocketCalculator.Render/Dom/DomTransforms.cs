@@ -30,6 +30,11 @@ internal static class DomTransforms
         float rootFontSize,
         (float Width, float Height) viewport)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         clipRects[id] = inherited?.Clone();
 
         // This node's own translate joins the accumulation for its box and its whole subtree

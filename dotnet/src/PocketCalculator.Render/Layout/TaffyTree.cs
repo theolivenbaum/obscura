@@ -490,6 +490,11 @@ public sealed class TaffyTree<TNodeContext>
 
         private LayoutOutput ComputeChildLayoutInner(NodeId nodeId, LayoutInput inputs, BlockContext? blockCtx)
         {
+            // The box tree's depth is bounded when it is built (BuildContext.MaxBoxDepth); this
+            // turns anything that still runs the stack out into an exception the caller can
+            // contain, rather than an uncatchable overflow (SECURITY.md C5).
+            StackGuard.Ensure();
+
             // If RunMode is PerformHiddenLayout then an ancestor node is Display::None and this
             // node must be laid out using hidden layout regardless of its own display style.
             if (inputs.RunMode == RunMode.PerformHiddenLayout)

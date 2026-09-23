@@ -276,8 +276,23 @@ internal static class PaintDomPainter
             : null;
     }
 
-    internal static Pixmap? PaintLaidDomScrolled(PaintPass pass)
+    /// <summary>
+    /// Paint a laid-out tree, on a large-stack thread when the tree is deep enough to need one
+    /// (<see cref="StackGuard.RunWithStackFor{T}"/>). Nested stacking contexts and scrollers
+    /// recurse through <see cref="PaintLaidDomScrolledCore"/>.
+    /// </summary>
+    internal static Pixmap? PaintLaidDomScrolled(PaintPass pass) =>
+        StackGuard.RunWithStackFor(pass.Tree, () => PaintLaidDomScrolledCore(pass));
+
+    private static Pixmap? PaintLaidDomScrolledCore(PaintPass pass)
     {
+        // Each nested stacking context or scroller paints through here; past what the stack
+        // holds, the deepest ones are left unpainted rather than overflowing (SECURITY.md C5).
+        if (!StackGuard.CanDescend())
+        {
+            return pass.Pixmap;
+        }
+
         DomTree tree = pass.Tree;
         DomLayout laid = pass.Laid;
         Pixmap pixmap = pass.Pixmap;
@@ -543,7 +558,7 @@ internal static class PaintDomPainter
                 }
 
                 // A stacking context is one structural paint item in its parent.
-                Pixmap? nested = PaintLaidDomScrolled(pass.With(
+                Pixmap? nested = PaintLaidDomScrolledCore(pass.With(
                     pixmap,
                     scrollState,
                     nid,
@@ -570,7 +585,7 @@ internal static class PaintDomPainter
                 }
 
                 // CSS paints each float as an atomic unit in the float band.
-                Pixmap? nested = PaintLaidDomScrolled(pass.With(
+                Pixmap? nested = PaintLaidDomScrolledCore(pass.With(
                     pixmap,
                     scrollState,
                     nid,
@@ -676,7 +691,7 @@ internal static class PaintDomPainter
                 if (transform.IsTranslation())
                 {
                     // Translation-only transforms retain the direct offset path.
-                    Pixmap? nested = PaintLaidDomScrolled(pass.With(
+                    Pixmap? nested = PaintLaidDomScrolledCore(pass.With(
                         pixmap,
                         scrollState,
                         nid,
@@ -757,7 +772,7 @@ internal static class PaintDomPainter
                     continue;
                 }
 
-                Pixmap? painted = PaintLaidDomScrolled(pass.With(
+                Pixmap? painted = PaintLaidDomScrolledCore(pass.With(
                     layer,
                     scrollState,
                     nid,
@@ -813,7 +828,7 @@ internal static class PaintDomPainter
                     return null;
                 }
 
-                Pixmap? painted = PaintLaidDomScrolled(pass.With(
+                Pixmap? painted = PaintLaidDomScrolledCore(pass.With(
                     layer,
                     scrollState,
                     nid,

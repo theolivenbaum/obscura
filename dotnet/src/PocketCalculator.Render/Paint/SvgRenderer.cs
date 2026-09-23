@@ -427,6 +427,11 @@ internal static class SvgRenderer
         ref SKRect      bounds,
         int             depth)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         if (depth > 24 || !document.TryVisit())
         {
             return;
@@ -651,6 +656,11 @@ internal static class SvgRenderer
         SvgFontDatabase fonts,
         int depth = 0)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         if (depth > 24 || !document.TryVisit())
         {
             return;
@@ -1090,6 +1100,11 @@ internal static class SvgRenderer
 
     private static string TextContent(XElement element)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return string.Empty;
+        }
+
         StringBuilder buffer = new();
         foreach (XNode node in element.Nodes())
         {

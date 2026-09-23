@@ -419,6 +419,11 @@ internal static class DomStyleFixups
         float vertical,
         Dictionary<NodeId, LayoutStyle> styles)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         foreach (NodeId cid in tree.Children(id))
         {
             if (DomTraversal.IsLocal(tree, cid, "table"))
@@ -444,6 +449,11 @@ internal static class DomStyleFixups
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         List<EffectiveGridChild> output)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         foreach (NodeId child in children)
         {
             bool transparent = styles.TryGetValue(child, out LayoutStyle? style)
@@ -679,6 +689,11 @@ internal static class DomStyleFixups
         NodeId id,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return false;
+        }
+
         foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
         {
             if (tree.GetNode(cid) is not { } node)
@@ -739,6 +754,11 @@ internal static class DomStyleFixups
         NodeId parent,
         Dictionary<NodeId, LayoutStyle> styles)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         foreach (NodeId child in DomTraversal.RenderedChildren(tree, parent))
         {
             styles.TryGetValue(child, out LayoutStyle? style);

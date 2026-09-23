@@ -144,6 +144,11 @@ internal static class DomTableSupport
         float initialCbWidth,
         int depth)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return null;
+        }
+
         if (depth > 4096)
         {
             return null;
@@ -241,6 +246,11 @@ internal static class DomTableSupport
         float initialCbWidth,
         int depth)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return null;
+        }
+
         if (depth > 4096)
         {
             return null;

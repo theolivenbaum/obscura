@@ -134,6 +134,11 @@ public static class Compute
 
     private static void RoundLayoutInner(IRoundTree tree, NodeId nodeId, float cumulativeX, float cumulativeY)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         var unroundedLayout = tree.GetUnroundedLayout(nodeId);
         var layout = unroundedLayout;
 

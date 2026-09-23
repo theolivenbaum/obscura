@@ -15,7 +15,28 @@ namespace PocketCalculator.Render;
 
 internal static partial class DomBuild
 {
+    /// <summary>
+    /// Build the box for element <paramref name=id/>, or nothing once the box tree is
+    /// <see cref="BuildContext.MaxBoxDepth"/> deep or the thread's stack is running out.
+    /// </summary>
     internal static TaffyNodeId? Build(BuildContext context, NodeId id)
+    {
+        if (!context.TryEnterLevel())
+        {
+            return null;
+        }
+
+        try
+        {
+            return BuildElement(context, id);
+        }
+        finally
+        {
+            context.ExitLevel();
+        }
+    }
+
+    private static TaffyNodeId? BuildElement(BuildContext context, NodeId id)
     {
         DomTree tree = context.Tree;
         if (tree.GetNode(id) is not { } node || node.AsElement() is not { } element)

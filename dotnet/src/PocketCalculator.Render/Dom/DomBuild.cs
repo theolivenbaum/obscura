@@ -132,6 +132,37 @@ internal sealed class BuildContext
     /// run, which therefore generate no box of their own when the walk reaches them.
     /// </summary>
     internal HashSet<NodeId> ConsumedByAnonymousTableRun { get; } = [];
+
+    /// <summary>
+    /// How deep the box tree may nest, counted in elements the build descends through.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which recurses once per element with no
+    /// bound: a script-built chain 1500 deep overflowed the thread stack in this build or in the
+    /// layout, paint and hit-test recursions that follow it over the same tree, and a stack
+    /// overflow cannot be caught, so it killed the process (SECURITY.md C5). Elements nested
+    /// deeper than this generate no box, as if they were <c>display: none</c>. The parser already
+    /// flattens markup at Chromium's depth of 512 (<c>HtmlParsing.MaxParserTreeDepth</c>), so
+    /// only a tree a script built deeper than that loses boxes; Chromium would still lay it out.
+    /// The same happens early when the thread's stack runs low, whatever the depth.
+    /// </remarks>
+    internal const int MaxBoxDepth = 768;
+
+    private int _depth;
+
+    /// <summary>Enter one more level of the box tree, or refuse when it may not go deeper.</summary>
+    internal bool TryEnterLevel()
+    {
+        if (_depth >= MaxBoxDepth || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            return false;
+        }
+
+        _depth++;
+        return true;
+    }
+
+    internal void ExitLevel() => _depth--;
 }
 
 internal static partial class DomBuild
@@ -155,10 +186,23 @@ internal static partial class DomBuild
             && style.Display != Display.None;
         if (splicesChildren)
         {
-            List<TaffyNodeId> spliced = [];
-            foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+            // Splicing recurses without a box of its own, so it counts against the depth cap too.
+            if (!context.TryEnterLevel())
             {
-                spliced.AddRange(BuildAny(context, cid));
+                return [];
+            }
+
+            List<TaffyNodeId> spliced = [];
+            try
+            {
+                foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+                {
+                    spliced.AddRange(BuildAny(context, cid));
+                }
+            }
+            finally
+            {
+                context.ExitLevel();
             }
 
             return spliced;
@@ -197,10 +241,22 @@ internal static partial class DomBuild
         {
             // A plain inline wrapper around text with no box appearance of its own: real inline
             // boxes do not wrap independently, so flatten its children into the caller's list.
-            List<TaffyNodeId> flattened = [];
-            foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+            if (!context.TryEnterLevel())
             {
-                flattened.AddRange(BuildAny(context, cid));
+                return [];
+            }
+
+            List<TaffyNodeId> flattened = [];
+            try
+            {
+                foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+                {
+                    flattened.AddRange(BuildAny(context, cid));
+                }
+            }
+            finally
+            {
+                context.ExitLevel();
             }
 
             return flattened;
@@ -971,6 +1027,11 @@ internal static partial class DomBuild
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         List<NodeId> output)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         foreach (NodeId cid in children)
         {
             bool splices = styles.TryGetValue(cid, out LayoutStyle? style)
@@ -993,6 +1054,11 @@ internal static partial class DomBuild
         NodeId id,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return false;
+        }
+
         if (!styles.TryGetValue(id, out LayoutStyle? style))
         {
             return false;
@@ -1114,6 +1180,11 @@ internal static partial class DomBuild
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         List<NodeId> output)
     {
+        if (!StackGuard.CanDescend())
+        {
+            return;
+        }
+
         foreach (NodeId cid in children)
         {
             bool displayContents = styles.TryGetValue(cid, out LayoutStyle? style)
