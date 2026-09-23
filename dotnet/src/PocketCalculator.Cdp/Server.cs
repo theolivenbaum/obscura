@@ -366,7 +366,8 @@ public static partial class CdpServer
         }
         finally
         {
-            listener.Dispose();
+            await shutdown.CancelAsync().ConfigureAwait(false);
+            StopAcceptThread(acceptThread, listener, ip, port);
 
             // Sockets the accept thread queued but the loop above never picked
             // up. Nothing else owns them, so without this their file descriptors
@@ -510,6 +511,44 @@ public static partial class CdpServer
     /// real connect rate, so the kernel backlog cannot overflow under a burst.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Stop the accept thread, then close the listener.
+    /// </summary>
+    /// <remarks>
+    /// The listener used to be disposed from this thread while the accept thread
+    /// sat in <c>Accept()</c> on it. On Linux, .NET then closes file descriptor 0
+    /// from the accept thread as the aborted accept unwinds (seen under strace:
+    /// <c>close(0)</c> on the accept thread right after the listener's close).
+    /// Descriptor 0 is stdin in a CLI, but in a process whose stdin is closed,
+    /// such as the test host, it is whatever was opened next: another server's
+    /// socket or the <c>Console.Error</c> handle, which then fails with EBADF.
+    /// The accept thread is instead woken with a throwaway connection, sees the
+    /// cancelled token and returns, and only then is the listener closed.
+    /// </remarks>
+    private static void StopAcceptThread(Thread acceptThread, Socket listener, IPAddress ip, int port)
+    {
+        try
+        {
+            var wake = ip.Equals(IPAddress.Any) ? IPAddress.Loopback
+                : ip.Equals(IPAddress.IPv6Any) ? IPAddress.IPv6Loopback
+                : ip;
+            using var client = new Socket(wake.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            // The bound port, not the requested one: `--port 0` binds an ephemeral port.
+            var bound = (listener.LocalEndPoint as IPEndPoint)?.Port ?? port;
+            client.Connect(new IPEndPoint(wake, bound));
+        }
+        catch (SocketException)
+        {
+        }
+
+        if (!acceptThread.Join(TimeSpan.FromSeconds(2)))
+        {
+            CdpLog.Warn("accept thread did not stop within 2s; closing the listener under it");
+        }
+
+        listener.Dispose();
+    }
+
     private static void AcceptLoop(
         Socket listener,
         IPAddress bindIp,
