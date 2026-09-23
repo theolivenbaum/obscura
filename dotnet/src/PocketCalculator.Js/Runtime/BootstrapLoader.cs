@@ -22,7 +22,15 @@ public static class BootstrapLoader
     /// </summary>
     internal static bool ExposeOpsForTests { get; set; }
 
-    public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps, uint frameId = 0)
+    public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps, uint frameId = 0) =>
+        Install(engine, bindOps, frameId, isolatedWorld: false);
+
+    /// <summary>
+    /// <see cref="Install(V8ScriptEngine, Action{ScriptObject}, uint)"/> for a CDP isolated
+    /// world when <paramref name="isolatedWorld"/> is set: its form state is the page
+    /// realm's (<see cref="FormStateMirror.InstallIsolatedWorld"/>).
+    /// </summary>
+    internal static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps, uint frameId, bool isolatedWorld)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(bindOps);
@@ -49,7 +57,14 @@ public static class BootstrapLoader
             """);
 
         // Ahead of bootstrap.js, which adopts the two globals this installs.
-        FormStateMirror.Install(engine, frameId);
+        if (isolatedWorld)
+        {
+            FormStateMirror.InstallIsolatedWorld(engine);
+        }
+        else
+        {
+            FormStateMirror.Install(engine, frameId);
+        }
 
         // EngineText, not Text: the shim's dynamic-classic-script call sites are
         // bridged onto op_run_classic_script on the way in. See BootstrapSource.

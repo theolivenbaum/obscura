@@ -6,6 +6,17 @@ using PocketCalculator.Js.Url;
 namespace PocketCalculator.Js.Ops;
 
 /// <summary>
+/// Runs a page-document <c>op_dom</c> command and tells the other realms over that
+/// document what it changed. Port addition (SECURITY.md M6): see
+/// <c>PocketCalculator.Js.Runtime.IsolatedWorld</c>.
+/// </summary>
+public interface IDomMutationForwarder
+{
+    /// <param name="source">The isolated world that made the call, or null for the page realm.</param>
+    string OpDom(object? source, PocketCalculatorState page, string cmd, string arg1, string arg2);
+}
+
+/// <summary>
 /// Schedules one browser posted-task delivery on the host's V8 task queue.
 /// </summary>
 /// <remarks>
@@ -160,7 +171,14 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         // --- DOM -----------------------------------------------------------
         Bind(ops, "op_dom", (Func<object?, object?, object?, object?, string>)(
             (cmd, a1, a2, frameId) =>
-                DomOps.OpDom(FrameState(U32(frameId)), S(cmd), S(a1), S(a2))));
+            {
+                var realm = U32(frameId);
+                // An isolated world over the page's document hears about the page's
+                // mutations through the forwarder, which exists only while a world does.
+                return realm == 0 && MutationForwarder is { } forwarder
+                    ? forwarder.OpDom(null, Page, S(cmd), S(a1), S(a2))
+                    : DomOps.OpDom(FrameState(realm), S(cmd), S(a1), S(a2));
+            }));
         Bind(ops, "op_script_mark_started", (Func<object?, bool>)(
             nid => CoreOps.OpScriptMarkStarted(Page, U32(nid))));
         Bind(ops, "op_script_try_start", (Func<object?, bool>)(
@@ -483,6 +501,46 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         }
 
         FastOpBinding.Bind(ops, name, function, Cancellation);
+    }
+
+    /// <summary>
+    /// Delivers the page document's mutations to the CDP isolated worlds over it. Null
+    /// until a world exists, which keeps a page without one on the plain path.
+    /// </summary>
+    public IDomMutationForwarder? MutationForwarder { get; set; }
+
+    /// <summary>
+    /// The ops that differ in a CDP isolated world (port addition, SECURITY.md M6). The
+    /// world's table is otherwise the page realm's, bound with <see cref="BindTo"/>.
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item><c>op_dom</c> always acts on the page's document, and goes through the
+    /// forwarder so the page realm's observers hear about the world's mutations.</item>
+    /// <item><c>op_world_call</c> reaches the page realm's copy of the node state
+    /// bootstrap.js keeps in JavaScript (form values, focus, selection).</item>
+    /// <item><c>op_binding_called</c> queues the call as the world's, so it is reported
+    /// with the world's execution context.</item>
+    /// <item>Console calls are not reported: they would carry the page's context.</item>
+    /// </list>
+    /// </remarks>
+    internal void BindIsolatedWorldOverrides(
+        ScriptObject ops,
+        object world,
+        Func<string, double, string, string> worldCall,
+        Action<string, string> bindingCalled)
+    {
+        ArgumentNullException.ThrowIfNull(ops);
+        Bind(ops, "op_dom", (Func<object?, object?, object?, object?, string>)(
+            (cmd, a1, a2, _) => MutationForwarder is { } forwarder
+                ? forwarder.OpDom(world, Page, S(cmd), S(a1), S(a2))
+                : DomOps.OpDom(Page, S(cmd), S(a1), S(a2))));
+        Bind(ops, "op_world_call", (Func<object?, object?, object?, string>)(
+            (kind, nid, arg) => OpGuard.Run("op_world_call", () => worldCall(S(kind), D(nid), S(arg)), string.Empty)));
+        Bind(ops, "op_binding_called", (Action<object?, object?>)(
+            (name, payload) => OpGuard.Run("op_binding_called", () => bindingCalled(S(name), S(payload)))));
+        Bind(ops, "op_runtime_events_enabled", (Func<bool>)(() => false));
+        Bind(ops, "op_console_msg", (Action<object?, object?, object?>)((_, _, _) => { }));
     }
 
     /// <summary>

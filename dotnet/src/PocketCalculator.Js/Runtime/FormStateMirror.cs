@@ -59,4 +59,54 @@ internal static class FormStateMirror
             })
             """ + "(" + id + ");");
     }
+
+    /// <summary>
+    /// The CDP isolated-world variant (SECURITY.md M6): the world's three form-state maps
+    /// read and write the page realm's, so a value the page's script set is the value a
+    /// world reads, and the other way round. Chromium keeps this state on the node, which
+    /// every world shares.
+    /// </summary>
+    /// <remarks>
+    /// Same shape as <see cref="Install"/>: proxies installed ahead of bootstrap.js, which
+    /// adopts them. Numeric keys go through <c>op_world_call</c>, which only a world's op
+    /// table has; the value encoding is bootstrap.js's <c>_worldValueEncode</c>.
+    /// </remarks>
+    internal static void InstallIsolatedWorld(V8ScriptEngine engine)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        engine.Execute("world-form-state", """
+            (function () {
+              const ops = globalThis.Deno.core.ops;
+              const encode = (v) => v === undefined ? 'u' : v === null ? 'n'
+                : typeof v === 'boolean' ? (v ? 'b1' : 'b0')
+                : typeof v === 'number' ? 'd' + String(v) : 's' + String(v);
+              const decode = (s) => {
+                s = String(s);
+                switch (s.charAt(0)) {
+                  case 'n': return null;
+                  case 'b': return s === 'b1';
+                  case 'd': return Number(s.slice(1));
+                  case 's': return s.slice(1);
+                  default: return undefined;
+                }
+              };
+              const numeric = (key) => typeof key === 'string' && /^[0-9]+$/.test(key);
+              const shared = (name) => new Proxy({}, {
+                get(target, key) {
+                  if (!numeric(key)) return target[key];
+                  try { return decode(ops.op_world_call('map-get:' + name, Number(key), '')); }
+                  catch (_) { return undefined; }
+                },
+                set(target, key, value) {
+                  if (!numeric(key)) { target[key] = value; return true; }
+                  try { ops.op_world_call('map-set:' + name, Number(key), encode(value)); } catch (_) {}
+                  return true;
+                },
+              });
+              globalThis._formValues = shared('value');
+              globalThis._formChecked = shared('checked');
+              globalThis._formIndeterminate = shared('indeterminate');
+            })();
+            """);
+    }
 }

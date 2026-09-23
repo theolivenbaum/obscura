@@ -150,6 +150,10 @@ let _realmFrameId = 0;
 // two rather than globalThis.__obscura_frameId / __obscura_parentFrameId, which page
 // script can overwrite.
 let _realmParentFrameId = 0;
+// Port addition (SECURITY.md M6): true in a CDP isolated world, a second realm over
+// the page's own document (IsolatedWorld.cs). Set once by __obscura_init from a flag
+// the host puts on that realm's global; page script has no path to that realm.
+let _realmIsolatedWorld = false;
 
 const _dom = (cmd, a1, a2) => {
   const result = __obscuraCore.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
@@ -181,6 +185,12 @@ const _dom = (cmd, a1, a2) => {
   }
   return result;
 };
+
+// Document.prototype.querySelector as bootstrap left it; see Document's head/body.
+let _documentQuerySelector = null;
+const _reflectApply = Reflect.apply;
+const _documentQuery = (doc, selector) =>
+  _documentQuerySelector ? _reflectApply(_documentQuerySelector, doc, [selector]) : doc.querySelector(selector);
 
 const _nativeFns = new Set();
 // Exact toString override for members whose native form is not just
@@ -861,13 +871,16 @@ const _scheduleAfter = (delay, fn) => {
   // it on either fire or clear, so repeated clearTimeout calls do not grow a
   // permanent set.
   // _realmFrameId, not upstream's page-writable globalThis.__obscura_frameId.
-  if (_realmFrameId) {
+  // An isolated world is not a frame, but it has no host timer queue of its own
+  // either (the host pumps only the page realm's), so its timers take the same path.
+  if (_realmFrameId || _realmIsolatedWorld) {
     const frameTimerId = -(++_frameTimerSeq);
     const state = { cancelled: false };
     _frameTimerStates.set(frameTimerId, state);
     __obscuraCore.ops.op_sleep(d).then(() => {
       _frameTimerStates.delete(frameTimerId);
       if (state.cancelled) return;
+      if (_realmIsolatedWorld) _worldSyncEpochs();
       __obscuraCore.ops.op_begin_render_task?.();
       fn();
     });
@@ -1140,6 +1153,7 @@ function _browserPostedTaskRunOne(currentGeneration = _invalidPostedTaskGenerati
   // Borrow contention is cancelled too: a browser task must not unwind through
   // V8 or enter a realm whose native owner is unavailable.
   _browserPostedTaskWakePending = false;
+  if (_realmIsolatedWorld) _worldSyncEpochs();
   if (currentGeneration === _invalidPostedTaskGeneration) {
     for (const queue of _browserPostedTaskQueues) _browserPostedTaskDiscardQueue(queue);
     return;
@@ -5241,8 +5255,12 @@ class Document extends Node {
   get childElementCount() { return this.documentElement ? 1 : 0; }
   get firstElementChild() { return this.documentElement; }
   get lastElementChild() { return this.documentElement; }
-  get head() { return this.querySelector("head"); }
-  get body() { return this.querySelector("body"); }
+  // Through the prototype's own querySelector, captured when bootstrap finishes: a
+  // page that shadows document.querySelector (an own property, as automation-detection
+  // scripts do) otherwise loses document.body and head, which Chromium never derives
+  // from script-visible methods. DEVIATION from crates/obscura-js/js/bootstrap.js.
+  get head() { return _documentQuery(this, "head"); }
+  get body() { return _documentQuery(this, "body"); }
   get doctype() {
     if (this._doctype !== undefined) return this._doctype;
     const info = _domParse("document_doctype");
@@ -9782,6 +9800,10 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
     if (matched) obs._notify([record]);
   }
 };
+
+// Port addition (SECURITY.md M6): the notifier as bootstrap defined it, for the host
+// helper that delivers a mutation another realm over this document made.
+const _notifyMutationInternal = globalThis.__notifyMutation;
 
 globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {
   constructor(nid, host, options) {
@@ -17424,6 +17446,8 @@ globalThis.__obscura_init = function() {
   // The host sets __obscura_frameId on a frame realm before calling this.
   _realmFrameId = globalThis.__obscura_frameId >>> 0;
   _realmParentFrameId = globalThis.__obscura_parentFrameId >>> 0;
+  _realmIsolatedWorld = globalThis.__obscura_isolated_world === true;
+  delete globalThis.__obscura_isolated_world;
   _browserPostedTaskWakePending = false;
   for (const queue of _browserPostedTaskQueues) _browserPostedTaskDiscardQueue(queue);
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
@@ -17507,9 +17531,15 @@ globalThis.__obscura_init = function() {
   // This also runs inside a frame realm, so a frame nested in a frame loads
   // by the same path, with op_frame_document_ready recording the caller as
   // its parent.
-  for (const frame of globalThis.document.querySelectorAll('iframe')) {
-    const src = frame.getAttribute('src');
-    if (src && src !== 'about:blank') frame._loadIframeSrc(src);
+  // An isolated world shares the page's document, and the page realm already
+  // loaded its frames.
+  if (!_realmIsolatedWorld) {
+    for (const frame of globalThis.document.querySelectorAll('iframe')) {
+      const src = frame.getAttribute('src');
+      if (src && src !== 'about:blank') frame._loadIframeSrc(src);
+    }
+  } else {
+    _installIsolatedWorldBridges();
   }
 
   // Hide internals (_*, obscura, Obscura). The set of keys is static at
@@ -18081,6 +18111,268 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
   }
 })();
 
+_documentQuerySelector = Document.prototype.querySelector;
+
+// ---- CDP isolated worlds (port addition, SECURITY.md M6) ----
+//
+// An isolated world is a second realm over the page's own document
+// (dotnet/src/PocketCalculator.Js/Runtime/IsolatedWorld.cs): its own global object and
+// built-ins, the same DOM nodes. The DOM tree lives in the host, so every realm sees the
+// same nodes; the state bootstrap.js keeps in JS (dirty form values, focus, selection,
+// option selectedness, event listeners) does not, and Chromium keeps it on the node, so
+// a world reads and writes that state through the page realm. The page realm answers
+// with the implementations captured here, when bootstrap.js has run and before any page
+// script does, so a page that replaces a prototype method does not change what the
+// world's call does. The Rust engine has no isolated worlds: its CDP contexts all run in
+// the page realm.
+const _worldValueEncode = (v) => v === undefined ? 'u' : v === null ? 'n'
+  : typeof v === 'boolean' ? (v ? 'b1' : 'b0')
+  : typeof v === 'number' ? 'd' + String(v) : 's' + String(v);
+const _worldValueDecode = (s) => {
+  s = String(s);
+  switch (s.charAt(0)) {
+    case 'n': return null;
+    case 'b': return s === 'b1';
+    case 'd': return Number(s.slice(1));
+    case 's': return s.slice(1);
+    default: return undefined;
+  }
+};
+const _worldNidList = (csv) => {
+  const text = String(csv || '');
+  if (!text) return [];
+  const out = [];
+  for (const part of text.split(',')) { const n = Number(part); if (n >= 0) out.push(n); }
+  return out;
+};
+const _worldEventClasses = ['PointerEvent', 'WheelEvent', 'MouseEvent', 'KeyboardEvent',
+  'InputEvent', 'CompositionEvent', 'FocusEvent', 'UIEvent', 'CustomEvent', 'Event'];
+
+// The page realm's half: what the host calls, as __obscura_host.worldCall, when a world
+// asks. Every answer is a string.
+const _worldCall = (function () {
+  const apply = Reflect.apply;
+  const parse = JSON.parse;
+  const EP = Element.prototype;
+  const NP = Node.prototype;
+  const own = (proto, name) => Object.getOwnPropertyDescriptor(proto, name) || {};
+  const methods = {
+    __proto__: null,
+    focus: EP.focus, click: EP.click, select: EP.select,
+    setSelectionRange: EP.setSelectionRange, setRangeText: EP.setRangeText,
+  };
+  const accessors = {
+    __proto__: null,
+    selected: own(EP, 'selected'), selectionStart: own(EP, 'selectionStart'),
+    selectionEnd: own(EP, 'selectionEnd'), selectionDirection: own(EP, 'selectionDirection'),
+  };
+  const maps = { __proto__: null, value: _formValues, checked: _formChecked, indeterminate: _formIndeterminate };
+  const elementDispatch = EP.dispatchEvent;
+  const nodeDispatch = NP.dispatchEvent;
+  const eventClasses = { __proto__: null };
+  for (const name of _worldEventClasses) {
+    if (typeof globalThis[name] === 'function') eventClasses[name] = globalThis[name];
+  }
+  return function worldCall(kind, nid, arg) {
+    kind = String(kind);
+    nid = Number(nid);
+    const node = nid >= 0 ? _wrap(nid) : null;
+    const colon = kind.indexOf(':');
+    const verb = colon < 0 ? kind : kind.slice(0, colon);
+    const name = colon < 0 ? '' : kind.slice(colon + 1);
+    switch (verb) {
+      case 'map-get':
+        return maps[name] ? _worldValueEncode(maps[name][nid]) : 'u';
+      case 'map-set':
+        if (maps[name]) maps[name][nid] = _worldValueDecode(arg);
+        return '';
+      case 'get':
+        if (!node || !accessors[name] || !accessors[name].get) return 'u';
+        return _worldValueEncode(apply(accessors[name].get, node, []));
+      case 'set':
+        if (node && accessors[name] && accessors[name].set) apply(accessors[name].set, node, [_worldValueDecode(arg)]);
+        return '';
+      case 'call':
+        if (node && typeof methods[name] === 'function') {
+          apply(methods[name], node, arg ? parse(String(arg)) : []);
+        }
+        return '';
+      case 'focused': {
+        const focused = globalThis.__obscura_focused;
+        return focused && typeof focused._nid === 'number' ? String(focused._nid) : '';
+      }
+      case 'unfocus':
+        globalThis.__obscura_focused = null;
+        return '';
+      case 'dispatch': {
+        if (!node) return '1';
+        const spec = parse(String(arg));
+        const Ctor = eventClasses[spec.c] || eventClasses.Event;
+        let event;
+        try { event = new Ctor(String(spec.t), spec.i); } catch (_) { event = new eventClasses.Event(String(spec.t), spec.i); }
+        const dispatch = +_dom('node_type', nid) === 1 ? elementDispatch : nodeDispatch;
+        return apply(dispatch, node, [event]) === false ? '0' : '1';
+      }
+      default:
+        return '';
+    }
+  };
+})();
+
+// Another realm's mutations reach a world lazily: the host marks it stale, and the
+// world's epochs are bumped before its next task (a timer, a posted task, a host call,
+// a mutation delivery) reads a cache keyed on them.
+function _worldSyncEpochs() {
+  const stale = String(__obscuraCore.ops.op_world_call('sync', -1, ''));
+  if (!stale) return;
+  _domMutationEpoch++;
+  if (stale === 't') _treeMutationEpoch++;
+}
+// Records for an observing world are batched by the host and delivered here, at the
+// microtask checkpoint where MutationObserver callbacks run anyway.
+function _worldDrainMutations() {
+  _worldSyncEpochs();
+  const batch = JSON.parse(String(__obscuraCore.ops.op_world_call('drain', -1, '')) || '[]');
+  for (const r of batch) {
+    _notifyMutationInternal(r[0], r[1], _worldNidList(r[2]), _worldNidList(r[3]), r[4] || null, r[5] ?? null);
+  }
+}
+
+// The world's half, installed by __obscura_init in an isolated world only. It replaces
+// the world's own accessors, which nothing in the page can reach.
+function _installIsolatedWorldBridges() {
+  const ops = __obscuraCore.ops;
+  const apply = Reflect.apply;
+  const stringify = JSON.stringify;
+  const parse = JSON.parse;
+  const nidOf = (node) => (node !== null && typeof node === 'object' && typeof node._nid === 'number') ? node._nid : -1;
+  const call = (kind, nid, arg) => String(ops.op_world_call(kind, nid, arg === undefined ? '' : String(arg)));
+  const EP = Element.prototype;
+  const NP = Node.prototype;
+
+  // Focus: the world reads and writes the page realm's focused element, so focus()
+  // here moves the focus the page, Input.insertText and :focus all see.
+  Object.defineProperty(globalThis, '__obscura_focused', {
+    configurable: true, enumerable: false,
+    get() { const r = call('focused', -1); return r === '' ? null : _wrap(+r); },
+    set(node) {
+      const nid = nidOf(node);
+      if (nid >= 0) call('call:focus', nid, '');
+      else call('unfocus', -1);
+    },
+  });
+
+  const accessor = (name) => {
+    const original = Object.getOwnPropertyDescriptor(EP, name);
+    if (!original) return;
+    Object.defineProperty(EP, name, {
+      configurable: true, enumerable: original.enumerable,
+      get() {
+        const nid = nidOf(this);
+        if (nid < 0) return original.get ? apply(original.get, this, []) : undefined;
+        return _worldValueDecode(call('get:' + name, nid));
+      },
+      set(value) {
+        const nid = nidOf(this);
+        if (nid < 0) { if (original.set) apply(original.set, this, [value]); return; }
+        call('set:' + name, nid, _worldValueEncode(value));
+      },
+    });
+  };
+  accessor('selected');
+  accessor('selectionStart');
+  accessor('selectionEnd');
+  accessor('selectionDirection');
+
+  const method = (name) => {
+    const original = EP[name];
+    if (typeof original !== 'function') return;
+    const replacement = {
+      [name](...args) {
+        const nid = nidOf(this);
+        if (nid < 0) return apply(original, this, args);
+        let encoded;
+        try { encoded = stringify(args); } catch (_) { encoded = '[]'; }
+        call('call:' + name, nid, encoded);
+      },
+    }[name];
+    Object.defineProperty(EP, name, { configurable: true, writable: true, enumerable: false, value: replacement });
+  };
+  method('click');
+  method('select');
+  method('setSelectionRange');
+  method('setRangeText');
+
+  // Events: a world's dispatch reaches the world's listeners and then the page's, as one
+  // dispatch on the shared node does in Chromium. The page gets an untrusted copy.
+  const eventClassOf = (event) => {
+    for (const name of _worldEventClasses) {
+      const C = globalThis[name];
+      if (typeof C === 'function' && event instanceof C) return name;
+    }
+    return 'Event';
+  };
+  const initKeys = ['detail', 'key', 'code', 'location', 'repeat', 'isComposing',
+    'ctrlKey', 'shiftKey', 'altKey', 'metaKey', 'button', 'buttons', 'clientX', 'clientY',
+    'screenX', 'screenY', 'data', 'inputType', 'deltaX', 'deltaY', 'deltaZ', 'deltaMode',
+    'pointerId', 'pointerType', 'width', 'height', 'pressure', 'isPrimary', 'which',
+    'keyCode', 'charCode'];
+  const forward = (target, event) => {
+    const nid = nidOf(target);
+    if (nid < 0 || event === null || typeof event !== 'object') return true;
+    let payload;
+    try {
+      const init = { bubbles: !!event.bubbles, cancelable: !!event.cancelable, composed: !!event.composed };
+      for (const key of initKeys) {
+        let value;
+        try { value = event[key]; } catch (_) { continue; }
+        const t = typeof value;
+        if (t === 'string' || t === 'number' || t === 'boolean') init[key] = value;
+        else if (key === 'detail' && value !== undefined && value !== null && t === 'object') {
+          try { init.detail = parse(stringify(value)); } catch (_) {}
+        }
+      }
+      payload = stringify({ c: eventClassOf(event), t: String(event.type), i: init });
+    } catch (_) { return true; }
+    return call('dispatch', nid, payload) !== '0';
+  };
+  // Bubbling re-enters dispatchEvent on each ancestor; only the outermost call is the
+  // dispatch, and the page realm bubbles its copy itself.
+  let dispatchDepth = 0;
+  const dispatcher = (proto) => {
+    const original = proto.dispatchEvent;
+    if (typeof original !== 'function') return;
+    Object.defineProperty(proto, 'dispatchEvent', {
+      configurable: true, writable: true, enumerable: false,
+      value: function dispatchEvent(event) {
+        let ours;
+        dispatchDepth++;
+        try { ours = apply(original, this, [event]); }
+        finally { dispatchDepth--; }
+        if (dispatchDepth !== 0) return ours;
+        const page = forward(this, event);
+        return ours !== false && page;
+      },
+    });
+  };
+  dispatcher(EP);
+  dispatcher(NP);
+
+  // Mutations another realm makes reach this world's observers once it has one. The
+  // host is told the first time, so a world nobody observes from costs nothing.
+  const observe = MutationObserver.prototype.observe;
+  let told = false;
+  Object.defineProperty(MutationObserver.prototype, 'observe', {
+    configurable: true, writable: true, enumerable: false,
+    value: {
+      observe(target, options) {
+        if (!told) { told = true; call('observing', -1); }
+        return apply(observe, this, [target, options]);
+      },
+    }.observe,
+  });
+}
+
 // Host helpers: what the host's own scripts (CDP Input, DOM.setFileInputFiles, the
 // MCP form tools, frame messaging, navigation) need and page script must not have.
 //
@@ -18114,6 +18406,25 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // trusted click. Upstream keeps it in page-writable globalThis.__obscura_mouse_down,
   // so a page could aim the click a real mouseup produces.
   pointer: Object.seal({ __proto__: null, down: null }),
+  // Port additions (SECURITY.md M6): the page realm's half of an isolated world's
+  // shared node state, and a mutation another realm over this document made. That
+  // realm's _dom bumped only its own epochs, so the caches keyed on them (parentNode,
+  // isConnected, layout snapshots) are stale here until these are bumped too; `type`
+  // is empty when this realm has no observer to tell.
+  worldCall: _worldCall,
+  // A world's: pick up another realm's mutations now (before host-initiated script), or
+  // at the next microtask checkpoint (a batch of records for its observers).
+  worldSync: () => _worldSyncEpochs(),
+  worldScheduleDrain: () => queueMicrotask(_worldDrainMutations),
+  externalMutation: (tree, type, nid, added, removed, attributeName, oldValue) => {
+    _domMutationEpoch++;
+    if (tree) _treeMutationEpoch++;
+    if (typeof globalThis.__obscura_recompute_resizes === "function") globalThis.__obscura_recompute_resizes();
+    if (typeof globalThis.__obscura_recompute_intersections === "function") globalThis.__obscura_recompute_intersections();
+    if (!type) return;
+    _notifyMutationInternal(String(type), Number(nid), _worldNidList(added), _worldNidList(removed),
+      attributeName ? String(attributeName) : null, oldValue == null ? null : String(oldValue));
+  },
 });
 
 })();

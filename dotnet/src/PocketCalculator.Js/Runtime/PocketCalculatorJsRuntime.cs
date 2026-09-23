@@ -58,10 +58,10 @@ public sealed partial class PocketCalculatorJsRuntime
     private readonly IDisposable _memoryRegistration;
     private readonly Dictionary<string, string> _objectStore = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _evaluationRecipes = new(StringComparer.Ordinal);
+    private readonly CdpScope _mainScope;
     private readonly Dictionary<long, string?> _moduleEvaluations = [];
     private readonly Dictionary<string, string?> _evaluatedModuleSpecifiers = new(StringComparer.Ordinal);
     private readonly List<FrameRealm> _realms = [];
-    private ulong _objectCounter;
     private int _pendingAsyncOps;
     private long _heapLimitBytes;
     private readonly Queue<Action<double>> _postedTasks = new();
@@ -135,6 +135,7 @@ public sealed partial class PocketCalculatorJsRuntime
             _engine.Script.__obscura_test_ops = _shim.Ops;
         }
         InitializeObjectStore(_engine);
+        _mainScope = new CdpScope(this, _engine, CdpScope.MainInjectedScriptId, _objectStore, _evaluationRecipes);
     }
 
     /// <summary>A runtime whose documents resolve against <c>about:blank</c>.</summary>
@@ -233,7 +234,7 @@ public sealed partial class PocketCalculatorJsRuntime
         return engine;
     }
 
-    private static void InitializeObjectStore(V8ScriptEngine engine) =>
+    internal static void InitializeObjectStore(V8ScriptEngine engine) =>
         engine.Execute("<obscura:init>", "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;");
 
     // ------------------------------------------------------ array buffers
@@ -546,12 +547,18 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     partial void BindOps(ScriptObject ops, bool mainRealm);
 
-    private object? ExecuteRuntimeScript(string name, string source)
+    private object? ExecuteRuntimeScript(string name, string source) => ExecuteIn(_engine, name, source);
+
+    /// <summary>
+    /// <see cref="ExecuteRuntimeScript"/> in any realm of this isolate: the page's, or an
+    /// isolated world's. Same deadline and heap-limit handling.
+    /// </summary>
+    internal object? ExecuteIn(V8ScriptEngine engine, string name, string source)
     {
         CancellationToken deadline = _ops.Cancellation.Token;
         try
         {
-            object? result = _engine.Evaluate(new DocumentInfo(name), source);
+            object? result = engine.Evaluate(new DocumentInfo(name), source);
             ThrowIfDeadlinePassed(deadline);
             return result;
         }
@@ -829,6 +836,7 @@ public sealed partial class PocketCalculatorJsRuntime
             realm.Dispose();
         }
         _realms.Clear();
+        DisposeIsolatedWorlds();
 
         // Before the engine, not after: while V8's promise-reject hook is still
         // registered it can call back into a half-disposed engine, and

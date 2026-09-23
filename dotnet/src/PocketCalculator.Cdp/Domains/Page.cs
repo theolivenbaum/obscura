@@ -1073,7 +1073,17 @@ public static partial class Page
                 string source = parameters.Get("source").AsString() ?? string.Empty;
                 ctx.PreloadCounter += 1;
                 string identifier = ctx.PreloadCounter.ToString(CultureInfo.InvariantCulture);
-                if (source.Length != 0)
+                // Port addition (SECURITY.md M6): a worldName script runs in that
+                // isolated world, which runs it when it is created. The Rust engine
+                // ran it with the page's own scripts, beside page script.
+                if (parameters.Get("worldName").AsString() is { Length: > 0 } worldName)
+                {
+                    if (source.Length != 0)
+                    {
+                        ctx.WorldPreloadScripts.Add((identifier, worldName, source));
+                    }
+                }
+                else if (source.Length != 0)
                 {
                     ctx.PreloadScripts.Add((identifier, source));
                 }
@@ -1085,6 +1095,8 @@ public static partial class Page
             {
                 string identifier = parameters.Get("identifier").AsString() ?? string.Empty;
                 ctx.PreloadScripts.RemoveAll(entry =>
+                    string.Equals(entry.Identifier, identifier, StringComparison.Ordinal));
+                ctx.WorldPreloadScripts.RemoveAll(entry =>
                     string.Equals(entry.Identifier, identifier, StringComparison.Ordinal));
                 return DomainResult.Empty();
             }

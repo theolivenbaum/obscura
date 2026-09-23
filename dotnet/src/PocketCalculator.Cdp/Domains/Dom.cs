@@ -137,7 +137,8 @@ public static class Dom
                     string code =
                         $"(function() {{ var o = globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
                         + "if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; })()";
-                    double? resolved = page.Evaluate(code).AsF64();
+                    // The realm that minted the id: the page's, or an isolated world's.
+                    double? resolved = page.EvaluateInObjectRealm(objectId, code).AsF64();
                     nodeId = resolved is { } value and >= 0 ? (ulong)value : 0UL;
                 }
                 else
@@ -168,7 +169,7 @@ public static class Dom
                     string code =
                         $"(function() {{ var o = globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
                         + "return (o && typeof o._nid === 'number') ? o._nid : -1; })()";
-                    double? resolved = page.Evaluate(code).AsF64();
+                    double? resolved = page.EvaluateInObjectRealm(objectId, code).AsF64();
                     nodeId = resolved is { } value and >= 0 ? (ulong)value : 0UL;
                 }
                 else
@@ -189,10 +190,18 @@ public static class Dom
                     throw new DomainError("No JS runtime");
                 }
 
+                // Port addition (SECURITY.md M6): executionContextId names the realm the
+                // handle is made in, which is how a client moves a node between worlds
+                // (describeNode, then resolveNode into the other context). The Rust
+                // engine ignores it and always answers from the page realm.
+                ExecutionContextRecord? context =
+                    Runtime.ValidateContext(parameters, "executionContextId", ctx, sessionId, "resolveNode");
+                PocketCalculator.Js.Runtime.IsolatedWorldTarget? world = ctx.WorldTargetFor(context, page);
+
                 PocketCalculator.Js.Runtime.RemoteObjectInfo info;
                 try
                 {
-                    info = js.StoreObjectWithMeta(jsCode);
+                    info = world is null ? js.StoreObjectWithMeta(jsCode) : js.StoreObjectWithMeta(jsCode, world);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -220,6 +229,21 @@ public static class Dom
                             ?? $"node-{nodeId.ToString(CultureInfo.InvariantCulture)}",
                     },
                 });
+            }
+
+            // The node behind a remote object, from whichever realm minted it. Node ids
+            // here are backend node ids, which every world shares. Port addition: the Rust
+            // engine has no DOM.requestNode.
+            case "requestNode":
+            {
+                BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
+                if (parameters.Get("objectId").AsString() is null)
+                {
+                    throw new DomainError("objectId required");
+                }
+
+                ulong nodeId = ResolveNodeId(page, parameters);
+                return DomainResult.Ok(new JsonObject { ["nodeId"] = nodeId });
             }
 
             case "setAttributeValue":
@@ -498,7 +522,7 @@ public static class Dom
             string code =
                 $"(function() {{ var o = globalThis.__obscura_objects && globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
                 + "return (o && typeof o._nid === 'number') ? o._nid : -1; })()";
-            double? result = page.Evaluate(code).AsF64();
+            double? result = page.EvaluateInObjectRealm(objectId, code).AsF64();
             long resolved = result is { } value ? (long)value : -1L;
             if (resolved < 0)
             {

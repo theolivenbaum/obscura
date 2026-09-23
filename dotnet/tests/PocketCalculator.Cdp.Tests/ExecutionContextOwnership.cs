@@ -187,8 +187,13 @@ public sealed class ExecutionContextOwnership
         Assert.Contains("Cannot find context", firstIsStale.Error!.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// DEVIATION from the Rust test <c>attached_isolated_context_ids_share_the_current_page_global_for_now</c>:
+    /// an isolated context is a realm of its own here (SECURITY.md M6), as in Chromium, so
+    /// it sees neither the page's global nor lets the page see its own.
+    /// </summary>
     [Fact]
-    public async Task AttachedIsolatedContextIdsShareTheCurrentPageGlobalForNow()
+    public async Task AttachedIsolatedContextIdsRunInTheirOwnWorld()
     {
         var ctx = CdpContext.New();
         using IDisposable owned4 = CoreCdp.Owned(ctx);
@@ -222,7 +227,7 @@ public sealed class ExecutionContextOwnership
             isolatedResponse.Error is null,
             $"isolated evaluate failed: {isolatedResponse.Error?.Message}");
         Assert.Equal(
-            "default-isolated", isolatedResponse.Result!["result"]!["value"].AsString());
+            "undefined-isolated", isolatedResponse.Result!["result"]!["value"].AsString());
 
         JsonNode defaultValue = await CoreCdp.CdpAsync(
             ctx,
@@ -230,7 +235,7 @@ public sealed class ExecutionContextOwnership
             "Runtime.evaluate",
             new JsonObject { ["expression"] = "globalThis.realmProbe", ["returnByValue"] = true },
             session);
-        Assert.Equal("default-isolated", defaultValue["result"]!["value"].AsString());
+        Assert.Equal("default", defaultValue["result"]!["value"].AsString());
     }
 
     [Fact]

@@ -173,6 +173,104 @@ public sealed partial class Page
             awaitTimeoutMs);
     }
 
+    /// <summary>
+    /// <c>Runtime.evaluate</c> in a CDP isolated world (null: the page realm). Port
+    /// addition, SECURITY.md M6: the Rust engine runs every context in the page realm.
+    /// </summary>
+    public async Task<RemoteObjectInfo> EvaluateForCdpWithTimeoutAsync(
+        string expression,
+        bool returnByValue,
+        bool awaitPromise,
+        ulong awaitTimeoutMs,
+        IsolatedWorldTarget? world)
+    {
+        if (world is null)
+        {
+            return await EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, awaitTimeoutMs)
+                .ConfigureAwait(false);
+        }
+        if (Js is not { } js)
+        {
+            throw new InvalidOperationException("JavaScript runtime unavailable");
+        }
+        return await js
+            .EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, awaitTimeoutMs, world)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <c>Runtime.callFunctionOn</c>: in the realm <paramref name="objectId"/> was minted
+    /// in, or in <paramref name="world"/> when there is no object (null: the page realm).
+    /// </summary>
+    public Task<RemoteObjectInfo> CallFunctionOnForCdpWithTimeoutAsync(
+        string functionDeclaration,
+        string? objectId,
+        IReadOnlyList<JsonNode?> args,
+        bool returnByValue,
+        bool awaitPromise,
+        ulong awaitTimeoutMs,
+        IsolatedWorldTarget? world)
+    {
+        if (Js is not { } js)
+        {
+            throw new InvalidOperationException("JavaScript runtime unavailable");
+        }
+        return js.CallFunctionOnForCdpWithTimeoutAsync(
+            functionDeclaration, objectId, args, returnByValue, awaitPromise, awaitTimeoutMs, world);
+    }
+
+    /// <summary>
+    /// <see cref="Evaluate"/> in the realm that minted <paramref name="objectId"/>: the page
+    /// realm for its own ids, or the isolated world that made it.
+    /// </summary>
+    public JsonNode? EvaluateInObjectRealm(string objectId, string expression)
+    {
+        if (Js is not { } js || PocketCalculatorJsRuntime.IsolatedWorldKeyOf(objectId) == 0)
+        {
+            return Evaluate(expression);
+        }
+        try
+        {
+            return js.EvaluateInObjectRealm(objectId, expression);
+        }
+        catch (JsRuntimeException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Runs host-authored <paramref name="source"/> in each isolated world named
+    /// <paramref name="worldName"/> that exists now. Worlds created later run it from their
+    /// init scripts.
+    /// </summary>
+    public void ExecuteInIsolatedWorlds(string worldName, string source)
+    {
+        if (Js is not { } js)
+        {
+            return;
+        }
+        foreach (var world in js.IsolatedWorlds.ToArray())
+        {
+            if (!string.Equals(world.Name, worldName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            try
+            {
+                world.ExecuteScript("<world-script>", source);
+            }
+            catch (JsRuntimeException)
+            {
+                // The same as a failing init script.
+            }
+        }
+    }
+
+    /// <summary>Binding calls made from isolated worlds, with the world's context id.</summary>
+    public IReadOnlyList<(long WorldKey, string Name, string Payload)> TakePendingWorldBindingCalls() =>
+        Js?.TakePendingWorldBindingCalls() ?? [];
+
     public void ReleaseObject(string objectId) => Js?.ReleaseObject(objectId);
 
     public void ReleaseObjectGroup() => Js?.ReleaseObjectGroup();
