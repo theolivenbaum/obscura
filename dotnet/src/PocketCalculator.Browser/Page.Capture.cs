@@ -358,13 +358,23 @@ public sealed partial class Page
         {
             return fallback;
         }
-        return WithDom(dom => RenderPaint.ScreenshotPngScrolledAtAnimationTimeWithSurfaceColor(
-            dom,
-            viewport,
-            baseUrl,
-            scroll,
-            animationSample.Time,
-            CaptureSurfaceColor()));
+        // A DOM-only page (for example after SuspendJs) still owns network policy. Its
+        // fallback must not bypass the page transport through the standalone
+        // synchronous loader (upstream 99647b4): external assets it has no bytes for
+        // stay unavailable until the page is resumed and its resources prepared.
+        return WithDom(dom =>
+        {
+            RenderResourceCache resources = RenderResourceCache.Default();
+            resources.SetSyncLoadingEnabled(false);
+            return RenderPaint.ScreenshotPngScrolledAtAnimationTimeWithSurfaceColorAndResources(
+                dom,
+                viewport,
+                baseUrl,
+                scroll,
+                animationSample.Time,
+                CaptureSurfaceColor(),
+                resources);
+        });
     }
 
     /// <summary>

@@ -442,4 +442,21 @@ public sealed class RenderResourceTransportTests
         Assert.Equal(30.0, Number(page, "document.getElementById('i').naturalWidth"));
         Assert.Equal(2, Volatile.Read(ref hits));
     }
+
+    [Fact]
+    public void SuspendedPageScreenshotNeverOpensResourceRequests()
+    {
+        using TestHttpServer server = TestHttpServer.Start(_ => TestResponse.Svg(RedSvg));
+        using Page page = PageWithTransportAndImage(
+            "suspended-capture", $"{server.Origin}/page", $"{server.Origin}/blocked.svg");
+        page.SetBlockedUrls(["*blocked.svg"]);
+        page.SuspendJs();
+        Assert.Null(page.Js);
+        byte[]? png = page.Screenshot(page.Viewport);
+        Assert.NotNull(png);
+        Assert.Equal(new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G' }, png![..4]);
+        Assert.False(
+            server.TryNextPath(TimeSpan.FromMilliseconds(100), out _),
+            "a suspended page must not use the synchronous renderer HTTP loader");
+    }
 }

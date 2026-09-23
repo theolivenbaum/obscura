@@ -157,8 +157,10 @@ public sealed partial class PocketCalculatorJsRuntime
         AnimationSampleTime animationSampleTime,
         RgbaColor surfaceColor)
     {
-        PocketCalculatorState state = State;
-        return state.Dom is not { } dom
+        // A capture observes the retained page and never opens its own network phase,
+        // even for a runtime that has no page transport (upstream 99647b4). Misses it
+        // records are loaded through the transport by the page afterwards.
+        return WithSyncRenderLoadingDisabled(State, state => state.Dom is not { } dom
             ? null
             : RenderPaint.ScreenshotPngScrolledAtAnimationTimeWithSurfaceColorAndResources(
                 dom,
@@ -167,7 +169,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 scroll,
                 animationSampleTime,
                 surfaceColor,
-                state.RenderResources);
+                state.RenderResources));
     }
 
     /// <summary>
