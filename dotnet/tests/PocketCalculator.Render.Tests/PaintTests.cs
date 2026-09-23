@@ -72,6 +72,21 @@ public class PaintTests
 
     private static string Invariant(FormattableString value) => value.ToString(CultureInfo.InvariantCulture);
 
+    // #1019: a near-singular transform over content far larger than the viewport
+    // makes one element's transform layer unallocatable. It must skip that
+    // element, not abort the whole page paint.
+    [Fact]
+    public void OversizedTransformLayerDoesNotAbortTheWholePaint()
+    {
+        DomTree tree = Parse(
+            """<html><body style="margin:0;background:white"><p style="margin:0;height:20px;background:rgb(0,0,255)"></p><div style="transform:rotate(45deg) scale(0.001)"><div style="position:absolute;width:100000px;height:100000px;background:red"></div></div></body></html>""");
+        Pixmap? pixmap = RenderPaint.PaintDom(tree, (100f, 100f), null);
+        Assert.NotNull(pixmap);
+        // The rest of the page still paints.
+        PremultipliedColor blue = Pixel(pixmap!, 5, 5);
+        Assert.True(blue.B > 240 && blue.R < 20 && blue.G < 20, $"expected blue, got {blue}");
+    }
+
     [Fact]
     public void NativeShadowFlatTreePaintsShadowAndSlottedContentOnly()
     {

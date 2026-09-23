@@ -730,13 +730,31 @@ internal static class PaintDomPainter
                 float top = MathF.Floor(layerSource.Y);
                 float right = MathF.Ceiling(layerSource.X + layerSource.Width);
                 float bottom = MathF.Ceiling(layerSource.Y + layerSource.Height);
-                uint layerWidth = (uint)F32.Max(right - left, 1f);
-                uint layerHeight = (uint)F32.Max(bottom - top, 1f);
+                float layerWidthF = F32.Max(right - left, 1f);
+                float layerHeightF = F32.Max(bottom - top, 1f);
+                // A near-singular transform can inverse-map the viewport to a layer far
+                // larger than any sane allocation. Cap it at the capture limits and skip
+                // just this element rather than failing the whole paint (upstream
+                // 8395f29, #1019). The comparison is on the float so a huge or NaN
+                // extent cannot wrap in the uint cast.
+                if (!(layerWidthF <= CaptureLimits.MaxCaptureDimension)
+                    || !(layerHeightF <= CaptureLimits.MaxCaptureDimension))
+                {
+                    continue;
+                }
+
+                uint layerWidth = (uint)layerWidthF;
+                uint layerHeight = (uint)layerHeightF;
+                if ((ulong)layerWidth * layerHeight > CaptureLimits.MaxCapturePixels)
+                {
+                    continue;
+                }
+
                 (float X, float Y) layerDelta = (-left, -top);
                 Pixmap? layer = Pixmap.New(layerWidth, layerHeight);
                 if (layer is null)
                 {
-                    return null;
+                    continue;
                 }
 
                 Pixmap? painted = PaintLaidDomScrolled(pass.With(
