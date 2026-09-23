@@ -1068,42 +1068,74 @@ internal static class PaintResources
     }
 
     /// <summary>
+    /// The most pixels one raster image may decode to: 64M, a 256 MiB RGBA bitmap
+    /// (8192x8192).
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust: the reference decodes every image at its full intrinsic size, so a
+    /// 190 KB 1-bit PNG declaring 40000x40000 pixels grew to 3.2 GB. Here the header is read
+    /// first. An image over the budget is decoded at a reduced scale where the codec supports
+    /// it (JPEG, WebP), no larger than it is drawn, which is what Chromium's decoders do for
+    /// images over their decoded-bytes limit; one that cannot be brought under it is a broken
+    /// image. Images inside the budget decode exactly as before.
+    /// </remarks>
+    internal const long MaxDecodedImagePixels = 64L * 1024 * 1024;
+
+    /// <summary>
     /// Decode raster image bytes to a premultiplied-alpha pixmap resized to <c>w</c>x<c>h</c>.
     /// </summary>
-    internal static Pixmap? RasterToPixmap(byte[] bytes, uint width, uint height)
+    internal static Pixmap? RasterToPixmap(byte[] bytes, uint width, uint height) =>
+        RasterToPixmap(bytes, width, height, 0, 0, width, height);
+
+    /// <summary>
+    /// Decode raster image bytes resized to <c>w</c>x<c>h</c>, but rasterize only the window
+    /// of that image at (<paramref name="windowX"/>, <paramref name="windowY"/>) sized
+    /// <paramref name="windowWidth"/>x<paramref name="windowHeight"/>: the part that lands on
+    /// the paint surface. The whole window is the whole image.
+    /// </summary>
+    internal static Pixmap? RasterToPixmap(
+        byte[] bytes,
+        uint width,
+        uint height,
+        uint windowX,
+        uint windowY,
+        uint windowWidth,
+        uint windowHeight)
     {
-        if (width == 0 || height == 0)
+        if (width == 0 || height == 0 || windowWidth == 0 || windowHeight == 0)
         {
             return null;
         }
 
         try
         {
-            using SkiaSharp.SKBitmap? decoded = SkiaSharp.SKBitmap.Decode(bytes);
+            using SkiaSharp.SKBitmap? decoded = DecodeWithinBudget(bytes, width, height);
             if (decoded is null)
             {
                 return null;
             }
 
-            Pixmap? pixmap = Pixmap.New(width, height);
+            Pixmap? pixmap = Pixmap.New(windowWidth, windowHeight);
             if (pixmap is null)
             {
                 return null;
             }
 
             var info = new SkiaSharp.SKImageInfo(
-                (int)width,
-                (int)height,
+                (int)windowWidth,
+                (int)windowHeight,
                 SkiaSharp.SKColorType.Rgba8888,
                 SkiaSharp.SKAlphaType.Premul);
             using SkiaSharp.SKBitmap target = new();
-            target.InstallPixels(info, pixmap.PixelPointer, (int)width * 4);
+            target.InstallPixels(info, pixmap.PixelPointer, (int)windowWidth * 4);
             using SkiaSharp.SKCanvas canvas = new(target);
             canvas.Clear(SkiaSharp.SKColors.Transparent);
             using SkiaSharp.SKImage image = SkiaSharp.SKImage.FromBitmap(decoded);
+            float left = -(float)windowX;
+            float top = -(float)windowY;
             canvas.DrawImage(
                 image,
-                new SkiaSharp.SKRect(0, 0, width, height),
+                new SkiaSharp.SKRect(left, top, left + width, top + height),
                 new SkiaSharp.SKSamplingOptions(SkiaSharp.SKFilterMode.Linear, SkiaSharp.SKMipmapMode.None),
                 null);
             return pixmap;
@@ -1112,6 +1144,44 @@ internal static class PaintResources
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Decode <paramref name="bytes"/>, checking the header's dimensions against
+    /// <see cref="MaxDecodedImagePixels"/> before any pixel is allocated.
+    /// </summary>
+    private static SkiaSharp.SKBitmap? DecodeWithinBudget(byte[] bytes, uint drawnWidth, uint drawnHeight)
+    {
+        using SkiaSharp.SKData data = SkiaSharp.SKData.CreateCopy(bytes);
+        using SkiaSharp.SKCodec? codec = SkiaSharp.SKCodec.Create(data);
+        if (codec is null)
+        {
+            return null;
+        }
+
+        SkiaSharp.SKImageInfo intrinsic = codec.Info;
+        if (intrinsic.Width <= 0 || intrinsic.Height <= 0)
+        {
+            return null;
+        }
+
+        if ((long)intrinsic.Width * intrinsic.Height <= MaxDecodedImagePixels)
+        {
+            return SkiaSharp.SKBitmap.Decode(codec);
+        }
+
+        // Over budget: ask the codec for the smallest scale that still covers the drawn size.
+        float scale = MathF.Min(
+            1f,
+            MathF.Max((float)drawnWidth / intrinsic.Width, (float)drawnHeight / intrinsic.Height));
+        SkiaSharp.SKSizeI scaled = codec.GetScaledDimensions(scale);
+        if (scaled.Width <= 0 || scaled.Height <= 0
+            || (long)scaled.Width * scaled.Height > MaxDecodedImagePixels)
+        {
+            return null;
+        }
+
+        return SkiaSharp.SKBitmap.Decode(codec, intrinsic.WithSize(scaled.Width, scaled.Height));
     }
 
     internal static string Invariant(FormattableString value) => value.ToString(CultureInfo.InvariantCulture);

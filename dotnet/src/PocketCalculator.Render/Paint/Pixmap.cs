@@ -50,6 +50,9 @@ public sealed class Pixmap : IDisposable
         Pixels = GC.AllocateArray<PremultipliedColor>(checked((int)(width * height)), pinned: true);
     }
 
+    /// <summary>The most pixels one pixmap or mask may hold.</summary>
+    internal const long MaxPixels = 4L * (long)CaptureLimits.MaxCapturePixels;
+
     /// <summary>tiny-skia's <c>Pixmap::new</c>: <c>None</c> for a zero-sized surface.</summary>
     public static Pixmap? New(uint width, uint height)
     {
@@ -58,8 +61,11 @@ public sealed class Pixmap : IDisposable
             return null;
         }
 
+        // Deviation from Rust: tiny-skia accepts any size that fits its stride, and the first
+        // port allowed 512M pixels (2 GB). No surface paint needs more than a few times the
+        // capture budget, so the cap is four captures' worth (64M pixels, 256 MiB).
         long pixels = (long)width * height;
-        if (pixels > 512L * 1024 * 1024)
+        if (pixels > MaxPixels)
         {
             return null;
         }
@@ -212,7 +218,7 @@ public sealed class Mask(uint width, uint height)
 
     /// <summary>tiny-skia's <c>Mask::new</c>: <c>None</c> for a zero-sized mask.</summary>
     public static Mask? New(uint width, uint height) =>
-        width == 0 || height == 0 || (long)width * height > 512L * 1024 * 1024
+        width == 0 || height == 0 || (long)width * height > Pixmap.MaxPixels
             ? null
             : new Mask(width, height);
 
