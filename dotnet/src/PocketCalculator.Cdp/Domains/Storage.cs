@@ -44,8 +44,12 @@ public static class Storage
                 {
                     if (parameters.Get("cookies").AsJsonArray() is { } cookies)
                     {
-                        CookieJarFor(ctx, parameters, sessionId)
-                            .SetCookiesFromCdpWithScope(Network.ParseCookies(cookies));
+                        if (Network.ParseCookies(cookies) is not { } parsed)
+                        {
+                            return DomainResult.Err("Invalid cookie fields");
+                        }
+
+                        CookieJarFor(ctx, parameters, sessionId).SetCookiesFromCdpWithScope(parsed);
                     }
 
                     return DomainResult.Empty();

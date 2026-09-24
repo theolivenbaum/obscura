@@ -8,8 +8,9 @@ namespace PocketCalculator.Cdp.Tests;
 /// <summary>
 /// CHIPS on the CDP cookie surfaces, as Chromium 141 answers them: a partitioned cookie
 /// reports <c>partitionKey</c> as <c>{topLevelSite, hasCrossSiteAncestor}</c> (absent on an
-/// ordinary cookie), <c>Network.setCookie</c> takes the same object with both fields,
-/// reduces the site and forces Secure, a malformed key fails the call, and
+/// ordinary cookie), <c>Network.setCookie</c> takes the same object with both fields and
+/// reduces the site, a malformed key or a partitioned cookie that is not Secure fails the
+/// call, and
 /// <c>deleteCookies</c> without a key leaves partitioned cookies alone.
 /// </summary>
 [Collection(CdpDomainCollection.Name)]
@@ -77,6 +78,76 @@ public sealed class PartitionedCookieCdpTests
 
         Assert.True((await HandleAsync(
             "deleteCookies", $$"""{"name": "p", "domain": "b.example.org", "partitionKey": {{key}}}""", ctx)).IsOk);
+        Assert.Empty(ctx.DefaultContext.CookieJar.GetAllCookies());
+    }
+
+    private const string PlainKey = """{"topLevelSite": "http://plain.test", "hasCrossSiteAncestor": false}""";
+
+    /// <summary>
+    /// Chromium 141 refuses a partitioned cookie that is not Secure ("Sanitizing cookie
+    /// failed"): one for an http url, or with a domain, without <c>secure</c>. The port
+    /// used to force Secure on and accept it.
+    /// </summary>
+    [Theory]
+    [InlineData("\"url\": \"http://plain.test/\"")]
+    [InlineData("\"domain\": \"plain.test\", \"path\": \"/\"")]
+    public async Task SetCookieRefusesAPartitionedCookieThatIsNotSecure(string scope)
+    {
+        var ctx = CdpContext.New();
+        DomainResult result = await HandleAsync(
+            "setCookie", $$"""{"name": "p", "value": "1", {{scope}}, "partitionKey": {{PlainKey}}}""", ctx);
+        Assert.Equal("Sanitizing cookie failed", CdpDomainFixtures.ErrorOf(result));
+        Assert.Empty(ctx.DefaultContext.CookieJar.GetAllCookies());
+
+        JsonNode set = CdpDomainFixtures.Unwrap(await HandleAsync(
+            "setCookie", $$"""{"name": "p", "value": "1", {{scope}}, "secure": true, "partitionKey": {{PlainKey}}}""", ctx));
+        Assert.True(set["success"]!.GetValue<bool>());
+        Assert.True(Assert.Single(ctx.DefaultContext.CookieJar.GetAllCookies()).Secure);
+    }
+
+    /// <summary>One cookie Chromium would refuse fails a whole <c>setCookies</c> call, which then sets none.</summary>
+    [Theory]
+    [InlineData("Network")]
+    [InlineData("Storage")]
+    public async Task SetCookiesWithOneRefusedCookieSetsNone(string domain)
+    {
+        var ctx = CdpContext.New();
+        JsonNode parameters = CdpDomainFixtures.Json($$"""
+            {"cookies": [
+                {"name": "ok", "value": "1", "url": "http://plain.test/"},
+                {"name": "p", "value": "1", "url": "http://plain.test/", "partitionKey": {{PlainKey}}}
+            ]}
+            """);
+        DomainResult result = domain == "Network"
+            ? await Network.HandleAsync("setCookies", parameters, ctx, null)
+            : await Storage.HandleAsync("setCookies", parameters, ctx, null);
+        Assert.Equal("Invalid cookie fields", CdpDomainFixtures.ErrorOf(result));
+        Assert.Empty(ctx.DefaultContext.CookieJar.GetAllCookies());
+    }
+
+    /// <summary>A cookie set for an https url is Secure in Chromium 141, whatever <c>secure</c> says.</summary>
+    [Fact]
+    public async Task SetCookieForAnHttpsUrlIsSecure()
+    {
+        var ctx = CdpContext.New();
+        Assert.True(CdpDomainFixtures.Unwrap(await HandleAsync(
+            "setCookie", """{"name": "s", "value": "1", "url": "https://plain.test/", "secure": false}""", ctx))["success"]!.GetValue<bool>());
+        Assert.True(CdpDomainFixtures.Unwrap(await HandleAsync(
+            "setCookie", """{"name": "p", "value": "1", "url": "https://plain.test/", "partitionKey": {{PlainKey}}}""".Replace("{{PlainKey}}", PlainKey, StringComparison.Ordinal), ctx))["success"]!.GetValue<bool>());
+        Assert.All(ctx.DefaultContext.CookieJar.GetAllCookies(), cookie => Assert.True(cookie.Secure));
+        JsonNode forHttp = CdpDomainFixtures.Unwrap(await HandleAsync(
+            "getCookies", """{"urls": ["http://plain.test/"]}""", ctx));
+        Assert.Empty(forHttp["cookies"]!.AsArray());
+    }
+
+    /// <summary>Chromium 141 answers a SameSite=None cookie that is not Secure with success: false.</summary>
+    [Fact]
+    public async Task SetCookieSameSiteNoneWithoutSecureIsNotStored()
+    {
+        var ctx = CdpContext.New();
+        JsonNode set = CdpDomainFixtures.Unwrap(await HandleAsync(
+            "setCookie", """{"name": "n", "value": "1", "url": "http://plain.test/", "sameSite": "None"}""", ctx));
+        Assert.False(set["success"]!.GetValue<bool>());
         Assert.Empty(ctx.DefaultContext.CookieJar.GetAllCookies());
     }
 }

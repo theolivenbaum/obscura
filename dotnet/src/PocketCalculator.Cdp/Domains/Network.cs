@@ -179,6 +179,19 @@ public static class Network
                     return DomainResult.Err("setCookie: missing required name/domain (or url)");
                 }
 
+                if (CookieParams.FailsSanitizing(cookie.Cookie))
+                {
+                    return DomainResult.Err("Sanitizing cookie failed");
+                }
+
+                // A SameSite=None cookie that is not Secure is not stored; Chromium 141
+                // answers that with success: false rather than an error.
+                if (string.Equals(cookie.Cookie.SameSite, "None", StringComparison.OrdinalIgnoreCase)
+                    && !cookie.Cookie.Secure)
+                {
+                    return DomainResult.Ok(new JsonObject { ["success"] = false });
+                }
+
                 CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope([(cookie.Cookie, cookie.HostOnly)]);
                 return DomainResult.Ok(new JsonObject { ["success"] = true });
             }
@@ -187,7 +200,12 @@ public static class Network
             {
                 if (parameters.Get("cookies").AsJsonArray() is { } cookies)
                 {
-                    CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope(ParseCookies(cookies));
+                    if (ParseCookies(cookies) is not { } parsed)
+                    {
+                        return DomainResult.Err("Invalid cookie fields");
+                    }
+
+                    CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope(parsed);
                 }
 
                 return DomainResult.Empty();
@@ -283,13 +301,23 @@ public static class Network
     }
 
     /// <summary>Parse a <c>cookies</c> array, keeping each cookie's host-only scope.</summary>
-    internal static List<(CookieInfo Cookie, bool HostOnly)> ParseCookies(JsonArray cookies)
+    /// <summary>
+    /// The cookies of a <c>setCookies</c> payload, or null when one of them fails
+    /// Chromium's sanitizing (<see cref="CookieParams.FailsSanitizing"/>): Chromium 141
+    /// then refuses the whole call and sets none of them.
+    /// </summary>
+    internal static List<(CookieInfo Cookie, bool HostOnly)>? ParseCookies(JsonArray cookies)
     {
         var parsed = new List<(CookieInfo, bool)>();
         foreach (JsonNode? entry in cookies)
         {
             if (CookieParams.ParseCdpCookie(entry) is { } cookie)
             {
+                if (CookieParams.FailsSanitizing(cookie.Cookie))
+                {
+                    return null;
+                }
+
                 parsed.Add((cookie.Cookie, cookie.HostOnly));
             }
         }

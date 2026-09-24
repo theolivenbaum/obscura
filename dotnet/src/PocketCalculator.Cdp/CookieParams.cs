@@ -54,7 +54,10 @@ public static class CookieParams
                    ?? (urlParsed is null ? null : CookieJar.DefaultCookiePath(urlParsed.Path))
                    ?? DefaultCookiePath;
 
-        var secure = value.Get("secure").AsBoolOr(false);
+        // Chromium 141 makes a cookie set for an https (or wss) url Secure whatever
+        // `secure` says. Deviation from crates/obscura-cdp, which reads the flag alone.
+        var secure = value.Get("secure").AsBoolOr(false)
+                     || urlParsed?.Scheme is "https" or "wss";
         var httpOnly = value.Get("httpOnly").AsBoolOr(false);
         var sameSite = value.Get("sameSite").AsStringOr(string.Empty);
         var expires = value.Get("expires").AsF64() is { } seconds ? SaturatingI64(seconds) : (long?)null;
@@ -77,6 +80,19 @@ public static class CookieParams
                 PartitionKey = partitionKey,
             },
             HostOnly: explicitDomain is null);
+    }
+
+    /// <summary>
+    /// Whether Chromium 141 refuses <paramref name="cookie"/> as it sanitizes a CDP cookie:
+    /// a partitioned cookie that is not Secure (set for an http url, or with a domain and
+    /// no <c>secure</c>). <c>Network.setCookie</c> fails with "Sanitizing cookie failed" and
+    /// <c>setCookies</c> with "Invalid cookie fields". Port addition: the jar used to force
+    /// Secure on such a cookie and accept it.
+    /// </summary>
+    public static bool FailsSanitizing(CookieInfo cookie)
+    {
+        ArgumentNullException.ThrowIfNull(cookie);
+        return cookie.PartitionKey is not null && !cookie.Secure;
     }
 
     /// <summary>
