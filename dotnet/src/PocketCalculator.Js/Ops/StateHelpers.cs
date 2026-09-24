@@ -1,5 +1,6 @@
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Url;
+using PocketCalculator.Net;
 
 namespace PocketCalculator.Js.Ops;
 
@@ -446,6 +447,72 @@ public static class StateHelpers
             RawHref = rawHref,
         };
         return (resolved, rawHref);
+    }
+
+    /// <summary>
+    /// The document's referrer policy: the last valid <c>&lt;meta name=referrer&gt;</c> in
+    /// tree order, else the <c>Referrer-Policy</c> header, else the default. Memoized on the
+    /// document's generations.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (Rust has no referrer policy). Chromium applies a meta from the moment
+    /// the parser inserts it, so an image before a late meta still gets the earlier policy;
+    /// here the whole document is parsed before any subresource loads, so a meta anywhere
+    /// applies to every load.
+    /// </remarks>
+    public static ReferrerPolicy DocumentReferrerPolicy(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (state.ReferrerPolicyCache is { } cached
+            && cached.Activity == state.ActivityGeneration
+            && cached.Document == state.DocumentGeneration
+            && cached.Header == state.ReferrerPolicyHeader)
+        {
+            return cached.Policy;
+        }
+
+        var policy = state.ReferrerPolicyHeader ?? ReferrerPolicies.Default;
+        if (state.Dom is { } dom && dom.TryQuerySelectorAll("meta[name]", out var metas, out _))
+        {
+            foreach (var id in metas)
+            {
+                if (dom.GetNode(id) is { } node
+                    && string.Equals(node.GetAttribute("name"), "referrer", StringComparison.OrdinalIgnoreCase)
+                    && ReferrerPolicies.ParseMeta(node.GetAttribute("content")) is { } meta)
+                {
+                    policy = meta;
+                }
+            }
+        }
+
+        state.ReferrerPolicyCache = (state.ActivityGeneration, state.DocumentGeneration, state.ReferrerPolicyHeader, policy);
+        return policy;
+    }
+
+    /// <summary>
+    /// An element's own referrer policy: <c>rel=noreferrer</c> (on links), else a valid
+    /// <c>referrerpolicy</c> attribute, else null for the document's.
+    /// </summary>
+    public static ReferrerPolicy? ElementReferrerPolicy(DomTree dom, NodeId id, bool honourNoreferrer = false)
+    {
+        ArgumentNullException.ThrowIfNull(dom);
+        if (dom.GetNode(id) is not { } node)
+        {
+            return null;
+        }
+
+        if (honourNoreferrer && node.GetAttribute("rel") is { } rel)
+        {
+            foreach (var token in rel.Split([' ', '\t', '\n', '\f', '\r'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (token.Equals("noreferrer", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ReferrerPolicy.NoReferrer;
+                }
+            }
+        }
+
+        return ReferrerPolicies.ParseAttribute(node.GetAttribute("referrerpolicy"));
     }
 
     public static string? DocumentBaseUrlMemoized(PocketCalculatorState state)

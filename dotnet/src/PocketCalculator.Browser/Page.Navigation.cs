@@ -213,6 +213,7 @@ public sealed partial class Page
         RetireRenderResources();
         Lifecycle = LifecycleState.Loading;
         Referrer = referrer;
+        ReferrerPolicyHeader = null;
         Url = url;
         NetworkEvents.Clear();
 
@@ -345,6 +346,8 @@ public sealed partial class Page
         {
             Url = NetUrl.To(response.Url);
         }
+
+        ReferrerPolicyHeader = ReferrerPolicies.ParseHeader(response.Header("referrer-policy"));
 
         // Honor the response charset: HTTP Content-Type, then a <meta charset> sniff
         // in the first 1KB, then UTF-8. Without this every non-UTF-8 page came
@@ -918,7 +921,11 @@ public sealed partial class Page
         Uri source = Uri.TryCreate(initiator.Initiator, UriKind.Absolute, out Uri? parsed)
             ? parsed
             : new Uri("about:blank");
-        return ResourceRequest.PageNavigation(source, initiator.UserActivated);
+        // The link's or the document's referrer policy (port addition).
+        return ResourceRequest.PageNavigation(source, initiator.UserActivated) with
+        {
+            ReferrerPolicy = initiator.ReferrerPolicy,
+        };
     }
 
     /// <summary>
@@ -926,11 +933,15 @@ public sealed partial class Page
     /// strict-origin-when-cross-origin value the request's Referer header carries, and
     /// empty for a browser-initiated navigation.
     /// </summary>
+    /// <remarks>
+    /// Under the navigation's referrer policy (port addition): upstream always applies
+    /// strict-origin-when-cross-origin.
+    /// </remarks>
     private static string DocumentReferrer(ResourceRequest profile, string targetUrl) =>
         profile.Referrer is { } source
-            && UrlRecord.Parse(source.AbsoluteUri) is { } from
             && PageUrl.TryParse(targetUrl) is { } target
-            ? PageHelpers.NavigationReferrer(from, target)
+            && Uri.TryCreate(target.Href, UriKind.Absolute, out Uri? targetUri)
+            ? ReferrerPolicies.Referrer(source, targetUri, profile.ReferrerPolicy ?? ReferrerPolicies.Default) ?? string.Empty
             : string.Empty;
 
     private static ulong ElapsedMilliseconds(long startTimestamp) =>

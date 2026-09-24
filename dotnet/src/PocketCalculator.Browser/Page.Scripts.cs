@@ -33,6 +33,9 @@ public sealed partial class Page
 
         /// <summary>Document base URL at this element's parser encounter point.</summary>
         internal required string BaseUrl { get; init; }
+
+        /// <summary>The element's valid <c>referrerpolicy</c>, or null (port addition).</summary>
+        internal ReferrerPolicy? ReferrerPolicy { get; init; }
     }
 
     private abstract record ScheduledScript
@@ -187,6 +190,9 @@ public sealed partial class Page
         }
 
         UrlRecord scriptInitiator = Url ?? PageUrl.TryParse("about:blank")!;
+        // The document's referrer policy (header, then <meta name=referrer>), for scripts
+        // without their own referrerpolicy. Port addition.
+        ReferrerPolicy documentReferrerPolicy = Js?.DocumentReferrerPolicy ?? ReferrerPolicies.Default;
         var fetchFactories =
             new List<Func<Task<(int Index, string Url, Response Response)?>>>(fetchTasks.Count);
         foreach ((int index, string url) in fetchTasks)
@@ -223,6 +229,7 @@ public sealed partial class Page
 
                 ResourceRequest request =
                     ResourceRequest.Subresource(ResourceType.Script, NetUrl.From(scriptInitiator));
+                request.ReferrerPolicy = allScripts[index].ReferrerPolicy ?? documentReferrerPolicy;
                 double startedAt = PerformanceOps.UnixMilliseconds();
                 try
                 {
@@ -716,6 +723,7 @@ public sealed partial class Page
                     Kind = kind,
                     Nid = sid.Raw,
                     BaseUrl = basesAtScript.TryGetValue(sid.Raw, out string? baseUrl) ? baseUrl : documentUrl,
+                    ReferrerPolicy = ReferrerPolicies.ParseAttribute(node.GetAttribute("referrerpolicy")),
                 });
             }
         }

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Modules;
+using PocketCalculator.Net;
 using PocketCalculator.Render;
 
 namespace PocketCalculator.Js.Ops;
@@ -147,6 +148,14 @@ public static class DomOps
             // Port addition (SECURITY.md I7): new WebSocket(ws:...) from a document
             // whose context is secure throws SecurityError in Chromium. Returns the
             // console message for a blocked URL (and posts it), or "" to allow.
+            // Port addition: a link's own referrer policy for the navigation the shim
+            // queues next (rel=noreferrer, referrerpolicy); "" clears it.
+            case "set_navigation_referrer_policy":
+                gs.NextNavigationReferrerPolicy = string.Equals(arg1, "no-referrer", StringComparison.Ordinal)
+                    ? ReferrerPolicy.NoReferrer
+                    : ReferrerPolicies.ParseAttribute(arg1);
+                return "null";
+
             case "websocket_mixed_content":
                 return SerdeJson.String(FetchOps.WebSocketMixedContent(gs, arg1));
 

@@ -525,7 +525,7 @@ public static class Input
             // an SPA's own link do nothing at all. Same fix as the el.click() path in
             // bootstrap.js. The navigation goes through the shim's own location path
             // (__obscura_host.navigate), not the page-replaceable location.assign.
-            + "if (href && h.slice(href, 0, 11) !== 'javascript:') __obscura_host.navigate(href);"
+            + "if (href && h.slice(href, 0, 11) !== 'javascript:') __obscura_host.navigate(href, link);"
             + "} else if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {"
             + "var form = h.closest(clickTarget, 'form');"
             + "if (form) { try { if (h.has(form, 'requestSubmit')) { h.call(form, 'requestSubmit', [clickTarget]); }"

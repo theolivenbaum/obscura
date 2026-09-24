@@ -1027,6 +1027,9 @@ public static class RenderOps
         var initiator = TryUri(shared.Url) ?? TryUri(selectedUrl) ?? new Uri("about:blank");
         var resourceRequest = ResourceRequest.Subresource(ResourceType.Image, initiator);
         resourceRequest.SecureAncestor = shared.SecureAncestorUrl is { } secureAncestor ? TryUri(secureAncestor) : null;
+        // The image's referrerpolicy, else the document's (port addition; Rust has none).
+        resourceRequest.ReferrerPolicy = StateHelpers.ElementReferrerPolicy(dom, nodeId)
+            ?? StateHelpers.DocumentReferrerPolicy(shared);
         switch (profile)
         {
             case ImageRequestProfile.CorsInclude:

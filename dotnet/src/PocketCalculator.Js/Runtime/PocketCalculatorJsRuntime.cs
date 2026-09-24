@@ -893,9 +893,12 @@ public sealed partial class PocketCalculatorJsRuntime
     private ModuleNetworkContext ModuleNetwork()
     {
         var page = _ops.Page;
-        return page.HttpClient is { } client
+        var context = page.HttpClient is { } client
             ? ModuleNetworkContext.From(client, page.StealthClient, page.Callbacks)
             : ModuleNetworkContext.From(_standaloneModuleClient, null, null);
+        // The last policy the runtime thread computed for this document (the header when
+        // none was): this may run off that thread, so it does not walk the DOM itself.
+        return context with { ReferrerPolicy = page.ReferrerPolicyCache?.Policy ?? page.ReferrerPolicyHeader };
     }
 
     /// <summary>

@@ -503,7 +503,7 @@ async function __fetchDynClassicScript(task) {
     // internalLoad: the engine's own script load gets the body of a no-cors
     // cross-origin response, which page fetch() only sees as opaque (04418a5).
     const raw = await __obscuraCore.ops.op_fetch_url(
-      task.url, "GET", "{}", new Uint8Array(0), "", "no-cors", "same-origin", true
+      task.url, "GET", "{}", new Uint8Array(0), task.referrerArg || "", "no-cors", "same-origin", true
     );
     const parsed = _JSONparse(raw);
     // The HTML script-fetch algorithm treats an unsuccessful HTTP response
@@ -2071,6 +2071,7 @@ function __prepareInsertedScript(script) {
       nid: script._nid,
       prevNid,
       pageOrigin,
+      referrerArg: _referrerArgFor(script),
       dispatchEvent: (ev) => { try { _dispatch(script, ev); } catch(e) {} },
     };
     // Non-parser-inserted external scripts are async by default, but scripts
@@ -3961,7 +3962,10 @@ class Element extends Node {
         // clicking an in-page link -- how most single page apps route -- did
         // nothing at all: no URL change, no hashchange, no popstate.
         if (href !== null && href !== '' && !href.startsWith('javascript:')) {
-          location.assign(href);
+          // The link's own referrer policy (rel=noreferrer, referrerpolicy) rides with
+          // the navigation op_navigate queues during assign (port addition).
+          _dom("set_navigation_referrer_policy", _linkReferrerPolicy(link));
+          try { location.assign(href); } finally { _dom("set_navigation_referrer_policy", ""); }
           return;
         }
       }
@@ -4389,7 +4393,9 @@ class Element extends Node {
   set download(v) { this.setAttribute("download", v); }
   get ping() { return this.getAttribute("ping") || ""; }
   set ping(v) { this.setAttribute("ping", v); }
-  get referrerPolicy() { return this.getAttribute("referrerpolicy") || ""; }
+  // An enumerated attribute (HTML): an unknown value reflects as "", as in Chromium.
+  // Rust reflected the raw attribute.
+  get referrerPolicy() { return _referrerPolicyToken(this.getAttribute("referrerpolicy")); }
   set referrerPolicy(v) { this.setAttribute("referrerpolicy", v); }
   // HTMLHyperlinkElementUtils URL-decomposition members, live on <a>/<area>.
   get protocol() { const u = (this.localName === 'a' || this.localName === 'area') ? _elemHrefURL(this) : null; return u ? u.protocol : ''; }
@@ -4464,7 +4470,7 @@ class Element extends Node {
     // the frame runs as nor its HTML passes through anything page script can reach. The
     // frame's state lives in _iframeStates, not in expandos a page could read or rewrite.
     Promise.resolve(__obscuraCore.ops.op_fetch_url(
-      fullUrl, 'GET', '{}', new Uint8Array(0), '',
+      fullUrl, 'GET', '{}', new Uint8Array(0), _referrerArgFor(el),
       'navigate', 'include', true
     )).then(raw => {
       if (_iframeStates.get(el) !== st) return;
@@ -7973,6 +7979,43 @@ function _normalizeMethod(method, where) {
   if (checked.error) throw new TypeError(where + ": " + checked.message);
   return checked.method;
 }
+// Referrer policy (port addition; Rust has none). The host applies it: these only
+// validate and carry what script asked for. See FetchReferrer.cs for the op argument.
+const _REFERRER_POLICIES = new Set(['', 'no-referrer', 'no-referrer-when-downgrade', 'origin',
+  'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url']);
+function _referrerPolicyToken(value) {
+  if (value === null || value === undefined) return '';
+  const lower = String(value).toLowerCase();
+  return _REFERRER_POLICIES.has(lower) ? lower : '';
+}
+function _requestReferrerPolicy(value, where) {
+  const policy = String(value);
+  if (!_REFERRER_POLICIES.has(policy)) {
+    throw new TypeError(where + ": Failed to read the 'referrerPolicy' property from 'RequestInit': The provided value '"
+      + policy + "' is not a valid enum value of type ReferrerPolicy.");
+  }
+  return policy;
+}
+function _requestReferrer(value) {
+  const referrer = String(value);
+  if (referrer === '' || referrer === 'about:client') return referrer;
+  return _resolveUrl(referrer);
+}
+function _referrerArg(policy, referrer) {
+  return 'ref\n' + (policy || '') + '\n' + (referrer === undefined ? 'about:client' : referrer);
+}
+function _referrerArgFor(el) {
+  let policy = '';
+  try { policy = _referrerPolicyToken(el.getAttribute('referrerpolicy')); } catch (e) {}
+  return _referrerArg(policy, 'about:client');
+}
+function _linkReferrerPolicy(link) {
+  try {
+    const rel = String(link.getAttribute('rel') || '').toLowerCase().split(/[\t\n\f\r ]+/);
+    if (rel.includes('noreferrer')) return 'no-referrer';
+    return _referrerPolicyToken(link.getAttribute('referrerpolicy'));
+  } catch (e) { return ''; }
+}
 // A CORS-safelisted method after Fetch's method normalization.
 function _noCorsMethodAllowed(method) {
   const upper = String(method).toUpperCase();
@@ -8017,10 +8060,18 @@ globalThis.fetch = async (input, init = {}) => {
   if (fetchCredentials !== "omit" && fetchCredentials !== "same-origin" && fetchCredentials !== "include") {
     throw new TypeError("Failed to execute 'fetch': '" + fetchCredentials + "' is not a valid RequestCredentials value");
   }
+  const fetchReferrerPolicy = init.referrerPolicy !== undefined
+    ? _requestReferrerPolicy(init.referrerPolicy, "Failed to execute 'fetch' on 'Window'")
+    : (request ? request.referrerPolicy : '');
+  const fetchReferrer = init.referrer !== undefined
+    ? _requestReferrer(init.referrer)
+    : (request ? request.referrer : 'about:client');
   // DEVIATION from crates/obscura-js/js/bootstrap.js, which passes an origin computed
   // with the page's own URL global: op_fetch_url derives the requesting origin from the
-  // calling realm's document host-side and ignores this argument (SECURITY.md C1).
-  const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, "", fetchMode, fetchCredentials, false);
+  // calling realm's document host-side and ignores this argument (SECURITY.md C1). The
+  // slot carries the referrer settings instead (FetchReferrer.cs).
+  const raw = await __obscuraCore.ops.op_fetch_url(
+    url, method, hdrs, body, _referrerArg(fetchReferrerPolicy, fetchReferrer), fetchMode, fetchCredentials, false);
   const parsed = _JSONparse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
@@ -8628,7 +8679,12 @@ if (typeof Request === 'undefined') {
         throw new TypeError("Failed to construct 'Request': '" + this.credentials + "' is not a valid RequestCredentials value");
       }
       this.redirect = init.redirect || 'follow';
-      this.referrer = init.referrer || '';
+      // Request.referrer is "about:client" by default and a resolved URL otherwise, and
+      // referrerPolicy is "" or a valid token (Chromium). Rust defaulted referrer to "".
+      this.referrer = init.referrer !== undefined ? _requestReferrer(init.referrer) : 'about:client';
+      this.referrerPolicy = init.referrerPolicy !== undefined
+        ? _requestReferrerPolicy(init.referrerPolicy, "Failed to construct 'Request'")
+        : '';
       this.signal = init.signal || { aborted: false, addEventListener(){}, removeEventListener(){} };
       this.cache = init.cache || 'default';
     }
@@ -8641,6 +8697,7 @@ if (typeof Request === 'undefined') {
         credentials: this.credentials,
         redirect: this.redirect,
         referrer: this.referrer,
+        referrerPolicy: this.referrerPolicy,
         signal: this.signal,
         cache: this.cache,
       });
@@ -19434,7 +19491,10 @@ globalThis.__obscura_host_handoff = Object.freeze({
   tryFragmentNavigate: _tryFragmentNavigate,
   // A CDP click on a link: location.assign as bootstrap defined it, which page script
   // can replace on its own location object (SECURITY.md L10).
-  navigate: (url) => _locationNavigate(_String(url), false),
+  navigate: (url, link) => {
+    _dom("set_navigation_referrer_policy", link ? _linkReferrerPolicy(link) : "");
+    try { _locationNavigate(_String(url), false); } finally { _dom("set_navigation_referrer_policy", ""); }
+  },
   setScreenOverride: _setScreenOverride,
   liveFrameIds: _liveFrameIds,
   forgetFrame: _forgetFrame,

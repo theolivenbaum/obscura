@@ -96,6 +96,10 @@ public sealed partial class Page
         var discovered = js.WithDom(dom => (
             Links: PageHelpers.LinkedStylesheetRequests(dom),
             Imports: PageHelpers.InlineStylesheetImportRequests(dom)));
+        // Referrer policy (port addition): a <link>'s own referrerpolicy, else the
+        // document's. Nested @imports and inline imports use the document's.
+        ReferrerPolicy documentReferrerPolicy = js.DocumentReferrerPolicy;
+        Dictionary<string, ReferrerPolicy> linkPolicies = new(StringComparer.Ordinal);
         List<(int LinkIndex, NodeId Node, string Href)> allLinks = discovered.Links ?? [];
         List<(NodeId Node, StylesheetImport Import)> inlineImports = discovered.Imports ?? [];
 
@@ -125,6 +129,11 @@ public sealed partial class Page
                 continue;
             }
             roots.Add((new AuthorStylesheetTarget.Linked(linkIndex, linkNode), key, null));
+            if (js.WithDom(dom => ReferrerPolicies.ParseAttribute(dom.GetNode(linkNode)?.GetAttribute("referrerpolicy")))
+                is { } linkPolicy)
+            {
+                linkPolicies.TryAdd(key, linkPolicy);
+            }
             if (scheduled.Add(key) && scheduled.Count <= PageHelpers.MaxStylesheetResources)
             {
                 pending.Add((key, resolved, 0));
@@ -163,6 +172,9 @@ public sealed partial class Page
                 {
                     ResourceRequest request =
                         ResourceRequest.Subresource(ResourceType.Stylesheet, NetUrl.From(documentUrl));
+                    request.ReferrerPolicy = depth == 0 && linkPolicies.TryGetValue(key, out ReferrerPolicy own)
+                        ? own
+                        : documentReferrerPolicy;
                     double startedAt = PerformanceOps.UnixMilliseconds();
                     try
                     {

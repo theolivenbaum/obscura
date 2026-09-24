@@ -843,6 +843,14 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
                         SsrfGuard.ValidateUrl(nextUrl, AllowPrivateNetwork);
                         ValidateRequestMode(request, nextUrl);
+
+                        // Fetch "set request's referrer policy on redirect": a policy on
+                        // the redirect response governs the following hops. Rust ignores it.
+                        if (ReferrerPolicies.ParseHeader(responseHeaders.GetValueOrDefault("referrer-policy")) is { } redirectPolicy)
+                        {
+                            request = request with { ReferrerPolicy = redirectPolicy };
+                        }
+
                         redirectTainted |= RedirectTaintsOrigin(request, currentUrl, nextUrl);
                         redirects.Add(currentUrl);
                         currentUrl = nextUrl;
@@ -1448,7 +1456,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         SameSiteContextFor(request, target, methodIsSafe, redirects);
 
     internal static string? RequestReferrer(ResourceRequest request, Uri target) =>
-        ReferrerFor(request.Referrer ?? request.Initiator, target);
+        ReferrerFor(request.Referrer ?? request.Initiator, target, request.ReferrerPolicy);
 
     /// <summary>
     /// The Referer of one hop of a redirect chain. The policy is applied at every hop to
@@ -1467,33 +1475,24 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         var source = request.Referrer ?? request.Initiator;
         foreach (var hop in redirects)
         {
-            if (ReferrerFor(source, hop) is not { } sent || !Uri.TryCreate(sent, UriKind.Absolute, out source))
+            if (ReferrerFor(source, hop, request.ReferrerPolicy) is not { } sent
+                || !Uri.TryCreate(sent, UriKind.Absolute, out source))
             {
                 return null;
             }
         }
 
-        return ReferrerFor(source, target);
+        return ReferrerFor(source, target, request.ReferrerPolicy);
     }
 
-    private static string? ReferrerFor(Uri? source, Uri target)
-    {
-        if (source is null)
-        {
-            return null;
-        }
-
-        if (!IsHttpScheme(source) || !IsHttpScheme(target)
-            || (string.Equals(source.Scheme, "https", StringComparison.Ordinal)
-                && string.Equals(target.Scheme, "http", StringComparison.Ordinal)))
-        {
-            return null;
-        }
-
-        return UrlOrigin.SameOrigin(source, target)
-            ? UrlOrigin.WithoutCredentialsOrFragment(source)
-            : $"{UrlOrigin.AsciiSerialization(source)}/";
-    }
+    /// <summary>
+    /// The Referer under <paramref name="policy"/> (the default when null). Deviation:
+    /// upstream hard-codes strict-origin-when-cross-origin and treats any https to http
+    /// request as a downgrade; the policy now comes from the document, the element or
+    /// fetch(), and http://localhost is potentially trustworthy, as in Chromium.
+    /// </summary>
+    private static string? ReferrerFor(Uri? source, Uri target, ReferrerPolicy? policy) =>
+        ReferrerPolicies.Referrer(source, target, policy ?? ReferrerPolicies.Default);
 
     private static bool IsHttpScheme(Uri url) =>
         string.Equals(url.Scheme, "http", StringComparison.Ordinal)

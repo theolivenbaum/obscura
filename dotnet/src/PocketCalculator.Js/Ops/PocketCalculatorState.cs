@@ -85,6 +85,22 @@ public sealed class PocketCalculatorState
     /// </summary>
     public string Referrer { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The policy of the document's <c>Referrer-Policy</c> response header, or null. A
+    /// <c>&lt;meta name=referrer&gt;</c> overrides it (<see cref="StateHelpers.DocumentReferrerPolicy"/>).
+    /// Port addition: Rust has no referrer policy.
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicyHeader { get; set; }
+
+    /// <summary>
+    /// A link's own policy (<c>referrerpolicy</c>, <c>rel=noreferrer</c>) for the navigation
+    /// the shim is about to queue; taken by <c>op_navigate</c>.
+    /// </summary>
+    public ReferrerPolicy? NextNavigationReferrerPolicy { get; set; }
+
+    /// <summary>Memo of <see cref="StateHelpers.DocumentReferrerPolicy"/>.</summary>
+    internal (ulong Activity, ulong Document, ReferrerPolicy? Header, ReferrerPolicy Policy)? ReferrerPolicyCache { get; set; }
+
     /// <summary>CDP <c>Network.setBlockedURLs</c> patterns, matched with <c>glob_match</c>.</summary>
     public List<string> BlockedUrls { get; } = [];
 
@@ -699,6 +715,12 @@ public sealed record PendingNavigation(string Url, string Method, string Body)
 {
     /// <summary>The URL of the document that started the navigation.</summary>
     public string Initiator { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The referrer policy of the navigation: the link's own, else the document's. Port
+    /// addition.
+    /// </summary>
+    public ReferrerPolicy ReferrerPolicy { get; init; } = ReferrerPolicies.Default;
 
     /// <summary>Whether the initiating realm had transient user activation.</summary>
     public bool UserActivated { get; init; }

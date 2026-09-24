@@ -310,10 +310,13 @@ public static class CoreOps
             // 4778192, #940).
             // The initiator is recorded with it (deviation: upstream queues only the
             // target), so the request is judged against the document that asked.
+            var policy = state.NextNavigationReferrerPolicy ?? StateHelpers.DocumentReferrerPolicy(state);
+            state.NextNavigationReferrerPolicy = null;
             state.PendingNavigation = new PendingNavigation(url, method, body)
             {
                 Initiator = state.Url,
                 UserActivated = state.HasTransientActivation,
+                ReferrerPolicy = policy,
             };
         });
 

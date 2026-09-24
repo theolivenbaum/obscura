@@ -148,6 +148,13 @@ public sealed record ResourceRequest
     /// </summary>
     public Uri? SecureAncestor { get; set; }
 
+    /// <summary>
+    /// The referrer policy the Referer is computed under; null is the default,
+    /// strict-origin-when-cross-origin. Port addition: Rust applies the default to every
+    /// request (see <see cref="ReferrerPolicies"/>).
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicy { get; set; }
+
     /// <summary>Fetch mode.</summary>
     public RequestMode Mode { get; set; }
 

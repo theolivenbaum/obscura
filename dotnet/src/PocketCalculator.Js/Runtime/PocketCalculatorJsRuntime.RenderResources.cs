@@ -1,4 +1,6 @@
+using PocketCalculator.Dom;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Url;
 using PocketCalculator.Net;
 using PocketCalculator.Render;
 
@@ -198,13 +200,51 @@ public sealed partial class PocketCalculatorJsRuntime
         CallbackRegistry? callbacks = state.Callbacks;
         ulong generation = state.DocumentGeneration;
         SemaphoreSlim limiter = state.RenderResourceLimiter;
+        ReferrerPolicy documentPolicy = StateHelpers.DocumentReferrerPolicy(state);
+        Dictionary<string, ReferrerPolicy>? imagePolicies = ImageReferrerPolicies(state);
         foreach (RenderResourceMiss request in requests)
         {
+            ReferrerPolicy policy = !request.IsFont && imagePolicies is not null
+                && imagePolicies.TryGetValue(request.Url, out ReferrerPolicy own)
+                    ? own
+                    : documentPolicy;
             _ = LoadRenderResourceAsync(
-                request, initiator, httpClient, stealthClient, callbacks, generation, limiter, loads);
+                request, initiator, httpClient, stealthClient, callbacks, generation, limiter, loads, policy);
         }
 
         return requests.Count;
+    }
+
+    /// <summary>
+    /// The <c>referrerpolicy</c> of each <c>&lt;img&gt;</c> that has a valid one, by its
+    /// resolved <c>src</c> without fragment; null when none has. A layout miss carries only
+    /// a URL, so this is how an image's own policy reaches its load. Port addition.
+    /// </summary>
+    private static Dictionary<string, ReferrerPolicy>? ImageReferrerPolicies(PocketCalculatorState state)
+    {
+        if (state.Dom is not { } dom
+            || !dom.TryQuerySelectorAll("img[referrerpolicy]", out List<NodeId> images, out _)
+            || images.Count == 0
+            || UrlRecord.Parse(StateHelpers.DocumentBaseUrlMemoized(state) ?? state.Url) is not { } baseUrl)
+        {
+            return null;
+        }
+
+        Dictionary<string, ReferrerPolicy>? policies = null;
+        foreach (NodeId image in images)
+        {
+            if (StateHelpers.ElementReferrerPolicy(dom, image) is { } policy
+                && dom.GetNode(image)?.GetAttribute("src") is { Length: > 0 } src
+                && baseUrl.Join(src.Trim()) is { } resolved)
+            {
+                string href = resolved.Href;
+                int hash = href.IndexOf('#', StringComparison.Ordinal);
+                (policies ??= new Dictionary<string, ReferrerPolicy>(StringComparer.Ordinal))[
+                    hash < 0 ? href : href[..hash]] = policy;
+            }
+        }
+
+        return policies;
     }
 
     private static async Task LoadRenderResourceAsync(
@@ -215,7 +255,8 @@ public sealed partial class PocketCalculatorJsRuntime
         CallbackRegistry? callbacks,
         ulong generation,
         SemaphoreSlim limiter,
-        RenderResourceLoads loads)
+        RenderResourceLoads loads,
+        ReferrerPolicy referrerPolicy = ReferrerPolicies.Default)
     {
         Response? response = null;
         double startedAt = 0;
@@ -234,6 +275,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 ResourceRequest resourceRequest = ResourceRequest.Subresource(
                     request.IsFont ? ResourceType.Font : ResourceType.Image,
                     initiator);
+                resourceRequest.ReferrerPolicy = referrerPolicy;
                 switch (request.Profile)
                 {
                     case ImageRequestProfile.CorsSameOrigin:

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using PocketCalculator.Dom;
 using PocketCalculator.Js.Url;
 using PocketCalculator.Render.Css;
 
@@ -60,7 +61,12 @@ internal static partial class LinkedStylesheetLoader
     {
         try
         {
-            var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal))
+            // The link's referrerpolicy, else the document's (port addition).
+            var policy = document.Dom is { } linkDom
+                ? StateHelpers.ElementReferrerPolicy(linkDom, NodeId.New(ownerNid))
+                : null;
+            var referrer = policy is null ? null : FetchReferrer.Client with { Policy = policy };
+            var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal), referrer)
                 .ConfigureAwait(false);
             if (!StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean))
             {
@@ -84,7 +90,8 @@ internal static partial class LinkedStylesheetLoader
         PocketCalculatorState document,
         string url,
         int depth,
-        HashSet<string> seen)
+        HashSet<string> seen,
+        FetchReferrer? referrer = null)
     {
         if (depth > MaxImportDepth || !seen.Add(url))
         {
@@ -93,7 +100,7 @@ internal static partial class LinkedStylesheetLoader
 
         var raw = await FetchOps.FetchUrlAsync(
                 transport, document, url, "GET", "{}", [], "no-cors", "same-origin",
-                internalLoad: true, hostConsumesBody: true)
+                internalLoad: true, hostConsumesBody: true, referrer: referrer)
             .ConfigureAwait(false);
         var load = TakeLoad(document, raw)
             ?? throw new InvalidOperationException("Stylesheet fetch failed: " + url);

@@ -219,6 +219,12 @@ public sealed partial class Page : IDisposable
     public string Referrer { get; set; } = string.Empty;
 
     /// <summary>
+    /// The policy of the current document's <c>Referrer-Policy</c> response header, or null.
+    /// Port addition (Rust has no referrer policy).
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicyHeader { get; set; }
+
+    /// <summary>
     /// CSS viewport used by responsive page JavaScript and CDP screenshots. The
     /// physical <c>screen</c> fingerprint stays independent.
     /// </summary>
@@ -447,6 +453,7 @@ public sealed partial class Page : IDisposable
         rt.SetEncoding(Encoding);
         rt.SetTitle(Title);
         rt.SetReferrer(Referrer);
+        rt.SetReferrerPolicyHeader(ReferrerPolicyHeader);
 
         rt.SetUserAgent(HttpClient.UserAgent);
         rt.SetPlatform(Context.Platform, Context.UaPlatform, Context.UaPlatformVersion);

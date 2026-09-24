@@ -269,6 +269,14 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     public void SetReferrer(string referrer) => State.Referrer = referrer;
 
+    /// <summary>
+    /// The document's <c>Referrer-Policy</c> header policy (null for none). Port addition.
+    /// </summary>
+    public void SetReferrerPolicyHeader(ReferrerPolicy? policy) => State.ReferrerPolicyHeader = policy;
+
+    /// <summary>The document's effective referrer policy (header, then meta).</summary>
+    public ReferrerPolicy DocumentReferrerPolicy => StateHelpers.DocumentReferrerPolicy(State);
+
     public void SetBlockedUrls(IEnumerable<string> patterns)
     {
         State.BlockedUrls.Clear();

@@ -343,10 +343,12 @@ public static partial class FetchOps
     {
         try
         {
-            // `origin` is the shim's argument slot and is ignored: see FetchUrlAsync.
-            _ = origin;
+            // `origin` is the shim's argument slot and is ignored as an origin: see
+            // FetchUrlAsync. The shim now passes the request's referrer settings in it
+            // (FetchReferrer.Parse); anything else means the defaults.
             return await FetchUrlAsync(
-                    state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad)
+                    state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad,
+                    referrer: FetchReferrer.Parse(origin))
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -373,7 +375,8 @@ public static partial class FetchOps
         string mode,
         string credentials,
         bool internalLoad,
-        bool hostConsumesBody = false)
+        bool hostConsumesBody = false,
+        FetchReferrer? referrer = null)
     {
         ArgumentNullException.ThrowIfNull(gs);
         ArgumentNullException.ThrowIfNull(document);
@@ -563,6 +566,13 @@ public static partial class FetchOps
 
             var client = httpClient?.RequestClient ?? SharedRequestClient(allowPrivateNetwork);
 
+            // Referrer policy (port addition; Rust sends fetch()/XHR and internal loads
+            // with no Referer at all): fetch()'s referrerPolicy, else the element's, else
+            // the document's; the referrer is the document's URL unless fetch() named a
+            // same-origin one or asked for none.
+            var referrerPolicy = referrer?.Policy ?? StateHelpers.DocumentReferrerPolicy(document);
+            var referrerSource = (referrer ?? FetchReferrer.Client).Source(document);
+
             var initialRequestOrigin = RequestOrigin(url) ?? string.Empty;
             var pageOrigin = origin;
             var isCrossOrigin = pageOrigin.Length != 0
@@ -697,8 +707,13 @@ public static partial class FetchOps
             // cross-site with the embedding document.
             var frameNavigation = string.Equals(mode, "navigate", StringComparison.Ordinal)
                 && Uri.TryCreate(document.Url, UriKind.Absolute, out var frameInitiator)
-                    ? ResourceRequest.FrameNavigation(frameInitiator)
+                    ? ResourceRequest.FrameNavigation(frameInitiator) with
+                    {
+                        Referrer = referrerSource,
+                        ReferrerPolicy = referrerPolicy,
+                    }
                     : null;
+            var hopReferrerSource = referrerSource;
 
             try
             {
@@ -742,6 +757,17 @@ public static partial class FetchOps
                         {
                             request.Headers.TryAddWithoutValidation(name, value);
                         }
+                    }
+
+                    // The Referer, trimmed hop by hop as the navigation paths do (a frame
+                    // navigation got its own above).
+                    if (frameNavigation is null
+                        && hopReferrerSource is not null
+                        && Uri.TryCreate(currentUrl, UriKind.Absolute, out var refererTarget)
+                        && ReferrerPolicies.Referrer(hopReferrerSource, refererTarget, referrerPolicy) is { } referer
+                        && !ContainsHeader(currentHeaders, "referer"))
+                    {
+                        request.Headers.TryAddWithoutValidation("Referer", referer);
                     }
 
                     var credentialsAllowed = credentialsMode.Allows(pageOrigin, currentUrl);
@@ -872,6 +898,9 @@ public static partial class FetchOps
                         break;
                     }
 
+                    var redirectReferrerPolicy = hop.Headers.NonValidated.TryGetValues("Referrer-Policy", out var redirectPolicies)
+                        ? string.Join(',', redirectPolicies)
+                        : null;
                     hop.Dispose();
 
                     // Re-validate every redirect target against the SSRF policy.
@@ -903,6 +932,23 @@ public static partial class FetchOps
                     var crossesOrigin = !string.Equals(
                         baseUrl.AsciiOrigin, nextUrl.AsciiOrigin, StringComparison.Ordinal);
                     SanitizeRedirectHeaders(currentHeaders, crossesOrigin, downgradedToGet);
+
+                    // The next hop is referred by what this one sent, and then under the
+                    // policy a Referrer-Policy on this redirect sets, if it names one.
+                    hopReferrerSource = hopReferrerSource is not null
+                        && Uri.TryCreate(currentUrl, UriKind.Absolute, out var redirectedFromUrl)
+                        && ReferrerPolicies.Referrer(hopReferrerSource, redirectedFromUrl, referrerPolicy) is { } sentBefore
+                        && Uri.TryCreate(sentBefore, UriKind.Absolute, out var sentBeforeUri)
+                            ? sentBeforeUri
+                            : null;
+                    if (ReferrerPolicies.ParseHeader(redirectReferrerPolicy) is { } redirectPolicy)
+                    {
+                        referrerPolicy = redirectPolicy;
+                        if (frameNavigation is not null)
+                        {
+                            frameNavigation = frameNavigation with { ReferrerPolicy = redirectPolicy };
+                        }
+                    }
                     taintedOrigin |= crossesOrigin
                         && !string.Equals(baseUrl.AsciiOrigin, pageOrigin, StringComparison.Ordinal);
 
@@ -1333,6 +1379,19 @@ public static partial class FetchOps
         }
 
         return headers;
+    }
+
+    private static bool ContainsHeader(Dictionary<string, string> headers, string name)
+    {
+        foreach (var key in headers.Keys)
+        {
+            if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Fetch's forbidden methods: <c>CONNECT</c>, <c>TRACE</c> and <c>TRACK</c>, in any case.</summary>
