@@ -381,6 +381,15 @@ internal static class GridPlacementAlgorithm
                     : primarySpan.End > primaryAxisGridEndLine;
                 if (primaryOutOfBounds)
                 {
+                    // Past the window every row is empty, so a span that still does not fit
+                    // the primary axis there never will: stop in the window's last track.
+                    if (secondaryAxisIsReversed
+                            ? secondarySpan.End.Value <= secondaryWindow.Start
+                            : secondarySpan.Start.Value >= secondaryWindow.End)
+                    {
+                        return (primaryWindow.Clamp(primarySpan), secondaryWindow.Clamp(secondarySpan));
+                    }
+
                     secondaryIdx = AdvancePosition(secondaryIdx, secondaryAxisIsReversed);
                     primaryIdx = primaryStartPosition;
                     continue;
