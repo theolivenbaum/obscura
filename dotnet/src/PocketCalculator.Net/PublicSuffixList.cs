@@ -209,7 +209,8 @@ public static class PublicSuffixList
                 line = line[2..];
             }
 
-            var rule = line.ToString().ToLowerInvariant();
+            // The list is published lower case; fold anyway, without a second copy when it is.
+            var rule = line.ContainsAnyInRange('A', 'Z') ? line.ToString().ToLowerInvariant() : line.ToString();
             Add(rules, rule, kind);
             if (!System.Text.Ascii.IsValid(rule))
             {
