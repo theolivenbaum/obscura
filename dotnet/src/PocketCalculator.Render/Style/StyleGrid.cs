@@ -811,6 +811,61 @@ public static partial class ComputedStyle
         return rows;
     }
 
+    /// <summary>
+    /// The row track list of the areas form of <c>grid-template</c>
+    /// (<c>[a] "x y" 10px [b] "z z"</c>): the names and sizes with the strings taken out, and
+    /// <c>auto</c> for a string with no size after it.
+    /// </summary>
+    private static string AreaRowTracks(string rows)
+    {
+        System.Text.StringBuilder withoutStrings = new();
+        char quote = '\0';
+        foreach (char character in rows)
+        {
+            if (quote != '\0')
+            {
+                if (character == quote)
+                {
+                    quote = '\0';
+                }
+            }
+            else if (character is '\'' or '"')
+            {
+                quote = character;
+                withoutStrings.Append(" \u0001 ");
+            }
+            else
+            {
+                withoutStrings.Append(character);
+            }
+        }
+
+        System.Text.StringBuilder tracks = new();
+        bool pending = false;
+        foreach (string token in TokenizeTracks(withoutStrings.ToString()))
+        {
+            bool isString = token == "\u0001";
+            bool isNames = token.StartsWith('[');
+            if (pending && (isString || isNames))
+            {
+                tracks.Append(" auto");
+            }
+
+            pending = isString;
+            if (!isString)
+            {
+                tracks.Append(' ').Append(token);
+            }
+        }
+
+        if (pending)
+        {
+            tracks.Append(" auto");
+        }
+
+        return tracks.ToString().Trim();
+    }
+
     /// <summary>Rust <c>parse_grid_template</c>.</summary>
     /// <remarks>
     /// Both track lists are parsed before either is applied, so an invalid one (nested
@@ -826,9 +881,11 @@ public static partial class ComputedStyle
         List<Layout.GridTemplateComponent> rowTracks = [];
         List<(string Name, short Line)> rowNames = [];
         List<object> rowCalc = [];
-        if (!rowsAreAreas
-            && rowsPart.Length != 0
-            && !TryParseTrackListNamed(rowsPart, out rowTracks, out rowNames, out rowCalc))
+        // Deviation from Rust, which reads only the strings of the areas form and drops the
+        // row sizes and names between them, so `"a" 10px "b" 20px / 1fr` gave auto rows.
+        string? rowsText = rowsAreAreas ? AreaRowTracks(rowsPart) : rowsPart;
+        if (rowsText is { Length: > 0 }
+            && !TryParseTrackListNamed(rowsText, out rowTracks, out rowNames, out rowCalc))
         {
             return;
         }
@@ -846,10 +903,11 @@ public static partial class ComputedStyle
         {
             style.GridAreas = ParseGridAreas(rowsPart);
         }
-        else if (rowsPart.Length != 0)
+
+        if (rowsText is { Length: > 0 })
         {
             style.GridTemplateRows = rowTracks;
-            style.GridTemplateRowsText = rowsPart;
+            style.GridTemplateRowsText = rowsText;
             GridCalcBuckets(style)[1] = rowCalc;
             style.GridRowLineNames = rowNames.Count != 0 ? BuildLineMap(rowNames) : null;
         }
@@ -894,6 +952,7 @@ public static partial class ComputedStyle
             style.GridAutoFlow = CssText.AsciiLower(rows).Contains("dense", StringComparison.Ordinal)
                 ? Layout.GridAutoFlow.RowDense
                 : Layout.GridAutoFlow.Row;
+            ApplyGridShorthandAutoTracks(style, rows, columns: false);
         }
         else if (CssText.AsciiLower(columns).Contains("auto-flow", StringComparison.Ordinal))
         {
@@ -913,11 +972,35 @@ public static partial class ComputedStyle
             style.GridAutoFlow = CssText.AsciiLower(columns).Contains("dense", StringComparison.Ordinal)
                 ? Layout.GridAutoFlow.ColumnDense
                 : Layout.GridAutoFlow.Column;
+            ApplyGridShorthandAutoTracks(style, columns, columns: true);
         }
         else
         {
             ParseGridTemplate(style, value);
         }
+    }
+
+    /// <summary>
+    /// The implicit track sizes of the <c>auto-flow</c> side of the <c>grid</c> shorthand
+    /// (<c>auto-flow dense 10px</c>), and <c>auto</c> for the other axis.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, which read only the flow keywords, so <c>grid: auto-flow 10px / 1fr</c>
+    /// kept whatever <c>grid-auto-rows</c> was before instead of 10px.
+    /// </remarks>
+    private static void ApplyGridShorthandAutoTracks(LayoutStyle style, string side, bool columns)
+    {
+        System.Text.StringBuilder sizes = new();
+        foreach (string token in TokenizeTracks(side))
+        {
+            if (!CssText.EqualsAscii(token, "auto-flow") && !CssText.EqualsAscii(token, "dense"))
+            {
+                sizes.Append(sizes.Length == 0 ? string.Empty : " ").Append(token);
+            }
+        }
+
+        ApplyGridAutoTracks(style, sizes.Length == 0 ? "auto" : sizes.ToString(), columns);
+        ApplyGridAutoTracks(style, "auto", !columns);
     }
 
     /// <summary>Rust <c>is_subgrid_track_list</c>.</summary>

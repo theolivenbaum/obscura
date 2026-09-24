@@ -185,4 +185,36 @@ public sealed class GridComputedStyleScriptTests
             ],
             result);
     }
+
+    [Theory]
+    [InlineData("block", "", "none", "none / none / none / row / auto / auto")]
+    [InlineData("block", "grid-template-columns:10px;grid-template-rows:20px 30px", "20px 30px / 10px", "20px 30px / 10px / none / row / auto / auto")]
+    [InlineData("block", "grid-template-areas:'a b' 'c d'", "", "none / none / \"a b\" \"c d\" / row / auto / auto")]
+    [InlineData("block", "grid-template:[a] 'x' 10px [b] 'y' [c] / 1fr", "[a] \"x\" 10px [b] \"y\" [c] / 1fr", "[a] 10px [b] auto [c] / 1fr / \"x\" \"y\" / row / auto / auto")]
+    [InlineData("block", "grid:auto-flow dense 10px / 20px 30px", "none / 20px 30px", "none / 20px 30px / none / dense / 10px / auto")]
+    [InlineData("block", "grid-template-rows:repeat(auto-fill, 10px)", "repeat(auto-fill, 10px) / none", "repeat(auto-fill, 10px) / none / none / row / auto / auto")]
+    [InlineData("grid", "", "0px / 300px", "0px / 300px / none / row / auto / auto")]
+    [InlineData("grid", "grid-template-columns:1fr 2fr", "0px / 1fr 2fr", "0px / 100px 200px / none / row / auto / auto")]
+    [InlineData("grid", "grid-template-areas:'a b' 'c d'", "\"a b\" 0px \"c d\" 0px / 150px 150px", "0px 0px / 150px 150px / \"a b\" \"c d\" / row / auto / auto")]
+    [InlineData("grid", "grid-template:'a a' 10px 'b c' 20px / 1fr 2fr", "\"a a\" 10px \"b c\" 20px / 1fr 2fr", "10px 20px / 100px 200px / \"a a\" \"b c\" / row / auto / auto")]
+    [InlineData("grid", "grid:10px / auto-flow dense 20px", "10px / 20px", "10px / 20px / none / column dense / auto / 20px")]
+    [InlineData("grid", "grid-template-columns:repeat(2, 10px)", "0px / repeat(2, 10px)", "0px / 10px 10px / none / row / auto / auto")]
+    public void TemplateAndGridShorthandsSerializeAsChromium(string display, string declarations, string template, string grid)
+    {
+        // Chromium 141: grid-template from the computed track lists (the used ones where a list
+        // is none, row strings before their sizes); grid as all six longhands, tracks resolved.
+        string[] result = Evaluate(
+            $$"""
+            <html><body style="margin: 0"><div style="width: 300px">
+              <div id="e" style="display: {{display}}; {{declarations}}"><i></i></div>
+            </div></body></html>
+            """,
+            """
+            (() => {
+              const cs = getComputedStyle(document.getElementById("e"));
+              return [cs.gridTemplate, cs.grid];
+            })()
+            """);
+        Assert.Equal([template, grid], result);
+    }
 }

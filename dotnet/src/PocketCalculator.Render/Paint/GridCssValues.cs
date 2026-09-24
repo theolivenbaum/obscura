@@ -344,6 +344,65 @@ internal static class GridCssValues
     }
 
     /// <summary>
+    /// The <c>grid-template</c> shorthand from its row and column lists: <c>rows / columns</c>,
+    /// or with areas each row's string before its size. Chromium gives the empty string when
+    /// the rows cannot carry the areas (no row list, a <c>repeat()</c>, another row count).
+    /// </summary>
+    public static string TemplateShorthand(string rows, string columns, List<List<string>>? areas)
+    {
+        if (areas is not { Count: > 0 })
+        {
+            return rows == "none" && columns == "none" ? "none" : rows + " / " + columns;
+        }
+
+        if (rows == "none" || rows.Contains("repeat(", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        List<string> tokens = ComputedStyle.TokenizeTracks(rows);
+        int sizes = 0;
+        foreach (string token in tokens)
+        {
+            sizes += token.TrimStart().StartsWith('[') ? 0 : 1;
+        }
+
+        if (sizes != areas.Count)
+        {
+            return string.Empty;
+        }
+
+        StringBuilder sb = new();
+        int row = 0;
+        foreach (string token in tokens)
+        {
+            string trimmed = token.Trim();
+            if (!trimmed.StartsWith('['))
+            {
+                Separate(sb).Append('"').AppendJoin(' ', areas[row++]).Append('"');
+                if (trimmed == "auto")
+                {
+                    // A row's size is optional in this form, and `auto` is left out.
+                    continue;
+                }
+            }
+
+            Separate(sb).Append(trimmed);
+        }
+
+        return columns == "none" ? sb.ToString() : sb.Append(" / ").Append(columns).ToString();
+    }
+
+    /// <summary><c>grid-auto-flow</c> as the <c>grid</c> shorthand lists it: <c>row</c> is implied by <c>dense</c>.</summary>
+    public static string AutoFlowInShorthand(GridAutoFlow flow) => flow switch
+    {
+        GridAutoFlow.Row => "row",
+        GridAutoFlow.RowDense => "dense",
+        GridAutoFlow.Column => "column",
+        _ => "column dense",
+    };
+
+    /// <summary>
     /// The computed <c>grid-*-start</c> and <c>grid-*-end</c> of one axis, as specified: an area
     /// name, a raw value that names lines, or the parsed placement.
     /// </summary>

@@ -151,4 +151,29 @@ public class GridAutoPlacementTests
             string.Empty);
         Assert.Equal(expected, rects[0]);
     }
+
+    [Fact]
+    public void TemplateAreasSizeTheExplicitGrid()
+    {
+        // Two area columns with no track list are two explicit columns sharing the width.
+        Assert.Equal(
+            ["0,0,150,10", "150,0,150,10"],
+            Place("width:300px;grid-template-areas:'a b' 'c d';grid-auto-columns:auto", string.Empty, string.Empty));
+    }
+
+    [Fact]
+    public void TemplateAreasFormKeepsTheRowSizes()
+    {
+        Assert.Equal(
+            ["0,0,100,10", "100,0,200,10", "0,10,100,20"],
+            Place("width:300px;grid-template:'a a' 10px 'b c' 20px / 1fr 2fr", string.Empty, string.Empty, string.Empty));
+    }
+
+    [Fact]
+    public void GridShorthandSetsTheAutoTracksOfItsFlowSide()
+    {
+        Assert.Equal(
+            ["0,0,20,10", "0,10,20,30"],
+            Place("width:300px;grid:auto-flow 30px / 20px;grid-template-rows:10px", string.Empty, string.Empty));
+    }
 }

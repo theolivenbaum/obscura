@@ -958,7 +958,8 @@ public sealed partial class PreparedRender
         {
             TaffyGridAutoFlow.Row => "row",
             TaffyGridAutoFlow.Column => "column",
-            TaffyGridAutoFlow.RowDense => "row dense",
+            // Chromium serializes the computed value without the implied `row`.
+            TaffyGridAutoFlow.RowDense => "dense",
             _ => "column dense",
         };
         AppendGridStyle(output, id, style, display, isPseudo);
@@ -996,12 +997,14 @@ public sealed partial class PreparedRender
         // Computed lengths are absolute: font-relative units against this element's face.
         CalcUnits units = new(
             FontUnits.ForStyle(style), RootFontSize, ViewportSize.Width / 100f, ViewportSize.Height / 100f);
-        if (!isPseudo
+        GridTrackSizes? used = null;
+        bool usedTracks = !isPseudo
             && display is "grid" or "inline-grid"
-            && Layout.GridTracks.TryGetValue(id, out GridTrackSizes? used))
+            && Layout.GridTracks.TryGetValue(id, out used);
+        if (usedTracks)
         {
             output["grid-template-columns"] = GridCssValues.UsedTrackList(
-                used.Columns, used.NegativeColumns, used.ExplicitColumns, style.GridTemplateColumnsText, style.GridColLineNames);
+                used!.Columns, used.NegativeColumns, used.ExplicitColumns, style.GridTemplateColumnsText, style.GridColLineNames);
             output["grid-template-rows"] = GridCssValues.UsedTrackList(
                 used.Rows, used.NegativeRows, used.ExplicitRows, style.GridTemplateRowsText, style.GridRowLineNames);
         }
@@ -1026,6 +1029,36 @@ public sealed partial class PreparedRender
         output["grid-column"] = GridCssValues.LineShorthand(columnStart, columnEnd);
         output["grid-row"] = GridCssValues.LineShorthand(rowStart, rowEnd);
         output["grid-area"] = GridCssValues.AreaShorthand(rowStart, columnStart, rowEnd, columnEnd);
+
+        // Chromium 141 builds `grid-template` from the computed track lists, falling back to
+        // the used ones only for a list that is `none`, and serializes `grid` as all six
+        // longhands, the track lists resolved.
+        string templateRows = output["grid-template-rows"];
+        string templateColumns = output["grid-template-columns"];
+        if (usedTracks)
+        {
+            string specifiedRows = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateRowsText, style.GridTemplateRows, units);
+            string specifiedColumns = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateColumnsText, style.GridTemplateColumns, units);
+            // A subgrid list on a box that lays out its own tracks also gives the used ones.
+            templateRows = specifiedRows == "none" || specifiedRows.StartsWith("subgrid", StringComparison.Ordinal)
+                ? templateRows
+                : specifiedRows;
+            templateColumns = specifiedColumns == "none" || specifiedColumns.StartsWith("subgrid", StringComparison.Ordinal)
+                ? templateColumns
+                : specifiedColumns;
+        }
+
+        output["grid-template"] = GridCssValues.TemplateShorthand(templateRows, templateColumns, style.GridAreas);
+        output["grid"] = string.Join(
+            " / ",
+            output["grid-template-rows"],
+            output["grid-template-columns"],
+            output["grid-template-areas"],
+            GridCssValues.AutoFlowInShorthand(style.GridAutoFlow ?? TaffyGridAutoFlow.Row),
+            output["grid-auto-rows"],
+            output["grid-auto-columns"]);
     }
 
     /// <summary>
