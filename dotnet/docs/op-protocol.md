@@ -107,6 +107,7 @@ shown with the deno_core attribute markers stripped: `String` is a JS string,
 | `op_layout_metrics` | sync | `(none)` | `String` |
 | `op_load_image_metadata` | async | `nid: u32` | `String` |
 | `op_navigate` | fast | `url: &str, method: &str, body: &str` | `(void)` |
+| `op_navigate_frame` | fast | `url: &str, method: &str, body: &str, target: &str` | `(void)` |
 | `op_post_frame_message` | fast | `target_frame_id: u32, source_frame_id: u32, origin: &str, target_origin: &str, data_json: &str` | `(void)` |
 | `op_posted_task` | sync | `frame_id: u32, callback: v8::Global<v8::Function>` | `f64` |
 | `op_posted_task_generation` | fast | `frame_id: u32` | `f64` |

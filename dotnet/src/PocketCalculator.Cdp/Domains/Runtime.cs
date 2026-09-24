@@ -268,6 +268,13 @@ public static class Runtime
                 ulong timeoutMs = parameters.Get("timeout").AsU64() ?? DefaultCommandTimeoutMs;
 
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
+                // `userGesture: true`, as on evaluate: Puppeteer's page.evaluate passes it,
+                // and a navigation the call starts reports Sec-Fetch-User: ?1 in Chromium.
+                if (parameters.Get("userGesture").AsBool() == true)
+                {
+                    page.NoteUserActivation();
+                }
+
                 // An objectId names the realm it was minted in; without one an isolated
                 // context runs in its own world (port addition, SECURITY.md M6).
                 IsolatedWorldTarget? world = ctx.WorldTargetFor(context, page);

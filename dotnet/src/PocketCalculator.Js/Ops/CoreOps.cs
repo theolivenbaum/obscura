@@ -353,6 +353,31 @@ public static class CoreOps
             };
         });
 
+    /// <summary>
+    /// <c>op_navigate_frame</c>: this realm's document navigates the child frame named
+    /// <paramref name="target"/> (a form's <c>target</c>). Queued for the Page, which loads
+    /// it into that iframe. Port addition. At most 64 wait; further ones are dropped.
+    /// </summary>
+    public static void OpNavigateFrame(PocketCalculatorState state, string url, string method, string body, string target) =>
+        OpGuard.Run("op_navigate_frame", () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (target.Length == 0 || state.PendingFrameNavigations.Count >= 64)
+            {
+                return;
+            }
+
+            var policy = state.NextNavigationReferrerPolicy ?? StateHelpers.DocumentReferrerPolicy(state);
+            state.NextNavigationReferrerPolicy = null;
+            state.PendingFrameNavigations.Add(new PendingNavigation(url, method, body)
+            {
+                Initiator = state.ReferrerSourceUrl ?? state.Url,
+                UserActivated = state.HasTransientActivation,
+                ReferrerPolicy = policy,
+                Target = target,
+            });
+        });
+
     internal static int FrameMessageQueueEntryLimit() =>
         EnvInt("POCKETCALCULATOR_FRAME_MESSAGE_QUEUE_ENTRIES", 4096);
 

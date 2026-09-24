@@ -388,6 +388,20 @@ public static partial class FetchOps
         // origin as the host knows it, and the argument is accepted and ignored so the
         // op keeps its shape.
         var origin = StateHelpers.DocumentOrigin(document);
+
+        // Port addition: a frame document load the host started for a frame's own
+        // navigation (a POST form in the frame) is initiated by that frame, not by the
+        // embedding document the op runs in. Taken before the first await, so it belongs
+        // to this load only.
+        FrameNavigationInitiator? navigationInitiator = null;
+        if (internalLoad
+            && string.Equals(mode, "navigate", StringComparison.Ordinal)
+            && document.NextFrameNavigation is { } next)
+        {
+            document.NextFrameNavigation = null;
+            navigationInitiator = next;
+        }
+
         using FetchConcurrency.Slot slot = await FetchConcurrency.EnterAsync(gs).ConfigureAwait(false);
 
         // Page-script requests run under the Fetch request guards; the engine's own
@@ -705,12 +719,21 @@ public static partial class FetchOps
             // navigation: fetch metadata with Sec-Fetch-Dest: iframe, the default
             // Referer, no Origin on a GET, and SameSite=None cookies only when it is
             // cross-site with the embedding document.
+            //
+            // A navigation someone started (a form, including one with `target` naming
+            // the frame) carries its initiator's user activation, and one the frame started
+            // itself is judged from the frame: its URL is the initiator and the Referer
+            // source, as in Chromium 141 (port addition).
+            var initiatorDocument = navigationInitiator?.Initiator ?? document;
             var frameNavigation = string.Equals(mode, "navigate", StringComparison.Ordinal)
-                && Uri.TryCreate(document.Url, UriKind.Absolute, out var frameInitiator)
+                && Uri.TryCreate(initiatorDocument.Url, UriKind.Absolute, out var frameInitiator)
                     ? ResourceRequest.FrameNavigation(frameInitiator) with
                     {
-                        Referrer = referrerSource,
-                        ReferrerPolicy = referrerPolicy,
+                        Referrer = navigationInitiator is { } byFrame
+                            ? FetchReferrer.Client.Source(byFrame.Initiator)
+                            : referrerSource,
+                        ReferrerPolicy = navigationInitiator?.Policy ?? referrerPolicy,
+                        UserActivated = navigationInitiator?.UserActivated ?? false,
                         // The embedding document's frame scope: a frame nested in a
                         // cross-site frame has no site for cookies (port addition).
                         TopLevel = StateHelpers.TopLevelUri(document),
@@ -760,6 +783,14 @@ public static partial class FetchOps
                                      frameNavigation, frameTarget, redirectedFrom))
                         {
                             request.Headers.TryAddWithoutValidation(name, value);
+                        }
+
+                        // A frame's POST navigation sends its initiator's origin, as a
+                        // top-level one does (port addition: frames only navigated by GET).
+                        if (currentMethod != HttpMethod.Get && currentMethod != HttpMethod.Head)
+                        {
+                            request.Headers.TryAddWithoutValidation(
+                                "Origin", StateHelpers.DocumentOrigin(initiatorDocument));
                         }
                     }
 

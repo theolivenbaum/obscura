@@ -265,6 +265,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (name, payload) => CoreOps.OpBindingCalled(Page, S(name), S(payload))));
         Bind(ops, "op_navigate", (Action<object?, object?, object?>)(
             (url, method, body) => CoreOps.OpNavigate(RealmState(), S(url), S(method), S(body))));
+        Bind(ops, "op_navigate_frame", (Action<object?, object?, object?, object?>)(
+            (url, method, body, target) => CoreOps.OpNavigateFrame(RealmState(), S(url), S(method), S(body), S(target))));
         Bind(ops, "op_get_cookies", (Func<string>)(
             () => CoreOps.OpGetCookies(RealmState())));
         Bind(ops, "op_set_cookie", (Func<object?, string?>)(
@@ -428,6 +430,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         ArgumentNullException.ThrowIfNull(state);
         Bind(ops, "op_navigate", (Action<object?, object?, object?>)(
             (url, method, body) => CoreOps.OpNavigate(state, S(url), S(method), S(body))));
+        Bind(ops, "op_navigate_frame", (Action<object?, object?, object?, object?>)(
+            (url, method, body, target) => CoreOps.OpNavigateFrame(state, S(url), S(method), S(body), S(target))));
         Bind(ops, "op_get_cookies", (Func<string>)(() => CoreOps.OpGetCookies(state)));
         Bind(ops, "op_set_cookie", (Func<object?, string?>)(
             cookie => CoreOps.OpSetCookie(state, S(cookie))));

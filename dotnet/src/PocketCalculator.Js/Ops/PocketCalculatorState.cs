@@ -172,6 +172,22 @@ public sealed class PocketCalculatorState
     public PendingNavigation? PendingNavigation { get; set; }
 
     /// <summary>
+    /// Navigations of a child frame by name that this realm's document started (a form
+    /// with <c>target</c> naming an iframe), recorded by <c>op_navigate_frame</c> and
+    /// followed by the Page as it follows a frame's own navigation. Port addition: the
+    /// Rust shim ignores <c>target</c> and navigates the realm's own document.
+    /// </summary>
+    public List<PendingNavigation> PendingFrameNavigations { get; } = [];
+
+    /// <summary>
+    /// The document the next frame document load (<c>op_fetch_url</c> in mode
+    /// <c>navigate</c>) is initiated by, set by the host around one
+    /// <c>navigateFrame</c> call and taken by that load. Host-only; null means the
+    /// calling realm's document. Port addition, see <see cref="FrameNavigationInitiator"/>.
+    /// </summary>
+    public FrameNavigationInitiator? NextFrameNavigation { get; set; }
+
+    /// <summary>
     /// <see cref="Stopwatch"/> timestamp of the last activation-triggering input the host
     /// dispatched (a mouse press or release, a key press), or 0 for none.
     /// </summary>
@@ -779,8 +795,18 @@ public sealed class ByteArrayJsBuffer(byte[] bytes) : IJsBuffer
 /// initiator. <see cref="Initiator"/> and <see cref="UserActivated"/> are what the
 /// request needs to apply SameSite, <c>Sec-Fetch-*</c> and Referer as Chromium does.
 /// </remarks>
+/// <summary>
+/// Who starts a child frame's navigation, when that is not the document embedding it: a
+/// frame navigating itself (a POST form) is its own initiator, so Chromium 141 sends its
+/// origin, its URL as the Referer and fetch metadata judged from it.
+/// </summary>
+public sealed record FrameNavigationInitiator(PocketCalculatorState Initiator, bool UserActivated, ReferrerPolicy Policy);
+
 public sealed record PendingNavigation(string Url, string Method, string Body)
 {
+    /// <summary>The browsing context name a navigation targets (<c>target</c>), or null for the realm's own.</summary>
+    public string? Target { get; init; }
+
     /// <summary>The URL of the document that started the navigation.</summary>
     public string Initiator { get; init; } = string.Empty;
 

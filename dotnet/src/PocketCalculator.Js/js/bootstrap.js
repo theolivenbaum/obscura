@@ -4505,7 +4505,7 @@ class Element extends Node {
     }
   }
   _resetIframeFrame() { return _resetIframeState(this); }
-  _loadIframeSrc(url) {
+  _loadIframeSrc(url, request) {
     // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the URL op,
     // the frame-state reset, the sandbox attribute, the geometry and the promise chain
     // below use the built-ins bootstrap captured, not `url.includes`, the page's URL
@@ -4520,8 +4520,9 @@ class Element extends Node {
     }
     // Both the src setter and the parser sweep in __obscura_init reach here, so
     // a frame the page assigned before init must not be fetched a second time.
+    // A form's navigation is loaded however often it is sent (port addition).
     const previous = _weakMapGet(_iframeStates, this);
-    if (previous && previous.loadingUrl === fullUrl) return;
+    if (!request && previous && previous.loadingUrl === fullUrl) return;
     const st = _resetIframeState(this);
     st.loadingUrl = fullUrl;
     const el = this;
@@ -4542,7 +4543,11 @@ class Element extends Node {
     // the frame runs as nor its HTML passes through anything page script can reach. The
     // frame's state lives in _iframeStates, not in expandos a page could read or rewrite.
     const loaded = _reflectApply(_promiseThenAtBoot, _promiseResolveAtBoot(__obscuraCore.ops.op_fetch_url(
-      fullUrl, 'GET', '{}', new _Uint8ArrayAtBoot(0), _referrerArgFor(el),
+      fullUrl,
+      request ? request.method : 'GET',
+      request ? '{"Content-Type":"' + request.contentType + '"}' : '{}',
+      request ? request.body : new _Uint8ArrayAtBoot(0),
+      _referrerArgFor(el),
       'navigate', 'include', true
     )), [raw => {
       if (_weakMapGet(_iframeStates, el) !== st) return;
@@ -4768,6 +4773,20 @@ class Element extends Node {
     try { targetUrl = new URL(action, baseUrl).href; } catch(e) { targetUrl = action; }
 
     const encoded = pairs.join('&');
+    // Port addition: a `target` (or the submitter's `formtarget`) naming one of this
+    // document's iframes navigates that frame, as in Chromium 141; the Rust shim
+    // navigated the document itself. Other names keep that behaviour.
+    const frameTarget = (submitter && _hostDom.getAttribute(submitter, 'formtarget'))
+      || _hostDom.getAttribute(this, 'target') || '';
+    if (frameTarget && frameTarget[0] !== '_' && _iframeNamed(document, _String(frameTarget))) {
+      if (method === 'POST') {
+        __obscuraCore.ops.op_navigate_frame(targetUrl, 'POST', encoded, _String(frameTarget));
+      } else {
+        const sep = targetUrl.includes('?') ? '&' : '?';
+        __obscuraCore.ops.op_navigate_frame(targetUrl + (encoded ? sep + encoded : ''), 'GET', '', _String(frameTarget));
+      }
+      return;
+    }
     if (method === 'POST') {
       __obscuraCore.ops.op_navigate(targetUrl, 'POST', encoded);
     } else {
@@ -20102,6 +20121,42 @@ const _cdpHost = _objectFreeze({
 // ScriptObject and passes it to its scripts as an argument (`__obscura_host`), so no
 // name on globalThis reaches it. See dotnet/docs/op-protocol.md, "Host helpers".
 const _iframeLoadAtBoot = Element.prototype._loadIframeSrc;
+// Port addition: the request a frame navigation the host follows carries, null for a GET.
+// The body is a urlencoded form, sent as UTF-8.
+function _frameNavigationRequest(method, body) {
+  if (_String(method) !== 'POST') return null;
+  body = _String(body || '');
+  const bytes = [];
+  for (let i = 0; i < body.length; i++) {
+    let c = _stringCharCodeAt(body, i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < body.length) {
+      const d = _stringCharCodeAt(body, i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00); i++; }
+    }
+    if (c < 0x80) bytes[bytes.length] = c;
+    else if (c < 0x800) { bytes[bytes.length] = 0xc0 | (c >> 6); bytes[bytes.length] = 0x80 | (c & 63); }
+    else if (c < 0x10000) {
+      bytes[bytes.length] = 0xe0 | (c >> 12); bytes[bytes.length] = 0x80 | ((c >> 6) & 63);
+      bytes[bytes.length] = 0x80 | (c & 63);
+    } else {
+      bytes[bytes.length] = 0xf0 | (c >> 18); bytes[bytes.length] = 0x80 | ((c >> 12) & 63);
+      bytes[bytes.length] = 0x80 | ((c >> 6) & 63); bytes[bytes.length] = 0x80 | (c & 63);
+    }
+  }
+  const out = new _Uint8ArrayAtBoot(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = bytes[i];
+  return { method: 'POST', body: out, contentType: 'application/x-www-form-urlencoded' };
+}
+// The first connected <iframe> of `doc` whose name is `name` (a browsing context name).
+function _iframeNamed(doc, name) {
+  if (!name) return null;
+  const frames = _qsa(doc, 'iframe');
+  for (let i = 0; i < frames.length; i++) {
+    const el = frames[i];
+    if (el.isConnected && _hostDom.getAttribute(el, 'name') === name) return el;
+  }
+  return null;
+}
 globalThis.__obscura_host_handoff = Object.freeze({
   __proto__: null,
   // Port additions (SECURITY.md I10): what upstream keeps as page-visible globals. The
@@ -20175,18 +20230,29 @@ globalThis.__obscura_host_handoff = Object.freeze({
     const el = _frameElements[frameId >>> 0];
     return el && el.isConnected ? el._nid : -1;
   },
+  // Port addition: start the parsed document's frames (srcdoc and src), for the host once
+  // the document is in place. See _loadDocumentFrames.
+  loadDocumentFrames: () => { _loadDocumentFrames(); },
   // Port addition: child frame `frameId` navigated itself (a link, location, a form's
   // GET), so its <iframe> here loads `url` in its place, as a new frame. The Rust engine
   // processes only the page's own navigation, so a click on a link inside a frame did
   // nothing. The iframe loader as bootstrap defined it, since page script can replace
   // Element.prototype._loadIframeSrc.
-  // Port addition: start the parsed document's frames (srcdoc and src), for the host once
-  // the document is in place. See _loadDocumentFrames.
-  loadDocumentFrames: () => { _loadDocumentFrames(); },
-  navigateFrame: (frameId, url) => {
+  //
+  // A POST (the frame's own form) loads with its method and urlencoded body; the host
+  // names the initiator of that load (port addition: frames navigated by GET only).
+  navigateFrame: (frameId, url, method, body) => {
     const el = _frameElements[frameId >>> 0];
     if (!el || !el.isConnected) return false;
-    _reflectApply(_iframeLoadAtBoot, el, [_String(url)]);
+    _reflectApply(_iframeLoadAtBoot, el, [_String(url), _frameNavigationRequest(method, body)]);
+    return true;
+  },
+  // Port addition: this document navigates its <iframe> named `name` (a form's `target`),
+  // as Chromium does; the Rust shim ignored `target` and navigated the document itself.
+  navigateFrameNamed: (name, url, method, body) => {
+    const el = _iframeNamed(document, _String(name));
+    if (!el) return false;
+    _reflectApply(_iframeLoadAtBoot, el, [_String(url), _frameNavigationRequest(method, body)]);
     return true;
   },
   frameContentOrigin: (frameId) => {

@@ -504,45 +504,129 @@ public sealed partial class Page
 
     /// <summary>
     /// Follows the navigations child frames queued for themselves (a link, a
-    /// <c>location</c> write, a GET form), by loading the new URL into the frame's
-    /// <c>&lt;iframe&gt;</c> in its parent's realm; the document arrives as a new frame.
+    /// <c>location</c> write, a form), by loading the new URL into the frame's
+    /// <c>&lt;iframe&gt;</c> in its parent's realm, and the navigations a document started
+    /// for a child frame by name (a form's <c>target</c>); the document arrives as a new
+    /// frame.
     /// </summary>
     /// <remarks>
     /// Port addition: the Rust engine only processes the page's own navigation, so a click
     /// on a link inside a frame (a CDP click routed into the frame's realm included) left
-    /// the frame where it was, where Chromium navigates it. A POST navigation of a frame
-    /// is dropped, as are page-initiated navigations to <c>file:</c> (SECURITY.md H3).
-    /// Reports whether any frame started loading.
+    /// the frame where it was, where Chromium navigates it. A POST carries its body and,
+    /// as Chromium 141 sends it, the initiator's origin, Referer, fetch metadata and user
+    /// activation; a frame navigating itself is its own initiator. Page-initiated
+    /// navigations to <c>file:</c> are dropped (SECURITY.md H3). Reports whether any frame
+    /// started loading.
     /// </remarks>
     internal bool StartFrameNavigations()
     {
-        if (Js is null || Frames.Count == 0)
+        if (Js is not { } js)
         {
             return false;
         }
         bool started = false;
+        if (js.State.PendingFrameNavigations.Count != 0)
+        {
+            started |= StartNamedFrameNavigations(0, js.State);
+        }
+        if (Frames.Count == 0)
+        {
+            return started;
+        }
         foreach (FrameRealm frame in Frames.ToArray())
         {
+            if (frame.State.PendingFrameNavigations.Count != 0)
+            {
+                started |= StartNamedFrameNavigations(frame.FrameId, frame.State);
+            }
             if (frame.State.PendingNavigation is not { } pending)
             {
                 continue;
             }
             frame.State.PendingNavigation = null;
-            if (!string.Equals(pending.Method, "GET", StringComparison.OrdinalIgnoreCase)
-                || !Uri.TryCreate(frame.Url, UriKind.Absolute, out Uri? baseUri)
+            if (!Uri.TryCreate(frame.Url, UriKind.Absolute, out Uri? baseUri)
                 || !Uri.TryCreate(baseUri, pending.Url, out Uri? target)
                 || NavigationPolicy.RefusesPageInitiated(pending, target.AbsoluteUri))
             {
                 continue;
             }
-            JsonNode? moved = EvaluateHostIn(
+            started |= LoadIntoFrame(
                 frame.ParentFrameId,
-                $"__obscura_host.navigateFrame({frame.FrameId.ToString(CultureInfo.InvariantCulture)}, "
-                + $"{JsonSerializer.Serialize(target.AbsoluteUri)})");
-            started |= moved?.GetValueKind() == JsonValueKind.True;
+                $"__obscura_host.navigateFrame({frame.FrameId.ToString(CultureInfo.InvariantCulture)}, ",
+                target,
+                pending,
+                FrameStateOf(frame.ParentFrameId),
+                new FrameNavigationInitiator(frame.State, pending.UserActivated, pending.ReferrerPolicy));
         }
         return started;
     }
+
+    /// <summary>The navigations document <paramref name="frameId"/> queued for child frames by name.</summary>
+    private bool StartNamedFrameNavigations(uint frameId, PocketCalculatorState state)
+    {
+        PendingNavigation[] queued = [.. state.PendingFrameNavigations];
+        state.PendingFrameNavigations.Clear();
+        bool started = false;
+        foreach (PendingNavigation pending in queued)
+        {
+            if (pending.Target is not { } name
+                || !Uri.TryCreate(state.Url, UriKind.Absolute, out Uri? baseUri)
+                || !Uri.TryCreate(baseUri, pending.Url, out Uri? target)
+                || NavigationPolicy.RefusesPageInitiated(pending, target.AbsoluteUri))
+            {
+                continue;
+            }
+            started |= LoadIntoFrame(
+                frameId,
+                $"__obscura_host.navigateFrameNamed({JsonSerializer.Serialize(name)}, ",
+                target,
+                pending,
+                state,
+                new FrameNavigationInitiator(state, pending.UserActivated, pending.ReferrerPolicy));
+        }
+        return started;
+    }
+
+    /// <summary>
+    /// Evaluates <paramref name="call"/><c>url, method, body)</c> in the realm of
+    /// <paramref name="realmFrameId"/>, with the frame load it starts initiated by
+    /// <paramref name="initiator"/>.
+    /// </summary>
+    private bool LoadIntoFrame(
+        uint realmFrameId,
+        string call,
+        Uri target,
+        PendingNavigation pending,
+        PocketCalculatorState? realmState,
+        FrameNavigationInitiator initiator)
+    {
+        bool post = string.Equals(pending.Method, "POST", StringComparison.OrdinalIgnoreCase);
+        if (realmState is not null)
+        {
+            realmState.NextFrameNavigation = initiator;
+        }
+        try
+        {
+            JsonNode? moved = EvaluateHostIn(
+                realmFrameId,
+                call + JsonSerializer.Serialize(target.AbsoluteUri) + ", "
+                + (post ? "'POST', " + JsonSerializer.Serialize(pending.Body) : "'GET', ''") + ")");
+            return moved?.GetValueKind() == JsonValueKind.True;
+        }
+        finally
+        {
+            // The load took it synchronously; one that never started must not leave it
+            // for the next frame load of that realm.
+            if (realmState is not null)
+            {
+                realmState.NextFrameNavigation = null;
+            }
+        }
+    }
+
+    /// <summary>The state of document <paramref name="frameId"/>: the page's for 0.</summary>
+    private PocketCalculatorState? FrameStateOf(uint frameId) =>
+        frameId == 0 ? Js?.State : FrameById(frameId)?.State;
 
     /// <summary>URLs of the page's live child frames, in creation order.</summary>
     public IReadOnlyList<string> FrameUrls() => [.. Frames.Select(frame => frame.Url)];
