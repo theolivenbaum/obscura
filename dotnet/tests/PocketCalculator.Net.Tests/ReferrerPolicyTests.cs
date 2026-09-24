@@ -66,7 +66,7 @@ public sealed class ReferrerPolicyTests
     }
 
     [Fact]
-    public void DowngradesStripAndLocalhostIsTrustworthy()
+    public void DowngradesStripEvenToLoopback()
     {
         var secure = new Uri("https://user:pw@secure.test/p?x#y");
         Assert.Null(ReferrerPolicies.Referrer(secure, new Uri("http://plain.test/"), ReferrerPolicy.StrictOriginWhenCrossOrigin));
@@ -74,9 +74,10 @@ public sealed class ReferrerPolicyTests
         Assert.Equal(
             "https://secure.test/",
             ReferrerPolicies.Referrer(secure, new Uri("http://plain.test/"), ReferrerPolicy.Origin));
-        Assert.Equal(
-            "https://secure.test/",
-            ReferrerPolicies.Referrer(secure, new Uri("http://127.0.0.1:9/"), ReferrerPolicy.StrictOriginWhenCrossOrigin));
+        // Chromium 141 strips an https referrer to http loopback too: its network layer
+        // checks the scheme, not whether the target is potentially trustworthy.
+        Assert.Null(ReferrerPolicies.Referrer(secure, new Uri("http://127.0.0.1:9/"), ReferrerPolicy.StrictOriginWhenCrossOrigin));
+        Assert.Null(ReferrerPolicies.Referrer(secure, new Uri("http://localhost:9/"), ReferrerPolicy.StrictOrigin));
         // Userinfo and fragment never go out.
         Assert.Equal(
             "https://secure.test/p?x",

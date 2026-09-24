@@ -160,11 +160,12 @@ public static class ReferrerPolicies
             full = origin;
         }
 
-        // A downgrade is a TLS-protected referrer going to a target that is not
-        // potentially trustworthy; http://localhost counts as trustworthy.
+        // A downgrade is an https referrer going to a target that is not https. Chromium's
+        // network layer checks the scheme only (SchemeIsCryptographic), so http://localhost
+        // and http://127.0.0.1 are downgrades too although mixed content allows them
+        // (measured on Chromium 141 for images, fetch, navigations and Page.navigate).
         var downgrade = string.Equals(source.Scheme, "https", StringComparison.OrdinalIgnoreCase)
-            && !(string.Equals(target.Scheme, "https", StringComparison.OrdinalIgnoreCase)
-                || MixedContent.IsTrustworthyHost(UrlOrigin.Host(target)));
+            && !string.Equals(target.Scheme, "https", StringComparison.OrdinalIgnoreCase);
         var sameOrigin = UrlOrigin.SameOrigin(source, target);
         return policy switch
         {
