@@ -219,6 +219,14 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 }
             };
 
+            // Revocation: Chromium does no online OCSP/CRL checks for ordinary
+            // certificates (it relies on CRLSets pushed with the browser), and an online
+            // check would leak every visited host to the CA and stall on a slow
+            // responder. Both validation paths (the platform one here and the
+            // SSL_CERT_FILE / SSL_CERT_DIR one below) therefore use NoCheck; this states
+            // the SocketsHttpHandler default explicitly so the two cannot drift.
+            handler.SslOptions.CertificateRevocationCheckMode = X509RevocationMode.NoCheck;
+
             if (CertificateRoots.AnyCertEnvSet())
             {
                 handler.SslOptions.RemoteCertificateValidationCallback = ValidateWithConfiguredRoots;
@@ -308,7 +316,46 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
 
         using var leaf = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-        return custom.Build(leaf);
+
+        // SECURITY.md I8: the platform path requires the leaf to be usable for TLS server
+        // authentication, and so does Chromium; the custom-root path did not, so a
+        // clientAuth or code-signing certificate from a configured CA authenticated a
+        // server. The chain's ApplicationPolicy is not used for this because it also
+        // applies the policy to the intermediates, which Chromium does not require of a
+        // locally trusted root.
+        return HasServerAuthUsage(leaf) && custom.Build(leaf);
+    }
+
+    private const string ServerAuthOid = "1.3.6.1.5.5.7.3.1";
+    private const string AnyExtendedKeyUsageOid = "2.5.29.37.0";
+
+    /// <summary>
+    /// RFC 5280 4.2.1.12 as Chromium applies it to a TLS server leaf: no EKU extension
+    /// means any purpose; otherwise it must list serverAuth or anyExtendedKeyUsage.
+    /// </summary>
+    internal static bool HasServerAuthUsage(X509Certificate2 leaf)
+    {
+        foreach (var extension in leaf.Extensions)
+        {
+            if (extension.Oid?.Value != "2.5.29.37")
+            {
+                continue;
+            }
+
+            var usages = extension as X509EnhancedKeyUsageExtension
+                ?? new X509EnhancedKeyUsageExtension(extension, extension.Critical);
+            foreach (var oid in usages.EnhancedKeyUsages)
+            {
+                if (oid.Value is ServerAuthOid or AnyExtendedKeyUsageOid)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>GET <paramref name="url"/> with the navigation profile.</summary>

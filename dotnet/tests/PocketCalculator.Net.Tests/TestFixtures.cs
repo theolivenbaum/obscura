@@ -374,6 +374,7 @@ internal sealed class PrivateCaHttpsFixture : IDisposable
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly X509Certificate2 _serverCertificate;
+    private Func<string, string>? _respond;
 
     private PrivateCaHttpsFixture(TcpListener listener, X509Certificate2 serverCertificate, int port, string caPem)
     {
@@ -387,7 +388,12 @@ internal sealed class PrivateCaHttpsFixture : IDisposable
 
     internal string CaPem { get; }
 
-    internal static PrivateCaHttpsFixture Serve()
+    /// <summary>
+    /// Serve over TLS with a leaf issued by a fresh private CA. <paramref name="leafEku"/>
+    /// is the leaf's extended key usage OIDs (null: serverAuth; empty: no EKU extension),
+    /// and <paramref name="respond"/> maps the request text to a raw HTTP response.
+    /// </summary>
+    internal static PrivateCaHttpsFixture Serve(string[]? leafEku = null, Func<string, string>? respond = null)
     {
         using var caKey = RSA.Create(2048);
         var caRequest = new CertificateRequest(
@@ -416,8 +422,17 @@ internal sealed class PrivateCaHttpsFixture : IDisposable
             new X509KeyUsageExtension(
                 X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment,
                 true));
-        leafRequest.CertificateExtensions.Add(
-            new X509EnhancedKeyUsageExtension([new Oid("1.3.6.1.5.5.7.3.1")], false));
+        leafEku ??= ["1.3.6.1.5.5.7.3.1"];
+        if (leafEku.Length != 0)
+        {
+            var usages = new OidCollection();
+            foreach (var oid in leafEku)
+            {
+                usages.Add(new Oid(oid));
+            }
+
+            leafRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(usages, false));
+        }
         var sanBuilder = new SubjectAlternativeNameBuilder();
         sanBuilder.AddIpAddress(IPAddress.Loopback);
         leafRequest.CertificateExtensions.Add(sanBuilder.Build());
@@ -442,6 +457,7 @@ internal sealed class PrivateCaHttpsFixture : IDisposable
             serverCertificate,
             port,
             caCert.ExportCertificatePem());
+        fixture._respond = respond;
         _ = Task.Run(fixture.RunAsync);
         return fixture;
     }
@@ -474,11 +490,11 @@ internal sealed class PrivateCaHttpsFixture : IDisposable
 
                             try
                             {
-                                var buffer = new byte[1024];
-                                _ = await tls.ReadAsync(buffer, _shutdown.Token).ConfigureAwait(false);
+                                var buffer = new byte[4096];
+                                var read = await tls.ReadAsync(buffer, _shutdown.Token).ConfigureAwait(false);
                                 const string body = "private ca ok";
-                                var response =
-                                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                                var response = _respond?.Invoke(Encoding.ASCII.GetString(buffer, 0, read))
+                                    ?? "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
                                     + $"content-length: {body.Length}\r\nconnection: close\r\n\r\n{body}";
                                 await tls.WriteAsync(Encoding.ASCII.GetBytes(response), _shutdown.Token)
                                     .ConfigureAwait(false);
