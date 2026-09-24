@@ -254,8 +254,8 @@ Security follow-ups found while porting (not upstream fixes):
       re-dispatch a trusted event it received (check Chromium first)
 - [x] Host snippets build events with the page's current `Event` / `MouseEvent`
       constructors, which a page can replace; capture them at bootstrap
-- [ ] Every `__obscura_*` name is still detectable with `'name' in window`; the hide list
-      only filters reflection
+- [x] Every `__obscura_*` name is still detectable with `'name' in window`; the hide list
+      only filters reflection (moved into closure state, I10)
 - [x] Referrer policy: `<meta name=referrer>`, `referrerpolicy` and `rel=noreferrer` are not
       supported (Chromium honours all three). Still not implemented: meta refresh and
       followed `window.open`. Chromium 141's default does not block third-party cookies,
@@ -391,7 +391,20 @@ Found during the review, not from upstream:
     Origin and immutable response headers; referrer policy (header, meta,
     `referrerpolicy`, `rel=noreferrer`, fetch options, stylesheets, frames,
     `Page.navigate`); CHIPS partitioned cookies and the site for cookies in frames
-  - [ ] ClearScript's non-configurable `EngineInternal` and the `__obscura_*` names (I10)
+  - [x] the shim's engine globals are closure state reached as `__obscura_host.vars`;
+    bindings install without a bridge global; module completion uses a random
+    top-level `const` (I10)
+  - [ ] ClearScript's non-configurable `EngineInternal` stays visible to `in`/`typeof`;
+    the global's shape differs from Chromium's (Object-based prototype chain, own index
+    getters `0`..`49`, own `addEventListener`/`dispatchEvent`/`constructor`,
+    `ContentIndex`, `FontFaceSet`, `SharedArrayBuffer`, `webkitAudioContext`)
+  - [x] child frames: init scripts and bindings run in frames, a frame's binding call
+    reports the frame's context, init scripts belong to the target that added them, a
+    frame's own GET navigation is followed, a click that loads a new document emits
+    the full navigation sequence
+  - [ ] found on the way: an awaited `Runtime.evaluate`/`callFunctionOn` that calls an
+    exposed binding deadlocks the connection (main frame too); a frame's POST
+    navigation is dropped
   - [ ] network, found on the way: CDP `Network.getCookies` returns every cookie
     (Chromium filters by URL and partition); `document.cookie` in about:srcdoc and
     about:blank frames uses the about: URL; a partitioned `setCookie` for an http URL
@@ -1287,6 +1300,11 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
 
+- **I10 (engine globals):** Rust keeps the shim's state and host-set values as `globalThis.__obscura_*` / `__*` / `_*` globals and calls `__obscura_init`, `__markParserScripts`, `__documentReadyState__` and `__currentScriptNid` by name. The port keeps them in a closure object the host reaches as `__obscura_host.vars` (HostScript), and page init is `__obscura_host.init`. Only ClearScript's non-configurable `EngineInternal` remains, hidden from the global's reflection APIs; `in` and `typeof` still see it.
+- **I10 (bindings):** Rust's `Runtime.addBinding` shim calls the page-visible `__obscura_binding_called`. The port files the binding name (`BindingPreload`) and installs a native-looking function that closes over `op_binding_called`; no bridge global exists.
+- **I10 (modules):** module completion is recorded through a randomly named top-level `const`, not a `__obscura_moduleSettled_N` global.
+- **Child frames:** Rust processes only the page's own navigation and reports every binding call with the main context. The port follows a frame's own GET navigation by reloading its iframe (a POST frame navigation is dropped), reports a frame's binding call with the frame's default context, scopes init scripts and bindings to the target that registered them (removing them when it closes), and emits the full navigation sequence (new loaderId, lifecycle, loadEventFired) for a click that loads a new document.
+- **L10 (host invocation):** the by-value serializer is invoked as a method, because ClearScript routes a property-obtained function through its JS `invokeMethod`, which uses the page's `Array.from`/`apply`. Markdown escaping, the world bridge, the iframe loader, link referrer policy, the linked-stylesheet script, the form-state mirror, `op_dom` command checks and lifecycle events use built-ins captured at bootstrap.
 - **Public suffix list (L6):** the full Mozilla PSL (ICANN and PRIVATE) is embedded, as the Rust `psl` crate does; the earlier curated C# table is gone. As in `psl`, a TLD not on the list gets the implicit `*` rule. Chromium instead gives a host under an unknown TLD no registrable domain; the implicit rule is kept so `.test` and `.internal` hosts keep their current site and cookie Domain behaviour.
 - **SSL_CERT_FILE/SSL_CERT_DIR roots (I8):** the leaf must allow serverAuth (or anyExtendedKeyUsage, or have no EKU), as on the platform path and in Chromium. Revocation is not checked on either path (NoCheck, as Chromium does no online revocation checks).
 - **HSTS and mixed content (I7):** Rust has neither. Each BrowserContext's HTTP client keeps an in-memory HSTS store filled from Strict-Transport-Security with Chromium's rules (no IP hosts, one-year cap, first header only); http requests to known hosts are upgraded and reported as a redirect hop; there is no preload list. Requests from https documents to insecure http hosts (loopback and localhost are trustworthy) are blocked, except images, which are upgraded to https without an http fallback; top-level navigations are exempt. Blocked and upgraded requests are reported on the Runtime console with Chromium's text. `POCKETCALCULATOR_ALLOW_INSECURE_CONTENT=1` / `AllowInsecureContent` turns the check off. Differences from Chromium: XHR and worker loads are reported as 'resource', audio and video are not modelled, only the requesting document's scheme is checked (not its ancestors'), and the fetch rejection carries the reason after 'Failed to fetch'.

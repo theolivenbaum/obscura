@@ -59,12 +59,16 @@ Still open after the fixes:
   memory per isolate (1 GiB) and DOM data per document (512 MiB), detached DOM
   nothing holds is garbage-collected, and `op_fetch_url` writes its result once. The
   per-process limit (`POCKETCALCULATOR_MAX_PROCESS_BYTES`) is opt-in.
-- **Remaining page-writable surfaces** (L10): shim internals still call some
-  page-replaceable built-ins (string and regex methods, `Array.prototype.push`,
-  `Function.prototype.call`). Host decisions and host snippets no longer read page
-  globals, and by-value results no longer call a page's `toJSON`.
-- **Detectability** (I10): ClearScript's `EngineInternal` global and the
-  `__obscura_*` names are still visible to `in` and `getOwnPropertyNames`.
+- **Remaining page-replaceable built-ins** (L10): some shim internals that no host
+  decision reads still call page-replaceable built-ins. Host decisions, host
+  snippets, the by-value serializer, markdown escaping and the world bridge no longer
+  do, and by-value results no longer call a page's `toJSON`.
+- **Detectability** (I10): the shim's state and host-set values moved off the global
+  object into closure state, so no `__obscura_*`, `__*` or `_*` name is left on it.
+  ClearScript's `EngineInternal` is defined non-configurable before any host code
+  runs; it is hidden from the global's reflection APIs, but `in` and `typeof` still
+  see it. The global's API shape still differs from Chromium's in places (its
+  prototype chain, and a few own properties).
 - **Not modelled:** the HSTS preload list; revocation checks (none, as in Chromium);
   Chromium's per-partition cookie size limits; the `srcdoc` attribute.
 
@@ -381,7 +385,7 @@ contradict an entry `todo.md` marks done say so.
 | L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | fixed: host code reads no page-writable value; some shim-internal string and array calls open |
 | L11 | Low | Browser | Latent integer overflow in `RgbImage.Decode` | read; not reachable today | fixed |
 | L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read | fixed: work inside ops is cancelled; opt-in exit (`POCKETCALCULATOR_HANG_EXIT_MS`) remains the backstop |
-| I1 to I10 | Info | various | See [Informational](#informational) | | I1 to I9 fixed; I10 open |
+| I1 to I10 | Info | various | See [Informational](#informational) | | fixed; `EngineInternal` stays visible to `in` (I10) |
 
 ### Critical
 
