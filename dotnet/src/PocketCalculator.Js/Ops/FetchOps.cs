@@ -392,6 +392,15 @@ public static partial class FetchOps
         if (!internalLoad)
         {
             mode = ScriptRequestMode(mode);
+
+            // Fetch forbids CONNECT, TRACE and TRACK in any case; the shim throws
+            // Chromium's TypeError first, and this holds when the op is reached without it.
+            // Rust sent them.
+            if (IsForbiddenMethod(method))
+            {
+                throw new OpException($"'{method}' HTTP method is unsupported.");
+            }
+
             if (string.Equals(mode, "no-cors", StringComparison.Ordinal) && !NoCorsAllowsMethod(method))
             {
                 throw new OpException($"'{method}' is unsupported in no-cors mode.");
@@ -676,6 +685,7 @@ public static partial class FetchOps
                 redirectsFollowed = 1;
             }
             var crossedOrigin = isCrossOrigin;
+            var taintedOrigin = false;
             HttpResponseMessage? response = null;
 
             // An iframe's document load reaches this transport with mode "navigate".
@@ -710,9 +720,18 @@ public static partial class FetchOps
                                 + $"the request origin '{pageOrigin}'");
                     }
 
-                    if (currentIsCrossOrigin && frameNavigation is null)
+                    // Fetch "append a request Origin header", as Chromium sends it: on a
+                    // CORS request to another origin, and on any request whose method is
+                    // not GET or HEAD (a same-origin POST included). Deviation from Rust,
+                    // which sent Origin on every cross-origin hop, no-cors GET and HEAD
+                    // included, and never on a same-origin POST.
+                    // After a redirect from one foreign origin to another the origin is
+                    // tainted and serializes as "null".
+                    if (frameNavigation is null
+                        && ((isCors && crossedOrigin)
+                            || (currentMethod != HttpMethod.Get && currentMethod != HttpMethod.Head)))
                     {
-                        request.Headers.TryAddWithoutValidation("Origin", pageOrigin);
+                        request.Headers.TryAddWithoutValidation("Origin", taintedOrigin ? "null" : pageOrigin);
                     }
 
                     if (frameNavigation is not null
@@ -745,8 +764,10 @@ public static partial class FetchOps
                         }
                     }
 
-                    // Send a default User-Agent on fetch()/XHR requests; UA-gated
-                    // servers reject a request with none. Honor an explicit override.
+                    // Send the context's User-Agent on fetch()/XHR requests; UA-gated
+                    // servers reject a request with none. Page script cannot replace it
+                    // (FilterScriptRequestHeaders drops it, as Chromium does); an
+                    // interception rewrite or an internal load's header still can.
                     var hasUserAgent = false;
                     foreach (var key in currentHeaders.Keys)
                     {
@@ -759,7 +780,7 @@ public static partial class FetchOps
 
                     if (!hasUserAgent)
                     {
-                        request.Headers.TryAddWithoutValidation("User-Agent", DefaultUserAgent);
+                        request.Headers.TryAddWithoutValidation("User-Agent", httpClient?.UserAgent ?? DefaultUserAgent);
                     }
 
                     if (currentBody.Length != 0)
@@ -882,6 +903,8 @@ public static partial class FetchOps
                     var crossesOrigin = !string.Equals(
                         baseUrl.AsciiOrigin, nextUrl.AsciiOrigin, StringComparison.Ordinal);
                     SanitizeRedirectHeaders(currentHeaders, crossesOrigin, downgradedToGet);
+                    taintedOrigin |= crossesOrigin
+                        && !string.Equals(baseUrl.AsciiOrigin, pageOrigin, StringComparison.Ordinal);
 
                     if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var from))
                     {
@@ -1275,6 +1298,12 @@ public static partial class FetchOps
 
         return headers;
     }
+
+    /// <summary>Fetch's forbidden methods: <c>CONNECT</c>, <c>TRACE</c> and <c>TRACK</c>, in any case.</summary>
+    internal static bool IsForbiddenMethod(string method) =>
+        method.Equals("CONNECT", StringComparison.OrdinalIgnoreCase)
+        || method.Equals("TRACE", StringComparison.OrdinalIgnoreCase)
+        || method.Equals("TRACK", StringComparison.OrdinalIgnoreCase);
 
     private static HttpMethod ParseMethod(string method)
     {

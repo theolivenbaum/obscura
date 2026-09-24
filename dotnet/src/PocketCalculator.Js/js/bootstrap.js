@@ -7953,6 +7953,26 @@ function _requestMode(initMode, fallback, op) {
   }
   return mode;
 }
+// Fetch's method checks, as Chromium applies them in fetch(), the Request
+// constructor and XHR open(): a method must be a token, CONNECT/TRACE/TRACK are
+// refused in any case, and only DELETE/GET/HEAD/OPTIONS/POST/PUT are uppercased
+// ('patch' stays 'patch'). Rust uppercased every method and sent any of them.
+// Returns the normalized method, or an error kind and message.
+const _NORMALIZED_METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT']);
+function _checkMethod(method) {
+  const m = String(method);
+  if (!_HTTP_TOKEN_RE.test(m)) return { error: 'invalid', message: "'" + m + "' is not a valid HTTP method." };
+  const upper = m.toUpperCase();
+  if (upper === 'CONNECT' || upper === 'TRACE' || upper === 'TRACK') {
+    return { error: 'forbidden', message: "'" + m + "' HTTP method is unsupported." };
+  }
+  return { method: _NORMALIZED_METHODS.has(upper) ? upper : m };
+}
+function _normalizeMethod(method, where) {
+  const checked = _checkMethod(method);
+  if (checked.error) throw new TypeError(where + ": " + checked.message);
+  return checked.method;
+}
 // A CORS-safelisted method after Fetch's method normalization.
 function _noCorsMethodAllowed(method) {
   const upper = String(method).toUpperCase();
@@ -7971,7 +7991,9 @@ globalThis.fetch = async (input, init = {}) => {
   // whether the input is absolute. _resolveUrl leaves absolute URLs
   // unchanged and keeps unparseable input as-is.
   url = _resolveUrl(url);
-  const method = init.method || (request ? request.method : "GET");
+  const method = _normalizeMethod(
+    init.method !== undefined ? init.method : (request ? request.method : "GET"),
+    "Failed to execute 'fetch' on 'Window'");
   const headers = init.headers !== undefined ? init.headers : (request ? request.headers : undefined);
   const fetchMode = _requestMode(init.mode, request ? request.mode : "cors", 'fetch');
   // Fetch's Request constructor, which fetch() runs on its arguments: a no-cors
@@ -8047,6 +8069,10 @@ const _HEADERS_FORBIDDEN_NAMES = new Set([
   'connection', 'content-length', 'cookie', 'cookie2', 'date', 'dnt', 'expect',
   'host', 'keep-alive', 'origin', 'referer', 'set-cookie', 'te', 'trailer',
   'transfer-encoding', 'upgrade', 'via',
+  // Not in Fetch's list any more, but Chromium still drops it from a Request's
+  // headers and ignores it in XHR setRequestHeader (measured on Chromium 141):
+  // the browser's User-Agent always goes out. Rust let script replace it.
+  'user-agent',
 ]);
 const _HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 function _isForbiddenRequestHeader(name, value) {
@@ -8289,7 +8315,14 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   open(method, url, async_) {
-    this._method = method;
+    // XHR open(): an invalid method is a SyntaxError and a forbidden one a
+    // SecurityError, thrown here as in Chromium; Rust accepted both.
+    const checked = _checkMethod(method);
+    if (checked.error) {
+      throw new DOMException("Failed to execute 'open' on 'XMLHttpRequest': " + checked.message,
+        checked.error === 'invalid' ? 'SyntaxError' : 'SecurityError');
+    }
+    this._method = checked.method;
     this._url = url;
     this._headers = {};
     this._responseHeaders = {};
@@ -8579,7 +8612,7 @@ if (typeof Request === 'undefined') {
       else if (inputRequest) { this.url = inputRequest.url; init = { ...inputRequest, ...init }; }
       else if (typeof URL === 'function' && input instanceof URL) { this.url = input.href; }
       else { this.url = input?.url || input?.href || String(input); }
-      this.method = (init.method || 'GET').toUpperCase();
+      this.method = _normalizeMethod(init.method !== undefined ? init.method : 'GET', "Failed to construct 'Request'");
       this.mode = _requestMode(init.mode, 'cors', 'Request');
       // A no-cors Request refuses a non-safelisted method and guards its headers
       // (see _headersGuards); Rust accepted both.
