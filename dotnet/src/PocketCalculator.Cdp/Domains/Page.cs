@@ -1120,18 +1120,26 @@ public static partial class Page
                 double pageY = 0.0;
                 double contentWidth = width;
                 double contentHeight = height;
-                JsonArray? values = JsonExt.AsJsonArray(ctx.GetSessionPageMut(sessionId)?.Evaluate(
-                    "[window.scrollX, window.scrollY, "
-                    + "document.documentElement && document.documentElement.scrollWidth, "
-                    + "document.documentElement && document.documentElement.scrollHeight]"));
+                // DEVIATION from page.rs, which reads window.scrollX/scrollY and the root's
+                // scrollWidth/scrollHeight through whatever the page left on its globals and
+                // prototypes (SECURITY.md L10): the offset is the host's, and the extent is
+                // read with the accessors bootstrap defined.
+                BrowserPage? live = ctx.GetSessionPageMut(sessionId);
+                if (live is not null)
+                {
+                    (float scrollX, float scrollY) = live.ScreenshotScrollOffset();
+                    pageX = scrollX;
+                    pageY = scrollY;
+                }
+                JsonArray? values = JsonExt.AsJsonArray(live?.EvaluateHost(
+                    "(function () { var h = __obscura_host.dom; var root = h.documentElement();"
+                    + " return root ? [h.get(root, 'scrollWidth'), h.get(root, 'scrollHeight')] : []; })()"));
                 if (values is not null)
                 {
-                    pageX = values.Count > 0 ? values[0].AsF64() ?? 0.0 : 0.0;
-                    pageY = values.Count > 1 ? values[1].AsF64() ?? 0.0 : 0.0;
-                    contentWidth = values.Count > 2 && values[2].AsF64() is { } cw && cw > 0.0
+                    contentWidth = values.Count > 0 && values[0].AsF64() is { } cw && cw > 0.0
                         ? cw
                         : width;
-                    contentHeight = values.Count > 3 && values[3].AsF64() is { } ch && ch > 0.0
+                    contentHeight = values.Count > 1 && values[1].AsF64() is { } ch && ch > 0.0
                         ? ch
                         : height;
                 }

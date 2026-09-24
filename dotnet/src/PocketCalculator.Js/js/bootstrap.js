@@ -39,6 +39,7 @@ const _stringTrim = _uncurry(String.prototype.trim);
 const _stringIndexOf = _uncurry(String.prototype.indexOf);
 const _stringLastIndexOf = _uncurry(String.prototype.lastIndexOf);
 const _objectHasOwn = Object.hasOwn;
+const _reflectApply = Reflect.apply;
 const _objectKeys = Object.keys;
 const _objectCreate = Object.create;
 const _objectFreeze = Object.freeze;
@@ -64,6 +65,8 @@ let Event, CustomEvent, MouseEvent, KeyboardEvent, FocusEvent, InputEvent, Error
 let _elementDispatchImpl = null, _documentDispatchImpl = null, _nodeDispatchImpl = null, _windowDispatchImpl = null;
 let _elementProtoAtBoot = null, _documentProtoAtBoot = null;
 const _isPrototypeOf = _uncurry(Object.prototype.isPrototypeOf);
+const _Uint8ArrayAtBoot = Uint8Array;
+let _atobAtBoot = null;
 function _dispatchImplFor(target) {
   if (target === globalThis) return _windowDispatchImpl;
   if (target === null || typeof target !== 'object' || typeof target._nid !== 'number' || !_nodeDispatchImpl) return null;
@@ -87,6 +90,17 @@ function _bubble(parent, event) {
 // getElementsByTagName, hit testing, label lookup) must not call a page's replacement.
 let _queryImpls = null;
 let _fragmentProtoAtBoot = null;
+// The focused element and the CDP click fallback target. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, which keeps them in the page-writable globals
+// __obscura_focused and __obscura_click_target: document.activeElement, and so CDP typing
+// and the target of a click that hits nothing, went wherever page script pointed them
+// (SECURITY.md L10). An isolated world reads and writes the page realm's focus through
+// _focusBridge (see _installIsolatedWorldBridges).
+let _focusedElement = null;
+let _clickTarget = null;
+let _focusBridge = null;
+function _getFocused() { return _focusBridge ? _focusBridge.get() : _focusedElement; }
+function _setFocused(node) { if (_focusBridge) _focusBridge.set(node); else _focusedElement = node; }
 function _queryImpl(root, all) {
   if (!_queryImpls || root === null || typeof root !== 'object' || typeof root._nid !== 'number') return null;
   if (_isPrototypeOf(_elementProtoAtBoot, root)) return all ? _queryImpls.elementAll : _queryImpls.element;
@@ -236,7 +250,7 @@ globalThis.removeEventListener = function(type, fn) {
 globalThis.dispatchEvent = function(event) {
   if (!event) return true;
   const handlers = globalThis.__windowListeners[event.type] || [];
-  for (const h of handlers) { try { h.call(globalThis, event); } catch(e) { console.error(e); } }
+  for (let i = 0; i < handlers.length; i++) { try { _reflectApply(handlers[i], globalThis, [event]); } catch(e) { console.error(e); } }
   return !event.defaultPrevented;
 };
 
@@ -304,7 +318,6 @@ const _dom = (cmd, a1, a2) => {
 
 // Document.prototype.querySelector as bootstrap left it; see Document's head/body.
 let _documentQuerySelector = null;
-const _reflectApply = Reflect.apply;
 const _documentQuery = (doc, selector) =>
   _documentQuerySelector ? _reflectApply(_documentQuerySelector, doc, [selector]) : _qs(doc, selector);
 
@@ -698,11 +711,11 @@ async function _loadLinkedStylesheet(c) {
   // so property assignments made before insertion are reflected onto them. HTMLLinkElement
   // reflects all three in Chromium.
   if (!c.getAttribute('rel') && c.rel) c.setAttribute('rel', String(c.rel));
-  if (Object.prototype.hasOwnProperty.call(c, 'media')) {
+  if (_objectHasOwn(c, 'media')) {
     if (c.media) c.setAttribute('media', String(c.media));
     else c.removeAttribute('media');
   }
-  if (Object.prototype.hasOwnProperty.call(c, 'disabled')) {
+  if (_objectHasOwn(c, 'disabled')) {
     if (c.disabled) c.setAttribute('disabled', '');
     else c.removeAttribute('disabled');
   }
@@ -1388,7 +1401,7 @@ function _schedulerNormalizeOptions(options) {
   const rawPriority = dictionary.priority;
   if (rawPriority !== undefined) {
     priority = String(rawPriority);
-    if (!Object.prototype.hasOwnProperty.call(_schedulerPriorityRank, priority)) {
+    if (!_objectHasOwn(_schedulerPriorityRank, priority)) {
       throw new TypeError("The provided value '" + priority + "' is not a valid enum value of type TaskPriority.");
     }
   }
@@ -1978,8 +1991,8 @@ function _eventTargetDispatch(target, event) {
     if (entry.once) _eventTargetRemove(target, event.type, entry.callback, entry.capture);
     const callback = entry.callback;
     try {
-      if (typeof callback === "function") callback.call(target, event);
-      else callback.handleEvent.call(callback, event);
+      if (typeof callback === "function") _reflectApply(callback, target, [event]);
+      else _reflectApply(callback.handleEvent, callback, [event]);
     } catch (error) {
       console.error(error);
     }
@@ -2071,7 +2084,7 @@ function __prepareInsertedScript(script) {
     // order; default/async=true scripts fetch concurrently and execute as soon
     // as each response is ready.
     const explicitlyInOrder = !isModule
-      && Object.prototype.hasOwnProperty.call(script, 'async')
+      && _objectHasOwn(script, 'async')
       && script.async === false;
     if (!isModule) {
       // Fetch all dynamically inserted classics immediately. `async=false`
@@ -2846,16 +2859,19 @@ function _htmlAttrName(el, n) {
 // textarea.
 const _LABELABLE = 'button,input:not([type=hidden]),meter,output,progress,select,textarea';
 function _labeledControl(label) {
-  if (!label || label.tagName !== 'LABEL') return null;
+  if (!label || _elGet('tagName', label) !== 'LABEL') return null;
   // A present `for` attribute means association by ID only; an empty value
   // associates nothing (no fallback to a descendant).
-  const forId = label.getAttribute ? label.getAttribute('for') : null;
+  const forId = label.getAttribute ? _elCall('getAttribute', label, ['for']) : null;
   if (forId !== null && forId !== undefined) {
     if (forId === '') return null;
-    const doc = label.ownerDocument || globalThis.document;
-    const el = doc && doc.getElementById ? doc.getElementById(forId) : null;
+    const doc = _elGet('ownerDocument', label) || globalThis.document;
+    const el = !doc ? null
+      : (_bootEl !== null && _isPrototypeOf(_documentProtoAtBoot, doc))
+        ? _reflectApply(_bootEl.getElementById, doc, [forId])
+        : (doc.getElementById ? doc.getElementById(forId) : null);
     if (!el) return null;
-    return el.matches && el.matches(_LABELABLE) ? el : null;
+    return el.matches && _elCall('matches', el, [_LABELABLE]) ? el : null;
   }
   return label.querySelector ? _qs(label, _LABELABLE) : null;
 }
@@ -2899,38 +2915,60 @@ const _FIELDSET_DISABLEABLE = 'button,input,select,textarea';
 // fieldset's legend and still be disabled by an outer fieldset. Checking the
 // first legend child, not the first legend descendant, keeps a legend wrapped
 // in a div from granting the exemption.
+// These run for the CDP click and MCP paths through __obscura_host, so they use the
+// element members bootstrap defined (_bootEl, set by _captureDispatchImpls), not what the
+// page has put on the prototypes since. DEVIATION from crates/obscura-js/js/bootstrap.js,
+// where a page that replaced Element.prototype.click received the trusted-activation
+// token and matches/closest decided what a CDP click activates (SECURITY.md L10).
+let _bootEl = null;
+function _isBootElement(el) {
+  return _bootEl !== null && el !== null && typeof el === 'object' && _isPrototypeOf(_elementProtoAtBoot, el);
+}
+function _elCall(name, el, args) {
+  const own = _isBootElement(el) ? _bootEl[name] : undefined;
+  return _reflectApply(typeof own === 'function' ? own : el[name], el, args);
+}
+function _elGet(name, el) {
+  const own = _isBootElement(el) ? _bootEl[name] : undefined;
+  return typeof own === 'function' ? _reflectApply(own, el, []) : el[name];
+}
 function _isActuallyDisabled(el) {
-  if (!el || !el.matches || !el.matches(_DISABLEABLE)) return false;
-  if (el.disabled || (el.hasAttribute && el.hasAttribute('disabled'))) return true;
-  if (!el.matches(_FIELDSET_DISABLEABLE)) return false;
+  if (!el || !el.matches || !_elCall('matches', el, [_DISABLEABLE])) return false;
+  if (el.disabled || _elCall('hasAttribute', el, ['disabled'])) return true;
+  if (!_elCall('matches', el, [_FIELDSET_DISABLEABLE])) return false;
   let child = el;
-  let parent = el.parentElement;
+  let parent = _elGet('parentElement', el);
   while (parent) {
-    if (parent.tagName === 'FIELDSET' && parent.hasAttribute('disabled')) {
+    if (_elGet('tagName', parent) === 'FIELDSET' && _elCall('hasAttribute', parent, ['disabled'])) {
       let firstLegend = null;
-      for (let c = parent.firstElementChild; c; c = c.nextElementSibling) {
-        if (c.tagName === 'LEGEND') { firstLegend = c; break; }
+      for (let c = _elGet('firstElementChild', parent); c; c = _elGet('nextElementSibling', c)) {
+        if (_elGet('tagName', c) === 'LEGEND') { firstLegend = c; break; }
       }
       if (child !== firstLegend) return true;
     }
     child = parent;
-    parent = parent.parentElement;
+    parent = _elGet('parentElement', parent);
   }
   return false;
 }
 
+const _forwardingHas = _uncurry(WeakSet.prototype.has);
+const _forwardingAdd = _uncurry(WeakSet.prototype.add);
+const _forwardingDelete = _uncurry(WeakSet.prototype.delete);
 function _activateLabel(label, control, trusted) {
-  if (!label || !control || _forwardingLabels.has(label)) return false;
-  if (_isActuallyDisabled(control) || typeof control.click !== 'function') return false;
-  _forwardingLabels.add(label);
-  try { control.click(trusted ? _TRUSTED_ACTIVATION : undefined); }
-  finally { _forwardingLabels.delete(label); }
+  if (!label || !control || _forwardingHas(_forwardingLabels, label)) return false;
+  if (_isActuallyDisabled(control)) return false;
+  const click = _isBootElement(control) ? _bootEl.click : control.click;
+  if (typeof click !== 'function') return false;
+  _forwardingAdd(_forwardingLabels, label);
+  try { _reflectApply(click, control, [trusted ? _TRUSTED_ACTIVATION : undefined]); }
+  finally { _forwardingDelete(_forwardingLabels, label); }
   return true;
 }
 // The CDP click path runs its own JS snippet, so it reaches the same rules
 // through these helpers rather than restating the selectors.
 function _interactiveHost(el) {
-  return el && el.closest ? el.closest(_INTERACTIVE) : null;
+  return el && el.closest ? _elCall('closest', el, [_INTERACTIVE]) : null;
 }
 // DEVIATION from crates/obscura-js/js/bootstrap.js, which publishes these as frozen
 // __obscura_activateLabel / __obscura_isDisabled / __obscura_labeledControl /
@@ -3810,13 +3848,13 @@ class Element extends Node {
     const inlineFn = this[handlerName] || this._resolveInlineHandler(handlerName);
     if (typeof inlineFn === 'function') {
       try {
-        const ret = inlineFn.call(this, event);
+        const ret = _reflectApply(inlineFn, this, [event]);
         if (ret === false) event.preventDefault();
       } catch(e) { console.error(e); }
     }
     const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
     for (const h of handlers) {
-      try { h.call(this, event); } catch(e) { console.error(e); }
+      try { _reflectApply(h, this, [event]); } catch(e) { console.error(e); }
       if (event._immediatePropagationStopped) break;
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
@@ -3828,7 +3866,7 @@ class Element extends Node {
     // name = 'onclick' / 'onsubmit' / etc. Compile the content attribute
     // as a function body on first read and cache it on the instance.
     const cache = this.__inlineHandlerCache || (this.__inlineHandlerCache = {});
-    if (Object.prototype.hasOwnProperty.call(cache, name)) return cache[name];
+    if (_objectHasOwn(cache, name)) return cache[name];
     const src = this.getAttribute && this.getAttribute(name);
     if (!src) { cache[name] = null; return null; }
     try {
@@ -3943,8 +3981,8 @@ class Element extends Node {
       }
     }
   }
-  focus() { globalThis.__obscura_focused = this; globalThis.__obscura_click_target = this; }
-  blur() { if (globalThis.__obscura_focused === this) globalThis.__obscura_focused = null; }
+  focus() { _setFocused(this); _clickTarget = this; }
+  blur() { if (_getFocused() === this) _setFocused(null); }
 
   // --- Popover API (HTML "popover") ---------------------------------------
   // Read the popover content attribute case-insensitively. The HTML parser
@@ -4931,7 +4969,7 @@ class Element extends Node {
     }
   }
   getBoundingClientRect() {
-    globalThis.__obscura_click_target = this;
+    _clickTarget = this;
     // Real layout when the render feature is compiled in: ask the Rust layout
     // cache for this element's border box. The op is absent in the default
     // build, so probe with typeof and fall through to the synthetic rect below.
@@ -5015,7 +5053,7 @@ class Element extends Node {
   get ariaSelected() { return this.getAttribute('aria-selected'); }
   set ariaSelected(v) { if (v == null) this.removeAttribute('aria-selected'); else this.setAttribute('aria-selected', String(v)); }
   scrollIntoView(arg) {
-    globalThis.__obscura_click_target = this;
+    _clickTarget = this;
     const rect = this.getBoundingClientRect();
     // A viewport-fixed subtree is already expressed in the viewport's
     // coordinate space and cannot be brought closer by moving the document.
@@ -5162,7 +5200,7 @@ function _convertNodes(nodes) {
 (function installElementReflectors() {
   const P = Element.prototype;
   const def = (name, get, set) => {
-    if (Object.prototype.hasOwnProperty.call(P, name)) return; // never clobber an existing member
+    if (_objectHasOwn(P, name)) return; // never clobber an existing member
     Object.defineProperty(P, name, { get, set, enumerable: true, configurable: true });
   };
   // WHATWG "rules for parsing integers"; returns a JS number or null on failure.
@@ -5651,7 +5689,7 @@ class Document extends Node {
   dispatchEvent(event) {
     if (!event) return true;
     const handlers = (this._listeners?.[event.type] || []).slice();
-    for (const h of handlers) { try { h.call(this, event); } catch(e) { console.error('document event error:', e); } }
+    for (let i = 0; i < handlers.length; i++) { try { _reflectApply(handlers[i], this, [event]); } catch(e) { console.error('document event error:', e); } }
     return !event.defaultPrevented;
   }
   createTreeWalker(root, whatToShow, filter) {
@@ -5853,7 +5891,7 @@ class Document extends Node {
     };
   }
   getSelection() { return this.defaultView ? _selectionFor(this) : null; }
-  get activeElement() { return globalThis.__obscura_focused || this.body; }
+  get activeElement() { return _getFocused() || this.body; }
   // The element that scrolls the viewport, and where the page offset lives
   // (issue #468). Standards mode, so documentElement — quirks mode would be
   // body, but we never parse in quirks mode.
@@ -6882,7 +6920,7 @@ function _gcWeaken(components) {
     entry.refs.push(new WeakRef(wrapper));
     entry.nids.push(nid);
     _gcKeepers.set(wrapper, entry.keeper);
-    if (Object.prototype.hasOwnProperty.call(_eventRegistry, nid)) {
+    if (_objectHasOwn(_eventRegistry, nid)) {
       entry.keeper.push({ nid, listeners: _eventRegistry[nid] });
       delete _eventRegistry[nid];
     }
@@ -6938,11 +6976,17 @@ function _gcForget() {
 globalThis.self = globalThis;
 
 globalThis.document = null;
+// The location and fragment-navigation helpers below parse with the URL op rather than
+// the page-replaceable URL global (SECURITY.md L10): CDP's Page.navigate and a CDP click
+// on a link reach them through __obscura_host. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, which uses `new URL` and `String`.
 function _resolveUrl(url) {
-  url = String(url);
+  url = _String(url);
   if (!url) return url;
-  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:')) return url;
-  try { return new URL(url, _documentBase() || "about:blank").href; } catch(e) { return url; }
+  if (_stringSlice(url, 0, 7) === 'http://' || _stringSlice(url, 0, 8) === 'https://'
+      || _stringSlice(url, 0, 6) === 'about:') return url;
+  const c = _urlParseOp(url, _documentBase() || "about:blank");
+  return c ? c.href : url;
 }
 // `_virtualUrl` is set by `history.pushState`/`replaceState` (and cleared by
 // any real navigation). When set, `location.href` and friends read it instead
@@ -6981,35 +7025,31 @@ function _setHistoryUrl(url) {
 // empty fragment and is still a fragment navigation in Chromium, while the same
 // URL with no `#` at all is a reload.
 function _isSameDocumentNavigation(current, target) {
-  try {
-    if (String(target).indexOf('#') < 0) return false;
-    var a = new URL(current);
-    var b = new URL(target);
-    return a.protocol === b.protocol && a.host === b.host
-        && a.username === b.username && a.password === b.password
-        && a.pathname === b.pathname && a.search === b.search;
-  } catch (e) { return false; }
+  if (_stringIndexOf(_String(target), '#') < 0) return false;
+  var a = _urlParseOp(current);
+  var b = _urlParseOp(target);
+  return !!a && !!b && a.protocol === b.protocol && a.host === b.host
+      && a.username === b.username && a.password === b.password
+      && a.pathname === b.pathname && a.search === b.search;
 }
 // The raw fragment of a URL, null when it carries none. Distinguishing a missing
 // fragment from an empty one is what `new URL(u).hash` cannot do -- it answers ''
 // for both -- and it is the difference between clicking `<a href="#">` from a
 // fragmentless URL (Chromium fires hashchange) and clicking it again (it does not).
 function _rawFragment(url) {
-  var text = String(url);
-  var hash = text.indexOf('#');
-  return hash < 0 ? null : text.slice(hash + 1);
+  var text = _String(url);
+  var hash = _stringIndexOf(text, '#');
+  return hash < 0 ? null : _stringSlice(text, hash + 1);
 }
 // Whether the fragment itself moved. Only that fires `hashchange`; a fragment
 // navigation to the fragment already in the URL fires `popstate` alone.
 function _isFragmentOnlyChange(current, target) {
-  try {
-    var a = new URL(current);
-    var b = new URL(target);
-    return a.protocol === b.protocol && a.host === b.host
-        && a.username === b.username && a.password === b.password
-        && a.pathname === b.pathname && a.search === b.search
-        && _rawFragment(current) !== _rawFragment(target);
-  } catch (e) { return false; }
+  var a = _urlParseOp(current);
+  var b = _urlParseOp(target);
+  return !!a && !!b && a.protocol === b.protocol && a.host === b.host
+      && a.username === b.username && a.password === b.password
+      && a.pathname === b.pathname && a.search === b.search
+      && _rawFragment(current) !== _rawFragment(target);
 }
 // window.dispatchEvent only runs addEventListener registrations, so the
 // `window.onhashchange = fn` / `window.onpopstate = fn` form (still common in
@@ -7017,20 +7057,22 @@ function _isFragmentOnlyChange(current, target) {
 function _dispatchWindowEventWithHandler(ev, handlerName) {
   try { _dispatch(globalThis, ev); } catch (e) { console.error(e); }
   try {
-    if (typeof globalThis[handlerName] === 'function') globalThis[handlerName].call(globalThis, ev);
+    const handler = globalThis[handlerName];
+    if (typeof handler === 'function') _reflectApply(handler, globalThis, [ev]);
   } catch (e) { console.error(e); }
 }
+// The History object and its methods as bootstrap defined them, set where History is.
+let _bootHistory = null;
 // Perform a fragment navigation: move the session history, then fire the events
 // the HTML spec's "navigate to a fragment" queues. Chromium fires `hashchange`
 // (only when the fragment actually moved) followed by `popstate`; `pushState`
 // fires neither, which is why the dispatch lives here and not inside pushState.
 function _fragmentNavigate(target, replace) {
   var current = __currentUrl();
-  var h = globalThis.history;
-  if (h && typeof h.pushState === 'function') {
+  var h = _bootHistory;
+  if (h) {
     // A fragment navigation gets a fresh entry with null state, per spec.
-    if (replace) h.replaceState(null, '', target);
-    else h.pushState(null, '', target);
+    _reflectApply(replace ? h.replaceState : h.pushState, h.history, [null, '', target]);
   } else {
     _setHistoryUrl(target);
   }
@@ -7043,7 +7085,7 @@ function _fragmentNavigate(target, replace) {
   }
   try {
     var state = null;
-    try { state = h ? h.state : null; } catch (e) {}
+    try { state = h ? _reflectApply(h.state, h.history, []) : null; } catch (e) {}
     _dispatchWindowEventWithHandler(new PopStateEvent('popstate', { state: state }), 'onpopstate');
   } catch (e) {}
 }
@@ -7068,7 +7110,7 @@ function _locationNavigate(url, replace) {
 // __obscura_tryFragmentNavigate.
 function _tryFragmentNavigate(url, replace) {
   try {
-    var target = _resolveUrl(String(url));
+    var target = _resolveUrl(_String(url));
     if (!_isSameDocumentNavigation(__currentUrl(), target)) return false;
     _fragmentNavigate(target, !!replace);
     return true;
@@ -7080,9 +7122,8 @@ function _tryFragmentNavigate(url, replace) {
 // leave the URL it booted on.
 function _locationSetPart(part, value) {
   var current = __currentUrl();
-  var u;
-  try { u = new URL(current); } catch (e) { return; }
-  try { u[part] = value == null ? '' : String(value); } catch (e) { return; }
+  var u = _urlSetOp(current, part, value == null ? '' : _String(value));
+  if (!u) return;
   // Assigning the value a component already has is not a navigation.
   if (u.href === current) return;
   _locationNavigate(u.href, false);
@@ -8447,14 +8488,14 @@ _markNative(XMLHttpRequest.prototype.getAllResponseHeaders);
 // the input is not a valid URL.
 function _urlParseOp(url, base) {
   try {
-    const s = __obscuraCore.ops.op_url_parse(String(url), (base === undefined || base === null) ? "" : String(base));
+    const s = __obscuraCore.ops.op_url_parse(_String(url), (base === undefined || base === null) ? "" : _String(base));
     const c = _JSONparse(s);
     return (c && c.ok) ? c : null;
   } catch (e) { return null; }
 }
 function _urlSetOp(href, part, value) {
   try {
-    const s = __obscuraCore.ops.op_url_set(String(href), part, String(value));
+    const s = __obscuraCore.ops.op_url_set(_String(href), part, _String(value));
     const c = _JSONparse(s);
     return (c && c.ok) ? c : null;
   } catch (e) { return null; }
@@ -9429,7 +9470,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
     // (`-webkit-line-clamp`). Normalize the prefix once for every WebKit
     // property instead of adding per-property aliases to the native snapshot.
     if (kebab.startsWith('webkit-')) kebab = '-' + kebab;
-    if (snapshot.rendered && Object.prototype.hasOwnProperty.call(snapshot.rendered, kebab))
+    if (snapshot.rendered && _objectHasOwn(snapshot.rendered, kebab))
       return snapshot.rendered[kebab];
     // A pseudo-element has neither an inline style nor a box of the element's to fall back on,
     // and an unrecognised one has no snapshot at all, which is the empty declaration Chromium
@@ -10893,14 +10934,17 @@ function _markTrusted(ev) {
 // user change. When no framework wrapper is present this is identical to a
 // direct assignment.
 // Host-only (__obscura_host.setFieldValue); upstream's global __obscura_setFieldValue.
+// DEVIATION from crates/obscura-js/js/bootstrap.js: the walk uses the built-ins bootstrap
+// captured, not the page-replaceable Object.getPrototypeOf and Function.prototype.call
+// (SECURITY.md L10).
 function _setFieldValue(el, field, value) {
   try {
-    let proto = Object.getPrototypeOf(el);
+    let proto = _getPrototypeOf(el);
     let desc;
-    while (proto && !((desc = Object.getOwnPropertyDescriptor(proto, field)) && desc.set)) {
-      proto = Object.getPrototypeOf(proto);
+    while (proto && !((desc = _getOwnPropertyDescriptor(proto, field)) && desc.set)) {
+      proto = _getPrototypeOf(proto);
     }
-    if (desc && desc.set) { desc.set.call(el, value); return; }
+    if (desc && desc.set) { _reflectApply(desc.set, el, [value]); return; }
   } catch (_e) {}
   el[field] = value;
 }
@@ -10921,16 +10965,21 @@ function _emptyFileList() { return _makeFileList([]); }
 // fire as a genuine selection would (issue #359).
 // Host-only (__obscura_host.setInputFiles); upstream's global __obscura_setInputFiles,
 // which let a page fill a file input and fire trusted input/change events.
+// The loop uses bootstrap's own atob, Uint8Array and string built-ins, not Array.prototype.map
+// and the page-replaceable globals (SECURITY.md L10).
 function _setInputFiles(el, specs) {
-  const files = (specs || []).map((s) => {
+  const list = specs || [];
+  const files = [];
+  for (let n = 0; n < list.length; n++) {
+    const s = list[n];
     let bytes;
     try {
-      const bin = atob(s.b64 || "");
-      bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    } catch (_e) { bytes = new Uint8Array(0); }
-    return new File([bytes], s.name || "", { type: s.type || "" });
-  });
+      const bin = _atobAtBoot(s.b64 || "");
+      bytes = new _Uint8ArrayAtBoot(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = _stringCharCodeAt(bin, i);
+    } catch (_e) { bytes = new _Uint8ArrayAtBoot(0); }
+    files[n] = new File([bytes], s.name || "", { type: s.type || "" });
+  }
   el._files = _makeFileList(files);
   // Mark the events trusted (isTrusted === true), like the Input domain does
   // for synthesized clicks/keys. A real <input type=file> selection fires
@@ -11057,7 +11106,7 @@ HashChangeEvent = globalThis.HashChangeEvent = class HashChangeEvent extends Eve
 MessageEvent = globalThis.MessageEvent = class extends Event {
   constructor(t,o={}) {
     super(t,o);
-    this.data = Object.prototype.hasOwnProperty.call(o, "data") ? o.data : null;
+    this.data = _objectHasOwn(o, "data") ? o.data : null;
     this.origin = o.origin == null ? "" : String(o.origin);
     this.lastEventId = o.lastEventId == null ? "" : String(o.lastEventId);
     this.source = o.source == null ? null : o.source;
@@ -12312,7 +12361,7 @@ function _structuredClone(value, seen) {
   const out = Array.isArray(value) ? [] : {};
   seen.set(value, out);
   for (const k in value) {
-    if (Object.prototype.hasOwnProperty.call(value, k)) {
+    if (_objectHasOwn(value, k)) {
       const cloned = _structuredClone(value[k], seen);
       // Only `__proto__` needs defineProperty: plain assignment would hit the
       // inherited prototype setter and reparent the clone instead of adding an
@@ -12346,7 +12395,7 @@ globalThis.reportError = globalThis.reportError || ((e) => console.error(e));
 // backing map. Plain prototype methods alone could not intercept direct
 // property access, so `localStorage.foo = x` never updated length before.
 globalThis.Storage = function Storage() {};
-Storage.prototype.getItem = function(k) { k = String(k); return Object.prototype.hasOwnProperty.call(this._data, k) ? this._data[k] : null; };
+Storage.prototype.getItem = function(k) { k = String(k); return _objectHasOwn(this._data, k) ? this._data[k] : null; };
 Storage.prototype.setItem = function(k, v) { this._data[String(k)] = String(v); };
 Storage.prototype.removeItem = function(k) { delete this._data[String(k)]; };
 Storage.prototype.clear = function() { const d = this._data; for (const k in d) delete d[k]; };
@@ -12360,11 +12409,11 @@ const _mkStore = () => {
   return new Proxy(target, {
     get(t, p, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.get(t, p, recv); const v = t.getItem(p); return v === null ? undefined : v; },
     set(t, p, v, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.set(t, p, v, recv); t.setItem(p, v); return true; },
-    has(t, p) { if (typeof p === 'symbol' || isReal(p)) return true; return Object.prototype.hasOwnProperty.call(t._data, p); },
+    has(t, p) { if (typeof p === 'symbol' || isReal(p)) return true; return _objectHasOwn(t._data, p); },
     deleteProperty(t, p) { if (typeof p === 'symbol' || isReal(p)) return Reflect.deleteProperty(t, p); t.removeItem(p); return true; },
     ownKeys(t) { return Object.keys(t._data); },
     getOwnPropertyDescriptor(t, p) {
-      if (typeof p !== 'symbol' && Object.prototype.hasOwnProperty.call(t._data, p))
+      if (typeof p !== 'symbol' && _objectHasOwn(t._data, p))
         return { value: t._data[p], writable: true, enumerable: true, configurable: true };
       return Reflect.getOwnPropertyDescriptor(t, p);
     },
@@ -12520,8 +12569,16 @@ globalThis.atob = globalThis.atob || ((s) => {
   Object.defineProperty(globalThis, "History", {
     value: History, writable: true, configurable: true,
   });
+  const historyObject = new History(historyToken);
   Object.defineProperty(globalThis, "history", {
-    value: new History(historyToken), writable: true, configurable: true,
+    value: historyObject, writable: true, configurable: true,
+  });
+  _bootHistory = _objectFreeze({
+    __proto__: null,
+    history: historyObject,
+    pushState: History.prototype.pushState,
+    replaceState: History.prototype.replaceState,
+    state: _getOwnPropertyDescriptor(History.prototype, 'state').get,
   });
 })();
 
@@ -12587,14 +12644,14 @@ globalThis.atob = globalThis.atob || ((s) => {
   nav.entries = () => [entry];
   nav.updateCurrentEntry = (options) => {
     const old = entry;
-    const state = options && Object.prototype.hasOwnProperty.call(options, "state")
+    const state = options && _objectHasOwn(options, "state")
       ? options.state : history.state;
     history.replaceState(state, "", __currentUrl());
     return changed(old);
   };
   nav.navigate = (url, options) => {
     const old = entry;
-    const state = options && Object.prototype.hasOwnProperty.call(options, "state")
+    const state = options && _objectHasOwn(options, "state")
       ? options.state : null;
     const replace = !!(options && options.history === "replace");
     try {
@@ -13655,7 +13712,7 @@ function _ensureWindowNamedProperty(name) {
   name = String(name || "");
   if (!name || _windowNamedPropertyNames.has(name)) return;
   // Existing own Window properties win over named elements.
-  if (Object.prototype.hasOwnProperty.call(globalThis, name)) return;
+  if (_objectHasOwn(globalThis, name)) return;
   try {
     Object.defineProperty(globalThis, name, {
       get() { return _windowNamedValue(name); },
@@ -17968,7 +18025,7 @@ globalThis.__obscura_init = function() {
   // __obscura_core_handoff back on the global (as undefined) after the host had
   // deleted it. Upstream has the same loop without the guard.
   for (let i = 0; i < toHide.length; i++) {
-    if (!Object.prototype.hasOwnProperty.call(globalThis, toHide[i])) continue;
+    if (!_objectHasOwn(globalThis, toHide[i])) continue;
     try { Object.defineProperty(globalThis, toHide[i], { enumerable: false }); } catch(e) {}
   }
   delete globalThis.__obscura_init;
@@ -18614,11 +18671,11 @@ const _worldCall = (function () {
         }
         return '';
       case 'focused': {
-        const focused = globalThis.__obscura_focused;
+        const focused = _getFocused();
         return focused && typeof focused._nid === 'number' ? String(focused._nid) : '';
       }
       case 'unfocus':
-        globalThis.__obscura_focused = null;
+        _setFocused(null);
         return '';
       case 'dispatch': {
         if (!node) return '1';
@@ -18668,8 +18725,8 @@ function _installIsolatedWorldBridges() {
 
   // Focus: the world reads and writes the page realm's focused element, so focus()
   // here moves the focus the page, Input.insertText and :focus all see.
-  Object.defineProperty(globalThis, '__obscura_focused', {
-    configurable: true, enumerable: false,
+  _focusBridge = _objectFreeze({
+    __proto__: null,
     get() { const r = call('focused', -1); return r === '' ? null : _wrap(+r); },
     set(node) {
       const nid = nidOf(node);
@@ -18843,6 +18900,28 @@ _installDispatchEntries();
 // The dispatchEvent _dispatch uses. Called once bootstrap has defined them, and again
 // by an isolated world once its bridges have replaced them.
 function _captureDispatchImpls() {
+  _atobAtBoot = globalThis.atob;
+  const findMember = (proto, name, kind) => {
+    for (let p = proto; p; p = _getPrototypeOf(p)) {
+      const d = _getOwnPropertyDescriptor(p, name);
+      if (d) return kind === 'get' ? d.get : d.value;
+    }
+    return undefined;
+  };
+  _bootEl = _objectFreeze({
+    __proto__: null,
+    matches: findMember(Element.prototype, 'matches'),
+    closest: findMember(Element.prototype, 'closest'),
+    getAttribute: findMember(Element.prototype, 'getAttribute'),
+    hasAttribute: findMember(Element.prototype, 'hasAttribute'),
+    click: findMember(Element.prototype, 'click'),
+    tagName: findMember(Element.prototype, 'tagName', 'get'),
+    parentElement: findMember(Element.prototype, 'parentElement', 'get'),
+    firstElementChild: findMember(Element.prototype, 'firstElementChild', 'get'),
+    nextElementSibling: findMember(Element.prototype, 'nextElementSibling', 'get'),
+    ownerDocument: findMember(Element.prototype, 'ownerDocument', 'get'),
+    getElementById: findMember(Document.prototype, 'getElementById'),
+  });
   _elementProtoAtBoot = Element.prototype;
   _documentProtoAtBoot = Document.prototype;
   _elementDispatchImpl = Element.prototype.dispatchEvent;
@@ -18859,6 +18938,103 @@ function _captureDispatchImpls() {
 }
 _captureDispatchImpls();
 
+// By-value serialization for the host (port addition, SECURITY.md L10): what CDP's
+// returnByValue, the host's Evaluate and MCP decode a value with. DEVIATION from the
+// Rust engine's v8_to_json, which is JSON.stringify: that consults toJSON, so a page that
+// added Object.prototype.toJSON or Array.prototype.toJSON answered for every result a
+// client asked for by value. Chromium serializes natively and never calls toJSON, and
+// this does what it does: own enumerable string keys, getters run, a Date, Map, RegExp or
+// node is {}, NaN and the infinities are null, undefined and symbols are dropped from
+// objects and null in arrays. A function is dropped the same way, where Chromium answers
+// {}: the shim's own objects (rects, entries) carry methods as own properties that are
+// prototype members in Chromium. For the same reason an interface the shim implements in
+// script (URL, PerformanceEntry, DOMRect) still answers with the toJSON bootstrap gave its
+// prototype, while that is still in place: Chromium's native object has no own state to
+// walk, and the shim's would show its internals. A cycle or a BigInt still throws, which
+// the host turns into the value's string form as before. A top-level function or
+// undefined has no JSON, as with JSON.stringify.
+let _shimToJson = null;
+function _collectShimToJson() {
+  const found = new Map();
+  const names = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < names.length; i++) {
+    const first = _stringCharCodeAt(names[i], 0);
+    if (first < 65 || first > 90) continue;
+    const d = _getOwnPropertyDescriptor(globalThis, names[i]);
+    const C = d ? d.value : undefined;
+    // Date's is V8's own, and Chromium does not call it either.
+    if (typeof C !== 'function' || C === Date || !C.prototype) continue;
+    const t = _getOwnPropertyDescriptor(C.prototype, 'toJSON');
+    if (t && typeof t.value === 'function') _mapSet(found, C.prototype, t.value);
+  }
+  _shimToJson = found;
+}
+function _hostValueJson(value) {
+  const t = typeof value;
+  if (t === 'function' || t === 'undefined' || t === 'symbol') return undefined;
+  const ancestors = [];
+  // The shim's own toJSON for v's interface, as { r: result }, or null.
+  const shimJson = (v) => {
+    if (_shimToJson === null) return null;
+    let p = _getPrototypeOf(v);
+    for (let n = 0; p !== null && n < 64; n++) {
+      const fn = _mapGet(_shimToJson, p);
+      if (fn !== undefined) {
+        const d = _getOwnPropertyDescriptor(p, 'toJSON');
+        return d && d.value === fn ? { r: _reflectApply(fn, v, []) } : null;
+      }
+      p = _getPrototypeOf(p);
+    }
+    return null;
+  };
+  const walk = (v) => {
+    switch (typeof v) {
+      case 'string': return _JSONstringify(v);
+      case 'number': return (v === v && v !== Infinity && v !== -Infinity) ? _JSONstringify(v) : 'null';
+      case 'boolean': return v ? 'true' : 'false';
+      case 'bigint': throw new TypeError('Do not know how to serialize a BigInt');
+      case 'undefined':
+      case 'symbol':
+      case 'function': return undefined;
+    }
+    if (v === null) return 'null';
+    const depth = ancestors.length;
+    for (let i = 0; i < depth; i++) {
+      if (ancestors[i] === v) throw new TypeError('Converting circular structure to JSON');
+    }
+    if (depth >= 1000) throw new RangeError('Object reference chain is too long');
+    ancestors[depth] = v;
+    let out;
+    const own = shimJson(v);
+    if (own !== null && own.r !== v) {
+      out = walk(own.r);
+      if (out === undefined) out = 'null';
+    } else if (_isArray(v)) {
+      out = '[';
+      const n = v.length;
+      for (let i = 0; i < n; i++) {
+        const item = walk(v[i]);
+        out += (i === 0 ? '' : ',') + (item === undefined ? 'null' : item);
+      }
+      out += ']';
+    } else {
+      const keys = _objectKeys(v);
+      out = '{';
+      let first = true;
+      for (let i = 0; i < keys.length; i++) {
+        const item = walk(v[keys[i]]);
+        if (item === undefined) continue;
+        out += (first ? '' : ',') + _JSONstringify(keys[i]) + ':' + item;
+        first = false;
+      }
+      out += '}';
+    }
+    ancestors.length = depth;
+    return out;
+  };
+  return walk(value);
+}
+
 // Built-ins host script uses, as bootstrap left them (port addition, SECURITY.md L10).
 //
 // DEVIATION from crates/obscura-cdp and crates/obscura-mcp, whose snippets call
@@ -18869,6 +19045,7 @@ _captureDispatchImpls();
 // natively, where page script cannot reach. Host snippets reach these through
 // __obscura_host.dom; page script calling the same names still gets its own versions.
 const _hostDom = (function () {
+  _collectShimToJson();
   const apply = _reflectApply;
   const EP = Element.prototype;
   const NP = Node.prototype;
@@ -19027,8 +19204,21 @@ const _hostDom = (function () {
       return trusted ? _markTrusted(ev) : ev;
     },
     computedStyle: (el) => apply(computedStyle, globalThis, [el]),
+    // The root scroll offset as the host holds it, [x, y], and the window scroll methods
+    // as bootstrap defined them: window.scrollX and scrollTo are page-replaceable.
+    scrollOffset: () => {
+      try {
+        const raw = __obscuraCore.ops.op_scroll_offset();
+        const p = raw ? _JSONparse(raw) : null;
+        return p ? [_Number(p.x) || 0, _Number(p.y) || 0] : [0, 0];
+      } catch (_) { return [0, 0]; }
+    },
+    scrollTo: (x, y) => _windowScroll(x, y, false),
+    scrollBy: (x, y) => _windowScroll(x, y, true),
     setTimeout: (fn, delay) => apply(setTimeoutAtBoot, globalThis, [fn, delay]),
     stringify: _JSONstringify,
+    // The serializer the host decodes by-value results with (see _hostValueJson).
+    value: _hostValueJson,
     parse: _JSONparse,
     keys: _objectKeys,
     isArray: _isArray,
@@ -19192,6 +19382,9 @@ globalThis.__obscura_host_handoff = Object.freeze({
   interactiveHost: _interactiveHost,
   registerLinkedStylesheet: _registerLinkedStylesheet,
   tryFragmentNavigate: _tryFragmentNavigate,
+  // A CDP click on a link: location.assign as bootstrap defined it, which page script
+  // can replace on its own location object (SECURITY.md L10).
+  navigate: (url) => _locationNavigate(_String(url), false),
   setScreenOverride: _setScreenOverride,
   liveFrameIds: _liveFrameIds,
   forgetFrame: _forgetFrame,
@@ -19207,6 +19400,13 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // The frame id an iframe element is bound to; 0 when none. Closure state, see
   // _iframeStates.
   frameIdOf: (element) => (_iframeStates.get(element)?.frameId || 0),
+  // The element a CDP click that hits nothing falls back to (closure state, SECURITY.md
+  // L10; upstream's page-writable globalThis.__obscura_click_target).
+  clickTarget: _objectFreeze({
+    __proto__: null,
+    get: () => _clickTarget,
+    set: (node) => { _clickTarget = node === undefined ? null : node; },
+  }),
   // The CDP pointer's pressed state, which the mouseReleased snippet turns into a
   // trusted click. Upstream keeps it in page-writable globalThis.__obscura_mouse_down,
   // so a page could aim the click a real mouseup produces.

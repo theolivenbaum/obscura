@@ -268,14 +268,25 @@ public sealed class FrameRealm : IDisposable
     /// helpers as <c>__obscura_host</c>.
     /// </summary>
     public JsonNode? EvaluateHost(string expression) =>
-        ParseJson(Run(() => HostScript.Invoke(
+        ParseJson(Run(() => Serialize(HostScript.Invoke(
             _engine,
             _shim?.HostHelpers,
             "<frame-host>",
-            HostScript.WrapStatements($"return JSON.stringify({expression});"))));
+            HostScript.WrapStatements($"return ({expression});")))));
 
     /// <summary>Evaluates an expression inside the frame and decodes it as JSON.</summary>
-    public JsonNode? Evaluate(string expression) => ParseJson(Run($"JSON.stringify({expression})"));
+    /// <remarks>
+    /// DEVIATION from frame.rs, which evaluates <c>JSON.stringify(expression)</c> with the
+    /// frame's global <c>JSON</c> and so a page's replacement or its <c>toJSON</c>: the value
+    /// is serialized with bootstrap's own walk (SECURITY.md L10).
+    /// </remarks>
+    public JsonNode? Evaluate(string expression) =>
+        ParseJson(Run(() => Serialize(_engine.Evaluate(new DocumentInfo("<frame>"), expression))));
+
+    private object? Serialize(object? value) =>
+        BootstrapLoader.StringifyOf(_engine) is { } serializer
+            ? serializer.InvokeAsFunction(value)
+            : ((ScriptObject)_engine.Global.GetProperty("JSON")).InvokeMethod("stringify", value);
 
     private static JsonNode? ParseJson(string? json)
     {

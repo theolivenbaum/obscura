@@ -103,4 +103,22 @@ public sealed class ToolsPageTampering
         var markdown = Tools.Markdown(JsonNode.Parse("{}"), state);
         Assert.Contains("# Title", markdown, StringComparison.Ordinal);
     }
+    /// <summary>
+    /// L10: the scroll tool reports the host's offset and viewport, not the page's
+    /// replaceable <c>window.scrollY</c>, <c>scrollBy</c> and <c>innerHeight</c>.
+    /// </summary>
+    [Fact]
+    public async Task ScrollReportsTheHostsOffset()
+    {
+        using var state = await OpenAsync();
+        state.PageMut().Evaluate(
+            "Object.defineProperty(window, 'scrollY', { get: () => 12345, configurable: true });"
+            + "Object.defineProperty(window, 'scrollX', { get: () => 12345, configurable: true });"
+            + "window.scrollBy = function () {}; window.scrollTo = function () {}; window.innerHeight = 1; 1");
+
+        string result = Tools.Scroll(JsonNode.Parse("""{ "direction": "down" }"""), state);
+        Assert.DoesNotContain("12345", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"viewport_h\":1}", result, StringComparison.Ordinal);
+        Assert.StartsWith("Scrolled down. {\"x\":0,\"y\":", result, StringComparison.Ordinal);
+    }
 }

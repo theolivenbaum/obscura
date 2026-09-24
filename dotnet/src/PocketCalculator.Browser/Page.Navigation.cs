@@ -796,6 +796,16 @@ public sealed partial class Page
             return PageNavigationOutcome.None;
         }
 
+        // The host checks first that the target differs from the document only in its
+        // fragment (port addition, SECURITY.md L10): the shim's answer runs in the page's
+        // realm, and a cross-document navigation must never be turned into a no-op there.
+        if (Url.Join(url) is not { Fragment: not null } target
+            || !string.Equals(
+                PageUrl.WithoutFragment(Url).Href, PageUrl.WithoutFragment(target).Href, StringComparison.Ordinal))
+        {
+            return PageNavigationOutcome.None;
+        }
+
         string literal = System.Text.Json.JsonSerializer.Serialize(url);
         JsonNode? handled;
         try

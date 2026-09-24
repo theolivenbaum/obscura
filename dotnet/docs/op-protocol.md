@@ -57,6 +57,10 @@ page-supplied code must never go through these entry points.
 | `setScreenOverride(w, h, emulated)` | `__obscura_set_screen_override` | `Emulation.setDeviceMetricsOverride` |
 | `liveFrameIds() -> number[]`, `forgetFrame(id)` | `__obscura_liveFrameIds`, `__obscura_forgetFrame` | detached-frame release |
 | `pointer.down` | `globalThis.__obscura_mouse_down` | CDP mousePressed / mouseReleased |
+| `clickTarget.get()`, `clickTarget.set(el)` | `globalThis.__obscura_click_target` | CDP mousePressed / mouseReleased fallback target |
+| `navigate(url)` | the page's `location.assign` | CDP mouseReleased on a link |
+| `dom.scrollOffset() -> [x, y]`, `dom.scrollTo(x, y)`, `dom.scrollBy(x, y)` | `window.scrollX/scrollY`, `window.scrollTo/scrollBy` | MCP `browser_scroll` |
+| `dom.value(v) -> json` | the page's `JSON.stringify` (toJSON included) | every by-value result the host decodes |
 | `gcCachedNids() -> csv`, `gcWeaken(componentsCsv)`, `gcSurvivors() -> csv`, `gcForget()` | none (port addition) | the DOM collector (`RealmDomGc`, `DomTree.Gc.cs`) |
 
 op_dom node ids are the full `NodeId.Value`: the slot index in the low 24 bits and the

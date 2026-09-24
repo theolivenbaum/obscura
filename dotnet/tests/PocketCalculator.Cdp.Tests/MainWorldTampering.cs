@@ -364,4 +364,97 @@ public sealed class MainWorldTampering
     internal static string Mouse(string type, double x, double y) => string.Create(
         CultureInfo.InvariantCulture,
         $$"""{"type": "{{type}}", "x": {{x}}, "y": {{y}}, "button": "left", "clickCount": 1}""");
+    /// <summary>
+    /// L10: a page-added <c>toJSON</c> does not answer for a by-value result. Chromium's
+    /// serialization never calls it: <c>{a:1,b:[1,2]}</c> comes back as itself.
+    /// </summary>
+    [Fact]
+    public async Task PageToJsonDoesNotShapeByValueResults()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenAsync(tamper: false);
+        using (server)
+        {
+            await EvaluateAsync(ctx,
+                "Object.prototype.toJSON = function () { return 'pwned'; };"
+                + " Array.prototype.toJSON = function () { return 'arr'; }; 1");
+            JsonNode result = await EvaluateAsync(ctx, "({ a: 1, b: [1, 2] })");
+            Assert.Equal("""{"a":1,"b":[1,2]}""", result["result"]!["value"]!.ToJsonString());
+        }
+    }
+
+    /// <summary>
+    /// L10: Page.getLayoutMetrics reports the host's scroll offset, not a page's
+    /// replacement of <c>window.scrollX</c> / <c>scrollY</c>.
+    /// </summary>
+    [Fact]
+    public async Task LayoutMetricsIgnoreAPagesScrollAccessors()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenAsync(tamper: false);
+        using (server)
+        {
+            await EvaluateAsync(ctx,
+                "Object.defineProperty(window, 'scrollX', { get: () => 4321, configurable: true });"
+                + " Object.defineProperty(window, 'scrollY', { get: () => 4321, configurable: true }); 1");
+            JsonNode metrics = await CdpAsync(ctx, "Page.getLayoutMetrics", new JsonObject());
+            Assert.Equal(0.0, metrics["cssLayoutViewport"]!["pageX"]!.GetValue<double>());
+            Assert.Equal(0.0, metrics["cssLayoutViewport"]!["pageY"]!.GetValue<double>());
+        }
+    }
+
+    /// <summary>
+    /// L10: CDP typing goes to the focused element, and a click that hits nothing to the
+    /// element the client last measured. A page writing upstream's
+    /// <c>__obscura_focused</c> / <c>__obscura_click_target</c> globals redirects neither.
+    /// </summary>
+    [Fact]
+    public async Task PageCannotRedirectTypingOrTheClickFallback()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenAsync(tamper: false);
+        using (server)
+        {
+            await EvaluateAsync(ctx,
+                "document.body.insertAdjacentHTML('beforeend', '<input id=victim>');"
+                + " document.getElementById('field').focus();"
+                + " globalThis.__obscura_focused = document.getElementById('victim');"
+                + " globalThis.__obscura_click_target = document.getElementById('btn'); 1");
+            await CdpAsync(ctx, "Input.insertText", new JsonObject { ["text"] = "typed" });
+            Assert.Equal(
+                "typed|",
+                await PageStringAsync(ctx, "document.getElementById('field').value + '|' + document.getElementById('victim').value"));
+
+            // Far outside the page: nothing is hit, so the fallback is the focused field.
+            foreach (string type in (string[])["mousePressed", "mouseReleased"])
+            {
+                await CdpAsync(ctx, "Input.dispatchMouseEvent", new JsonObject
+                {
+                    ["type"] = type, ["x"] = 5000.0, ["y"] = 5000.0, ["button"] = "left", ["clickCount"] = 1,
+                });
+            }
+            Assert.Equal("", await PageStringAsync(ctx, "document.getElementById('out').textContent"));
+        }
+    }
+
+    /// <summary>
+    /// L10: a CDP click on a link navigates through the shim's own location path, not the
+    /// page-replaceable <c>location.assign</c>.
+    /// </summary>
+    [Fact]
+    public async Task LinkClickDoesNotCallAPagesLocationAssign()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenAsync(tamper: false);
+        using (server)
+        {
+            await EvaluateAsync(ctx,
+                "document.body.insertAdjacentHTML('beforeend', '<a id=frag href=\"#next\" style=\"position:absolute;left:300px;top:10px;display:block;width:50px;height:20px\">x</a>');"
+                + " globalThis.__assigned = []; location.assign = (u) => __assigned.push(u); 1");
+            foreach (string type in (string[])["mousePressed", "mouseReleased"])
+            {
+                await CdpAsync(ctx, "Input.dispatchMouseEvent", new JsonObject
+                {
+                    ["type"] = type, ["x"] = 310.0, ["y"] = 15.0, ["button"] = "left", ["clickCount"] = 1,
+                });
+            }
+            Assert.Equal("0|#next", await PageStringAsync(ctx, "__assigned.length + '|' + location.hash"));
+        }
+    }
 }

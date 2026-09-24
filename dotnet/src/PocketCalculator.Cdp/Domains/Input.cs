@@ -419,9 +419,9 @@ public static class Input
         return "(function() {"
             + "var h = __obscura_host.dom;"
             + "var target = h.elementFromPoint(" + sx + "," + sy
-            + ") || globalThis.__obscura_click_target || h.activeElement() || h.body();"
+            + ") || __obscura_host.clickTarget.get() || h.activeElement() || h.body();"
             + "if (!target) return;"
-            + "globalThis.__obscura_click_target = target;"
+            + "__obscura_host.clickTarget.set(target);"
             + "__obscura_host.pointer.down = {__proto__:null,target:target,button:" + button
             + ",clickCount:" + detail + "};"
             + "var evt = h.event('MouseEvent', 'mousedown', "
@@ -452,7 +452,7 @@ public static class Input
         return "(function() {"
             + "var h = __obscura_host.dom;"
             + "var target = h.elementFromPoint(" + sx + "," + sy
-            + ") || globalThis.__obscura_click_target || h.activeElement() || h.body();"
+            + ") || __obscura_host.clickTarget.get() || h.activeElement() || h.body();"
             + "if (!target) return;"
             + "var down = __obscura_host.pointer.down;"
             + "__obscura_host.pointer.down = null;"
@@ -523,8 +523,9 @@ public static class Input
             // document down, so an in-page link would have rebooted the realm. Fragment
             // navigation is same-document now, and skipping it made a real mouse click on
             // an SPA's own link do nothing at all. Same fix as the el.click() path in
-            // bootstrap.js.
-            + "if (href && h.slice(href, 0, 11) !== 'javascript:') location.assign(href);"
+            // bootstrap.js. The navigation goes through the shim's own location path
+            // (__obscura_host.navigate), not the page-replaceable location.assign.
+            + "if (href && h.slice(href, 0, 11) !== 'javascript:') __obscura_host.navigate(href);"
             + "} else if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {"
             + "var form = h.closest(clickTarget, 'form');"
             + "if (form) { try { if (h.has(form, 'requestSubmit')) { h.call(form, 'requestSubmit', [clickTarget]); }"

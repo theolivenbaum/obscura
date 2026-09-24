@@ -25,7 +25,7 @@ public static class BootstrapLoader
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<V8ScriptEngine, ScriptObject> Stringifiers = new();
 
     /// <summary>
-    /// <paramref name="engine"/>'s <c>JSON.stringify</c> as bootstrap.js left it, or null for
+    /// <paramref name="engine"/>'s by-value serializer as bootstrap.js left it, or null for
     /// an engine that never ran it.
     /// </summary>
     internal static ScriptObject? StringifyOf(V8ScriptEngine engine) =>
@@ -122,8 +122,11 @@ public static class BootstrapLoader
         shim.HostHelpers = engine.Evaluate("globalThis.__obscura_host_handoff") as ScriptObject;
         // The serializer the host decodes values with, before any page script can replace
         // it (SECURITY.md L10).
+        // It is bootstrap's own by-value walk, which never calls a page's toJSON (see
+        // _hostValueJson), and JSON.stringify as bootstrap left it only where that is absent.
         if (shim.HostHelpers?.GetProperty("dom") is ScriptObject dom
-            && dom.GetProperty("stringify") is ScriptObject stringify)
+            && (dom.GetProperty("value") as ScriptObject ?? dom.GetProperty("stringify") as ScriptObject)
+                is { } stringify)
         {
             Stringifiers.AddOrUpdate(engine, stringify);
         }

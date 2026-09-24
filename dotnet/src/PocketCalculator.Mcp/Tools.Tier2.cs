@@ -254,7 +254,8 @@ internal static partial class Tools
                     var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                     if (!el) return "error:not found";
                     h.call(el, 'scrollIntoView', [{__proto__:null, behavior:'instant', block:'center'}]);
-                    return h.stringify({__proto__:null, x: window.scrollX, y: window.scrollY});
+                    var at = h.scrollOffset();
+                    return h.stringify({__proto__:null, x: at[0], y: at[1]});
                 })()
                 """;
             var elementResult = state.PageMut().EvaluateHost(js);
@@ -270,22 +271,28 @@ internal static partial class Tools
         // handlers fire (we don't have a real layout engine, so the window.scrollY
         // value won't change but the event is what matters).
         var amt = amount ?? 720.0;
+        // DEVIATION from tool_scroll, which scrolls and reads the offset through
+        // window.scrollTo/scrollBy/scrollX/scrollY/innerHeight: all page-replaceable, so a
+        // page could fake where it had scrolled to (SECURITY.md L10). The shim's own scroll
+        // path, the host's offset and the host's viewport are used instead.
+        var viewportHeight = McpJson.Display(state.PageMut().Viewport.Height);
         var scrollJs = $$"""
             (function(){
                 var h = __obscura_host.dom;
                 var dir = {{McpJson.String(direction)}};
                 var amt = {{McpJson.Display(amt)}};
                 switch (dir) {
-                    case 'top': window.scrollTo(0, 0); break;
-                    case 'bottom': window.scrollTo(0, h.get(h.body(), 'scrollHeight')); break;
-                    case 'up': window.scrollBy(0, -amt); break;
-                    case 'down': window.scrollBy(0, amt); break;
-                    case 'left': window.scrollBy(-amt, 0); break;
-                    case 'right': window.scrollBy(amt, 0); break;
+                    case 'top': h.scrollTo(0, 0); break;
+                    case 'bottom': h.scrollTo(0, h.get(h.body(), 'scrollHeight')); break;
+                    case 'up': h.scrollBy(0, -amt); break;
+                    case 'down': h.scrollBy(0, amt); break;
+                    case 'left': h.scrollBy(-amt, 0); break;
+                    case 'right': h.scrollBy(amt, 0); break;
                 }
                 try { h.dispatch(globalThis, h.event('Event', 'scroll', {__proto__:null,bubbles:true}, false)); } catch(e) {}
                 try { h.dispatch(h.document(), h.event('Event', 'scroll', {__proto__:null,bubbles:true}, false)); } catch(e) {}
-                return h.stringify({__proto__:null, x: window.scrollX, y: window.scrollY, max_y: h.get(h.body(), 'scrollHeight'), viewport_h: window.innerHeight});
+                var at = h.scrollOffset();
+                return h.stringify({__proto__:null, x: at[0], y: at[1], max_y: h.get(h.body(), 'scrollHeight'), viewport_h: {{viewportHeight}}});
             })()
             """;
         var res = state.PageMut().EvaluateHost(scrollJs);

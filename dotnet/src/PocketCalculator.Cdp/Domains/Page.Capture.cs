@@ -703,9 +703,11 @@ public static partial class Page
             ?? throw new DomainError("No page for session");
         AnimationSample animationSample = page.LiveAnimationSample();
         (float Width, float Height) viewport = page.Viewport;
-        JsonArray? scrollValues = JsonExt.AsJsonArray(page.Evaluate("[window.scrollX, window.scrollY]"));
-        double scrollX = scrollValues is { Count: > 0 } ? scrollValues[0].AsF64() ?? 0.0 : 0.0;
-        double scrollY = scrollValues is { Count: > 1 } ? scrollValues[1].AsF64() ?? 0.0 : 0.0;
+        // The host's scroll offset, not the page-replaceable window.scrollX/scrollY
+        // (SECURITY.md L10).
+        (float hostScrollX, float hostScrollY) = page.ScreenshotScrollOffset();
+        double scrollX = hostScrollX;
+        double scrollY = hostScrollY;
         if (CaptureLimits.ValidateCaptureRegion(CaptureRegion.New(
                 (float)scrollX, (float)scrollY, viewport.Width, viewport.Height, 1.0f)) is { } regionError)
         {
