@@ -214,8 +214,9 @@ public static class Input
                         // A mouse press is activation-triggering input (HTML "user
                         // activation"), so a navigation it causes is user-activated.
                         page.NoteUserActivation();
-                        page.EvaluateHost(MousePressedJs(
-                            x, y, buttonCode, buttons, clickCount, altKey, ctrlKey, metaKey, shiftKey));
+                        (uint frameId, double fx, double fy) = page.FrameAtPoint(x, y);
+                        page.EvaluateHostIn(frameId, MousePressedJs(
+                            fx, fy, buttonCode, buttons, clickCount, altKey, ctrlKey, metaKey, shiftKey));
                     }
                 }
                 else if (eventType == "mouseReleased")
@@ -225,8 +226,9 @@ public static class Input
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
                         page.NoteUserActivation();
-                        page.EvaluateHost(MouseReleasedJs(
-                            x, y, buttonCode, clickCount, altKey, ctrlKey, metaKey, shiftKey));
+                        (uint frameId, double fx, double fy) = page.FrameAtPoint(x, y);
+                        page.EvaluateHostIn(frameId, MouseReleasedJs(
+                            fx, fy, buttonCode, clickCount, altKey, ctrlKey, metaKey, shiftKey));
                         PocketCalculator.Browser.PageNavigationOutcome moved;
                         try
                         {
@@ -292,8 +294,9 @@ public static class Input
                     double deltaY = parameters.Get("deltaY").AsF64() ?? 0.0;
                     if (ctx.GetSessionPageMut(sessionId) is { } page)
                     {
-                        page.EvaluateHost(MouseWheelJs(
-                            x, y, deltaX, deltaY, altKey, ctrlKey, metaKey, shiftKey));
+                        (uint frameId, double fx, double fy) = page.FrameAtPoint(x, y);
+                        page.EvaluateHostIn(frameId, MouseWheelJs(
+                            fx, fy, deltaX, deltaY, altKey, ctrlKey, metaKey, shiftKey));
                     }
                 }
 
@@ -305,7 +308,13 @@ public static class Input
             case "insertText":
             {
                 string text = parameters.Get("text").AsString() ?? string.Empty;
-                ctx.GetSessionPageMut(sessionId)?.EvaluateHost(InsertTextJs(text));
+                // Into the focused frame's realm, as Chromium sends it to the focused frame
+                // (port addition, child-frame contexts); the page's without child frames.
+                if (ctx.GetSessionPageMut(sessionId) is { } focusPage)
+                {
+                    focusPage.EvaluateHostIn(focusPage.FocusedFrameId(), InsertTextJs(text));
+                }
+
                 return DomainResult.Empty();
             }
 
@@ -318,6 +327,7 @@ public static class Input
 
                 if (ctx.GetSessionPageMut(sessionId) is { } page)
                 {
+                    uint focused = page.FocusedFrameId();
                     switch (eventType)
                     {
                         case "keyDown":
@@ -332,7 +342,7 @@ public static class Input
                             // Escape backslash BEFORE single-quote (as the text path below does) so
                             // a key like "\" - Chrome's backslash key - doesn't escape the closing
                             // quote and produce a syntax error that drops the event.
-                            page.EvaluateHost("(function() {"
+                            page.EvaluateHostIn(focused, "(function() {"
                                 + "var h = __obscura_host.dom;"
                                 + "var target = h.activeElement() || h.body();"
                                 + "var evt = h.event('KeyboardEvent', 'keydown', "
@@ -343,7 +353,7 @@ public static class Input
 
                             if (text.Length != 0 && text != "\r" && text != "\n")
                             {
-                                page.EvaluateHost(InsertTextJs(text));
+                                page.EvaluateHostIn(focused, InsertTextJs(text));
                             }
 
                             if (key == "Enter")
@@ -352,19 +362,19 @@ public static class Input
                                 // the containing form. Real Chrome distinguishes these two and we
                                 // should too: previously every Enter tried to submit the nearest
                                 // form even from a textarea.
-                                page.EvaluateHost(EnterJs);
+                                page.EvaluateHostIn(focused, EnterJs);
                             }
 
                             if (key == "Backspace")
                             {
-                                page.EvaluateHost(BackspaceJs);
+                                page.EvaluateHostIn(focused, BackspaceJs);
                             }
 
                             break;
                         }
 
                         case "keyUp":
-                            page.EvaluateHost("(function() {"
+                            page.EvaluateHostIn(focused, "(function() {"
                                 + "var h = __obscura_host.dom;"
                                 + "var target = h.activeElement() || h.body();"
                                 + "var evt = h.event('KeyboardEvent', 'keyup', "
@@ -376,7 +386,7 @@ public static class Input
                         case "char":
                             if (text.Length != 0)
                             {
-                                page.EvaluateHost(InsertTextJs(text));
+                                page.EvaluateHostIn(focused, InsertTextJs(text));
                                 // Pump the event loop so Angular change detection picks up the input.
                                 await page.SettleAsync(50).ConfigureAwait(false);
                             }

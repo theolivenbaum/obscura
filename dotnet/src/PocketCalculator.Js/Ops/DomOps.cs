@@ -28,6 +28,47 @@ public static class DomOps
 {
     private static readonly char[] TitleWhitespace = ['\t', '\n', '\f', '\r', ' '];
 
+    /// <summary>The order realms took focus in, across every document (<c>note_focus</c>).</summary>
+    private static long s_focusClock;
+
+    /// <summary>
+    /// File inputs' selections by document and node id: the specs JSON
+    /// DOM.setFileInputFiles built, and a version that changes with each selection.
+    /// </summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DomTree, Dictionary<uint, (long Version, string Specs)>> s_inputFiles = new();
+
+    private static long s_inputFilesVersion;
+
+    /// <summary>
+    /// <c>set_input_files</c> (answers the new version), <c>input_files_version</c> (the
+    /// empty string when the node has no selection) and <c>get_input_files</c>.
+    /// </summary>
+    private static string InputFiles(PocketCalculatorState state, string cmd, string arg1, string arg2)
+    {
+        if (state.Dom is not { } dom || !uint.TryParse(arg1, NumberStyles.None, CultureInfo.InvariantCulture, out var nid))
+        {
+            return string.Empty;
+        }
+        var table = s_inputFiles.GetValue(dom, static _ => []);
+        switch (cmd)
+        {
+            case "set_input_files":
+            {
+                if (dom.GetNode(NodeId.New(nid)) is null)
+                {
+                    return string.Empty;
+                }
+                var version = Interlocked.Increment(ref s_inputFilesVersion);
+                table[nid] = (version, arg2);
+                return version.ToString(CultureInfo.InvariantCulture);
+            }
+            case "input_files_version":
+                return table.TryGetValue(nid, out var entry) ? entry.Version.ToString(CultureInfo.InvariantCulture) : string.Empty;
+            default:
+                return table.TryGetValue(nid, out var held) ? held.Specs : "[]";
+        }
+    }
+
     /// <summary>
     /// The op entry point. The Rust op wraps the body in <c>catch_unwind</c> because
     /// a panic would unwind into V8's FFI frame, where <c>V8_Fatal</c> calls
@@ -100,6 +141,19 @@ public static class DomOps
     internal static string Inner(PocketCalculatorState gs, string cmd, string arg1, string arg2)
     {
         ArgumentNullException.ThrowIfNull(gs);
+        // Port addition (child-frame CDP contexts): the realm took focus. See
+        // PocketCalculatorState.FocusStamp.
+        if (cmd == "note_focus")
+        {
+            gs.FocusStamp = Interlocked.Increment(ref s_focusClock);
+            return string.Empty;
+        }
+        // Port addition (SECURITY.md M6): a file input's selection, held here for every
+        // realm over the document (bootstrap.js _inputFilesOf).
+        if (cmd is "set_input_files" or "input_files_version" or "get_input_files")
+        {
+            return InputFiles(gs, cmd, arg1, arg2);
+        }
         Prelude(gs, cmd, arg1, arg2);
 
         if (gs.Dom is not { } dom)

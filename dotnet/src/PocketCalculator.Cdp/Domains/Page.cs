@@ -43,6 +43,17 @@ public static partial class Page
     internal static string ChildFrameId(string pageFrameId, uint frameId) =>
         $"{pageFrameId}-frame-{frameId.ToString(CultureInfo.InvariantCulture)}";
 
+    /// <summary>The realm id behind a <see cref="ChildFrameId"/>, or null when it is not one of this page's.</summary>
+    internal static uint? ChildFrameNumber(string pageFrameId, string protocolFrameId)
+    {
+        string prefix = pageFrameId + "-frame-";
+        return protocolFrameId.StartsWith(prefix, StringComparison.Ordinal)
+            && uint.TryParse(protocolFrameId.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out uint id)
+            && id != 0
+                ? id
+                : null;
+    }
+
     /// <summary>
     /// The Rust <c>is_localhost</c>: a <c>localhost</c> domain (or a subdomain of one),
     /// an IPv4 loopback (127.0.0.0/8) or the IPv6 loopback.
@@ -1078,10 +1089,10 @@ public static partial class Page
                 // ran it with the page's own scripts, beside page script.
                 if (parameters.Get("worldName").AsString() is { Length: > 0 } worldName)
                 {
-                    if (source.Length != 0)
-                    {
-                        ctx.WorldPreloadScripts.Add((identifier, worldName, source));
-                    }
+                    // Kept even when empty: the script names a world every new document,
+                    // child frames' included, gets a context for (Playwright registers its
+                    // utility world with an empty source).
+                    ctx.WorldPreloadScripts.Add((identifier, worldName, source));
                 }
                 else if (source.Length != 0)
                 {

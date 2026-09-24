@@ -48,6 +48,8 @@ const _defineProperty = Object.defineProperty;
 const _getPrototypeOf = Object.getPrototypeOf;
 const _String = String;
 const _Number = Number;
+const _parseFloatAtBoot = parseFloat;
+const _promiseThenAtBoot = Promise.prototype.then;
 const _MathMin = Math.min;
 const _MathMax = Math.max;
 // The shim's own event classes. DEVIATION from crates/obscura-js/js/bootstrap.js, whose
@@ -100,7 +102,34 @@ let _focusedElement = null;
 let _clickTarget = null;
 let _focusBridge = null;
 function _getFocused() { return _focusBridge ? _focusBridge.get() : _focusedElement; }
-function _setFocused(node) { if (_focusBridge) _focusBridge.set(node); else _focusedElement = node; }
+// Port addition (SECURITY.md M6): listeners CDP isolated worlds registered on this
+// document's nodes. Null while no world of this document listens for anything; else the
+// event types some world listens for, pushed by the host (worldListenTypes). While it is
+// set, this realm's own listeners are stamped from the counter the worlds' are
+// (_handlerStamps, worldStamp), so one dispatch runs both in registration order. See the
+// isolated-world section at the end of this file.
+let _worldListenTypes = null;
+let _crossStamp = 0;
+// In an isolated world: runs one of its listeners for the document realm's dispatch.
+let _worldInvokeImpl = null;
+const _handlerStamps = new WeakMap();
+const _handlerStampGet = _uncurry(WeakMap.prototype.get);
+const _handlerStampHas = _uncurry(WeakMap.prototype.has);
+const _handlerStampSet = _uncurry(WeakMap.prototype.set);
+function _stampHandler(handler) {
+  if (_worldListenTypes !== null && handler !== null && (typeof handler === 'object' || typeof handler === 'function')
+      && !_handlerStampHas(_handlerStamps, handler)) {
+    _handlerStampSet(_handlerStamps, handler, ++_crossStamp);
+  }
+}
+// Port addition (child-frame CDP contexts): a realm taking focus tells the host, which
+// sends key events to the realm that took it last (Page.FocusedFrameId). The Rust
+// engine has one realm that ever receives CDP input.
+function _setFocused(node) {
+  if (_focusBridge) { _focusBridge.set(node); return; }
+  _focusedElement = node;
+  if (node) { try { __obscuraCore.ops.op_dom('note_focus', '', '', _realmFrameId); } catch (_) {} }
+}
 function _queryImpl(root, all) {
   if (!_queryImpls || root === null || typeof root !== 'object' || typeof root._nid !== 'number') return null;
   if (_isPrototypeOf(_elementProtoAtBoot, root)) return all ? _queryImpls.elementAll : _queryImpls.element;
@@ -1011,13 +1040,15 @@ const _scheduleAfter = (delay, fn) => {
     const frameTimerId = -(++_frameTimerSeq);
     const state = { cancelled: false };
     _frameTimerStates.set(frameTimerId, state);
-    __obscuraCore.ops.op_sleep(d).then(() => {
+    // Promise.prototype.then as bootstrap found it: a frame that replaced it would
+    // otherwise never see one of its own timers fire (port deviation, SECURITY.md L10).
+    _reflectApply(_promiseThenAtBoot, __obscuraCore.ops.op_sleep(d), [() => {
       _frameTimerStates.delete(frameTimerId);
       if (state.cancelled) return;
       if (_realmIsolatedWorld) _worldSyncEpochs();
       __obscuraCore.ops.op_begin_render_task?.();
       fn();
-    });
+    }]);
     return frameTimerId;
   }
   // The callback runs only when the embedder pumps the event loop, after the
@@ -3828,6 +3859,7 @@ class Element extends Node {
     if (!_eventRegistry[key]) _eventRegistry[key] = {};
     if (!_eventRegistry[key][type]) _eventRegistry[key][type] = [];
     _eventRegistry[key][type].push(handler);
+    _stampHandler(handler);
   }
   removeEventListener(type, handler) {
     const key = this._nid;
@@ -3854,9 +3886,14 @@ class Element extends Node {
       } catch(e) { console.error(e); }
     }
     const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
-    for (const h of handlers) {
-      try { _reflectApply(h, this, [event]); } catch(e) { console.error(e); }
-      if (event._immediatePropagationStopped) break;
+    if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 4) !== 0) {
+      // Port addition (SECURITY.md M6): isolated worlds listen on this node too.
+      _worldRunListeners(this, event, handlers, false);
+    } else {
+      for (const h of handlers) {
+        try { _reflectApply(h, this, [event]); } catch(e) { console.error(e); }
+        if (event._immediatePropagationStopped) break;
+      }
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
       _bubble(this.parentNode, event);
@@ -4166,18 +4203,19 @@ class Element extends Node {
       }
       if (itype === 'file') {
         // Chrome exposes a file input's value as C:\fakepath\<first filename>.
-        return (this._files && this._files.length) ? ('C:\\fakepath\\' + this._files[0].name) : '';
+        { const files = _inputFilesOf(this); return (files && files.length) ? ('C:\\fakepath\\' + files[0].name) : ''; }
       }
     }
     return this.getAttribute("value") || "";
   }
   // FileList for <input type=file>, populated by DOM.setFileInputFiles (Puppeteer
   // uploadFile / Playwright setInputFiles). null for non-file inputs, matching
-  // the DOM. See __obscura_setInputFiles (issue #359).
+  // the DOM. See __obscura_setInputFiles (issue #359). Read from the host, which holds the
+  // selection for every realm over the document (_inputFilesOf).
   get files() {
     if (this.localName !== 'input') return undefined;
     if ((this.getAttribute('type') || '').toLowerCase() !== 'file') return null;
-    return this._files || _emptyFileList();
+    return _inputFilesOf(this) || _emptyFileList();
   }
   set value(v) {
     const tag = this.localName;
@@ -4486,9 +4524,20 @@ class Element extends Node {
         // document below stays: it is what the parent reads through
         // contentDocument, and it is empty unless the frame is same-origin.
         const box = el.getBoundingClientRect();
+        // The frame's viewport is the iframe's content box, as in Chromium (a 400x300
+        // iframe with its default 2px border is a 400x300 viewport). DEVIATION from
+        // crates/obscura-js/js/bootstrap.js, which passes the border box.
+        let cs = null;
+        try { cs = _hostDom.computedStyle(el); } catch (_) {}
+        const edges = (a, b, c, d) => cs
+          ? (_parseFloatAtBoot(cs[a]) || 0) + (_parseFloatAtBoot(cs[b]) || 0)
+            + (_parseFloatAtBoot(cs[c]) || 0) + (_parseFloatAtBoot(cs[d]) || 0)
+          : 0;
+        const contentWidth = box.width - edges('borderLeftWidth', 'borderRightWidth', 'paddingLeft', 'paddingRight');
+        const contentHeight = box.height - edges('borderTopWidth', 'borderBottomWidth', 'paddingTop', 'paddingBottom');
         st.frameId = typeof response.bodyToken === 'number'
           ? (__obscuraCore.ops.op_frame_document_from_load(
-              response.bodyToken, Math.round(box.width) || 300, Math.round(box.height) || 150,
+              response.bodyToken, Math.round(contentWidth) || 300, Math.round(contentHeight) || 150,
               sandboxed) >>> 0)
           : 0;
         st.doc = new _IframeDocument(html, loadedUrl, el);
@@ -5685,7 +5734,7 @@ class Document extends Node {
     if (typeof fn !== 'function') return;
     if (!this._listeners) this._listeners = {};
     if (!this._listeners[type]) this._listeners[type] = [];
-    if (!this._listeners[type].includes(fn)) this._listeners[type].push(fn);
+    if (!this._listeners[type].includes(fn)) { this._listeners[type].push(fn); _stampHandler(fn); }
   }
   removeEventListener(type, fn) {
     if (this._listeners?.[type]) {
@@ -5695,6 +5744,11 @@ class Document extends Node {
   dispatchEvent(event) {
     if (!event) return true;
     const handlers = (this._listeners?.[event.type] || []).slice();
+    if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 4) !== 0 && typeof this._nid === 'number') {
+      // Port addition (SECURITY.md M6): isolated worlds listen on the document too.
+      _worldRunListeners(this, event, handlers, true);
+      return !event.defaultPrevented;
+    }
     for (let i = 0; i < handlers.length; i++) { try { _reflectApply(handlers[i], this, [event]); } catch(e) { console.error('document event error:', e); } }
     return !event.defaultPrevented;
   }
@@ -11058,7 +11112,35 @@ function _emptyFileList() { return _makeFileList([]); }
 // The loop uses bootstrap's own atob, Uint8Array and string built-ins, not Array.prototype.map
 // and the page-replaceable globals (SECURITY.md L10).
 function _setInputFiles(el, specs) {
-  const list = specs || [];
+  const list = _isArray(specs) ? specs : [];
+  // The selection is node state, so it lives in the host, where every realm over the
+  // document reads it (port addition, SECURITY.md M6): an isolated world sees the files
+  // DOM.setFileInputFiles gave the page, and the other way round. The Rust engine keeps
+  // them on the calling realm's wrapper.
+  const clean = [];
+  for (let n = 0; n < list.length; n++) {
+    const s = list[n] || {};
+    clean[n] = { name: _String(s.name || ""), type: _String(s.type || ""), b64: _String(s.b64 || "") };
+  }
+  let version = '';
+  if (typeof el._nid === 'number') {
+    try {
+      version = String(__obscuraCore.ops.op_dom('set_input_files', String(el._nid), _JSONstringify(clean), _realmFrameId));
+    } catch (_e) {}
+  }
+  const fileList = _makeFileList(_filesFromSpecs(clean));
+  if (version) _inputFileCacheSet(_inputFileCache, el, { version, list: fileList });
+  else el._files = fileList;
+  // Mark the events trusted (isTrusted === true), like the Input domain does
+  // for synthesized clicks/keys. A real <input type=file> selection fires
+  // trusted events; upload flows that gate their change handler on
+  // event.isTrusted (common in frameworks and anti-bot code) ignore untrusted
+  // ones, which would silently break the exact case this feature targets.
+  try { _dispatch(el, _markTrusted(new Event("input", { bubbles: true }))); } catch (_e) {}
+  try { _dispatch(el, _markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
+}
+// Real File objects (backed by the bytes) for [{ name, type, b64 }].
+function _filesFromSpecs(list) {
   const files = [];
   for (let n = 0; n < list.length; n++) {
     const s = list[n];
@@ -11070,14 +11152,26 @@ function _setInputFiles(el, specs) {
     } catch (_e) { bytes = new _Uint8ArrayAtBoot(0); }
     files[n] = new File([bytes], s.name || "", { type: s.type || "" });
   }
-  el._files = _makeFileList(files);
-  // Mark the events trusted (isTrusted === true), like the Input domain does
-  // for synthesized clicks/keys. A real <input type=file> selection fires
-  // trusted events; upload flows that gate their change handler on
-  // event.isTrusted (common in frameworks and anti-bot code) ignore untrusted
-  // ones, which would silently break the exact case this feature targets.
-  try { _dispatch(el, _markTrusted(new Event("input", { bubbles: true }))); } catch (_e) {}
-  try { _dispatch(el, _markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
+  return files;
+}
+// This realm's FileList for a file input's host-held selection, rebuilt only when the
+// selection changed (its version), so `input.files === input.files` holds. Null when the
+// host holds none for the node.
+const _inputFileCache = new WeakMap();
+const _inputFileCacheGet = _uncurry(WeakMap.prototype.get);
+const _inputFileCacheSet = _uncurry(WeakMap.prototype.set);
+function _inputFilesOf(el) {
+  if (typeof el._nid !== 'number') return el._files || null;
+  let version = '';
+  try { version = String(__obscuraCore.ops.op_dom('input_files_version', String(el._nid), '', _realmFrameId)); } catch (_e) {}
+  if (!version) return el._files || null;
+  const cached = _inputFileCacheGet(_inputFileCache, el);
+  if (cached && cached.version === version) return cached.list;
+  let specs = [];
+  try { specs = _JSONparse(String(__obscuraCore.ops.op_dom('get_input_files', String(el._nid), '', _realmFrameId))); } catch (_e) {}
+  const list = _makeFileList(_filesFromSpecs(_isArray(specs) ? specs : []));
+  _inputFileCacheSet(_inputFileCache, el, { version, list });
+  return list;
 }
 Event = globalThis.Event = class Event {
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
@@ -18719,6 +18813,154 @@ const _worldNidList = (csv) => {
 };
 const _worldEventClasses = ['PointerEvent', 'WheelEvent', 'MouseEvent', 'KeyboardEvent',
   'InputEvent', 'CompositionEvent', 'FocusEvent', 'UIEvent', 'CustomEvent', 'Event'];
+// The init dictionary members that travel with an event from one realm to another.
+const _worldInitKeys = ['detail', 'key', 'code', 'location', 'repeat', 'isComposing',
+  'ctrlKey', 'shiftKey', 'altKey', 'metaKey', 'button', 'buttons', 'clientX', 'clientY',
+  'screenX', 'screenY', 'data', 'inputType', 'deltaX', 'deltaY', 'deltaZ', 'deltaMode',
+  'pointerId', 'pointerType', 'width', 'height', 'pressure', 'isPrimary', 'which',
+  'keyCode', 'charCode'];
+const _worldClassCtors = (function () {
+  const out = { __proto__: null };
+  for (const name of _worldEventClasses) {
+    if (typeof globalThis[name] === 'function') out[name] = globalThis[name];
+  }
+  return out;
+})();
+function _worldEventClassOf(event) {
+  for (const name of _worldEventClasses) {
+    const C = _worldClassCtors[name];
+    if (C && _isPrototypeOf(C.prototype, event)) return name;
+  }
+  return 'Event';
+}
+// An event's class, type and init dictionary, which another realm rebuilds it from.
+function _worldEventInit(event) {
+  const init = { bubbles: !!event.bubbles, cancelable: !!event.cancelable, composed: !!event.composed };
+  for (const key of _worldInitKeys) {
+    let value;
+    try { value = event[key]; } catch (_) { continue; }
+    const t = typeof value;
+    if (t === 'string' || t === 'number' || t === 'boolean') init[key] = value;
+    else if (key === 'detail' && value !== undefined && value !== null && t === 'object') {
+      try { init.detail = _JSONparse(_JSONstringify(value)); } catch (_) {}
+    }
+  }
+  return init;
+}
+
+// Page-dispatched events reach isolated-world listeners (port addition, SECURITY.md M6).
+// In Chromium an event dispatched in any world runs the listeners every world registered
+// on the node, from one list in registration order. Here each realm keeps its own
+// listeners, so the realm that owns the document dispatches as before and, at each node
+// a world listens on (the host keeps the index: world_listeners), interleaves the
+// worlds' listeners with its own by the stamp each got from one counter (_crossStamp).
+// A world runs its listener with its own wrappers for the event and the nodes
+// (worldInvoke), and propagation flags travel both ways. Only types some world listens
+// for pay anything: every other dispatch sees _worldListenTypes miss.
+//
+// This follows the engine's own event model, where a node event runs each node's
+// listeners in bubble order with no capture phase and the window is not reached. A
+// world's window listeners (Playwright's hit-target check listens there, capturing) are
+// run around the node dispatch instead: capturing ones before it, the others after it.
+const _worldEventKeys = new WeakMap();
+const _worldEventKeyGet = _uncurry(WeakMap.prototype.get);
+const _worldEventKeySet = _uncurry(WeakMap.prototype.set);
+const _worldEventKeyDelete = _uncurry(WeakMap.prototype.delete);
+let _worldEventSeq = 0;
+function _worldEventKey(event) {
+  let key = _worldEventKeyGet(_worldEventKeys, event);
+  if (key === undefined) {
+    key = 'p' + (++_worldEventSeq);
+    _worldEventKeySet(_worldEventKeys, event, key);
+  }
+  return key;
+}
+function _worldEventForget(event) {
+  if (event !== null && typeof event === 'object') _worldEventKeyDelete(_worldEventKeys, event);
+}
+// [[stamp, worldKey], ...] in stamp order: the worlds' listeners for `type` on node `nid`.
+function _worldListenersAt(nid, type) {
+  let raw;
+  try {
+    raw = String(__obscuraCore.ops.op_dom('world_listeners', String(nid), String(type), _realmFrameId));
+  } catch (_) { return []; }
+  return _worldParseEntries(raw);
+}
+// The window's are pushed with the types (worldListenTypes): [capturing, other].
+let _worldWindowLists = null;
+function _worldParseEntries(raw) {
+  const out = [];
+  for (let at = 0; at < raw.length;) {
+    let comma = _stringIndexOf(raw, ',', at);
+    if (comma < 0) comma = raw.length;
+    const colon = _stringIndexOf(raw, ':', at);
+    if (colon > at && colon < comma) {
+      out[out.length] = [_Number(_stringSlice(raw, at, colon)), _stringSlice(raw, colon + 1, comma)];
+    }
+    at = comma + 1;
+  }
+  return out;
+}
+// Runs one world's listener (stamp `entry[0]`, world `entry[1]`) on node `nid` for
+// `event`, and takes back what it did to propagation.
+function _worldInvoke(event, target, nid, entry, phase) {
+  const spec = {
+    k: _worldEventKey(event), n: nid, s: entry[0], t: String(event.type), c: _worldEventClassOf(event),
+    i: _worldEventInit(event), tr: _trustedHas(_trustedEvents, event),
+    g: typeof target._nid === 'number' ? target._nid : -1, p: phase,
+    f: [!!event.defaultPrevented, !!event._propagationStopped, !!event._immediatePropagationStopped],
+  };
+  let flags = '';
+  try {
+    flags = String(__obscuraCore.ops.op_dom('world_invoke', String(entry[1]), _JSONstringify(spec), _realmFrameId));
+  } catch (_) { return; }
+  if (flags[0] === '1' && event.cancelable) event.defaultPrevented = true;
+  if (flags[1] === '1') event._propagationStopped = true;
+  if (flags[2] === '1') { event._propagationStopped = true; event._immediatePropagationStopped = true; }
+}
+// A node's listeners, this realm's (`handlers`) and the worlds', in stamp order.
+function _worldRunListeners(node, event, handlers, isDocument) {
+  const world = _worldListenersAt(node._nid, event.type);
+  const target = event.target || node;
+  const phase = target === node ? 2 : 3;
+  let j = 0;
+  for (let i = 0; i <= handlers.length; i++) {
+    const h = i < handlers.length ? handlers[i] : null;
+    const stamp = h === null ? Infinity : (_handlerStampGet(_handlerStamps, h) || 0);
+    while (j < world.length && world[j][0] < stamp) {
+      _worldInvoke(event, target, node._nid, world[j], phase);
+      j++;
+      if (event._immediatePropagationStopped && !isDocument) return;
+    }
+    if (h === null) break;
+    try { _reflectApply(h, node, [event]); } catch (e) {
+      if (isDocument) console.error('document event error:', e); else console.error(e);
+    }
+    if (event._immediatePropagationStopped && !isDocument) return;
+  }
+}
+function _worldRunWindow(target, event, phase) {
+  const lists = _worldWindowLists === null ? undefined : _worldWindowLists[event.type];
+  if (lists === undefined) return;
+  const world = lists[phase === 1 ? 0 : 1];
+  for (let j = 0; j < world.length; j++) {
+    _worldInvoke(event, target, -1, world[j], phase);
+    if (event._immediatePropagationStopped) return;
+  }
+}
+function _worldDispatchAround(target, event, original) {
+  const mask = _worldListenTypes === null ? 0 : _worldListenTypes[event.type] | 0;
+  if (mask & 1) {
+    _worldRunWindow(target, event, 1);
+    if (event._propagationStopped) {
+      if (!event.target) event.target = target;
+      return !event.defaultPrevented;
+    }
+  }
+  _reflectApply(original, target, [event]);
+  if ((mask & 2) && event.bubbles && !event._propagationStopped) _worldRunWindow(target, event, 3);
+  return !event.defaultPrevented;
+}
 
 // The page realm's half: what the host calls, as __obscura_host.worldCall, when a world
 // asks. Every answer is a string.
@@ -18739,8 +18981,6 @@ const _worldCall = (function () {
     selectionEnd: own(EP, 'selectionEnd'), selectionDirection: own(EP, 'selectionDirection'),
   };
   const maps = { __proto__: null, value: _formValues, checked: _formChecked, indeterminate: _formIndeterminate };
-  const elementDispatch = EP.dispatchEvent;
-  const nodeDispatch = NP.dispatchEvent;
   const eventClasses = { __proto__: null };
   for (const name of _worldEventClasses) {
     if (typeof globalThis[name] === 'function') eventClasses[name] = globalThis[name];
@@ -18782,8 +19022,12 @@ const _worldCall = (function () {
         const Ctor = eventClasses[spec.c] || eventClasses.Event;
         let event;
         try { event = new Ctor(String(spec.t), spec.i); } catch (_) { event = new eventClasses.Event(String(spec.t), spec.i); }
-        const dispatch = +_dom('node_type', nid) === 1 ? elementDispatch : nodeDispatch;
-        return apply(dispatch, node, [event]) === false ? '0' : '1';
+        // One dispatch for every realm: this realm's listeners and every world's, the
+        // calling world's with its own event object, which `k` names (SECURITY.md M6).
+        if (typeof spec.k === 'string') _worldEventKeySet(_worldEventKeys, event, spec.k);
+        try { _dispatch(node, event); } catch (_) {} finally { _worldEventForget(event); }
+        return (event.defaultPrevented ? '1' : '0') + (event._propagationStopped ? '1' : '0')
+          + (event._immediatePropagationStopped ? '1' : '0');
       }
       default:
         return '';
@@ -18875,61 +19119,191 @@ function _installIsolatedWorldBridges() {
   method('setSelectionRange');
   method('setRangeText');
 
-  // Events: a world's dispatch reaches the world's listeners and then the page's, as one
-  // dispatch on the shared node does in Chromium. The page gets an untrusted copy.
-  const eventClassOf = (event) => {
-    for (const name of _worldEventClasses) {
-      const C = globalThis[name];
-      if (typeof C === 'function' && event instanceof C) return name;
-    }
-    return 'Event';
+  // Events. This world's listeners on nodes, the document and the window are kept here
+  // and registered with the host, which orders them among the document realm's own; that
+  // realm's dispatch calls them back (worldInvoke) with this world's wrappers for the
+  // event and the nodes. A dispatch this world makes on a node goes through the same
+  // dispatch, so every realm's listeners run once, in registration order, as one
+  // dispatch on the shared node does in Chromium: the document realm dispatches an
+  // untrusted copy, and this world's listeners get the event object it dispatched.
+  const worldTag = call('tag', -1);
+  const entries = new Map();
+  const keyOf = (nid, type, capture) => (nid < 0 ? '-1|' + type + '|' + (capture ? '1' : '0') : nid + '|' + type);
+  const captureOf = (options) => (typeof options === 'boolean' ? options : !!(options && options.capture));
+  const addListener = (nid, type, fn, options) => {
+    if (fn === null || (typeof fn !== 'function' && (typeof fn !== 'object' || typeof fn.handleEvent !== 'function'))) return;
+    type = String(type);
+    const capture = captureOf(options);
+    const key = keyOf(nid, type, capture);
+    let list = entries.get(key);
+    if (!list) { list = []; entries.set(key, list); }
+    for (const entry of list) if (entry.fn === fn) return;
+    const stamp = _Number(call('listen', nid, type + '\0' + (capture ? '1' : '0')));
+    if (!(stamp > 0)) return;
+    list.push({ fn, stamp, once: !!(options && typeof options === 'object' && options.once) });
   };
-  const initKeys = ['detail', 'key', 'code', 'location', 'repeat', 'isComposing',
-    'ctrlKey', 'shiftKey', 'altKey', 'metaKey', 'button', 'buttons', 'clientX', 'clientY',
-    'screenX', 'screenY', 'data', 'inputType', 'deltaX', 'deltaY', 'deltaZ', 'deltaMode',
-    'pointerId', 'pointerType', 'width', 'height', 'pressure', 'isPrimary', 'which',
-    'keyCode', 'charCode'];
+  const removeListener = (nid, type, fn, capture) => {
+    type = String(type);
+    const key = keyOf(nid, type, capture);
+    const list = entries.get(key);
+    if (!list) return;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].fn !== fn) continue;
+      const stamp = list[i].stamp;
+      list.splice(i, 1);
+      if (list.length === 0) entries.delete(key);
+      call('unlisten', nid, type + '\0' + String(stamp));
+      return;
+    }
+  };
+  const listenerMethods = (proto) => {
+    const add = proto.addEventListener;
+    const remove = proto.removeEventListener;
+    if (typeof add !== 'function' || typeof remove !== 'function') return;
+    Object.defineProperty(proto, 'addEventListener', {
+      configurable: true, writable: true, enumerable: false,
+      value: {
+        addEventListener(type, fn, options) {
+          const nid = nidOf(this);
+          if (nid < 0) return apply(add, this, [type, fn, options]);
+          addListener(nid, type, fn, options);
+        },
+      }.addEventListener,
+    });
+    Object.defineProperty(proto, 'removeEventListener', {
+      configurable: true, writable: true, enumerable: false,
+      value: {
+        removeEventListener(type, fn, options) {
+          const nid = nidOf(this);
+          if (nid < 0) return apply(remove, this, [type, fn, options]);
+          removeListener(nid, type, fn, false);
+        },
+      }.removeEventListener,
+    });
+  };
+  listenerMethods(EP);
+  listenerMethods(Document.prototype);
+  // The window keeps its own listeners too, for events dispatched on it in this world.
+  {
+    const add = globalThis.addEventListener;
+    const remove = globalThis.removeEventListener;
+    if (typeof add === 'function' && typeof remove === 'function') {
+      const d = Object.getOwnPropertyDescriptor(globalThis, 'addEventListener') || { writable: true, enumerable: true, configurable: true };
+      Object.defineProperty(globalThis, 'addEventListener', {
+        configurable: d.configurable, enumerable: d.enumerable, writable: true,
+        value: {
+          addEventListener(type, fn, options) {
+            apply(add, globalThis, [type, fn, options]);
+            if (this === globalThis || this === undefined || this === null) addListener(-1, type, fn, options);
+          },
+        }.addEventListener,
+      });
+      Object.defineProperty(globalThis, 'removeEventListener', {
+        configurable: d.configurable, enumerable: d.enumerable, writable: true,
+        value: {
+          removeEventListener(type, fn, options) {
+            apply(remove, globalThis, [type, fn, options]);
+            if (this === globalThis || this === undefined || this === null) removeListener(-1, type, fn, captureOf(options));
+          },
+        }.removeEventListener,
+      });
+    }
+  }
+
+  // The events this world dispatched that the document realm is dispatching now, and this
+  // world's wrappers for events other realms dispatch, by the dispatch's key.
+  const own = new Map();
+  const wrappers = new Map();
+  let ownSeq = 0;
   const forward = (target, event) => {
     const nid = nidOf(target);
-    if (nid < 0 || event === null || typeof event !== 'object') return true;
+    const k = 'w' + worldTag + ':' + (++ownSeq);
     let payload;
     try {
-      const init = { bubbles: !!event.bubbles, cancelable: !!event.cancelable, composed: !!event.composed };
-      for (const key of initKeys) {
-        let value;
-        try { value = event[key]; } catch (_) { continue; }
-        const t = typeof value;
-        if (t === 'string' || t === 'number' || t === 'boolean') init[key] = value;
-        else if (key === 'detail' && value !== undefined && value !== null && t === 'object') {
-          try { init.detail = parse(stringify(value)); } catch (_) {}
-        }
-      }
-      payload = stringify({ c: eventClassOf(event), t: String(event.type), i: init });
+      payload = stringify({ c: _worldEventClassOf(event), t: String(event.type), i: _worldEventInit(event), k });
     } catch (_) { return true; }
-    return call('dispatch', nid, payload) !== '0';
+    own.set(k, event);
+    let flags;
+    try { flags = call('dispatch', nid, payload); } finally { own.delete(k); }
+    if (flags.charAt(0) === '1' && event.cancelable) event.defaultPrevented = true;
+    return !event.defaultPrevented;
   };
-  // Bubbling re-enters dispatchEvent on each ancestor; only the outermost call is the
-  // dispatch, and the page realm bubbles its copy itself.
-  let dispatchDepth = 0;
   const dispatcher = (proto) => {
     const original = proto.dispatchEvent;
     if (typeof original !== 'function') return;
     Object.defineProperty(proto, 'dispatchEvent', {
       configurable: true, writable: true, enumerable: false,
       value: function dispatchEvent(event) {
-        let ours;
-        dispatchDepth++;
-        try { ours = apply(original, this, [event]); }
-        finally { dispatchDepth--; }
-        if (dispatchDepth !== 0) return ours;
-        const page = forward(this, event);
-        return ours !== false && page;
+        const nid = nidOf(this);
+        if (nid < 0 || event === null || typeof event !== 'object' || typeof event.type === 'undefined') {
+          return apply(original, this, [event]);
+        }
+        if (_dispatchingHas(_dispatching, event)) {
+          throw new DOMException(
+            "Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.",
+            'InvalidStateError');
+        }
+        if (!_trustedPendingTake(_trustedPending, event)) _trustedDelete(_trustedEvents, event);
+        _dispatchingAdd(_dispatching, event);
+        try { return forward(this, event); }
+        finally { _dispatchingDelete(_dispatching, event); }
       },
     });
   };
   dispatcher(EP);
   dispatcher(NP);
+  dispatcher(Document.prototype);
   _captureDispatchImpls();
+
+  // The document realm running one of this world's listeners (host helper worldInvoke).
+  _worldInvokeImpl = (json) => {
+    const m = parse(String(json));
+    const k = String(m.k);
+    const type = String(m.t);
+    let ev = own.get(k);
+    if (ev === undefined) {
+      ev = wrappers.get(k);
+      if (ev === undefined) {
+        const C = _worldClassCtors[m.c] || _worldClassCtors.Event;
+        try { ev = new C(type, m.i); } catch (_) { ev = new _worldClassCtors.Event(type, m.i); }
+        if (m.tr === true) _trustedAdd(_trustedEvents, ev);
+        ev.target = m.g >= 0 ? _wrap(m.g) : globalThis;
+        wrappers.set(k, ev);
+        if (wrappers.size > 64) wrappers.delete(wrappers.keys().next().value);
+      }
+    } else if (!ev.target) {
+      ev.target = m.g >= 0 ? _wrap(m.g) : globalThis;
+    }
+    const f = m.f || [];
+    if (f[0] && ev.cancelable) ev.defaultPrevented = true;
+    if (f[1]) ev._propagationStopped = true;
+    if (f[2]) ev._immediatePropagationStopped = true;
+    const capture = m.n < 0 && m.p === 1;
+    const list = entries.get(keyOf(m.n, type, capture));
+    let entry = null;
+    if (list) for (const candidate of list) if (candidate.stamp === m.s) { entry = candidate; break; }
+    if (entry !== null) {
+      if (entry.once) removeListener(m.n, type, entry.fn, capture);
+      const current = m.n >= 0 ? _wrap(m.n) : globalThis;
+      ev.currentTarget = current;
+      ev.eventPhase = m.p;
+      const marked = !_dispatchingHas(_dispatching, ev);
+      if (marked) _dispatchingAdd(_dispatching, ev);
+      try {
+        const fn = entry.fn;
+        if (typeof fn === 'function') apply(fn, current, [ev]);
+        else apply(fn.handleEvent, fn, [ev]);
+      } catch (e) {
+        try { console.error(e); } catch (_) {}
+      } finally {
+        if (marked) _dispatchingDelete(_dispatching, ev);
+        ev.currentTarget = null;
+        ev.eventPhase = 0;
+      }
+    }
+    return (ev.defaultPrevented ? '1' : '0') + (ev._propagationStopped ? '1' : '0')
+      + (ev._immediatePropagationStopped ? '1' : '0');
+  };
 
   // Mutations another realm makes reach this world's observers once it has one. The
   // host is told the first time, so a world nobody observes from costs nothing.
@@ -18972,9 +19346,16 @@ function _dispatchEntry(original) {
       if (!_trustedPendingTake(_trustedPending, event)) _trustedDelete(_trustedEvents, event);
       _dispatchingAdd(_dispatching, event);
       try {
+        // Port addition (SECURITY.md M6): isolated worlds' window listeners for this
+        // event, around the node dispatch below.
+        if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 3) !== 0
+            && this !== globalThis && this !== null && typeof this._nid === 'number') {
+          return _worldDispatchAround(this, event, original);
+        }
         return _reflectApply(original, this, [event]);
       } finally {
         _dispatchingDelete(_dispatching, event);
+        if (_worldListenTypes !== null) _worldEventForget(event);
       }
     },
   }.dispatchEvent);
@@ -19510,6 +19891,28 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // The frame id an iframe element is bound to; 0 when none. Closure state, see
   // _iframeStates.
   frameIdOf: (element) => (_iframeStates.get(element)?.frameId || 0),
+  // Port additions (SECURITY.md M6, child-frame CDP contexts): the node id of the iframe
+  // element that owns child frame `frameId` in this realm (DOM.getFrameOwner; -1 for
+  // none), and the top-left of its content box in this realm's viewport, [x, y], which is
+  // where the frame's own coordinates start (DOM.getContentQuads, Input hit testing; null
+  // when the frame has no connected element here).
+  frameOwner: (frameId) => {
+    const el = _frameElements[frameId >>> 0];
+    return el && el.isConnected ? el._nid : -1;
+  },
+  frameContentOrigin: (frameId) => {
+    const el = _frameElements[frameId >>> 0];
+    if (!el || !el.isConnected) return null;
+    const r = _hostDom.rect(el);
+    if (!r) return null;
+    let cs = null;
+    try { cs = _hostDom.computedStyle(el); } catch (_) {}
+    const px = (name) => {
+      const n = cs ? _parseFloatAtBoot(cs[name]) : 0;
+      return n === n ? n : 0;
+    };
+    return [r.left + px('borderLeftWidth') + px('paddingLeft'), r.top + px('borderTopWidth') + px('paddingTop')];
+  },
   // The element a CDP click that hits nothing falls back to (closure state, SECURITY.md
   // L10; upstream's page-writable globalThis.__obscura_click_target).
   clickTarget: _objectFreeze({
@@ -19536,6 +19939,27 @@ globalThis.__obscura_host_handoff = Object.freeze({
   gcSurvivors: _gcSurvivors,
   gcForget: _gcForget,
   worldScheduleDrain: () => queueMicrotask(_worldDrainMutations),
+  // Port additions (SECURITY.md M6): page-dispatched events reaching world listeners.
+  // The document realm's: the event types worlds listen for on this document (a comma
+  // list, empty for none), and the next stamp on the counter its own listeners use. A
+  // world's: run one of its listeners (see _worldInvokeImpl).
+  worldListenTypes: (json) => {
+    const text = _String(json);
+    if (!text) { _worldListenTypes = null; _worldWindowLists = null; return; }
+    const parsed = _JSONparse(text);
+    const types = _objectCreate(null);
+    const windows = _objectCreate(null);
+    const keys = _objectKeys(parsed);
+    for (let i = 0; i < keys.length; i++) {
+      const value = parsed[keys[i]];
+      types[keys[i]] = value[0] | 0;
+      windows[keys[i]] = [_worldParseEntries(_String(value[1] || '')), _worldParseEntries(_String(value[2] || ''))];
+    }
+    _worldWindowLists = windows;
+    _worldListenTypes = types;
+  },
+  worldStamp: () => ++_crossStamp,
+  worldInvoke: (json) => (_worldInvokeImpl ? _worldInvokeImpl(json) : '000'),
   // Port additions (SECURITY.md L10): the built-ins host snippets use, and the CDP
   // remote-object store, both as bootstrap left them.
   dom: _hostDom,

@@ -159,7 +159,7 @@ public sealed partial class PocketCalculatorJsRuntime
         ulong awaitTimeoutMs,
         IsolatedWorldTarget? world) =>
         EvaluateForCdpInScopeAsync(
-            world is { } target ? GetOrCreateIsolatedWorld(target).Scope : _mainScope,
+            world is { } target ? ScopeFor(target) : _mainScope,
             expression, returnByValue, awaitPromise, awaitTimeoutMs);
 
     private async Task<RemoteObjectInfo> EvaluateForCdpInScopeAsync(
@@ -341,7 +341,7 @@ public sealed partial class PocketCalculatorJsRuntime
         }
         else
         {
-            scope = world is { } target ? GetOrCreateIsolatedWorld(target).Scope : _mainScope;
+            scope = world is { } target ? ScopeFor(target) : _mainScope;
         }
         return CallFunctionOnInScopeAsync(
             scope, functionDeclaration, objectId, arguments, returnByValue, awaitPromise, awaitTimeoutMs);
@@ -467,7 +467,17 @@ public sealed partial class PocketCalculatorJsRuntime
     /// realm when it is null: <c>DOM.resolveNode</c> with an <c>executionContextId</c>.
     /// </summary>
     public RemoteObjectInfo StoreObjectWithMeta(string jsExpression, IsolatedWorldTarget? world) =>
-        StoreObjectWithMeta(world is { } target ? GetOrCreateIsolatedWorld(target).Scope : _mainScope, jsExpression);
+        StoreObjectWithMeta(world is { } target ? ScopeFor(target) : _mainScope, jsExpression);
+
+    /// <summary>
+    /// <see cref="StoreObjectWithMeta(string)"/> in the realm that minted
+    /// <paramref name="objectId"/>: the page's, an isolated world's or a child frame's.
+    /// </summary>
+    /// <exception cref="JsRuntimeException">That realm is gone.</exception>
+    public RemoteObjectInfo StoreObjectWithMetaInRealmOf(string objectId, string jsExpression) =>
+        StoreObjectWithMeta(
+            ScopeForObjectId(objectId) ?? throw new JsRuntimeException("Cannot find context with specified id"),
+            jsExpression);
 
     private RemoteObjectInfo StoreObjectWithMeta(CdpScope scope, string jsExpression)
     {
@@ -522,9 +532,8 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         if (IsolatedWorldKeyOf(objectId) != 0)
         {
-            if (FindIsolatedWorld(IsolatedWorldKeyOf(objectId)) is { } world)
+            if (ScopeForObjectId(objectId) is { } scope)
             {
-                var scope = world.Scope;
                 scope.Recipes.Remove(objectId);
                 if (scope.Store.Remove(objectId))
                 {

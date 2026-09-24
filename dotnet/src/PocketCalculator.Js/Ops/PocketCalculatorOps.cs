@@ -231,10 +231,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (cmd, a1, a2, frameId) =>
             {
                 var realm = U32(frameId);
-                // An isolated world over the page's document hears about the page's
-                // mutations through the forwarder, which exists only while a world does.
-                return realm == 0 && MutationForwarder is { } forwarder
-                    ? forwarder.OpDom(null, Page, S(cmd), S(a1), S(a2))
+                // An isolated world over a document hears about its realm's mutations
+                // through the forwarder, which exists only while a world does.
+                return MutationForwarder is { } forwarder
+                    ? forwarder.OpDom(null, FrameState(realm), S(cmd), S(a1), S(a2))
                     : DomOps.OpDom(FrameState(realm), S(cmd), S(a1), S(a2));
             }));
         Bind(ops, "op_script_mark_started", (Func<object?, bool>)(
@@ -459,6 +459,60 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (nid, url) => LinkedStylesheetLoader.OpLoadStylesheetAsync(RealmState(), document, U32(nid), S(url))));
         Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
             frameId => OpGuard.Run("op_frame_same_origin", () => FrameSameOrigin(document, U32(frameId)), -1d)));
+        if (!ReferenceEquals(document, Page))
+        {
+            BindDocumentRenderOps(ops, document);
+        }
+    }
+
+    /// <summary>
+    /// The render ops that answer about one document's nodes, bound to a child frame's
+    /// document for its realm and its isolated worlds.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (ops.rs), where every realm's render ops read the
+    /// page's state: a frame's <c>getBoundingClientRect</c> and <c>getComputedStyle</c>
+    /// looked its node id up in the page's document, so they described whatever page node
+    /// shared the id. Chromium lays out each frame's document in its own viewport, which
+    /// is what a frame's CDP contexts (Playwright's visibility and hit checks) measure.
+    /// The frame's renderer cache does not load resources (ShareResourcesWith).
+    /// </remarks>
+    private void BindDocumentRenderOps(ScriptObject ops, PocketCalculatorState document)
+    {
+        Bind(ops, "op_begin_render_task", (Action)(() => RenderOps.OpBeginRenderTask(document)));
+        Bind(ops, "op_canvas_register_surface", (Func<object?, object?, object?, object?, bool>)(
+            (nid, width, height, pixels) => RenderOps.OpCanvasRegisterSurface(
+                document, U32(nid), U32(width), U32(height), JsBuffer(pixels))));
+        Bind(ops, "op_canvas_paint_damage", (Func<object?, bool>)(
+            nid => RenderOps.OpCanvasPaintDamage(document, U32(nid))));
+        Bind(ops, "op_image_metadata", (Func<object?, object?, string>)(
+            (nid, cachedOnly) => RenderOps.OpImageMetadata(document, U32(nid), B(cachedOnly))));
+        Bind(ops, "op_load_image_metadata", (Func<object?, Task<string>>)(
+            nid => RenderOps.OpLoadImageMetadataAsync(document, U32(nid))));
+        Bind(ops, "op_layout_geometry", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutGeometry(document, S(nid))));
+        Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
+            nids => RenderOps.OpResizeObserverMeasurements(document, S(nids))));
+        Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(
+            nids => RenderOps.OpIntersectionObserverMeasurements(document, S(nids))));
+        Bind(ops, "op_computed_style", (Func<object?, string>)(
+            nid => RenderOps.OpComputedStyle(document, S(nid))));
+        Bind(ops, "op_computed_style_pseudo", (Func<object?, object?, string>)(
+            (nid, pseudo) => RenderOps.OpComputedStylePseudo(document, S(nid), S(pseudo))));
+        Bind(ops, "op_inner_text", (Func<object?, string>)(
+            nid => RenderOps.OpInnerText(document, S(nid))));
+        Bind(ops, "op_layout_metrics", (Func<string>)(() => RenderOps.OpLayoutMetrics(document)));
+        Bind(ops, "op_element_scroll_metrics", (Func<object?, string>)(
+            nid => RenderOps.OpElementScrollMetrics(document, S(nid))));
+        Bind(ops, "op_element_scroll_to", (Func<object?, object?, object?, string>)(
+            (nid, x, y) => RenderOps.OpElementScrollTo(document, S(nid), D(x), D(y))));
+        Bind(ops, "op_scroll_offset", (Func<string>)(() => RenderOps.OpScrollOffset(document)));
+        Bind(ops, "op_scroll_to", (Func<object?, object?, string>)(
+            (x, y) => RenderOps.OpScrollTo(document, D(x), D(y))));
+        Bind(ops, "op_waapi_create", (Func<object?, bool>)(
+            input => RenderOps.OpWaapiCreate(document, S(input))));
+        Bind(ops, "op_waapi_control", (Func<object?, object?, object?, bool>)(
+            (id, action, value) => RenderOps.OpWaapiControl(document, D(id), S(action), D(value))));
     }
 
     /// <summary>
@@ -583,7 +637,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     /// </summary>
     /// <remarks>
     /// <list type="bullet">
-    /// <item><c>op_dom</c> always acts on the page's document, and goes through the
+    /// <item><c>op_dom</c> always acts on the world's document, and goes through the
     /// forwarder so the page realm's observers hear about the world's mutations.</item>
     /// <item><c>op_world_call</c> reaches the page realm's copy of the node state
     /// bootstrap.js keeps in JavaScript (form values, focus, selection).</item>
@@ -595,14 +649,16 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     internal void BindIsolatedWorldOverrides(
         ScriptObject ops,
         object world,
+        PocketCalculatorState document,
         Func<string, double, string, string> worldCall,
         Action<string, string> bindingCalled)
     {
         ArgumentNullException.ThrowIfNull(ops);
+        ArgumentNullException.ThrowIfNull(document);
         Bind(ops, "op_dom", (Func<object?, object?, object?, object?, string>)(
             (cmd, a1, a2, _) => MutationForwarder is { } forwarder
-                ? forwarder.OpDom(world, Page, S(cmd), S(a1), S(a2))
-                : DomOps.OpDom(Page, S(cmd), S(a1), S(a2))));
+                ? forwarder.OpDom(world, document, S(cmd), S(a1), S(a2))
+                : DomOps.OpDom(document, S(cmd), S(a1), S(a2))));
         Bind(ops, "op_world_call", (Func<object?, object?, object?, string>)(
             (kind, nid, arg) => OpGuard.Run("op_world_call", () => worldCall(S(kind), D(nid), S(arg)), string.Empty)));
         Bind(ops, "op_binding_called", (Action<object?, object?>)(

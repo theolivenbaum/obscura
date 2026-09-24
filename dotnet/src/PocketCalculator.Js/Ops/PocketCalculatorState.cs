@@ -218,6 +218,13 @@ public sealed class PocketCalculatorState
     public uint FrameId { get; set; }
 
     /// <summary>
+    /// When this realm last took focus, on a clock shared by every document; 0 never.
+    /// Port addition (child-frame CDP contexts): CDP key input goes to the realm with the
+    /// latest stamp, the way Chromium sends it to the focused frame.
+    /// </summary>
+    public long FocusStamp { get; set; }
+
+    /// <summary>
     /// postMessage traffic between realms, waiting to be delivered. Queued on the
     /// *page's* state whichever realm sent it, so one drain sees the traffic of the
     /// whole tree.

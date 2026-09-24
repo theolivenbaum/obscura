@@ -569,6 +569,15 @@ public static class Dispatcher
                     continue;
                 }
 
+                // Port addition (SECURITY.md M6): the frame's execution contexts, its own
+                // realm and a world per new-document world name, as Chromium creates them
+                // on the frame's document. The Rust engine announces a frame with none, so
+                // a client could not evaluate in it at all.
+                ctx.EnsureDefaultContext(page.Id);
+                List<ExecutionContextRecord> frameContexts = ctx.CreateFrameContexts(
+                    page.Id, id, frame.Get("url").AsStringOr(string.Empty));
+                List<string> runtimeSessions = frameContexts.Count == 0 ? [] : ctx.RuntimeSessionsForPage(page.Id);
+
                 foreach (var sessionId in sessionIds)
                 {
                     // Attach before navigate: a client builds its frame from the
@@ -594,6 +603,14 @@ public static class Dispatcher
                         },
                         SessionId = sessionId,
                     });
+
+                    if (runtimeSessions.Contains(sessionId, StringComparer.Ordinal))
+                    {
+                        foreach (ExecutionContextRecord context in frameContexts)
+                        {
+                            events.Add(Domains.Runtime.ExecutionContextCreatedEvent(context, sessionId));
+                        }
+                    }
 
                     // The frame's document scripts have already run by the time it
                     // is in this list, so it is not still loading.

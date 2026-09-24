@@ -102,6 +102,11 @@ public sealed class FrameRealm : IDisposable
     /// <summary>The frame's own state, as registered in the realm table.</summary>
     public PocketCalculatorState State { get; private init; } = null!;
 
+    internal V8ScriptEngine Engine => _engine;
+
+    /// <summary>The realm's host helpers (<see cref="HostScript"/>), for CDP and isolated worlds.</summary>
+    internal ScriptObject? HostHelpers => _shim?.HostHelpers;
+
     /// <summary>
     /// Builds a frame realm around an already-fetched document.
     /// </summary>
@@ -243,6 +248,16 @@ public sealed class FrameRealm : IDisposable
     {
         var w = double.IsFinite(width) && width > 0 ? width : 300.0;
         var h = double.IsFinite(height) && height > 0 ? height : 150.0;
+        // The frame's own renderer lays its document out in this viewport (port addition:
+        // see PocketCalculatorOps.BindDocumentRenderOps).
+        var viewport = ((float)w, (float)h);
+        if (State.Viewport != viewport)
+        {
+            State.Viewport = viewport;
+            State.PreparedRender = null;
+            State.PendingStyleMutations.Clear();
+            State.ResolvedScroll = null;
+        }
         ExecuteScript(
             $"globalThis.innerWidth={Format(w)};globalThis.innerHeight={Format(h)};"
             + "if(globalThis.visualViewport){"

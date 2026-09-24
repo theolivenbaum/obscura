@@ -978,5 +978,9 @@ public sealed partial class PocketCalculatorJsRuntime
 
     internal void RegisterRealm(FrameRealm realm) => _realms.Add(realm);
 
-    internal void ForgetRealm(FrameRealm realm) => _realms.Remove(realm);
+    internal void ForgetRealm(FrameRealm realm)
+    {
+        _realms.Remove(realm);
+        ForgetFrameWorlds(realm.FrameId);
+    }
 }

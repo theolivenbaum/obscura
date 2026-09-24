@@ -153,21 +153,87 @@ public sealed class CdpContext
     /// null for the page realm.
     /// </summary>
     /// <remarks>
-    /// Only the main frame's worlds are realms of their own: a child frame's
-    /// commands run in the page realm, isolated or not, as they did before.
+    /// A child frame's contexts run in that frame: its default context in the frame's own
+    /// realm, an isolated one in a world over the frame's document (port addition,
+    /// SECURITY.md M6; before, every child-frame command ran in the page realm).
     /// </remarks>
     public IsolatedWorldTarget? WorldTargetFor(ExecutionContextRecord? context, Page page)
     {
         ArgumentNullException.ThrowIfNull(page);
-        if (context is null
-            || context.IsDefault
-            || context.Id <= 1
-            || !string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal))
+        if (context is null || context.Id <= 1)
         {
             return null;
         }
 
-        return new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName));
+        if (string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal))
+        {
+            return context.IsDefault
+                ? null
+                : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName));
+        }
+
+        if (Domains.Page.ChildFrameNumber(page.FrameId, context.FrameId) is not { } frameId)
+        {
+            return null;
+        }
+
+        return context.IsDefault
+            ? IsolatedWorldTarget.ForFrameMainWorld(context.Id, frameId)
+            : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName), frameId);
+    }
+
+    /// <summary>
+    /// The world names a new document gets a context for: every name
+    /// <c>Page.addScriptToEvaluateOnNewDocument</c> or <c>Runtime.addBinding</c> registered
+    /// a world script under, in first-registration order.
+    /// </summary>
+    public List<string> NewDocumentWorldNames()
+    {
+        List<string> names = [];
+        foreach (var (_, world, _) in WorldPreloadScripts)
+        {
+            if (world.Length != 0 && !names.Contains(world, StringComparer.Ordinal))
+            {
+                names.Add(world);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Gives a child frame that has just been announced its execution contexts: the
+    /// default one and one per <see cref="NewDocumentWorldNames"/>, as Chromium creates
+    /// them on the frame's new document. Existing ones are kept.
+    /// </summary>
+    internal List<ExecutionContextRecord> CreateFrameContexts(string pageId, string frameId, string origin)
+    {
+        List<ExecutionContextRecord> created = [];
+        bool hasDefault = false;
+        foreach (var context in ContextsForPage(pageId))
+        {
+            if (context.IsDefault && string.Equals(context.FrameId, frameId, StringComparison.Ordinal))
+            {
+                hasDefault = true;
+                break;
+            }
+        }
+
+        if (!hasDefault)
+        {
+            created.Add(AllocateContext(pageId, frameId, origin, string.Empty, true));
+        }
+
+        foreach (var world in NewDocumentWorldNames())
+        {
+            (ExecutionContextRecord context, bool fresh) = CreateIsolatedContext(pageId, frameId, origin, world, false);
+            if (fresh)
+            {
+                created.Add(context);
+            }
+        }
+
+        return created;
     }
 
     /// <summary>
@@ -563,7 +629,7 @@ public sealed class CdpContext
     {
         foreach (var context in ContextsForPage(pageId))
         {
-            if (context.IsDefault)
+            if (context.IsDefault && !IsChildFrameContext(context))
             {
                 return context;
             }
@@ -592,6 +658,10 @@ public sealed class CdpContext
             }
         }
 
+        // The old document's child frames went with it, and so did their contexts: the new
+        // document's frames are announced afresh, with contexts of their own, even where
+        // a realm id repeats.
+        AnnouncedFrames.Remove(pageId);
         List<ExecutionContextRecord> contexts =
             [AllocateContext(pageId, frameId, origin, string.Empty, true)];
         List<string> worlds = [.. IsolatedWorlds];
@@ -691,7 +761,7 @@ public sealed class CdpContext
     {
         foreach (var context in ContextsForPage(pageId))
         {
-            if (context.IsDefault)
+            if (context.IsDefault && !IsChildFrameContext(context))
             {
                 return context.Id;
             }
@@ -699,6 +769,11 @@ public sealed class CdpContext
 
         return null;
     }
+
+    /// <summary>Whether a context belongs to one of its page's child frames rather than the main frame.</summary>
+    private bool IsChildFrameContext(ExecutionContextRecord context) =>
+        GetPage(context.PageId) is { } page
+        && !string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal);
 
     internal List<ExecutionContextRecord> RemoveFrameContexts(string pageId, string frameId)
     {
