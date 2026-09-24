@@ -119,6 +119,25 @@ public class ParserComplexityTests
     }
 
     [Fact]
+    public void QuerySelectorStopsAtTheFirstMatch()
+    {
+        // document.body is this query. It snapshotted every descendant before matching, so each
+        // call cost the whole document.
+        var tree = HtmlParsing.ParseHtml(Repeat("<div>x</div>", N));
+        NodeId? body = null;
+        var elapsed = Time(() =>
+        {
+            for (var i = 0; i < 20_000; i++)
+            {
+                body = tree.QuerySelector("body");
+            }
+        });
+        Assert.Equal("body", tree.GetNode(body!.Value)!.ElementName!.Value.Local);
+        Assert.True(elapsed < Bound, $"20000 body lookups took {elapsed}");
+        Assert.Equal(tree.QuerySelectorAll("div")[^1], tree.QuerySelector("div:last-child"));
+    }
+
+    [Fact]
     public void ParsingObservesCancellation()
     {
         using var source = new CancellationTokenSource();

@@ -791,6 +791,94 @@ public sealed class DocumentWriteStreamTests
         Assert.Empty(stream.Write(string.Empty, dom));
     }
 
+    // SECURITY.md M11: the stream re-parsed everything written so far on every call, so 5,000
+    // small writes took 30 s. It parses only what each call adds now.
+    [Fact]
+    public void ManySmallWritesCostLinearTime()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var placements = 0;
+        for (var i = 0; i < 20_000; i++)
+        {
+            placements += stream.Write("<div>x</div>", dom).Count;
+        }
+
+        Assert.Equal(40_000, placements);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(8), $"20000 writes took {watch.Elapsed}");
+    }
+
+    [Fact]
+    public void ACharacterReferenceSplitAcrossCallsIsDecodedOnce()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+
+        // "&am" could still become "&amp;", so it waits for the next call.
+        var first = stream.Write("<p>a&am", dom);
+        Assert.Equal("a", Text(dom, first[1].Node));
+
+        Assert.Empty(stream.Write("p;b", dom));
+        Assert.Equal("a&b", Text(dom, first[1].Node));
+    }
+
+    [Fact]
+    public void ACommentSplitAcrossCallsAppearsWhenItCloses()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+
+        Assert.Empty(stream.Write("<!-- a", dom));
+        var placements = stream.Write(" b -->c", dom);
+        Assert.Equal(2, placements.Count);
+        Assert.Equal(" a b ", Assert.IsType<CommentData>(dom.GetNode(placements[0].Node)!.Data).Contents);
+        Assert.Equal("c", Text(dom, placements[1].Node));
+    }
+
+    [Fact]
+    public void ATrailingLessThanWaitsForTheTagItMayStart()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+
+        var first = stream.Write("a<", dom);
+        Assert.Equal("a", Text(dom, Assert.Single(first).Node));
+
+        var second = stream.Write("b>c", dom);
+        Assert.Equal("b", dom.GetNode(second[0].Node)!.ElementName!.Value.Local);
+        Assert.Equal("c", Text(dom, second[1].Node));
+    }
+
+    [Fact]
+    public void ACrLfSplitAcrossCallsIsOneNewline()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+
+        var first = stream.Write("<p>a\r", dom);
+        stream.Write("\nb", dom);
+        Assert.Equal("a\nb", Text(dom, first[1].Node));
+    }
+
+    [Fact]
+    public void RawTextSplitAcrossCallsIsNotDuplicated()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+
+        // The textarea's text is tokenized again on each call, and replaces the last result.
+        var first = stream.Write("<textarea>ab", dom);
+        Assert.Equal("textarea", dom.GetNode(first[0].Node)!.ElementName!.Value.Local);
+        var text = first[1].Node;
+        Assert.Equal("ab", Text(dom, text));
+
+        Assert.Empty(stream.Write("c</ti", dom));
+        var last = stream.Write("tle></textarea><p>d", dom);
+        Assert.Equal("abc</title>", Text(dom, text));
+        Assert.Equal("p", dom.GetNode(last[0].Node)!.ElementName!.Value.Local);
+    }
+
     private static string Text(DomTree dom, NodeId node) =>
         dom.GetNode(node)!.Data is TextData text ? text.Contents : string.Empty;
 }

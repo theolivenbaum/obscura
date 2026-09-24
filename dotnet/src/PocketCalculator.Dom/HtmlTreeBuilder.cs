@@ -162,7 +162,7 @@ internal sealed partial class HtmlTreeBuilder
     // ------------------------------------------------------------------ state
 
     private readonly DomTree _tree;
-    private readonly HtmlTokenizer _tokenizer;
+    private HtmlTokenizer _tokenizer;
     private readonly Tok _tok = new();
 
     private readonly List<Rec> _stack = [];
@@ -189,9 +189,6 @@ internal sealed partial class HtmlTreeBuilder
 
     /// <summary>The fragment parsing context element; not on the stack.</summary>
     private readonly Rec? _context;
-
-    /// <summary>Receives the open elements at the end of the input, if set.</summary>
-    private HashSet<NodeId>? _openAtEnd;
 
     private readonly StringBuilder _pendingTableText = new();
     private bool _pendingTableTextHasNonSpace;
@@ -223,12 +220,15 @@ internal sealed partial class HtmlTreeBuilder
         _context = context;
         _namesBySpan = _names.GetAlternateLookup<ReadOnlySpan<char>>();
         _tagAttributeNamesBySpan = _tagAttributeNames.GetAlternateLookup<ReadOnlySpan<char>>();
-        _tokenizer = new HtmlTokenizer(new TextSource(new StringTextSource(html)), HtmlEntityProvider.ResolverExtended)
+        _tokenizer = NewTokenizer(html);
+    }
+
+    private HtmlTokenizer NewTokenizer(string html) =>
+        new(new TextSource(new StringTextSource(html)), HtmlEntityProvider.ResolverExtended)
         {
             DisableElementPositionTracking = true,
             ShouldEmitAttribute = ShouldEmitAttribute,
         };
-    }
 
     /// <summary>
     /// How many attributes one tag keeps.
@@ -297,22 +297,13 @@ internal sealed partial class HtmlTreeBuilder
     /// element named <paramref name="contextName"/>, below <paramref name="root"/>, which stands
     /// for the algorithm's <c>html</c> root element.
     /// </summary>
-    /// <remarks>
-    /// With <paramref name="openAtEnd"/>, the elements still open when the input ran out, before
-    /// the end of file closed them, are added to it: the ones more input could still add to.
-    /// </remarks>
-    internal static void ParseFragment(
-        DomTree tree,
-        NodeId root,
-        string html,
-        QualName contextName,
-        HashSet<NodeId>? openAtEnd = null)
+    internal static void ParseFragment(DomTree tree, NodeId root, string html, QualName contextName)
     {
         var context = new Rec();
         SetName(context, contextName.Ns, contextName.Local);
         context.Flags = Classify(context.Ns, context.Tag, context.Local, annotationXmlIntegrationPoint: false);
 
-        var builder = new HtmlTreeBuilder(tree, html, context) { _openAtEnd = openAtEnd };
+        var builder = new HtmlTreeBuilder(tree, html, context);
         builder.StartFragment(root);
         builder.Run();
     }
@@ -362,34 +353,9 @@ internal sealed partial class HtmlTreeBuilder
                 var acn = AdjustedCurrentNode;
                 _tokenizer.IsAcceptingCharacterData = acn is not null && acn.Ns != ElemNs.Html;
                 ref var token = ref _tokenizer.GetStructToken();
-                if (!ReadToken(ref token))
-                {
-                    continue;
-                }
-
-                if (_skipNextNewline)
-                {
-                    _skipNextNewline = false;
-                    if (_tok.Kind == TokKind.Character && _tok.Chars.Span is ['\n', ..])
-                    {
-                        _tok.Chars = _tok.Chars[1..];
-                        if (_tok.Chars.IsEmpty)
-                        {
-                            continue;
-                        }
-                    }
-                }
-
-                if (_tok.Kind == TokKind.Eof && _openAtEnd is not null)
-                {
-                    foreach (var open in _stack)
-                    {
-                        _openAtEnd.Add(open.Id);
-                    }
-                }
-
-                Process(_tok);
-                if (_tok.Kind == TokKind.Eof)
+                var eof = token.Type == HtmlTokenType.EndOfFile;
+                ProcessToken(ref token);
+                if (eof)
                 {
                     break;
                 }
@@ -406,16 +372,21 @@ internal sealed partial class HtmlTreeBuilder
         }
         finally
         {
-            foreach (var (id, builder) in _growingText)
-            {
-                if (_tree.GetNode(id)?.Data is TextData text)
-                {
-                    text.Contents = builder.ToString();
-                }
-            }
-
-            _growingText.Clear();
+            WriteBackGrowingText();
         }
+    }
+
+    private void WriteBackGrowingText()
+    {
+        foreach (var (id, builder) in _growingText)
+        {
+            if (_tree.GetNode(id)?.Data is TextData text)
+            {
+                text.Contents = builder.ToString();
+            }
+        }
+
+        _growingText.Clear();
     }
 
     /// <summary>Copy the tokenizer's token into <see cref="_tok"/>; false for one to skip.</summary>
@@ -642,6 +613,7 @@ internal sealed partial class HtmlTreeBuilder
     {
         r.Index = _stack.Count;
         _stack.Add(r);
+        _openIds?.Add(r.Id);
 
         if (r.Ns == ElemNs.Html)
         {
@@ -691,6 +663,7 @@ internal sealed partial class HtmlTreeBuilder
     {
         var r = _stack[^1];
         _stack.RemoveAt(_stack.Count - 1);
+        _openIds?.Remove(r.Id);
 
         if (r.Ns == ElemNs.Html)
         {

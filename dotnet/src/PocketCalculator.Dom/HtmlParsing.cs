@@ -32,14 +32,7 @@ public static class HtmlParsing
     /// fragment parsing context, and so does this, including an SVG or MathML context, whose
     /// children are parsed as foreign content.
     /// </summary>
-    public static DomTree ParseFragmentWithContext(string html, QualName contextName) =>
-        ParseFragmentWithContext(html, contextName, openAtEnd: null);
-
-    /// <summary>
-    /// Parse a fragment and report, in <paramref name="openAtEnd"/>, the elements still open
-    /// when the input ran out: the ones more input would still add to (document.write).
-    /// </summary>
-    internal static DomTree ParseFragmentWithContext(string html, QualName contextName, HashSet<NodeId>? openAtEnd)
+    public static DomTree ParseFragmentWithContext(string html, QualName contextName)
     {
         var tree = new DomTree();
         // Fragment parsing deliberately leaves declarative shadow roots disabled.
@@ -48,7 +41,7 @@ public static class HtmlParsing
         // algorithm's own root element, so the parsed nodes are built under it directly.
         var root = tree.NewNode(NodeData.Element(QualName.Html("html")));
         tree.AppendChild(tree.Document, root);
-        HtmlTreeBuilder.ParseFragment(tree, root, html, contextName, openAtEnd);
+        HtmlTreeBuilder.ParseFragment(tree, root, html, contextName);
         return tree;
     }
 

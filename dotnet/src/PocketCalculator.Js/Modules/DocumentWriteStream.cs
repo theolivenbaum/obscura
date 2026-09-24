@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 
 using PocketCalculator.Dom;
@@ -28,28 +27,35 @@ public readonly record struct Placement(NodeId? Parent, NodeId Node);
 /// the same time, registers window named access, and loads a written stylesheet.
 /// </para>
 /// <para>
-/// <b>Port note.</b> The Rust stream owns a live <c>html5ever</c> parser and feeds
-/// it each call's argument, so the tokenizer's state persists and nothing is
-/// re-tokenized. AngleSharp's tokenizer cannot be resumed once it has reached the end
-/// of its input, so this port keeps the concatenated input stream and re-parses it per call. The
-/// parser is deterministic and the input only ever grows at the end, so every node
-/// keeps its position; nodes are therefore identified by their path from the
-/// fragment root rather than by an arena id, and the handed-over map, the
-/// fresh-children walk, the hold-back of incomplete script/template nodes, the
-/// staging container and the subtree mapping are all ported unchanged.
-/// The cost is that a write is linear in the whole stream rather than in the new
-/// text; see the note on <see cref="Write"/>.
+/// Like the Rust stream (crates/obscura-js/src/write_stream.rs), which owns a live
+/// <c>html5ever</c> parser, this keeps one tree builder alive across calls
+/// (<see cref="HtmlTreeBuilder.Feed"/>) and parses only what each call adds, so
+/// nodes keep their arena ids from call to call. What the end of a call might still
+/// change, such as a tag cut off in its name, waits for the next call.
+/// </para>
+/// <para>
+/// DEVIATION (SECURITY.md M11): the port used to re-parse the whole stream on every
+/// call and identify nodes by their path, because AngleSharp's tree builder could not
+/// be fed in pieces. A write cost as much as everything written before it, so 5,000
+/// small writes took 30 s.
 /// </para>
 /// </remarks>
 public sealed class DocumentWriteStream
 {
-    private readonly StringBuilder _input = new();
+    /// <summary>The input from where the tree builder stopped, newlines normalized.</summary>
+    private readonly StringBuilder _pending = new();
+
+    /// <summary>A CR ended the last call; it becomes one newline with a following LF.</summary>
+    private bool _pendingCr;
+
+    private DomTree? _source;
+    private HtmlTreeBuilder? _builder;
 
     /// <summary>
-    /// Maps a node of the parser tree, by its path, to its copy in the document. A
-    /// path missing here has not been handed over yet.
+    /// Maps a node of the parser tree to its copy in the document. A node missing here
+    /// has not been handed over yet.
     /// </summary>
-    private readonly Dictionary<string, NodeId> _handedOver = new(StringComparer.Ordinal);
+    private readonly Dictionary<NodeId, NodeId> _handedOver = [];
 
     /// <summary>Staging for copying a whole subtree, reused.</summary>
     private NodeId? _staging;
@@ -87,62 +93,63 @@ public sealed class DocumentWriteStream
     {
         ArgumentNullException.ThrowIfNull(dom);
 
-        _input.Append(html);
-        var stream = _input.ToString();
+        AppendNormalized(html);
+        if (_builder is null)
+        {
+            _source = new DomTree();
+            var fragmentRoot = _source.NewNode(NodeData.Element(QualName.Html("html")));
+            _source.AppendChild(_source.Document, fragmentRoot);
+            _builder = HtmlTreeBuilder.CreateIncremental(_source, fragmentRoot, QualName.Html("body"));
+        }
 
-        // The elements still open at the end of the stream, which the parser would still be
-        // able to add to. html5ever answers this through TreeSink::trace_handles; the tree
-        // builder reports its stack of open elements as the input runs out. That includes a
-        // raw-text element such as an unterminated <script>. When the stream ends inside a
-        // tag, the tag produces no node, so there is nothing of it to hold back.
-        var retained = new HashSet<NodeId>();
-        var source = HtmlParsing.ParseFragmentWithContext(stream, QualName.Html("body"), retained);
+        var consumed = _builder.Feed(_pending.ToString());
+        _pending.Remove(0, consumed);
+
+        var source = _source!;
         var root = source.FragmentRoot();
-
         var placements = new List<Placement>();
-        var stack = new List<Entry>();
-        AppendFreshChildren(stack, source, root, string.Empty);
+        var stack = new List<NodeId>();
+        AppendFreshChildren(stack, source, root);
 
         while (stack.Count > 0)
         {
-            var entry = stack[^1];
+            var current = stack[^1];
             stack.RemoveAt(stack.Count - 1);
 
-            var node = source.GetNode(entry.Node);
+            var node = source.GetNode(current);
             if (node is null)
             {
                 continue;
             }
 
-            if (_handedOver.TryGetValue(entry.Path, out var known))
+            if (_handedOver.TryGetValue(current, out var known))
             {
                 // A text node at the end of the input stream grows with every call
                 // and stays the same node. Elements no longer change after their
                 // creation.
                 if (node.IsText && dom.GetNode(known)?.Data is TextData text)
                 {
-                    var grown = source.TextContent(entry.Node);
+                    var grown = source.TextContent(current);
                     dom.ChargeGrowth(2L * (grown.Length - text.Contents.Length));
                     text.Contents = grown;
                 }
 
-                AppendFreshChildren(stack, source, entry.Node, entry.Path);
+                AppendFreshChildren(stack, source, current);
                 continue;
             }
 
             NodeId? parent;
-            if (entry.Path.Length == 0)
+            if (node.Parent is not { } sourceParent)
             {
                 continue;
             }
 
-            var separator = entry.Path.LastIndexOf('/');
-            if (separator < 0)
+            if (sourceParent == root)
             {
                 // A direct child of the fragment root belongs at the insertion point.
                 parent = null;
             }
-            else if (_handedOver.TryGetValue(entry.Path[..separator], out var parentCopy))
+            else if (_handedOver.TryGetValue(sourceParent, out var parentCopy))
             {
                 parent = parentCopy;
             }
@@ -152,22 +159,23 @@ public sealed class DocumentWriteStream
                 continue;
             }
 
-            if (NeedsToBeComplete(source, entry.Node))
+            if (NeedsToBeComplete(source, current))
             {
-                if (retained.Contains(entry.Node))
+                // Still open: the parser can still add to it.
+                if (_builder.IsOpen(current))
                 {
                     continue;
                 }
 
                 var container = _staging ??= dom.NewNode(NodeData.Document);
-                var complete = dom.ImportNodeFrom(container, source, entry.Node);
+                var complete = dom.ImportNodeFrom(container, source, current);
                 if (complete is not { } completeId)
                 {
                     continue;
                 }
 
                 dom.Detach(completeId);
-                MapSubtree(source, entry.Node, entry.Path, dom, completeId);
+                MapSubtree(source, current, dom, completeId);
                 placements.Add(new Placement(parent, completeId));
                 continue;
             }
@@ -175,12 +183,38 @@ public sealed class DocumentWriteStream
             // Handed over shallow and left to grow in place. That makes an element
             // that is never closed appear at once instead of never.
             var copy = dom.NewNode(node.Data.Clone());
-            _handedOver[entry.Path] = copy;
+            _handedOver[current] = copy;
             placements.Add(new Placement(parent, copy));
-            AppendFreshChildren(stack, source, entry.Node, entry.Path);
+            AppendFreshChildren(stack, source, current);
         }
 
         return placements;
+    }
+
+    /// <summary>
+    /// The input stream's newline normalization, which the tree builder's resumption
+    /// relies on: CRLF and CR become LF. A CR at the end waits, since an LF may follow.
+    /// </summary>
+    private void AppendNormalized(string html)
+    {
+        if (html.Length == 0)
+        {
+            return;
+        }
+
+        var text = _pendingCr ? "\r" + html : html;
+        _pendingCr = text[^1] == '\r';
+        if (_pendingCr)
+        {
+            text = text[..^1];
+        }
+
+        if (text.Contains('\r'))
+        {
+            text = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        }
+
+        _pending.Append(text);
     }
 
     /// <summary>
@@ -205,18 +239,12 @@ public sealed class DocumentWriteStream
     /// node at the end of the input stream keeps growing and an open element still
     /// receives children.
     /// </remarks>
-    private void AppendFreshChildren(
-        List<Entry> stack,
-        DomTree source,
-        NodeId parent,
-        string parentPath)
+    private void AppendFreshChildren(List<NodeId> stack, DomTree source, NodeId parent)
     {
-        var children = source.Children(parent);
-        for (var i = children.Count - 1; i >= 0; i--)
+        for (var child = source.GetNode(parent)?.LastChild; child is { } id; child = source.GetNode(id)?.PrevSibling)
         {
-            var path = ChildPath(parentPath, i);
-            stack.Add(new Entry(children[i], path));
-            if (_handedOver.ContainsKey(path))
+            stack.Add(id);
+            if (_handedOver.ContainsKey(id))
             {
                 break;
             }
@@ -227,38 +255,22 @@ public sealed class DocumentWriteStream
     /// After copying, both trees have the same shape, so a lockstep walk aligns the
     /// nodes.
     /// </summary>
-    private void MapSubtree(
-        DomTree source,
-        NodeId sourceNode,
-        string sourcePath,
-        DomTree dom,
-        NodeId copy)
+    private void MapSubtree(DomTree source, NodeId sourceNode, DomTree dom, NodeId copy)
     {
-        var pairs = new List<(NodeId From, string FromPath, NodeId To)>
-        {
-            (sourceNode, sourcePath, copy),
-        };
-
+        var pairs = new List<(NodeId From, NodeId To)> { (sourceNode, copy) };
         while (pairs.Count > 0)
         {
-            var (from, fromPath, to) = pairs[^1];
+            var (from, to) = pairs[^1];
             pairs.RemoveAt(pairs.Count - 1);
-            _handedOver[fromPath] = to;
+            _handedOver[from] = to;
 
             var fromChildren = source.Children(from);
             var toChildren = dom.Children(to);
             var shared = Math.Min(fromChildren.Count, toChildren.Count);
             for (var i = 0; i < shared; i++)
             {
-                pairs.Add((fromChildren[i], ChildPath(fromPath, i), toChildren[i]));
+                pairs.Add((fromChildren[i], toChildren[i]));
             }
         }
     }
-
-    private static string ChildPath(string parentPath, int index) =>
-        parentPath.Length == 0
-            ? index.ToString(CultureInfo.InvariantCulture)
-            : string.Concat(parentPath, "/", index.ToString(CultureInfo.InvariantCulture));
-
-    private readonly record struct Entry(NodeId Node, string Path);
 }
