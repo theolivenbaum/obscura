@@ -38,6 +38,7 @@ public sealed partial class PreparedRender
             return null;
         }
 
+        (NodeId Details, NodeId? Summary)? closedDetails = null;
         InnerTextJoiner joiner = new();
         List<Frame> stack = [new(root, tree.GetNode(root)!.FirstChild, SpaceMode(rootStyle), !IsHidden(rootStyle), 0)];
         int guard = 0;
@@ -68,6 +69,15 @@ public sealed partial class PreparedRender
             Node? child = tree.GetNode(childId);
             stack[^1] = frame with { Next = child?.NextSibling };
             if (child is null)
+            {
+                continue;
+            }
+
+            // DEVIATION from crates/obscura-js (bootstrap's walk), which reads a closed
+            // <details>'s DOM children: only its summary is rendered, so Chromium 141 leaves
+            // the rest out of innerText.
+            if (ClosedDetailsSummary(tree, frame.Node, ref closedDetails) is { } rendered
+                && rendered != childId)
             {
                 continue;
             }
@@ -153,6 +163,39 @@ public sealed partial class PreparedRender
         return joiner.Finish();
     }
 
+    /// <summary>
+    /// For a closed HTML <c>details</c>, the one child it renders: its first summary, or the
+    /// details itself when it has none, which matches no child. <c>null</c> for any other
+    /// element.
+    /// </summary>
+    private static NodeId? ClosedDetailsSummary(
+        DomTree tree,
+        NodeId parent,
+        ref (NodeId Details, NodeId? Summary)? cache)
+    {
+        if (cache is { } known && known.Details == parent)
+        {
+            return known.Summary ?? parent;
+        }
+
+        if (tree.GetNode(parent) is not { } node
+            || node.AsElement() is not { } element
+            || !string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+            || !string.Equals(element.Name.Local, "details", StringComparison.Ordinal)
+            || node.GetAttribute("open") is not null)
+        {
+            return null;
+        }
+
+        List<NodeId> rendered = Inline.RenderedChildren(tree, parent);
+        NodeId? summary = rendered.Count > 0 ? rendered[0] : null;
+        cache = (parent, summary);
+
+        // With no summary nothing renders: answer with the details itself, which is never one
+        // of its own children.
+        return summary ?? parent;
+    }
+
     private readonly record struct Frame(NodeId Node, NodeId? Next, WhiteSpaceMode Mode, bool Visible, byte Close, int Breaks = 1);
 
     private enum WhiteSpaceMode : byte
@@ -199,7 +242,8 @@ public sealed partial class PreparedRender
             _ => WhiteSpaceMode.Preserve,
         };
 
-    private static bool IsHidden(LayoutStyle style) => style.VisibilityHidden == true;
+    // Inherited: a descendant of a hidden element is hidden unless it says `visible` itself.
+    private static bool IsHidden(LayoutStyle style) => style.ComputedVisibilityHidden;
 
 
     // data.replace(/[\t\n\r ]+/g, ' '). DEVIATION from crates/obscura-js, whose walk also

@@ -97,6 +97,7 @@ internal static class RetainedLayoutReuse
         "Cursor",                // LayoutDomComputed only (inherited), then Paint/.
         "VisibilityHidden",      // LayoutDomComputed only (feeds EffectivelyInvisible).
         "EffectivelyInvisible",  // An output of LayoutDomComputed, read only by Paint/.
+        "ComputedVisibilityHidden", // The same pass's output, read by Paint/ and innerText.
     ];
 
     private static readonly (FieldInfo Field, bool PaintOnly)[] Members = BuildMembers(typeof(LayoutStyle));

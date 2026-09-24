@@ -2147,6 +2147,14 @@ public sealed class LayoutStyle
     /// </summary>
     public bool EffectivelyInvisible;
 
+    /// <summary>
+    /// The computed <c>visibility</c>: <see cref="VisibilityHidden"/> where declared, the
+    /// parent's computed value where not. Resolved in the same pass as
+    /// <see cref="EffectivelyInvisible"/>, and what <c>getComputedStyle()</c> and
+    /// <c>innerText</c> read.
+    /// </summary>
+    public bool ComputedVisibilityHidden;
+
     /// <summary>A CSS image supplied by <c>content: url(...)</c> on a replaced element.</summary>
     /// <remarks>
     /// This is distinct from generated pseudo text: on an <c>&lt;img&gt;</c> it becomes the

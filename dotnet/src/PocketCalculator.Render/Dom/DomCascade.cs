@@ -587,6 +587,17 @@ internal static class DomCascade
                 style.Display = Display.None;
             }
 
+            // UA rule `dialog:not([open]) { display: none }`. DEVIATION from
+            // crates/obscura-render/src/style.rs, which has no dialog rule, so a closed dialog
+            // laid out and painted as a block and its text reached innerText (Chromium 141:
+            // display none, a 0,0,0,0 rect, no text).
+            if (!isSvgNamespace
+                && string.Equals(node.AsElement()?.Name.Local, "dialog", StringComparison.Ordinal)
+                && node.GetAttribute("open") is null)
+            {
+                style.Display = Display.None;
+            }
+
             ApplyPresentationalHints(node, style);
             if (isSvgNamespace)
             {

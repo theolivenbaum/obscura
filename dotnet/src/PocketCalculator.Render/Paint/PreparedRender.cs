@@ -602,7 +602,10 @@ public sealed partial class PreparedRender
         output["z-index"] = style.ZIndex is { } z
             ? z.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : "auto";
-        output["visibility"] = style.VisibilityHidden == true ? "hidden" : "visible";
+        // DEVIATION from crates/obscura-render: visibility is inherited, so a child of a
+        // `visibility: hidden` element reports `hidden` (Chromium 141), not its own
+        // undeclared value.
+        output["visibility"] = style.ComputedVisibilityHidden ? "hidden" : "visible";
         output["opacity"] = PaintCssValues.CssNumber(style.Opacity ?? 1f);
         RgbaColor background = style.BackgroundColor ?? new RgbaColor(0, 0, 0, 0);
         output["background-color"] = style.BackgroundColorIsSrgbFunction

@@ -201,6 +201,7 @@ public sealed class DomLayout
             bool visibilityHidden = style.VisibilityHidden ?? parentState.VisibilityHidden;
             bool opacityZero = parentState.OpacityZero || style.Opacity is { } opacity && opacity <= 0f;
             style.EffectivelyInvisible = visibilityHidden || opacityZero;
+            style.ComputedVisibilityHidden = visibilityHidden;
             if (style.BeforePseudo is { } before)
             {
                 before.EffectivelyInvisible = style.EffectivelyInvisible;
