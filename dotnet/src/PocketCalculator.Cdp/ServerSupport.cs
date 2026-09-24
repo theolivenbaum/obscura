@@ -24,6 +24,13 @@ internal abstract record ServerMessage
 internal static class ServerSupport
 {
     /// <summary>
+    /// Written to a connection's reply queue for a message the processor cannot answer
+    /// (it does not parse), so the idle timeout stops counting it as a command in
+    /// flight. The send loop drops it: nothing goes on the wire. Compared by reference.
+    /// </summary>
+    internal static readonly string UnansweredMarker = new("\0unanswered".ToCharArray());
+
+    /// <summary>
     /// Whether a raw CDP frame is exactly a <c>Page.navigate</c> call, and so
     /// should take the spawn-and-defer navigation path.
     /// </summary>

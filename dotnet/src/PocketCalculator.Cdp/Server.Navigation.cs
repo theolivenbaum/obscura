@@ -43,6 +43,7 @@ public static partial class CdpServer
         if (parsed is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}");
+            replyTx.TryWrite(ServerSupport.UnansweredMarker);
             return;
         }
 
@@ -414,6 +415,7 @@ public static partial class CdpServer
         if (req is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}: {ServerSupport.Utf8Preview(text, 200)}");
+            replyTx.TryWrite(ServerSupport.UnansweredMarker);
             return;
         }
 
