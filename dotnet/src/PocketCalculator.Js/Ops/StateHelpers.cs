@@ -450,6 +450,64 @@ public static class StateHelpers
     }
 
     /// <summary>
+    /// The cookie context of <paramref name="state"/>'s own document at
+    /// <paramref name="url"/> (<c>document.cookie</c>): same-site unless the document is a
+    /// frame with a cross-site ancestor, partitioned by the page's site. Port addition
+    /// (CHIPS; Rust reads and writes every document's cookies as a top-level document's).
+    /// </summary>
+    public static CookieAccess DocumentCookieAccess(PocketCalculatorState state, Uri url)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(url);
+        var topLevel = TopLevelUri(state) ?? url;
+        return new CookieAccess(
+            state.CrossSiteAncestor ? SameSiteContext.CrossSite : SameSiteContext.SameSite,
+            CookiePartitionKey.For(topLevel, state.CrossSiteAncestor, url));
+    }
+
+    /// <summary>
+    /// The cookie context of a scripted request (fetch, XHR, an internal load) by
+    /// <paramref name="state"/>'s document, whose origin is <paramref name="origin"/>, to
+    /// <paramref name="target"/>: same-site only when the document, its ancestors and the
+    /// target are all same-site with the page. Port addition (the site for cookies and
+    /// CHIPS; Rust judges the document's origin alone).
+    /// </summary>
+    public static CookieAccess RequestCookieAccess(PocketCalculatorState state, string origin, Uri target)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(target);
+        var sameSite = CookieJar.ContextForInitiator(origin, target);
+        var topLevel = TopLevelUri(state);
+        if (topLevel is not null && (state.CrossSiteAncestor || !CookieJar.IsSameSite(topLevel, target)))
+        {
+            sameSite = SameSiteContext.CrossSite;
+        }
+
+        topLevel ??= Uri.TryCreate(state.Url, UriKind.Absolute, out var own) ? own : null;
+        return new CookieAccess(
+            sameSite,
+            topLevel is null ? null : CookiePartitionKey.For(topLevel, state.CrossSiteAncestor, target));
+    }
+
+    /// <summary>
+    /// Give a request <paramref name="state"/>'s document starts the frame scope its cookies
+    /// are judged in (<see cref="ResourceRequest.TopLevel"/>,
+    /// <see cref="ResourceRequest.CrossSiteAncestor"/>). A no-op for the page's own document.
+    /// </summary>
+    public static ResourceRequest WithFrameScope(ResourceRequest request, PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(state);
+        request.TopLevel = TopLevelUri(state);
+        request.CrossSiteAncestor = state.CrossSiteAncestor;
+        return request;
+    }
+
+    /// <summary>The page's URL for a frame's document; null for the page's own.</summary>
+    public static Uri? TopLevelUri(PocketCalculatorState state) =>
+        state.TopLevelUrl is { } top && Uri.TryCreate(top, UriKind.Absolute, out var parsed) ? parsed : null;
+
+    /// <summary>
     /// The document's referrer policy: the last valid <c>&lt;meta name=referrer&gt;</c> in
     /// tree order, else the <c>Referrer-Policy</c> header, else the default. Memoized on the
     /// document's generations.

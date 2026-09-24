@@ -60,7 +60,7 @@ public static class Storage
                     if (CookieParams.ParseDeleteCookiesParams(parameters) is { } filter)
                     {
                         CookieJarFor(ctx, parameters, sessionId)
-                            .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path);
+                            .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path, filter.PartitionKey);
                     }
 
                     return DomainResult.Empty();

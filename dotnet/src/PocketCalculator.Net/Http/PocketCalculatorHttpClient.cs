@@ -513,7 +513,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             }
         }
 
-        if (request.SendsCredentialsTo(url) && CookieJar.GetCookieHeaderSameSite(url).Length != 0)
+        if (request.SendsCredentialsTo(url)
+            && CookieJar.GetCookieHeader(url, CookieAccessFor(request, url, methodIsSafe: true, [])).Length != 0)
         {
             return null;
         }
@@ -529,6 +530,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             request.Credentials,
             request.Initiator?.ToString(),
             request.Referrer?.ToString(),
+            request.TopLevel?.ToString(),
+            request.CrossSiteAncestor,
             UserAgent,
             headerFingerprint,
             request.MaxResponseBytes);
@@ -824,9 +827,10 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 if (request.SendsCredentialsTo(currentUrl)
                     && resp.Headers.NonValidated.TryGetValues("Set-Cookie", out var setCookies))
                 {
+                    var setAccess = CookieSetAccessFor(request, currentUrl, redirects);
                     foreach (var value in setCookies)
                     {
-                        CookieJar.SetCookie(value, currentUrl);
+                        CookieJar.SetCookie(value, currentUrl, setAccess);
                     }
                 }
 
@@ -961,9 +965,9 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
 
         var cookieHeader = request.SendsCredentialsTo(currentUrl)
-            ? CookieJar.GetCookieHeaderInContext(
+            ? CookieJar.GetCookieHeader(
                 currentUrl,
-                SameSiteContextFor(
+                CookieAccessFor(
                     request, currentUrl, method == HttpMethod.Get || method == HttpMethod.Head, redirects))
             : string.Empty;
         if (cookieHeader.Length != 0)
@@ -1402,6 +1406,17 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             }
         }
 
+        // A request from inside a frame is same-site only when the frame and every
+        // ancestor are same-site with the top-level document, which the target must be
+        // too: Chromium's site for cookies. Deviation: Rust judges the initiator alone,
+        // so a cross-site frame's requests to its own site carried Lax and Strict cookies
+        // (Chromium 141 sends SameSite=None cookies only).
+        if (sameSite && !IsTopLevelNavigation(request) && request.TopLevel is { } topLevel
+            && (request.CrossSiteAncestor || !CookieJar.IsSameSite(topLevel, target)))
+        {
+            sameSite = false;
+        }
+
         if (sameSite)
         {
             return SameSiteContext.SameSite;
@@ -1410,6 +1425,45 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         return request.Mode == RequestMode.Navigate && !request.NestedDocument && methodIsSafe
             ? SameSiteContext.CrossSiteTopLevelSafe
             : SameSiteContext.CrossSite;
+    }
+
+    private static bool IsTopLevelNavigation(ResourceRequest request) =>
+        request.Mode == RequestMode.Navigate && !request.NestedDocument;
+
+    /// <summary>
+    /// The cookie context of one hop of <paramref name="request"/>: its SameSite context and
+    /// its partition key. A top-level navigation is keyed by its own target; any other
+    /// request by the top-level document (<see cref="ResourceRequest.TopLevel"/>, else the
+    /// initiator), with the cross-site bit when the initiating frame had a cross-site
+    /// ancestor or the target is cross-site with the top level. Port addition (CHIPS).
+    /// </summary>
+    public static CookieAccess CookieAccessFor(
+        ResourceRequest request,
+        Uri target,
+        bool methodIsSafe,
+        IReadOnlyList<Uri> redirects)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var sameSite = SameSiteContextFor(request, target, methodIsSafe, redirects);
+        var topLevel = IsTopLevelNavigation(request) ? null : request.TopLevel ?? request.Initiator;
+        var partition = topLevel is null
+            ? CookiePartitionKey.ForTopLevel(target)
+            : CookiePartitionKey.For(topLevel, request.CrossSiteAncestor, target);
+        return new CookieAccess(sameSite, partition);
+    }
+
+    /// <summary>
+    /// The context a <c>Set-Cookie</c> on the response to one hop of <paramref name="request"/>
+    /// is stored in: <see cref="CookieAccessFor"/>, except that the response to a top-level
+    /// navigation may set any cookie, as Chromium lets it.
+    /// </summary>
+    public static CookieAccess CookieSetAccessFor(
+        ResourceRequest request,
+        Uri target,
+        IReadOnlyList<Uri> redirects)
+    {
+        var access = CookieAccessFor(request, target, methodIsSafe: true, redirects);
+        return IsTopLevelNavigation(request) ? access with { SameSite = SameSiteContext.SameSite } : access;
     }
 
     /// <summary>
@@ -1614,6 +1668,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         RequestCredentials Credentials,
         string? Initiator,
         string? Referrer,
+        string? TopLevel,
+        bool CrossSiteAncestor,
         string UserAgent,
         string ExtraHeaders,
         long MaxResponseBytes);

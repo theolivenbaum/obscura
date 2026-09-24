@@ -221,7 +221,9 @@ public static class CoreOps
                 return string.Empty;
             }
 
-            return jar.GetJsVisibleCookies(url);
+            // A frame reads in its own cookie context: a cross-site frame sees SameSite=None
+            // cookies only, and partitioned ones of its partition (port addition, CHIPS).
+            return jar.GetJsVisibleCookies(url, StateHelpers.DocumentCookieAccess(state, url));
         },
         string.Empty);
 
@@ -236,7 +238,7 @@ public static class CoreOps
                 return;
             }
 
-            jar.SetCookieFromJs(cookieStr, url);
+            jar.SetCookieFromJs(cookieStr, url, StateHelpers.DocumentCookieAccess(state, url));
         });
 
     /// <summary>

@@ -40,4 +40,13 @@ public sealed class CookieInfo
     /// <summary>Unix expiry in seconds, or null for a session cookie.</summary>
     [JsonPropertyName("expires")]
     public long? Expires { get; set; }
+
+    /// <summary>
+    /// The partition of a <c>Partitioned</c> (CHIPS) cookie; null for an ordinary one, and
+    /// then not written, so an unpartitioned cookie serializes as it always has. Port
+    /// addition (see <see cref="CookiePartitionKey"/>).
+    /// </summary>
+    [JsonPropertyName("partitionKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CookiePartitionKey? PartitionKey { get; set; }
 }

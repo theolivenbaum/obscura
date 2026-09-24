@@ -711,6 +711,10 @@ public static partial class FetchOps
                     {
                         Referrer = referrerSource,
                         ReferrerPolicy = referrerPolicy,
+                        // The embedding document's frame scope: a frame nested in a
+                        // cross-site frame has no site for cookies (port addition).
+                        TopLevel = StateHelpers.TopLevelUri(document),
+                        CrossSiteAncestor = document.CrossSiteAncestor,
                     }
                     : null;
             var hopReferrerSource = referrerSource;
@@ -775,15 +779,18 @@ public static partial class FetchOps
                         && jar is not null
                         && Uri.TryCreate(currentUrl, UriKind.Absolute, out var cookieUri))
                     {
-                        var cookieHeader = jar.GetCookieHeaderInContext(
+                        // Deviation: Rust judges the document's origin alone. The site for
+                        // cookies also needs the frame's ancestors same-site with the page,
+                        // and partitioned (CHIPS) cookies go to their partition only.
+                        var cookieHeader = jar.GetCookieHeader(
                             cookieUri,
                             frameNavigation is not null
-                                ? PocketCalculatorHttpClient.NavigationSameSiteContext(
+                                ? PocketCalculatorHttpClient.CookieAccessFor(
                                     frameNavigation,
                                     cookieUri,
                                     currentMethod == HttpMethod.Get || currentMethod == HttpMethod.Head,
                                     redirectedFrom)
-                                : CookieJar.ContextForInitiator(pageOrigin, cookieUri));
+                                : StateHelpers.RequestCookieAccess(document, pageOrigin, cookieUri));
                         if (cookieHeader.Length != 0)
                         {
                             request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
@@ -830,9 +837,12 @@ public static partial class FetchOps
                         && Uri.TryCreate(currentUrl, UriKind.Absolute, out var setCookieUri)
                         && hop.Headers.TryGetValues("Set-Cookie", out var setCookies))
                     {
+                        var setAccess = frameNavigation is not null
+                            ? PocketCalculatorHttpClient.CookieSetAccessFor(frameNavigation, setCookieUri, redirectedFrom)
+                            : StateHelpers.RequestCookieAccess(document, pageOrigin, setCookieUri);
                         foreach (var value in setCookies)
                         {
-                            jar.SetCookie(value, setCookieUri);
+                            jar.SetCookie(value, setCookieUri, setAccess);
                         }
                     }
 

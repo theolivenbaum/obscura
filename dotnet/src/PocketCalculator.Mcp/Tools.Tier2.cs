@@ -651,6 +651,17 @@ internal static partial class Tools
                 ["same_site"] = c.SameSite,
                 ["expires"] = c.Expires is { } expires ? JsonExt.Int(expires) : null,
             });
+
+            // Port addition (CHIPS): only a partitioned cookie carries its key, so a
+            // restore does not widen it to an ordinary third-party cookie.
+            if (c.PartitionKey is { } key)
+            {
+                ((JsonObject)cookies[^1]!)["partition_key"] = new JsonObject
+                {
+                    ["top_level_site"] = key.TopLevelSite,
+                    ["has_cross_site_ancestor"] = key.HasCrossSiteAncestor,
+                };
+            }
         }
 
         // Pull localStorage + sessionStorage for the current page's origin.
@@ -742,6 +753,11 @@ internal static partial class Tools
                     HttpOnly = c.Get("http_only").AsBool() ?? false,
                     SameSite = c.Get("same_site").AsString() ?? string.Empty,
                     Expires = c.Get("expires").AsI64(),
+                    PartitionKey = c.Get("partition_key") is { } key
+                        ? new CookiePartitionKey(
+                            key.Get("top_level_site").AsString() ?? string.Empty,
+                            key.Get("has_cross_site_ancestor").AsBool() ?? true)
+                        : null,
                 });
             }
 

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EntryKey = (string Name, string Path, PocketCalculator.Net.CookiePartitionKey? Partition);
 
 namespace PocketCalculator.Net;
 
@@ -21,12 +22,13 @@ public sealed class CookieJar
     private const int PurgedCookiesTotal = 3000;
 
     /// <summary>
-    /// domain -> (name, path) -> entry. RFC 6265 section 5.3 identifies a cookie by
+    /// domain -> (name, path, partition) -> entry. RFC 6265 section 5.3 identifies a cookie by
     /// (name, domain, path); the outer map scopes by domain and the inner key
     /// carries name+path so same-name cookies on different paths coexist instead of
-    /// clobbering each other.
+    /// clobbering each other. CHIPS adds the partition key to the identity, as Chromium
+    /// does: a partitioned and an unpartitioned cookie of one name coexist.
     /// </summary>
-    private readonly Dictionary<string, Dictionary<(string Name, string Path), CookieEntry>> _cookies =
+    private readonly Dictionary<string, Dictionary<EntryKey, CookieEntry>> _cookies =
         new(StringComparer.Ordinal);
 
     private readonly System.Threading.Lock _lock = new();
@@ -52,8 +54,13 @@ public sealed class CookieJar
         public long? Expires { get; init; }
         public required string SameSite { get; init; }
 
+        /// <summary>The partition of a <c>Partitioned</c> cookie; null for an ordinary one.</summary>
+        public CookiePartitionKey? Partition { get; init; }
+
         /// <summary>When the cookie was last stored or sent, on the jar's use counter.</summary>
         public long LastAccess { get; set; }
+
+        public EntryKey Key => (Name, Path, Partition);
     }
 
     /// <summary>
@@ -99,15 +106,26 @@ public sealed class CookieJar
         return index <= 0 ? "/" : requestPath[..index];
     }
 
-    /// <summary>Store a cookie from a <c>Set-Cookie</c> response header.</summary>
+    /// <summary>
+    /// Store a cookie from a <c>Set-Cookie</c> response header to a top-level document's
+    /// request (same-site, partitioned by <paramref name="url"/>'s own site).
+    /// </summary>
     public void SetCookie(string setCookieString, Uri url) =>
-        Store(setCookieString, url, fromJavaScript: false);
+        Store(setCookieString, url, fromJavaScript: false, CookieAccess.TopLevel(url));
 
-    /// <summary>Store a cookie from a <c>document.cookie</c> assignment.</summary>
+    /// <summary>Store a cookie from a <c>Set-Cookie</c> response header received in <paramref name="access"/>.</summary>
+    public void SetCookie(string setCookieString, Uri url, CookieAccess access) =>
+        Store(setCookieString, url, fromJavaScript: false, access);
+
+    /// <summary>Store a cookie from a top-level document's <c>document.cookie</c> assignment.</summary>
     public void SetCookieFromJs(string cookieString, Uri url) =>
-        Store(cookieString, url, fromJavaScript: true);
+        Store(cookieString, url, fromJavaScript: true, CookieAccess.TopLevel(url));
 
-    private void Store(string cookieString, Uri url, bool fromJavaScript)
+    /// <summary>Store a cookie from a <c>document.cookie</c> assignment by a document in <paramref name="access"/>.</summary>
+    public void SetCookieFromJs(string cookieString, Uri url, CookieAccess access) =>
+        Store(cookieString, url, fromJavaScript: true, access);
+
+    private void Store(string cookieString, Uri url, bool fromJavaScript, CookieAccess access)
     {
         var (nameValue, attributes) = SplitOnce(cookieString, ';');
         nameValue = nameValue.Trim();
@@ -133,6 +151,7 @@ public sealed class CookieJar
         var hasPathAttr = false;
         var secure = false;
         var httpOnly = false;
+        var partitioned = false;
         long? expires = null;
         var sameSite = "Lax";
 
@@ -187,6 +206,9 @@ public sealed class CookieJar
                         case "httponly" when !fromJavaScript:
                             httpOnly = true;
                             break;
+                        case "partitioned":
+                            partitioned = true;
+                            break;
                         default:
                             break;
                     }
@@ -215,6 +237,26 @@ public sealed class CookieJar
             return;
         }
 
+        // Deviation from cookies.rs, which ignores both (Chromium 141, measured): a
+        // cross-site context (a cross-site frame's document, or a response to a request
+        // whose site for cookies is another site) may only set SameSite=None cookies, and
+        // a Partitioned cookie needs Secure and is kept under the context's partition key.
+        if (access.SameSite == SameSiteContext.CrossSite && sameSite != "None")
+        {
+            return;
+        }
+
+        CookiePartitionKey? partition = null;
+        if (partitioned)
+        {
+            if (!secure || access.Partition is not { } key)
+            {
+                return;
+            }
+
+            partition = key;
+        }
+
         lock (_lock)
         {
             if (!sourceIsSecure && SecureCookieConflicts(name, domain, path))
@@ -234,6 +276,7 @@ public sealed class CookieJar
                     HttpOnly = httpOnly,
                     Expires = expires,
                     SameSite = sameSite,
+                    Partition = partition,
                 },
                 fromJavaScript);
         }
@@ -242,7 +285,8 @@ public sealed class CookieJar
     /// <summary>Delete or insert <paramref name="entry"/>. Caller holds the lock.</summary>
     private void StoreLocked(CookieEntry entry, bool fromJavaScript)
     {
-        var (name, path, domain) = (entry.Name, entry.Path, entry.Domain);
+        var domain = entry.Domain;
+        var key = entry.Key;
         if (entry.Expires is { } exp && exp <= Now())
         {
             if (_cookies.TryGetValue(domain, out var doomedIn))
@@ -250,13 +294,13 @@ public sealed class CookieJar
                 // RFC 6265 5.3: a non-HTTP API (document.cookie) must not delete an
                 // existing HttpOnly cookie.
                 if (fromJavaScript
-                    && doomedIn.TryGetValue((name, path), out var doomed)
+                    && doomedIn.TryGetValue(key, out var doomed)
                     && doomed.HttpOnly)
                 {
                     return;
                 }
 
-                doomedIn.Remove((name, path));
+                doomedIn.Remove(key);
             }
 
             return;
@@ -271,15 +315,15 @@ public sealed class CookieJar
         // RFC 6265 5.3: a non-HTTP API (document.cookie) must not overwrite an
         // existing HttpOnly cookie set by the server.
         if (fromJavaScript
-            && domainCookies.TryGetValue((name, path), out var existing)
+            && domainCookies.TryGetValue(key, out var existing)
             && existing.HttpOnly)
         {
             return;
         }
 
         entry.LastAccess = ++_accessClock;
-        var added = !domainCookies.ContainsKey((name, path));
-        domainCookies[(name, path)] = entry;
+        var added = !domainCookies.ContainsKey(key);
+        domainCookies[key] = entry;
         if (added)
         {
             EnforceLimitsLocked(domainCookies);
@@ -333,7 +377,7 @@ public sealed class CookieJar
     /// per jar domain and orders by expiry and last use only, which the global cap
     /// backstops against a page spreading cookies over many subdomains.
     /// </remarks>
-    private void EnforceLimitsLocked(Dictionary<(string Name, string Path), CookieEntry> domainCookies)
+    private void EnforceLimitsLocked(Dictionary<EntryKey, CookieEntry> domainCookies)
     {
         if (domainCookies.Count > MaxCookiesPerDomain)
         {
@@ -353,11 +397,11 @@ public sealed class CookieJar
     }
 
     private static void Purge(
-        List<Dictionary<(string Name, string Path), CookieEntry>> scopes,
+        List<Dictionary<EntryKey, CookieEntry>> scopes,
         int keep)
     {
         var now = Now();
-        var candidates = new List<(Dictionary<(string Name, string Path), CookieEntry> Scope, CookieEntry Entry)>();
+        var candidates = new List<(Dictionary<EntryKey, CookieEntry> Scope, CookieEntry Entry)>();
         foreach (var scope in scopes)
         {
             foreach (var entry in scope.Values)
@@ -380,7 +424,7 @@ public sealed class CookieJar
         for (var i = 0; i < excess; i++)
         {
             var (scope, entry) = candidates[i];
-            scope.Remove((entry.Name, entry.Path));
+            scope.Remove(entry.Key);
         }
     }
 
@@ -425,11 +469,22 @@ public sealed class CookieJar
 
     /// <summary>The <c>Cookie</c> header for a request in the given site context.</summary>
     public string GetCookieHeaderInContext(Uri url, SameSiteContext context) =>
-        Collect(url, jsVisibleOnly: false, context);
+        Collect(url, jsVisibleOnly: false, context, CookiePartitionKey.ForTopLevel(url));
+
+    /// <summary>
+    /// The <c>Cookie</c> header for a request in <paramref name="access"/>: unpartitioned
+    /// cookies under its SameSite context, and partitioned ones of its partition only.
+    /// </summary>
+    public string GetCookieHeader(Uri url, CookieAccess access) =>
+        Collect(url, jsVisibleOnly: false, access.SameSite, access.Partition);
 
     /// <summary>The <c>document.cookie</c> value for <paramref name="url"/>: HttpOnly cookies are hidden.</summary>
     public string GetJsVisibleCookies(Uri url) =>
-        Collect(url, jsVisibleOnly: true, SameSiteContext.SameSite);
+        Collect(url, jsVisibleOnly: true, SameSiteContext.SameSite, CookiePartitionKey.ForTopLevel(url));
+
+    /// <summary>The <c>document.cookie</c> value for a document at <paramref name="url"/> in <paramref name="access"/>.</summary>
+    public string GetJsVisibleCookies(Uri url, CookieAccess access) =>
+        Collect(url, jsVisibleOnly: true, access.SameSite, access.Partition);
 
     /// <summary>
     /// Registrable-domain same-site check (port of <c>same_site</c> in
@@ -482,7 +537,7 @@ public sealed class CookieJar
             ? SameSiteContext.SameSite
             : SameSiteContext.CrossSite;
 
-    private string Collect(Uri url, bool jsVisibleOnly, SameSiteContext context)
+    private string Collect(Uri url, bool jsVisibleOnly, SameSiteContext context, CookiePartitionKey? partition)
     {
         var host = HostOf(url);
         var path = url.AbsolutePath;
@@ -507,6 +562,12 @@ public sealed class CookieJar
                     }
 
                     if (jsVisibleOnly && entry.HttpOnly)
+                    {
+                        continue;
+                    }
+
+                    // A partitioned cookie goes only to its own partition.
+                    if (entry.Partition is { } entryPartition && entryPartition != partition)
                     {
                         continue;
                     }
@@ -621,13 +682,13 @@ public sealed class CookieJar
         }
 
         // Entries are immutable, so copying the two map levels is a full copy.
-        Dictionary<string, Dictionary<(string Name, string Path), CookieEntry>> snapshot =
+        Dictionary<string, Dictionary<EntryKey, CookieEntry>> snapshot =
             new(StringComparer.Ordinal);
         lock (source._lock)
         {
             foreach (var (domain, entries) in source._cookies)
             {
-                snapshot[domain] = new Dictionary<(string Name, string Path), CookieEntry>(entries);
+                snapshot[domain] = new Dictionary<EntryKey, CookieEntry>(entries);
             }
         }
 
@@ -663,7 +724,25 @@ public sealed class CookieJar
                 var sameSite = cookie.SameSite.Length == 0
                     ? DefaultSameSite
                     : NormalizeSameSite(cookie.SameSite);
-                if (sameSite == "None" && !cookie.Secure)
+
+                // A partitioned cookie is always Secure (Chromium forces the flag on a CDP
+                // import), and its key is reduced to a site. One whose key names no site
+                // is dropped rather than widened to an ordinary cookie.
+                CookiePartitionKey? partition = null;
+                var secure = cookie.Secure;
+                if (cookie.PartitionKey is { } requested)
+                {
+                    if (!CookiePartitionKey.TryNormalize(
+                            requested.TopLevelSite, requested.HasCrossSiteAncestor, out var normalized))
+                    {
+                        continue;
+                    }
+
+                    partition = normalized;
+                    secure = true;
+                }
+
+                if (sameSite == "None" && !secure)
                 {
                     continue;
                 }
@@ -672,15 +751,7 @@ public sealed class CookieJar
                 {
                     if (_cookies.TryGetValue(domain, out var existing))
                     {
-                        var doomed = existing
-                            .Where(pair => string.Equals(pair.Value.Name, cookie.Name, StringComparison.Ordinal)
-                                && string.Equals(pair.Value.Path, cookie.Path, StringComparison.Ordinal))
-                            .Select(pair => pair.Key)
-                            .ToList();
-                        foreach (var key in doomed)
-                        {
-                            existing.Remove(key);
-                        }
+                        existing.Remove((cookie.Name, cookie.Path, partition));
                     }
 
                     continue;
@@ -693,10 +764,11 @@ public sealed class CookieJar
                     Path = cookie.Path,
                     Domain = domain,
                     HostOnly = hostOnly,
-                    Secure = cookie.Secure,
+                    Secure = secure,
                     HttpOnly = cookie.HttpOnly,
                     Expires = cookie.Expires is { } e && e > 0 ? e : null,
                     SameSite = sameSite,
+                    Partition = partition,
                 };
 
                 if (!_cookies.TryGetValue(domain, out var domainCookies))
@@ -705,7 +777,7 @@ public sealed class CookieJar
                     _cookies[domain] = domainCookies;
                 }
 
-                domainCookies[(cookie.Name, cookie.Path)] = entry;
+                domainCookies[entry.Key] = entry;
             }
         }
     }
@@ -716,14 +788,28 @@ public sealed class CookieJar
 
     /// <summary>
     /// Delete cookies named <paramref name="name"/>, optionally scoped to a domain
-    /// and a path. A null <paramref name="path"/> deletes regardless of path.
+    /// and a path. A null <paramref name="path"/> deletes regardless of path. Cookies of
+    /// every partition go.
     /// </summary>
-    public void DeleteCookiesFiltered(string name, string domain, string? path)
+    public void DeleteCookiesFiltered(string name, string domain, string? path) =>
+        DeleteCookiesFiltered(name, domain, path, anyPartition: true, partition: null);
+
+    /// <summary>
+    /// <see cref="DeleteCookiesFiltered(string, string, string?)"/> for one partition only, as
+    /// CDP <c>deleteCookies</c> scopes it in Chromium 141: a null
+    /// <paramref name="partition"/> deletes unpartitioned cookies alone.
+    /// </summary>
+    public void DeleteCookiesFiltered(string name, string domain, string? path, CookiePartitionKey? partition) =>
+        DeleteCookiesFiltered(name, domain, path, anyPartition: false, partition);
+
+    private void DeleteCookiesFiltered(
+        string name, string domain, string? path, bool anyPartition, CookiePartitionKey? partition)
     {
         lock (_lock)
         {
-            bool MatchesPath(string entryPath) =>
-                path is null || string.Equals(entryPath, path, StringComparison.Ordinal);
+            bool MatchesPath(CookieEntry entry) =>
+                (path is null || string.Equals(entry.Path, path, StringComparison.Ordinal))
+                && (anyPartition || entry.Partition == partition);
 
             if (domain.Length == 0)
             {
@@ -740,13 +826,13 @@ public sealed class CookieJar
     }
 
     private static void RemoveMatching(
-        Dictionary<(string Name, string Path), CookieEntry> domainCookies,
+        Dictionary<EntryKey, CookieEntry> domainCookies,
         string name,
-        Func<string, bool> matchesPath)
+        Func<CookieEntry, bool> matchesPath)
     {
         var doomed = domainCookies
             .Where(pair => string.Equals(pair.Value.Name, name, StringComparison.Ordinal)
-                && matchesPath(pair.Value.Path))
+                && matchesPath(pair.Value))
             .Select(pair => pair.Key)
             .ToList();
         foreach (var key in doomed)
@@ -903,6 +989,14 @@ public sealed class CookieJar
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public bool? HostOnly { get; set; }
 
+        /// <summary>
+        /// Port addition, written only for a partitioned cookie, so a jar without one is
+        /// the file Rust writes and a file without the field loads as it always has.
+        /// </summary>
+        [JsonPropertyName("partitionKey")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public CookiePartitionKey? PartitionKey { get; set; }
+
         public static PersistedCookie From(CookieInfo cookie, bool hostOnly) => new()
         {
             Name = cookie.Name,
@@ -914,6 +1008,7 @@ public sealed class CookieJar
             SameSite = cookie.SameSite,
             Expires = cookie.Expires,
             HostOnly = hostOnly,
+            PartitionKey = cookie.PartitionKey,
         };
 
         public CookieInfo ToInfo() => new()
@@ -926,6 +1021,7 @@ public sealed class CookieJar
             HttpOnly = HttpOnly,
             SameSite = SameSite,
             Expires = Expires,
+            PartitionKey = PartitionKey,
         };
     }
 
@@ -939,6 +1035,7 @@ public sealed class CookieJar
         HttpOnly = entry.HttpOnly,
         SameSite = entry.SameSite,
         Expires = entry.Expires,
+        PartitionKey = entry.Partition,
     };
 
     private static long Now() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();

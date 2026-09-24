@@ -144,6 +144,7 @@ public sealed class FrameRealm : IDisposable
                 ? parentState.Url
                 : parentState.SecureAncestorUrl;
         InheritReferrerFromParent(state, parentState, url);
+        InheritFrameScope(state, parent.State, parentState, url);
 
         var engine = parent.CreateRealmEngine();
         DenoCoreShim? shim = null;
@@ -198,6 +199,31 @@ public sealed class FrameRealm : IDisposable
             realm.PublishRealmObjects();
         }
         return realm;
+    }
+
+    /// <summary>
+    /// The frame's cookie scope (CHIPS and the site for cookies): the page's URL as its top
+    /// level, and whether it or an ancestor frame is cross-site with the page. A srcdoc or
+    /// about:blank frame takes its site from its parent; an opaque-origin frame is
+    /// cross-site with everything. Port addition: Rust frames read and send cookies as the
+    /// page does.
+    /// </summary>
+    internal static void InheritFrameScope(
+        PocketCalculatorState state, PocketCalculatorState page, PocketCalculatorState parentState, string url)
+    {
+        state.TopLevelUrl = page.Url;
+        var aboutFrame = url.StartsWith("about:", StringComparison.Ordinal);
+        if (aboutFrame)
+        {
+            state.SiteUrl = parentState.SiteUrl ?? parentState.Url;
+        }
+
+        var site = aboutFrame ? state.SiteUrl : url;
+        state.CrossSiteAncestor = state.OpaqueOrigin
+            || parentState.CrossSiteAncestor
+            || !Uri.TryCreate(site, UriKind.Absolute, out var siteUri)
+            || !Uri.TryCreate(page.Url, UriKind.Absolute, out var pageUri)
+            || !CookieJar.IsSameSite(siteUri, pageUri);
     }
 
     /// <summary>

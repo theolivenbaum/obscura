@@ -108,6 +108,27 @@ public sealed class PocketCalculatorState
     /// </summary>
     public string? ReferrerSourceUrl { get; set; }
 
+    /// <summary>
+    /// For a frame's document, the URL of the page's (top-level) document; null for the
+    /// page's own. Port addition: with <see cref="CrossSiteAncestor"/> it is the frame's
+    /// site for cookies and cookie partition (CHIPS), which Rust does not have.
+    /// </summary>
+    public string? TopLevelUrl { get; set; }
+
+    /// <summary>
+    /// Whether this frame's document, or a frame between it and the page, is cross-site
+    /// with the page (an opaque-origin frame always is). Such a document sees and sends
+    /// SameSite=None cookies only, and its partitioned cookies carry the cross-site bit.
+    /// False for the page. Port addition.
+    /// </summary>
+    public bool CrossSiteAncestor { get; set; }
+
+    /// <summary>
+    /// The URL a srcdoc or about:blank frame takes its site from (its parent's); null for
+    /// any other document, whose site is its own URL's. Port addition.
+    /// </summary>
+    public string? SiteUrl { get; set; }
+
     /// <summary>The external stylesheet that referenced each CSS image and font URL.</summary>
     public CssSubresourceReferrers CssSubresourceReferrers { get; } = new();
 

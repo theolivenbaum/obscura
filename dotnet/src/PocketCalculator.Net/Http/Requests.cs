@@ -155,6 +155,22 @@ public sealed record ResourceRequest
     /// </summary>
     public ReferrerPolicy? ReferrerPolicy { get; set; }
 
+    /// <summary>
+    /// The URL of the top-level document when the initiating document is a frame; null
+    /// when the initiator is itself the top-level document (or there is none). With
+    /// <see cref="CrossSiteAncestor"/> it decides the request's site for cookies and its
+    /// cookie partition. Port addition: Rust has neither.
+    /// </summary>
+    public Uri? TopLevel { get; set; }
+
+    /// <summary>
+    /// Whether the initiating document, or a frame between it and the top-level document,
+    /// is cross-site with the top-level document. Such a document has no site for cookies:
+    /// its requests carry SameSite=None cookies only, and its partitioned cookies are keyed
+    /// with the cross-site bit. Port addition.
+    /// </summary>
+    public bool CrossSiteAncestor { get; set; }
+
     /// <summary>Fetch mode.</summary>
     public RequestMode Mode { get; set; }
 

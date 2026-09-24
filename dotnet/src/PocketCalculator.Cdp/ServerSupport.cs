@@ -162,8 +162,8 @@ internal static class ServerSupport
             : CdpResponse.Success(req.Id, result, req.SessionId).ToJson();
     }
 
-    internal static (string Domain, string Name, string Path) CookieKey(CookieInfo cookie) =>
-        (cookie.Domain, cookie.Name, cookie.Path);
+    internal static (string Domain, string Name, string Path, CookiePartitionKey? Partition) CookieKey(CookieInfo cookie) =>
+        (cookie.Domain, cookie.Name, cookie.Path, cookie.PartitionKey);
 
     internal static bool CookieValuesMatch(CookieInfo left, CookieInfo right) =>
         string.Equals(left.Value, right.Value, StringComparison.Ordinal) &&
@@ -197,13 +197,13 @@ internal static class ServerSupport
         IReadOnlyList<(CookieInfo Cookie, bool HostOnly)> initial,
         IReadOnlyList<(CookieInfo Cookie, bool HostOnly)> current)
     {
-        Dictionary<(string, string, string), (CookieInfo Cookie, bool HostOnly)> before = [];
+        Dictionary<(string, string, string, CookiePartitionKey?), (CookieInfo Cookie, bool HostOnly)> before = [];
         foreach (var scoped in initial)
         {
             before[CookieKey(scoped.Cookie)] = scoped;
         }
 
-        Dictionary<(string, string, string), (CookieInfo Cookie, bool HostOnly)> after = [];
+        Dictionary<(string, string, string, CookiePartitionKey?), (CookieInfo Cookie, bool HostOnly)> after = [];
         foreach (var scoped in current)
         {
             after[CookieKey(scoped.Cookie)] = scoped;
@@ -213,7 +213,8 @@ internal static class ServerSupport
         {
             if (!after.ContainsKey(key))
             {
-                destination.DeleteCookiesFiltered(scoped.Cookie.Name, scoped.Cookie.Domain, scoped.Cookie.Path);
+                destination.DeleteCookiesFiltered(
+                    scoped.Cookie.Name, scoped.Cookie.Domain, scoped.Cookie.Path, scoped.Cookie.PartitionKey);
             }
         }
 
