@@ -595,6 +595,10 @@ public class CookieTests
         [
             ("https://a.example.co.uk/", "co.uk", "https://b.example.co.uk/"),
             ("https://alice.github.io/", "github.io", "https://bob.github.io/"),
+            // SECURITY.md L6: missing from the old curated list.
+            ("https://app.onrender.com/", "onrender.com", "https://evil.onrender.com/"),
+            ("https://shop.myshopify.com/", "myshopify.com", "https://evil.myshopify.com/"),
+            ("https://b.s3.eu-west-1.amazonaws.com/", "s3.eu-west-1.amazonaws.com", "https://c.s3.eu-west-1.amazonaws.com/"),
         ];
         foreach (var (origin, suffix, sibling) in cases)
         {
@@ -609,6 +613,10 @@ public class CookieTests
         suffixJar.SetCookie("sid=secret; Domain=github.io; Path=/; Secure", publicSuffixHost);
         Assert.Contains("sid=secret", suffixJar.GetCookieHeaderSameSite(publicSuffixHost), StringComparison.Ordinal);
         Assert.Equal(string.Empty, suffixJar.GetCookieHeaderSameSite(new Uri("https://sub.github.io/")));
+
+        Assert.False(CookieJar.IsSameSite(new Uri("https://a.ngrok-free.app/"), new Uri("https://b.ngrok-free.app/")));
+        Assert.False(CookieJar.IsSameSite(new Uri("https://a.fly.dev/"), new Uri("https://b.fly.dev/")));
+        Assert.True(CookieJar.IsSameSite(new Uri("https://x.a.fly.dev/"), new Uri("https://a.fly.dev/")));
     }
 
     [Fact]

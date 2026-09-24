@@ -456,18 +456,19 @@ public sealed class CookieJar
             return false;
         }
 
-        return string.Equals(SiteOf(source, sourceHost), SiteOf(target, targetHost), StringComparison.OrdinalIgnoreCase);
+        return SiteOf(source, sourceHost).Equals(SiteOf(target, targetHost), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string SiteOf(Uri url, string host)
+    // A slice of the host, so the per-request same-site check allocates nothing (the
+    // suffix lookup is case-insensitive).
+    private static ReadOnlySpan<char> SiteOf(Uri url, string host)
     {
         if (url.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
         {
             return host;
         }
 
-        var lower = host.ToLowerInvariant();
-        return PublicSuffixList.RegistrableDomain(lower) ?? lower;
+        return PublicSuffixList.TryGetRegistrableDomain(host, out var site) ? site : host;
     }
 
     /// <summary>
@@ -1027,8 +1028,8 @@ public sealed class CookieJar
     /// response from attacker.test planting a cookie scoped to victim.test. Per RFC
     /// 6265, a public suffix equal to the origin host is kept as a host-only cookie.
     ///
-    /// The public suffix list is the curated <see cref="PublicSuffixList"/>, so a
-    /// multi-label suffix missing from it is accepted as a Domain.
+    /// The public suffix list is the full Mozilla list, private section included, as
+    /// Chromium uses it for cookies.
     /// </summary>
     internal static bool TryResolveCookieDomain(
         string originHost,
