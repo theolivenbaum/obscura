@@ -130,11 +130,7 @@ public static partial class CdpServer
         var navBody = req.Params.Get("__body").AsStringOr(string.Empty);
         var navInitiator = Domains.Page.PageInitiator(url, navMethod, navBody, req.Params);
 
-        List<string> preloadScripts = [];
-        foreach (var (_, source) in ctx.PreloadScripts)
-        {
-            preloadScripts.Add(source);
-        }
+        List<string> preloadScripts = ctx.PreloadSourcesFor(page.Id);
 
         if (ctx.InterceptSink is { } sink)
         {

@@ -379,6 +379,10 @@ public sealed partial class Page
     public IReadOnlyList<(string Name, string Payload)> TakePendingBindingCalls() =>
         Js?.TakePendingBindingCalls() ?? [];
 
+    /// <summary>Binding calls made in child frames' realms, with each frame's realm id.</summary>
+    public IReadOnlyList<(uint FrameId, string Name, string Payload)> TakePendingFrameBindingCalls() =>
+        Js?.TakePendingFrameBindingCalls() ?? [];
+
     public IReadOnlyList<RuntimeEvent> TakePendingRuntimeEvents() =>
         Js?.TakePendingRuntimeEvents() ?? [];
 

@@ -842,10 +842,9 @@ public static partial class Page
 
         ClientReferrer? clientReferrer = ClientReferrerOf(parameters);
 
-        List<string> preloadScripts = [.. ctx.PreloadScripts.Select(entry => entry.Source)];
-
         BrowserPage page = ctx.GetSessionPageMut(sessionId)
             ?? throw new DomainError("No page for session");
+        List<string> preloadScripts = ctx.PreloadSourcesFor(page.Id);
         string frameId = page.FrameId;
 
         // Navigating to the loaded document's own URL with a different fragment is a
@@ -1139,11 +1138,11 @@ public static partial class Page
                     // Kept even when empty: the script names a world every new document,
                     // child frames' included, gets a context for (Playwright registers its
                     // utility world with an empty source).
-                    ctx.WorldPreloadScripts.Add((identifier, worldName, source));
+                    ctx.WorldPreloadScripts.Add((identifier, worldName, source, ctx.PreloadOwner(sessionId)));
                 }
                 else if (source.Length != 0)
                 {
-                    ctx.PreloadScripts.Add((identifier, source));
+                    ctx.PreloadScripts.Add((identifier, source, ctx.PreloadOwner(sessionId)));
                 }
 
                 return DomainResult.Ok(new JsonObject { ["identifier"] = identifier });

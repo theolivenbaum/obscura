@@ -264,27 +264,26 @@ public static class Input
                                 frame.PageId,
                                 frame.Outcome.NavigationType);
                         }
-                        else
+                        else if (ctx.GetSessionPageMut(sessionId) is { } navigated)
                         {
-                            string loaderId =
-                                ctx.CurrentLoaderIds.TryGetValue(frame.PageId, out string? existing)
-                                    ? existing
-                                    : "loader-blank-" + frame.PageId;
-                            ctx.PendingEvents.Add(new CdpEvent
-                            {
-                                Method = "Page.frameNavigated",
-                                Params = new JsonObject
-                                {
-                                    ["frame"] = Page.FrameValue(
-                                        frame.FrameId,
-                                        null,
-                                        loaderId,
-                                        frame.Url,
-                                        "text/html"),
-                                    ["type"] = "Navigation",
-                                },
-                                SessionId = sessionId ?? string.Empty,
-                            });
+                            // A new document: the whole navigation sequence under a new loader,
+                            // as Runtime.evaluate reports one it caused (EmitPostEvalNavAsync).
+                            // Port fix: this used to send a lone Page.frameNavigated under the old
+                            // loader id and no lifecycle, so Puppeteer's waitForNavigation and
+                            // Playwright's waitForURL after a click on a link timed out waiting
+                            // for the new document's load.
+                            List<PocketCalculator.Browser.NetworkEvent> networkEvents = [.. navigated.NetworkEvents];
+                            navigated.NetworkEvents.Clear();
+                            Page.EmitNavigationEvents(
+                                ctx,
+                                sessionId,
+                                frame.FrameId,
+                                $"loader-{Guid.NewGuid()}",
+                                frame.Url,
+                                frame.PageId,
+                                networkEvents,
+                                PocketCalculator.Browser.WaitUntil.Load,
+                                navigated.Lifecycle == PocketCalculator.Browser.LifecycleState.NetworkIdle);
                         }
                     }
                 }

@@ -434,6 +434,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, state.FrameId, S(url), S(html), U64(width), U64(height))));
+        // Port addition: a child frame's binding call carries the frame's id, so CDP
+        // reports it with that frame's execution context (PendingFrameBindingCalls).
+        Bind(ops, "op_binding_called", (Action<object?, object?>)(
+            (name, payload) => CoreOps.OpBindingCalled(Page, state.FrameId, S(name), S(payload))));
         BindDocumentOps(ops, state);
     }
 

@@ -393,9 +393,13 @@ public static class Dispatcher
             // Port addition (SECURITY.md M6): calls from an isolated world's binding,
             // which report that world's execution context.
             var worldCalls = page.TakePendingWorldBindingCalls();
-            if (calls.Count != 0 || worldCalls.Count != 0)
+            // Port addition: calls from a child frame's own realm, which report that
+            // frame's default context, as in Chromium. A frame with no live context yet
+            // (not announced) has no client to hear it.
+            var frameCalls = page.TakePendingFrameBindingCalls();
+            if (calls.Count != 0 || worldCalls.Count != 0 || frameCalls.Count != 0)
             {
-                List<(string Name, string Payload, long WorldKey)> all = new(calls.Count + worldCalls.Count);
+                List<(string Name, string Payload, long WorldKey)> all = new(calls.Count + worldCalls.Count + frameCalls.Count);
                 foreach (var (name, payload) in calls)
                 {
                     all.Add((name, payload, 0));
@@ -404,6 +408,14 @@ public static class Dispatcher
                 foreach (var (worldKey, name, payload) in worldCalls)
                 {
                     all.Add((name, payload, worldKey));
+                }
+
+                foreach (var (frameId, name, payload) in frameCalls)
+                {
+                    if (ctx.FrameDefaultContextId(page.Id, Domains.Page.ChildFrameId(page.FrameId, frameId)) is { } contextId)
+                    {
+                        all.Add((name, payload, -contextId));
+                    }
                 }
 
                 drained.Add((page.Id, all));
@@ -426,13 +438,20 @@ public static class Dispatcher
         // fire Runtime.bindingCalled for a binding no client registered, or one
         // it removed. Only names with a live Runtime.addBinding shim in this
         // context are reported now; the rest are dropped.
-        HashSet<string> registeredNames = new(StringComparer.Ordinal);
-        foreach (var (identifier, _) in ctx.PreloadScripts)
+        // Port fix: per page, as Chromium scopes a binding to its target (CdpContext.PreloadScripts).
+        HashSet<string> RegisteredNames(string pageId)
         {
-            if (identifier.StartsWith(BindingPreloadPrefix, StringComparison.Ordinal))
+            HashSet<string> names = new(StringComparer.Ordinal);
+            foreach (var (identifier, _, owner) in ctx.PreloadScripts)
             {
-                registeredNames.Add(identifier[BindingPreloadPrefix.Length..]);
+                if (identifier.StartsWith(BindingPreloadPrefix, StringComparison.Ordinal)
+                    && CdpContext.PreloadAppliesTo(owner, pageId))
+                {
+                    names.Add(identifier[BindingPreloadPrefix.Length..]);
+                }
             }
+
+            return names;
         }
 
         List<CdpEvent> events = [];
@@ -446,16 +465,28 @@ public static class Dispatcher
             }
 
             var defaultContextId = ctx.DefaultContextId(pageId) ?? 1;
+            HashSet<string> registeredNames = RegisteredNames(pageId);
             foreach (var (name, payload, worldKey) in calls)
             {
                 long executionContextId = defaultContextId;
-                if (worldKey != 0)
+                if (worldKey < 0)
+                {
+                    // A child frame's own realm (negated context id, above): a page-level
+                    // binding, reported with the frame's default context.
+                    if (!registeredNames.Contains(name))
+                    {
+                        continue;
+                    }
+
+                    executionContextId = -worldKey;
+                }
+                else if (worldKey != 0)
                 {
                     // A world's call counts only for a binding registered for that
                     // world's name, and only while its context is live.
                     if (ctx.ContextById(worldKey) is not { IsDefault: false } world
                         || !string.Equals(world.PageId, pageId, StringComparison.Ordinal)
-                        || !WorldHasBinding(ctx, world.WorldName, name))
+                        || !WorldHasBinding(ctx, world.WorldName, name, pageId))
                     {
                         continue;
                     }
@@ -506,13 +537,14 @@ public static class Dispatcher
         ctx.PendingEvents.AddRange(events);
     }
 
-    private static bool WorldHasBinding(CdpContext ctx, string worldName, string name)
+    private static bool WorldHasBinding(CdpContext ctx, string worldName, string name, string pageId)
     {
         string key = BindingPreloadPrefix + name;
-        foreach (var (identifier, world, _) in ctx.WorldPreloadScripts)
+        foreach (var (identifier, world, _, owner) in ctx.WorldPreloadScripts)
         {
             if (string.Equals(identifier, key, StringComparison.Ordinal)
-                && string.Equals(world, worldName, StringComparison.Ordinal))
+                && string.Equals(world, worldName, StringComparison.Ordinal)
+                && CdpContext.PreloadAppliesTo(owner, pageId))
             {
                 return true;
             }

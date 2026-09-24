@@ -483,7 +483,8 @@ public sealed partial class Page
     /// </remarks>
     internal async Task<bool> AdvanceFramesAsync(CancellationToken cancellationToken = default)
     {
-        bool queuedNew = QueuePendingFrames();
+        bool navigating = StartFrameNavigations();
+        bool queuedNew = QueuePendingFrames() | navigating;
         ReleaseDetachedFrames();
         if (_pendingFrameWork.Count == 0 && QueuePendingFrames())
         {
@@ -499,6 +500,48 @@ public sealed partial class Page
         bool delivered = DeliverFrameMessages();
         ReleaseDetachedFrames();
         return queuedNew || scriptsRan || delivered;
+    }
+
+    /// <summary>
+    /// Follows the navigations child frames queued for themselves (a link, a
+    /// <c>location</c> write, a GET form), by loading the new URL into the frame's
+    /// <c>&lt;iframe&gt;</c> in its parent's realm; the document arrives as a new frame.
+    /// </summary>
+    /// <remarks>
+    /// Port addition: the Rust engine only processes the page's own navigation, so a click
+    /// on a link inside a frame (a CDP click routed into the frame's realm included) left
+    /// the frame where it was, where Chromium navigates it. A POST navigation of a frame
+    /// is dropped, as are page-initiated navigations to <c>file:</c> (SECURITY.md H3).
+    /// Reports whether any frame started loading.
+    /// </remarks>
+    internal bool StartFrameNavigations()
+    {
+        if (Js is null || Frames.Count == 0)
+        {
+            return false;
+        }
+        bool started = false;
+        foreach (FrameRealm frame in Frames.ToArray())
+        {
+            if (frame.State.PendingNavigation is not { } pending)
+            {
+                continue;
+            }
+            frame.State.PendingNavigation = null;
+            if (!string.Equals(pending.Method, "GET", StringComparison.OrdinalIgnoreCase)
+                || !Uri.TryCreate(frame.Url, UriKind.Absolute, out Uri? baseUri)
+                || !Uri.TryCreate(baseUri, pending.Url, out Uri? target)
+                || NavigationPolicy.RefusesPageInitiated(pending, target.AbsoluteUri))
+            {
+                continue;
+            }
+            JsonNode? moved = EvaluateHostIn(
+                frame.ParentFrameId,
+                $"__obscura_host.navigateFrame({frame.FrameId.ToString(CultureInfo.InvariantCulture)}, "
+                + $"{JsonSerializer.Serialize(target.AbsoluteUri)})");
+            started |= moved?.GetValueKind() == JsonValueKind.True;
+        }
+        return started;
     }
 
     /// <summary>URLs of the page's live child frames, in creation order.</summary>

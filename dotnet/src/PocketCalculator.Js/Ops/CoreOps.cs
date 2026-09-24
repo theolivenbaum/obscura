@@ -523,18 +523,32 @@ public static class CoreOps
     /// message queue, dropping the newest call over the cap.
     /// </remarks>
     public static void OpBindingCalled(PocketCalculatorState page, string name, string payload) =>
+        OpBindingCalled(page, 0, name, payload);
+
+    /// <summary>
+    /// <see cref="OpBindingCalled(PocketCalculatorState, string, string)"/> from the realm of
+    /// child frame <paramref name="frameId"/> (0 for the page's own realm).
+    /// </summary>
+    public static void OpBindingCalled(PocketCalculatorState page, uint frameId, string name, string payload) =>
         OpGuard.Run("op_binding_called", () =>
         {
             ArgumentNullException.ThrowIfNull(page);
             long size = (long)name.Length + payload.Length;
-            if (page.PendingBindingCalls.Count >= BindingQueueEntryLimit()
+            if (page.PendingBindingCalls.Count + page.PendingFrameBindingCalls.Count >= BindingQueueEntryLimit()
                 || page.PendingBindingCallBytes + size > BindingQueueByteLimit())
             {
                 return;
             }
 
             page.PendingBindingCallBytes += size;
-            page.PendingBindingCalls.Add((name, payload));
+            if (frameId == 0)
+            {
+                page.PendingBindingCalls.Add((name, payload));
+            }
+            else
+            {
+                page.PendingFrameBindingCalls.Add((frameId, name, payload));
+            }
         });
 
     internal static int BindingQueueEntryLimit() =>

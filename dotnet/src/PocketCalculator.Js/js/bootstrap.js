@@ -19881,6 +19881,7 @@ const _cdpHost = _objectFreeze({
 // the same handoff as __obscura_core_handoff, in every realm. The host keeps it as a
 // ScriptObject and passes it to its scripts as an argument (`__obscura_host`), so no
 // name on globalThis reaches it. See dotnet/docs/op-protocol.md, "Host helpers".
+const _iframeLoadAtBoot = Element.prototype._loadIframeSrc;
 globalThis.__obscura_host_handoff = Object.freeze({
   __proto__: null,
   // Port additions (SECURITY.md I10): what upstream keeps as page-visible globals. The
@@ -19953,6 +19954,17 @@ globalThis.__obscura_host_handoff = Object.freeze({
   frameOwner: (frameId) => {
     const el = _frameElements[frameId >>> 0];
     return el && el.isConnected ? el._nid : -1;
+  },
+  // Port addition: child frame `frameId` navigated itself (a link, location, a form's
+  // GET), so its <iframe> here loads `url` in its place, as a new frame. The Rust engine
+  // processes only the page's own navigation, so a click on a link inside a frame did
+  // nothing. The iframe loader as bootstrap defined it, since page script can replace
+  // Element.prototype._loadIframeSrc.
+  navigateFrame: (frameId, url) => {
+    const el = _frameElements[frameId >>> 0];
+    if (!el || !el.isConnected) return false;
+    _reflectApply(_iframeLoadAtBoot, el, [_String(url)]);
+    return true;
   },
   frameContentOrigin: (frameId) => {
     const el = _frameElements[frameId >>> 0];

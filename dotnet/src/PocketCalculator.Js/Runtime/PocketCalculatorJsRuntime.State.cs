@@ -308,7 +308,16 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         var calls = State.PendingBindingCalls.ToArray();
         State.PendingBindingCalls.Clear();
-        State.PendingBindingCallBytes = 0;
+        State.PendingBindingCallBytes = State.PendingFrameBindingCalls.Count == 0 ? 0 : State.PendingBindingCallBytes;
+        return calls;
+    }
+
+    /// <summary>Binding calls made in child frames' realms, with each frame's id.</summary>
+    public IReadOnlyList<(uint FrameId, string Name, string Payload)> TakePendingFrameBindingCalls()
+    {
+        var calls = State.PendingFrameBindingCalls.ToArray();
+        State.PendingFrameBindingCalls.Clear();
+        State.PendingBindingCallBytes = State.PendingBindingCalls.Count == 0 ? 0 : State.PendingBindingCallBytes;
         return calls;
     }
 

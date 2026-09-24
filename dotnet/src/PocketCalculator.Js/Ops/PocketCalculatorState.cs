@@ -186,7 +186,15 @@ public sealed class PocketCalculatorState
     /// </summary>
     public List<(string Name, string Payload)> PendingBindingCalls { get; } = [];
 
-    /// <summary>UTF-16 length of the payloads in <see cref="PendingBindingCalls"/>.</summary>
+    /// <summary>
+    /// Binding calls made in a child frame's realm, with that frame's id, so the CDP layer
+    /// reports them with the frame's execution context as Chromium does. Port addition:
+    /// the Rust engine has no frame realm that runs bindings. Shares the limits of
+    /// <see cref="PendingBindingCalls"/>.
+    /// </summary>
+    public List<(uint FrameId, string Name, string Payload)> PendingFrameBindingCalls { get; } = [];
+
+    /// <summary>UTF-16 length of the payloads in <see cref="PendingBindingCalls"/> and <see cref="PendingFrameBindingCalls"/>.</summary>
     public long PendingBindingCallBytes { get; set; }
 
     /// <summary>

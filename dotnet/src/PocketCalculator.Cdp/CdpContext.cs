@@ -116,8 +116,42 @@ public sealed class CdpContext
 
     public Dictionary<string, BrowserContext> BrowserContexts { get; } = new(StringComparer.Ordinal);
 
-    /// <summary>(identifier, source) pairs, in insertion order.</summary>
-    public List<(string Identifier, string Source)> PreloadScripts { get; } = [];
+    /// <summary>
+    /// (identifier, source, owner) entries, in insertion order. The owner is the page id of
+    /// the session that registered the script, or empty for one registered without a page,
+    /// which every page runs.
+    /// </summary>
+    /// <remarks>
+    /// Port fix: Chromium scopes <c>Page.addScriptToEvaluateOnNewDocument</c> and
+    /// <c>Runtime.addBinding</c> to the target they were sent to. Kept per connection, a
+    /// Playwright or Puppeteer client opening several pages ran every page's init scripts
+    /// in every page, once per page that registered them, and kept them after the page
+    /// closed.
+    /// </remarks>
+    public List<(string Identifier, string Source, string Owner)> PreloadScripts { get; } = [];
+
+    /// <summary>The page id a script registered by <paramref name="sessionId"/> belongs to; empty for none.</summary>
+    public string PreloadOwner(string? sessionId) =>
+        sessionId is not null && Sessions.TryGetValue(sessionId, out string? pageId) ? pageId : string.Empty;
+
+    /// <summary>Whether an entry registered for <paramref name="owner"/> runs in page <paramref name="pageId"/>.</summary>
+    public static bool PreloadAppliesTo(string owner, string? pageId) =>
+        owner.Length == 0 || string.Equals(owner, pageId, StringComparison.Ordinal);
+
+    /// <summary>The new-document sources page <paramref name="pageId"/> runs, in registration order.</summary>
+    public List<string> PreloadSourcesFor(string? pageId)
+    {
+        List<string> sources = [];
+        foreach (var (_, source, owner) in PreloadScripts)
+        {
+            if (PreloadAppliesTo(owner, pageId))
+            {
+                sources.Add(source);
+            }
+        }
+
+        return sources;
+    }
 
     public uint PreloadCounter { get; set; }
 
@@ -131,15 +165,15 @@ public sealed class CdpContext
     /// Port addition (SECURITY.md M6). The Rust engine files a <c>worldName</c> script
     /// with the page's own, so it ran beside page script.
     /// </remarks>
-    public List<(string Identifier, string WorldName, string Source)> WorldPreloadScripts { get; } = [];
+    public List<(string Identifier, string WorldName, string Source, string Owner)> WorldPreloadScripts { get; } = [];
 
-    /// <summary>The init scripts of the world named <paramref name="worldName"/>.</summary>
-    public IReadOnlyList<string> WorldPreloadSources(string worldName)
+    /// <summary>The init scripts of the world named <paramref name="worldName"/> in page <paramref name="pageId"/>.</summary>
+    public IReadOnlyList<string> WorldPreloadSources(string worldName, string? pageId)
     {
         List<string> sources = [];
-        foreach (var (_, world, source) in WorldPreloadScripts)
+        foreach (var (_, world, source, owner) in WorldPreloadScripts)
         {
-            if (string.Equals(world, worldName, StringComparison.Ordinal))
+            if (string.Equals(world, worldName, StringComparison.Ordinal) && PreloadAppliesTo(owner, pageId))
             {
                 sources.Add(source);
             }
@@ -169,7 +203,7 @@ public sealed class CdpContext
         {
             return context.IsDefault
                 ? null
-                : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName));
+                : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName, page.Id));
         }
 
         if (Domains.Page.ChildFrameNumber(page.FrameId, context.FrameId) is not { } frameId)
@@ -179,7 +213,7 @@ public sealed class CdpContext
 
         return context.IsDefault
             ? IsolatedWorldTarget.ForFrameMainWorld(context.Id, frameId)
-            : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName), frameId);
+            : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName, page.Id), frameId);
     }
 
     /// <summary>
@@ -187,12 +221,12 @@ public sealed class CdpContext
     /// <c>Page.addScriptToEvaluateOnNewDocument</c> or <c>Runtime.addBinding</c> registered
     /// a world script under, in first-registration order.
     /// </summary>
-    public List<string> NewDocumentWorldNames()
+    public List<string> NewDocumentWorldNames(string? pageId)
     {
         List<string> names = [];
-        foreach (var (_, world, _) in WorldPreloadScripts)
+        foreach (var (_, world, _, owner) in WorldPreloadScripts)
         {
-            if (world.Length != 0 && !names.Contains(world, StringComparer.Ordinal))
+            if (world.Length != 0 && PreloadAppliesTo(owner, pageId) && !names.Contains(world, StringComparer.Ordinal))
             {
                 names.Add(world);
             }
@@ -224,7 +258,7 @@ public sealed class CdpContext
             created.Add(AllocateContext(pageId, frameId, origin, string.Empty, true));
         }
 
-        foreach (var world in NewDocumentWorldNames())
+        foreach (var world in NewDocumentWorldNames(pageId))
         {
             (ExecutionContextRecord context, bool fresh) = CreateIsolatedContext(pageId, frameId, origin, world, false);
             if (fresh)
@@ -551,6 +585,9 @@ public sealed class CdpContext
 
         CurrentLoaderIds.Remove(id);
         AnnouncedFrames.Remove(id);
+        // A closed page's init scripts and bindings go with it, as its target's do in Chromium.
+        PreloadScripts.RemoveAll(entry => string.Equals(entry.Owner, id, StringComparison.Ordinal));
+        WorldPreloadScripts.RemoveAll(entry => string.Equals(entry.Owner, id, StringComparison.Ordinal));
         foreach (var sessionId in removedSessions)
         {
             Screencasts.Remove(sessionId);
@@ -755,6 +792,20 @@ public sealed class CdpContext
         }
 
         return (AllocateContext(pageId, frameId, origin, worldName, false), true);
+    }
+
+    /// <summary>The default execution context of frame <paramref name="frameId"/> of the page, if it has one.</summary>
+    internal long? FrameDefaultContextId(string pageId, string frameId)
+    {
+        foreach (var context in ContextsForPage(pageId))
+        {
+            if (context.IsDefault && string.Equals(context.FrameId, frameId, StringComparison.Ordinal))
+            {
+                return context.Id;
+            }
+        }
+
+        return null;
     }
 
     public long? DefaultContextId(string pageId)

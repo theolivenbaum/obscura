@@ -325,20 +325,23 @@ public static class Runtime
                     // (executionContextName, or the id of one) is installed in that
                     // world, whose calls report the world's context id. Puppeteer asks
                     // for its utility world's bindings this way.
+                    string owner = ctx.PreloadOwner(sessionId);
                     if (IsolatedBindingWorld(parameters, ctx, sessionId) is { } worldName)
                     {
                         ctx.WorldPreloadScripts.RemoveAll(entry =>
                             string.Equals(entry.Identifier, key, StringComparison.Ordinal)
-                            && string.Equals(entry.WorldName, worldName, StringComparison.Ordinal));
-                        ctx.WorldPreloadScripts.Add((key, worldName, shim));
+                            && string.Equals(entry.WorldName, worldName, StringComparison.Ordinal)
+                            && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
+                        ctx.WorldPreloadScripts.Add((key, worldName, shim, owner));
                         RegisterBindingSession(ctx, name, sessionId);
                         ctx.GetSessionPageMut(sessionId)?.ExecuteInIsolatedWorlds(worldName, shim);
                         return DomainResult.Empty();
                     }
 
                     ctx.PreloadScripts.RemoveAll(entry =>
-                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
-                    ctx.PreloadScripts.Add((key, shim));
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                        && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
+                    ctx.PreloadScripts.Add((key, shim, owner));
                     // Remember who subscribed, so the call goes back to this session
                     // rather than to whichever session of the page a dictionary happens
                     // to yield first. A client discards an event addressed to a session
@@ -372,12 +375,15 @@ public static class Runtime
                 if (IsValidBindingName(name))
                 {
                     string key = Dispatcher.BindingPreloadPrefix + name;
+                    string owner = ctx.PreloadOwner(sessionId);
                     ctx.PreloadScripts.RemoveAll(entry =>
-                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                        && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
                     List<string> worldNames = [];
-                    foreach (var (identifier, worldName, _) in ctx.WorldPreloadScripts)
+                    foreach (var (identifier, worldName, _, entryOwner) in ctx.WorldPreloadScripts)
                     {
                         if (string.Equals(identifier, key, StringComparison.Ordinal)
+                            && string.Equals(entryOwner, owner, StringComparison.Ordinal)
                             && !worldNames.Contains(worldName, StringComparer.Ordinal))
                         {
                             worldNames.Add(worldName);
@@ -385,7 +391,8 @@ public static class Runtime
                     }
 
                     ctx.WorldPreloadScripts.RemoveAll(entry =>
-                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                        && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
                     foreach (string worldName in worldNames)
                     {
                         ctx.GetSessionPageMut(sessionId)?.ExecuteInIsolatedWorlds(
