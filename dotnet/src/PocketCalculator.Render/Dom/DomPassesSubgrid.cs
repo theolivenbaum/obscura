@@ -204,7 +204,7 @@ internal static class DomSubgridPasses
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         Func<TaffyTree, TaffyNodeId, float?> measureMaxContent)
     {
-        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = new(idMap.Count);
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
             taffyByDom[domId] = taffyId;
@@ -763,7 +763,7 @@ internal static class DomSubgridPasses
             return false;
         }
 
-        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = new(idMap.Count);
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
             taffyByDom[domId] = taffyId;
@@ -870,7 +870,7 @@ internal static class DomSubgridPasses
             return false;
         }
 
-        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = new(idMap.Count);
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
             taffyByDom[domId] = taffyId;
@@ -1311,7 +1311,7 @@ internal static class DomSubgridPasses
             return false;
         }
 
-        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = new(idMap.Count);
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
             taffyByDom[domId] = taffyId;

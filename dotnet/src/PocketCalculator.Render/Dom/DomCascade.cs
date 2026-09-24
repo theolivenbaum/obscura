@@ -771,6 +771,7 @@ internal static class DomCascade
     {
         DomTree tree = context.Tree;
         List<Matcher> subtreeMatchers = [];
+        List<NodeId> childScratch = [];
 
         // A work item is either a visit, a pop-ancestor marker, or a pop-subtree-matcher marker.
         List<(Visit? Visit, int Marker)> work =
@@ -896,7 +897,8 @@ internal static class DomCascade
             }
 
             bool isShadowHost = tree.ShadowRootOf(visit.Id) is not null;
-            List<NodeId> children = tree.Children(visit.Id);
+            List<NodeId> children = childScratch;
+            tree.CopyChildrenTo(visit.Id, children);
             for (int index = children.Count - 1; index >= 0; index--)
             {
                 NodeId cid = children[index];

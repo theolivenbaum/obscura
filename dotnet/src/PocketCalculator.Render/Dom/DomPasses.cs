@@ -352,7 +352,7 @@ internal static class DomPasses
         IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
-        Dictionary<NodeId, TaffyNodeId> reverse = [];
+        Dictionary<NodeId, TaffyNodeId> reverse = new(idMap.Count);
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
             reverse[domId] = taffyId;
@@ -664,7 +664,7 @@ internal static class DomPasses
             return false;
         }
 
-        Dictionary<NodeId, TaffyNodeId> reverse = [];
+        Dictionary<NodeId, TaffyNodeId> reverse = new(idMap.Count);
         TaffyNodeId? root = null;
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
         {
