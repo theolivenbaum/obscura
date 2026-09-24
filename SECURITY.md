@@ -9,11 +9,11 @@ and how to configure them, the issues found by the security review of September
 JavaScript from arbitrary web pages. The review found that it did not hold the
 same-origin policy against a hostile page, let a page read local files, and let
 page-supplied inputs crash the whole process. Every Critical and High finding is
-now fixed, with a regression test each (see [Fix status](#fix-status)); several
-Medium and Low items are partial or open. Work inside ops stops at the
-watchdog's deadline, and `ArrayBuffer`s and DOM data have per-page budgets, but
-the engine still runs every page of a process in one address space and the
-process-wide memory limit is opt-in, so the
+now fixed, with a regression test each (see [Fix status](#fix-status)), and so
+are the Medium, Low and Informational findings, apart from the items listed there.
+Work inside ops stops at the watchdog's deadline, and `ArrayBuffer`s, WebAssembly
+memory and DOM data have per-page budgets, but the engine still runs every page of
+a process in one address space and the process-wide memory limit is opt-in, so the
 [Deployment guidance](#deployment-guidance) still applies: isolate tenants per
 process, keep secrets off its filesystem, and cap its resources from outside.
 
@@ -40,43 +40,33 @@ Still open after the fixes:
   | nested grid `repeat()` (now invalid, as in Chromium) | exponential | 1.2 s |
   | `innerText`, 10k deep | JS stack overflow | 41 ms |
   | `Range.toString()`, 10k deep | 29 s | 12 ms |
+  | 50k nested `<div>`s, parse | 20 s | 0.14 s |
+  | `innerHTML` with 50k siblings | 91 s | 0.13 s |
+  | 1,500 nested tables, first layout | 4.0 s | 2.5 s |
+  | a grid item spanning 10k x 10k tracks, relayout / peak RSS | 190 ms / 577 MB | 45 ms / 192 MB |
+  | 1,000 grid items spanning 10k tracks | 5.8 s | 0.8 s |
 
-  Grid track counts follow Chromium's `kGridMaxTracks` rules at 10,000 tracks per
-  axis. Still slow, but bounded by the deadline:
-  - nested `display:table` (quadratic, about 1.7 s at 300);
-  - the first layout of a 10k-deep or 50k-wide tree (5-7 s);
-  - `innerHTML` with tens of thousands of top-level nodes (quadratic inside
-    AngleSharp);
-  - a grid item spanning the whole track limit, which allocates up to 400 MB for one
-    layout.
+  HTML is parsed by the port's own WHATWG tree builder over AngleSharp's tokenizer
+  (M11). Grid axes hold up to 100,000 tracks with sparse occupancy. Still slow, but
+  bounded by the deadline:
+  - nested `display:table` relayouts per depth level (quadratic, capped by the box
+    depth limit at about 110 ms warm);
+  - the first layout of a 50k-wide tree (about 4 s, most of it garbage collection).
 
   `POCKETCALCULATOR_HANG_EXIT_MS` stays as the opt-in backstop for `serve` and
   `mcp`, for work outside any of these scopes.
-- **Deep markup parses in quadratic time** inside AngleSharp's tree builder
-  (M11): 50k nested `<div>`s take about 20 s.
-- **Memory** (M7, M4): `ArrayBuffer`s are capped per isolate (1 GiB) and DOM data per
-  document (512 MiB), detached DOM nothing holds is garbage-collected, and
-  `op_fetch_url` writes its result once. WebAssembly memory is still not counted, and
-  the per-process limit (`POCKETCALCULATOR_MAX_PROCESS_BYTES`) is opt-in.
-- **CDP isolated worlds** (M6): main-frame worlds are separate realms now, so page
-  tampering no longer reaches Playwright's or Puppeteer's utility-world results.
-  Child-frame worlds still share the frame's realm.
-- **Remaining page-writable surfaces:**
-  - `__virtualUrl` still moves the URL the page reports and the one CDP and MCP
-    show. Origin, cookie and initiator decisions no longer read it.
-  - A few host reads of page-writable values remain (`window.scrollX/Y`,
-    `location.assign`), and shim internals still use some page-replaceable built-ins
-    (`Array.prototype.push/forEach`, `Function.prototype.call`, string methods); see
-    todo.md. The CDP object store, frame registries, host snippets and event
-    construction no longer depend on page globals (L10).
-  - MCP `browser_import_state` applies every origin's storage to the current page
-    (L9).
-- **Not changed:**
-  - the curated public suffix list (L6);
-  - no HSTS store and no mixed-content blocking (I7);
-  - custom-root EKU and revocation checks (I8);
-  - `EngineInternal` visible (I10: ClearScript defines it non-configurable);
-  - plaintext control planes (I1: terminate TLS in front).
+- **Memory** (M7, M4): `ArrayBuffer`s are capped per isolate (1 GiB), WebAssembly
+  memory per isolate (1 GiB) and DOM data per document (512 MiB), detached DOM
+  nothing holds is garbage-collected, and `op_fetch_url` writes its result once. The
+  per-process limit (`POCKETCALCULATOR_MAX_PROCESS_BYTES`) is opt-in.
+- **Remaining page-writable surfaces** (L10): shim internals still call some
+  page-replaceable built-ins (string and regex methods, `Array.prototype.push`,
+  `Function.prototype.call`). Host decisions and host snippets no longer read page
+  globals, and by-value results no longer call a page's `toJSON`.
+- **Detectability** (I10): ClearScript's `EngineInternal` global and the
+  `__obscura_*` names are still visible to `in` and `getOwnPropertyNames`.
+- **Not modelled:** the HSTS preload list; revocation checks (none, as in Chromium);
+  Chromium's per-partition cookie size limits; the `srcdoc` attribute.
 
 ### Cancellation of work inside ops
 
@@ -211,8 +201,9 @@ Skia and HarfBuzz.
    and the Fetch spec's request guards.
 5. **Cookies and storage** are per `BrowserContext`. Cookie access from script uses
    the host-side document URL, not the page's `location`. HttpOnly cookies are
-   invisible to script, Secure cookies are only set from https, and SameSite is
-   applied with the navigation initiator.
+   invisible to script, Secure cookies are only set from https, SameSite is judged
+   by the site for cookies (the frame, its ancestors and the target against the
+   top-level site), and `Partitioned` cookies are keyed by the top-level site.
 6. **Control planes.**
    - **CDP** is a WebSocket server with `/json` discovery. It checks, in order:
      - any browser `Origin` is refused;
@@ -266,7 +257,8 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 | `POCKETCALCULATOR_FETCH_MAX_BODY_BYTES` | 100 MB | Decompressed body cap for `fetch()`/XHR. |
 | `POCKETCALCULATOR_NETWORK_BODY_BUFFER_BYTES` / `_ENTRIES` | 2 MB | Bodies retained for CDP `Network.getResponseBody`. |
 | `ResourceRequest.MaxResponseBytes` | 64 MB | Navigation body cap. |
-| `SSL_CERT_FILE`, `SSL_CERT_DIR` | none | Extra trust roots. There is no option to disable certificate validation. |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | none | Extra trust roots; the leaf must allow serverAuth (I8). There is no option to disable certificate validation. |
+| `POCKETCALCULATOR_ALLOW_INSECURE_CONTENT=1`, `AllowInsecureContent` | off | Turns mixed-content blocking off. By default an https document's http subresources are blocked (images upgraded), and hosts that sent `Strict-Transport-Security` are upgraded to https (I7). |
 
 ### Control planes
 
@@ -282,6 +274,8 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 | `--workers N` (`serve`) | 1 | Runs N worker processes behind a TCP balancer; one crashing page takes out one worker. |
 | `POCKETCALCULATOR_IO_STREAM_MAX_ENTRIES` / `_BYTES` | bounded | Per-connection CDP `IO` stream store. |
 | `POCKETCALCULATOR_CDP_COMMAND_TIMEOUT_MS` | bounded | Per-command CDP watchdog. |
+| `--tls-cert`, `--tls-key`, `POCKETCALCULATOR_TLS_CERT` / `_KEY` (`serve`, `mcp --http`) | none | PEM certificate and key: serve CDP and MCP over TLS (I1). Discovery then advertises `wss://`. |
+| `POCKETCALCULATOR_CDP_IDLE_TIMEOUT_MS`, `POCKETCALCULATOR_MCP_IDLE_TIMEOUT_MS` | 30 min | Close a CDP connection with no inbound traffic, or an MCP SSE stream with no request (0 disables; L3). |
 
 ### Content and resources
 
@@ -290,17 +284,18 @@ Defaults are safe unless noted. Every knob that widens access is opt-in.
 | `--timeout`, `POCKETCALCULATOR_SCRIPT_DEADLINE_MS`, `POCKETCALCULATOR_NAV_TIMEOUT_MS` | 30 s | Watchdog on synchronous V8 work, and navigation deadlines. The watchdog also cancels C# work inside ops and captures, and `--timeout` now stops the script phase too. `POCKETCALCULATOR_HANG_EXIT_MS` (opt-in, `serve`/`mcp`) exits the process when an interrupted command still does not return (L12). |
 | `POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES` | 1 GiB | `ArrayBuffer` backing stores per isolate (0 for none). Over it: `RangeError`. |
 | `POCKETCALCULATOR_MAX_DOM_BYTES` | 512 MiB | DOM node and text/attribute data per document (0 disables). Over it, after a collection: `QuotaExceededError`. |
+| `POCKETCALCULATOR_MAX_WASM_MEMORY_BYTES` | 1 GiB | WebAssembly memory per isolate. Over it: `RangeError`. |
 | `POCKETCALCULATOR_MAX_PROCESS_BYTES` | off | Process working-set limit: over it, running page work is terminated and new pages are refused. |
 | `POCKETCALCULATOR_MCP_TOOL_TIMEOUT_MS` | 60 s | Watchdog on each MCP tool call (0 disables), like `POCKETCALCULATOR_CDP_COMMAND_TIMEOUT_MS` for CDP commands. |
 | V8 flags `--max-old-space-size` | 4096 MB | Enforced heap cap, applied to every runtime, library and CDP included (M7). Memory outside the V8 heap is not counted. |
 | `--font-dir`, `BrowserConfig.FontDirectories` | none | Operator-chosen font directories, read once. With none set, no font file is read from disk. |
 | `POCKETCALCULATOR_FRAME_MESSAGE_QUEUE_BYTES` / `_ENTRIES`, `POCKETCALCULATOR_MAX_LIVE_FRAMES`, `POCKETCALCULATOR_NAV_CHAIN_LIMIT` | bounded | Cross-frame message queue, live frames, navigation chain length. |
-| Built-in caps (not configurable) | | Explicit-stack HTML adapter, iterative DOM walks and serialization with cycle guards; CSS 8 MB / 100k rules per sheet, `calc()` depth 64, `var()` depth 16; SVG depth 24, no DTD / external entities; capture 32768 px per side, 16M px, 128 MB; canvas 32767 px per side, 64M px, 256 MB per runtime; PDF 250 pages, 64 MB; PBKDF2 / HKDF / random sizes. |
+| Built-in caps (not configurable) | | Explicit-stack HTML tree builder (512 elements deep, 512 attributes per tag), iterative DOM walks and serialization with cycle guards; CSS 8 MB / 100k rules per sheet, `calc()` depth 64, `var()` depth 16; SVG depth 24, no DTD / external entities; capture 32768 px per side, 16M px, 128 MB; canvas 32767 px per side, 64M px, 256 MB per runtime; PDF 250 pages, 64 MB; PBKDF2 / HKDF / random sizes. |
 
 ## Deployment guidance
 
-The Critical and High findings are fixed, but the engine has no per-page memory
-budget (see [Fix status](#fix-status)).
+The Critical and High findings are fixed, and pages have memory budgets, but every
+page of a process shares one address space (see [Fix status](#fix-status)).
 For untrusted content:
 
 - **One trust domain per process.**
@@ -323,14 +318,14 @@ For untrusted content:
   - Block metadata endpoints (`169.254.169.254`, `fd00:ec2::254`) and internal
     ranges at the network layer as well.
 - **Cap resources outside the process.** Set a cgroup/container memory limit and
-  a CPU limit. DOM text and `ArrayBuffer`s are not counted against the V8 heap
-  cap (M7), and deep script-built trees can still cost minutes of CPU.
+  a CPU limit. The per-page budgets (M7) are per isolate and per document, so many
+  pages together can still exhaust the host.
 - **Treat control planes as root on the process.**
   - Keep CDP and MCP on loopback.
   - On a shared host, remember that loopback has no token by default: any local
     user can connect. Set a token anyway.
-  - For remote access, put TLS in front (the servers speak plaintext) and set a
-    32+ byte token.
+  - For remote access, serve TLS (`--tls-cert`/`--tls-key`) or terminate it in
+    front, and set a 32+ byte token.
 - **Treat dumps as untrusted.** Serialization and the markdown dump now escape
   what they must (M9, M10), but a dump is still the page's content. Sanitize it
   before rendering, and do not feed it to an agent with tool access without the
@@ -368,25 +363,25 @@ contradict an entry `todo.md` marks done say so.
 | M3 | Medium | Net | No timeout on response body reads | tested | fixed |
 | M4 | Medium | Net | `op_fetch_url` copies each body about 5x, with no concurrency cap | read | fixed: concurrency capped, result written once |
 | M5 | Medium | Net | `__Host-` / `__Secure-` cookie prefixes not enforced; cookie jar unbounded | read | fixed |
-| M6 | Medium | CDP | Isolated worlds share the main world; binding calls forgeable | read | fixed: binding names checked, main-frame worlds are realms; child-frame worlds open |
-| M7 | Medium | JS | Memory outside the V8 heap cap; no default cap for embedders | tested | fixed: heap, ArrayBuffer and DOM budgets, DOM collector, opt-in process limit; WebAssembly memory open |
+| M6 | Medium | CDP | Isolated worlds share the main world; binding calls forgeable | read | fixed: binding names checked, every frame's worlds are realms |
+| M7 | Medium | JS | Memory outside the V8 heap cap; no default cap for embedders | tested | fixed: heap, ArrayBuffer, WebAssembly and DOM budgets, DOM collector, opt-in process limit |
 | M8 | Medium | JS | PBKDF2 bomb runs synchronously and cannot be interrupted | tested (CLI) | fixed |
 | M9 | Medium | DOM | Serialization mXSS: `textarea`/`title`, foreign `style`/`script` emitted raw | tested; inherited | fixed |
 | M10 | Medium | CLI | Markdown dump passes raw HTML and `javascript:` links through | tested | fixed |
-| M11 | Medium | DOM | Quadratic parse and append cost on deep trees | tested | partial: append fixed, parse cost in AngleSharp open |
+| M11 | Medium | DOM | Quadratic parse and append cost on deep trees | tested | fixed: own tree builder, linear append |
 | L1 | Low | MCP | MCP HTTP has no `Host` check (DNS rebinding for SSE GETs) | tested | fixed |
 | L2 | Low | MCP | SSE streams do not count against the connection cap | read | fixed |
-| L3 | Low | CDP | CDP resource limits loose: 64 MiB messages x 128, unbounded queues/targets | read | fixed; no idle timeout |
+| L3 | Low | CDP | CDP resource limits loose: 64 MiB messages x 128, unbounded queues/targets | read | fixed, with idle timeouts |
 | L4 | Low | CDP | Any message containing `"Browser.close"` closes the connection | tested | fixed |
 | L5 | Low | CI | Pipeline has no `pr:` section or branch condition on push; no lock files | read | fixed |
-| L6 | Low | Net | Public suffix list is curated (~450 rules) | read; in todo.md | open |
+| L6 | Low | Net | Public suffix list is curated (~450 rules) | read; in todo.md | fixed: full list embedded |
 | L7 | Low | Net | Tracker blocklist skips `op_fetch_url` and redirect hops | read; inherited | fixed |
 | L8 | Low | Net | `InterceptAction.ModifyHeaders` leaks headers into later requests | read | fixed |
-| L9 | Low | JS/MCP | Cross-origin `pushState` spoofs `location.origin`; MCP state export/import trusts it | tested | partial: `pushState` fixed; `__virtualUrl` and MCP state import/export open |
-| L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | fixed: host snippets, remote-object store, frame registries and event construction use bootstrap-captured built-ins; minor shim internals open |
+| L9 | Low | JS/MCP | Cross-origin `pushState` spoofs `location.origin`; MCP state export/import trusts it | tested | fixed |
+| L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | fixed: host code reads no page-writable value; some shim-internal string and array calls open |
 | L11 | Low | Browser | Latent integer overflow in `RgbImage.Decode` | read; not reachable today | fixed |
 | L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read | fixed: work inside ops is cancelled; opt-in exit (`POCKETCALCULATOR_HANG_EXIT_MS`) remains the backstop |
-| I1 to I10 | Info | various | See [Informational](#informational) | | I2 to I6, I9 fixed; I1, I7, I8, I10 open |
+| I1 to I10 | Info | various | See [Informational](#informational) | | I1 to I9 fixed; I10 open |
 
 ### Critical
 
