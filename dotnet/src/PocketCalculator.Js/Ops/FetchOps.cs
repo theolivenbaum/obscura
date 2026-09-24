@@ -1105,7 +1105,11 @@ public static partial class FetchOps
                         redirected,
                         requestId,
                         VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
-                        hostConsumesBody);
+                        hostConsumesBody,
+                        // The host keeps the policy of every response, a cross-origin frame
+                        // document's or sheet's included, though page script is not shown
+                        // the header.
+                        ReferrerPolicyHeaderOf(respHeaders));
                 }
 
                 // Page script sees an opaque no-cors response as status 0 with no body
@@ -1199,11 +1203,13 @@ public static partial class FetchOps
         bool redirected,
         string? requestId,
         IReadOnlyDictionary<string, string> headers,
-        bool hostConsumesBody)
+        bool hostConsumesBody,
+        ReferrerPolicy? referrerPolicyHeader = null)
     {
         var token = InternalLoads.Put(
             document,
-            new InternalLoad(mode, status, requestUrl, finalUrl, bodyText, tainted, ReferrerPolicyHeaderOf(headers)));
+            new InternalLoad(
+                mode, status, requestUrl, finalUrl, bodyText, tainted, referrerPolicyHeader ?? ReferrerPolicyHeaderOf(headers)));
         // Only a frame document is read back by the shim (its parent-side copy for a
         // same-origin contentDocument); a script or a sheet is run or installed by the host.
         var visible = !tainted && !hostConsumesBody && string.Equals(mode, "navigate", StringComparison.Ordinal);

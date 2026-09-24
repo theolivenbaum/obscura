@@ -121,7 +121,8 @@ public sealed class FrameRealm : IDisposable
         uint parentFrameId,
         string url,
         string html,
-        bool opaqueOrigin = false)
+        bool opaqueOrigin = false,
+        ReferrerPolicy? referrerPolicyHeader = null)
     {
         ArgumentNullException.ThrowIfNull(parent);
 
@@ -133,6 +134,9 @@ public sealed class FrameRealm : IDisposable
             // A sandboxed frame without allow-same-origin: its document's origin is opaque
             // whatever its URL (port addition; the Rust engine has no frame sandboxing).
             OpaqueOrigin = opaqueOrigin,
+            // The frame document's own Referrer-Policy header governs what it fetches, as
+            // in Chromium 141; srcdoc and about:blank frames inherit below instead.
+            ReferrerPolicyHeader = referrerPolicyHeader,
         };
         parent.ShareResourcesWith(state);
 
@@ -467,6 +471,36 @@ public sealed class FrameRealm : IDisposable
             }
         }
         return problems;
+    }
+
+    /// <summary>
+    /// The fetch profile of one of the frame's <c>src=</c> classic scripts: a no-cors
+    /// script load by the frame's own document, referred by it (a srcdoc frame by its
+    /// parent) under its referrer policy, in its cookie scope.
+    /// </summary>
+    /// <remarks>
+    /// Port addition. Rust fetches a frame's scripts with the navigation profile, as though
+    /// typed into the address bar: no Referer, <c>Sec-Fetch-Site: none</c>,
+    /// <c>Sec-Fetch-Dest: document</c>, and every cookie of the script's site, SameSite=Strict
+    /// included, even from a cross-site frame. Chromium 141 sends the frame's URL as the
+    /// Referer under the frame document's policy, <c>Sec-Fetch-Dest: script</c>, and from a
+    /// cross-site frame SameSite=None cookies only.
+    /// </remarks>
+    public ResourceRequest ScriptRequest()
+    {
+        var state = State;
+        // A srcdoc or about:blank document's origin, and so its site, is its parent's.
+        var source = !state.OpaqueOrigin && state.SiteUrl is { } site ? site : state.Url;
+        var initiator = Uri.TryCreate(source, UriKind.Absolute, out var parsed) ? parsed : new Uri("about:blank");
+        var request = ResourceRequest.Subresource(ResourceType.Script, initiator);
+        request.Referrer = state.ReferrerSourceUrl is { } referrer && Uri.TryCreate(referrer, UriKind.Absolute, out var from)
+            ? from
+            : Uri.TryCreate(state.Url, UriKind.Absolute, out var own) ? own : null;
+        request.ReferrerPolicy = StateHelpers.DocumentReferrerPolicy(state);
+        request.SecureAncestor = state.SecureAncestorUrl is { } secure && Uri.TryCreate(secure, UriKind.Absolute, out var ancestor)
+            ? ancestor
+            : null;
+        return StateHelpers.WithFrameScope(request, state);
     }
 
     /// <summary>

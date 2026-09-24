@@ -63,7 +63,8 @@ public sealed partial class Page
 
             FrameRealm? realm = Js is { } parent
                 ? FrameRealm.Create(
-                    parent, frame.FrameId, frame.ParentFrameId, frame.Url, frame.Html, frame.OpaqueOrigin)
+                    parent, frame.FrameId, frame.ParentFrameId, frame.Url, frame.Html, frame.OpaqueOrigin,
+                    frame.ReferrerPolicyHeader)
                 : null;
             if (realm is null)
             {
@@ -116,10 +117,17 @@ public sealed partial class Page
             string? source = null;
             if (!ShouldBlockUrl(url) && PageUrl.TryParse(url) is { } parsed)
             {
+                // The frame's own document loads its scripts: its referrer, policy and
+                // cookie scope, not the navigation profile Rust uses (see ScriptRequest).
+                ResourceRequest? scriptRequest = Frames.Find(realm => realm.FrameId == frameId)?.ScriptRequest();
                 double startedAt = PerformanceOps.UnixMilliseconds();
                 try
                 {
-                    Response response = await DoFetchAsync(parsed, cancellationToken).ConfigureAwait(false);
+                    Response response = scriptRequest is null
+                        ? await DoFetchAsync(parsed, cancellationToken).ConfigureAwait(false)
+                        : await HttpClient
+                            .FetchResourceWithCallbacksAsync(NetUrl.From(parsed), scriptRequest, _callbacks, cancellationToken)
+                            .ConfigureAwait(false);
                     // A frame document is a resource of the page that embeds it, which
                     // is the timeline this records onto; the frame's own realm reports
                     // it as its navigation entry.

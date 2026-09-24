@@ -633,6 +633,12 @@ public sealed class PendingFrame
     /// sandboxed without <c>allow-same-origin</c> does. Port addition.
     /// </summary>
     public bool OpaqueOrigin { get; init; }
+
+    /// <summary>
+    /// The policy of the frame document's <c>Referrer-Policy</c> response header, or null.
+    /// Port addition: Rust has no referrer policy.
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicyHeader { get; init; }
 }
 
 /// <summary>One <c>postMessage</c> in flight between two realms.</summary>

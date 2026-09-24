@@ -405,7 +405,7 @@ public static class CoreOps
         string html,
         ulong viewportWidth,
         ulong viewportHeight) =>
-        QueueFrameDocument(page, parentFrameId, url, html, viewportWidth, viewportHeight, opaqueOrigin: false);
+        QueueFrameDocument(page, parentFrameId, url, html, viewportWidth, viewportHeight, opaqueOrigin: false, referrerPolicyHeader: null);
 
     /// <summary>
     /// <c>op_frame_document_from_load</c>. <see cref="OpFrameDocumentReady"/> for a document
@@ -439,7 +439,8 @@ public static class CoreOps
             }
 
             return QueueFrameDocument(
-                page, document.FrameId, load.FinalUrl, load.Body, viewportWidth, viewportHeight, sandboxed);
+                page, document.FrameId, load.FinalUrl, load.Body, viewportWidth, viewportHeight, sandboxed,
+                load.ReferrerPolicyHeader);
         },
         0u);
 
@@ -450,7 +451,8 @@ public static class CoreOps
         string html,
         ulong viewportWidth,
         ulong viewportHeight,
-        bool opaqueOrigin) => OpGuard.Run(
+        bool opaqueOrigin,
+        ReferrerPolicy? referrerPolicyHeader) => OpGuard.Run(
         "op_frame_document_ready",
         () =>
         {
@@ -479,6 +481,7 @@ public static class CoreOps
                 ViewportHeight = viewportHeight,
                 ParentFrameId = parentFrameId,
                 OpaqueOrigin = opaqueOrigin,
+                ReferrerPolicyHeader = referrerPolicyHeader,
             });
             return frameId;
         },
