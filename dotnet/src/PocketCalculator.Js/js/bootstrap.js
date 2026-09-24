@@ -75,6 +75,13 @@ function _dispatch(target, event) {
   const impl = _dispatchImplFor(target);
   return impl ? _reflectApply(impl, target, [event]) : target.dispatchEvent(event);
 }
+// An Element's dispatch bubbling to its parent: the one call that may pass an event that
+// is already being dispatched (see _dispatchEntry).
+let _bubbleToken = false;
+function _bubble(parent, event) {
+  _bubbleToken = true;
+  try { return _dispatch(parent, event); } finally { _bubbleToken = false; }
+}
 // querySelector / querySelectorAll by the shim's own methods for the root's kind, for the
 // same reason as _dispatch: the shim's own queries (select.options, form.elements,
 // getElementsByTagName, hit testing, label lookup) must not call a page's replacement.
@@ -3801,7 +3808,7 @@ class Element extends Node {
       if (event._immediatePropagationStopped) break;
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
-      _dispatch(this.parentNode, event);
+      _bubble(this.parentNode, event);
     }
     return !event.defaultPrevented;
   }
@@ -10693,7 +10700,21 @@ globalThis.DOMException = (function () {
 const _trustedEvents = new WeakSet();
 const _trustedAdd = Function.prototype.call.bind(WeakSet.prototype.add);
 const _trustedHas = Function.prototype.call.bind(WeakSet.prototype.has);
-function _markTrusted(ev) { try { if (ev) _trustedAdd(_trustedEvents, ev); } catch (_e) {} return ev; }
+// DOM "dispatch": dispatchEvent() sets isTrusted to false. An event the user agent marks
+// is trusted through its own dispatch, so the mark is taken by the first dispatch after
+// it and every later one clears it: page script re-dispatching a trusted event it was
+// handed gets an untrusted one, as in Chromium (SECURITY.md L10). DEVIATION from
+// crates/obscura-js/js/bootstrap.js, where the mark stays for any later dispatch.
+const _trustedPending = new WeakSet();
+const _trustedPendingAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _trustedPendingTake = Function.prototype.call.bind(WeakSet.prototype.delete);
+const _trustedDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+function _markTrusted(ev) {
+  try {
+    if (ev) { _trustedAdd(_trustedEvents, ev); _trustedPendingAdd(_trustedPending, ev); }
+  } catch (_e) {}
+  return ev;
+}
 
 // Write value/checked through the element's *prototype* accessor, skipping any
 // per-instance property a framework layered on top. React (and Preact/Vue)
@@ -18604,6 +18625,56 @@ function _installIsolatedWorldBridges() {
     }.observe,
   });
 }
+
+// The page-facing dispatchEvent of Node, Element, Document and the window: DOM's
+// "dispatch" steps the shim's own methods leave out. Re-dispatching an event that is
+// still being dispatched throws InvalidStateError, and an event is trusted only through
+// the dispatch the user agent marked it for (_markTrusted). Measured in Chromium: a
+// listener's re-dispatch of the trusted click it is handling throws InvalidStateError; a
+// later re-dispatch reaches listeners with isTrusted false, and the event reads false
+// from then on.
+const _dispatchingAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _dispatchingHas = Function.prototype.call.bind(WeakSet.prototype.has);
+const _dispatchingDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+const _dispatching = new WeakSet();
+function _dispatchEntry(original) {
+  return _markNative({
+    dispatchEvent(event) {
+      const bubbling = _bubbleToken;
+      _bubbleToken = false;
+      if (event === null || typeof event !== 'object') return _reflectApply(original, this, [event]);
+      if (_dispatchingHas(_dispatching, event)) {
+        if (bubbling) return _reflectApply(original, this, [event]);
+        throw new DOMException(
+          "Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.",
+          'InvalidStateError');
+      }
+      if (!_trustedPendingTake(_trustedPending, event)) _trustedDelete(_trustedEvents, event);
+      _dispatchingAdd(_dispatching, event);
+      try {
+        return _reflectApply(original, this, [event]);
+      } finally {
+        _dispatchingDelete(_dispatching, event);
+      }
+    },
+  }.dispatchEvent);
+}
+function _installDispatchEntries() {
+  for (const proto of [Node.prototype, Element.prototype, Document.prototype]) {
+    const original = proto.dispatchEvent;
+    _defineProperty(proto, 'dispatchEvent', {
+      value: _dispatchEntry(original), writable: true, enumerable: false, configurable: true,
+    });
+  }
+  const current = _getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
+  if (current && typeof current.value === 'function') {
+    _defineProperty(globalThis, 'dispatchEvent', {
+      value: _dispatchEntry(current.value), writable: current.writable,
+      enumerable: current.enumerable, configurable: current.configurable,
+    });
+  }
+}
+_installDispatchEntries();
 
 // The dispatchEvent _dispatch uses. Called once bootstrap has defined them, and again
 // by an isolated world once its bridges have replaced them.
