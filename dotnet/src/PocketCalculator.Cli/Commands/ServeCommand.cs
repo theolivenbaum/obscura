@@ -234,6 +234,9 @@ public static class ServeCommand
         // client without bound.
         var maxConnections = Math.Max(1, settings.MaxConnections);
         var live = 0;
+        // Refusals in flight. On a TLS listener each one costs a handshake, so
+        // past this many a refused client is closed with no reply at all.
+        var refusing = 0;
         while (true)
         {
             var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
@@ -243,7 +246,23 @@ public static class ServeCommand
                 Log.Warn(string.Create(
                     CultureInfo.InvariantCulture,
                     $"refusing connection: at --max-connections ({maxConnections})"));
-                _ = Task.Run(() => RefuseAsync(client));
+                if (Interlocked.Increment(ref refusing) > maxConnections)
+                {
+                    Interlocked.Decrement(ref refusing);
+                    client.Dispose();
+                    continue;
+                }
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await RefuseAsync(client, settings.Certificate).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref refusing);
+                    }
+                });
                 continue;
             }
             try
@@ -544,17 +563,35 @@ public static class ServeCommand
     }
 
     /// <summary>Turn away a client that arrived while the balancer was at its limit.</summary>
-    private static async Task RefuseAsync(TcpClient client)
+    /// <remarks>
+    /// On a TLS listener the balancer terminates TLS for this reply itself, as a
+    /// single TLS worker does, so nothing plaintext is ever written on a TLS port;
+    /// a client that fails the handshake is simply closed.
+    /// </remarks>
+    public static async Task RefuseAsync(TcpClient client, X509Certificate2? certificate)
     {
         using (client)
         {
+            Stream? stream = null;
             try
             {
-                var stream = client.GetStream();
-                await stream.WriteAsync(Encoding.ASCII.GetBytes(
-                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n"
-                    + "X-Obscura-Reason: max-connections\r\n\r\n")).ConfigureAwait(false);
-                await stream.FlushAsync().ConfigureAwait(false);
+                stream = client.GetStream();
+                if (certificate is not null)
+                {
+                    stream = await PocketCalculator.Net.ServerTls
+                        .AuthenticateAsync(stream, certificate, CancellationToken.None).ConfigureAwait(false);
+                }
+                using (var write = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+                {
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n"
+                        + "X-Obscura-Reason: max-connections\r\n\r\n"), write.Token).ConfigureAwait(false);
+                    await stream.FlushAsync(write.Token).ConfigureAwait(false);
+                }
+                if (stream is SslStream ssl)
+                {
+                    await ssl.ShutdownAsync().ConfigureAwait(false);
+                }
                 client.Client.Shutdown(SocketShutdown.Send);
                 // Drain briefly so the close is not a reset that discards the 503.
                 using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
@@ -564,9 +601,17 @@ public static class ServeCommand
                 }
             }
             catch (Exception error) when (error is IOException or ObjectDisposedException
-                or InvalidOperationException or SocketException or OperationCanceledException)
+                or InvalidOperationException or SocketException or OperationCanceledException
+                or System.Security.Authentication.AuthenticationException)
             {
                 // Best effort: the client sees a reset instead.
+            }
+            finally
+            {
+                if (stream is SslStream owned)
+                {
+                    await owned.DisposeAsync().ConfigureAwait(false);
+                }
             }
         }
     }
