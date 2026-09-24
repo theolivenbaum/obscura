@@ -8,6 +8,8 @@
 // for one layout), and it could not grow to the implicit-track window placement now allows.
 // Memory is O(items x log tracks) and every query is polylogarithmic; the answers are the
 // dense matrix's, cell for cell (CellOccupancyMatrixTests compares the two on random input).
+// A grid of at most DefaultDenseCellLimit cells keeps a dense byte per cell instead, which is
+// cheaper to build for the small grids a page lays out many times over.
 namespace PocketCalculator.Render.Layout;
 
 /// <summary>The occupancy state of a single grid cell.</summary>
@@ -34,24 +36,35 @@ internal enum CellOccupancyState : byte
 /// </remarks>
 internal sealed class CellOccupancyMatrix
 {
+    /// <summary>The most cells a grid may have and still be tracked densely.</summary>
+    internal const int DefaultDenseCellLimit = 1024;
+
     private readonly List<Area> _areas = [];
+    private readonly int _denseCellLimit;
     private TrackCounts _columns;
     private TrackCounts _rows;
+
+    // A byte per cell while the grid is small; null once it has outgrown the limit, after
+    // which the indexes below answer.
+    private DenseCells? _dense;
 
     // One index per primary axis, built on first use from _areas. Placement uses only the one
     // for its flow direction.
     private OccupancyIndex? _columnsPrimary;
     private OccupancyIndex? _rowsPrimary;
 
-    private CellOccupancyMatrix(TrackCounts columns, TrackCounts rows)
+    private CellOccupancyMatrix(TrackCounts columns, TrackCounts rows, int denseCellLimit)
     {
         _columns = columns;
         _rows = rows;
+        _denseCellLimit = denseCellLimit;
+        _dense = DenseCells.Resize(null, columns, rows, denseCellLimit);
     }
 
     /// <summary>Create a CellOccupancyMatrix given a set of provisional track counts.</summary>
-    public static CellOccupancyMatrix WithTrackCounts(TrackCounts columns, TrackCounts rows) =>
-        new(columns, rows);
+    public static CellOccupancyMatrix WithTrackCounts(
+        TrackCounts columns, TrackCounts rows, int denseCellLimit = DefaultDenseCellLimit) =>
+        new(columns, rows, denseCellLimit);
 
     /// <summary>Determines whether the specified area fits within the tracks currently allocated.</summary>
     public bool IsAreaInRange(AbsoluteAxis primaryAxis, TrackRange primaryRange, TrackRange secondaryRange)
@@ -90,6 +103,10 @@ internal sealed class CellOccupancyMatrix
         if (!IsAreaInRange(AbsoluteAxis.Horizontal, colRange, rowRange))
         {
             ExpandToFitRange(rowRange, colRange);
+            if (_dense is not null)
+            {
+                _dense = DenseCells.Resize(_dense, _columns, _rows, _denseCellLimit);
+            }
         }
 
         if (value == CellOccupancyState.Unoccupied
@@ -101,6 +118,7 @@ internal sealed class CellOccupancyMatrix
 
         var area = new Area(columnSpan.Start.Value, columnSpan.End.Value, rowSpan.Start.Value, rowSpan.End.Value);
         _areas.Add(area);
+        _dense?.Fill(area);
         _columnsPrimary?.Add(area);
         _rowsPrimary?.Add(area);
     }
@@ -114,8 +132,15 @@ internal sealed class CellOccupancyMatrix
         Line<OriginZeroLine> primarySpan,
         Line<OriginZeroLine> secondarySpan) =>
         _areas.Count == 0
-        || !IndexFor(primaryAxis).Intersects(
-            primarySpan.Start.Value, primarySpan.End.Value, secondarySpan.Start.Value, secondarySpan.End.Value);
+        || !(_dense is { } dense
+            ? dense.Intersects(
+                primaryAxis == AbsoluteAxis.Horizontal,
+                primarySpan.Start.Value,
+                primarySpan.End.Value,
+                secondarySpan.Start.Value,
+                secondarySpan.End.Value)
+            : IndexFor(primaryAxis).Intersects(
+                primarySpan.Start.Value, primarySpan.End.Value, secondarySpan.Start.Value, secondarySpan.End.Value));
 
     /// <summary>
     /// The first and last occupied primary-axis tracks of an area given by grid lines, as the
@@ -137,9 +162,16 @@ internal sealed class CellOccupancyMatrix
             return null;
         }
 
-        return IndexFor(primaryAxis).OccupiedBounds(
-            primarySpan.Start.Value, primarySpan.End.Value, secondarySpan.Start.Value, secondarySpan.End.Value)
-            is { } bounds
+        var found = _dense is { } dense
+            ? dense.OccupiedBounds(
+                primaryAxis == AbsoluteAxis.Horizontal,
+                primarySpan.Start.Value,
+                primarySpan.End.Value,
+                secondarySpan.Start.Value,
+                secondarySpan.End.Value)
+            : IndexFor(primaryAxis).OccupiedBounds(
+                primarySpan.Start.Value, primarySpan.End.Value, secondarySpan.Start.Value, secondarySpan.End.Value);
+        return found is { } bounds
             ? (new OriginZeroLine(bounds.First), new OriginZeroLine(bounds.Last))
             : null;
     }
@@ -161,8 +193,15 @@ internal sealed class CellOccupancyMatrix
         bool reversed) =>
         _areas.Count == 0
             ? from
-            : new OriginZeroLine(IndexFor(primaryAxis).NextFree(
-                from.Value, secondarySpan.Start.Value, secondarySpan.End.Value, reversed));
+            : new OriginZeroLine(_dense is { } dense
+                ? dense.NextFree(
+                    primaryAxis == AbsoluteAxis.Horizontal,
+                    from.Value,
+                    secondarySpan.Start.Value,
+                    secondarySpan.End.Value,
+                    reversed)
+                : IndexFor(primaryAxis).NextFree(
+                    from.Value, secondarySpan.Start.Value, secondarySpan.End.Value, reversed));
 
     /// <summary>
     /// Determines whether a grid area specified by a range of indexes into this matrix is entirely
@@ -199,6 +238,10 @@ internal sealed class CellOccupancyMatrix
         }
 
         int line = TrackCountsFor(axis).TrackToPrevOzLine(index).Value;
+        if (_dense is { } dense)
+        {
+            return dense.TrackIsOccupied(axis == AbsoluteAxis.Horizontal, line);
+        }
 
         // Either index answers; prefer the one placement already built.
         return _columnsPrimary is null && _rowsPrimary is null
@@ -243,6 +286,182 @@ internal sealed class CellOccupancyMatrix
 
     /// <summary>An occupied area, in origin-zero lines.</summary>
     private readonly record struct Area(int ColumnStart, int ColumnEnd, int RowStart, int RowEnd);
+
+    /// <summary>
+    /// A byte per cell over the grid's current tracks, row-major, for a small grid. Out of range
+    /// cells are unoccupied.
+    /// </summary>
+    private sealed class DenseCells
+    {
+        private readonly byte[] _cells;
+        private readonly int _row0;
+        private readonly int _col0;
+        private readonly int _rows;
+        private readonly int _cols;
+
+        private DenseCells(int row0, int rows, int col0, int cols)
+        {
+            _row0 = row0;
+            _rows = rows;
+            _col0 = col0;
+            _cols = cols;
+            _cells = new byte[rows * cols];
+        }
+
+        /// <summary>
+        /// Cells for the given track counts with the old cells copied in, or null when the grid
+        /// is over the limit.
+        /// </summary>
+        public static DenseCells? Resize(DenseCells? old, TrackCounts columns, TrackCounts rows, int limit)
+        {
+            long cells = (long)columns.Len() * rows.Len();
+            if (cells > limit)
+            {
+                return null;
+            }
+
+            var grown = new DenseCells(-rows.NegativeImplicit, rows.Len(), -columns.NegativeImplicit, columns.Len());
+            if (old is not null && old._cols != 0)
+            {
+                for (int row = 0; row < old._rows; row++)
+                {
+                    old._cells.AsSpan(row * old._cols, old._cols).CopyTo(grown._cells.AsSpan(
+                        ((row + old._row0 - grown._row0) * grown._cols) + (old._col0 - grown._col0)));
+                }
+            }
+
+            return grown;
+        }
+
+        public void Fill(Area area)
+        {
+            int colStart = Math.Max(area.ColumnStart - _col0, 0);
+            int colEnd = Math.Min(area.ColumnEnd - _col0, _cols);
+            if (colEnd <= colStart)
+            {
+                return;
+            }
+
+            for (int row = Math.Max(area.RowStart - _row0, 0); row < Math.Min(area.RowEnd - _row0, _rows); row++)
+            {
+                _cells.AsSpan((row * _cols) + colStart, colEnd - colStart).Fill(1);
+            }
+        }
+
+        public bool Intersects(bool primaryIsColumns, int pLo, int pHi, int sLo, int sHi)
+        {
+            var (colLo, colHi, rowLo, rowHi) = Cells(primaryIsColumns, pLo, pHi, sLo, sHi);
+            if (colHi <= colLo)
+            {
+                return false;
+            }
+
+            for (int row = rowLo; row < rowHi; row++)
+            {
+                if (_cells.AsSpan((row * _cols) + colLo, colHi - colLo).Contains((byte)1))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public (int First, int Last)? OccupiedBounds(bool primaryIsColumns, int pLo, int pHi, int sLo, int sHi)
+        {
+            var (colLo, colHi, rowLo, rowHi) = Cells(primaryIsColumns, pLo, pHi, sLo, sHi);
+            if (colHi <= colLo)
+            {
+                return null;
+            }
+
+            int first = int.MaxValue;
+            int last = -1;
+            for (int row = rowLo; row < rowHi; row++)
+            {
+                var cells = _cells.AsSpan((row * _cols) + colLo, colHi - colLo);
+                if (primaryIsColumns)
+                {
+                    int lo = cells.IndexOf((byte)1);
+                    if (lo >= 0)
+                    {
+                        first = Math.Min(first, colLo + lo);
+                        last = Math.Max(last, colLo + cells.LastIndexOf((byte)1));
+                    }
+                }
+                else if (cells.Contains((byte)1))
+                {
+                    first = Math.Min(first, row);
+                    last = row;
+                }
+            }
+
+            if (last < 0)
+            {
+                return null;
+            }
+
+            int origin = primaryIsColumns ? _col0 : _row0;
+            return (first + origin, last + origin);
+        }
+
+        public int NextFree(bool primaryIsColumns, int from, int sLo, int sHi, bool reversed)
+        {
+            int origin = primaryIsColumns ? _col0 : _row0;
+            int length = primaryIsColumns ? _cols : _rows;
+            int track = from - origin;
+            while (track >= 0 && track < length)
+            {
+                bool occupied = primaryIsColumns
+                    ? Intersects(primaryIsColumns: true, track + origin, track + origin + 1, sLo, sHi)
+                    : Intersects(primaryIsColumns: false, track + origin, track + origin + 1, sLo, sHi);
+                if (!occupied)
+                {
+                    break;
+                }
+
+                track += reversed ? -1 : 1;
+            }
+
+            return track + origin;
+        }
+
+        public bool TrackIsOccupied(bool columnAxis, int line)
+        {
+            int index = line - (columnAxis ? _col0 : _row0);
+            if (index < 0 || index >= (columnAxis ? _cols : _rows))
+            {
+                return false;
+            }
+
+            if (!columnAxis)
+            {
+                return _cells.AsSpan(index * _cols, _cols).Contains((byte)1);
+            }
+
+            for (int row = 0; row < _rows; row++)
+            {
+                if (_cells[(row * _cols) + index] != 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>A query's column and row index ranges, clamped to the cells.</summary>
+        private (int ColLo, int ColHi, int RowLo, int RowHi) Cells(
+            bool primaryIsColumns, int pLo, int pHi, int sLo, int sHi)
+        {
+            var (cLo, cHi, rLo, rHi) = primaryIsColumns ? (pLo, pHi, sLo, sHi) : (sLo, sHi, pLo, pHi);
+            return (
+                Math.Max(cLo - _col0, 0),
+                Math.Min(cHi - _col0, _cols),
+                Math.Max(rLo - _row0, 0),
+                Math.Min(rHi - _row0, _rows));
+        }
+    }
 
     /// <summary>
     /// A segment tree over the secondary axis. Each area is stored, as its primary-axis interval,

@@ -1,4 +1,4 @@
-// The sparse CellOccupancyMatrix against a dense one, cell for cell. taffy's matrix
+// CellOccupancyMatrix (sparse, or dense for a small grid) against taffy's matrix, cell for cell. taffy's matrix
 // (vendor/taffy/src/compute/grid/types/cell_occupancy.rs) stores a state per cell; the port
 // keeps the placed areas instead (see "Known deviations" in todo.md), and every query must
 // still give taffy's answer. DenseOracle below is taffy's matrix, queried naively.
@@ -9,21 +9,22 @@ using Xunit;
 
 public class CellOccupancyMatrixTests
 {
+    // Dense cell limits: always sparse, always dense, and switching part-way.
     [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(3)]
-    [InlineData(4)]
-    [InlineData(5)]
-    [InlineData(6)]
-    [InlineData(7)]
-    [InlineData(8)]
-    public void MatchesADenseMatrixOnRandomInput(int seed)
+    [InlineData(1, 0)]
+    [InlineData(2, 0)]
+    [InlineData(3, 0)]
+    [InlineData(4, 0)]
+    [InlineData(5, int.MaxValue)]
+    [InlineData(6, int.MaxValue)]
+    [InlineData(7, 40)]
+    [InlineData(8, 40)]
+    public void MatchesADenseMatrixOnRandomInput(int seed, int denseCellLimit)
     {
         var random = new Random(seed);
         for (int round = 0; round < 300; round++)
         {
-            RunRandomSequence(random);
+            RunRandomSequence(random, denseCellLimit);
         }
     }
 
@@ -46,11 +47,11 @@ public class CellOccupancyMatrixTests
         Assert.True(allocated < 64 * 1024, $"allocated {allocated} bytes");
     }
 
-    private static void RunRandomSequence(Random random)
+    private static void RunRandomSequence(Random random, int denseCellLimit)
     {
         var columns = new TrackCounts(random.Next(3), (ushort)random.Next(5), random.Next(3));
         var rows = new TrackCounts(random.Next(3), (ushort)random.Next(5), random.Next(3));
-        var sparse = CellOccupancyMatrix.WithTrackCounts(columns, rows);
+        var sparse = CellOccupancyMatrix.WithTrackCounts(columns, rows, denseCellLimit);
         var dense = new DenseOracle(columns, rows);
         var primary = random.Next(2) == 0 ? AbsoluteAxis.Horizontal : AbsoluteAxis.Vertical;
         int definite = random.Next(6);
