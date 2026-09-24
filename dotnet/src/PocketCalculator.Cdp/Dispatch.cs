@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using PocketCalculator.Js.Modules;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Runtime;
 
 namespace PocketCalculator.Cdp;
 
@@ -173,6 +174,7 @@ public static class Dispatcher
         var method = req.Method[(separator + 1)..];
 
         DomainResult result;
+        ParkedCommand? parkedCommand = null;
         try
         {
             result = domain switch
@@ -214,6 +216,12 @@ public static class Dispatcher
                 _ => DomainResult.Err($"Unknown domain: {domain}"),
             };
         }
+        catch (CommandParkedException parked)
+        {
+            parkedCommand = new ParkedCommand(req.Id, req.SessionId, req.Method, parked.Parked, parked.Finish);
+            ctx.ParkedCommands.Add(parkedCommand);
+            result = DomainResult.Empty();
+        }
         catch (OperationCanceledException) when (watchdog is { Fired: true })
         {
             // The command watchdog cancelled C# work the handler was doing outside
@@ -235,7 +243,7 @@ public static class Dispatcher
             throw;
         }
 
-        if (result.IsOk && Domains.Page.CommandCanChangeScreencastFrame(req.Method))
+        if (parkedCommand is null && result.IsOk && Domains.Page.CommandCanChangeScreencastFrame(req.Method))
         {
             if (Domains.Page.QueueScreencastFrame(ctx, req.SessionId, false) is { } screencastError)
             {
@@ -260,6 +268,11 @@ public static class Dispatcher
         DrainBindingCalls(ctx);
         DrainFrameEvents(ctx);
 
+        if (parkedCommand is not null)
+        {
+            return new CdpResponse { Id = req.Id, SessionId = req.SessionId, Parked = true };
+        }
+
         if (result.IsOk)
         {
             return CdpResponse.Success(req.Id, result.Value, req.SessionId);
@@ -267,6 +280,99 @@ public static class Dispatcher
 
         CdpLog.Warn($"CDP error for {req.Method}: {result.Error}");
         return CdpResponse.Failure(req.Id, -32601, result.Error!, req.SessionId);
+    }
+
+    /// <summary>
+    /// Answers <paramref name="parked"/> if its promise has settled or its time is up,
+    /// under the same lock and command watchdog as a dispatched command. Null while it
+    /// is still pending.
+    /// </summary>
+    internal static async Task<CdpResponse?> TryResumeParkedAsync(ParkedCommand parked, CdpContext ctx)
+    {
+        ArgumentNullException.ThrowIfNull(parked);
+        ArgumentNullException.ThrowIfNull(ctx);
+        await ctx.V8Lock.WaitAsync().ConfigureAwait(false);
+        ArmedWatchdog? watchdog = null;
+        try
+        {
+            RemoteObjectInfo? info;
+            try
+            {
+                info = parked.Await.TryComplete();
+            }
+            catch (CdpContextGoneException error)
+            {
+                // The realm went away under the promise (a navigation, a closed or
+                // suspended page): Chromium answers -32000 "Inspected target navigated
+                // or closed", or "Execution context was destroyed." for a lost frame.
+                return CdpResponse.Failure(parked.Id, -32000, error.Message, parked.SessionId);
+            }
+            catch (JsRuntimeException error)
+            {
+                return CdpResponse.Failure(parked.Id, -32601, error.Message, parked.SessionId);
+            }
+
+            if (info is null)
+            {
+                if (Environment.TickCount64 >= parked.Await.Deadline)
+                {
+                    CdpLog.Warn($"CDP error for {parked.Method}: {parked.Await.TimeoutMessage}");
+                    return CdpResponse.Failure(parked.Id, -32601, parked.Await.TimeoutMessage, parked.SessionId);
+                }
+
+                return null;
+            }
+
+            var budgetMs = CommandBudgetMs();
+            if (budgetMs != 0 && ctx.GetSessionPage(parked.SessionId)?.IsolateHandle is { } handle)
+            {
+                watchdog = CdpWatchdog.Arm(handle, TimeSpan.FromMilliseconds(budgetMs));
+            }
+
+            DomainResult result;
+            try
+            {
+                result = await parked.Finish(info).ConfigureAwait(false);
+            }
+            catch (Domains.DomainError error)
+            {
+                result = DomainResult.Err(error.Message);
+            }
+            catch (OperationCanceledException) when (watchdog is { Fired: true })
+            {
+                result = DomainResult.Err($"{parked.Method} exceeded its {budgetMs}ms time budget");
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                result = DomainResult.Err(error.Message);
+            }
+
+            if (watchdog is not null && CdpWatchdog.Disarm(watchdog))
+            {
+                ctx.GetSessionPageMut(parked.SessionId)?.CancelV8Termination();
+            }
+
+            watchdog = null;
+            DrainRuntimeEvents(ctx);
+            DrainBindingCalls(ctx);
+            DrainFrameEvents(ctx);
+            if (result.IsOk)
+            {
+                return CdpResponse.Success(parked.Id, result.Value, parked.SessionId);
+            }
+
+            CdpLog.Warn($"CDP error for {parked.Method}: {result.Error}");
+            return CdpResponse.Failure(parked.Id, -32601, result.Error!, parked.SessionId);
+        }
+        finally
+        {
+            if (watchdog is not null)
+            {
+                CdpWatchdog.Disarm(watchdog);
+            }
+
+            ctx.V8Lock.Release();
+        }
     }
 
     private static ulong CommandBudgetMs()
@@ -755,6 +861,9 @@ public static class Dispatcher
         CdpRequest req,
         CdpContext ctx)
     {
+        // The wrapped reply is built from the inner one, so the inner command cannot be
+        // answered later: its await stays inline.
+        PocketCalculator.Js.Runtime.CdpAwaitParking.YieldWhen = null;
         var sessionId = req.Params.Get("sessionId").AsString();
         if (req.Params.Get("message").AsString() is not { } message)
         {

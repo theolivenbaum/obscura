@@ -1165,8 +1165,9 @@ public static partial class CdpServer
 
             try
             {
-                var messages = Channel.CreateUnbounded<ServerMessage>(
-                    new UnboundedChannelOptions { SingleReader = true });
+                // Not SingleReader: that channel cannot count, and a parked awaited
+                // command asks how many frames are waiting (ParkedCommand).
+                var messages = Channel.CreateUnbounded<ServerMessage>();
                 using var processorStop = new CancellationTokenSource();
 
                 // Tripped when the processor stops, whether or not it ever

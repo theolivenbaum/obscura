@@ -376,6 +376,9 @@ public sealed partial class Page
     /// </summary>
     public void NoteUserActivation() => Js?.NoteUserActivation();
 
+    /// <summary>Whether the page has binding calls the CDP server has not drained yet.</summary>
+    public bool HasPendingBindingCalls => Js?.HasPendingBindingCalls ?? false;
+
     public IReadOnlyList<(string Name, string Payload)> TakePendingBindingCalls() =>
         Js?.TakePendingBindingCalls() ?? [];
 

@@ -234,11 +234,11 @@ public static class Runtime
                         ? page.EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, timeoutMs)
                         : page.EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, timeoutMs, world),
                     timeoutMs,
-                    $"Runtime.evaluate exceeded {timeoutMs.ToString(CultureInfo.InvariantCulture)}ms timeout")
+                    $"Runtime.evaluate exceeded {timeoutMs.ToString(CultureInfo.InvariantCulture)}ms timeout",
+                    ctx,
+                    sessionId)
                     .ConfigureAwait(false);
-                await EmitPostEvalNavAsync(ctx, sessionId).ConfigureAwait(false);
-
-                return DomainResult.Ok(EvaluationReply(info));
+                return await FinishEvaluationAsync(ctx, sessionId, info).ConfigureAwait(false);
             }
 
             case "callFunctionOn":
@@ -275,11 +275,11 @@ public static class Runtime
                     () => page.CallFunctionOnForCdpWithTimeoutAsync(
                         functionDeclaration, objectId, arguments, returnByValue, awaitPromise, timeoutMs, world),
                     timeoutMs,
-                    $"Runtime.callFunctionOn exceeded {timeoutMs.ToString(CultureInfo.InvariantCulture)}ms timeout")
+                    $"Runtime.callFunctionOn exceeded {timeoutMs.ToString(CultureInfo.InvariantCulture)}ms timeout",
+                    ctx,
+                    sessionId)
                     .ConfigureAwait(false);
-                await EmitPostEvalNavAsync(ctx, sessionId).ConfigureAwait(false);
-
-                return DomainResult.Ok(EvaluationReply(info));
+                return await FinishEvaluationAsync(ctx, sessionId, info).ConfigureAwait(false);
             }
 
             case "getProperties":
@@ -478,10 +478,22 @@ public static class Runtime
     /// Bound one evaluation by the caller's timeout, translating a runtime failure into
     /// the protocol error string the Rust engine returns.
     /// </summary>
+    /// <summary>The reply to an evaluate or callFunctionOn, after the navigation it may have started.</summary>
+    private static async Task<DomainResult> FinishEvaluationAsync(
+        CdpContext ctx,
+        string? sessionId,
+        RemoteObjectInfo info)
+    {
+        await EmitPostEvalNavAsync(ctx, sessionId).ConfigureAwait(false);
+        return DomainResult.Ok(EvaluationReply(info));
+    }
+
     private static async Task<RemoteObjectInfo> RunBoundedAsync(
         Func<Task<RemoteObjectInfo>> start,
         ulong timeoutMs,
-        string timeoutMessage)
+        string timeoutMessage,
+        CdpContext ctx,
+        string? sessionId)
     {
         Task<RemoteObjectInfo> work;
         try
@@ -516,6 +528,15 @@ public static class Runtime
         catch (JsRuntimeException exception)
         {
             throw new DomainError(exception.Message);
+        }
+        catch (CdpAwaitParkedException parked)
+        {
+            // The promise is still pending and the connection has other work: the
+            // dispatcher records the command and the processor answers it when the
+            // promise settles, as Chromium does (port addition, see ParkedCommand).
+            throw new CommandParkedException(
+                parked.Parked,
+                info => FinishEvaluationAsync(ctx, sessionId, info));
         }
     }
 

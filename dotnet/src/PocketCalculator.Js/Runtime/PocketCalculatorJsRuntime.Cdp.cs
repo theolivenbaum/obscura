@@ -199,7 +199,9 @@ public sealed partial class PocketCalculatorJsRuntime
                     }
                 })();
                 """);
-            outcome = await AwaitOutcomeAsync(scope, done, awaitTimeoutMs, "Runtime.evaluate").ConfigureAwait(false);
+            outcome = await AwaitOutcomeAsync(
+                scope, done, awaitTimeoutMs, "Runtime.evaluate",
+                settled => FinishEvaluate(scope, oid, expression, returnByValue, settled)).ConfigureAwait(false);
         }
         else
         {
@@ -221,6 +223,17 @@ public sealed partial class PocketCalculatorJsRuntime
                 ?? throw new JsRuntimeException("Runtime.evaluate produced no result");
         }
 
+        return FinishEvaluate(scope, oid, expression, returnByValue, outcome);
+    }
+
+    /// <summary>The result of an evaluate whose wrapper reported <paramref name="outcome"/>.</summary>
+    private RemoteObjectInfo FinishEvaluate(
+        CdpScope scope,
+        string oid,
+        string expression,
+        bool returnByValue,
+        ScriptObject outcome)
+    {
         // Neither a rejection nor a synchronous throw is a protocol failure. CDP
         // answers the command and puts the value in exceptionDetails, so it
         // travels back as a remote object flagged Thrown, by reference even when
@@ -245,15 +258,33 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Pumps the event loop until the awaiting wrapper numbered <paramref name="done"/> has
     /// settled, and takes its outcome.
     /// </summary>
-    private async Task<ScriptObject> AwaitOutcomeAsync(CdpScope scope, string done, ulong awaitTimeoutMs, string method)
+    /// <remarks>
+    /// When the CDP server allows it (<see cref="CdpAwaitParking.YieldWhen"/>) and the
+    /// connection has other work, an unsettled promise is parked rather than waited for:
+    /// this throws <see cref="CdpAwaitParkedException"/>, whose
+    /// <see cref="ParkedCdpAwait"/> finishes the command with <paramref name="finish"/>
+    /// once the promise settles. The returned outcome is the inline case.
+    /// </remarks>
+    private async Task<ScriptObject> AwaitOutcomeAsync(
+        CdpScope scope,
+        string done,
+        ulong awaitTimeoutMs,
+        string method,
+        Func<ScriptObject, RemoteObjectInfo> finish)
     {
         var outcomes = scope.Outcomes;
+        var yieldWhen = CdpAwaitParking.YieldWhen;
+        var started = Environment.TickCount64;
+        var yielded = false;
         var settled = await ResolvePromisesUntilAsync(
             _ =>
             {
                 try
                 {
-                    return outcomes.GetProperty(done) is ScriptObject;
+                    if (outcomes.GetProperty(done) is ScriptObject)
+                    {
+                        return true;
+                    }
                 }
                 catch (ScriptEngineException)
                 {
@@ -263,8 +294,22 @@ public sealed partial class PocketCalculatorJsRuntime
                 {
                     return false;
                 }
+                if (yieldWhen is not null && yieldWhen())
+                {
+                    yielded = true;
+                    return true;
+                }
+                return false;
             },
             awaitTimeoutMs).ConfigureAwait(false);
+        if (settled && yielded && outcomes.GetProperty(done) is not ScriptObject)
+        {
+            var deadline = awaitTimeoutMs >= long.MaxValue / 2
+                ? long.MaxValue
+                : started + (long)awaitTimeoutMs;
+            throw new CdpAwaitParkedException(
+                new ParkedCdpAwait(this, scope, done, method, awaitTimeoutMs, deadline, finish));
+        }
         if (!settled || outcomes.GetProperty(done) is not ScriptObject outcome)
         {
             throw new JsRuntimeException($"{method} promise did not settle within {awaitTimeoutMs}ms");
@@ -390,24 +435,10 @@ public sealed partial class PocketCalculatorJsRuntime
                     }
                 })();
                 """);
-            var outcome = await AwaitOutcomeAsync(scope, done, awaitTimeoutMs, "Runtime.callFunctionOn").ConfigureAwait(false);
-
-            // Same rule as evaluate: a rejected call is answered, not failed, and
-            // never serialized by value. Without this the wrapper stored the error
-            // under the object id a success uses, so a rejection came back as an
-            // ordinary result.
-            scope.Store[oid] = CdpScope.Retrieval(oid);
-            if (IsRejected(outcome))
-            {
-                return InfoFromMeta(MetaOf(outcome), oid) with { Thrown = true };
-            }
-
-            if (returnByValue)
-            {
-                return InfoFromJson(ToJson(scope.Objects.GetProperty(oid), scope.Engine));
-            }
-
-            return InfoFromMeta(MetaOf(outcome), oid);
+            var outcome = await AwaitOutcomeAsync(
+                scope, done, awaitTimeoutMs, "Runtime.callFunctionOn",
+                settled => FinishCallFunctionOn(scope, oid, returnByValue, settled)).ConfigureAwait(false);
+            return FinishCallFunctionOn(scope, oid, returnByValue, outcome);
         }
 
         if (returnByValue)
@@ -428,6 +459,27 @@ public sealed partial class PocketCalculatorJsRuntime
             ?? throw new JsRuntimeException("Runtime.callFunctionOn produced no result");
         scope.Store[oid] = CdpScope.Retrieval(oid);
         return InfoFromMeta(MetaOf(remote), oid);
+    }
+
+    /// <summary>The result of an awaited call whose wrapper reported <paramref name="outcome"/>.</summary>
+    private RemoteObjectInfo FinishCallFunctionOn(CdpScope scope, string oid, bool returnByValue, ScriptObject outcome)
+    {
+        // Same rule as evaluate: a rejected call is answered, not failed, and
+        // never serialized by value. Without this the wrapper stored the error
+        // under the object id a success uses, so a rejection came back as an
+        // ordinary result.
+        scope.Store[oid] = CdpScope.Retrieval(oid);
+        if (IsRejected(outcome))
+        {
+            return InfoFromMeta(MetaOf(outcome), oid) with { Thrown = true };
+        }
+
+        if (returnByValue)
+        {
+            return InfoFromJson(ToJson(scope.Objects.GetProperty(oid), scope.Engine));
+        }
+
+        return InfoFromMeta(MetaOf(outcome), oid);
     }
 
     public Task<RemoteObjectInfo> CallFunctionOnAsync(

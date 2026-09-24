@@ -67,6 +67,9 @@ public sealed partial class PocketCalculatorJsRuntime
     private readonly Queue<Action<double>> _postedTasks = new();
     private bool _disposed;
 
+    /// <summary>Whether this runtime has been disposed (its page navigated or closed).</summary>
+    internal bool IsDisposed => _disposed;
+
     private PocketCalculatorJsRuntime(string baseUrl, string? proxyUrl)
     {
         // A process over POCKETCALCULATOR_MAX_PROCESS_BYTES takes no new page (M7).

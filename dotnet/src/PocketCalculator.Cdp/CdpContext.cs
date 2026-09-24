@@ -338,6 +338,33 @@ public sealed class CdpContext
     /// </summary>
     public SemaphoreSlim V8Lock { get; } = new(1, 1);
 
+    /// <summary>
+    /// Awaited commands whose promise had not settled when the connection had other
+    /// work, in the order they parked. The processor answers each when it settles.
+    /// </summary>
+    internal List<ParkedCommand> ParkedCommands { get; } = [];
+
+    /// <summary>
+    /// Whether the connection has work an awaited command must not hold up: a frame
+    /// or a deferred message waiting, or an intercepted request. Set by the
+    /// processor; null (a direct dispatcher) means an await is always inline.
+    /// </summary>
+    internal Func<bool>? ConnectionHasWork { get; set; }
+
+    /// <summary>Whether a page of this connection has binding calls not yet reported.</summary>
+    internal bool AnyPendingBindingCalls()
+    {
+        foreach (var page in Pages)
+        {
+            if (page.HasPendingBindingCalls)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static CdpContext New() => NewWithOptions(null, false);
 
     public static CdpContext NewWithProxy(string? proxy) => NewWithOptions(proxy, false);

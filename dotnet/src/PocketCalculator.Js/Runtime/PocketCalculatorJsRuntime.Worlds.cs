@@ -189,6 +189,10 @@ public sealed partial class PocketCalculatorJsRuntime
         return FindIsolatedWorld(key)?.Scope;
     }
 
+    /// <summary>Whether any realm of this page has binding calls the CDP server has not drained.</summary>
+    public bool HasPendingBindingCalls =>
+        State.PendingBindingCalls.Count != 0 || State.PendingFrameBindingCalls.Count != 0 || _worldBindingCalls.Count != 0;
+
     /// <summary>Calls queued by a world's <c>Runtime.addBinding</c> shims, with the world they came from.</summary>
     public IReadOnlyList<(long WorldKey, string Name, string Payload)> TakePendingWorldBindingCalls()
     {
