@@ -8149,6 +8149,9 @@ globalThis.fetch = async (input, init = {}) => {
     url: exposeRedirectMetadata ? (parsed.url || url) : (respType === "opaque" ? "" : url),
     redirected: exposeRedirectMetadata && !!parsed.redirected,
   });
+  // A fetched response's headers have the "immutable" guard, as in Chromium:
+  // set/append/delete throw TypeError. Rust left them writable.
+  _headersGuards.set(response.headers, 'immutable');
   if (parsed.requestId) {
     Object.defineProperty(response, "__obscuraRequestId", {
       value: parsed.requestId,
@@ -8282,10 +8285,10 @@ if (typeof Headers === "undefined") {
       if (init !== undefined && init !== null) _fillHeaders(this, init);
     }
     _guard() { return _headersGuards.get(this) || 'none'; }
-    _validate(name, value) {
+    _validate(name, value, op) {
       // Fetch "validate": false means the guard ignores this header.
       const guard = this._guard();
-      if (guard === 'immutable') throw new TypeError("Failed to execute on 'Headers': Headers are immutable");
+      if (guard === 'immutable') throw new TypeError("Failed to execute '" + op + "' on 'Headers': Headers are immutable");
       if (guard === 'request' && _isForbiddenRequestHeader(name, value)) return false;
       if (guard === 'response') {
         const lower = name.toLowerCase();
@@ -8304,7 +8307,7 @@ if (typeof Headers === "undefined") {
     set(n, v) {
       const name = _headerName(n, 'set');
       const value = _headerValue(v, 'set');
-      if (!this._validate(name, value)) return;
+      if (!this._validate(name, value, 'set')) return;
       if (this._guard() === 'request-no-cors' && !_isNoCorsSafelistedRequestHeader(name, value)) return;
       const lower = name.toLowerCase();
       const existing = this._h.get(lower);
@@ -8314,7 +8317,7 @@ if (typeof Headers === "undefined") {
     append(n, v) {
       const name = _headerName(n, 'append');
       const value = _headerValue(v, 'append');
-      if (!this._validate(name, value)) return;
+      if (!this._validate(name, value, 'append')) return;
       const lower = name.toLowerCase();
       const existing = this._h.get(lower);
       const combined = existing ? existing.value + ', ' + value : value;
@@ -8324,7 +8327,7 @@ if (typeof Headers === "undefined") {
     }
     delete(n) {
       const name = _headerName(n, 'delete');
-      if (!this._validate(name, '')) return;
+      if (!this._validate(name, '', 'delete')) return;
       const lower = name.toLowerCase();
       if (this._guard() === 'request-no-cors' && !_isNoCorsSafelistedName(lower) && lower !== 'range') return;
       this._h.delete(lower);
@@ -8429,6 +8432,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     }
     this._method = checked.method;
     this._url = url;
+    this._sendFlag = false;
     this._headers = {};
     this._responseHeaders = {};
     this._aborted = false;
@@ -8440,9 +8444,37 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   setRequestHeader(name, value) {
-    // XHR: a forbidden request-header is silently ignored. Rust stored and sent
-    // it. fetch() applies the same guard again on the way out.
+    // XHR setRequestHeader as in Chromium 141: ByteString conversion (TypeError),
+    // then InvalidStateError unless opened and not sent, then SyntaxError for an
+    // invalid name or value; a repeated name combines with ", ". Rust stored any
+    // name and value and overwrote. A forbidden request-header is silently
+    // ignored (Rust stored and sent it); fetch() applies the same guard again.
+    const prefix = "Failed to execute 'setRequestHeader' on 'XMLHttpRequest': ";
+    name = String(name);
+    value = String(value);
+    for (const s of [name, value]) {
+      for (let i = 0; i < s.length; i++) {
+        if (s.charCodeAt(i) > 0xff) throw new TypeError(prefix + 'String contains non ISO-8859-1 code point.');
+      }
+    }
+    if (this.readyState !== 1 || this._sendFlag) {
+      throw new DOMException(prefix + "The object's state must be OPENED.", 'InvalidStateError');
+    }
+    value = value.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+    if (!_HTTP_TOKEN_RE.test(name)) {
+      throw new DOMException(prefix + "'" + name + "' is not a valid HTTP header field name.", 'SyntaxError');
+    }
+    if (/[\0\r\n]/.test(value)) {
+      throw new DOMException(prefix + "'" + value + "' is not a valid HTTP header field value.", 'SyntaxError');
+    }
     if (_isForbiddenRequestHeader(name, value)) return;
+    const lower = name.toLowerCase();
+    for (const k of Object.keys(this._headers)) {
+      if (k.toLowerCase() === lower) {
+        this._headers[k] = this._headers[k] + ', ' + value;
+        return;
+      }
+    }
     this._headers[name] = value;
   }
 
@@ -8465,6 +8497,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   send(body) {
     if (this.readyState !== 1) return;
     if (this._aborted) return;
+    this._sendFlag = true;
 
     const xhr = this;
     this._fireEvent('loadstart');
@@ -8833,9 +8866,16 @@ if (typeof Response === 'undefined') {
     async json() { this._consumeBody(); return _JSONparse(await _decodeBodyWithCharset(this._bodyBytes, this.headers)); }
     async arrayBuffer() { this._consumeBody(); return _arrayBufferFromBytes(this._bodyBytes); }
     async blob() { this._consumeBody(); return new Blob([this._bodyBytes]); }
-    clone() { return new Response(this._bodyBytes, { status: this.status, statusText: this.statusText, headers: this.headers, type: this.type, url: this.url, redirected: this.redirected }); }
-    static error() { return new Response(null, { status: 0 }); }
-    static redirect(url, status) { return new Response(null, { status: status || 302, headers: { Location: url } }); }
+    clone() {
+      const copy = new Response(this._bodyBytes, { status: this.status, statusText: this.statusText, headers: this.headers, type: this.type, url: this.url, redirected: this.redirected });
+      // A clone keeps its source's guard (immutable for a fetched response).
+      const guard = _headersGuards.get(this.headers);
+      if (guard) _headersGuards.set(copy.headers, guard);
+      return copy;
+    }
+    // Response.error() and Response.redirect() have immutable headers (Fetch, Chromium).
+    static error() { const r = new Response(null, { status: 0 }); _headersGuards.set(r.headers, 'immutable'); return r; }
+    static redirect(url, status) { const r = new Response(null, { status: status || 302, headers: { Location: url } }); _headersGuards.set(r.headers, 'immutable'); return r; }
     static json(data, init) { return new Response(_JSONstringify(data), { ...init, headers: { 'content-type': 'application/json', ...(init?.headers || {}) } }); }
   };
 }
