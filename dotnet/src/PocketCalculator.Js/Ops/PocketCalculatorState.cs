@@ -56,6 +56,15 @@ public sealed class PocketCalculatorState
     /// </summary>
     public bool OpaqueOrigin { get; set; }
 
+    /// <summary>
+    /// The URL of the nearest ancestor document loaded over https (or wss), or null when
+    /// no ancestor is. A frame whose own URL is not secure (<c>about:srcdoc</c>,
+    /// <c>about:blank</c>, <c>data:</c>, or an http frame) still has its requests checked
+    /// for mixed content against it, as Chromium checks the frame and the top frame
+    /// (SECURITY.md I7). Port addition.
+    /// </summary>
+    public string? SecureAncestorUrl { get; set; }
+
     /// <summary>Bodies of this document's internal loads, held for the host (see <see cref="InternalLoads"/>).</summary>
     public InternalLoadStore InternalLoadStore { get; } = new();
 

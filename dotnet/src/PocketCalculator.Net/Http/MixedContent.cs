@@ -27,10 +27,12 @@ public enum MixedContentDecision
 /// (<c>127.0.0.0/8</c>, <c>::1</c>) and <c>localhost</c> / <c>*.localhost</c> are
 /// trustworthy, so they are never mixed.</item>
 /// <item>A top-level navigation is never mixed content.</item>
-/// <item>Images (Chromium also covers audio and video, which this engine does not load)
-/// are upgraded to https; the upgraded request is not retried over http if it fails,
-/// as in Chromium. Everything else (scripts, stylesheets, frames, fetch/XHR, fonts,
-/// workers) is blocked.</item>
+/// <item>Images, audio and video are upgraded to https; the upgraded request is not
+/// retried over http if it fails, as in Chromium. Everything else (scripts, stylesheets,
+/// frames, fetch/XHR, fonts, workers, WebSockets) is blocked.</item>
+/// <item>A frame that is not itself secure (<c>about:srcdoc</c>, <c>about:blank</c>, an
+/// http frame) is checked against its nearest secure ancestor, as Chromium checks the
+/// frame and the top frame: see <see cref="Context"/>.</item>
 /// <item>Each redirect hop is checked again, so an https URL that redirects to http is
 /// treated the same way.</item>
 /// <item>The decision is reported on the page's console channel with Chromium's text.</item>
@@ -68,10 +70,17 @@ public static class MixedContent
             return MixedContentDecision.Allow;
         }
 
-        return resourceType == ResourceType.Image
+        return resourceType is ResourceType.Image or ResourceType.Media
             ? MixedContentDecision.Upgrade
             : MixedContentDecision.Block;
     }
+
+    /// <summary>
+    /// The document whose security decides for a request: the initiating document when it
+    /// is secure, otherwise its nearest secure ancestor (null when there is none).
+    /// </summary>
+    public static Uri? Context(Uri? initiator, Uri? secureAncestor) =>
+        initiator is not null && ProhibitsMixedContent(initiator) ? initiator : secureAncestor ?? initiator;
 
     /// <summary>True when a document at <paramref name="document"/> is a secure context whose requests are checked.</summary>
     public static bool ProhibitsMixedContent(Uri document) =>
@@ -121,6 +130,11 @@ public static class MixedContent
     public static string BlockedMessage(string page, string requestKind, string target) =>
         $"Mixed Content: The page at '{page}' was loaded over HTTPS, but requested an insecure "
         + $"{requestKind} '{target}'. This request has been blocked; the content must be served over HTTPS.";
+
+    /// <summary>Chromium's console text for a blocked WebSocket.</summary>
+    public static string BlockedWebSocketMessage(string page, string target) =>
+        $"Mixed Content: The page at '{page}' was loaded over HTTPS, but attempted to connect to the insecure "
+        + $"WebSocket endpoint '{target}'. This request has been blocked; this endpoint must be available over WSS.";
 
     /// <summary>Chromium's console text for an automatically upgraded request.</summary>
     public static string UpgradedMessage(string page, string target) =>

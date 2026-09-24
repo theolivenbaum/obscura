@@ -386,16 +386,19 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
 
         var topLevel = request.ResourceType == ResourceType.Document && !request.NestedDocument;
-        switch (MixedContent.Check(request.Initiator, target, request.ResourceType, topLevel))
+        var context = MixedContent.Context(request.Initiator, request.SecureAncestor);
+        switch (MixedContent.Check(context, target, request.ResourceType, topLevel))
         {
             case MixedContentDecision.Upgrade:
+                // Chromium names the initiating frame here (about:srcdoc for a srcdoc
+                // frame), and the secure page in the blocked message below.
                 callbacks?.FireConsole(
                     "warning",
-                    MixedContent.UpgradedMessage(request.Initiator!.AbsoluteUri, target.AbsoluteUri));
+                    MixedContent.UpgradedMessage((request.Initiator ?? context)!.AbsoluteUri, target.AbsoluteUri));
                 return MixedContent.UpgradeUrl(target);
             case MixedContentDecision.Block:
                 var message = MixedContent.BlockedMessage(
-                    request.Initiator!.AbsoluteUri,
+                    context!.AbsoluteUri,
                     MixedContent.RequestKind(request.ResourceType, request.NestedDocument),
                     target.AbsoluteUri);
                 callbacks?.FireConsole("error", message);

@@ -298,4 +298,46 @@ public sealed class HstsAndMixedContentTests
             Assert.Equal([new Uri("https://insecure.example/")], interceptor.Seen);
         }
     }
+
+    // ------------------------------------------------------ I7 leftovers (round 5)
+
+    [Fact]
+    public void HstsUpgradesWebSocketsToo()
+    {
+        var store = new HstsStore();
+        store.Add("hsts.example", TimeSpan.FromHours(1), includeSubdomains: true);
+        Assert.Equal(new Uri("wss://api.hsts.example/socket"), store.Upgrade(new Uri("ws://api.hsts.example/socket")));
+        Assert.Equal(new Uri("wss://hsts.example:8080/s"), store.Upgrade(new Uri("ws://hsts.example:8080/s")));
+        Assert.Null(store.Upgrade(new Uri("ws://plain.example/s")));
+        Assert.Null(store.Upgrade(new Uri("wss://hsts.example/s")));
+    }
+
+    [Fact]
+    public void AudioAndVideoAreUpgradedLikeImages()
+    {
+        var target = new Uri("http://insecure.example/v.mp4");
+        Assert.Equal(MixedContentDecision.Upgrade, MixedContent.Check(SecurePage, target, ResourceType.Media, false));
+        Assert.Equal(MixedContentDecision.Block, MixedContent.Check(SecurePage, new Uri("ws://insecure.example/"), ResourceType.Other, false));
+    }
+
+    [Fact]
+    public async Task SrcdocFrameRequestsAreCheckedAgainstTheSecureAncestor()
+    {
+        var (client, interceptor, callbacks, console) = MixedContentClient();
+        using (client)
+        {
+            var srcdoc = new Uri("about:srcdoc");
+            var script = ResourceRequest.Subresource(ResourceType.Script, srcdoc) with { SecureAncestor = SecurePage };
+            await Assert.ThrowsAsync<PocketCalculatorNetException>(() => client.FetchResourceWithCallbacksAsync(
+                new Uri("http://insecure.example/s.js"), script, callbacks));
+            Assert.Empty(interceptor.Seen);
+            Assert.StartsWith("Mixed Content: The page at 'https://secure.example/page'", console[0].Item2, StringComparison.Ordinal);
+
+            var image = ResourceRequest.Subresource(ResourceType.Image, srcdoc) with { SecureAncestor = SecurePage };
+            _ = await client.FetchResourceWithCallbacksAsync(new Uri("http://insecure.example/i.png"), image, callbacks);
+            Assert.Equal([new Uri("https://insecure.example/i.png")], interceptor.Seen);
+            // Chromium names the srcdoc frame in the upgrade warning.
+            Assert.StartsWith("Mixed Content: The page at 'about:srcdoc'", console[1].Item2, StringComparison.Ordinal);
+        }
+    }
 }

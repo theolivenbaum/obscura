@@ -83,6 +83,9 @@ public enum ResourceType
 
     /// <summary>Anything else.</summary>
     Other,
+
+    /// <summary>Audio or video. Port addition, for the mixed-content upgrade.</summary>
+    Media,
 }
 
 /// <summary>
@@ -137,6 +140,13 @@ public sealed record ResourceRequest
     /// module while its credentials mode is still relative to the owning document.
     /// </summary>
     public Uri? Referrer { get; set; }
+
+    /// <summary>
+    /// The nearest secure ancestor of the initiating document, when the initiator itself
+    /// is not secure (a srcdoc or http frame in an https page). Mixed content is decided
+    /// against it (<see cref="MixedContent.Context"/>). Port addition.
+    /// </summary>
+    public Uri? SecureAncestor { get; set; }
 
     /// <summary>Fetch mode.</summary>
     public RequestMode Mode { get; set; }
@@ -284,6 +294,7 @@ public sealed record ResourceRequest
         ResourceType.Stylesheet => "style",
         ResourceType.Image => "image",
         ResourceType.Font => "font",
+        ResourceType.Media => "video",
         _ => "empty",
     };
 

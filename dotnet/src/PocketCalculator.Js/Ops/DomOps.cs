@@ -144,6 +144,12 @@ public static class DomOps
             case "document_referrer":
                 return SerdeJson.String(gs.Referrer);
 
+            // Port addition (SECURITY.md I7): new WebSocket(ws:...) from a document
+            // whose context is secure throws SecurityError in Chromium. Returns the
+            // console message for a blocked URL (and posts it), or "" to allow.
+            case "websocket_mixed_content":
+                return SerdeJson.String(FetchOps.WebSocketMixedContent(gs, arg1));
+
             case "document_encoding":
                 return SerdeJson.String(gs.Encoding);
 

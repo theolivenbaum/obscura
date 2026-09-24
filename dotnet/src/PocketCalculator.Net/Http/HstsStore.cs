@@ -168,11 +168,14 @@ public sealed class HstsStore
 
     /// <summary>
     /// The https URL an http <paramref name="url"/> is upgraded to when its host is a
-    /// known HSTS host, or null when it is not upgraded.
+    /// known HSTS host (wss for a ws URL, as Chromium upgrades WebSockets too), or null
+    /// when it is not upgraded.
     /// </summary>
     public Uri? Upgrade(Uri url)
     {
-        if (!string.Equals(url.Scheme, "http", StringComparison.Ordinal) || !ShouldUpgrade(url.Host))
+        if ((!string.Equals(url.Scheme, "http", StringComparison.Ordinal)
+                && !string.Equals(url.Scheme, "ws", StringComparison.Ordinal))
+            || !ShouldUpgrade(url.Host))
         {
             return null;
         }

@@ -5,6 +5,7 @@ using Microsoft.ClearScript;
 using Microsoft.ClearScript.V8;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Net;
 
 namespace PocketCalculator.Js.Runtime;
 
@@ -129,6 +130,14 @@ public sealed class FrameRealm : IDisposable
             OpaqueOrigin = opaqueOrigin,
         };
         parent.ShareResourcesWith(state);
+
+        // Mixed content follows the ancestor chain: the nearest https ancestor decides
+        // for a frame that is not itself secure.
+        var parentState = (parentFrameId == 0 ? null : parent.RealmStates.ByFrameId(parentFrameId)) ?? parent.State;
+        state.SecureAncestorUrl = Uri.TryCreate(parentState.Url, UriKind.Absolute, out var parentUri)
+            && MixedContent.ProhibitsMixedContent(parentUri)
+                ? parentState.Url
+                : parentState.SecureAncestorUrl;
 
         var engine = parent.CreateRealmEngine();
         DenoCoreShim? shim = null;

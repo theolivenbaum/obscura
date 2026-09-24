@@ -17238,6 +17238,15 @@ if (typeof WebSocket === 'undefined') {
           'SyntaxError'
         );
       }
+      // Mixed content (SECURITY.md I7; Rust has no check): ws: from a secure context
+      // throws SecurityError, as Chromium does. The host decides, from the document it
+      // committed and its ancestors, and posts Chromium's console error.
+      if (_domParse("websocket_mixed_content", url)) {
+        throw new DOMException(
+          "Failed to construct 'WebSocket': An insecure WebSocket connection may not be initiated from a page loaded over HTTPS.",
+          'SecurityError'
+        );
+      }
       this.url = url;
       this.readyState = 0; // CONNECTING
       this.bufferedAmount = 0;

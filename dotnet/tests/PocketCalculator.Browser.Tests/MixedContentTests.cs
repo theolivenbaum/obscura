@@ -143,4 +143,24 @@ public sealed class MixedContentTests
             Assert.Equal("http://plain.example/y", proxy.NextPath(TimeSpan.FromSeconds(5)));
         }
     }
+
+    [Fact]
+    public async Task InsecureWebSocketFromAnHttpsPageThrowsAndIsReported()
+    {
+        var (proxy, page) = SecurePage("mixed-ws", "https://secure.example/app", string.Empty);
+        using (proxy)
+        using (page)
+        {
+            Assert.Equal(
+                "SecurityError",
+                PageFixtures.AsString(page.Evaluate(
+                    "(() => { try { new WebSocket('ws://insecure.example/s'); return 'ok'; } catch (e) { return e.name; } })()")));
+            await page.SettleAsync(50);
+            Assert.Contains(
+                "error: Mixed Content: The page at 'https://secure.example/app' was loaded over HTTPS, but attempted to "
+                + "connect to the insecure WebSocket endpoint 'ws://insecure.example/s'. This request has been blocked; "
+                + "this endpoint must be available over WSS.",
+                ConsoleTexts(page));
+        }
+    }
 }

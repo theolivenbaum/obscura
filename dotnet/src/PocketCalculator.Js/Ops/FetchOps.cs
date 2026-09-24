@@ -549,7 +549,7 @@ public static partial class FetchOps
             // XHR, iframe documents, dynamic scripts, linked stylesheets, workers) is
             // blockable mixed content from an https document; then HSTS moves a known
             // host to https, reported as a redirect the way Chromium's internal 307 is.
-            if (MixedContentBlocked(httpClient, callbacks, document.Url, url, mode) is { } mixedInitial)
+            if (MixedContentBlocked(httpClient, callbacks, document, url, mode) is { } mixedInitial)
             {
                 return mixedInitial;
             }
@@ -912,7 +912,7 @@ public static partial class FetchOps
                     }
 
                     currentUrl = nextUrl.Href;
-                    if (MixedContentBlocked(httpClient, callbacks, document.Url, currentUrl, mode) is { } mixedHop)
+                    if (MixedContentBlocked(httpClient, callbacks, document, currentUrl, mode) is { } mixedHop)
                     {
                         return mixedHop;
                     }
@@ -1167,13 +1167,13 @@ public static partial class FetchOps
     private static string? MixedContentBlocked(
         PocketCalculatorHttpClient? httpClient,
         CallbackRegistry? callbacks,
-        string documentUrl,
+        PocketCalculatorState state,
         string target,
         string mode)
     {
         if ((httpClient?.AllowInsecureContent ?? MixedContent.EnvAllowsInsecureContent())
-            || !Uri.TryCreate(documentUrl, UriKind.Absolute, out var document)
-            || !Uri.TryCreate(target, UriKind.Absolute, out var targetUri))
+            || !Uri.TryCreate(target, UriKind.Absolute, out var targetUri)
+            || MixedContentContext(state) is not { } document)
         {
             return null;
         }
@@ -1189,6 +1189,42 @@ public static partial class FetchOps
             document.AbsoluteUri, MixedContent.RequestKind(type, nestedDocument: frame), targetUri.AbsoluteUri);
         callbacks?.FireConsole("error", message);
         return CorsBlocked(target, message);
+    }
+
+    /// <summary>
+    /// The document mixed content is decided against for a request from
+    /// <paramref name="state"/>: the document itself, or for a frame that is not secure
+    /// (srcdoc, about:blank, http) its nearest secure ancestor, as Chromium checks the
+    /// top frame too. The I7 fix checked only the calling document.
+    /// </summary>
+    internal static Uri? MixedContentContext(PocketCalculatorState state)
+    {
+        Uri.TryCreate(state.Url, UriKind.Absolute, out var document);
+        Uri? ancestor = state.SecureAncestorUrl is { } secure && Uri.TryCreate(secure, UriKind.Absolute, out var parsed)
+            ? parsed
+            : null;
+        return MixedContent.Context(document, ancestor);
+    }
+
+    /// <summary>
+    /// Chromium's check in the WebSocket constructor: a ws: URL from a secure context is
+    /// blocked (SecurityError), with a console error. Returns that message, or the empty
+    /// string when the socket may be created.
+    /// </summary>
+    internal static string WebSocketMixedContent(PocketCalculatorState state, string url)
+    {
+        if ((state.HttpClient?.AllowInsecureContent ?? MixedContent.EnvAllowsInsecureContent())
+            || !Uri.TryCreate(url, UriKind.Absolute, out var target)
+            || MixedContentContext(state) is not { } document
+            || MixedContent.Check(document, target, ResourceType.Other, topLevelNavigation: false)
+                == MixedContentDecision.Allow)
+        {
+            return string.Empty;
+        }
+
+        var message = MixedContent.BlockedWebSocketMessage(document.AbsoluteUri, target.AbsoluteUri);
+        state.Callbacks?.FireConsole("error", message);
+        return message;
     }
 
     private static string? HstsUpgrade(PocketCalculatorHttpClient? httpClient, string url) =>

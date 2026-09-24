@@ -1026,6 +1026,7 @@ public static class RenderOps
         var selectedUrl = selected.Url;
         var initiator = TryUri(shared.Url) ?? TryUri(selectedUrl) ?? new Uri("about:blank");
         var resourceRequest = ResourceRequest.Subresource(ResourceType.Image, initiator);
+        resourceRequest.SecureAncestor = shared.SecureAncestorUrl is { } secureAncestor ? TryUri(secureAncestor) : null;
         switch (profile)
         {
             case ImageRequestProfile.CorsInclude:
