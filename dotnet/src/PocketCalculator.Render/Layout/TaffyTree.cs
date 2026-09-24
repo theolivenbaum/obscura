@@ -444,6 +444,18 @@ public sealed class TaffyTree<TNodeContext>
         }
     }
 
+    /// <summary>
+    /// <see cref="ComputeLayoutWithMeasure"/> without the rounding pass, for a measurement whose
+    /// caller reads only <see cref="GetUnroundedLayout"/> and lays the tree out again afterwards.
+    /// Not in vendor/taffy: rounding walks the whole subtree, so measuring every nested table
+    /// with it rounded each subtree once per ancestor, quadratic in the nesting depth.
+    /// </summary>
+    public void ComputeUnroundedLayoutWithMeasure(
+        NodeId nodeId,
+        Size<AvailableSpace> availableSpace,
+        TreeMeasureFunction<TNodeContext> measureFunction) =>
+        Compute.ComputeRootLayout(new TaffyView(this, measureFunction), nodeId, availableSpace);
+
     /// <summary>Updates the stored layout of the provided node and its children.</summary>
     public void ComputeLayout(NodeId node, Size<AvailableSpace> availableSpace) =>
         ComputeLayoutWithMeasure(
