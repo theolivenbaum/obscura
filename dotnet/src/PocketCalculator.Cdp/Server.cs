@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -194,6 +195,29 @@ public static partial class CdpServer
             cancellationToken);
 
     /// <summary>
+    /// As <see cref="StartWithServeOptionsAndLimitAsync"/>, serving CDP and the
+    /// <c>/json</c> endpoints over TLS with <paramref name="certificate"/> when it is set
+    /// (<c>serve --tls-cert/--tls-key</c>). Discovery then advertises <c>wss://</c> URLs.
+    /// A non-loopback bind still requires the token.
+    /// </summary>
+    public static Task StartWithTlsAsync(
+        int port,
+        string host,
+        string? proxy,
+        bool stealth,
+        string? userAgent,
+        bool allowFileAccess,
+        string? storageDir,
+        bool allowPrivateNetwork,
+        int maxConnections,
+        X509Certificate2? certificate,
+        CancellationToken cancellationToken = default) =>
+        StartWithControlTokenAsync(
+            port, host, proxy, stealth, userAgent, allowFileAccess, storageDir,
+            allowPrivateNetwork, maxConnections, ControlTokenFromEnv, ForwardedAuthorityFromEnv,
+            certificate, cancellationToken);
+
+    /// <summary>
     /// As the full overload, with no forwarded authority.
     /// </summary>
     internal static Task StartWithControlTokenAsync(
@@ -220,6 +244,32 @@ public static partial class CdpServer
     /// tests pass them directly instead of mutating the process environment under
     /// a parallel test run.
     /// </summary>
+    internal static Task StartWithControlTokenAsync(
+        int port,
+        string host,
+        string? proxy,
+        bool stealth,
+        string? userAgent,
+        bool allowFileAccess,
+        string? storageDir,
+        bool allowPrivateNetwork,
+        int maxConnections,
+        Func<string?> controlToken,
+        Func<ForwardedAuthority?> forwardedAuthority,
+        CancellationToken cancellationToken = default) =>
+        StartWithControlTokenAsync(
+            port, host, proxy, stealth, userAgent, allowFileAccess, storageDir,
+            allowPrivateNetwork, maxConnections, controlToken, forwardedAuthority, null, cancellationToken);
+
+    /// <summary>
+    /// The server body, as above, with an optional TLS <paramref name="certificate"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md I1): upstream speaks plaintext only, so the bearer token
+    /// crossed the network in clear text on a non-loopback bind. With a certificate,
+    /// every connection completes a TLS handshake before its request head is read, and
+    /// discovery advertises <c>wss://</c>.
+    /// </remarks>
     internal static async Task StartWithControlTokenAsync(
         int port,
         string host,
@@ -232,6 +282,7 @@ public static partial class CdpServer
         int maxConnections,
         Func<string?> controlToken,
         Func<ForwardedAuthority?> forwardedAuthority,
+        X509Certificate2? certificate,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -281,8 +332,13 @@ public static partial class CdpServer
             throw new IOException($"bind {host}:{port}: {e.Message}", e);
         }
 
-        CdpLog.Info($"PocketCalculator CDP server listening on ws://{host}:{port}");
-        CdpLog.Info($"DevTools endpoint: ws://{host}:{port}/devtools/browser");
+        var wsScheme = certificate is null ? "ws" : "wss";
+        CdpLog.Info($"PocketCalculator CDP server listening on {wsScheme}://{host}:{port}");
+        CdpLog.Info($"DevTools endpoint: {wsScheme}://{host}:{port}/devtools/browser");
+        if (certificate is not null)
+        {
+            CdpLog.Info($"TLS enabled: {certificate.Subject}");
+        }
         if (allowFileAccess)
         {
             CdpLog.Info(
@@ -294,7 +350,7 @@ public static partial class CdpServer
             CdpLog.Info("CDP bearer authentication enabled");
         }
 
-        var handoff = Channel.CreateBounded<Socket>(new BoundedChannelOptions(MaxPendingWsHandoffs)
+        var handoff = Channel.CreateBounded<AcceptedConnection>(new BoundedChannelOptions(MaxPendingWsHandoffs)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -307,7 +363,7 @@ public static partial class CdpServer
         using var signals = InstallSignalHandlers(shutdown);
 
         var acceptThread = new Thread(
-            () => AcceptLoop(listener, ip, port, forwarded, authToken, handoff.Writer, shutdown.Token))
+            () => AcceptLoop(listener, ip, port, forwarded, authToken, certificate, handoff.Writer, shutdown.Token))
         {
             IsBackground = true,
             Name = "obscura-cdp-accept",
@@ -349,10 +405,10 @@ public static partial class CdpServer
         {
             while (true)
             {
-                Socket socket;
+                AcceptedConnection accepted;
                 try
                 {
-                    socket = await handoff.Reader.ReadAsync(shutdown.Token).ConfigureAwait(false);
+                    accepted = await handoff.Reader.ReadAsync(shutdown.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -362,6 +418,24 @@ public static partial class CdpServer
                 {
                     break;
                 }
+
+                // A TLS connection arrives as a stream that has finished its handshake
+                // and replays its request head; its socket is already set up.
+                if (accepted.Stream is { } secure)
+                {
+                    if (!liveConnections.TryReserve(maxConnections))
+                    {
+                        CdpLog.Warn($"refusing CDP connection: at --max-connections ({maxConnections})");
+                        await RefuseStreamAsync(secure, ConnectionLimitResponse).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    RunConnection(
+                        secure, template, persistence, persistenceLock, shutdown.Token, liveConnections);
+                    continue;
+                }
+
+                var socket = accepted.Socket!;
 
                 // Nagle off before the socket is handed to its connection. CDP
                 // exchanges many small (~100-byte) frames during newPage() and
@@ -396,8 +470,21 @@ public static partial class CdpServer
                     continue;
                 }
 
+                NetworkStream plain;
+                try
+                {
+                    // Takes ownership of the socket, so every exit path closes it.
+                    plain = new NetworkStream(socket, ownsSocket: true);
+                }
+                catch (Exception e) when (e is IOException or SocketException or ObjectDisposedException)
+                {
+                    socket.Dispose();
+                    liveConnections.Release();
+                    continue;
+                }
+
                 RunConnection(
-                    socket, template, persistence, persistenceLock, shutdown.Token, liveConnections);
+                    plain, template, persistence, persistenceLock, shutdown.Token, liveConnections);
             }
         }
         finally
@@ -413,7 +500,11 @@ public static partial class CdpServer
             handoff.Writer.TryComplete();
             while (handoff.Reader.TryRead(out var queued))
             {
-                queued.Dispose();
+                queued.Socket?.Dispose();
+                if (queued.Stream is { } queuedStream)
+                {
+                    await queuedStream.DisposeAsync().ConfigureAwait(false);
+                }
             }
         }
 
@@ -591,9 +682,16 @@ public static partial class CdpServer
         int port,
         ForwardedAuthority? forwarded,
         string? authToken,
-        ChannelWriter<Socket> handoff,
+        X509Certificate2? certificate,
+        ChannelWriter<AcceptedConnection> handoff,
         CancellationToken shutdown)
     {
+        if (certificate is not null)
+        {
+            TlsAcceptLoop(listener, bindIp, port, forwarded, authToken, certificate, handoff, shutdown);
+            return;
+        }
+
         List<(Socket Socket, long Since)> pending = [];
         while (!shutdown.IsCancellationRequested)
         {
@@ -801,7 +899,7 @@ public static partial class CdpServer
         int port,
         ForwardedAuthority? forwarded,
         string? authToken,
-        ChannelWriter<Socket> handoff,
+        ChannelWriter<AcceptedConnection> handoff,
         string head)
     {
         if (GetControlRefusal(head, bindIp, forwarded, authToken) is { } refusal)
@@ -810,22 +908,7 @@ public static partial class CdpServer
             return true;
         }
 
-        string? endpoint = null;
-        if (head.Contains("/json/version", StringComparison.Ordinal))
-        {
-            endpoint = "version";
-        }
-        else if (head.Contains("/json/list", StringComparison.Ordinal) ||
-                 head.Contains("/json\r\n", StringComparison.Ordinal) ||
-                 head.Contains("/json HTTP", StringComparison.Ordinal))
-        {
-            endpoint = "list";
-        }
-        else if (head.Contains("/json/protocol", StringComparison.Ordinal))
-        {
-            endpoint = "protocol";
-        }
-
+        var endpoint = JsonEndpoint(head);
         if (endpoint is not null)
         {
             // The request head is already sitting in the kernel receive buffer;
@@ -859,7 +942,7 @@ public static partial class CdpServer
         // which would freeze the HTTP control plane this whole layout exists to
         // keep alive. The dropped socket closes itself; the client sees a reset
         // and can retry.
-        if (handoff.TryWrite(socket))
+        if (handoff.TryWrite(new AcceptedConnection(socket, null)))
         {
             return true;
         }
@@ -872,12 +955,49 @@ public static partial class CdpServer
         return false;
     }
 
+    /// <summary>Which <c>/json</c> endpoint a request head names, or null for a WebSocket upgrade.</summary>
+    private static string? JsonEndpoint(string head)
+    {
+        if (head.Contains("/json/version", StringComparison.Ordinal))
+        {
+            return "version";
+        }
+
+        if (head.Contains("/json/list", StringComparison.Ordinal) ||
+            head.Contains("/json\r\n", StringComparison.Ordinal) ||
+            head.Contains("/json HTTP", StringComparison.Ordinal))
+        {
+            return "list";
+        }
+
+        return head.Contains("/json/protocol", StringComparison.Ordinal) ? "protocol" : null;
+    }
+
     /// <summary>Serve an HTTP <c>/json/*</c> endpoint with blocking I/O on the accept thread.</summary>
     private static void HandleHttpJsonBlocking(
         Socket socket, int port, ForwardedAuthority? forwarded, string endpoint, string requestHead)
     {
         var scratch = new byte[4096];
         _ = socket.Receive(scratch, 0, scratch.Length, SocketFlags.None);
+        var (response, bodyBytes) = JsonEndpointResponse(port, forwarded, endpoint, requestHead, "ws");
+        socket.Send(response);
+        socket.Send(bodyBytes);
+        try
+        {
+            socket.Shutdown(SocketShutdown.Both);
+        }
+        catch (SocketException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// The head and body of a <c>/json/*</c> response. <paramref name="wsScheme"/> is
+    /// <c>ws</c>, or <c>wss</c> on a TLS server.
+    /// </summary>
+    private static (byte[] Head, byte[] Body) JsonEndpointResponse(
+        int port, ForwardedAuthority? forwarded, string endpoint, string requestHead, string wsScheme)
+    {
         var authority = WebSocketAuthority(requestHead, port, forwarded);
 
         var body = endpoint switch
@@ -890,7 +1010,7 @@ public static partial class CdpServer
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
                 ["V8-Version"] = "14.5.0.0",
                 ["WebKit-Version"] = "537.36",
-                ["webSocketDebuggerUrl"] = $"ws://{authority}/devtools/browser",
+                ["webSocketDebuggerUrl"] = $"{wsScheme}://{authority}/devtools/browser",
             }),
             "list" => CdpJson.SerializePretty(new JsonArray
             {
@@ -902,7 +1022,7 @@ public static partial class CdpServer
                     ["title"] = "",
                     ["type"] = "page",
                     ["url"] = "about:blank",
-                    ["webSocketDebuggerUrl"] = $"ws://{authority}/devtools/page/page-1",
+                    ["webSocketDebuggerUrl"] = $"{wsScheme}://{authority}/devtools/page/page-1",
                 },
             }),
             "protocol" => CdpJson.SerializePretty(new JsonObject
@@ -917,15 +1037,7 @@ public static partial class CdpServer
             "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n" +
             $"Content-Length: {bodyBytes.Length.ToString(CultureInfo.InvariantCulture)}\r\n" +
             "Connection: close\r\n\r\n");
-        socket.Send(response);
-        socket.Send(bodyBytes);
-        try
-        {
-            socket.Shutdown(SocketShutdown.Both);
-        }
-        catch (SocketException)
-        {
-        }
+        return (response, bodyBytes);
     }
 
     /// <summary>Turn away a connection that arrived while the server was at its limit.</summary>
@@ -1010,7 +1122,7 @@ public static partial class CdpServer
     /// </para>
     /// </remarks>
     private static void RunConnection(
-        Socket socket,
+        Stream stream,
         BrowserContext template,
         BrowserContext persistence,
         object persistenceLock,
@@ -1025,7 +1137,7 @@ public static partial class CdpServer
         {
             try
             {
-                await ConnectionBodyAsync(socket, template, persistence, persistenceLock, shutdown)
+                await ConnectionBodyAsync(stream, template, persistence, persistenceLock, shutdown)
                     .ConfigureAwait(false);
             }
             catch (Exception e)
@@ -1040,24 +1152,12 @@ public static partial class CdpServer
     }
 
     private static async Task ConnectionBodyAsync(
-        Socket socket,
+        Stream stream,
         BrowserContext template,
         BrowserContext persistence,
         object persistenceLock,
         CancellationToken shutdown)
     {
-        NetworkStream stream;
-        try
-        {
-            // Takes ownership of the socket, so every exit path below closes it.
-            stream = new NetworkStream(socket, ownsSocket: true);
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
-
         using (stream)
         {
             var defaultContext = template.IsolatedCopy("default", true);

@@ -147,7 +147,23 @@ public static class CliDefinition
             AllowMultipleArgumentsPerToken = false,
         };
         public static readonly Option<bool> Quiet = new("--quiet");
+        public static readonly Option<FileSystemInfo?> TlsCert = TlsCertOption();
+        public static readonly Option<FileSystemInfo?> TlsKey = TlsKeyOption();
     }
+
+    // Deviation (SECURITY.md I1): the Rust CLI has no TLS options; its control planes
+    // speak plaintext only. POCKETCALCULATOR_TLS_CERT / _KEY are the fallbacks.
+    private static Option<FileSystemInfo?> TlsCertOption() => new("--tls-cert")
+    {
+        Description = "Serve over TLS with this PEM certificate (chain). Needs --tls-key. Falls back to POCKETCALCULATOR_TLS_CERT.",
+        HelpName = "PATH",
+    };
+
+    private static Option<FileSystemInfo?> TlsKeyOption() => new("--tls-key")
+    {
+        Description = "The PEM private key for --tls-cert. Falls back to POCKETCALCULATOR_TLS_KEY.",
+        HelpName = "PATH",
+    };
 
     /// <summary>
     /// Mirrors <c>obscura_cdp::DEFAULT_MAX_CONNECTIONS</c>. Each connection runs
@@ -225,12 +241,15 @@ public static class CliDefinition
         };
         public static readonly Option<string?> Proxy = new("--proxy");
         public static readonly Option<string?> UserAgent = new("--user-agent");
+        public static readonly Option<FileSystemInfo?> TlsCert = TlsCertOption();
+        public static readonly Option<FileSystemInfo?> TlsKey = TlsKeyOption();
     }
 
     private static Command BuildServe() => new("serve", "Run the Chrome DevTools Protocol server")
     {
         Serve.Port, Serve.Host, Serve.Proxy, Serve.UserAgent, Serve.Workers,
         Serve.MaxConnections, Serve.AllowFileAccess, Serve.StorageDir, Serve.FontDirs, Serve.Quiet,
+        Serve.TlsCert, Serve.TlsKey,
     };
 
     private static Command BuildFetch()
@@ -274,7 +293,7 @@ public static class CliDefinition
 
     private static Command BuildMcp() => new("mcp", "Run the MCP automation server")
     {
-        Mcp.Http, Mcp.Host, Mcp.Port, Mcp.Proxy, Mcp.UserAgent,
+        Mcp.Http, Mcp.Host, Mcp.Port, Mcp.Proxy, Mcp.UserAgent, Mcp.TlsCert, Mcp.TlsKey,
     };
 
     /// <summary>

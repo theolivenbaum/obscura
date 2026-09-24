@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using PocketCalculator.Cdp;
 using PocketCalculator.Cli.CommandLine;
@@ -41,6 +43,18 @@ public static class ServeCommand
         {
             Log.Info($"Font dir: {directory}");
         }
+        // SECURITY.md I1: optional TLS. Loaded here so a bad path fails before
+        // anything is bound or spawned.
+        X509Certificate2? certificate;
+        try
+        {
+            certificate = PocketCalculator.Net.ServerTls.Resolve(serve.TlsCert, serve.TlsKey);
+        }
+        catch (InvalidOperationException error)
+        {
+            throw new CliException(error.Message);
+        }
+
         // Rust logs "Stealth mode enabled (...)" here, in the Serve arm only.
         // Program.cs already logs the port's equivalent line, with the TLS gap
         // named, for every subcommand; repeating it here would put two stealth
@@ -62,12 +76,15 @@ public static class ServeCommand
                     MaxConnections = serve.MaxConnections,
                     AllowPrivateNetwork = args.AllowPrivateNetwork,
                     V8Flags = args.V8Flags,
+                    TlsCert = serve.TlsCert,
+                    TlsKey = serve.TlsKey,
+                    Certificate = certificate,
                 })
                 .ConfigureAwait(false);
             return;
         }
 
-        await CdpServer.StartWithServeOptionsAndLimitAsync(
+        await CdpServer.StartWithTlsAsync(
             serve.Port,
             serve.Host,
             proxy,
@@ -76,7 +93,8 @@ public static class ServeCommand
             serve.AllowFileAccess,
             serve.StorageDir,
             args.AllowPrivateNetwork,
-            serve.MaxConnections).ConfigureAwait(false);
+            serve.MaxConnections,
+            certificate).ConfigureAwait(false);
     }
 
     /// <summary>The bare <c>obscura</c> invocation with no subcommand.</summary>
@@ -176,7 +194,7 @@ public static class ServeCommand
             }
 
             await WaitForWorkersAsync(children, workerPorts).ConfigureAwait(false);
-            await VerifyWorkersAsync(workerPorts, token).ConfigureAwait(false);
+            await VerifyWorkersAsync(workerPorts, token, settings.Certificate).ConfigureAwait(false);
         }
         catch
         {
@@ -290,6 +308,15 @@ public static class ServeCommand
 
         /// <summary><c>--v8-flags</c>.</summary>
         public string? V8Flags { get; init; }
+
+        /// <summary><c>--tls-cert</c>, passed on so each worker terminates TLS itself.</summary>
+        public string? TlsCert { get; init; }
+
+        /// <summary><c>--tls-key</c>.</summary>
+        public string? TlsKey { get; init; }
+
+        /// <summary>The loaded certificate, which the balancer pins when it probes a worker.</summary>
+        public X509Certificate2? Certificate { get; init; }
     }
 
     /// <summary>The program a worker is started as, and the arguments that precede its own.</summary>
@@ -409,6 +436,16 @@ public static class ServeCommand
         {
             psi.ArgumentList.Add("--allow-private-network");
         }
+        // TLS (SECURITY.md I1): the balancer proxies bytes, so each worker terminates
+        // TLS. Paths only; POCKETCALCULATOR_TLS_CERT/_KEY reach workers through the
+        // inherited environment.
+        if (settings.TlsCert is { } tlsCert && settings.TlsKey is { } tlsKey)
+        {
+            psi.ArgumentList.Add("--tls-cert");
+            psi.ArgumentList.Add(tlsCert);
+            psi.ArgumentList.Add("--tls-key");
+            psi.ArgumentList.Add(tlsKey);
+        }
         return psi;
     }
 
@@ -424,17 +461,25 @@ public static class ServeCommand
     /// the DevTools version document, and, with a token configured, refuse the
     /// same request without it with 401.
     /// </remarks>
-    public static async Task VerifyWorkersAsync(IReadOnlyList<int> workerPorts, string? token)
+    public static Task VerifyWorkersAsync(IReadOnlyList<int> workerPorts, string? token) =>
+        VerifyWorkersAsync(workerPorts, token, null);
+
+    /// <summary>
+    /// As <see cref="VerifyWorkersAsync(IReadOnlyList{int}, string?)"/>, over TLS pinned to
+    /// <paramref name="certificate"/> when the workers serve TLS.
+    /// </summary>
+    public static async Task VerifyWorkersAsync(
+        IReadOnlyList<int> workerPorts, string? token, X509Certificate2? certificate)
     {
         for (var i = 0; i < workerPorts.Count; i++)
         {
             var authority = string.Create(CultureInfo.InvariantCulture, $"127.0.0.1:{workerPorts[i]}");
-            var authorized = await ProbeAsync(workerPorts[i], authority, token).ConfigureAwait(false);
+            var authorized = await ProbeAsync(workerPorts[i], authority, token, certificate).ConfigureAwait(false);
             var ok = authorized.StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal)
                 && authorized.Contains("\"webSocketDebuggerUrl\"", StringComparison.Ordinal);
             if (ok && !string.IsNullOrEmpty(token))
             {
-                var anonymous = await ProbeAsync(workerPorts[i], authority, null).ConfigureAwait(false);
+                var anonymous = await ProbeAsync(workerPorts[i], authority, null, certificate).ConfigureAwait(false);
                 ok = anonymous.StartsWith("HTTP/1.1 401 ", StringComparison.Ordinal);
             }
             if (!ok)
@@ -446,14 +491,32 @@ public static class ServeCommand
         }
     }
 
-    private static async Task<string> ProbeAsync(int port, string authority, string? token)
+    private static async Task<string> ProbeAsync(
+        int port, string authority, string? token, X509Certificate2? certificate)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         try
         {
             using var probe = new TcpClient(AddressFamily.InterNetwork);
             await probe.ConnectAsync(IPAddress.Loopback, port, cts.Token).ConfigureAwait(false);
-            var stream = probe.GetStream();
+            Stream stream = probe.GetStream();
+            if (certificate is not null)
+            {
+                // The worker must present the very certificate this process loaded.
+                var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
+                await ssl.AuthenticateAsClientAsync(
+                        new SslClientAuthenticationOptions
+                        {
+                            TargetHost = "127.0.0.1",
+                            RemoteCertificateValidationCallback = (_, presented, _, _) =>
+                                presented is not null
+                                && presented.GetCertHashString() == certificate.GetCertHashString(),
+                        },
+                        cts.Token)
+                    .ConfigureAwait(false);
+                stream = ssl;
+            }
+
             var request = $"GET /json/version HTTP/1.1\r\nHost: {authority}\r\n"
                 + (string.IsNullOrEmpty(token) ? string.Empty : $"Authorization: Bearer {token}\r\n")
                 + "Connection: close\r\n\r\n";
@@ -473,7 +536,8 @@ public static class ServeCommand
             }
             return Encoding.UTF8.GetString(buffer, 0, received);
         }
-        catch (Exception error) when (error is SocketException or IOException or OperationCanceledException)
+        catch (Exception error) when (error is SocketException or IOException or OperationCanceledException
+            or System.Security.Authentication.AuthenticationException)
         {
             return string.Empty;
         }

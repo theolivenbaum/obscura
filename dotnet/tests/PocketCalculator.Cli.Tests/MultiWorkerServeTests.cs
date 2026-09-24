@@ -58,7 +58,8 @@ public sealed partial class MultiWorkerServeTests
         int workers = 2,
         bool viaDotnetHost = false,
         IEnumerable<string>? extra = null,
-        int? maxConnections = null)
+        int? maxConnections = null,
+        IEnumerable<string>? serveExtra = null)
     {
         Assert.True(CliProcess.SkipReason is null, CliProcess.SkipReason ?? string.Empty);
         var psi = new ProcessStartInfo(viaDotnetHost ? DotnetHost() : CliProcess.Binary!)
@@ -83,6 +84,10 @@ public sealed partial class MultiWorkerServeTests
         {
             psi.ArgumentList.Add("--max-connections");
             psi.ArgumentList.Add(cap.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        foreach (var arg in serveExtra ?? [])
+        {
+            psi.ArgumentList.Add(arg);
         }
         psi.Environment["POCKETCALCULATOR_CDP_TOKEN"] = token ?? string.Empty;
         var process = Process.Start(psi) ?? throw new InvalidOperationException("failed to start the CLI");

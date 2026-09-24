@@ -3,10 +3,12 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using PocketCalculator.Net;
 
 namespace PocketCalculator.Mcp;
 
@@ -98,7 +100,31 @@ public static class Http
     {
         /// <summary>SSE idle timeout (<see cref="IdleTimeoutFromEnv"/>); zero disables it.</summary>
         public TimeSpan IdleTimeout { get; init; } = IdleTimeoutFromEnv();
+
+        /// <summary>
+        /// The TLS certificate (<c>mcp --http --tls-cert/--tls-key</c>), or null for
+        /// plaintext. Deviation (SECURITY.md I1): upstream speaks plaintext only, so the
+        /// bearer token crossed the network in clear text on a non-loopback bind.
+        /// </summary>
+        public X509Certificate2? Certificate { get; init; }
     }
+
+    /// <summary>
+    /// <see cref="RunAsync(string, ushort, string?, string?, bool, CancellationToken)"/>
+    /// over TLS with <paramref name="certificate"/> when it is set. A non-loopback bind
+    /// still requires the token.
+    /// </summary>
+    public static Task RunAsync(
+        string host,
+        ushort port,
+        string? proxy,
+        string? userAgent,
+        bool stealth,
+        X509Certificate2? certificate,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(
+            host, port, proxy, userAgent, stealth, AllowedOriginsEnv(), TokenFromEnv(),
+            new ServerOptions { Certificate = certificate }, cancellationToken);
 
     /// <summary>When the server last read a request, on any connection.</summary>
     private sealed class ServerActivity
@@ -672,7 +698,13 @@ public static class Http
         ServerActivity activity,
         CancellationToken cancellationToken)
     {
-        var stream = client.GetStream();
+        Stream stream = client.GetStream();
+        if (options.Certificate is { } certificate)
+        {
+            // A failed or slow handshake ends here; the caller closes the client.
+            stream = await ServerTls.AuthenticateAsync(stream, certificate, cancellationToken).ConfigureAwait(false);
+        }
+
         var reader = new LineReader(stream);
 
         try
