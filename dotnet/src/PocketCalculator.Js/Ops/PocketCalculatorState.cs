@@ -124,10 +124,18 @@ public sealed class PocketCalculatorState
     public bool CrossSiteAncestor { get; set; }
 
     /// <summary>
-    /// The URL a srcdoc or about:blank frame takes its site from (its parent's); null for
-    /// any other document, whose site is its own URL's. Port addition.
+    /// The URL a srcdoc or about:blank frame takes its origin, site and cookie URL from (its
+    /// parent's, which is the creator's); null for any other document, whose origin, site
+    /// and cookie URL are its own URL's. Port addition.
     /// </summary>
     public string? SiteUrl { get; set; }
+
+    /// <summary>
+    /// A srcdoc or about:blank frame's fallback base URL: its parent's document base URL
+    /// when the frame was created (HTML "fallback base URL"). Null for any other document,
+    /// whose fallback base URL is its own URL. Port addition.
+    /// </summary>
+    public string? FallbackBaseUrl { get; set; }
 
     /// <summary>The external stylesheet that referenced each CSS image and font URL.</summary>
     public CssSubresourceReferrers CssSubresourceReferrers { get; } = new();

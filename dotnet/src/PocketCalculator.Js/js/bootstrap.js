@@ -3671,7 +3671,11 @@ class Element extends Node {
       : null;
     const value = String(v);
     _dom("set_attribute", this._nid, n + "\0" + value);
-    if (n === "src" && this.localName === "iframe") {
+    if (n === "srcdoc" && this.localName === "iframe") {
+      _loadIframeSrcdoc(this);
+    } else if (n === "src" && this.localName === "iframe"
+        // A src change does nothing while srcdoc is present (port addition, Chromium 141).
+        && _hostDom.getAttribute(this, "srcdoc") === null) {
       if (value && value !== "about:blank") this._loadIframeSrc(value);
       else this._resetIframeFrame();
     }
@@ -3723,7 +3727,11 @@ class Element extends Node {
     const previousWindowName = (n === "id" || n === "name")
       ? this.getAttribute(n)
       : null;
+    // Removing srcdoc navigates the frame to src (port addition, Chromium 141).
+    const removedSrcdoc = n === "srcdoc" && this.localName === "iframe"
+      && _hostDom.getAttribute(this, "srcdoc") !== null;
     _dom("remove_attribute", this._nid, n);
+    if (removedSrcdoc) _iframeAttributeChanged(this, n);
     if (this._nullNamespaceAttrs instanceof Map) {
       this._nullNamespaceAttrs.delete(n);
     }
@@ -4485,6 +4493,17 @@ class Element extends Node {
   set src(v) {
     this.setAttribute("src", v);
   }
+  // HTMLIFrameElement.srcdoc reflects the attribute (port addition).
+  get srcdoc() {
+    if (this.namespaceURI !== "http://www.w3.org/1999/xhtml" || this.localName !== "iframe") return undefined;
+    const v = this.getAttribute("srcdoc");
+    return v === null ? "" : v;
+  }
+  set srcdoc(v) {
+    if (this.namespaceURI === "http://www.w3.org/1999/xhtml" && this.localName === "iframe") {
+      this.setAttribute("srcdoc", v);
+    }
+  }
   _resetIframeFrame() { return _resetIframeState(this); }
   _loadIframeSrc(url) {
     // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the URL op,
@@ -4506,10 +4525,7 @@ class Element extends Node {
     const st = _resetIframeState(this);
     st.loadingUrl = fullUrl;
     const el = this;
-    // A sandbox without allow-same-origin gives the frame an opaque origin. Sandboxing
-    // only ever takes access away, so the host can take the flag from here.
-    const sandbox = _hostDom.getAttribute(el, 'sandbox');
-    const sandboxed = sandbox !== null && !_hasAsciiToken(_stringToLowerCase(_String(sandbox)), 'allow-same-origin');
+    const sandboxed = _iframeSandboxed(el);
     // Upstream 04418a5: the frame loads through the op directly rather than the
     // page's own fetch(), and the document's origin is the response's final URL,
     // not `src`. A same-origin src that redirected cross-origin used to leave a
@@ -4541,22 +4557,10 @@ class Element extends Node {
         // own and runs the scripts that came with it (issue #600). The shim
         // document below stays: it is what the parent reads through
         // contentDocument, and it is empty unless the frame is same-origin.
-        const box = _hostDom.rect(el) || { width: 0, height: 0 };
-        // The frame's viewport is the iframe's content box, as in Chromium (a 400x300
-        // iframe with its default 2px border is a 400x300 viewport). DEVIATION from
-        // crates/obscura-js/js/bootstrap.js, which passes the border box.
-        let cs = null;
-        try { cs = _hostDom.computedStyle(el); } catch (_) {}
-        const edges = (a, b, c, d) => cs
-          ? (_parseFloatAtBoot(cs[a]) || 0) + (_parseFloatAtBoot(cs[b]) || 0)
-            + (_parseFloatAtBoot(cs[c]) || 0) + (_parseFloatAtBoot(cs[d]) || 0)
-          : 0;
-        const contentWidth = box.width - edges('borderLeftWidth', 'borderRightWidth', 'paddingLeft', 'paddingRight');
-        const contentHeight = box.height - edges('borderTopWidth', 'borderBottomWidth', 'paddingTop', 'paddingBottom');
+        const viewport = _iframeViewport(el);
         st.frameId = typeof response.bodyToken === 'number'
           ? (__obscuraCore.ops.op_frame_document_from_load(
-              response.bodyToken, _MathRound(contentWidth) || 300, _MathRound(contentHeight) || 150,
-              sandboxed) >>> 0)
+              response.bodyToken, viewport[0], viewport[1], sandboxed) >>> 0)
           : 0;
         st.doc = new _IframeDocument(html, loadedUrl, el);
         st.win = _makeIframeWindow(el, st.doc, loadedUrl);
@@ -6040,12 +6044,10 @@ class Document extends Node {
   get images() { return _qsa(this, "img"); }
   get links() { return _qsa(this, "a[href], area[href]"); }
   get scripts() { return _qsa(this, "script"); }
-  get cookie() {
-    return __obscuraCore.ops.op_get_cookies();
-  }
+  get cookie() { return _documentCookieGet(); }
   set cookie(v) {
     if (!v) return;
-    __obscuraCore.ops.op_set_cookie(v);
+    _documentCookieSet(v);
   }
   // Inserts into the document's input stream, which the host keeps alive across calls.
   // Parsing each call on its own would lose every construct that spans two of them. This is
@@ -14337,6 +14339,25 @@ _markNative(globalThis.Selection);
   XMLSerializer, XMLSerializer.prototype.serializeToString,
 ].forEach(fn => { if (typeof fn === 'function') _markNative(fn); });
 
+// document.cookie through the realm's host state. The host reads and writes for the
+// document's cookie URL, which for about:blank and about:srcdoc is the creator's, and answers
+// a document with an opaque origin (sandboxed without allow-same-origin) with a marker, where
+// Chromium throws. DEVIATION from crates/obscura-js/js/bootstrap.js, which has no sandboxing.
+// Function declarations only: document.cookie may be read before this point runs.
+function _cookieSandboxedError(verb) {
+  return new DOMException(verb + " 'cookie' property "
+    + (verb === "Failed to read the" ? "from" : "on")
+    + " 'Document': The document is sandboxed and lacks the 'allow-same-origin' flag.", "SecurityError");
+}
+function _documentCookieGet() {
+  const cookies = __obscuraCore.ops.op_get_cookies();
+  if (cookies === "\u0000sandboxed") throw _cookieSandboxedError("Failed to read the");
+  return cookies;
+}
+function _documentCookieSet(v) {
+  if (__obscuraCore.ops.op_set_cookie(v) === "\u0000sandboxed") throw _cookieSandboxedError("Failed to set the");
+}
+
 class _IframeDocument {
   constructor(html, url, iframeEl) {
     this._url = url;
@@ -14408,8 +14429,13 @@ class _IframeDocument {
   createRange() { return new Range(); }
   hasFocus() { return false; }
 
-  get cookie() { return ''; }
-  set cookie(v) {}
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, where this stand-in reads no cookies:
+  // an about:blank or about:srcdoc document reads and writes as its creator, this realm's
+  // document (Chromium 141). A stand-in for a loaded URL keeps reading nothing.
+  get cookie() { return _stringSlice(_String(this._url), 0, 6) === 'about:' ? _documentCookieGet() : ''; }
+  set cookie(v) {
+    if (v && _stringSlice(_String(this._url), 0, 6) === 'about:') _documentCookieSet(v);
+  }
   get implementation() { return document.implementation; }
   get styleSheets() { return []; }
 
@@ -14572,11 +14598,95 @@ function _makeIframeWindow(el, doc, url) {
   return win;
 }
 
-// The initial about:blank document, which inherits the embedder's origin.
+// Whether the iframe's sandbox attribute, if any, lacks allow-same-origin, which gives the
+// frame's documents an opaque origin. Sandboxing only ever takes access away, so the host can
+// take the flag from here.
+function _iframeSandboxed(el) {
+  const sandbox = _hostDom.getAttribute(el, 'sandbox');
+  return sandbox !== null && !_hasAsciiToken(_stringToLowerCase(_String(sandbox)), 'allow-same-origin');
+}
+
+// The frame's viewport, [width, height]: the iframe's content box, as in Chromium (a 400x300
+// iframe with its default 2px border is a 400x300 viewport), 300x150 when it has none.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which passes the border box.
+function _iframeViewport(el) {
+  const box = _hostDom.rect(el) || { width: 0, height: 0 };
+  let cs = null;
+  try { cs = _hostDom.computedStyle(el); } catch (_) {}
+  const edges = (a, b, c, d) => cs
+    ? (_parseFloatAtBoot(cs[a]) || 0) + (_parseFloatAtBoot(cs[b]) || 0)
+      + (_parseFloatAtBoot(cs[c]) || 0) + (_parseFloatAtBoot(cs[d]) || 0)
+    : 0;
+  const contentWidth = box.width - edges('borderLeftWidth', 'borderRightWidth', 'paddingLeft', 'paddingRight');
+  const contentHeight = box.height - edges('borderTopWidth', 'borderBottomWidth', 'paddingTop', 'paddingBottom');
+  return [_MathRound(contentWidth) || 300, _MathRound(contentHeight) || 150];
+}
+
+// <iframe srcdoc>: the frame navigates to about:srcdoc with the attribute as its document,
+// and srcdoc wins over src (HTML "process the iframe attributes"; Chromium 141). The document
+// has its creator's origin, or an opaque one when sandboxed without allow-same-origin. The
+// host reads the markup from this realm's DOM by node id and derives the origin itself, so
+// nothing page script computes names what the frame runs as. The load event is async.
+// Port addition: crates/obscura-js/js/bootstrap.js ignores srcdoc (the frame loads src).
+function _loadIframeSrcdoc(el) {
+  const st = _resetIframeState(el);
+  st.loadingUrl = 'about:srcdoc';
+  st.loadedUrl = 'about:srcdoc';
+  const sandboxed = _iframeSandboxed(el);
+  st.sameOrigin = !sandboxed && _realmOrigin() !== 'null';
+  const viewport = _iframeViewport(el);
+  st.frameId = __obscuraCore.ops.op_frame_document_srcdoc(el._nid, viewport[0], viewport[1], sandboxed) >>> 0;
+  const html = st.sameOrigin ? _String(_hostDom.getAttribute(el, 'srcdoc') ?? '') : '';
+  st.doc = new _IframeDocument(html, 'about:srcdoc', el);
+  st.win = _makeIframeWindow(el, st.doc, 'about:srcdoc');
+  if (st.frameId) {
+    _frameWindows[st.frameId] = st.sameOrigin ? st.win : _crossOriginWindowFor(el);
+    _frameElements[st.frameId] = el;
+  }
+  _reflectApply(_promiseThenAtBoot, _promiseResolveAtBoot(undefined), [() => {
+    if (_weakMapGet(_iframeStates, el) !== st) return;
+    _dispatch(el, new Event('load'));
+  }]);
+}
+
+// Start the load of every parser-created <iframe> in this realm's document that has not
+// started one: srcdoc wins over src (port addition, Chromium 141). Run by page init and, as
+// __obscura_host.loadDocumentFrames, by the host once the document is parsed; a frame that is
+// already loading is left alone (_loadIframeSrc dedupes by URL).
+function _loadDocumentFrames() {
+  const frames = _qsa(_realmDocument || globalThis.document, 'iframe');
+  for (let i = 0; i < frames.length; i++) {
+    const frame = frames[i];
+    if (_hostDom.getAttribute(frame, 'srcdoc') !== null) {
+      const st = _weakMapGet(_iframeStates, frame);
+      if (!st || st.loadingUrl !== 'about:srcdoc') _loadIframeSrcdoc(frame);
+      continue;
+    }
+    const src = _hostDom.getAttribute(frame, 'src');
+    if (src && src !== 'about:blank') _reflectApply(_iframeLoadAtBoot, frame, [_String(src)]);
+  }
+}
+
+// What an iframe's src or srcdoc attribute changing does: with srcdoc present, a src change
+// does nothing and a srcdoc change reloads it; with srcdoc gone, the frame loads src (or goes
+// back to about:blank).
+function _iframeAttributeChanged(el, name) {
+  if (_hostDom.getAttribute(el, 'srcdoc') !== null) {
+    if (name === 'srcdoc') _loadIframeSrcdoc(el);
+    return;
+  }
+  const src = _hostDom.getAttribute(el, 'src');
+  if (src && src !== 'about:blank') _reflectApply(_iframeLoadAtBoot, el, [_String(src)]);
+  else _resetIframeState(el);
+}
+
+// The initial about:blank document, which inherits the embedder's origin. DEVIATION from
+// crates/obscura-js/js/bootstrap.js: not when the iframe is sandboxed without
+// allow-same-origin, whose contentDocument is null in Chromium 141.
 function _blankIframeState(el) {
   const doc = new _IframeDocument(_BLANK_FRAME_HTML, 'about:blank', el);
   const st = {
-    frameId: 0, loadingUrl: null, loadedUrl: 'about:blank', sameOrigin: true,
+    frameId: 0, loadingUrl: null, loadedUrl: 'about:blank', sameOrigin: !_iframeSandboxed(el),
     doc, win: null,
   };
   st.win = _makeIframeWindow(el, doc, 'about:blank');
@@ -18263,10 +18373,7 @@ function _pageInit() {
   // An isolated world shares the page's document, and the page realm already
   // loaded its frames.
   if (!_realmIsolatedWorld) {
-    for (const frame of _qsa(globalThis.document, 'iframe')) {
-      const src = frame.getAttribute('src');
-      if (src && src !== 'about:blank') frame._loadIframeSrc(src);
-    }
+    _loadDocumentFrames();
   } else {
     _installIsolatedWorldBridges();
   }
@@ -20073,6 +20180,9 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // processes only the page's own navigation, so a click on a link inside a frame did
   // nothing. The iframe loader as bootstrap defined it, since page script can replace
   // Element.prototype._loadIframeSrc.
+  // Port addition: start the parsed document's frames (srcdoc and src), for the host once
+  // the document is in place. See _loadDocumentFrames.
+  loadDocumentFrames: () => { _loadDocumentFrames(); },
   navigateFrame: (frameId, url) => {
     const el = _frameElements[frameId >>> 0];
     if (!el || !el.isConnected) return false;

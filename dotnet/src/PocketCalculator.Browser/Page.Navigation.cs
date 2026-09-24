@@ -443,12 +443,10 @@ public sealed partial class Page
         Js?.ResetAnimationTimeline();
         if (Js is { } iframeJs)
         {
-            TryExecute(
-                iframeJs,
-                "<iframe-load>",
-                "(function() { var iframes = document.querySelectorAll('iframe[src]');"
-                + " for (var i = 0; i < iframes.length; i++) { var src = iframes[i].getAttribute('src');"
-                + " if (src && src !== 'about:blank') iframes[i]._loadIframeSrc(src); } })()");
+            // DEVIATION from crates/obscura-browser, which loads each iframe[src] through the
+            // page-visible Element.prototype._loadIframeSrc: the shim's own loader, which also
+            // gives a srcdoc frame its about:srcdoc document instead of loading src.
+            TryExecuteHost(iframeJs, "<iframe-load>", "__obscura_host.loadDocumentFrames();");
         }
 
         // Scripts can synchronously flush style/layout through getComputedStyle(),

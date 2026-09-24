@@ -209,14 +209,33 @@ public static class CoreOps
                 new RuntimeEvent.Console(new RuntimeConsoleEvent(level, args, timestamp)));
         });
 
-    /// <summary><c>op_get_cookies</c>. The JS-visible cookies for the realm's document URL.</summary>
+    /// <summary>
+    /// What <c>op_get_cookies</c> returns, and <c>op_set_cookie</c>, to a document with an
+    /// opaque origin (a frame sandboxed without <c>allow-same-origin</c>), where Chromium
+    /// throws SecurityError. A cookie string cannot contain NUL, so it names no cookie.
+    /// Port addition: Rust has no sandboxing.
+    /// </summary>
+    public const string CookieSandboxed = "\0sandboxed";
+
+    /// <summary><c>op_get_cookies</c>. The JS-visible cookies for the realm's cookie URL.</summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-js (ops.rs), which reads for the document URL: a srcdoc
+    /// or about:blank frame reads for its creator's URL (<see cref="StateHelpers.DocumentCookieUrl"/>),
+    /// as Chromium 141 does, where about: saw nothing; and an opaque-origin document reads
+    /// nothing and is told so (<see cref="CookieSandboxed"/>).
+    /// </remarks>
     public static string OpGetCookies(PocketCalculatorState state) => OpGuard.Run(
         "op_get_cookies",
         () =>
         {
             ArgumentNullException.ThrowIfNull(state);
+            if (state.OpaqueOrigin)
+            {
+                return CookieSandboxed;
+            }
+
             if (state.CookieJar is not { } jar
-                || !Uri.TryCreate(state.Url, UriKind.Absolute, out var url))
+                || !Uri.TryCreate(StateHelpers.DocumentCookieUrl(state), UriKind.Absolute, out var url))
             {
                 return string.Empty;
             }
@@ -228,18 +247,29 @@ public static class CoreOps
         string.Empty);
 
     /// <summary><c>op_set_cookie</c>. Applies one <c>document.cookie</c> assignment.</summary>
-    public static void OpSetCookie(PocketCalculatorState state, string cookieStr) =>
-        OpGuard.Run("op_set_cookie", () =>
+    /// <returns>
+    /// <see cref="CookieSandboxed"/> when the document has an opaque origin and nothing was
+    /// set, else null (the op's value in Rust, which has no return).
+    /// </returns>
+    /// <remarks>Deviations as for <see cref="OpGetCookies"/>.</remarks>
+    public static string? OpSetCookie(PocketCalculatorState state, string cookieStr) =>
+        OpGuard.Run<string?>("op_set_cookie", () =>
         {
             ArgumentNullException.ThrowIfNull(state);
-            if (state.CookieJar is not { } jar
-                || !Uri.TryCreate(state.Url, UriKind.Absolute, out var url))
+            if (state.OpaqueOrigin)
             {
-                return;
+                return CookieSandboxed;
+            }
+
+            if (state.CookieJar is not { } jar
+                || !Uri.TryCreate(StateHelpers.DocumentCookieUrl(state), UriKind.Absolute, out var url))
+            {
+                return null;
             }
 
             jar.SetCookieFromJs(cookieStr, url, StateHelpers.DocumentCookieAccess(state, url));
-        });
+            return null;
+        }, null);
 
     /// <summary>
     /// <c>op_history_url</c>: records a History API move of the realm's document URL, or
@@ -441,6 +471,42 @@ public static class CoreOps
             return QueueFrameDocument(
                 page, document.FrameId, load.FinalUrl, load.Body, viewportWidth, viewportHeight, sandboxed,
                 load.ReferrerPolicyHeader);
+        },
+        0u);
+
+    /// <summary>
+    /// <c>op_frame_document_srcdoc</c>. Queues the <c>about:srcdoc</c> document of the
+    /// <c>&lt;iframe&gt;</c> <paramref name="nid"/> in <paramref name="document"/>, its markup
+    /// read from that element's <c>srcdoc</c> attribute, and returns the frame's id (0 for
+    /// none).
+    /// </summary>
+    /// <remarks>
+    /// Port addition: Rust has no srcdoc. The shim passes only the element, so the frame's
+    /// URL and markup come from the host's DOM, and its origin is derived host-side from the
+    /// parent (<see cref="Runtime.FrameRealm.InheritFrameScope"/>), opaque when sandboxed.
+    /// </remarks>
+    public static uint OpFrameDocumentSrcdoc(
+        PocketCalculatorState page,
+        PocketCalculatorState document,
+        uint nid,
+        ulong viewportWidth,
+        ulong viewportHeight,
+        bool sandboxed) => OpGuard.Run(
+        "op_frame_document_srcdoc",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(document);
+            if (document.Dom?.GetNode(NodeId.New(nid)) is not { } node
+                || node.AsElement() is not { } element
+                || !string.Equals(element.Name.Local, "iframe", StringComparison.Ordinal)
+                || node.GetAttribute("srcdoc") is not { } html)
+            {
+                return 0u;
+            }
+
+            return QueueFrameDocument(
+                page, document.FrameId, "about:srcdoc", html, viewportWidth, viewportHeight, sandboxed,
+                referrerPolicyHeader: null);
         },
         0u);
 

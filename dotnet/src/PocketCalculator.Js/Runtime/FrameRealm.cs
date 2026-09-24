@@ -171,7 +171,8 @@ public sealed class FrameRealm : IDisposable
 
         // Only a same-origin frame is reachable from the page. A cross-origin
         // frame is opaque, and nothing about it is published.
-        var origin = opaqueOrigin ? "null" : OriginOf(url);
+        // A srcdoc or about:blank frame has its creator's origin (InheritFrameScope).
+        var origin = state.OpaqueOrigin ? "null" : OriginOf(state.SiteUrl ?? url);
         var sameOrigin = !string.Equals(origin, "null", StringComparison.Ordinal)
             && string.Equals(origin, parent.PageOrigin, StringComparison.Ordinal);
 
@@ -219,7 +220,12 @@ public sealed class FrameRealm : IDisposable
         var aboutFrame = url.StartsWith("about:", StringComparison.Ordinal);
         if (aboutFrame)
         {
+            // The creator's origin (and cookie URL), and its sandboxing: a srcdoc frame of an
+            // opaque-origin document is opaque too. Its relative URLs resolve against the
+            // parent's base (Chromium 141).
             state.SiteUrl = parentState.SiteUrl ?? parentState.Url;
+            state.OpaqueOrigin |= parentState.OpaqueOrigin;
+            state.FallbackBaseUrl = StateHelpers.DocumentBaseUrlMemoized(parentState) ?? state.SiteUrl;
         }
 
         var site = aboutFrame ? state.SiteUrl : url;
@@ -619,8 +625,14 @@ public sealed class FrameRealm : IDisposable
     /// Resolves a subresource URL against the frame's own document URL, not the
     /// parent's. A relative <c>src</c> in a frame is relative to the frame.
     /// </summary>
+    /// <remarks>
+    /// Against the frame document's base URL, which for a srcdoc frame is its parent's base
+    /// (Chromium 141). Rust resolves against the frame URL, which for about:srcdoc resolves
+    /// nothing.
+    /// </remarks>
     private string Resolve(string src) =>
-        Uri.TryCreate(Url, UriKind.Absolute, out var baseUri) && Uri.TryCreate(baseUri, src, out var resolved)
+        Uri.TryCreate(StateHelpers.DocumentBaseUrl(State) ?? Url, UriKind.Absolute, out var baseUri)
+            && Uri.TryCreate(baseUri, src, out var resolved)
             ? resolved.ToString()
             : src;
 

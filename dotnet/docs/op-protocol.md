@@ -310,10 +310,16 @@ so these are called unguarded:
 | `op_realm_origin` | fast | `frame_id: u32` | `String` (the realm's origin, `"null"` when opaque) |
 | `op_run_fetched_script` | sync | `body_token: f64, url: String` | `(void)`; throws like `op_run_classic_script` |
 | `op_frame_document_from_load` | fast | `body_token: f64, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
+| `op_frame_document_srcdoc` | fast | `iframe_nid: u32, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_load_stylesheet` | async | `owner_nid: u32, url: String` | `String`: `{"ok":true,"responseUrl":...}` or `{"ok":false}` |
 | `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
 | `op_history_url` | fast | `url: String, frame_id: u32` | `bool`: false, and nothing kept, when the document may not be rewritten to `url`; `""` clears it |
 | `op_wasm_memory_admit` | fast | `held_bytes: f64, delta_bytes: f64` | `bool`: whether the isolate's WebAssembly memory budget allows `delta_bytes` more |
+
+`op_get_cookies` and `op_set_cookie` answer a document with an opaque origin (a frame
+sandboxed without `allow-same-origin`) with the string `"\u0000sandboxed"`, on which
+the shim throws `SecurityError`; `op_set_cookie` otherwise returns `null`. Both read
+and write an `about:srcdoc` or `about:blank` frame's cookies for its creator's URL.
 
 `op_history_url` replaces upstream's page-writable `__virtualUrl` global: the
 History API reports each move of the document URL, the host checks it against the
@@ -325,7 +331,9 @@ only that. `op_wasm_memory_admit` is asked before `new WebAssembly.Memory` and
 of the calling realm, named by its request URL. `op_frame_document_from_load`
 queues a frame from the host-held body and final URL of a `navigate` internal load
 (what `op_frame_document_ready` did from shim-supplied values; the shim no longer
-calls that op). `op_load_stylesheet` fetches a dynamic `<link rel=stylesheet>` and
+calls that op). `op_frame_document_srcdoc` queues an `about:srcdoc` frame from the
+`srcdoc` attribute of the calling realm's `<iframe>` node, read host-side; the frame
+takes its origin from the calling realm. `op_load_stylesheet` fetches a dynamic `<link rel=stylesheet>` and
 its `@import` graph host-side, rebases its `url()`s, computes origin-clean from the
 responses and installs the result in the stylesheet store. A token is taken once,
 only by the realm that loaded it and only in the mode it was loaded with.

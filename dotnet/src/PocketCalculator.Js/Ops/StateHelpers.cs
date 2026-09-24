@@ -44,7 +44,20 @@ public static class StateHelpers
     public static string DocumentOrigin(PocketCalculatorState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        return state.OpaqueOrigin ? "null" : UrlRecord.Parse(state.Url)?.AsciiOrigin ?? "null";
+        // A srcdoc or about:blank frame has its creator's origin (SiteUrl), not about:'s
+        // opaque one (port addition; Rust derives no origin host-side).
+        return state.OpaqueOrigin ? "null" : UrlRecord.Parse(state.SiteUrl ?? state.Url)?.AsciiOrigin ?? "null";
+    }
+
+    /// <summary>
+    /// The URL <c>document.cookie</c> reads and writes as: the document's own, or for a
+    /// srcdoc or about:blank frame its creator's, as Chromium's <c>Document::CookieURL</c>.
+    /// Port addition: Rust reads cookies for the document URL, which for about: is none.
+    /// </summary>
+    public static string DocumentCookieUrl(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        return state.SiteUrl ?? state.Url;
     }
 
     public static bool NodeIsScript(DomTree dom, NodeId nodeId)
@@ -376,7 +389,10 @@ public static class StateHelpers
     public static string? DocumentBaseUrl(PocketCalculatorState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        var documentUrl = UrlRecord.Parse(state.Url);
+        // A srcdoc or about:blank frame resolves against its fallback base URL, the parent's
+        // base when it was created (HTML; Chromium 141). Port addition: Rust resolves against
+        // about:, which resolves nothing.
+        var documentUrl = UrlRecord.Parse(state.FallbackBaseUrl ?? state.Url);
         if (documentUrl is null)
         {
             return null;

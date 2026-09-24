@@ -267,7 +267,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (url, method, body) => CoreOps.OpNavigate(RealmState(), S(url), S(method), S(body))));
         Bind(ops, "op_get_cookies", (Func<string>)(
             () => CoreOps.OpGetCookies(RealmState())));
-        Bind(ops, "op_set_cookie", (Action<object?>)(
+        Bind(ops, "op_set_cookie", (Func<object?, string?>)(
             cookie => CoreOps.OpSetCookie(RealmState(), S(cookie))));
         // Port addition: the calling realm's origin as the host knows it, for the
         // shim's postMessage targetOrigin checks (SECURITY.md H4).
@@ -429,7 +429,7 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_navigate", (Action<object?, object?, object?>)(
             (url, method, body) => CoreOps.OpNavigate(state, S(url), S(method), S(body))));
         Bind(ops, "op_get_cookies", (Func<string>)(() => CoreOps.OpGetCookies(state)));
-        Bind(ops, "op_set_cookie", (Action<object?>)(
+        Bind(ops, "op_set_cookie", (Func<object?, string?>)(
             cookie => CoreOps.OpSetCookie(state, S(cookie))));
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
@@ -459,6 +459,9 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_frame_document_from_load", (Func<object?, object?, object?, object?, double>)(
             (token, width, height, sandboxed) => CoreOps.OpFrameDocumentFromLoad(
                 Page, document, D(token), U64(width), U64(height), B(sandboxed))));
+        Bind(ops, "op_frame_document_srcdoc", (Func<object?, object?, object?, object?, double>)(
+            (nid, width, height, sandboxed) => CoreOps.OpFrameDocumentSrcdoc(
+                Page, document, U32(nid), U64(width), U64(height), B(sandboxed))));
         Bind(ops, "op_load_stylesheet", (Func<object?, object?, Task<string>>)(
             (nid, url) => LinkedStylesheetLoader.OpLoadStylesheetAsync(RealmState(), document, U32(nid), S(url))));
         Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
@@ -542,7 +545,14 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             {
                 if (pending.FrameId == frameId)
                 {
-                    frameOrigin = pending.OpaqueOrigin ? "null" : UrlRecord.Parse(pending.Url)?.AsciiOrigin ?? "null";
+                    // A queued srcdoc or about:blank frame will have its parent's origin
+                    // (FrameRealm.InheritFrameScope).
+                    var parent = pending.Url.StartsWith("about:", StringComparison.Ordinal)
+                        ? pending.ParentFrameId == 0 ? Page : Realms.ByFrameId(pending.ParentFrameId)
+                        : null;
+                    frameOrigin = pending.OpaqueOrigin ? "null"
+                        : parent is not null ? StateHelpers.DocumentOrigin(parent)
+                        : UrlRecord.Parse(pending.Url)?.AsciiOrigin ?? "null";
                     break;
                 }
             }

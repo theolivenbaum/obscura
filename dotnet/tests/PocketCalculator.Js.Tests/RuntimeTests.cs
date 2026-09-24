@@ -20428,8 +20428,11 @@ public sealed partial class RuntimeTests
     public void OpaqueOriginFramesAreNeverSameOrigin()
     {
         using var page = RuntimeFixture.Page("https://parent.example/", "<html><body></body></html>");
+        // DEVIATION from frame.rs, whose about:blank frame stands in for an opaque origin: an
+        // about:blank frame has its creator's origin (Chromium 141; see
+        // SrcdocAndBlankFramesUseTheirCreatorsCookieUrl), so the opaque one here is sandboxed.
         using var frame = FrameRealm.Create(
-            page.Runtime, 1, 0, "about:blank", "<html><body></body></html>");
+            page.Runtime, 1, 0, "about:blank", "<html><body></body></html>", opaqueOrigin: true);
         Assert.NotNull(frame);
         Assert.Equal("null", frame.Origin);
         Assert.False(frame.IsSameOriginAs("null"));
