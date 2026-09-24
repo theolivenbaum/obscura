@@ -50,6 +50,17 @@ public sealed class PageTamperingTests
     }
 
     [Fact]
+    public void HostRegistriesAreNotPageVisible()
+    {
+        using var fixture = RuntimeFixture.Setup(Page);
+        var runtime = fixture.Runtime;
+        Assert.Equal(
+            "\"false,false,false,false,false,false\"",
+            Eval(runtime, "String(['__obscura_frameWindows', '__obscura_frameElements', '__obscura_frameObjects', '__obscura_objects', '__obscura_oid', '_wrap'].map(n => n in globalThis))"));
+        Assert.Equal("[0,0,0]", runtime.EvaluateHost("__obscura_host.frameRegistrySize()")?.ToJsonString());
+    }
+
+    [Fact]
     public void TamperedArrayDoesNotBreakSelectValue()
     {
         using var fixture = RuntimeFixture.Setup(Page);

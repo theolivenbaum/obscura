@@ -267,7 +267,7 @@ public sealed partial class Page
         ExecuteFrameOwnerScript(parentFrameId, script);
         if (parentFrameId != 0 && Js is { } js)
         {
-            TryExecute(js, "<frame-detach>", $"delete globalThis.__obscura_frameObjects[{id}];");
+            TryExecuteHost(js, "<frame-detach>", $"__obscura_host.forgetFrameObjects({id});");
         }
     }
 

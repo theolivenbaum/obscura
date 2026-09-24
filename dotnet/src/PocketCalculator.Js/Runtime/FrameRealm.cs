@@ -447,7 +447,7 @@ public sealed class FrameRealm : IDisposable
 
     /// <summary>
     /// Publishes what this realm can share with the page realm under
-    /// <c>__obscura_frameObjects[frameId]</c>.
+    /// the frame registry (<c>__obscura_host.publishFrameObjects</c>).
     /// </summary>
     /// <remarks>
     /// In the reference this hands the page the frame's <em>real</em>
@@ -462,13 +462,11 @@ public sealed class FrameRealm : IDisposable
     {
         try
         {
-            _parent.ExecuteScript(
+            // A host helper: the registry is closure state of bootstrap.js, not the Rust
+            // engine's page-visible __obscura_frameObjects (SECURITY.md L10).
+            _parent.ExecuteHostScript(
                 "<publish-frame-objects>",
-                "globalThis.__obscura_frameObjects = globalThis.__obscura_frameObjects || {};"
-                + $"globalThis.__obscura_frameObjects[{FrameId.ToString(CultureInfo.InvariantCulture)}] = "
-                + "globalThis.__obscura_frameObjects["
-                + FrameId.ToString(CultureInfo.InvariantCulture)
-                + "] || {};");
+                $"__obscura_host.publishFrameObjects({FrameId.ToString(CultureInfo.InvariantCulture)});");
         }
         catch (JsRuntimeException)
         {

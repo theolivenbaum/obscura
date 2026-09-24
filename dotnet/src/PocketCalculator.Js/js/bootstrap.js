@@ -102,6 +102,19 @@ function _qsa(root, selector) {
   const impl = _queryImpl(root, true);
   return impl ? _reflectApply(impl, root, [selector]) : root.querySelectorAll(selector);
 }
+// Frame registries. DEVIATION from crates/obscura-js/js/bootstrap.js, where they are the
+// page-visible globals __obscura_frameWindows, __obscura_frameElements and
+// __obscura_frameObjects: a page could read or replace the window an iframe stands for,
+// or the element that keeps a frame alive (SECURITY.md L10). The host reaches them
+// through __obscura_host (publishFrameObjects, forgetFrame, frameRegistrySize).
+// frame id -> the window this realm uses for it
+const _frameWindows = Object.create(null);
+// frame id -> the iframe element that owns it. The host uses this composed-tree
+// registry to retain frames inside closed shadow roots without keeping removed
+// elements alive after their browsing context is released.
+const _frameElements = Object.create(null);
+// frame id -> what the host published for that frame
+const _frameObjects = Object.create(null);
 // `ids.map(wrap).filter(Boolean)` without either method: the wrappers for a list of node
 // ids, skipping any id that no longer names a node.
 const _wrapIds = (ids, wrap) => {
@@ -134,8 +147,7 @@ const _wrapIds = (ids, wrap) => {
     // because it leaves them on the global. They are closure-private here, and
     // pre-declaring them would put an own `undefined` property back on globalThis.
     '__obscura_stealth', '__obscura_core_handoff',
-    '__obscura_frameId', '__obscura_parentFrameId', '__obscura_frameWindows',
-    '__obscura_frameObjects', '__obscura_frameElements',
+    '__obscura_frameId', '__obscura_parentFrameId',
     '_rawFragment',
     '__markParserScripts', '__obscura_hasPendingDynamicScripts',
     '__obscura_hasPendingLoadDelayingScripts',
@@ -4377,8 +4389,8 @@ class Element extends Node {
   _resetIframeFrame() {
     const old = _iframeStates.get(this);
     if (old && old.frameId) {
-      delete globalThis.__obscura_frameElements[old.frameId];
-      delete globalThis.__obscura_frameWindows[old.frameId];
+      delete _frameElements[old.frameId];
+      delete _frameWindows[old.frameId];
     }
     return _blankIframeState(this);
   }
@@ -4441,8 +4453,8 @@ class Element extends Node {
         // posting into the frame reach the frame's own listeners, and makes a
         // message coming back out arrive with this window as its `source`.
         if (st.frameId) {
-          globalThis.__obscura_frameWindows[st.frameId] = sameOrigin ? st.win : _crossOriginWindowFor(el);
-          globalThis.__obscura_frameElements[st.frameId] = el;
+          _frameWindows[st.frameId] = sameOrigin ? st.win : _crossOriginWindowFor(el);
+          _frameElements[st.frameId] = el;
         }
       } else {
         _failIframeLoad(el, st, fullUrl, sandboxed);
@@ -14184,16 +14196,8 @@ function _crossOriginWindowFor(el) {
 // picks them up; a global added later would stay enumerable on `window`.
 globalThis.__obscura_frameId = 0;        // 0 is the page's own realm
 globalThis.__obscura_parentFrameId = 0;
-globalThis.__obscura_frameWindows = Object.create(null); // frame id -> its window
-// frame id -> the iframe element that owns it. The host uses this composed-tree
-// registry to retain frames inside closed shadow roots without keeping removed
-// elements alive after their browsing context is released.
-globalThis.__obscura_frameElements = Object.create(null);
-// frame id -> that frame's real window and document, filled by the host.
-// Declared here rather than created by the host at runtime: the hide list is
-// computed from this global at snapshot time, so a property the host adds later
-// would stay enumerable on `window` and be visible to any script that walks it.
-globalThis.__obscura_frameObjects = Object.create(null);
+// The frame registries (_frameWindows, _frameElements, _frameObjects) are declared at
+// the top of this file.
 // The frames of this realm whose element is still in the document.
 //
 // Liveness is asked of the element, not of a document query: an iframe inside
@@ -14203,8 +14207,8 @@ globalThis.__obscura_frameObjects = Object.create(null);
 // Host-only (__obscura_host.liveFrameIds); upstream's global __obscura_liveFrameIds.
 function _liveFrameIds() {
   const live = [];
-  for (const id in globalThis.__obscura_frameElements) {
-    const element = globalThis.__obscura_frameElements[id];
+  for (const id in _frameElements) {
+    const element = _frameElements[id];
     if (element && element.isConnected) live.push(id >>> 0);
   }
   return live;
@@ -14215,12 +14219,12 @@ function _liveFrameIds() {
 // surviving reference keeps the frame's context and DOM tree alive.
 // Host-only (__obscura_host.forgetFrame); upstream's global __obscura_forgetFrame.
 function _forgetFrame(frameId) {
-  const element = globalThis.__obscura_frameElements[frameId];
+  const element = _frameElements[frameId];
   const st = element && _iframeStates.get(element);
   if (st && st.frameId === frameId) st.frameId = 0;
-  delete globalThis.__obscura_frameElements[frameId];
-  delete globalThis.__obscura_frameObjects[frameId];
-  delete globalThis.__obscura_frameWindows[frameId];
+  delete _frameElements[frameId];
+  delete _frameObjects[frameId];
+  delete _frameWindows[frameId];
 }
 
 // DEVIATION from crates/obscura-js/js/bootstrap.js, which computes this with the page's
@@ -14281,7 +14285,7 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
 function _frameObjectsFor(element) {
   const frameId = _iframeStates.get(element)?.frameId;
   if (!frameId) return null;
-  const entry = globalThis.__obscura_frameObjects[frameId];
+  const entry = _frameObjects[frameId];
   return entry || null;
 }
 
@@ -14294,8 +14298,8 @@ function _frameObjectsFor(element) {
 // and receiver, losing the sender's origin and source.
 function _frameWindowFor(frameId) {
   if (!frameId) return null;
-  const real = globalThis.__obscura_frameObjects?.[frameId]?.window;
-  const existing = globalThis.__obscura_frameWindows[frameId];
+  const real = _frameObjects[frameId]?.window;
+  const existing = _frameWindows[frameId];
   if (!real) return existing || null;
   if (existing && existing.__obscura_wrapsRealm) return existing;
 
@@ -14314,7 +14318,7 @@ function _frameWindowFor(frameId) {
       return prop === '__obscura_wrapsRealm' || Reflect.has(target, prop);
     },
   });
-  globalThis.__obscura_frameWindows[frameId] = win;
+  _frameWindows[frameId] = win;
   return win;
 }
 
@@ -19031,6 +19035,15 @@ globalThis.__obscura_host_handoff = Object.freeze({
   setScreenOverride: _setScreenOverride,
   liveFrameIds: _liveFrameIds,
   forgetFrame: _forgetFrame,
+  // Port additions (SECURITY.md L10): the frame registries are closure state now.
+  publishFrameObjects: (frameId) => {
+    frameId = frameId >>> 0;
+    if (!_frameObjects[frameId]) _frameObjects[frameId] = { __proto__: null };
+  },
+  forgetFrameObjects: (frameId) => { delete _frameObjects[frameId >>> 0]; },
+  // [windows, elements, published objects]: what a frame still holds in this realm.
+  frameRegistrySize: () =>
+    [_objectKeys(_frameWindows).length, _objectKeys(_frameElements).length, _objectKeys(_frameObjects).length],
   // The frame id an iframe element is bound to; 0 when none. Closure state, see
   // _iframeStates.
   frameIdOf: (element) => (_iframeStates.get(element)?.frameId || 0),

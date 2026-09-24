@@ -1135,7 +1135,7 @@ public sealed class PageTests
         Assert.Equal(
             1.0,
             PageFixtures.AsDouble(
-                page.Js!.Evaluate("Object.keys(globalThis.__obscura_frameObjects).length")));
+                page.Js!.EvaluateHost("__obscura_host.frameRegistrySize()[2]")));
     }
 
     /// <summary>
@@ -1157,10 +1157,8 @@ public sealed class PageTests
         Assert.Empty(page.Frames);
         Assert.Equal(
             0.0,
-            PageFixtures.AsDouble(page.Js!.Evaluate(
-                "Object.keys(globalThis.__obscura_frameObjects).length"
-                + " + Object.keys(globalThis.__obscura_frameWindows).length"
-                + " + Object.keys(globalThis.__obscura_frameElements).length")));
+            PageFixtures.AsDouble(page.Js!.EvaluateHost(
+                "(function (s) { return s[0] + s[1] + s[2]; })(__obscura_host.frameRegistrySize())")));
     }
 
     [Fact]

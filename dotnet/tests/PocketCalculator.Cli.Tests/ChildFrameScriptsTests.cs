@@ -294,17 +294,7 @@ public sealed class ChildFrameScriptsTests
             await page.SettleAsync(2000);
 
             Assert.Empty(page.FrameUrls());
-            foreach (var registry in new[]
-            {
-                "__obscura_frameObjects",
-                "__obscura_frameWindows",
-                "__obscura_frameElements",
-            })
-            {
-                Assert.Equal(
-                    0.0,
-                    PageProbe.Number(page.Evaluate($"Object.keys(globalThis.{registry}).length")));
-            }
+            Assert.Equal("0,0,0", FrameRegistries(page));
         }
         finally
         {
@@ -336,11 +326,19 @@ public sealed class ChildFrameScriptsTests
         await page.SettleAsync(1000);
 
         Assert.Empty(page.FrameUrls());
-        foreach (var registry in new[] { "__obscura_frameWindows", "__obscura_frameElements" })
-        {
-            Assert.Equal(
-                0.0,
-                PageProbe.Number(page.Evaluate($"Object.keys(globalThis.{registry}).length")));
-        }
+        Assert.StartsWith("0,0,", FrameRegistries(page), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The page realm's frame registries (windows, elements, published objects). They are
+    /// closure state reached by host script only (SECURITY.md L10), which the public API
+    /// does not offer, so the probe goes through the wrapped engine page.
+    /// </summary>
+    private static string FrameRegistries(object page)
+    {
+        var inner = (PocketCalculator.Browser.Page)page.GetType()
+            .GetProperty("Inner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(page)!;
+        return inner.EvaluateHost("__obscura_host.frameRegistrySize().join(',')")?.GetValue<string>() ?? "null";
     }
 }
