@@ -2958,8 +2958,10 @@ public class PaintTests
         {
             for (uint y = 20; y < 60 && !scaledText; y++)
             {
+                // The span's own #0000ff: its run used to reach the shaper spliced into the
+                // block's text, which painted it in the block's black.
                 PremultipliedColor pixel = Pixel(pixmap, x, y);
-                scaledText = pixel.R < 80 && pixel.G < 80 && pixel.B < 80;
+                scaledText = pixel.B > 150 && pixel.R < 80 && pixel.G < 80;
             }
         }
 

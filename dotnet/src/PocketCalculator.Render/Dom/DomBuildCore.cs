@@ -403,7 +403,7 @@ internal static partial class DomBuild
         if (style.Display == Display.Block || style.InternalFlexContainer)
         {
             List<NodeId> flattened = [];
-            FlattenBoxlessInlineChildren(tree, domChildren, context.Styles, flattened);
+            FlattenBoxlessInlineChildren(tree, domChildren, context.Styles, flattened, context.Ifc.SplicedInlines);
             domChildren = flattened;
         }
 

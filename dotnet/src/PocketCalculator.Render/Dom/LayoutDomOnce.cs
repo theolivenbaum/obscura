@@ -939,6 +939,11 @@ public static partial class RenderDom
             }
         }
 
+        if (ifcItems.SplicedInlines.Count != 0)
+        {
+            SynthesizeSplicedInlineRects(tree, ifcItems.SplicedInlines, rects, styles, textRuns);
+        }
+
         List<GeneratedBox> generatedBoxes = [];
         for (int index = 0; index < ifcItems.Generated.Count; index++)
         {
@@ -1057,6 +1062,76 @@ public static partial class RenderDom
         }
 
         return fragments;
+    }
+
+    /// <summary>
+    /// Give a spliced inline wrapper that owns no shaped range the union of its content.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, where a decoration-free inline wrapper
+    /// spliced out of a block's child list has no layout box at all, so
+    /// <c>getBoundingClientRect()</c> reported 0,0,0,0 and a click by coordinates could not
+    /// reach it. Where its run folds into a shaped item it gets its line fragments from
+    /// shaping; where the run does not fold (it holds an image or a form control) this takes
+    /// the union of what its children laid out to. Chromium 141 reports
+    /// <c>&lt;a&gt;&lt;img width=20 height=20&gt;&lt;/a&gt;</c> as the image's width over the
+    /// link's font box, 20x17; this gives the image's box, 20x20. <paramref name="spliced"/>
+    /// lists outer wrappers before inner ones, so walking it backwards sees every nested
+    /// wrapper's union before its parent reads it, and each child is visited once.
+    /// </remarks>
+    internal static void SynthesizeSplicedInlineRects(
+        DomTree tree,
+        List<NodeId> spliced,
+        Dictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns)
+    {
+        for (int index = spliced.Count - 1; index >= 0; index--)
+        {
+            NodeId wrapper = spliced[index];
+            if (rects.ContainsKey(wrapper))
+            {
+                continue;
+            }
+
+            WorkCancellation.ThrowIfCancellationRequested();
+            float left = float.PositiveInfinity;
+            float top = float.PositiveInfinity;
+            float right = float.NegativeInfinity;
+            float bottom = float.NegativeInfinity;
+            void Include(Rect rect)
+            {
+                left = F32.Min(left, rect.X);
+                top = F32.Min(top, rect.Y);
+                right = F32.Max(right, rect.X + rect.Width);
+                bottom = F32.Max(bottom, rect.Y + rect.Height);
+            }
+
+            for (NodeId? child = tree.GetNode(wrapper)?.FirstChild;
+                child is { } cid;
+                child = tree.GetNode(cid)?.NextSibling)
+            {
+                if (textRuns.TryGetValue(cid, out List<(Rect Rect, string Text)>? words))
+                {
+                    foreach ((Rect rect, _) in words)
+                    {
+                        Include(rect);
+                    }
+                }
+                else if (rects.TryGetValue(cid, out Rect rect)
+                    && styles.TryGetValue(cid, out LayoutStyle? style)
+                    && style.Display != Display.None
+                    && style.Position != TaffyPosition.Absolute)
+                {
+                    Include(rect);
+                }
+            }
+
+            if (left <= right && top <= bottom)
+            {
+                rects[wrapper] = new Rect(left, top, right - left, bottom - top);
+            }
+        }
     }
 
     internal static Dictionary<NodeId, List<Rect>> SynthesizeShapedInlineFragments(
