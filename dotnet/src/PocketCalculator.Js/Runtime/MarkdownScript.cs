@@ -30,25 +30,16 @@ public static class MarkdownScript
     /// Must be evaluated against a page with a fully bootstrapped JS runtime, as host
     /// script (<c>EvaluateHost</c>): it reaches the DOM through <c>__obscura_host.dom</c>
     /// rather than the page's own <c>childNodes</c>, <c>tagName</c> and
-    /// <c>getAttribute</c> (SECURITY.md L10), and trims with the captured
-    /// <c>String.prototype.trim</c>. Its regular expressions still run through the page's
-    /// <c>RegExp.prototype</c>.
+    /// <c>getAttribute</c> (SECURITY.md L10), and rewrites text and URLs with the helpers
+    /// there (<c>mdText</c>, <c>mdUrl</c>, <c>mdCollapse</c>, <c>mdQuote</c>, <c>trim</c>),
+    /// which use no regular expression and no page-replaceable <c>String.prototype</c> or
+    /// <c>RegExp.prototype</c> member.
     /// </summary>
     public const string HtmlToMarkdown = """
         (function() {
-            function escText(s, inLink) {
-                s = s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                return inLink ? s.replace(/[\\\[\]]/g, '\\$&') : s;
-            }
-            function safeUrl(url) {
-                var bare = url.replace(/[\u0000-\u0020\u007f]/g, '');
-                var scheme = /^([a-zA-Z][a-zA-Z0-9+.\-]*):/.exec(bare);
-                if (scheme && !/^(https?|mailto)$/i.test(scheme[1])) return null;
-                return h.trim(url).replace(/[\u0000-\u0020\u007f()<>]/g, function(c) {
-                    return '%' + ('0' + c.charCodeAt(0).toString(16).toUpperCase()).slice(-2);
-                });
-            }
             var h = __obscura_host.dom;
+            function escText(s, inLink) { return h.mdText(s, inLink); }
+            function safeUrl(url) { return h.mdUrl(url); }
             function toMd(el, depth) {
                 if (!el) return '';
                 var out = '';
@@ -60,7 +51,7 @@ public static class MarkdownScript
                 var cn = h.get(el, 'childNodes') || [];
                 var childDepth = tag === 'a' ? depth + 1 : depth;
                 for (var i = 0; i < cn.length; i++) children += toMd(cn[i], childDepth);
-                children = children.replace(/\n{3,}/g, '\n\n');
+                children = h.mdCollapse(children);
                 switch(tag) {
                     case 'h1': return '\n# ' + h.trim(children) + '\n\n';
                     case 'h2': return '\n## ' + h.trim(children) + '\n\n';
@@ -75,7 +66,7 @@ public static class MarkdownScript
                     case 'em': case 'i': return '*' + children + '*';
                     case 'code': return '`' + children + '`';
                     case 'pre': return '\n```\n' + children + '\n```\n\n';
-                    case 'blockquote': return '\n> ' + h.trim(children).replace(/\n/g, '\n> ') + '\n\n';
+                    case 'blockquote': return '\n> ' + h.mdQuote(h.trim(children)) + '\n\n';
                     case 'a':
                         var href = safeUrl(h.getAttribute(el, 'href') || '');
                         if (href && h.trim(children)) return '[' + h.trim(children) + '](' + href + ')';
@@ -111,7 +102,7 @@ public static class MarkdownScript
             }
             var body = h.body() || h.documentElement();
             var md = toMd(body, 0);
-            md = h.trim(md.replace(/\n{3,}/g, '\n\n'));
+            md = h.trim(h.mdCollapse(md));
             return md;
         })()
         """;

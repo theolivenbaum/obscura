@@ -166,4 +166,90 @@ public sealed class PageTamperingTests
         Assert.Equal("true", Eval(runtime, "document.getElementById('c').checked"));
         Assert.Equal("0", Eval(runtime, "__tokens.length"));
     }
+
+    /// <summary>
+    /// ClearScript calls a function taken off an object through its own JavaScript
+    /// (<c>EngineInternal.invokeMethod</c>), which uses the page's <c>Array.from</c> and
+    /// <c>Function.prototype.apply</c>. The by-value serializer used to be called that way,
+    /// so a page replacing them saw every host result and chose what the host read.
+    /// </summary>
+    [Fact]
+    public void HostResultsDoNotPassThroughThePagesApply()
+    {
+        using var fixture = RuntimeFixture.Setup(Page);
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("tamper", """
+            globalThis.__seen = [];
+            Function.prototype.apply = function () { __seen[__seen.length] = 'apply'; return '{"forged":true}'; };
+            Array.from = function () { __seen[__seen.length] = 'from'; return []; };
+            """);
+        Assert.Equal("""{"a":[1,2],"s":"x"}""", runtime.EvaluateHost("({ a: [1, 2], s: 'x' })")!.ToJsonString());
+        Assert.Equal("""{"a":1}""", runtime.Evaluate("({ a: 1 })")!.ToJsonString());
+        using var frame = FrameRealm.Create(runtime, 1, 0, "https://child.example/f", "<html><body></body></html>");
+        Assert.NotNull(frame);
+        frame.ExecuteScript("Function.prototype.apply = function () { return '[]'; }; Array.from = () => [];");
+        Assert.Equal("""{"b":2}""", frame.Evaluate("({ b: 2 })")!.ToJsonString());
+        Assert.Equal("[]", Eval(runtime, "__seen"));
+    }
+
+    /// <summary>
+    /// The markdown the host extracts (LP.getMarkdown, <c>--dump markdown</c>) is rewritten
+    /// without the page's <c>String.prototype.replace</c> or <c>RegExp.prototype</c>: a page
+    /// replacing them could otherwise put a live <c>javascript:</c> link or raw markup into
+    /// what an agent reads.
+    /// </summary>
+    [Fact]
+    public void MarkdownIgnoresThePagesStringAndRegExp()
+    {
+        const string html = """
+            <html><body><h1>T &lt;b&gt;</h1>
+            <p><a href="javascript:alert(1)">bad</a> <a href="https://ok.example/a b">good [x]</a></p>
+            <blockquote>one<br>two</blockquote><p>a</p><p></p><p></p><p>b</p></body></html>
+            """;
+        using var plain = RuntimeFixture.Setup(html);
+        string expected = plain.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        Assert.Contains("[good \\[x\\]](https://ok.example/a%20b)", expected, StringComparison.Ordinal);
+        Assert.DoesNotContain("javascript:", expected, StringComparison.Ordinal);
+        Assert.Contains("# T &lt;b&gt;", expected, StringComparison.Ordinal);
+        Assert.Contains("> one\n> two", expected, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n\n\n", expected, StringComparison.Ordinal);
+
+        using var tampered = RuntimeFixture.Setup(html);
+        tampered.Runtime.ExecuteScript("tamper", """
+            String.prototype.replace = function () { return String(this); };
+            String.prototype.trim = function () { return String(this); };
+            String.prototype.toLowerCase = function () { return 'https'; };
+            String.prototype.slice = function () { return ''; };
+            RegExp.prototype.exec = () => null;
+            RegExp.prototype.test = () => true;
+            RegExp.prototype[Symbol.replace] = function (s) { return String(s); };
+            """);
+        Assert.Equal(expected, tampered.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// An isolated world's focus, clicks and form state go through the page realm's half of
+    /// the bridge, which parsed the world's request with the page's
+    /// <c>String.prototype.indexOf</c> and <c>slice</c>: Puppeteer's focus() and type() did
+    /// nothing on a page that replaced either.
+    /// </summary>
+    [Fact]
+    public async Task WorldBridgeIgnoresThePagesStringMethods()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><input id=f></body></html>");
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("tamper", """
+            String.prototype.indexOf = () => -1;
+            String.prototype.slice = () => 'tampered';
+            String.prototype.split = () => ['tampered'];
+            String.prototype.charAt = () => 'u';
+            """);
+        var world = new IsolatedWorldTarget(100, "w", []);
+        var focus = await runtime.EvaluateForCdpWithTimeoutAsync(
+            "document.getElementById('f').focus(); document.getElementById('f').value = 'typed'; document.getElementById('f').value",
+            true, true, 5_000, world);
+        Assert.False(focus.Thrown, focus.Description);
+        Assert.Equal("typed", focus.Value?.GetValue<string>());
+        Assert.Equal("\"f|typed\"", Eval(runtime, "document.activeElement.id + '|' + document.getElementById('f').value"));
+    }
 }

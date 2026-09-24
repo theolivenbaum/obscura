@@ -22,14 +22,28 @@ public static class BootstrapLoader
     /// </summary>
     internal static bool ExposeOpsForTests { get; set; }
 
-    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<V8ScriptEngine, ScriptObject> Stringifiers = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<V8ScriptEngine, Serializer> Stringifiers = new();
+
+    /// <summary>The object holding a realm's by-value serializer, and the member's name.</summary>
+    private sealed record Serializer(ScriptObject Holder, string Member);
 
     /// <summary>
-    /// <paramref name="engine"/>'s by-value serializer as bootstrap.js left it, or null for
-    /// an engine that never ran it.
+    /// Serializes <paramref name="value"/> with <paramref name="engine"/>'s by-value
+    /// serializer as bootstrap.js left it, or its current <c>JSON.stringify</c> for an engine
+    /// that never ran bootstrap.js.
     /// </summary>
-    internal static ScriptObject? StringifyOf(V8ScriptEngine engine) =>
-        Stringifiers.TryGetValue(engine, out var stringify) ? stringify : null;
+    /// <remarks>
+    /// Called as a method of the object that holds it, never as a function taken off that
+    /// object: ClearScript invokes a function obtained through <c>GetProperty</c> by way of
+    /// its own <c>EngineInternal.invokeMethod</c>, which calls <c>Array.from</c> and
+    /// <c>Function.prototype.apply</c> as the page left them, so a page replacing either saw
+    /// every host result on its way out and chose what the host read (SECURITY.md L10).
+    /// <c>InvokeMethod</c> calls the member natively.
+    /// </remarks>
+    internal static object? Stringify(V8ScriptEngine engine, object? value) =>
+        Stringifiers.TryGetValue(engine, out var serializer)
+            ? serializer.Holder.InvokeMethod(serializer.Member, value)
+            : ((ScriptObject)engine.Global.GetProperty("JSON")).InvokeMethod("stringify", value);
 
     public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps, uint frameId = 0) =>
         Install(engine, bindOps, frameId, isolatedWorld: false);
@@ -124,11 +138,15 @@ public static class BootstrapLoader
         // it (SECURITY.md L10).
         // It is bootstrap's own by-value walk, which never calls a page's toJSON (see
         // _hostValueJson), and JSON.stringify as bootstrap left it only where that is absent.
-        if (shim.HostHelpers?.GetProperty("dom") is ScriptObject dom
-            && (dom.GetProperty("value") as ScriptObject ?? dom.GetProperty("stringify") as ScriptObject)
-                is { } stringify)
+        if (shim.HostHelpers?.GetProperty("dom") is ScriptObject dom)
         {
-            Stringifiers.AddOrUpdate(engine, stringify);
+            string? member = dom.GetProperty("value") is ScriptObject ? "value"
+                : dom.GetProperty("stringify") is ScriptObject ? "stringify"
+                : null;
+            if (member is not null)
+            {
+                Stringifiers.AddOrUpdate(engine, new Serializer(dom, member));
+            }
         }
 
         // Drop the op-table handoff and `Deno` itself, exactly as

@@ -840,9 +840,7 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         try
         {
-            var json = BootstrapLoader.StringifyOf(engine) is { } stringify
-                ? stringify.InvokeAsFunction(value)
-                : ((ScriptObject)engine.Global.GetProperty("JSON")).InvokeMethod("stringify", value);
+            var json = BootstrapLoader.Stringify(engine, value);
             return json as string;
         }
         catch (ScriptEngineException)

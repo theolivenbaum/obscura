@@ -1069,7 +1069,10 @@ internal static partial class PageHelpers
     /// page-visible <c>__obscura_linkedStylesheetCss</c> / <c>__obscura_setLinkedStylesheetCss</c>).
     ///
     /// Run it with <see cref="Page.TryExecuteHost"/>: <c>registerLinkedStylesheet</c> is a host
-    /// helper. DEVIATION from upstream 04418a5, which calls a page-visible
+    /// helper, and the query, attribute writes and load event go through
+    /// <c>__obscura_host.dom</c> (SECURITY.md L10), where upstream's script calls the page's
+    /// <c>querySelectorAll</c>, <c>Function.prototype.call</c>, <c>String.prototype.trim</c>,
+    /// <c>setAttribute</c>, <c>dispatchEvent</c> and <c>Event</c>. DEVIATION from upstream 04418a5, which calls a page-visible
     /// <c>globalThis.__obscura_registerLinkedStylesheet</c> and deletes it once static
     /// registration is done (never in a frame realm).
     ///
@@ -1083,24 +1086,25 @@ internal static partial class PageHelpers
         string response = responseUrl is null ? "undefined" : JsonSerializer.Serialize(responseUrl);
         return $$"""
             (function() {
-                        var links = document.querySelectorAll('link[rel~="stylesheet"]');
+                        var h = __obscura_host.dom;
+                        var links = h.querySelectorAll(h.document(), 'link[rel~="stylesheet"]');
                         var link = links[{{linkIndex.ToString(CultureInfo.InvariantCulture)}}];
                         if (!link) return;
                         function syncSheet() {
-                            if (Object.prototype.hasOwnProperty.call(link, 'media')) {
-                                var wanted = String(link.media || '').trim();
-                                if (wanted) link.setAttribute('media', wanted);
-                                else link.removeAttribute('media');
+                            if (h.hasOwn(link, 'media')) {
+                                var wanted = h.trim(link.media || '');
+                                if (wanted) h.call(link, 'setAttribute', ['media', wanted]);
+                                else h.call(link, 'removeAttribute', ['media']);
                             }
-                            if (Object.prototype.hasOwnProperty.call(link, 'disabled')) {
-                                if (link.disabled) link.setAttribute('disabled', '');
-                                else link.removeAttribute('disabled');
+                            if (h.hasOwn(link, 'disabled')) {
+                                if (link.disabled) h.call(link, 'setAttribute', ['disabled', '']);
+                                else h.call(link, 'removeAttribute', ['disabled']);
                             }
                         }
 
                         syncSheet();
                         __obscura_host.registerLinkedStylesheet(link, undefined, {{response}});
-                        try { link.dispatchEvent(new Event('load')); }
+                        try { h.dispatch(link, h.event('Event', 'load')); }
                         finally { syncSheet(); }
                     })()
             """;

@@ -38,6 +38,7 @@ const _mapHas = _uncurry(Map.prototype.has);
 const _mapDelete = _uncurry(Map.prototype.delete);
 const _setHas = _uncurry(Set.prototype.has);
 const _weakMapGet = _uncurry(WeakMap.prototype.get);
+const _weakMapSet = _uncurry(WeakMap.prototype.set);
 const _stringSlice = _uncurry(String.prototype.slice);
 const _stringToLowerCase = _uncurry(String.prototype.toLowerCase);
 const _stringCharAt = _uncurry(String.prototype.charAt);
@@ -57,6 +58,10 @@ const _String = String;
 const _Number = Number;
 const _parseFloatAtBoot = parseFloat;
 const _promiseThenAtBoot = Promise.prototype.then;
+const _promiseResolveFn = Promise.resolve;
+const _PromiseAtBoot = Promise;
+const _promiseResolveAtBoot = (value) => _reflectApply(_promiseResolveFn, _PromiseAtBoot, [value]);
+const _MathRound = Math.round;
 const _MathMin = Math.min;
 const _MathMax = Math.max;
 // The shim's own event classes. DEVIATION from crates/obscura-js/js/bootstrap.js, whose
@@ -300,14 +305,14 @@ let _realmIsolatedWorld = false;
 let _realmDocument = null;
 
 const _dom = (cmd, a1, a2) => {
-  const result = __obscuraCore.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
+  const result = __obscuraCore.ops.op_dom(cmd, _String(a1 ?? ""), _String(a2 ?? ""), _realmFrameId);
   // DEVIATION (SECURITY.md M7): the host refused a mutation that would take the
   // document past its byte budget, and changed nothing. Rust has no budget;
   // Chromium would run out of memory and kill the renderer.
   if (result === "quota-exceeded") {
     throw new DOMException("The document exceeded its memory budget.", "QuotaExceededError");
   }
-  if (_DOM_MUTATION_COMMANDS.has(cmd)) {
+  if (_setHas(_DOM_MUTATION_COMMANDS, cmd)) {
     _domMutationEpoch++;
     // Resize observation is tied to rendering-invalidating DOM work. The
     // hook is installed later in bootstrap, before page script can run.
@@ -324,7 +329,7 @@ const _dom = (cmd, a1, a2) => {
   // Native mutation ops report their verified postcondition. Only a real tree
   // change invalidates ancestry caches; rejected cycles and invalid roots must
   // not make JS believe a move happened.
-  if (result === "true" && _DOM_TREE_MUTATION_COMMANDS.has(cmd)) {
+  if (result === "true" && _setHas(_DOM_TREE_MUTATION_COMMANDS, cmd)) {
     _treeMutationEpoch++;
   }
   return result;
@@ -850,6 +855,29 @@ const _domParse = (cmd, a1, a2) => { try { return _JSONparse(_dom(cmd, a1, a2));
 // Class token splitting (classList, getElementsByClassName) uses exactly this set.
 // JS \s is wider (U+000B, U+00A0, U+2028, etc.), so it must not be used here.
 const _ASCII_WS = /[ \t\n\f\r]+/;
+// Whether `token` is one of the ASCII-whitespace-separated tokens of `text`, without
+// String.prototype.split or a regular expression (SECURITY.md L10).
+function _hasAsciiToken(text, token) {
+  let start = 0;
+  for (let i = 0; i <= text.length; i++) {
+    const c = i < text.length ? _stringCharCodeAt(text, i) : 32;
+    if (c === 32 || c === 9 || c === 10 || c === 12 || c === 13) {
+      if (i > start && _stringSlice(text, start, i) === token) return true;
+      start = i + 1;
+    }
+  }
+  return false;
+}
+// The iframe element's frame state, reset for a new load (Element.prototype._resetIframeFrame,
+// which page script can replace, delegates here).
+function _resetIframeState(el) {
+  const old = _weakMapGet(_iframeStates, el);
+  if (old && old.frameId) {
+    delete _frameElements[old.frameId];
+    delete _frameWindows[old.frameId];
+  }
+  return _blankIframeState(el);
+}
 function _splitAsciiWhitespace(s) {
   // WebIDL DOMString coercion: null -> "null", undefined -> "undefined".
   return String(s).split(_ASCII_WS).filter(Boolean);
@@ -4457,30 +4485,31 @@ class Element extends Node {
   set src(v) {
     this.setAttribute("src", v);
   }
-  _resetIframeFrame() {
-    const old = _iframeStates.get(this);
-    if (old && old.frameId) {
-      delete _frameElements[old.frameId];
-      delete _frameWindows[old.frameId];
-    }
-    return _blankIframeState(this);
-  }
+  _resetIframeFrame() { return _resetIframeState(this); }
   _loadIframeSrc(url) {
+    // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the URL op,
+    // the frame-state reset, the sandbox attribute, the geometry and the promise chain
+    // below use the built-ins bootstrap captured, not `url.includes`, the page's URL
+    // global, this._resetIframeFrame, String.prototype.split, getBoundingClientRect or
+    // Promise.prototype.then. The host reaches this through __obscura_host.navigateFrame
+    // and the parser sweep in page init.
+    url = _String(url);
     let fullUrl = url;
-    if (!url.includes('://')) {
-      try { fullUrl = new URL(url, _domParse("document_url") || "about:blank").href; } catch(e) {}
+    if (_stringIndexOf(url, '://') < 0) {
+      const parsed = _urlParseOp(url, _domParse("document_url") || "about:blank");
+      if (parsed) fullUrl = parsed.href;
     }
     // Both the src setter and the parser sweep in __obscura_init reach here, so
     // a frame the page assigned before init must not be fetched a second time.
-    const previous = _iframeStates.get(this);
+    const previous = _weakMapGet(_iframeStates, this);
     if (previous && previous.loadingUrl === fullUrl) return;
-    const st = this._resetIframeFrame();
+    const st = _resetIframeState(this);
     st.loadingUrl = fullUrl;
     const el = this;
     // A sandbox without allow-same-origin gives the frame an opaque origin. Sandboxing
     // only ever takes access away, so the host can take the flag from here.
-    const sandboxed = el.hasAttribute('sandbox')
-      && !String(el.getAttribute('sandbox') || '').toLowerCase().split(/\s+/).includes('allow-same-origin');
+    const sandbox = _hostDom.getAttribute(el, 'sandbox');
+    const sandboxed = sandbox !== null && !_hasAsciiToken(_stringToLowerCase(_String(sandbox)), 'allow-same-origin');
     // Upstream 04418a5: the frame loads through the op directly rather than the
     // page's own fetch(), and the document's origin is the response's final URL,
     // not `src`. A same-origin src that redirected cross-origin used to leave a
@@ -4496,11 +4525,11 @@ class Element extends Node {
     // from its own record of the load (op_frame_document_from_load), so neither the URL
     // the frame runs as nor its HTML passes through anything page script can reach. The
     // frame's state lives in _iframeStates, not in expandos a page could read or rewrite.
-    Promise.resolve(__obscuraCore.ops.op_fetch_url(
-      fullUrl, 'GET', '{}', new Uint8Array(0), _referrerArgFor(el),
+    const loaded = _reflectApply(_promiseThenAtBoot, _promiseResolveAtBoot(__obscuraCore.ops.op_fetch_url(
+      fullUrl, 'GET', '{}', new _Uint8ArrayAtBoot(0), _referrerArgFor(el),
       'navigate', 'include', true
-    )).then(raw => {
-      if (_iframeStates.get(el) !== st) return;
+    )), [raw => {
+      if (_weakMapGet(_iframeStates, el) !== st) return;
       const response = _JSONparse(raw);
       if (!response.blocked && response.status > 0 && response.status < 400) {
         const sameOrigin = response.sameOrigin === true && !sandboxed;
@@ -4512,7 +4541,7 @@ class Element extends Node {
         // own and runs the scripts that came with it (issue #600). The shim
         // document below stays: it is what the parent reads through
         // contentDocument, and it is empty unless the frame is same-origin.
-        const box = el.getBoundingClientRect();
+        const box = _hostDom.rect(el) || { width: 0, height: 0 };
         // The frame's viewport is the iframe's content box, as in Chromium (a 400x300
         // iframe with its default 2px border is a 400x300 viewport). DEVIATION from
         // crates/obscura-js/js/bootstrap.js, which passes the border box.
@@ -4526,7 +4555,7 @@ class Element extends Node {
         const contentHeight = box.height - edges('borderTopWidth', 'borderBottomWidth', 'paddingTop', 'paddingBottom');
         st.frameId = typeof response.bodyToken === 'number'
           ? (__obscuraCore.ops.op_frame_document_from_load(
-              response.bodyToken, Math.round(contentWidth) || 300, Math.round(contentHeight) || 150,
+              response.bodyToken, _MathRound(contentWidth) || 300, _MathRound(contentHeight) || 150,
               sandboxed) >>> 0)
           : 0;
         st.doc = new _IframeDocument(html, loadedUrl, el);
@@ -4546,15 +4575,16 @@ class Element extends Node {
       // addEventListener('load', ...) listeners all run. Calling el.onload()
       // directly bypasses listeners registered via addEventListener.
       _dispatch(el, new Event('load'));
-    }).catch(() => {
-      if (_iframeStates.get(el) !== st) return;
+    }]);
+    _reflectApply(_promiseThenAtBoot, loaded, [undefined, () => {
+      if (_weakMapGet(_iframeStates, el) !== st) return;
       _failIframeLoad(el, st, fullUrl, sandboxed);
       _dispatch(el, new Event('load'));
-    });
+    }]);
   }
   get contentDocument() {
     if (this.localName !== 'iframe') return undefined;
-    const st = _iframeStates.get(this) || _blankIframeState(this);
+    const st = _weakMapGet(_iframeStates, this) || _blankIframeState(this);
     // DEVIATION from crates/obscura-js/js/bootstrap.js, which judges this with the page's
     // URL global against a page-writable _iframeLoadedUrl expando (SECURITY.md C2).
     if (!_iframeSameOrigin(st)) return null;
@@ -4564,7 +4594,7 @@ class Element extends Node {
   }
   get contentWindow() {
     if (this.localName !== 'iframe') return undefined;
-    let st = _iframeStates.get(this);
+    let st = _weakMapGet(_iframeStates, this);
     if (!st) {
       if (this.parentNode === null) return null;
       st = _blankIframeState(this);
@@ -8026,10 +8056,12 @@ function _normalizeMethod(method, where) {
 // validate and carry what script asked for. See FetchReferrer.cs for the op argument.
 const _REFERRER_POLICIES = new Set(['', 'no-referrer', 'no-referrer-when-downgrade', 'origin',
   'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url']);
+// The token helpers below use the built-ins as bootstrap found them: the host's CDP click
+// on a link reaches them through __obscura_host.navigate (SECURITY.md L10).
 function _referrerPolicyToken(value) {
   if (value === null || value === undefined) return '';
-  const lower = String(value).toLowerCase();
-  return _REFERRER_POLICIES.has(lower) ? lower : '';
+  const lower = _stringToLowerCase(_String(value));
+  return _setHas(_REFERRER_POLICIES, lower) ? lower : '';
 }
 function _requestReferrerPolicy(value, where) {
   const policy = String(value);
@@ -8049,14 +8081,14 @@ function _referrerArg(policy, referrer) {
 }
 function _referrerArgFor(el) {
   let policy = '';
-  try { policy = _referrerPolicyToken(el.getAttribute('referrerpolicy')); } catch (e) {}
+  try { policy = _referrerPolicyToken(_hostDom.getAttribute(el, 'referrerpolicy')); } catch (e) {}
   return _referrerArg(policy, 'about:client');
 }
 function _linkReferrerPolicy(link) {
   try {
-    const rel = String(link.getAttribute('rel') || '').toLowerCase().split(/[\t\n\f\r ]+/);
-    if (rel.includes('noreferrer')) return 'no-referrer';
-    return _referrerPolicyToken(link.getAttribute('referrerpolicy'));
+    const rel = _stringToLowerCase(_String(_hostDom.getAttribute(link, 'rel') || ''));
+    if (_hasAsciiToken(rel, 'noreferrer')) return 'no-referrer';
+    return _referrerPolicyToken(_hostDom.getAttribute(link, 'referrerpolicy'));
   } catch (e) { return ''; }
 }
 // A CORS-safelisted method after Fetch's method normalization.
@@ -14548,7 +14580,7 @@ function _blankIframeState(el) {
     doc, win: null,
   };
   st.win = _makeIframeWindow(el, doc, 'about:blank');
-  _iframeStates.set(el, st);
+  _weakMapSet(_iframeStates, el, st);
   return st;
 }
 
@@ -14585,7 +14617,7 @@ function _iframeSameOrigin(st) {
 class _CrossOriginFrameWindow {
   postMessage(data, targetOrigin, _transfer) {
     const el = _crossOriginWindowElements.get(this);
-    const st = el && _iframeStates.get(el);
+    const st = el && _weakMapGet(_iframeStates, el);
     if (st && st.frameId) _sendRealmMessage(st.frameId, data, targetOrigin);
   }
   get self() { return this; }
@@ -14650,7 +14682,7 @@ function _liveFrameIds() {
 // Host-only (__obscura_host.forgetFrame); upstream's global __obscura_forgetFrame.
 function _forgetFrame(frameId) {
   const element = _frameElements[frameId];
-  const st = element && _iframeStates.get(element);
+  const st = element && _weakMapGet(_iframeStates, element);
   if (st && st.frameId === frameId) st.frameId = 0;
   delete _frameElements[frameId];
   delete _frameObjects[frameId];
@@ -14713,7 +14745,7 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
 // public interface is visible to anything that walks it, and real Chrome has no
 // such member.
 function _frameObjectsFor(element) {
-  const frameId = _iframeStates.get(element)?.frameId;
+  const frameId = _weakMapGet(_iframeStates, element)?.frameId;
   if (!frameId) return null;
   const entry = _frameObjects[frameId];
   return entry || null;
@@ -14884,7 +14916,7 @@ class _IframeWindow {
     // the document inside its iframe. A frame that has not loaded yet has no
     // browsing context to receive anything.
     const owner = _iframeWindowOwners.get(this);
-    const st = owner && _iframeStates.get(owner);
+    const st = owner && _weakMapGet(_iframeStates, owner);
     if (!st || st.win !== this || !st.frameId) return;
     _sendRealmMessage(st.frameId, data, targetOrigin);
   }
@@ -18814,24 +18846,32 @@ _documentQuerySelector = Document.prototype.querySelector;
 // script does, so a page that replaces a prototype method does not change what the
 // world's call does. The Rust engine has no isolated worlds: its CDP contexts all run in
 // the page realm.
+// The encoding and the node-id lists use the built-ins bootstrap captured: the page realm
+// decodes what a world sends it, and a page's String.prototype must not change that
+// (SECURITY.md L10).
 const _worldValueEncode = (v) => v === undefined ? 'u' : v === null ? 'n'
   : typeof v === 'boolean' ? (v ? 'b1' : 'b0')
-  : typeof v === 'number' ? 'd' + String(v) : 's' + String(v);
+  : typeof v === 'number' ? 'd' + _String(v) : 's' + _String(v);
 const _worldValueDecode = (s) => {
-  s = String(s);
-  switch (s.charAt(0)) {
+  s = _String(s);
+  switch (_stringCharAt(s, 0)) {
     case 'n': return null;
     case 'b': return s === 'b1';
-    case 'd': return Number(s.slice(1));
-    case 's': return s.slice(1);
+    case 'd': return _Number(_stringSlice(s, 1));
+    case 's': return _stringSlice(s, 1);
     default: return undefined;
   }
 };
 const _worldNidList = (csv) => {
-  const text = String(csv || '');
-  if (!text) return [];
+  const text = _String(csv || '');
   const out = [];
-  for (const part of text.split(',')) { const n = Number(part); if (n >= 0) out.push(n); }
+  let start = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i === text.length || text[i] === ',') {
+      if (i > start) { const n = _Number(_stringSlice(text, start, i)); if (n >= 0) out[out.length] = n; }
+      start = i + 1;
+    }
+  }
   return out;
 };
 const _worldEventClasses = ['PointerEvent', 'WheelEvent', 'MouseEvent', 'KeyboardEvent',
@@ -19008,13 +19048,16 @@ const _worldCall = (function () {
   for (const name of _worldEventClasses) {
     if (typeof globalThis[name] === 'function') eventClasses[name] = globalThis[name];
   }
+  // The page realm runs this for a world, so it parses with the built-ins bootstrap
+  // captured, not the page's String.prototype (SECURITY.md L10): a page that replaced
+  // String.prototype.slice broke focus(), clicks and form state in every world.
   return function worldCall(kind, nid, arg) {
-    kind = String(kind);
-    nid = Number(nid);
+    kind = _String(kind);
+    nid = _Number(nid);
     const node = nid >= 0 ? _wrap(nid) : null;
-    const colon = kind.indexOf(':');
-    const verb = colon < 0 ? kind : kind.slice(0, colon);
-    const name = colon < 0 ? '' : kind.slice(colon + 1);
+    const colon = _stringIndexOf(kind, ':');
+    const verb = colon < 0 ? kind : _stringSlice(kind, 0, colon);
+    const name = colon < 0 ? '' : _stringSlice(kind, colon + 1);
     switch (verb) {
       case 'map-get':
         return maps[name] ? _worldValueEncode(maps[name][nid]) : 'u';
@@ -19029,22 +19072,22 @@ const _worldCall = (function () {
         return '';
       case 'call':
         if (node && typeof methods[name] === 'function') {
-          apply(methods[name], node, arg ? parse(String(arg)) : []);
+          apply(methods[name], node, arg ? parse(_String(arg)) : []);
         }
         return '';
       case 'focused': {
         const focused = _getFocused();
-        return focused && typeof focused._nid === 'number' ? String(focused._nid) : '';
+        return focused && typeof focused._nid === 'number' ? _String(focused._nid) : '';
       }
       case 'unfocus':
         _setFocused(null);
         return '';
       case 'dispatch': {
         if (!node) return '1';
-        const spec = parse(String(arg));
+        const spec = parse(_String(arg));
         const Ctor = eventClasses[spec.c] || eventClasses.Event;
         let event;
-        try { event = new Ctor(String(spec.t), spec.i); } catch (_) { event = new eventClasses.Event(String(spec.t), spec.i); }
+        try { event = new Ctor(_String(spec.t), spec.i); } catch (_) { event = new eventClasses.Event(_String(spec.t), spec.i); }
         // One dispatch for every realm: this realm's listeners and every world's, the
         // calling world's with its own event object, which `k` names (SECURITY.md M6).
         if (typeof spec.k === 'string') _worldEventKeySet(_worldEventKeys, event, spec.k);
@@ -19611,7 +19654,7 @@ const _hostDom = (function () {
     'textContent', 'outerHTML', 'childNodes', 'scrollWidth', 'scrollHeight', 'clientWidth',
     'clientHeight', 'scrollLeft', 'scrollTop', 'selectionStart', 'selectionEnd', 'click',
     'focus', 'setSelectionRange', 'scrollIntoView', 'scrollBy', 'setAttribute',
-    'requestSubmit', 'submit'];
+    'requestSubmit', 'submit', 'removeAttribute'];
   const snapshots = new WeakMap();
   const snapshotGet = _uncurry(WeakMap.prototype.get);
   const snapshot = (proto) => {
@@ -19755,6 +19798,76 @@ const _hostDom = (function () {
         out += text[i];
       }
       return max === undefined ? out : _stringSlice(out, 0, max);
+    },
+    // Port additions (SECURITY.md L10, M10): the string rewriting MarkdownScript does, by
+    // loops rather than String.prototype.replace, which dispatches to the page's
+    // RegExp.prototype[Symbol.replace] and exec: a page replacing them could otherwise
+    // put a live link or markup of its choosing into the markdown an agent reads.
+    // `<` and `>` as entities, and inside link text `\`, `[` and `]` backslash-escaped.
+    mdText: (s, inLink) => {
+      const text = _String(s);
+      let out = '';
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (c === '<') out += '&lt;';
+        else if (c === '>') out += '&gt;';
+        else if (inLink && (c === '\\' || c === '[' || c === ']')) out += '\\' + c;
+        else out += c;
+      }
+      return out;
+    },
+    // A link destination: null for a scheme other than http, https or mailto (checked
+    // with C0 controls, space and DEL removed), else the trimmed URL with those and
+    // `(`, `)`, `<`, `>` percent-encoded.
+    mdUrl: (value) => {
+      const url = _String(value);
+      const hex = '0123456789ABCDEF';
+      const control = (c) => c <= 0x20 || c === 0x7f;
+      let bare = '';
+      for (let i = 0; i < url.length; i++) {
+        if (!control(_stringCharCodeAt(url, i))) bare += url[i];
+      }
+      const letter = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+      let end = -1;
+      if (bare.length && letter(_stringCharCodeAt(bare, 0))) {
+        for (let i = 1; i < bare.length; i++) {
+          const c = _stringCharCodeAt(bare, i);
+          if (c === 58) { end = i; break; }
+          if (!(letter(c) || (c >= 48 && c <= 57) || c === 43 || c === 46 || c === 45)) break;
+        }
+      }
+      if (end > 0) {
+        const scheme = _stringToLowerCase(_stringSlice(bare, 0, end));
+        if (scheme !== 'http' && scheme !== 'https' && scheme !== 'mailto') return null;
+      }
+      const trimmed = _stringTrim(url);
+      let out = '';
+      for (let i = 0; i < trimmed.length; i++) {
+        const c = _stringCharCodeAt(trimmed, i);
+        if (control(c) || c === 40 || c === 41 || c === 60 || c === 62) out += '%' + hex[c >> 4] + hex[c & 15];
+        else out += trimmed[i];
+      }
+      return out;
+    },
+    // Runs of three or more line feeds as two.
+    mdCollapse: (s) => {
+      const text = _String(s);
+      let out = '';
+      let run = 0;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (c === '\n') { if (++run <= 2) out += c; continue; }
+        run = 0;
+        out += c;
+      }
+      return out;
+    },
+    // Every line feed followed by `> `.
+    mdQuote: (s) => {
+      const text = _String(s);
+      let out = '';
+      for (let i = 0; i < text.length; i++) out += text[i] === '\n' ? '\n> ' : text[i];
+      return out;
     },
     hasOwn: (obj, key) => _objectHasOwn(obj, key),
     // A plain record for a host result, with no prototype for the page's
@@ -19945,7 +20058,7 @@ globalThis.__obscura_host_handoff = Object.freeze({
     [_objectKeys(_frameWindows).length, _objectKeys(_frameElements).length, _objectKeys(_frameObjects).length],
   // The frame id an iframe element is bound to; 0 when none. Closure state, see
   // _iframeStates.
-  frameIdOf: (element) => (_iframeStates.get(element)?.frameId || 0),
+  frameIdOf: (element) => (_weakMapGet(_iframeStates, element)?.frameId || 0),
   // Port additions (SECURITY.md M6, child-frame CDP contexts): the node id of the iframe
   // element that owns child frame `frameId` in this realm (DOM.getFrameOwner; -1 for
   // none), and the top-left of its content box in this realm's viewport, [x, y], which is

@@ -385,10 +385,7 @@ public sealed class FrameRealm : IDisposable
     public JsonNode? Evaluate(string expression) =>
         ParseJson(Run(() => Serialize(_engine.Evaluate(new DocumentInfo("<frame>"), expression))));
 
-    private object? Serialize(object? value) =>
-        BootstrapLoader.StringifyOf(_engine) is { } serializer
-            ? serializer.InvokeAsFunction(value)
-            : ((ScriptObject)_engine.Global.GetProperty("JSON")).InvokeMethod("stringify", value);
+    private object? Serialize(object? value) => BootstrapLoader.Stringify(_engine, value);
 
     private static JsonNode? ParseJson(string? json)
     {
