@@ -495,14 +495,26 @@ internal static class DomSubgridPasses
 
         List<DeferredCyclicInlineSize> deferred = [];
 
-        foreach ((NodeId id, int slot, DeferredCyclicInlineSourceKind kind, string? expression, float percent)
-            in candidates)
+        // The flex item an expression's percentage cycles through depends only on where the
+        // walk starts, so it is memoized per node: every candidate used to walk its whole
+        // ancestor chain, O(n x depth) on nested tables (1,500 levels spent 640 ms here).
+        Dictionary<NodeId, NodeId?> cyclicItems = [];
+        List<NodeId> walked = [];
+        NodeId? CyclicFlexItem(NodeId? start)
         {
-            // Start at the expression's containing-box chain, not the sized node itself.
-            NodeId? candidate = DomTraversal.RenderedParent(tree, id);
-            NodeId? flexItem = null;
+            walked.Clear();
+            NodeId? found = null;
+            NodeId? candidate = start;
             while (candidate is { } item)
             {
+                if (cyclicItems.TryGetValue(item, out NodeId? known))
+                {
+                    found = known;
+                    break;
+                }
+
+                walked.Add(item);
+                NodeId? flexItem = null;
                 NodeId? parent = DomTraversal.RenderedParent(tree, item);
                 while (parent is { } parentId)
                 {
@@ -546,11 +558,26 @@ internal static class DomSubgridPasses
 
                 if (flexItem is not null)
                 {
+                    found = flexItem;
                     break;
                 }
 
                 candidate = DomTraversal.RenderedParent(tree, item);
             }
+
+            foreach (NodeId node in walked)
+            {
+                cyclicItems[node] = found;
+            }
+
+            return found;
+        }
+
+        foreach ((NodeId id, int slot, DeferredCyclicInlineSourceKind kind, string? expression, float percent)
+            in candidates)
+        {
+            // Start at the expression's containing-box chain, not the sized node itself.
+            NodeId? flexItem = CyclicFlexItem(DomTraversal.RenderedParent(tree, id));
 
             if (flexItem is not { } resolvedFlexItem)
             {
@@ -603,6 +630,14 @@ internal static class DomSubgridPasses
                 {
                     case 0:
                         style.Width = value;
+
+                        // A definite width can make this node a definite flex item for the
+                        // walks after it, which the memo has not seen.
+                        if (value.Kind == DimensionKind.Px)
+                        {
+                            cyclicItems.Clear();
+                        }
+
                         break;
                     case 2:
                         style.MinWidth = value;

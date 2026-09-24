@@ -456,6 +456,17 @@ public sealed class TaffyTree<TNodeContext>
         TreeMeasureFunction<TNodeContext> measureFunction) =>
         Compute.ComputeRootLayout(new TaffyView(this, measureFunction), nodeId, availableSpace);
 
+    /// <summary>
+    /// The size <see cref="ComputeUnroundedLayoutWithMeasure"/> would give the node, computed
+    /// without laying it out: no stored layout changes. Not in vendor/taffy; see
+    /// <see cref="Compute.MeasureRootSize"/>.
+    /// </summary>
+    public Size<float> MeasureUnroundedWithMeasure(
+        NodeId nodeId,
+        Size<AvailableSpace> availableSpace,
+        TreeMeasureFunction<TNodeContext> measureFunction) =>
+        Compute.MeasureRootSize(new TaffyView(this, measureFunction), nodeId, availableSpace);
+
     /// <summary>Updates the stored layout of the provided node and its children.</summary>
     public void ComputeLayout(NodeId node, Size<AvailableSpace> availableSpace) =>
         ComputeLayoutWithMeasure(
