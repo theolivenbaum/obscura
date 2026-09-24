@@ -205,7 +205,12 @@ public sealed partial class PocketCalculatorJsRuntime
         foreach (RenderResourceMiss request in requests)
         {
             // An <img>'s own referrerpolicy; else, for a URL an external sheet named, that
-            // sheet as referrer under its policy; else the document under its policy.
+            // sheet as referrer under its policy; else the document as referrer, under its
+            // policy for a content image and under the default for anything else. A miss
+            // without an image profile is a CSS image or font of the document's own CSS (an
+            // inline <style>, a style attribute, CSSOM), and Chromium 141 loads those under
+            // strict-origin-when-cross-origin whatever the document's header or meta says.
+            // Port addition (Rust has no referrer policy).
             Uri? referrer = null;
             ReferrerPolicy policy;
             if (!request.IsFont && imagePolicies is not null
@@ -220,7 +225,7 @@ public sealed partial class PocketCalculatorJsRuntime
             }
             else
             {
-                policy = documentPolicy;
+                policy = request.Profile is null ? ReferrerPolicies.Default : documentPolicy;
             }
             _ = LoadRenderResourceAsync(
                 request, initiator, httpClient, stealthClient, callbacks, generation, limiter, loads, policy, referrer);

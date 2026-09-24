@@ -142,6 +142,59 @@ public sealed class CssSubresourceReferrerTests
         Assert.Null(Referer(Request(server, "/csspol/bg.png")));
     }
 
+    // An inline <style> with an @import, an image and a font, a style="" image and an <img>.
+    private static string InlinePage(string imageOrigin, string head) =>
+        $"<!doctype html><html><head>{head}<style>@import \"/inl/imp.css\";"
+        + $" .bg{{width:10px;height:10px;background-image:url({imageOrigin}/inl/bg.png)}}"
+        + $" @font-face{{font-family:F;src:url({imageOrigin}/inl/f.woff)}} .f{{font-family:F}}</style></head><body>"
+        + $"{Body}<div style=\"width:10px;height:10px;background-image:url({imageOrigin}/inl/attr.png)\"></div>"
+        + $"<img src=\"{imageOrigin}/inl/img.png\"></body></html>";
+
+    [Fact]
+    public async Task InlineStyleImagesAndFontsUseTheDefaultPolicyNotTheDocuments()
+    {
+        // Chromium 141: meta no-referrer silences the <img> and the inline @import, while the
+        // inline sheet's image and font and the style attribute's image still carry the full
+        // same-origin URL (strict-origin-when-cross-origin).
+        using TestHttpServer server = Server(path => path switch
+        {
+            "/inl/page" => TestResponse.Html(InlinePage(string.Empty, "<meta name=referrer content=no-referrer>")),
+            _ => null,
+        });
+        using Page page = PageFixtures.NewPage("css-referrer-inline-meta");
+        await LoadAsync(page, $"{server.Origin}/inl/page?q=1");
+
+        Assert.Null(Referer(Request(server, "/inl/imp.css")));
+        Assert.Null(Referer(Request(server, "/inl/img.png")));
+        Assert.Equal($"{server.Origin}/inl/page?q=1", Referer(Request(server, "/inl/bg.png")));
+        Assert.Equal($"{server.Origin}/inl/page?q=1", Referer(Request(server, "/inl/f.woff")));
+        Assert.Equal($"{server.Origin}/inl/page?q=1", Referer(Request(server, "/inl/attr.png")));
+    }
+
+    [Fact]
+    public async Task InlineStyleImagesIgnoreTheDocumentsHeaderPolicy()
+    {
+        // Chromium 141: Referrer-Policy: unsafe-url gives the <img> the full URL cross-origin;
+        // the inline sheet's image and the style attribute's image send the origin only.
+        using TestHttpServer cross = Server(_ => null);
+        using TestHttpServer server = Server(path => path switch
+        {
+            "/inl/page" => TestResponse.Html(InlinePage(cross.Origin, string.Empty)) with
+            {
+                ExtraHeaders = [("Referrer-Policy", "unsafe-url")],
+            },
+            _ => null,
+        });
+        using Page page = PageFixtures.NewPage("css-referrer-inline-header");
+        await LoadAsync(page, $"{server.Origin}/inl/page?q=1");
+
+        Assert.Equal($"{server.Origin}/inl/page?q=1", Referer(Request(server, "/inl/imp.css")));
+        Assert.Equal($"{server.Origin}/inl/page?q=1", Referer(Request(cross, "/inl/img.png")));
+        Assert.Equal($"{server.Origin}/", Referer(Request(cross, "/inl/bg.png")));
+        Assert.Equal($"{server.Origin}/", Referer(Request(cross, "/inl/f.woff")));
+        Assert.Equal($"{server.Origin}/", Referer(Request(cross, "/inl/attr.png")));
+    }
+
     [Fact]
     public async Task ScriptInsertedSheetsReferTheirImportsAndImages()
     {
