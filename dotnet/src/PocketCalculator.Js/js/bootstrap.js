@@ -15,6 +15,9 @@ const __obscuraCore = globalThis.Deno.core;
 // (Chromium has none of them) and several of which it could call or overwrite. The host
 // reaches this object as `__obscura_host.vars` (HostScript); nothing on the global does.
 const _hostVars = { __proto__: null };
+// The globals V8 and ClearScript defined before this file ran: the language's own
+// built-ins, which _shapeGlobalObject leaves as V8 made them.
+const _engineGlobalNames = new Set(Object.getOwnPropertyNames(globalThis));
 // DEVIATION from crates/obscura-js/js/bootstrap.js: the privileged paths that read an op's
 // JSON (internal loads, frames) use JSON.parse as it was before any page script ran, not
 // whatever the page has put on the global since (SECURITY.md C3).
@@ -64,6 +67,13 @@ const _promiseResolveAtBoot = (value) => _reflectApply(_promiseResolveFn, _Promi
 const _MathRound = Math.round;
 const _MathMin = Math.min;
 const _MathMax = Math.max;
+// Chromium exposes SharedArrayBuffer only to a cross-origin isolated document, and this
+// engine has no cross-origin isolation, so the global goes (SECURITY.md I10). The shim
+// keeps V8's constructor for the checks it makes on buffers a page can still obtain
+// (shared WebAssembly memory). DEVIATION from crates/obscura-js/js/bootstrap.js, which
+// leaves V8's global in place.
+const _SharedArrayBufferAtBoot = typeof SharedArrayBuffer === 'function' ? SharedArrayBuffer : null;
+delete globalThis.SharedArrayBuffer;
 // The shim's own event classes. DEVIATION from crates/obscura-js/js/bootstrap.js, whose
 // internal `new Event(...)`, `new MouseEvent(...)` and the rest name the page-writable
 // globals, so a page that replaced window.MouseEvent broke el.click() and could hand
@@ -378,6 +388,15 @@ _nativeFns.add(_functionToString);
 // lookup still see that one (see EngineInternalHidden). The filter uses Set.prototype.has
 // and Array.prototype.push as bootstrap found them (SECURITY.md L10).
 let _hideList = null;
+// Chromium's named properties object (the global's WindowProperties prototype), set where
+// the Window interface is. It lists no names to reflection, as Chromium's does not: the
+// element ids it resolves are not its own properties there (SECURITY.md I10).
+let _namedPropertiesObject = null;
+// The window's frame indices (_syncFrameIndices): how many are defined, and the tree
+// epoch they were counted at. Ready once the Window interface is set up.
+let _frameIndexCount = 0;
+let _frameIndexEpoch = -1;
+let _frameIndicesReady = false;
 (function _hideInternalsFromReflection() {
   var _cache = null, _cacheLen = -1;
   function _set() {
@@ -390,7 +409,13 @@ let _hideList = null;
   }
   function _isGlobal(t) { return t === globalThis; }
   function _filter(t, names) {
+    if (t === _namedPropertiesObject && t !== null) {
+      var syms = [];
+      for (var j = 0; j < names.length; j++) { if (typeof names[j] === 'symbol') { syms[syms.length] = names[j]; } }
+      return syms;
+    }
     if (!_isGlobal(t)) { return names; }
+    _syncFrameIndices();
     var set = _set();
     if (!set) { return names; }
     var out = [];
@@ -408,6 +433,12 @@ let _hideList = null;
   define(Reflect, 'ownKeys', function ownKeys(t) { return _filter(t, _oOwnKeys(t)); });
   define(Object, 'keys', function keys(t) { return _filter(t, _oKeys(t)); });
   define(Object, 'getOwnPropertyDescriptors', function getOwnPropertyDescriptors(t) {
+    if (t === _namedPropertiesObject && t !== null) {
+      var named = _oGOPDs(t), nk = _oGOPN(named);
+      for (var k = 0; k < nk.length; k++) { delete named[nk[k]]; }
+      return named;
+    }
+    if (_isGlobal(t)) { _syncFrameIndices(); }
     var all = _oGOPDs(t);
     if (_isGlobal(t)) {
       var set = _set();
@@ -2218,6 +2249,20 @@ function _seedUnchangedConnection(node, connected) {
   node._treeConnected = !!connected;
   node._treeConnectedEpoch = _treeMutationEpoch;
 }
+
+// EventTarget is an interface of its own, Node's parent and the Window's ancestor
+// (Window.prototype -> WindowProperties -> EventTarget.prototype). DEVIATION from
+// crates/obscura-js/js/bootstrap.js, where EventTarget is Node itself, so
+// `new EventTarget()` made a Node, EventTarget.prototype carried the whole Node
+// surface and `window instanceof EventTarget` was false (SECURITY.md I10). The
+// methods here serve plain targets until _shapeGlobalObject makes them the one
+// entry for every node, the document and the window, as Chromium's are.
+class EventTarget {
+  addEventListener(type, callback) { _eventTargetAdd(this, type, callback, arguments[2]); }
+  removeEventListener(type, callback) { _eventTargetRemove(this, type, callback, arguments[2]); }
+  dispatchEvent(event) { return _eventTargetDispatch(this, event); }
+}
+_defineProperty(EventTarget.prototype, Symbol.toStringTag, { value: 'EventTarget', configurable: true });
 
 class Node {
   static ELEMENT_NODE = 1;
@@ -7339,11 +7384,11 @@ for (const _ev of [
   "abort","beforeprint","beforeunload","blur","cancel","canplay","canplaythrough",
   "change","click","close","contextmenu","cuechange","dblclick","drag","dragend",
   "dragenter","dragleave","dragover","dragstart","drop","durationchange","emptied",
-  "ended","error","focus","focusin","focusout","formdata","gotpointercapture",
+  "ended","error","focus","formdata","gotpointercapture",
   "hashchange","input","invalid","keydown","keypress","keyup","languagechange",
   "load","loadeddata","loadedmetadata","loadstart","lostpointercapture","message",
   "mousedown","mouseenter","mouseleave","mousemove","mouseout","mouseover","mouseup",
-  "offline","online","pagehide","pageshow","paste","pause","play","playing",
+  "offline","online","pagehide","pageshow","pause","play","playing",
   "pointercancel","pointerdown","pointerenter","pointerleave","pointermove",
   "pointerout","pointerover","pointerup","popstate","progress","ratechange",
   "rejectionhandled","reset","resize","scroll","seeked","seeking","select",
@@ -7355,6 +7400,17 @@ for (const _ev of [
   for (const _proto of [Document.prototype, Element.prototype]) {
     if (!(_on in _proto)) {
       Object.defineProperty(_proto, _on, { value: null, writable: true, configurable: true, enumerable: false });
+    }
+  }
+}
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose list above also has focusin,
+// focusout and paste, for all three targets. Chromium 141 has no onfocusin or onfocusout
+// anywhere, and oncopy, oncut and onpaste only on documents and elements (the
+// DocumentAndElementEventHandlers mixin), never on the window (SECURITY.md I10).
+for (const _ev of ["copy", "cut", "paste"]) {
+  for (const _proto of [Document.prototype, Element.prototype]) {
+    if (!(("on" + _ev) in _proto)) {
+      Object.defineProperty(_proto, "on" + _ev, { value: null, writable: true, configurable: true, enumerable: false });
     }
   }
 }
@@ -7401,46 +7457,86 @@ Object.defineProperty(Element.prototype, 'onload', {
   enumerable: false,
 });
 
-globalThis.Window = globalThis.Window || function Window() {};
-Object.defineProperty(globalThis.Window, Symbol.hasInstance, {
-  value(obj) { return obj === globalThis || (obj && obj.window === obj); },
-  configurable: true,
-});
-// A browser global is a Window object, not merely an object accepted by
-// `Window[Symbol.hasInstance]`. Framework environment gates (including Ember's)
-// also require the direct identity `self.constructor === Window`; leaving the
-// inherited Object constructor makes them enter their server-rendering path
-// and hand string selectors to DOM render operations.
-Object.defineProperty(globalThis, 'constructor', {
-  value: globalThis.Window,
-  writable: true,
-  configurable: true,
-  enumerable: false,
-});
+// The global's prototype chain, as Chromium's: window -> Window.prototype ->
+// WindowProperties -> EventTarget.prototype -> Object.prototype. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, where the global's prototype is Object.prototype,
+// `window.constructor` is an own property, Window is a plain constructible function
+// with a Symbol.hasInstance override, and fifty index getters sit on the global
+// whether or not a frame exists (SECURITY.md I10). Each of those told a page it was
+// not in Chromium: Object.getPrototypeOf(window) !== Window.prototype,
+// `window instanceof EventTarget` false, `'0' in window` true with no frame.
+// V8 lets the global's prototype be replaced; the global stays an ordinary object,
+// so Object.setPrototypeOf(window, x) succeeds where Chromium throws (its
+// prototype is immutable), and the chain can be broken by a page that does that.
+const Window = [function Window() {
+  throw new TypeError(new.target ? "Failed to construct 'Window': Illegal constructor" : 'Illegal constructor');
+}][0];
+_markNative(Window);
+_defineProperty(Window, 'prototype', { writable: false, enumerable: false, configurable: false });
+Object.setPrototypeOf(Window, EventTarget);
+// Chromium's named properties object: element ids and frame names resolve here, below
+// every Window.prototype member and own global and above EventTarget.prototype. It has no
+// constructor, and reflection lists none of its names (see _hideInternalsFromReflection).
+const _windowProperties = Object.create(EventTarget.prototype);
+_defineProperty(_windowProperties, Symbol.toStringTag, { value: 'WindowProperties', configurable: true });
+_namedPropertiesObject = _windowProperties;
+_frameIndicesReady = true;
+Object.setPrototypeOf(Window.prototype, _windowProperties);
+_defineProperty(Window.prototype, 'constructor', { value: Window, writable: true, enumerable: false, configurable: true });
+_defineProperty(Window.prototype, 'TEMPORARY', { value: 0, writable: false, enumerable: true, configurable: false });
+_defineProperty(Window.prototype, 'PERSISTENT', { value: 1, writable: false, enumerable: true, configurable: false });
+_defineProperty(Window.prototype, Symbol.toStringTag, { value: 'Window', configurable: true });
+Object.setPrototypeOf(globalThis, Window.prototype);
+globalThis.Window = Window;
 
-
-// Remove the static _iframeRegistry and replace with dynamic getters.
+// The document whose frames this window's indices and length count.
+function _frameCountDocument() { return _realmDocument || globalThis.document; }
+function _frameElementsNow() {
+  const doc = _frameCountDocument();
+  return doc ? _qsa(doc, 'iframe') : [];
+}
 Object.defineProperty(globalThis, 'length', {
   get() {
-    return _qsa(document, 'iframe').length;
+    const frames = _frameElementsNow();
+    _syncFrameIndices(frames.length);
+    return frames.length;
   },
   configurable: true,
   enumerable: true
 });
 
-// Since we cannot define a Proxy on globalThis easily, we'll define a reasonable number of indexed getters.
-for (let i = 0; i < 50; i++) {
-  Object.defineProperty(globalThis, i, {
-    get() {
-      const iframes = _qsa(document, 'iframe');
-      if (i < iframes.length) {
-        return iframes[i].contentWindow;
-      }
-      return undefined;
-    },
-    configurable: true,
-    enumerable: false
-  });
+// window[i]: an own property for each child frame that exists, as in Chromium, where
+// `'1' in window` is false and getOwnPropertyNames lists "0" with one frame. The
+// properties are kept in step with the document's iframes when a tree containing one is
+// inserted or removed, when `length` or the global's reflection is read, and when a
+// stale one is read. DEVIATION from Chromium: an accessor, where Chromium's is a
+// read-only data property (its WindowProxy answers from the frame tree).
+const _contentWindowAtBoot = _getOwnPropertyDescriptor(Element.prototype, 'contentWindow').get;
+function _syncFrameIndices(count) {
+  if (!_frameIndicesReady) return;
+  if (count === undefined) {
+    if (_frameIndexEpoch === _treeMutationEpoch) return;
+    count = _frameElementsNow().length;
+  }
+  _frameIndexEpoch = _treeMutationEpoch;
+  while (_frameIndexCount < count) {
+    const i = _frameIndexCount++;
+    _defineProperty(globalThis, i, {
+      get: _markNativeAs(_getOwnPropertyDescriptor({
+        get [i]() {
+          const frames = _frameElementsNow();
+          if (i < frames.length) return _reflectApply(_contentWindowAtBoot, frames[i], []);
+          _syncFrameIndices(frames.length);
+          return undefined;
+        },
+      }, i).get, 'function () { [native code] }'),
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  while (_frameIndexCount > count) {
+    delete globalThis[--_frameIndexCount];
+  }
 }
 
 // Navigator constructor so that typeof Navigator !== 'undefined' and
@@ -7553,7 +7649,8 @@ class NetworkInformation {
 _markNative(NetworkInformation);
 globalThis.NetworkInformation = NetworkInformation;
 
-globalThis.ContentIndex = class ContentIndex {};
+// DEVIATION from crates/obscura-js/js/bootstrap.js: no ContentIndex global. Chromium 141
+// does not expose it to a window (SECURITY.md I10).
 
 function _chromeMajor() {
   var m = (_hostVars.__obscura_ua || '').match(/Chrome\/(\d+)/);
@@ -7911,9 +8008,9 @@ _installWasmStreamingFallback();
   const nativeGrow = MP.grow;
   const bufferOf = _getOwnPropertyDescriptor(MP, 'buffer').get;
   const abLength = _getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
-  const sabLength = typeof SharedArrayBuffer === 'function'
-    ? _getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength').get : null;
-  const sabProto = sabLength ? SharedArrayBuffer.prototype : null;
+  const sabLength = typeof _SharedArrayBufferAtBoot === 'function'
+    ? _getOwnPropertyDescriptor(_SharedArrayBufferAtBoot.prototype, 'byteLength').get : null;
+  const sabProto = sabLength ? _SharedArrayBufferAtBoot.prototype : null;
   const isShared = (buffer) => sabProto !== null && _isPrototypeOf(sabProto, buffer);
   // Swap a member for its wrapper, keeping the attributes V8 gave it.
   const replace = (obj, name, value) => {
@@ -12650,7 +12747,7 @@ function _structuredClone(value, seen) {
     seen.set(value, copy);
     return copy;
   }
-  if (value instanceof SharedArrayBuffer) {
+  if (_SharedArrayBufferAtBoot && value instanceof _SharedArrayBufferAtBoot) {
     return value; // transferable, not copyable
   }
   if (value instanceof Date) return new Date(value.getTime());
@@ -12902,8 +12999,9 @@ globalThis.atob = globalThis.atob || ((s) => {
     value: History, writable: true, configurable: true,
   });
   const historyObject = new History(historyToken);
+  // Enumerable, as Chromium's window.history is (SECURITY.md I10).
   Object.defineProperty(globalThis, "history", {
-    value: historyObject, writable: true, configurable: true,
+    value: historyObject, writable: true, enumerable: true, configurable: true,
   });
   _bootHistory = _objectFreeze({
     __proto__: null,
@@ -13945,7 +14043,11 @@ for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
   _proto.prepend = Element.prototype.prepend;
   _proto.replaceChildren = Element.prototype.replaceChildren;
 }
-globalThis.EventTarget = Node;
+// DEVIATION from crates/obscura-js/js/bootstrap.js (`globalThis.EventTarget = Node`):
+// EventTarget is Node's parent interface, as in Chromium (SECURITY.md I10).
+Object.setPrototypeOf(Node, EventTarget);
+Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
+globalThis.EventTarget = EventTarget;
 globalThis.HTMLCollection = class HTMLCollection extends Array {
   item(i) {
     i = i >>> 0;
@@ -14061,16 +14163,25 @@ function _windowNamedValue(name) {
     : element;
 }
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which defines each name as an own,
+// enumerable, getter-only property of the global: getOwnPropertyNames(window) and
+// Object.keys(window) listed every element id, `var foo` kept the element, and
+// `window.foo = 1` was dropped. Chromium resolves them on the named properties object
+// (_windowProperties), so own globals and Window.prototype members shadow them, they
+// never shadow an EventTarget.prototype or Object.prototype member, and an assignment
+// makes an ordinary own property (SECURITY.md I10).
 function _ensureWindowNamedProperty(name) {
   name = String(name || "");
   if (!name || _windowNamedPropertyNames.has(name)) return;
-  // Existing own Window properties win over named elements.
-  if (_objectHasOwn(globalThis, name)) return;
+  if (name in EventTarget.prototype) return;
   try {
-    Object.defineProperty(globalThis, name, {
+    Object.defineProperty(_windowProperties, name, {
       get() { return _windowNamedValue(name); },
+      set(value) {
+        _defineProperty(this, name, { value, writable: true, enumerable: true, configurable: true });
+      },
       configurable: true,
-      enumerable: true,
+      enumerable: false,
     });
     _windowNamedPropertyNames.add(name);
   } catch (_error) {}
@@ -14079,22 +14190,28 @@ function _ensureWindowNamedProperty(name) {
 function _reconcileWindowNamedProperty(name) {
   if (!_windowNamedPropertyNames.has(name)) return;
   if (_windowNamedCandidates(name).length !== 0) return;
-  try { delete globalThis[name]; } catch (_error) {}
+  try { delete _windowProperties[name]; } catch (_error) {}
   _windowNamedPropertyNames.delete(name);
 }
 
+// The names a tree contributes. `hasFrame` on the result says whether the tree holds an
+// iframe, so the window's frame indices can follow it (_syncFrameIndices): the selector
+// takes every iframe for that, and an iframe without an id or a name adds no name.
 function _windowNamedNamesInTree(root) {
   const names = new Set();
+  names.hasFrame = false;
   if (!root) return names;
   if (root.nodeType === 1) {
     for (const name of _windowNamedSupportedNames(root)) names.add(name);
+    if (root.localName === "iframe") names.hasFrame = true;
   }
   if (typeof root.querySelectorAll === "function") {
     const elements = _qsa(root,
-      "[id],embed[name],form[name],iframe[name],img[name],object[name]"
+      "[id],embed[name],form[name],iframe,img[name],object[name]"
     );
     for (let i = 0; i < elements.length; i++) {
       for (const name of _windowNamedSupportedNames(elements[i])) names.add(name);
+      if (!names.hasFrame && elements[i].localName === "iframe") names.hasFrame = true;
     }
   }
   return names;
@@ -14108,9 +14225,11 @@ function _registerWindowNamedTree(root) {
   if (!root || !root.isConnected || root.getRootNode() !== globalThis.document) return;
   const names = _windowNamedNamesInTree(root);
   for (const name of names) _ensureWindowNamedProperty(name);
+  if (names.hasFrame) _syncFrameIndices();
 }
 
 function _reconcileWindowNamedProperties(names) {
+  if (names && names.hasFrame) _syncFrameIndices();
   if (!names || names.size === 0) return;
   const doc = globalThis.document;
   if (!doc) return;
@@ -14125,7 +14244,7 @@ function _reconcileWindowNamedProperties(names) {
   }
   for (const name of names) {
     if (_windowNamedPropertyNames.has(name) && !present.has(name)) {
-      try { delete globalThis[name]; } catch (_error) {}
+      try { delete _windowProperties[name]; } catch (_error) {}
       _windowNamedPropertyNames.delete(name);
     }
   }
@@ -16479,7 +16598,8 @@ globalThis.OfflineAudioContext = class OfflineAudioContext extends AudioContext 
     return p;
   }
 };
-globalThis.webkitAudioContext = globalThis.AudioContext;
+// DEVIATION from crates/obscura-js/js/bootstrap.js: no webkitAudioContext alias. Chromium
+// removed it (M57), so its presence marked the engine (SECURITY.md I10).
 
 globalThis.speechSynthesis = {
   speaking: false, pending: false, paused: false,
@@ -18120,7 +18240,10 @@ if (typeof FontFace === 'undefined') {
     return Math.abs(faceWeight - selection.weight) < 350 && italic === (selection.style !== 'normal');
   };
 
-  globalThis.FontFaceSet = class FontFaceSet extends EventTarget {
+  // DEVIATION from crates/obscura-js/js/bootstrap.js: FontFaceSet is not a global.
+  // Chromium exposes no interface object for it, and document.fonts.constructor is
+  // EventTarget there (SECURITY.md I10).
+  const FontFaceSet = class FontFaceSet extends EventTarget {
     constructor(initialFaces=[], ownerDocument=null) {
       super();
       this._faces = new Set();
@@ -18244,6 +18367,14 @@ if (typeof FontFace === 'undefined') {
     values() { this._discoverCssFaces(); return Array.from(this._faces).values(); }
     [Symbol.iterator]() { return this.values(); }
   };
+  _defineProperty(FontFaceSet.prototype, Symbol.toStringTag, { value: 'FontFaceSet', configurable: true });
+  for (const key of Object.getOwnPropertyNames(FontFaceSet.prototype)) {
+    const d = _getOwnPropertyDescriptor(FontFaceSet.prototype, key);
+    if (typeof d.value === 'function') _markNative(d.value);
+    if (typeof d.get === 'function') _markNativeAs(d.get, 'function get ' + key + '() { [native code] }');
+    if (typeof d.set === 'function') _markNativeAs(d.set, 'function set ' + key + '() { [native code] }');
+  }
+  delete FontFaceSet.prototype.constructor;
   Object.defineProperty(Document.prototype, 'fonts', {
     get() {
       if (!this._fonts) this._fonts = new FontFaceSet([], this);
@@ -20236,6 +20367,87 @@ const _cdpHost = _objectFreeze({
 // the same handoff as __obscura_core_handoff, in every realm. The host keeps it as a
 // ScriptObject and passes it to its scripts as an argument (`__obscura_host`), so no
 // name on globalThis reaches it. See dotnet/docs/op-protocol.md, "Host helpers".
+// The global object's API shape, once everything is defined (SECURITY.md I10). DEVIATION
+// from crates/obscura-js/js/bootstrap.js, which leaves it as the rest of this file built it:
+// - addEventListener, removeEventListener and dispatchEvent were own members of the
+//   window, Node.prototype, Element.prototype and Document.prototype. In Chromium they
+//   are EventTarget.prototype's alone, so `window.addEventListener ===
+//   EventTarget.prototype.addEventListener`. Each target kind keeps the implementation it
+//   had; the one member on EventTarget.prototype picks it by the receiver (an undefined
+//   receiver is the window, as for any operation on the global in WebIDL).
+// - interface objects were enumerable own globals, so Object.keys(window) listed some
+//   hundreds of names that Chromium's does not;
+// - the shim's interfaces had no Symbol.toStringTag, so Object.prototype.toString of a
+//   node, a rect or an event was "[object Object]".
+// Shim members an isolated world replaces later are its own, in its own realm.
+(function _shapeGlobalObject() {
+  const ETP = EventTarget.prototype;
+  const EP = Element.prototype;
+  const DP = Document.prototype;
+  const take = (obj, name) => {
+    const d = _getOwnPropertyDescriptor(obj, name);
+    if (!d || typeof d.value !== 'function') return null;
+    delete obj[name];
+    return d.value;
+  };
+  const table = (name) => {
+    const node = take(Node.prototype, name) || ETP[name];
+    return _objectFreeze({
+      __proto__: null,
+      win: take(globalThis, name) || node,
+      el: take(EP, name) || node,
+      doc: take(DP, name) || node,
+      node,
+    });
+  };
+  const addImpls = table('addEventListener');
+  const removeImpls = table('removeEventListener');
+  const dispatchImpls = table('dispatchEvent');
+  const pick = (impls, target) => target === globalThis ? impls.win
+    : _isPrototypeOf(EP, target) ? impls.el
+    : _isPrototypeOf(DP, target) ? impls.doc
+    : impls.node;
+  const members = {
+    addEventListener(type, callback) {
+      const target = this === undefined || this === null ? globalThis : this;
+      return _reflectApply(pick(addImpls, target), target, arguments);
+    },
+    removeEventListener(type, callback) {
+      const target = this === undefined || this === null ? globalThis : this;
+      return _reflectApply(pick(removeImpls, target), target, arguments);
+    },
+    dispatchEvent(event) {
+      const target = this === undefined || this === null ? globalThis : this;
+      return _reflectApply(pick(dispatchImpls, target), target, arguments);
+    },
+  };
+  const names = ['addEventListener', 'removeEventListener', 'dispatchEvent'];
+  for (let i = 0; i < names.length; i++) {
+    _defineProperty(ETP, names[i], {
+      value: _markNative(members[names[i]]), writable: true, enumerable: true, configurable: true,
+    });
+  }
+
+  const globals = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < globals.length; i++) {
+    const name = globals[i];
+    const first = _stringCharCodeAt(name, 0);
+    if (first < 65 || first > 90) continue;
+    const d = _getOwnPropertyDescriptor(globalThis, name);
+    if (!d || !('value' in d)) continue;
+    if (d.enumerable && d.configurable) {
+      _defineProperty(globalThis, name, { enumerable: false });
+    }
+    const C = d.value;
+    if (typeof C !== 'function' || _setHas(_engineGlobalNames, name)) continue;
+    const proto = C.prototype;
+    if (proto === null || typeof proto !== 'object' || _objectHasOwn(proto, Symbol.toStringTag)) continue;
+    // An alias (Image, Audio, Option) shares its interface's prototype and does not name it.
+    if (!_objectHasOwn(proto, 'constructor') || proto.constructor !== C) continue;
+    _defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true });
+  }
+})();
+
 const _iframeLoadAtBoot = Element.prototype._loadIframeSrc;
 // Port addition: the request a frame navigation the host follows carries, null for a GET.
 // The body is a urlencoded form, sent as UTF-8.
