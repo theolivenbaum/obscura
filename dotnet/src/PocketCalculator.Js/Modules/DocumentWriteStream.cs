@@ -102,7 +102,24 @@ public sealed class DocumentWriteStream
             _builder = HtmlTreeBuilder.CreateIncremental(_source, fragmentRoot, QualName.Html("body"));
         }
 
-        var consumed = _builder.Feed(_pending.ToString());
+        int consumed;
+        try
+        {
+            consumed = _builder.Feed(_pending.ToString());
+        }
+        catch
+        {
+            // Cancelled part-way through a token (the op's deadline passed): the parser's state
+            // no longer matches the input it was given, so the stream starts over, as after
+            // document.open(), rather than parse the same input twice.
+            _builder = null;
+            _source = null;
+            _pending.Clear();
+            _pendingCr = false;
+            _handedOver.Clear();
+            throw;
+        }
+
         _pending.Remove(0, consumed);
 
         var source = _source!;

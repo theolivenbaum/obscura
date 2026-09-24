@@ -862,6 +862,30 @@ public sealed class DocumentWriteStreamTests
     }
 
     [Fact]
+    public void ACancelledWriteStartsTheStreamOver()
+    {
+        var dom = new DomTree();
+        var stream = new DocumentWriteStream();
+        Assert.Equal(3, stream.Write("<ul><li>one", dom).Count);
+
+        using (var cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            using (WorkCancellation.Enter(cancelled.Token))
+            {
+                Assert.Throws<OperationCanceledException>(() => stream.Write("<li>two", dom));
+            }
+        }
+
+        // Nothing of the cancelled call survives, and the next call parses as a fresh stream:
+        // its nodes belong at the insertion point, not inside the earlier <ul>.
+        var placements = stream.Write("<p>three", dom);
+        Assert.Equal(2, placements.Count);
+        Assert.Null(placements[0].Parent);
+        Assert.Equal("p", dom.GetNode(placements[0].Node)!.ElementName!.Value.Local);
+    }
+
+    [Fact]
     public void RawTextSplitAcrossCallsIsNotDuplicated()
     {
         var dom = new DomTree();
