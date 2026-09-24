@@ -55,12 +55,13 @@ public sealed partial class PocketCalculatorJsRuntime
     private readonly PocketCalculatorModuleLoader _moduleLoader;
     private readonly PocketCalculatorHttpClient _standaloneModuleClient;
     private readonly V8IsolateHandle _isolateHandle;
+    private readonly IDisposable _memoryRegistration;
     private readonly Dictionary<string, string> _objectStore = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _evaluationRecipes = new(StringComparer.Ordinal);
+    private readonly CdpScope _mainScope;
     private readonly Dictionary<long, string?> _moduleEvaluations = [];
     private readonly Dictionary<string, string?> _evaluatedModuleSpecifiers = new(StringComparer.Ordinal);
     private readonly List<FrameRealm> _realms = [];
-    private ulong _objectCounter;
     private int _pendingAsyncOps;
     private long _heapLimitBytes;
     private readonly Queue<Action<double>> _postedTasks = new();
@@ -68,11 +69,14 @@ public sealed partial class PocketCalculatorJsRuntime
 
     private PocketCalculatorJsRuntime(string baseUrl, string? proxyUrl)
     {
+        // A process over POCKETCALCULATOR_MAX_PROCESS_BYTES takes no new page (M7).
+        ProcessMemoryGuard.Default.ThrowIfOverLimit();
+
         // A runtime is about to initialize the V8 platform; from here on a
         // SetV8Flags call must be refused rather than changing nothing silently.
         V8Flags.MarkPlatformStarted();
 
-        var constraints = V8Flags.Constraints ?? new V8RuntimeConstraints();
+        var constraints = WithArrayBufferLimit(V8Flags.Constraints);
         _v8 = new V8Runtime("obscura", constraints, V8RuntimeFlags.EnableDynamicModuleImports)
         {
             // A watchdog interrupt must reach every realm of this isolate, the
@@ -96,6 +100,7 @@ public sealed partial class PocketCalculatorJsRuntime
         _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
+        _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
         _ops.Cancellation.Interrupter = () =>
         {
             if (_disposed)
@@ -130,6 +135,7 @@ public sealed partial class PocketCalculatorJsRuntime
             _engine.Script.__obscura_test_ops = _shim.Ops;
         }
         InitializeObjectStore(_engine);
+        _mainScope = new CdpScope(this, _engine, CdpScope.MainInjectedScriptId, _objectStore, _evaluationRecipes);
     }
 
     /// <summary>A runtime whose documents resolve against <c>about:blank</c>.</summary>
@@ -148,6 +154,9 @@ public sealed partial class PocketCalculatorJsRuntime
 
     /// <summary>The main realm's script engine. Frames get their own.</summary>
     internal V8ScriptEngine Engine => _engine;
+
+    /// <summary>Test seam: watch this isolate with a guard of the test's own.</summary>
+    internal IDisposable WatchMemoryWith(ProcessMemoryGuard guard) => guard.Register(_isolateHandle);
 
     /// <summary>The isolate every realm of this page shares.</summary>
     internal V8Runtime Isolate => _v8;
@@ -225,8 +234,75 @@ public sealed partial class PocketCalculatorJsRuntime
         return engine;
     }
 
-    private static void InitializeObjectStore(V8ScriptEngine engine) =>
+    internal static void InitializeObjectStore(V8ScriptEngine engine) =>
         engine.Execute("<obscura:init>", "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;");
+
+    // ------------------------------------------------------ array buffers
+
+    /// <summary>
+    /// The per-isolate ceiling on <c>ArrayBuffer</c> backing stores a runtime gets when
+    /// <c>POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES</c> is unset: 1 GiB on 64-bit hosts and
+    /// 256 MiB on 32-bit ones. Zero in the variable removes the ceiling.
+    /// </summary>
+    public static long DefaultArrayBufferLimitBytes { get; } =
+        (IntPtr.Size == 8 ? 1024L : 256L) * 1024 * 1024;
+
+    /// <summary>The <c>ArrayBuffer</c> ceiling new runtimes get, in bytes; zero for none.</summary>
+    /// <remarks>
+    /// Read per runtime, so an embedder (or a test) can set the variable before creating a
+    /// page. A malformed or negative value keeps the default.
+    /// </remarks>
+    public static long ArrayBufferLimitBytes()
+    {
+        if (ArrayBufferLimitForTests.Value is { } overridden)
+        {
+            return overridden;
+        }
+
+        string? raw = Environment.GetEnvironmentVariable("POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES");
+        return long.TryParse(raw, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out long bytes) && bytes >= 0
+            ? bytes
+            : DefaultArrayBufferLimitBytes;
+    }
+
+    /// <summary>Test seam: a ceiling for runtimes created on this async flow only.</summary>
+    internal static readonly AsyncLocal<long?> ArrayBufferLimitForTests = new();
+
+    /// <summary>
+    /// A copy of the flag-derived constraints carrying the <c>ArrayBuffer</c> ceiling.
+    /// </summary>
+    /// <remarks>
+    /// Backing stores live outside the V8 heap, so <see cref="SetHeapLimit"/> never sees
+    /// them: six 512 MB <c>Uint8Array</c>s succeeded under a 4 GiB heap cap (SECURITY.md
+    /// M7). ClearScript's allocator refuses an allocation past
+    /// <see cref="V8RuntimeConstraints.MaxArrayBufferAllocation"/>, which V8 reports to
+    /// script as <c>RangeError: Array buffer allocation failed</c>, the error Chromium
+    /// gives when its partition allocator refuses one. Rust (deno_core) sets no such
+    /// limit. The shared flag object is copied, never mutated, because every runtime of
+    /// the process starts from it.
+    /// </remarks>
+    private static V8RuntimeConstraints WithArrayBufferLimit(V8RuntimeConstraints? shared)
+    {
+        var constraints = new V8RuntimeConstraints();
+        if (shared is not null)
+        {
+            constraints.MaxNewSpaceSize = shared.MaxNewSpaceSize;
+            constraints.MaxOldSpaceSize = shared.MaxOldSpaceSize;
+            constraints.MaxYoungSpaceSize = shared.MaxYoungSpaceSize;
+            constraints.MaxExecutableSize = shared.MaxExecutableSize;
+            constraints.HeapExpansionMultiplier = shared.HeapExpansionMultiplier;
+            constraints.MaxArrayBufferAllocation = shared.MaxArrayBufferAllocation;
+        }
+
+        long limit = ArrayBufferLimitBytes();
+        if (limit > 0)
+        {
+            constraints.MaxArrayBufferAllocation = (ulong)limit;
+        }
+
+        return constraints;
+    }
 
     // ------------------------------------------------------------- heap cap
 
@@ -471,12 +547,18 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     partial void BindOps(ScriptObject ops, bool mainRealm);
 
-    private object? ExecuteRuntimeScript(string name, string source)
+    private object? ExecuteRuntimeScript(string name, string source) => ExecuteIn(_engine, name, source);
+
+    /// <summary>
+    /// <see cref="ExecuteRuntimeScript"/> in any realm of this isolate: the page's, or an
+    /// isolated world's. Same deadline and heap-limit handling.
+    /// </summary>
+    internal object? ExecuteIn(V8ScriptEngine engine, string name, string source)
     {
         CancellationToken deadline = _ops.Cancellation.Token;
         try
         {
-            object? result = _engine.Evaluate(new DocumentInfo(name), source);
+            object? result = engine.Evaluate(new DocumentInfo(name), source);
             ThrowIfDeadlinePassed(deadline);
             return result;
         }
@@ -745,6 +827,8 @@ public sealed partial class PocketCalculatorJsRuntime
             return;
         }
         _disposed = true;
+        _memoryRegistration.Dispose();
+        DetachDomGc();
         // Background render-resource loads belong to this document; a closed page must
         // not keep fetching for a document nobody can observe any more.
         AbandonRenderResources();
@@ -753,6 +837,7 @@ public sealed partial class PocketCalculatorJsRuntime
             realm.Dispose();
         }
         _realms.Clear();
+        DisposeIsolatedWorlds();
 
         // Before the engine, not after: while V8's promise-reject hook is still
         // registered it can call back into a half-disposed engine, and

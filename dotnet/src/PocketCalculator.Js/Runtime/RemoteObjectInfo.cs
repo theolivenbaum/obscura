@@ -56,6 +56,9 @@ public sealed class CdpObjectState
     internal ulong ObjectCounter { get; init; }
 
     internal Dictionary<string, string> EvaluationRecipes { get; init; } = new(StringComparer.Ordinal);
+
+    /// <summary>The isolated worlds the suspended runtime had, by CDP context id.</summary>
+    internal IReadOnlyDictionary<long, IsolatedWorldState> Worlds { get; init; } = new Dictionary<long, IsolatedWorldState>();
 }
 
 /// <summary>

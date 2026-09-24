@@ -182,7 +182,7 @@ public static class DomSnapshot
                 nodeType.Add(0);
                 nodeName.Add(0);
                 nodeValue.Add(0);
-                backendIds.Add((long)nid.Index);
+                backendIds.Add((long)nid.Raw);
                 attributes.Add(new JsonArray());
                 layoutNodeIndex.Add((long)i);
                 bounds.Add(new JsonArray(0.0, 0.0, 0.0, 0.0));
@@ -238,7 +238,7 @@ public static class DomSnapshot
             nodeType.Add(ntype);
             nodeName.Add(strings.Intern(nname));
             nodeValue.Add(strings.Intern(nval));
-            backendIds.Add((long)nid.Index);
+            backendIds.Add((long)nid.Raw);
 
             var attrIndex = new JsonArray();
             foreach ((string key, string value) in attrs)

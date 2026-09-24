@@ -78,6 +78,8 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         taskError = null;
         ranTimers = false;
+        // No script is on the stack here, which is what a full DOM collection needs.
+        CollectDomAtTaskBoundary();
         // Timer-driven page script observes bytes that landed during a wait.
         ServiceRenderResources();
         PerformMicrotaskCheckpoint();

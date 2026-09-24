@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.ClearScript;
+using Microsoft.ClearScript.V8;
 
 namespace PocketCalculator.Js.Runtime;
 
@@ -132,7 +133,29 @@ public sealed partial class PocketCalculatorJsRuntime
     /// lands on <c>globalThis</c> the way it does in Chrome (#746).
     /// </para>
     /// </remarks>
-    public async Task<RemoteObjectInfo> EvaluateForCdpWithTimeoutAsync(
+    public Task<RemoteObjectInfo> EvaluateForCdpWithTimeoutAsync(
+        string expression,
+        bool returnByValue,
+        bool awaitPromise,
+        ulong awaitTimeoutMs) =>
+        EvaluateForCdpInScopeAsync(_mainScope, expression, returnByValue, awaitPromise, awaitTimeoutMs);
+
+    /// <summary>
+    /// <c>Runtime.evaluate</c> in <paramref name="world"/>, or in the page realm when it is
+    /// null. The world is created the first time a client names it.
+    /// </summary>
+    public Task<RemoteObjectInfo> EvaluateForCdpWithTimeoutAsync(
+        string expression,
+        bool returnByValue,
+        bool awaitPromise,
+        ulong awaitTimeoutMs,
+        IsolatedWorldTarget? world) =>
+        EvaluateForCdpInScopeAsync(
+            world is { } target ? GetOrCreateIsolatedWorld(target).Scope : _mainScope,
+            expression, returnByValue, awaitPromise, awaitTimeoutMs);
+
+    private async Task<RemoteObjectInfo> EvaluateForCdpInScopeAsync(
+        CdpScope scope,
         string expression,
         bool returnByValue,
         bool awaitPromise,
@@ -140,10 +163,10 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         BeginJavaScriptTask();
 
-        _objectCounter += 1;
-        var oid = MakeOid(_objectCounter);
+        scope.Counter += 1;
+        var oid = scope.MakeOid(scope.Counter);
         var sourceLiteral = JsStringLiteral(expression);
-        var doneCounter = _objectCounter;
+        var doneCounter = scope.Counter;
 
         var metaCode = awaitPromise
             ? $$"""
@@ -182,7 +205,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 })()
                 """;
 
-        var result = ExecuteRuntimeScript("<eval-remote>", metaCode);
+        var result = scope.Run("<eval-remote>", metaCode);
 
         object? metaValue;
         if (awaitPromise)
@@ -193,7 +216,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 {
                     try
                     {
-                        return ToJson(runtime.ExecuteRuntimeScript("<done?>", sentinel))?.GetValue<bool>() ?? false;
+                        return runtime.ToJson(scope.Run("<done?>", sentinel), scope.Engine)?.GetValue<bool>() ?? false;
                     }
                     catch (JsRuntimeException)
                     {
@@ -210,7 +233,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 throw new JsRuntimeException(
                     $"Runtime.evaluate promise did not settle within {awaitTimeoutMs}ms");
             }
-            metaValue = ExecuteRuntimeScript("<readMeta>", "globalThis.__obscura_await_meta");
+            metaValue = scope.Run("<readMeta>", "globalThis.__obscura_await_meta");
         }
         else
         {
@@ -222,22 +245,22 @@ public sealed partial class PocketCalculatorJsRuntime
         // travels back as a remote object flagged Thrown, by reference even when
         // the caller asked for a value: JSON.stringify(new Error("boom")) is {},
         // so serializing it would throw the message away.
-        if (AsBool(ExecuteRuntimeScript("<readRejected>", "globalThis.__obscura_await_rejected")))
+        if (AsBool(scope.Run("<readRejected>", "globalThis.__obscura_await_rejected")))
         {
-            return ThrownInfo(oid);
+            return ThrownInfo(scope, oid);
         }
 
-        var metaJson = DecodeMeta(ToJson(metaValue));
-        _objectStore[oid] = $"globalThis.__obscura_objects['{oid}']";
+        var metaJson = DecodeMeta(ToJson(metaValue, scope.Engine));
+        scope.Store[oid] = $"globalThis.__obscura_objects['{oid}']";
         if (!returnByValue)
         {
-            _evaluationRecipes[oid] = expression;
+            scope.Recipes[oid] = expression;
         }
 
         if (returnByValue)
         {
-            var read = ExecuteRuntimeScript("<readResult>", $"globalThis.__obscura_objects['{oid}']");
-            return InfoFromJson(ToJson(read));
+            var read = scope.Run("<readResult>", $"globalThis.__obscura_objects['{oid}']");
+            return InfoFromJson(ToJson(read, scope.Engine));
         }
 
         return InfoFromMeta(metaJson, oid);
@@ -254,7 +277,46 @@ public sealed partial class PocketCalculatorJsRuntime
         CallFunctionOnForCdpWithTimeoutAsync(
             functionDeclaration, objectId, arguments, returnByValue, awaitPromise, DefaultCdpAwaitTimeoutMs);
 
-    public async Task<RemoteObjectInfo> CallFunctionOnForCdpWithTimeoutAsync(
+    public Task<RemoteObjectInfo> CallFunctionOnForCdpWithTimeoutAsync(
+        string functionDeclaration,
+        string? objectId,
+        IReadOnlyList<JsonNode?> arguments,
+        bool returnByValue,
+        bool awaitPromise,
+        ulong awaitTimeoutMs) =>
+        CallFunctionOnForCdpWithTimeoutAsync(
+            functionDeclaration, objectId, arguments, returnByValue, awaitPromise, awaitTimeoutMs, world: null);
+
+    /// <summary>
+    /// <c>Runtime.callFunctionOn</c>. An <paramref name="objectId"/> names the realm it
+    /// was minted in, which is where the call runs; with none, the call runs in
+    /// <paramref name="world"/>, or in the page realm when that is null too.
+    /// </summary>
+    public Task<RemoteObjectInfo> CallFunctionOnForCdpWithTimeoutAsync(
+        string functionDeclaration,
+        string? objectId,
+        IReadOnlyList<JsonNode?> arguments,
+        bool returnByValue,
+        bool awaitPromise,
+        ulong awaitTimeoutMs,
+        IsolatedWorldTarget? world)
+    {
+        CdpScope scope;
+        if (objectId is not null)
+        {
+            scope = ScopeForObjectId(objectId)
+                ?? throw new JsRuntimeException("Cannot find context with specified id");
+        }
+        else
+        {
+            scope = world is { } target ? GetOrCreateIsolatedWorld(target).Scope : _mainScope;
+        }
+        return CallFunctionOnInScopeAsync(
+            scope, functionDeclaration, objectId, arguments, returnByValue, awaitPromise, awaitTimeoutMs);
+    }
+
+    private async Task<RemoteObjectInfo> CallFunctionOnInScopeAsync(
+        CdpScope scope,
         string functionDeclaration,
         string? objectId,
         IReadOnlyList<JsonNode?> arguments,
@@ -263,15 +325,15 @@ public sealed partial class PocketCalculatorJsRuntime
         ulong awaitTimeoutMs)
     {
         BeginJavaScriptTask();
-        var thisExpr = ResolveThis(objectId);
-        var (setup, argsList) = BuildArgs(arguments);
+        var thisExpr = ResolveThis(scope, objectId);
+        var (setup, argsList) = BuildArgs(scope, arguments);
 
-        _objectCounter += 1;
-        var oid = MakeOid(_objectCounter);
+        scope.Counter += 1;
+        var oid = scope.MakeOid(scope.Counter);
 
         if (awaitPromise)
         {
-            var doneCounter = _objectCounter;
+            var doneCounter = scope.Counter;
             var code = $$"""
                 (async function() {
                     {{setup}}
@@ -293,7 +355,7 @@ public sealed partial class PocketCalculatorJsRuntime
                     }
                 })()
                 """;
-            ExecuteRuntimeScript("<callFnAsync>", code);
+            scope.Run("<callFnAsync>", code);
 
             var sentinel = $"globalThis.__obscura_done_{doneCounter} === true";
             var settled = await ResolvePromisesUntilAsync(
@@ -301,7 +363,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 {
                     try
                     {
-                        return ToJson(runtime.ExecuteRuntimeScript("<done?>", sentinel))?.GetValue<bool>() ?? false;
+                        return runtime.ToJson(scope.Run("<done?>", sentinel), scope.Engine)?.GetValue<bool>() ?? false;
                     }
                     catch (JsRuntimeException)
                     {
@@ -323,20 +385,20 @@ public sealed partial class PocketCalculatorJsRuntime
             // never serialized by value. Without this the wrapper stored the error
             // under the object id a success uses, so a rejection came back as an
             // ordinary result.
-            if (AsBool(ExecuteRuntimeScript("<readRejected>", "globalThis.__obscura_await_rejected")))
+            if (AsBool(scope.Run("<readRejected>", "globalThis.__obscura_await_rejected")))
             {
-                return ThrownInfo(oid);
+                return ThrownInfo(scope, oid);
             }
 
             if (returnByValue)
             {
-                var read = ExecuteRuntimeScript("<readResult>", $"globalThis.__obscura_objects['{oid}']");
-                return InfoFromJson(ToJson(read));
+                var read = scope.Run("<readResult>", $"globalThis.__obscura_objects['{oid}']");
+                return InfoFromJson(ToJson(read, scope.Engine));
             }
 
-            var metaResult = ExecuteRuntimeScript("<readMeta>", "globalThis.__obscura_await_meta");
-            _objectStore[oid] = $"globalThis.__obscura_objects['{oid}']";
-            return InfoFromMeta(DecodeMeta(ToJson(metaResult)), oid);
+            var metaResult = scope.Run("<readMeta>", "globalThis.__obscura_await_meta");
+            scope.Store[oid] = $"globalThis.__obscura_objects['{oid}']";
+            return InfoFromMeta(DecodeMeta(ToJson(metaResult, scope.Engine)), oid);
         }
 
         if (returnByValue)
@@ -349,8 +411,8 @@ public sealed partial class PocketCalculatorJsRuntime
                     return __fn.call(__this, {{argsList}});
                 })()
                 """;
-            var value = ExecuteRuntimeScript("<callFnByValue>", byValue);
-            return InfoFromJson(ToJson(value));
+            var value = scope.Run("<callFnByValue>", byValue);
+            return InfoFromJson(ToJson(value, scope.Engine));
         }
 
         var remote = $$"""
@@ -363,9 +425,9 @@ public sealed partial class PocketCalculatorJsRuntime
                 return {{MetaExtractJs("__result")}};
             })()
             """;
-        var meta = ExecuteRuntimeScript("<callFnRemote>", remote);
-        _objectStore[oid] = $"globalThis.__obscura_objects['{oid}']";
-        return InfoFromMeta(DecodeMeta(ToJson(meta)), oid);
+        var meta = scope.Run("<callFnRemote>", remote);
+        scope.Store[oid] = $"globalThis.__obscura_objects['{oid}']";
+        return InfoFromMeta(DecodeMeta(ToJson(meta, scope.Engine)), oid);
     }
 
     public Task<RemoteObjectInfo> CallFunctionOnAsync(
@@ -380,8 +442,8 @@ public sealed partial class PocketCalculatorJsRuntime
     public string StoreObject(string jsExpression)
     {
         BeginJavaScriptTask();
-        _objectCounter += 1;
-        var oid = MakeOid(_objectCounter);
+        _mainScope.Counter += 1;
+        var oid = _mainScope.MakeOid(_mainScope.Counter);
         try
         {
             ExecuteRuntimeScript("<store>", $"globalThis.__obscura_objects['{oid}'] = ({jsExpression});");
@@ -394,11 +456,20 @@ public sealed partial class PocketCalculatorJsRuntime
         return oid;
     }
 
-    public RemoteObjectInfo StoreObjectWithMeta(string jsExpression)
+    public RemoteObjectInfo StoreObjectWithMeta(string jsExpression) => StoreObjectWithMeta(_mainScope, jsExpression);
+
+    /// <summary>
+    /// <see cref="StoreObjectWithMeta(string)"/> in <paramref name="world"/>, or in the page
+    /// realm when it is null: <c>DOM.resolveNode</c> with an <c>executionContextId</c>.
+    /// </summary>
+    public RemoteObjectInfo StoreObjectWithMeta(string jsExpression, IsolatedWorldTarget? world) =>
+        StoreObjectWithMeta(world is { } target ? GetOrCreateIsolatedWorld(target).Scope : _mainScope, jsExpression);
+
+    private RemoteObjectInfo StoreObjectWithMeta(CdpScope scope, string jsExpression)
     {
         BeginJavaScriptTask();
-        _objectCounter += 1;
-        var oid = MakeOid(_objectCounter);
+        scope.Counter += 1;
+        var oid = scope.MakeOid(scope.Counter);
         var code = $$"""
             (function() {
                 var __result = (
@@ -411,18 +482,57 @@ public sealed partial class PocketCalculatorJsRuntime
         object? result;
         try
         {
-            result = ExecuteRuntimeScript("<store-meta>", code);
+            result = scope.Run("<store-meta>", code);
         }
         catch (JsRuntimeException error)
         {
             throw new JsRuntimeException($"Store error: {error.Message}");
         }
-        _objectStore[oid] = $"globalThis.__obscura_objects['{oid}']";
-        return InfoFromMeta(DecodeMeta(ToJson(result)), oid);
+        scope.Store[oid] = $"globalThis.__obscura_objects['{oid}']";
+        return InfoFromMeta(DecodeMeta(ToJson(result, scope.Engine)), oid);
+    }
+
+    /// <summary>
+    /// Evaluates host-authored <paramref name="expression"/> in the realm that minted
+    /// <paramref name="objectId"/> and decodes the result as JSON, the way
+    /// <see cref="Evaluate"/> does for the page realm. Null when the id names an isolated
+    /// world that no longer exists.
+    /// </summary>
+    /// <remarks>
+    /// The CDP handlers that look an object up by id (<c>Runtime.getProperties</c>,
+    /// <c>DOM.describeNode</c> and the rest) build a snippet over
+    /// <c>__obscura_objects</c>, and that store is per realm.
+    /// </remarks>
+    public JsonNode? EvaluateInObjectRealm(string objectId, string expression)
+    {
+        ArgumentNullException.ThrowIfNull(objectId);
+        if (IsolatedWorldKeyOf(objectId) == 0)
+        {
+            return Evaluate(expression);
+        }
+        if (ScopeForObjectId(objectId) is not { } scope)
+        {
+            return null;
+        }
+        BeginJavaScriptTask();
+        return ToJson(scope.Run("<eval>", WrapExpression(expression)), scope.Engine);
     }
 
     public void ReleaseObject(string objectId)
     {
+        if (IsolatedWorldKeyOf(objectId) != 0)
+        {
+            if (FindIsolatedWorld(IsolatedWorldKeyOf(objectId)) is { } world)
+            {
+                var scope = world.Scope;
+                scope.Recipes.Remove(objectId);
+                if (scope.Store.Remove(objectId))
+                {
+                    TryRunIn(scope, "<release>", $"delete globalThis.__obscura_objects[{JsStringLiteral(objectId)}];");
+                }
+            }
+            return;
+        }
         _evaluationRecipes.Remove(objectId);
         if (!_objectStore.Remove(objectId))
         {
@@ -451,14 +561,16 @@ public sealed partial class PocketCalculatorJsRuntime
         TryRun("<releaseGroup>", code.ToString());
         _objectStore.Clear();
         _evaluationRecipes.Clear();
+        ReleaseIsolatedWorldObjects();
     }
 
     public CdpObjectState TakeCdpObjectState()
     {
         var state = new CdpObjectState
         {
-            ObjectCounter = _objectCounter,
+            ObjectCounter = _mainScope.Counter,
             EvaluationRecipes = new Dictionary<string, string>(_evaluationRecipes, StringComparer.Ordinal),
+            Worlds = TakeIsolatedWorldStates(),
         };
         _evaluationRecipes.Clear();
         return state;
@@ -467,19 +579,22 @@ public sealed partial class PocketCalculatorJsRuntime
     public void RestoreCdpObjectState(CdpObjectState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        _objectCounter = Math.Max(_objectCounter, state.ObjectCounter);
+        _mainScope.Counter = Math.Max(_mainScope.Counter, state.ObjectCounter);
         _evaluationRecipes.Clear();
         foreach (var (key, value) in state.EvaluationRecipes)
         {
             _evaluationRecipes[key] = value;
         }
+        RestoreIsolatedWorldStates(state.Worlds);
     }
 
-    private void TryRun(string name, string source)
+    private void TryRun(string name, string source) => TryRunIn(_mainScope, name, source);
+
+    private static void TryRunIn(CdpScope scope, string name, string source)
     {
         try
         {
-            ExecuteRuntimeScript(name, source);
+            scope.Run(name, source);
         }
         catch (JsRuntimeException)
         {
@@ -502,9 +617,6 @@ public sealed partial class PocketCalculatorJsRuntime
     }
 
     // ------------------------------------------------------------------ helpers
-
-    private static string MakeOid(ulong counter) =>
-        string.Create(CultureInfo.InvariantCulture, $"{{\"injectedScriptId\":1,\"id\":{counter}}}");
 
     /// <summary>
     /// Wrap an expression or short statement bundle for <c>--eval</c>.
@@ -588,20 +700,20 @@ public sealed partial class PocketCalculatorJsRuntime
                     })({{varName}})
         """;
 
-    private string? ResolveRemoteObject(string objectId)
+    private string? ResolveRemoteObject(CdpScope scope, string objectId)
     {
-        if (_objectStore.TryGetValue(objectId, out var retrieval))
+        if (scope.Store.TryGetValue(objectId, out var retrieval))
         {
             return retrieval;
         }
-        if (!_evaluationRecipes.TryGetValue(objectId, out var expression))
+        if (!scope.Recipes.TryGetValue(objectId, out var expression))
         {
             return null;
         }
         var literal = JsStringLiteral(objectId);
         try
         {
-            ExecuteRuntimeScript(
+            scope.Run(
                 "<restore-cdp-object>",
                 $"globalThis.__obscura_objects[{literal}] = (\n{expression}\n);");
         }
@@ -610,17 +722,17 @@ public sealed partial class PocketCalculatorJsRuntime
             return null;
         }
         var restored = $"globalThis.__obscura_objects[{literal}]";
-        _objectStore[objectId] = restored;
+        scope.Store[objectId] = restored;
         return restored;
     }
 
-    private string ResolveThis(string? objectId)
+    private string ResolveThis(CdpScope scope, string? objectId)
     {
         if (objectId is null)
         {
             return "globalThis";
         }
-        var retrieval = ResolveRemoteObject(objectId);
+        var retrieval = ResolveRemoteObject(scope, objectId);
         if (retrieval is not null)
         {
             return retrieval;
@@ -642,7 +754,7 @@ public sealed partial class PocketCalculatorJsRuntime
         return "globalThis";
     }
 
-    private (string Setup, string Args) BuildArgs(IReadOnlyList<JsonNode?> arguments)
+    private (string Setup, string Args) BuildArgs(CdpScope scope, IReadOnlyList<JsonNode?> arguments)
     {
         var setupLines = new List<string>(arguments.Count);
         var argNames = new List<string>(arguments.Count);
@@ -658,7 +770,15 @@ public sealed partial class PocketCalculatorJsRuntime
                 && arg.TryGetPropertyValue("objectId", out var objectIdNode)
                 && objectIdNode?.GetValueKind() == JsonValueKind.String)
             {
-                var retrieval = ResolveRemoteObject(objectIdNode.GetValue<string>());
+                var argumentId = objectIdNode.GetValue<string>();
+                // An object lives in one realm, and Chromium refuses to hand it to a
+                // function running in another (port addition, SECURITY.md M6: until
+                // isolated worlds had realms of their own there was only one).
+                if (IsolatedWorldKeyOf(argumentId) != scope.WorldKey)
+                {
+                    throw new JsRuntimeException("Argument should belong to the same JavaScript world as target object");
+                }
+                var retrieval = ResolveRemoteObject(scope, argumentId);
                 setupLines.Add($"var {argName} = {retrieval ?? "undefined"};");
             }
             else if (arg is not null
@@ -688,7 +808,13 @@ public sealed partial class PocketCalculatorJsRuntime
     /// function, a cyclic object) falls back to its string form, exactly as
     /// <c>v8_to_json</c> does.
     /// </remarks>
-    internal JsonNode? ToJson(object? result)
+    internal JsonNode? ToJson(object? result) => ToJson(result, _engine);
+
+    /// <summary>
+    /// <see cref="ToJson(object?)"/> with <paramref name="engine"/>'s own
+    /// <c>JSON.stringify</c>: a value from an isolated world is serialized by that world.
+    /// </summary>
+    internal JsonNode? ToJson(object? result, V8ScriptEngine engine)
     {
         switch (result)
         {
@@ -718,7 +844,7 @@ public sealed partial class PocketCalculatorJsRuntime
 
         if (result is ScriptObject scriptObject)
         {
-            var json = Stringify(scriptObject);
+            var json = Stringify(scriptObject, engine);
             if (json is not null)
             {
                 try
@@ -734,11 +860,11 @@ public sealed partial class PocketCalculatorJsRuntime
         return JsonValue.Create(result.ToString() ?? string.Empty);
     }
 
-    private string? Stringify(ScriptObject value)
+    private static string? Stringify(ScriptObject value, V8ScriptEngine engine)
     {
         try
         {
-            var json = ((ScriptObject)_engine.Global.GetProperty("JSON")).InvokeMethod("stringify", value);
+            var json = ((ScriptObject)engine.Global.GetProperty("JSON")).InvokeMethod("stringify", value);
             return json as string;
         }
         catch (ScriptEngineException)
@@ -777,10 +903,10 @@ public sealed partial class PocketCalculatorJsRuntime
     /// CDP layer answer with <c>exceptionDetails</c> rather than fail the
     /// command or present the value as the result.
     /// </remarks>
-    private RemoteObjectInfo ThrownInfo(string oid)
+    private RemoteObjectInfo ThrownInfo(CdpScope scope, string oid)
     {
-        var meta = DecodeMeta(ToJson(ExecuteRuntimeScript("<readMeta>", "globalThis.__obscura_await_meta")));
-        _objectStore[oid] = $"globalThis.__obscura_objects['{oid}']";
+        var meta = DecodeMeta(ToJson(scope.Run("<readMeta>", "globalThis.__obscura_await_meta"), scope.Engine));
+        scope.Store[oid] = $"globalThis.__obscura_objects['{oid}']";
         return InfoFromMeta(meta, oid) with { Thrown = true };
     }
 

@@ -174,6 +174,13 @@ public sealed class Element
     {
         _nodeId = nodeId;
         _page = page;
+        // The handle names its node by id, so the DOM collector keeps the node for as long
+        // as the handle lives (port addition, see DomTree.Gc.cs).
+        page.Inner.WithDom(dom =>
+        {
+            dom.PinWhileAlive(this, PocketCalculator.Dom.NodeId.New((uint)nodeId));
+            return 0;
+        });
     }
 
     /// <summary>The node id this handle wraps.</summary>

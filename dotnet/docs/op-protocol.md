@@ -57,6 +57,11 @@ page-supplied code must never go through these entry points.
 | `setScreenOverride(w, h, emulated)` | `__obscura_set_screen_override` | `Emulation.setDeviceMetricsOverride` |
 | `liveFrameIds() -> number[]`, `forgetFrame(id)` | `__obscura_liveFrameIds`, `__obscura_forgetFrame` | detached-frame release |
 | `pointer.down` | `globalThis.__obscura_mouse_down` | CDP mousePressed / mouseReleased |
+| `gcCachedNids() -> csv`, `gcWeaken(componentsCsv)`, `gcSurvivors() -> csv`, `gcForget()` | none (port addition) | the DOM collector (`RealmDomGc`, `DomTree.Gc.cs`) |
+
+op_dom node ids are the full `NodeId.Value`: the slot index in the low 24 bits and the
+slot's generation above it (port addition, see `NodeId`). A slot that was never reused
+has generation 0, so the numbers an ordinary page sees are the ones Rust returns.
 
 The shim also sends its own closure-held realm id, not the page-writable
 `globalThis.__obscura_frameId`, as `op_post_frame_message`'s `source_frame_id`,

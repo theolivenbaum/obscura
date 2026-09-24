@@ -235,6 +235,23 @@ public sealed class OpsTests
         Assert.Equal(1024, body.Length);
     }
 
+    // M4: a body is read into an exact array (declared length) or chunks and one copy.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Read_body_capped_returns_exactly_the_body(bool withContentLength)
+    {
+        const int Length = (3 * 1024 * 1024) + 17;
+        var endpoint = ServeBodyOnce(Length, withContentLength);
+        using var client = new HttpClient();
+        using var response = await client.GetAsync(
+            new Uri($"http://{endpoint}/"),
+            HttpCompletionOption.ResponseHeadersRead);
+        var body = await FetchOps.ReadBodyCappedAsync(response, 4 * 1024 * 1024);
+        Assert.Equal(Length, body.Length);
+        Assert.DoesNotContain(body, b => b != (byte)'a');
+    }
+
     [Fact]
     public void Glob_match_handles_cdp_blocked_url_patterns()
     {

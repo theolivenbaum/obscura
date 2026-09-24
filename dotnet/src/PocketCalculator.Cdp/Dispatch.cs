@@ -386,13 +386,27 @@ public static class Dispatcher
     public static void DrainBindingCalls(CdpContext ctx)
     {
         ArgumentNullException.ThrowIfNull(ctx);
-        List<(string PageId, IReadOnlyList<(string Name, string Payload)> Calls)> drained = [];
+        List<(string PageId, List<(string Name, string Payload, long WorldKey)> Calls)> drained = [];
         foreach (var page in ctx.Pages)
         {
             var calls = page.TakePendingBindingCalls();
-            if (calls.Count != 0)
+            // Port addition (SECURITY.md M6): calls from an isolated world's binding,
+            // which report that world's execution context.
+            var worldCalls = page.TakePendingWorldBindingCalls();
+            if (calls.Count != 0 || worldCalls.Count != 0)
             {
-                drained.Add((page.Id, calls));
+                List<(string Name, string Payload, long WorldKey)> all = new(calls.Count + worldCalls.Count);
+                foreach (var (name, payload) in calls)
+                {
+                    all.Add((name, payload, 0));
+                }
+
+                foreach (var (worldKey, name, payload) in worldCalls)
+                {
+                    all.Add((name, payload, worldKey));
+                }
+
+                drained.Add((page.Id, all));
             }
         }
 
@@ -431,10 +445,24 @@ public static class Dispatcher
                 continue;
             }
 
-            var executionContextId = ctx.DefaultContextId(pageId) ?? 1;
-            foreach (var (name, payload) in calls)
+            var defaultContextId = ctx.DefaultContextId(pageId) ?? 1;
+            foreach (var (name, payload, worldKey) in calls)
             {
-                if (!registeredNames.Contains(name))
+                long executionContextId = defaultContextId;
+                if (worldKey != 0)
+                {
+                    // A world's call counts only for a binding registered for that
+                    // world's name, and only while its context is live.
+                    if (ctx.ContextById(worldKey) is not { IsDefault: false } world
+                        || !string.Equals(world.PageId, pageId, StringComparison.Ordinal)
+                        || !WorldHasBinding(ctx, world.WorldName, name))
+                    {
+                        continue;
+                    }
+
+                    executionContextId = worldKey;
+                }
+                else if (!registeredNames.Contains(name))
                 {
                     continue;
                 }
@@ -476,6 +504,21 @@ public static class Dispatcher
         }
 
         ctx.PendingEvents.AddRange(events);
+    }
+
+    private static bool WorldHasBinding(CdpContext ctx, string worldName, string name)
+    {
+        string key = BindingPreloadPrefix + name;
+        foreach (var (identifier, world, _) in ctx.WorldPreloadScripts)
+        {
+            if (string.Equals(identifier, key, StringComparison.Ordinal)
+                && string.Equals(world, worldName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

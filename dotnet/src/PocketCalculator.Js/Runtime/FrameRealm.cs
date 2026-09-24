@@ -51,6 +51,9 @@ public sealed class FrameRealm : IDisposable
     /// </summary>
     private DenoCoreShim? _shim;
 
+    /// <summary>The DOM collector's half for this frame's document.</summary>
+    private RealmDomGc? _domGc;
+
     private FrameRealm(
         PocketCalculatorJsRuntime parent,
         V8ScriptEngine engine,
@@ -156,6 +159,7 @@ public sealed class FrameRealm : IDisposable
 
         var realm = new FrameRealm(parent, engine, frameId, parentFrameId, url, origin) { State = state };
         realm._shim = shim;
+        realm._domGc = PocketCalculatorJsRuntime.AttachFrameDomGc(parent, state, () => realm._shim?.HostHelpers);
         parent.RegisterRealm(realm);
 
         // Both ids before init, not after: init is what installs `parent` and
@@ -391,6 +395,12 @@ public sealed class FrameRealm : IDisposable
             return;
         }
         _disposed = true;
+        if (_domGc is { } gc && State.Dom is { } dom)
+        {
+            dom.RemoveGcParticipant(gc);
+            dom.AutomaticCollection = false;
+        }
+
         _parent.RealmStates.Forget(_engine);
         _parent.ForgetRealm(this);
         // Detach V8's promise-reject hook before the engine goes, for the reason

@@ -197,25 +197,92 @@ public static partial class FetchOps
         try
         {
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var buffer = new MemoryStream();
-            var chunk = new byte[64 * 1024];
+
+            // A declared length is read straight into an array of that size, so the body is
+            // held once. The port used to grow a MemoryStream and copy it out, three times
+            // the body at the peak (SECURITY.md M4).
+            byte[]? exact = response.Content.Headers.ContentLength is { } declared and > 0
+                ? new byte[declared]
+                : null;
+            var filled = 0;
+            if (exact is not null)
+            {
+                while (filled < exact.Length)
+                {
+                    var read = await stream.ReadAsync(exact.AsMemory(filled), cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    filled += read;
+                }
+
+                if (filled < exact.Length)
+                {
+                    return exact[..filled];
+                }
+            }
+
+            // No length, or more bytes than it declared: chunks, then one exact copy.
+            List<byte[]> chunks = [];
+            var chunkSize = 64 * 1024;
+            long total = filled;
             while (true)
             {
-                var read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false);
-                if (read == 0)
+                var chunk = new byte[chunkSize];
+                var used = 0;
+                while (used < chunk.Length)
+                {
+                    var read = await stream.ReadAsync(chunk.AsMemory(used), cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    if (total + read > max)
+                    {
+                        throw new OpException($"response body exceeds the maximum of {max} bytes");
+                    }
+
+                    used += read;
+                    total += read;
+                }
+
+                if (used == 0)
                 {
                     break;
                 }
 
-                if (buffer.Length + read > max)
+                chunks.Add(used == chunk.Length ? chunk : chunk[..used]);
+                if (used < chunk.Length)
                 {
-                    throw new OpException($"response body exceeds the maximum of {max} bytes");
+                    break;
                 }
 
-                buffer.Write(chunk, 0, read);
+                chunkSize = Math.Min(chunkSize * 2, 4 * 1024 * 1024);
             }
 
-            return buffer.ToArray();
+            if (exact is not null && chunks.Count == 0)
+            {
+                return exact;
+            }
+
+            var body = new byte[total];
+            var at = 0;
+            if (exact is not null)
+            {
+                exact.CopyTo(body, 0);
+                at = exact.Length;
+            }
+
+            foreach (var chunk in chunks)
+            {
+                chunk.CopyTo(body, at);
+                at += chunk.Length;
+            }
+
+            return body;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -832,7 +899,9 @@ public static partial class FetchOps
 
                 var respBytes = await ReadBodyCappedAsync(response, FetchMaxBodyBytes(), deadline.Token)
                     .ConfigureAwait(false);
-                var respBody = Encoding.UTF8.GetString(respBytes);
+                // Decoded only where a string is kept (a small stored body, an internal
+                // load); the script-facing JSON is written from the bytes (M4).
+                string? respBody = null;
 
                 if (callbacks is not null && callbacks.HasResponseCallbacks())
                 {
@@ -864,6 +933,7 @@ public static partial class FetchOps
                 var maxBytes = ResponseBodyByteLimit();
                 if (maxEntries > 0 && maxBytes > 0 && respBytes.Length <= maxBytes)
                 {
+                    respBody ??= Encoding.UTF8.GetString(respBytes);
                     gs.NetworkResponseBodies[requestId] = new StoredNetworkResponseBody(respBody, false);
                     gs.NetworkResponseBodyOrder.Enqueue(requestId);
                     while (gs.NetworkResponseBodyOrder.Count > maxEntries)
@@ -916,15 +986,13 @@ public static partial class FetchOps
                         finalStatus,
                         url,
                         currentUrl,
-                        respBody,
+                        respBody ?? Encoding.UTF8.GetString(respBytes),
                         tainted: crossedOrigin || string.Equals(pageOrigin, "null", StringComparison.Ordinal),
                         redirected,
                         requestId,
                         VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
                         hostConsumesBody);
                 }
-
-                var respBodyBase64 = Convert.ToBase64String(respBytes);
 
                 // Page script sees an opaque no-cors response as status 0 with no body
                 // and no headers; the engine's own subresource loads (internalLoad) still
@@ -938,23 +1006,14 @@ public static partial class FetchOps
                     ? new Dictionary<string, string>(StringComparer.Ordinal)
                     : VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode);
 
-                var result = new StringBuilder(respBody.Length + respBodyBase64.Length + 256);
-                result.Append("{\"status\":").Append(
-                    opaque ? "0" : finalStatus.ToString(CultureInfo.InvariantCulture));
-                result.Append(",\"body\":");
-                SerdeJson.AppendString(result, opaque ? string.Empty : respBody);
-                result.Append(",\"bodyBase64\":");
-                SerdeJson.AppendString(result, opaque ? string.Empty : respBodyBase64);
-                result.Append(",\"requestId\":");
-                SerdeJson.AppendString(result, requestId);
-                result.Append(",\"url\":");
-                SerdeJson.AppendString(result, currentUrl);
-                result.Append(",\"redirected\":").Append(redirected ? "true" : "false");
-                result.Append(",\"opaque\":").Append(opaque ? "true" : "false");
-                result.Append(",\"headers\":");
-                AppendHeaders(result, scriptHeaders);
-                result.Append('}');
-                return result.ToString();
+                return ScriptResponseJson(
+                    StatusText(opaque, finalStatus),
+                    respBytes,
+                    requestId,
+                    currentUrl,
+                    redirected,
+                    opaque,
+                    scriptHeaders);
             }
             finally
             {

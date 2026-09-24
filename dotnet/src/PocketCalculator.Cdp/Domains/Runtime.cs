@@ -207,7 +207,8 @@ public static class Runtime
                     ?? throw new DomainError("expression required");
                 bool returnByValue = parameters.Get("returnByValue").AsBool() ?? false;
 
-                ValidateContext(parameters, "contextId", ctx, sessionId, "evaluate");
+                ExecutionContextRecord? context =
+                    ValidateContext(parameters, "contextId", ctx, sessionId, "evaluate");
 
                 bool awaitPromise = parameters.Get("awaitPromise").AsBool() ?? false;
 
@@ -225,9 +226,13 @@ public static class Runtime
                     page.NoteUserActivation();
                 }
 
+                // Port addition (SECURITY.md M6): an isolated context runs in a realm of
+                // its own. The Rust engine evaluates every context in the page realm.
+                IsolatedWorldTarget? world = ctx.WorldTargetFor(context, page);
                 RemoteObjectInfo info = await RunBoundedAsync(
-                    () => page.EvaluateForCdpWithTimeoutAsync(
-                        expression, returnByValue, awaitPromise, timeoutMs),
+                    () => world is null
+                        ? page.EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, timeoutMs)
+                        : page.EvaluateForCdpWithTimeoutAsync(expression, returnByValue, awaitPromise, timeoutMs, world),
                     timeoutMs,
                     $"Runtime.evaluate exceeded {timeoutMs.ToString(CultureInfo.InvariantCulture)}ms timeout")
                     .ConfigureAwait(false);
@@ -253,7 +258,8 @@ public static class Runtime
                 // CDP names this field `executionContextId` on callFunctionOn (not
                 // `contextId`); a request may omit it when `objectId` is supplied - in
                 // that case context validation is a no-op and the default context is used.
-                ValidateContext(parameters, "executionContextId", ctx, sessionId, "callFunctionOn");
+                ExecutionContextRecord? context =
+                    ValidateContext(parameters, "executionContextId", ctx, sessionId, "callFunctionOn");
 
                 // Keep awaitPromise alive for the same command budget as evaluate.
                 // Playwright implements waits with callFunctionOn on some utility paths,
@@ -262,9 +268,12 @@ public static class Runtime
                 ulong timeoutMs = parameters.Get("timeout").AsU64() ?? DefaultCommandTimeoutMs;
 
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
+                // An objectId names the realm it was minted in; without one an isolated
+                // context runs in its own world (port addition, SECURITY.md M6).
+                IsolatedWorldTarget? world = ctx.WorldTargetFor(context, page);
                 RemoteObjectInfo info = await RunBoundedAsync(
                     () => page.CallFunctionOnForCdpWithTimeoutAsync(
-                        functionDeclaration, objectId, arguments, returnByValue, awaitPromise, timeoutMs),
+                        functionDeclaration, objectId, arguments, returnByValue, awaitPromise, timeoutMs, world),
                     timeoutMs,
                     $"Runtime.callFunctionOn exceeded {timeoutMs.ToString(CultureInfo.InvariantCulture)}ms timeout")
                     .ConfigureAwait(false);
@@ -319,6 +328,21 @@ public static class Runtime
                     // document, and puppeteer registers bindings once-per-page rather
                     // than once-per-document.
                     string key = Dispatcher.BindingPreloadPrefix + name;
+                    // Port addition (SECURITY.md M6): a binding for an isolated world
+                    // (executionContextName, or the id of one) is installed in that
+                    // world, whose calls report the world's context id. Puppeteer asks
+                    // for its utility world's bindings this way.
+                    if (IsolatedBindingWorld(parameters, ctx, sessionId) is { } worldName)
+                    {
+                        ctx.WorldPreloadScripts.RemoveAll(entry =>
+                            string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                            && string.Equals(entry.WorldName, worldName, StringComparison.Ordinal));
+                        ctx.WorldPreloadScripts.Add((key, worldName, shim));
+                        RegisterBindingSession(ctx, name, sessionId);
+                        ctx.GetSessionPageMut(sessionId)?.ExecuteInIsolatedWorlds(worldName, shim);
+                        return DomainResult.Empty();
+                    }
+
                     ctx.PreloadScripts.RemoveAll(entry =>
                         string.Equals(entry.Identifier, key, StringComparison.Ordinal));
                     ctx.PreloadScripts.Add((key, shim));
@@ -357,6 +381,24 @@ public static class Runtime
                     string key = Dispatcher.BindingPreloadPrefix + name;
                     ctx.PreloadScripts.RemoveAll(entry =>
                         string.Equals(entry.Identifier, key, StringComparison.Ordinal));
+                    List<string> worldNames = [];
+                    foreach (var (identifier, worldName, _) in ctx.WorldPreloadScripts)
+                    {
+                        if (string.Equals(identifier, key, StringComparison.Ordinal)
+                            && !worldNames.Contains(worldName, StringComparer.Ordinal))
+                        {
+                            worldNames.Add(worldName);
+                        }
+                    }
+
+                    ctx.WorldPreloadScripts.RemoveAll(entry =>
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
+                    foreach (string worldName in worldNames)
+                    {
+                        ctx.GetSessionPageMut(sessionId)?.ExecuteInIsolatedWorlds(
+                            worldName, $"delete globalThis['{name}'];");
+                    }
+
                     if (sessionId is not null
                         && ctx.BindingSessions.TryGetValue(name, out List<string>? owners))
                     {
@@ -384,6 +426,51 @@ public static class Runtime
 
             default:
                 return DomainResult.Err($"Unknown Runtime method: {method}");
+        }
+    }
+
+    /// <summary>
+    /// The isolated world a <c>Runtime.addBinding</c> names, by
+    /// <c>executionContextName</c> or by the id of an isolated context, or null when it
+    /// is for the page realm.
+    /// </summary>
+    private static string? IsolatedBindingWorld(JsonNode? parameters, CdpContext ctx, string? sessionId)
+    {
+        if (parameters.Get("executionContextName").AsString() is { Length: > 0 } worldName)
+        {
+            return worldName;
+        }
+
+        if (parameters.Get("executionContextId").AsI64() is { } id
+            && ctx.ContextById(id) is { IsDefault: false } record
+            && sessionId is not null
+            && ctx.Sessions.TryGetValue(sessionId, out string? pageId)
+            && string.Equals(pageId, record.PageId, StringComparison.Ordinal)
+            && ctx.GetPage(pageId) is { } page
+            && ctx.WorldTargetFor(record, page) is not null)
+        {
+            return record.WorldName;
+        }
+
+        return null;
+    }
+
+    private static void RegisterBindingSession(CdpContext ctx, string name, string? sessionId)
+    {
+        if (sessionId is null)
+        {
+            return;
+        }
+
+        if (!ctx.BindingSessions.TryGetValue(name, out List<string>? owners))
+        {
+            owners = [];
+            ctx.BindingSessions[name] = owners;
+        }
+
+        if (!owners.Contains(sessionId, StringComparer.Ordinal))
+        {
+            owners.Add(sessionId);
         }
     }
 
@@ -497,7 +584,8 @@ public static class Runtime
             + "});"
             + "})()";
 
-        JsonNode? result = page.Evaluate(code);
+        // The object lives in the realm that minted it: the page's, or an isolated world's.
+        JsonNode? result = page.EvaluateInObjectRealm(objectId, code);
         if (JsonExt.AsJsonArray(result) is not { } properties)
         {
             return empty;
@@ -583,7 +671,7 @@ public static class Runtime
     /// An absent identity uses the page's default context. Direct embedders retain the
     /// compatibility path for ids reserved through <c>NextIsolatedContext</c>.
     /// </remarks>
-    internal static void ValidateContext(
+    internal static ExecutionContextRecord? ValidateContext(
         JsonNode? parameters,
         string field,
         CdpContext ctx,
@@ -600,7 +688,7 @@ public static class Runtime
 
         if (id is null && uniqueId is null)
         {
-            return;
+            return null;
         }
 
         ExecutionContextRecord? record = null;
@@ -618,10 +706,9 @@ public static class Runtime
                 : null;
             if (owner is not null && string.Equals(owner, record.PageId, StringComparison.Ordinal))
             {
-                // This registry currently validates ownership/routing only. A named
-                // isolated context still executes in the owning page's current V8
-                // runtime/global; it is not a separate V8 realm yet.
-                return;
+                // The caller picks the realm from the record: an isolated context of the
+                // main frame runs in its own world (CdpContext.WorldTargetFor).
+                return record;
             }
         }
         else if (sessionId is null && uniqueId is null
@@ -629,7 +716,7 @@ public static class Runtime
         {
             // Direct embedders can still reserve an id through the existing public
             // NextIsolatedContext API. Attached sessions require page ownership.
-            return;
+            return null;
         }
 
         string identity = id?.ToString(CultureInfo.InvariantCulture) ?? uniqueId ?? string.Empty;
@@ -637,6 +724,8 @@ public static class Runtime
         {
             throw new DomainError($"Cannot find context with specified id: {identity}");
         }
+
+        return null;
     }
 
     /// <summary>

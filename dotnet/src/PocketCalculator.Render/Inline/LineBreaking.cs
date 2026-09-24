@@ -80,7 +80,7 @@ public static class LineBreaking
         }
 
         // Class and end offset of every grapheme cluster; breaks land on cluster boundaries.
-        List<(int End, BreakClass Class, bool IsSpace)> clusters = [];
+        List<(int End, BreakClass Class, bool IsSpace)> clusters = new(text.Length);
         foreach ((int start, int length) in GraphemeClusters(text))
         {
             clusters.Add((start + length, ClusterClass(text, start, length), IsSpaceCluster(text, start)));

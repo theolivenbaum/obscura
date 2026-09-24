@@ -312,7 +312,10 @@ internal static class TextLayout
             }
 
             List<(int Start, int End)> newOrder = Bidi.Reorder(shape, visual.Ranges);
-            var glyphs = new List<LayoutGlyph>(1);
+            // Sized up front: growing by doubling allocated twice the line's glyphs again, and
+            // a LayoutGlyph is 120 bytes, so one long word cost hundreds of megabytes of copies
+            // (SECURITY.md M7). The count walks words, not glyphs.
+            var glyphs = new List<LayoutGlyph>(Math.Max(1, CountGlyphs(shape, visual)));
             float x = startX;
             float y = 0f;
             float maxAbove = float.NegativeInfinity;
@@ -454,6 +457,29 @@ internal static class TextLayout
         }
 
         return layoutLines;
+    }
+
+    /// <summary>The number of glyphs <c>ProcessRange</c> emits for one visual line.</summary>
+    private static int CountGlyphs(ShapeLine shape, VisualLine visual)
+    {
+        long count = 0;
+        foreach ((int spanIndex, (int startingWord, int startingGlyph), (int endingWord, int endingGlyph)) in visual.Ranges)
+        {
+            ShapeSpan span = shape.Spans[spanIndex];
+            int last = endingWord + (endingGlyph != 0 ? 1 : 0);
+            for (int i = startingWord; i < last && i < span.Words.Count; i++)
+            {
+                ShapeWord word = span.Words[i];
+                int from = i == startingWord ? startingGlyph : 0;
+                int to = Math.Min(i == endingWord ? endingGlyph : word.Glyphs.Count, word.Glyphs.Count);
+                if (to > from)
+                {
+                    count += to - from;
+                }
+            }
+        }
+
+        return (int)Math.Min(count, Array.MaxLength);
     }
 
     /// <summary>

@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using PocketCalculator.Cdp.Domains;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Runtime;
 using BrowserContext = PocketCalculator.Browser.BrowserContext;
 using Page = PocketCalculator.Browser.Page;
 
@@ -119,6 +120,55 @@ public sealed class CdpContext
     public List<(string Identifier, string Source)> PreloadScripts { get; } = [];
 
     public uint PreloadCounter { get; set; }
+
+    /// <summary>
+    /// <c>Page.addScriptToEvaluateOnNewDocument</c> scripts registered for an isolated
+    /// world (<c>worldName</c>), and <c>Runtime.addBinding</c> shims registered for one
+    /// (<c>executionContextName</c>), in insertion order. A world runs them when it is
+    /// created, which is the first time a command names it on each document.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (SECURITY.md M6). The Rust engine files a <c>worldName</c> script
+    /// with the page's own, so it ran beside page script.
+    /// </remarks>
+    public List<(string Identifier, string WorldName, string Source)> WorldPreloadScripts { get; } = [];
+
+    /// <summary>The init scripts of the world named <paramref name="worldName"/>.</summary>
+    public IReadOnlyList<string> WorldPreloadSources(string worldName)
+    {
+        List<string> sources = [];
+        foreach (var (_, world, source) in WorldPreloadScripts)
+        {
+            if (string.Equals(world, worldName, StringComparison.Ordinal))
+            {
+                sources.Add(source);
+            }
+        }
+
+        return sources;
+    }
+
+    /// <summary>
+    /// The isolated world a command addressed to <paramref name="context"/> runs in, or
+    /// null for the page realm.
+    /// </summary>
+    /// <remarks>
+    /// Only the main frame's worlds are realms of their own: a child frame's
+    /// commands run in the page realm, isolated or not, as they did before.
+    /// </remarks>
+    public IsolatedWorldTarget? WorldTargetFor(ExecutionContextRecord? context, Page page)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        if (context is null
+            || context.IsDefault
+            || context.Id <= 1
+            || !string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName));
+    }
 
     /// <summary>
     /// Which sessions asked for each <c>Runtime.addBinding</c> name. A binding is

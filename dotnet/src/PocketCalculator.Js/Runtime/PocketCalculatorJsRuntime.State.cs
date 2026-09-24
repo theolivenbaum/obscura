@@ -167,7 +167,9 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>Install a fresh document. A new document owns fresh page state.</summary>
     public void SetDom(DomTree dom)
     {
+        DetachDomGc();
         State.Dom = dom;
+        AttachDomGc(dom);
         State.DocumentGeneration = unchecked(State.DocumentGeneration + 1);
         State.ActivityGeneration = 0;
         State.PageInFlight = new InFlightCounter();
@@ -506,6 +508,7 @@ public sealed partial class PocketCalculatorJsRuntime
         State.DynamicFonts.Clear();
         State.ElementScrollOffsets.Clear();
         State.ResolvedScroll = null;
+        DetachDomGc();
         var dom = State.Dom;
         State.Dom = null;
         return dom;

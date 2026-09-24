@@ -350,9 +350,21 @@ Found during the review, not from upstream:
     Chromium's y
   - [ ] deep markup parses quadratically in AngleSharp (`IsInButtonScope` scans the
     open-element stack): 50k nested divs take ~20 s (M11)
-  - [ ] per-page DOM byte budget, `ArrayBuffer` accounting, per-process memory
-    budget (M7); `op_fetch_url` still copies a body several times (M4)
-  - [ ] CDP isolated worlds as separate realms (M6); CDP idle timeout (L3)
+  - [x] memory budgets (M7): `ArrayBuffer` cap per isolate, DOM byte budget per
+    document, glyph lists sized up front, opt-in per-process backstop; op_fetch_url
+    builds its result from the body bytes in one pass (M4)
+  - [x] DOM garbage collector: detached components nothing holds are freed at task
+    boundaries (and in-op when the budget refuses a mutation), with generation-tagged
+    node ids so a stale id never aliases a reused slot
+  - [x] CDP isolated worlds in the main frame are their own realms (M6)
+  - [ ] WebAssembly memory is not counted by the `ArrayBuffer` cap
+  - [ ] child-frame isolated worlds still run in the frame's realm; page-dispatched
+    events do not reach world listeners; a world's `input.files` is not shared
+  - [ ] CDP main-world snippets and page-realm internals use page-visible built-ins
+    (L10): on a page that overrides `Array.prototype.map` or `JSON.stringify`,
+    Playwright `check`/`click` and Puppeteer's main-world `$`/`$eval`/`type`/`click`
+    still fail
+  - [ ] CDP idle timeout (L3)
   - [ ] `__virtualUrl` is page-writable and moves `Page.Url` (cosmetic now: origin,
     cookie and initiator decisions use the host-side document URL); MCP
     `browser_import_state` applies every origin's storage to the current page (L9)
@@ -1247,6 +1259,66 @@ DEVIATION comment at the C# code that differs.
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
+
+- **ArrayBuffer cap (M7):** Rust sets no `ArrayBuffer` limit. Each runtime caps
+  backing stores at 1 GiB (256 MiB on 32-bit) through ClearScript's
+  `MaxArrayBufferAllocation` (`POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES`, 0 for none).
+  Over it V8 throws `RangeError: Array buffer allocation failed`; host op results
+  (crypto) reject with `OperationError`; a canvas whose backing store cannot be
+  allocated has a `null` 2d context. WebAssembly memory is not counted.
+- **DOM byte budget (M7):** Rust has none, and Chromium runs out of memory instead.
+  Each `DomTree` charges 64 bytes per node plus 2 per UTF-16 unit of text, comment,
+  processing-instruction, doctype and attribute data, incrementally (512 MiB default,
+  `POCKETCALCULATOR_MAX_DOM_BYTES`, 0 disables). A growth past it throws
+  `QuotaExceededError` from script (op_dom returns `quota-exceeded`) with the document
+  unchanged, after one collection and retry; `innerHTML` parses and checks before
+  detaching the old children; a parse keeps what fits (`ParseTruncated`).
+- **Long-word layout (M7):** the port's word cache skips words over 4096 glyphs, and
+  glyph lists are sized up front: about 350 bytes per character instead of 710, with
+  no observable change.
+- **Per-process backstop (M7):** opt-in `POCKETCALCULATOR_MAX_PROCESS_BYTES`, no Rust
+  equivalent. A 100 ms working-set sample over the limit after one forced GC terminates
+  the running work of every live isolate and refuses new runtimes
+  (`ProcessMemoryExceededException`) while the process stays over.
+- **op_fetch_url result (M4):** the JSON is byte-identical to Rust's, but it is written
+  once from the body bytes in two passes instead of holding the decoded string, the
+  base64 string, a builder and a final copy. A declared Content-Length is read into an
+  exact array. bootstrap.js `_utf8DecodeBytes` joins 8K chunks instead of appending per
+  character; the output is identical.
+- **DOM garbage collector (`DomTree.Gc.cs`, `PocketCalculatorJsRuntime.DomGc.cs`,
+  bootstrap.js `_gcWeaken`/`_gcSurvivors`/`_gcForget`):** Rust never frees a detached
+  node and keeps every wrapper in a strong `_cache`, so a long-running page leaks and,
+  under the DOM budget, would eventually fail. The port frees detached components
+  (parent/child, shadow root to host, template to contents) that nothing holds: a
+  connected node, a CDP or library pin, an isolated world's pending record, the
+  `document.write` stream, or a live JS wrapper in any realm. A full pass runs at task
+  boundaries with one exhaustive V8 collection over temporarily weakened wrappers; a
+  conservative in-op pass runs when due or when the budget refuses a mutation. Chromium
+  frees unreachable detached nodes the same way.
+  - **Node ids:** a 7-bit generation sits above a 24-bit slot index, so a stale id never
+    aliases a reused slot; slots retire at generation 127, at most 16M slots per tree.
+    Ids equal Rust's until a slot is reused. op_dom and DOMSnapshot `backendNodeId`
+    serialize the full id.
+  - **Pins:** the CDP DOM domain pins the node ids it hands out until the next
+    `DOM.getDocument`, like Chromium's DOM agent; library `Element` handles pin while
+    alive.
+  - **Mutation records:** `__notifyMutation` builds a record only when an observer
+    matches, and the `innerHTML` setter reads the old children only when some observer
+    can see that element's child list. Rust does both whenever any observer exists.
+- **CDP isolated worlds are realms (M6):** Rust records a context for
+  `Page.createIsolatedWorld` and runs everything addressed to it in the page realm. C#
+  gives each main-frame isolated world its own engine on the page isolate: bootstrap.js
+  over the page's document, created on first use, at most 32 per document, disposed with
+  the runtime. World objectIds carry the context id as `injectedScriptId`;
+  `DOM.resolveNode` honours `executionContextId` and `DOM.requestNode` is added;
+  `addScriptToEvaluateOnNewDocument` with `worldName` and `addBinding` with
+  `executionContextName` target the world. A world reaches the page realm's form state,
+  focus, selection and `click()` through implementations captured at bootstrap end
+  (`worldCall`); host-built mutation records are forwarded between realms. Console calls
+  from a world are not reported.
+- **`document.head`/`body`** use `Document.prototype.querySelector` captured at bootstrap
+  end, so an own-property `document.querySelector` override does not remove them
+  (Chromium behaviour).
 
 - **Cancellation of work inside ops (H8, L12):** Rust's `terminate_execution` has the
   same gap the port had: C# (or Rust) work inside an op runs to completion, and the

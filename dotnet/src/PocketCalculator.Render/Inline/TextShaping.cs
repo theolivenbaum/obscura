@@ -217,6 +217,9 @@ public sealed class TextShaper(FontDatabase database)
 
     private const int WordCacheLimit = 1 << 16;
 
+    /// <summary>The longest word, in glyphs, the per-shaper word cache keeps.</summary>
+    private const int MaxCachedWordGlyphs = 4096;
+
     private readonly Dictionary<WordShapeKey, ShapeGlyph[]> _words = [];
 
     private readonly record struct WordShapeKey(string Text, TextAttrs Attrs, bool Rtl);
@@ -398,7 +401,8 @@ public sealed class TextShaper(FontDatabase database)
     private static CssBreakData BuildBreakData(string span, int spanStart, AttrsList attrsList)
     {
         List<int> normalBreaks = LineBreaking.Breaks(span);
-        var clusters = new List<(int End, BreakClass Class, BreakClass BreakAllClass, bool VerticalLine, CssLineBreak? Policy)>();
+        // At most one cluster per code unit; sized once rather than grown (SECURITY.md M7).
+        var clusters = new List<(int End, BreakClass Class, BreakClass BreakAllClass, bool VerticalLine, CssLineBreak? Policy)>(span.Length);
         foreach ((int start, int length) in LineBreaking.GraphemeClusters(span))
         {
             clusters.Add((
@@ -553,7 +557,10 @@ public sealed class TextShaper(FontDatabase database)
             }
 
             ShapeRun(word.Glyphs, line, attrsList, start, end, spanRtl);
-            if (_words.Count < WordCacheLimit)
+            // A word too long to recur is not cached: the relative copy doubled what one long
+            // word held (5M glyphs, 480 MB) for a cache hit that never comes (SECURITY.md M7).
+            // Rust (cosmic-text) has no word cache at all.
+            if (_words.Count < WordCacheLimit && word.Glyphs.Count <= MaxCachedWordGlyphs)
             {
                 var relative = new ShapeGlyph[word.Glyphs.Count];
                 for (int i = 0; i < relative.Length; i++)
@@ -732,6 +739,9 @@ public sealed class TextShaper(FontDatabase database)
 
         List<int> missing = [];
         int glyphStart = glyphs.Count;
+        // One ShapeGlyph per HarfBuzz glyph, 96 bytes each: reserve them at once instead of
+        // doubling, which allocated the run's glyphs about twice over (SECURITY.md M7).
+        glyphs.EnsureCapacity(glyphStart + infos.Length);
         for (int index = 0; index < infos.Length; index++)
         {
             GlyphInfo info = infos[index];

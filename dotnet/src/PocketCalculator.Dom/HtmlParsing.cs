@@ -30,9 +30,12 @@ public static class HtmlParsing
 
     private static IDocument ContextDocument => _contextDocument ??= Parser.ParseDocument("");
 
-    public static DomTree ParseHtml(string html)
+    public static DomTree ParseHtml(string html) => ParseHtml(html, DomTree.DefaultContentByteBudget);
+
+    /// <summary>Parse a document into a tree with the given byte budget (M7).</summary>
+    public static DomTree ParseHtml(string html, long contentByteBudget)
     {
-        var tree = new DomTree();
+        var tree = new DomTree { ContentByteBudget = contentByteBudget };
         tree.SetAllowDeclarativeShadowRoots(true);
         var document = Parser.ParseDocument(html);
         // Only full quirks mode makes CSS class/id selectors case-insensitive; limited-quirks
@@ -176,6 +179,21 @@ public static class HtmlParsing
     // counting the root <html> as 1), which keeps growing past the cap exactly as Chromium's stack
     // does; only the attachment point is clamped. Text is not moved, as in Chromium.
     private static void Adapt(DomTree tree, NodeId destParent, INodeList nodes)
+    {
+        try
+        {
+            AdaptNodes(tree, destParent, nodes);
+        }
+        catch (DomQuotaExceededException)
+        {
+            // DEVIATION (SECURITY.md M7): past the tree's byte budget the parse keeps what it
+            // built and drops the rest, as a truncated response would; Rust has no budget, and
+            // Chromium would run out of memory instead.
+            tree.ParseTruncated = true;
+        }
+    }
+
+    private static void AdaptNodes(DomTree tree, NodeId destParent, INodeList nodes)
     {
         // Explicit stack: a deeply nested source document must not overflow the thread stack.
         var stack = new Stack<(NodeId Parent, INode Node, int Depth)>();
