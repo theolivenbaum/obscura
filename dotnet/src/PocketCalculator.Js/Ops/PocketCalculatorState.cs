@@ -131,6 +131,14 @@ public sealed class PocketCalculatorState
     public string? SiteUrl { get; set; }
 
     /// <summary>
+    /// For a srcdoc or about:blank frame, the frame id of the document whose origin it
+    /// inherited (through any chain of such frames); null for any other document, which owns
+    /// its origin. Tells an inherited opaque origin from a new one (<see cref="StateHelpers.SameOrigin"/>).
+    /// Port addition.
+    /// </summary>
+    public uint? OriginOwnerFrameId { get; set; }
+
+    /// <summary>
     /// A srcdoc or about:blank frame's fallback base URL: its parent's document base URL
     /// when the frame was created (HTML "fallback base URL"). Null for any other document,
     /// whose fallback base URL is its own URL. Port addition.

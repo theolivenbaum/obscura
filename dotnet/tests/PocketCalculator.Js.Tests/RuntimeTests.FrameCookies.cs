@@ -73,6 +73,28 @@ public sealed partial class RuntimeTests
     }
 
     [Fact]
+    public void SrcdocSharesAnInheritedOpaqueOriginOnly()
+    {
+        // Chromium 141: a file: page reaches its srcdoc frame's document; a sandboxed srcdoc
+        // frame and another file: document are other origins.
+        using var page = RuntimeFixture.Page("file:///tmp/page.html", "<html><body></body></html>");
+        using var srcdoc = FrameRealm.Create(page.Runtime, 1, 0, "about:srcdoc", "<html><body></body></html>");
+        using var nested = FrameRealm.Create(page.Runtime, 2, 1, "about:srcdoc", "<html><body></body></html>");
+        using var sandboxed = FrameRealm.Create(page.Runtime, 3, 0, "about:srcdoc", "<html><body></body></html>", opaqueOrigin: true);
+        using var file = FrameRealm.Create(page.Runtime, 4, 0, "file:///tmp/page.html", "<html><body></body></html>");
+        Assert.NotNull(srcdoc);
+        Assert.NotNull(nested);
+        Assert.NotNull(sandboxed);
+        Assert.NotNull(file);
+
+        Assert.True(StateHelpers.SameOrigin(page.Runtime.State, srcdoc.State));
+        Assert.True(StateHelpers.SameOrigin(page.Runtime.State, nested.State));
+        Assert.False(StateHelpers.SameOrigin(page.Runtime.State, sandboxed.State));
+        Assert.False(StateHelpers.SameOrigin(page.Runtime.State, file.State));
+        Assert.False(StateHelpers.SameOrigin(srcdoc.State, file.State));
+    }
+
+    [Fact]
     public void OpaqueOriginFramesThrowFromDocumentCookie()
     {
         var jar = new CookieJar();

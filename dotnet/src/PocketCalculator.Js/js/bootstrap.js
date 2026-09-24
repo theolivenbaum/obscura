@@ -14633,7 +14633,7 @@ function _loadIframeSrcdoc(el) {
   st.loadingUrl = 'about:srcdoc';
   st.loadedUrl = 'about:srcdoc';
   const sandboxed = _iframeSandboxed(el);
-  st.sameOrigin = !sandboxed && _realmOrigin() !== 'null';
+  st.sameOrigin = !sandboxed;
   const viewport = _iframeViewport(el);
   st.frameId = __obscuraCore.ops.op_frame_document_srcdoc(el._nid, viewport[0], viewport[1], sandboxed) >>> 0;
   const html = st.sameOrigin ? _String(_hostDom.getAttribute(el, 'srcdoc') ?? '') : '';

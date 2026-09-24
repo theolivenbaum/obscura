@@ -534,40 +534,39 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             return -1d;
         }
 
-        string? frameOrigin = null;
         if (Realms.ByFrameId(frameId) is { } frame)
         {
-            frameOrigin = StateHelpers.DocumentOrigin(frame);
+            return StateHelpers.SameOrigin(document, frame) ? 1d : 0d;
         }
-        else
+
+        foreach (var pending in Page.PendingFrames)
         {
-            foreach (var pending in Page.PendingFrames)
+            if (pending.FrameId != frameId)
             {
-                if (pending.FrameId == frameId)
-                {
-                    // A queued srcdoc or about:blank frame will have its parent's origin
-                    // (FrameRealm.InheritFrameScope).
-                    var parent = pending.Url.StartsWith("about:", StringComparison.Ordinal)
-                        ? pending.ParentFrameId == 0 ? Page : Realms.ByFrameId(pending.ParentFrameId)
-                        : null;
-                    frameOrigin = pending.OpaqueOrigin ? "null"
-                        : parent is not null ? StateHelpers.DocumentOrigin(parent)
-                        : UrlRecord.Parse(pending.Url)?.AsciiOrigin ?? "null";
-                    break;
-                }
+                continue;
             }
+
+            if (pending.OpaqueOrigin)
+            {
+                return 0d;
+            }
+
+            // A queued srcdoc or about:blank frame will have its parent's origin
+            // (FrameRealm.InheritFrameScope).
+            if (pending.Url.StartsWith("about:", StringComparison.Ordinal)
+                && (pending.ParentFrameId == 0 ? Page : Realms.ByFrameId(pending.ParentFrameId)) is { } parent)
+            {
+                return StateHelpers.SameOrigin(document, parent) ? 1d : 0d;
+            }
+
+            var own = StateHelpers.DocumentOrigin(document);
+            return !string.Equals(own, "null", StringComparison.Ordinal)
+                && string.Equals(own, UrlRecord.Parse(pending.Url)?.AsciiOrigin, StringComparison.Ordinal)
+                    ? 1d
+                    : 0d;
         }
 
-        if (frameOrigin is null)
-        {
-            return -1d;
-        }
-
-        var own = StateHelpers.DocumentOrigin(document);
-        return !string.Equals(own, "null", StringComparison.Ordinal)
-            && string.Equals(own, frameOrigin, StringComparison.Ordinal)
-                ? 1d
-                : 0d;
+        return -1d;
     }
 
     /// <summary>

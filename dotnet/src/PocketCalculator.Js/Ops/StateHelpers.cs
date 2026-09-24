@@ -50,6 +50,32 @@ public static class StateHelpers
     }
 
     /// <summary>
+    /// Whether two documents are same-origin: equal tuple origins, or the same opaque origin,
+    /// which only a srcdoc or about:blank frame shares, with the creator it inherited it from
+    /// (a <c>file:</c> or <c>data:</c> page and its srcdoc frame, in Chromium 141). A sandbox's
+    /// opaque origin is new, so it matches nothing. Port addition.
+    /// </summary>
+    public static bool SameOrigin(PocketCalculatorState a, PocketCalculatorState b)
+    {
+        ArgumentNullException.ThrowIfNull(a);
+        ArgumentNullException.ThrowIfNull(b);
+        if (a.OpaqueOrigin || b.OpaqueOrigin)
+        {
+            return false;
+        }
+
+        var left = DocumentOrigin(a);
+        var right = DocumentOrigin(b);
+        if (!string.Equals(left, "null", StringComparison.Ordinal)
+            || !string.Equals(right, "null", StringComparison.Ordinal))
+        {
+            return string.Equals(left, right, StringComparison.Ordinal);
+        }
+
+        return (a.OriginOwnerFrameId ?? a.FrameId) == (b.OriginOwnerFrameId ?? b.FrameId);
+    }
+
+    /// <summary>
     /// The URL <c>document.cookie</c> reads and writes as: the document's own, or for a
     /// srcdoc or about:blank frame its creator's, as Chromium's <c>Document::CookieURL</c>.
     /// Port addition: Rust reads cookies for the document URL, which for about: is none.

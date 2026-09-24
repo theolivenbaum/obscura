@@ -173,8 +173,10 @@ public sealed class FrameRealm : IDisposable
         // frame is opaque, and nothing about it is published.
         // A srcdoc or about:blank frame has its creator's origin (InheritFrameScope).
         var origin = state.OpaqueOrigin ? "null" : OriginOf(state.SiteUrl ?? url);
-        var sameOrigin = !string.Equals(origin, "null", StringComparison.Ordinal)
-            && string.Equals(origin, parent.PageOrigin, StringComparison.Ordinal);
+        var sameOrigin = (!string.Equals(origin, "null", StringComparison.Ordinal)
+                && string.Equals(origin, parent.PageOrigin, StringComparison.Ordinal))
+            // An opaque origin the frame inherited from the page (a file: page's srcdoc frame).
+            || (string.Equals(origin, "null", StringComparison.Ordinal) && StateHelpers.SameOrigin(state, parent.State));
 
         parent.RealmStates.Register(engine, frameId, state);
 
@@ -225,6 +227,7 @@ public sealed class FrameRealm : IDisposable
             // parent's base (Chromium 141).
             state.SiteUrl = parentState.SiteUrl ?? parentState.Url;
             state.OpaqueOrigin |= parentState.OpaqueOrigin;
+            state.OriginOwnerFrameId = parentState.OriginOwnerFrameId ?? parentState.FrameId;
             state.FallbackBaseUrl = StateHelpers.DocumentBaseUrlMemoized(parentState) ?? state.SiteUrl;
         }
 
