@@ -112,4 +112,22 @@ public sealed class GridComputedStyleScriptTests
             ],
             result);
     }
+
+    [Fact]
+    public void RightToLeftTracksAreListedInLogicalOrder()
+    {
+        // The layout mirrors an RTL grid's columns; getComputedStyle lists them from the start
+        // edge, implicit tracks included, as Chromium does.
+        string[] result = Evaluate(
+            """
+            <html><head><style>
+              #g { display: grid; direction: rtl; width: 300px; grid-template-columns: 10px 20px 30px;
+                   grid-auto-columns: 5px 7px; grid-template-rows: 10px }
+            </style></head><body><div id="g">
+              <div style="grid-column: 5"></div><div style="grid-column: -6"></div>
+            </div></body></html>
+            """,
+            """[getComputedStyle(document.getElementById("g")).gridTemplateColumns]""");
+        Assert.Equal(["5px 7px 10px 20px 30px 5px 7px"], result);
+    }
 }

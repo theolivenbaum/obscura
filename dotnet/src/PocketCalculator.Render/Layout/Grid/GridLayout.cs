@@ -246,7 +246,7 @@ public static class GridLayout
 
         // 3. Implicit Grid: estimate track counts
         var (estColCounts, estRowCounts) = ImplicitGrid.ComputeGridSizeEstimate(
-            explicitColCount, explicitRowCount, direction, allChildStyles);
+            explicitColCount, explicitRowCount, allChildStyles);
 
         // 4. Grid Item Placement
         var items = new List<GridItem>(childCount);
@@ -266,7 +266,6 @@ public static class GridLayout
             cellOccupancyMatrix,
             items,
             inFlowChildren,
-            direction,
             style.GridAutoFlow,
             alignItems ?? AlignItems.Normal,
             justifyItems ?? AlignItems.Normal,
@@ -279,33 +278,34 @@ public static class GridLayout
         // 5. Initialize Tracks
         var columns = new List<GridTrack>();
         var rows = new List<GridTrack>();
-        var columnTrackCountsForInit = finalColCounts;
-        if (direction.IsRtl() && finalColCounts.Explicit <= 1)
+        ExplicitGrid.InitializeGridTracks(
+            columns, finalColCounts, style, AbsoluteAxis.Horizontal, cellOccupancyMatrix.ColumnIsOccupied);
+        ExplicitGrid.InitializeGridTracks(
+            rows, finalRowCounts, style, AbsoluteAxis.Vertical, cellOccupancyMatrix.RowIsOccupied);
+
+        // Deviation from the vendored taffy, which placed RTL items in mirrored coordinates and
+        // then reversed only the explicit column tracks (all of them when there were at most
+        // one), so implicit tracks kept their logical sizes on the wrong side. Placement is
+        // logical (Chromium); here the finished grid is mirrored as a whole: the column list
+        // (tracks and gutters) is reversed, the implicit counts trade sides, and each item's
+        // column lines are reflected about the explicit grid, so everything after this point
+        // works in physical left-to-right columns, as before.
+        var logicalColCounts = finalColCounts;
+        if (direction.IsRtl())
         {
-            columnTrackCountsForInit = columnTrackCountsForInit with
+            columns.Reverse();
+            int explicitEndLine = finalColCounts.Explicit;
+            finalColCounts = finalColCounts with
             {
                 NegativeImplicit = finalColCounts.PositiveImplicit,
                 PositiveImplicit = finalColCounts.NegativeImplicit,
             };
-        }
-
-        ExplicitGrid.InitializeGridTracks(
-            columns,
-            columnTrackCountsForInit,
-            style,
-            AbsoluteAxis.Horizontal,
-            columnIndex =>
+            foreach (var item in items)
             {
-                int occupancyIndex = direction.IsRtl()
-                    ? RtlColumnOccupancyIndexForInitialization(columnIndex, finalColCounts)
-                    : columnIndex;
-                return cellOccupancyMatrix.ColumnIsOccupied(occupancyIndex);
-            });
-        ExplicitGrid.InitializeGridTracks(
-            rows, finalRowCounts, style, AbsoluteAxis.Vertical, cellOccupancyMatrix.RowIsOccupied);
-        if (direction.IsRtl())
-        {
-            ReverseNonGutterTracks(columns, finalColCounts);
+                item.Column = new Line<OriginZeroLine>(
+                    new OriginZeroLine(explicitEndLine - item.Column.End.Value),
+                    new OriginZeroLine(explicitEndLine - item.Column.Start.Value));
+            }
         }
 
         // 6. Track Sizing
@@ -792,7 +792,10 @@ public static class GridLayout
             new DetailedGridInfo
             {
                 Rows = DetailedGridTracksInfo.FromGridTracksAndTrackCount(finalRowCounts, rows),
-                Columns = DetailedGridTracksInfo.FromGridTracksAndTrackCount(finalColCounts, columns),
+                // Logical order, the order getComputedStyle lists the tracks in.
+                Columns = direction.IsRtl()
+                    ? DetailedGridTracksInfo.FromGridTracksAndTrackCount(logicalColCounts, [.. Enumerable.Reverse(columns)])
+                    : DetailedGridTracksInfo.FromGridTracksAndTrackCount(finalColCounts, columns),
                 Items = detailedItems,
             });
 
@@ -833,67 +836,6 @@ public static class GridLayout
             containerBorderBox,
             itemContentSizeContribution,
             new Point<float?>(null, gridContainerBaseline));
-    }
-
-    /// <summary>Reverses only non-gutter column tracks in place while preserving line/gutter slots.</summary>
-    private static void ReverseNonGutterTracks(List<GridTrack> tracks, TrackCounts trackCounts)
-    {
-        // When the explicit grid has 0/1 tracks, visual RTL mirroring is entirely determined by
-        // implicit tracks. Reverse all non-gutter tracks in that case.
-        if (trackCounts.Explicit <= 1)
-        {
-            const int MinTrackVecLenToReverseColumns = 5;
-            if (tracks.Count < MinTrackVecLenToReverseColumns)
-            {
-                return;
-            }
-
-            int left = 1;
-            int right = tracks.Count - 2;
-            while (left < right)
-            {
-                (tracks[left], tracks[right]) = (tracks[right], tracks[left]);
-                left += 2;
-                right = right >= 2 ? right - 2 : 0;
-            }
-
-            return;
-        }
-
-        int explicitTrackCount = trackCounts.Explicit;
-        if (explicitTrackCount < 2)
-        {
-            return;
-        }
-
-        int l = trackCounts.NegativeImplicit;
-        int r = l + explicitTrackCount - 1;
-        while (l < r)
-        {
-            int li = (2 * l) + 1;
-            int ri = (2 * r) + 1;
-            (tracks[li], tracks[ri]) = (tracks[ri], tracks[li]);
-            l += 1;
-            r = r >= 1 ? r - 1 : 0;
-        }
-    }
-
-    /// <summary>Maps initialized column indexes to occupancy-matrix indexes for auto-fit in RTL.</summary>
-    private static int RtlColumnOccupancyIndexForInitialization(int columnIndex, TrackCounts trackCounts)
-    {
-        if (trackCounts.Explicit <= 1)
-        {
-            return trackCounts.Len() - columnIndex - 1;
-        }
-
-        int explicitStart = trackCounts.NegativeImplicit;
-        int explicitEnd = explicitStart + trackCounts.Explicit;
-        if (columnIndex >= explicitStart && columnIndex < explicitEnd)
-        {
-            return explicitStart + (explicitEnd - columnIndex - 1);
-        }
-
-        return columnIndex;
     }
 }
 

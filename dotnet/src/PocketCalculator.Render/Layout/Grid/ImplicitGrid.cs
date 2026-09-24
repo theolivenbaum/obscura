@@ -18,11 +18,10 @@ internal static class ImplicitGrid
     public static (TrackCounts Columns, TrackCounts Rows) ComputeGridSizeEstimate(
         ushort explicitColCount,
         ushort explicitRowCount,
-        Direction direction,
         IEnumerable<IGridItemStyle> childStylesIter)
     {
         var (colMin, colMax, colMaxSpan, rowMin, rowMax, rowMaxSpan) =
-            GetKnownChildPositions(childStylesIter, explicitColCount, explicitRowCount, direction);
+            GetKnownChildPositions(childStylesIter, explicitColCount, explicitRowCount);
 
         int negativeImplicitInlineTracks = colMin.ImpliedNegativeImplicitTracks();
         ushort explicitInlineTracks = explicitColCount;
@@ -72,8 +71,7 @@ internal static class ImplicitGrid
         ushort RowMaxSpan) GetKnownChildPositions(
         IEnumerable<IGridItemStyle> childrenIter,
         ushort explicitColCount,
-        ushort explicitRowCount,
-        Direction direction)
+        ushort explicitRowCount)
     {
         var colMin = new OriginZeroLine(0);
         var colMax = new OriginZeroLine(0);
@@ -91,18 +89,6 @@ internal static class ImplicitGrid
                 ChildMinLineMaxLineSpan(colLine, explicitColCount);
             var (childRowMin, childRowMax, childRowSpan) =
                 ChildMinLineMaxLineSpan(rowLine, explicitRowCount);
-
-            // Placement mirrors horizontal spans in RTL, so mirror known column line bounds here to
-            // keep implicit-grid pre-sizing consistent with actual placement.
-            if (direction.IsRtl()
-                && (childColMin != new OriginZeroLine(0) || childColMax != new OriginZeroLine(0)))
-            {
-                int explicitColEndLine = explicitColCount;
-                var mirroredMin = new OriginZeroLine(explicitColEndLine - childColMax.Value);
-                var mirroredMax = new OriginZeroLine(explicitColEndLine - childColMin.Value);
-                childColMin = mirroredMin;
-                childColMax = mirroredMax;
-            }
 
             colMin = OriginZeroLine.Min(colMin, childColMin);
             colMax = OriginZeroLine.Max(colMax, childColMax);

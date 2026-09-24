@@ -63,4 +63,39 @@ public class GridAutoPlacementTests
                 "grid-row:span 2",
                 "grid-row:auto / 1"));
     }
+
+    [Fact]
+    public void RightToLeftPlacesInLogicalColumns()
+    {
+        // Chromium places an RTL grid in logical columns and mirrors the result. The port
+        // searched mirrored columns from the right end of the explicit grid, so the fourth
+        // item, auto-placed after the span-2 item in column 3, landed one column left.
+        Assert.Equal(
+            ["40,40,10,10", "30,0,10,20", "20,20,20,10", "30,30,10,10", "0,0,10,10"],
+            Place(
+                "grid-auto-flow:column;direction:rtl;width:50px;grid-template-columns:repeat(5,10px);"
+                + "grid-template-rows:repeat(3,10px)",
+                "grid-row:5 / auto",
+                "grid-row:auto / span 2",
+                "grid-column:span 2 / auto",
+                string.Empty,
+                "grid-column:-1 / -2"));
+    }
+
+    [Fact]
+    public void RightToLeftMirrorsImplicitTracksWithTheGrid()
+    {
+        // Implicit columns on both sides of the explicit grid, with a two-size
+        // grid-auto-columns pattern: the tracks keep their logical sizes and the whole grid is
+        // mirrored, so the implicit columns after the explicit grid lie to its left.
+        Assert.Equal(
+            ["216,0,7,10", "295,10,5,10", "288,10,7,10", "258,10,30,10"],
+            Place(
+                "direction:rtl;width:300px;grid-template-columns:10px 20px 30px;"
+                + "grid-auto-columns:5px 7px;grid-template-rows:10px",
+                "grid-column:5",
+                "grid-column:-6",
+                string.Empty,
+                "grid-column:span 2"));
+    }
 }
