@@ -274,6 +274,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_realm_origin", (Func<object?, string>)(
             frameId => OpGuard.Run(
                 "op_realm_origin", () => StateHelpers.DocumentOrigin(FrameState(U32(frameId))), "null")));
+        // Port addition: a History API move of the realm's URL, checked and kept host-side
+        // (SECURITY.md L9).
+        Bind(ops, "op_history_url", (Func<object?, object?, bool>)(
+            (url, frameId) => CoreOps.OpHistoryUrl(FrameState(U32(frameId)), S(url))));
         // Port addition: the isolate's WebAssembly.Memory budget (see OpWasmMemoryAdmit).
         var wasmRealm = new StrongBox<double>(0);
         _wasmRealms.Add(wasmRealm, wasmRealm);

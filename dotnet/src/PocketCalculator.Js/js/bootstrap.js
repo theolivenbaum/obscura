@@ -2748,7 +2748,7 @@ function _applyDocQueryEncoding(u) {
 function _documentBase() {
   // history.pushState moves the document URL without reaching the Rust side. Then the base must
   // be built here, or every relative URL resolves against the pre-routing address.
-  const virtual = globalThis.__virtualUrl;
+  const virtual = _virtualUrl;
   if (virtual) {
     const raw = _domParse("document_base_href");
     if (!raw) return virtual;
@@ -6944,15 +6944,34 @@ function _resolveUrl(url) {
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('about:')) return url;
   try { return new URL(url, _documentBase() || "about:blank").href; } catch(e) { return url; }
 }
-// `__virtualUrl` is set by `history.pushState`/`replaceState` (and cleared by
+// `_virtualUrl` is set by `history.pushState`/`replaceState` (and cleared by
 // any real navigation). When set, `location.href` and friends read it instead
 // of the underlying `document_url`. Without this, client-side routers
 // (Next.js, React Router, vue-router) call `pushState` but the URL never
 // changes, so their `useLocation` hooks return the wrong path and the UI
 // freezes on the original route.
-globalThis.__virtualUrl = null;
+//
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where it is the page-writable
+// global globalThis.__virtualUrl, which the host also read back as the page's URL:
+// a page could set it to any string and move location, Page.Url and what CDP and
+// MCP report (SECURITY.md L9). Here it is closure state, and the host learns a
+// History API move only through op_history_url, which checks it against the
+// document URL the host committed. A location setter's synchronous preview (below)
+// stays in the closure and is never reported: the navigation it starts is.
+let _virtualUrl = null;
 function __currentUrl() {
-  return globalThis.__virtualUrl || _domParse("document_url") || "about:blank";
+  return _virtualUrl || _domParse("document_url") || "about:blank";
+}
+// Moves the document URL the way the History API does, telling the host; null goes
+// back to the committed document URL. False when the host refuses the URL.
+function _setHistoryUrl(url) {
+  const op = __obscuraCore.ops.op_history_url;
+  let accepted = typeof op !== 'function';
+  if (!accepted) {
+    try { accepted = !!op(url == null ? '' : _String(url), _realmFrameId); } catch (e) { accepted = false; }
+  }
+  if (accepted) _virtualUrl = url == null ? null : _String(url);
+  return accepted;
 }
 // Whether two URLs name the same document, so moving between them is a
 // *same-document* navigation: nothing is re-fetched and the JavaScript context
@@ -7013,7 +7032,7 @@ function _fragmentNavigate(target, replace) {
     if (replace) h.replaceState(null, '', target);
     else h.pushState(null, '', target);
   } else {
-    globalThis.__virtualUrl = target;
+    _setHistoryUrl(target);
   }
   var next = __currentUrl();
   if (_isFragmentOnlyChange(current, next)) {
@@ -7039,7 +7058,7 @@ function _locationNavigate(url, replace) {
     _fragmentNavigate(target, replace);
     return;
   }
-  globalThis.__virtualUrl = target;
+  _virtualUrl = target;
   __obscuraCore.ops.op_navigate(target, 'GET', '');
 }
 // The host side asks whether a navigation it was handed is same-document, and
@@ -7089,7 +7108,7 @@ globalThis.location = {
   toString() { return this.href; },
   assign(url) { _locationNavigate(url, false); },
   // A reload really re-fetches, fragment or not.
-  reload() { var r = _resolveUrl(this.href); globalThis.__virtualUrl = r; __obscuraCore.ops.op_navigate(r, 'GET', ''); },
+  reload() { var r = _resolveUrl(this.href); _virtualUrl = r; __obscuraCore.ops.op_navigate(r, 'GET', ''); },
   replace(url) { _locationNavigate(url, true); },
 };
 const _locationObj = globalThis.location;
@@ -12381,7 +12400,7 @@ globalThis.atob = globalThis.atob || ((s) => {
 // never updated, and popstate-driven UI froze.
 //
 // Internally we keep a tiny in-memory stack of {state, url} entries. push/
-// replace mutate the stack and set globalThis.__virtualUrl so location.href
+// replace mutate the stack and move _virtualUrl (and the host's copy) so location.href
 // reads the new URL. Real Chrome doesn't fire popstate on push/replace,
 // only on user-driven back/forward — we match that exactly.
 (() => {
@@ -12406,6 +12425,11 @@ globalThis.atob = globalThis.atob || ((s) => {
       return (c && c.ok) ? c : null;
     } catch (e) { return null; }
   };
+  const rewriteError = (method, target, documentUrl) => new DOMException(
+    "Failed to execute '" + method + "' on 'History': A history state object with URL '"
+      + target + "' cannot be created in a document with origin '" + _realmOrigin()
+      + "' and URL '" + documentUrl + "'.",
+    'SecurityError');
   const assertRewritable = (method, target) => {
     const documentUrl = __currentUrl();
     const a = urlParts(target);
@@ -12415,17 +12439,17 @@ globalThis.atob = globalThis.atob || ((s) => {
     if (ok && a.protocol !== 'http:' && a.protocol !== 'https:') {
       ok = a.pathname === b.pathname && (a.protocol === 'file:' || a.search === b.search);
     }
-    if (!ok) {
-      throw new DOMException(
-        "Failed to execute '" + method + "' on 'History': A history state object with URL '"
-          + target + "' cannot be created in a document with origin '" + _realmOrigin()
-          + "' and URL '" + documentUrl + "'.",
-        'SecurityError');
-    }
+    if (!ok) throw rewriteError(method, target, documentUrl);
+  };
+  // The host checks the URL again against the document URL it committed, and keeps
+  // it; the entry is only written once it has agreed.
+  const commitUrl = (method, target) => {
+    const documentUrl = __currentUrl();
+    if (!_setHistoryUrl(target)) throw rewriteError(method, target, documentUrl);
   };
   const applyVirtual = () => {
     const entry = stack[idx];
-    globalThis.__virtualUrl = entry.url ?? null;
+    _setHistoryUrl(entry.url ?? null);
   };
   // Traversal (back/forward) across a fragment fires hashchange; pushState and
   // replaceState fire nothing at all, even when the URL they write differs in
@@ -12461,18 +12485,18 @@ globalThis.atob = globalThis.atob || ((s) => {
     pushState(state, _title, url) {
       const resolved = resolveOrFallback(url);
       assertRewritable('pushState', resolved);
+      commitUrl('pushState', resolved);
       // Truncate forward entries (real Chrome drops the forward stack on a
       // new push) then append + advance.
       stack.length = idx + 1;
       stack.push({state: state ?? null, url: resolved});
       idx = stack.length - 1;
-      applyVirtual();
     }
     replaceState(state, _title, url) {
       const resolved = resolveOrFallback(url);
       assertRewritable('replaceState', resolved);
+      commitUrl('replaceState', resolved);
       stack[idx] = {state: state ?? null, url: resolved};
-      applyVirtual();
     }
     go(n) {
       n = (n | 0);
@@ -17846,7 +17870,7 @@ globalThis.__obscura_init = function() {
   // A real navigation just completed (this runs after set_url), so drop any
   // URL a location setter previewed synchronously and let document_url drive
   // location.href again, including any redirect target.
-  globalThis.__virtualUrl = null;
+  _virtualUrl = null;
   _installWasmStreamingFallback();
 
   const documentNid = +_dom("document_node_id");

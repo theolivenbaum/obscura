@@ -812,7 +812,7 @@ public sealed partial class Page
             return PageNavigationOutcome.None;
         }
 
-        // bootstrap.js moved __virtualUrl; adopt it host-side so page.url() and every CDP
+        // bootstrap.js moved the history URL (op_history_url); adopt it host-side so page.url() and every CDP
         // payload that reports it agree with what the page now thinks it is.
         SyncVirtualUrl();
 

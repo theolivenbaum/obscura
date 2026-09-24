@@ -308,6 +308,14 @@ so these are called unguarded:
 | `op_frame_document_from_load` | fast | `body_token: f64, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_load_stylesheet` | async | `owner_nid: u32, url: String` | `String`: `{"ok":true,"responseUrl":...}` or `{"ok":false}` |
 | `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
+| `op_history_url` | fast | `url: String, frame_id: u32` | `bool`: false, and nothing kept, when the document may not be rewritten to `url`; `""` clears it |
+| `op_wasm_memory_admit` | fast | `held_bytes: f64, delta_bytes: f64` | `bool`: whether the isolate's WebAssembly memory budget allows `delta_bytes` more |
+
+`op_history_url` replaces upstream's page-writable `__virtualUrl` global: the
+History API reports each move of the document URL, the host checks it against the
+committed URL ("can have its URL rewritten") and keeps it, and `Page.Url` reads
+only that. `op_wasm_memory_admit` is asked before `new WebAssembly.Memory` and
+`grow`; the shim guards both with a `typeof` test.
 
 `op_run_fetched_script` runs the host-held body of a 2xx `no-cors` internal load
 of the calling realm, named by its request URL. `op_frame_document_from_load`

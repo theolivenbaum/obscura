@@ -561,8 +561,8 @@ public sealed partial class Page : IDisposable
     /// </summary>
     /// <remarks>
     /// A single page app answers a click by calling <c>history.pushState</c> and
-    /// rendering the next view in place. <c>bootstrap.js</c> tracks that in
-    /// <c>__virtualUrl</c> so <c>location.href</c> reads correctly, but nothing on
+    /// rendering the next view in place. <c>bootstrap.js</c> tracks that (upstream in
+    /// <c>__virtualUrl</c>, here reported through <c>op_history_url</c>) so <c>location.href</c> reads correctly, but nothing on
     /// the host side looked at it, so the page had moved on while
     /// <c>page.url()</c> still reported the old document. Adopting the URL is
     /// unchanged; what the outcome adds is that the change is classified, because
@@ -584,21 +584,12 @@ public sealed partial class Page : IDisposable
         {
             return PageNavigationOutcome.None;
         }
-        JsonNode? value;
-        try
-        {
-            value = js.Evaluate("globalThis.__virtualUrl || ''");
-        }
-        catch (JsRuntimeException)
-        {
-            return PageNavigationOutcome.None;
-        }
-        if (value?.GetValueKind() != System.Text.Json.JsonValueKind.String)
-        {
-            return PageNavigationOutcome.None;
-        }
-        string virtualUrl = value.GetValue<string>();
-        if (virtualUrl.Length == 0 || PageUrl.TryParse(virtualUrl) is not { } parsed)
+        // DEVIATION from fork_virtual_url.rs, which evaluates the page-writable global
+        // __virtualUrl: a page could set it to any URL and move Page.Url and what CDP and
+        // MCP report (SECURITY.md L9). The host keeps the History API URL itself, checked
+        // against the committed document URL when the page moved it.
+        string? virtualUrl = js.HistoryUrl;
+        if (string.IsNullOrEmpty(virtualUrl) || PageUrl.TryParse(virtualUrl) is not { } parsed)
         {
             return PageNavigationOutcome.None;
         }

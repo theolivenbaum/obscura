@@ -38,6 +38,18 @@ public sealed class PocketCalculatorState
     public string Url { get; set; } = "about:blank";
 
     /// <summary>
+    /// The URL <c>history.pushState</c>/<c>replaceState</c> (or a fragment navigation)
+    /// moved this document to, null while it is still at <see cref="Url"/>.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (SECURITY.md L9). Rust keeps this in the page-writable global
+    /// <c>__virtualUrl</c> and the host reads it back from there. Here bootstrap.js reports
+    /// each move through <c>op_history_url</c>, which refuses a URL the document could not
+    /// rewrite itself to, and the host reads only this.
+    /// </remarks>
+    public string? HistoryUrl { get; set; }
+
+    /// <summary>
     /// Whether the document has an opaque origin whatever its URL says, as a frame
     /// sandboxed without <c>allow-same-origin</c> does. Port addition: Rust derives
     /// no origin host-side at all (see <see cref="StateHelpers.DocumentOrigin"/>).

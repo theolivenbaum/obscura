@@ -447,6 +447,37 @@ public sealed partial class RuntimeTests
     }
 
     /// <summary>
+    /// L9: the History API URL is host state. A page that writes the upstream global
+    /// <c>__virtualUrl</c> moves neither <c>location</c> nor the URL the host reports, and
+    /// <c>op_history_url</c> refuses another origin even when called directly.
+    /// </summary>
+    [Fact]
+    public void TheHistoryUrlIsHostStateThePageCannotWrite()
+    {
+        using var fixture = RuntimeFixture.Page("http://example.com/page", "<html><body></body></html>");
+        var tampered = fixture.Runtime.Evaluate(
+            """
+            (() => {
+                globalThis.__virtualUrl = "https://bank.example/login";
+                return location.href;
+            })()
+            """);
+        Assert.Equal("http://example.com/page", tampered?.ToString());
+        Assert.Null(fixture.Runtime.HistoryUrl);
+
+        fixture.Runtime.Evaluate("history.pushState({}, '', '/next#a')");
+        Assert.Equal("http://example.com/next#a", fixture.Runtime.HistoryUrl);
+
+        Assert.Equal("false", fixture.Runtime.Evaluate(
+            "String(__obscura_test_ops.op_history_url('https://bank.example/', 0))")?.ToString());
+        Assert.Equal("http://example.com/next#a", fixture.Runtime.HistoryUrl);
+
+        fixture.Runtime.Evaluate("history.back()");
+        Assert.Null(fixture.Runtime.HistoryUrl);
+        Assert.Equal("http://example.com/page", fixture.Runtime.Evaluate("location.href")?.ToString());
+    }
+
+    /// <summary>
     /// L10: the crypto ops build their result with the realm's own <c>Uint8Array</c>, not
     /// with whatever page script has put on the global by the time the op runs.
     /// </summary>

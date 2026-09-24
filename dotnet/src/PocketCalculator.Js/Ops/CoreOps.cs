@@ -240,6 +240,62 @@ public static class CoreOps
         });
 
     /// <summary>
+    /// <c>op_history_url</c>: records a History API move of the realm's document URL, or
+    /// clears it when <paramref name="url"/> is empty.
+    /// </summary>
+    /// <returns>False, and nothing recorded, when the document may not take that URL.</returns>
+    /// <remarks>
+    /// Port addition (SECURITY.md L9). The check is HTML's "can have its URL rewritten",
+    /// against the URL the host committed rather than anything the page reports: the same
+    /// scheme, credentials, host and port, and outside http(s) the same path, and the same
+    /// query too unless the scheme is <c>file</c>. It is the check that makes Chromium
+    /// throw <c>SecurityError</c> from <c>pushState</c>.
+    /// </remarks>
+    public static bool OpHistoryUrl(PocketCalculatorState state, string url) => OpGuard.Run(
+        "op_history_url",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (url.Length == 0)
+            {
+                state.HistoryUrl = null;
+                return true;
+            }
+
+            if (Url.UrlRecord.Parse(url) is not { } target
+                || Url.UrlRecord.Parse(state.Url) is not { } document
+                || !CanRewriteUrl(document, target))
+            {
+                return false;
+            }
+
+            state.HistoryUrl = target.Href;
+            return true;
+        },
+        false);
+
+    /// <summary>HTML's "can have its URL rewritten".</summary>
+    internal static bool CanRewriteUrl(Url.UrlRecord document, Url.UrlRecord target)
+    {
+        if (!string.Equals(document.Scheme, target.Scheme, StringComparison.Ordinal)
+            || !string.Equals(document.Username, target.Username, StringComparison.Ordinal)
+            || !string.Equals(document.Password, target.Password, StringComparison.Ordinal)
+            || !string.Equals(document.HostStr, target.HostStr, StringComparison.Ordinal)
+            || document.PortNumber != target.PortNumber)
+        {
+            return false;
+        }
+
+        if (target.Scheme is "http" or "https")
+        {
+            return true;
+        }
+
+        return string.Equals(document.Path, target.Path, StringComparison.Ordinal)
+            && (target.Scheme == "file" || string.Equals(document.Query, target.Query, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// <c>op_navigate</c>. A frame that navigates itself must not move the top
     /// document, so the navigation is recorded against the calling realm.
     /// </summary>

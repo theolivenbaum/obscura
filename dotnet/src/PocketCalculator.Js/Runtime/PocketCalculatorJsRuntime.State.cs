@@ -638,6 +638,12 @@ public sealed partial class PocketCalculatorJsRuntime
         }
     }
 
+    /// <summary>
+    /// The URL the main document moved itself to through the History API, as the host
+    /// checked and recorded it (<c>op_history_url</c>); null while it has not moved.
+    /// </summary>
+    public string? HistoryUrl => State.HistoryUrl;
+
     // -------------------------------------------------------------- render state
 
     /// <summary>Current clamped root scroll offset shared by CSSOM geometry and paint.</summary>
