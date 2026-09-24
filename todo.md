@@ -245,14 +245,14 @@ Security follow-ups found while porting (not upstream fixes):
       callers with no page (as upstream), since `Obscura.Render` cannot see `SsrfGuard`
 - [x] `serve --workers` behind a DNS Host name: a156914's forwarded authority is ported as
       `POCKETCALCULATOR_CDP_FORWARDED_HOST/PORT`
-- [ ] The CDP remote-object store (`__obscura_objects`, `__obscura_oid`, `__obscura_await_meta`,
+- [x] The CDP remote-object store (`__obscura_objects`, `__obscura_oid`, `__obscura_await_meta`,
       `__obscura_await_rejected`, `__obscura_done_N`) and the frame registries
       (`__obscura_frameObjects/Elements/Windows`) are page-readable and page-writable, so a
       page can read or forge a client's handles and awaitPromise results. Moving them behind
       the host wrapper changes how client Runtime.evaluate code runs (sloppy mode, `var`)
-- [ ] `el.dispatchEvent(ev)` does not clear `isTrusted` as DOM requires, so page script can
+- [x] `el.dispatchEvent(ev)` does not clear `isTrusted` as DOM requires, so page script can
       re-dispatch a trusted event it received (check Chromium first)
-- [ ] Host snippets build events with the page's current `Event` / `MouseEvent`
+- [x] Host snippets build events with the page's current `Event` / `MouseEvent`
       constructors, which a page can replace; capture them at bootstrap
 - [ ] Every `__obscura_*` name is still detectable with `'name' in window`; the hide list
       only filters reflection
@@ -360,10 +360,18 @@ Found during the review, not from upstream:
   - [ ] WebAssembly memory is not counted by the `ArrayBuffer` cap
   - [ ] child-frame isolated worlds still run in the frame's realm; page-dispatched
     events do not reach world listeners; a world's `input.files` is not shared
-  - [ ] CDP main-world snippets and page-realm internals use page-visible built-ins
-    (L10): on a page that overrides `Array.prototype.map` or `JSON.stringify`,
-    Playwright `check`/`click` and Puppeteer's main-world `$`/`$eval`/`type`/`click`
-    still fail
+  - [x] CDP main-world snippets, MCP tools and the shim's own DOM paths use built-ins
+    captured at bootstrap (L10): Playwright and Puppeteer pass on pages that override
+    `querySelector`, `Array.prototype.map/filter`, `Promise.prototype.then`, `JSON`,
+    `Object.keys`, `dispatchEvent`, `elementFromPoint` and the event constructors
+  - [ ] L10 leftovers: string/regex handling in the markdown script and shim,
+    `Array.prototype.push/forEach`, `Function.prototype.call` and `Set`/`Map` methods in
+    shim internals, a page-added `toJSON` on `Object.prototype`/`Array.prototype`
+    shaping by-value results, and page-writable values the host reads
+    (`window.scrollX/Y`, `location.assign`, `__obscura_click_target`, `__obscura_focused`)
+  - [ ] an inline `<a>` reports an empty rect, so CDP clicks by coordinates miss inline
+    links; Puppeteer `type` puts the caret at the end where Chromium puts it at the
+    start; Puppeteer `::-p-text` selectors do not work
   - [ ] CDP idle timeout (L3)
   - [ ] `__virtualUrl` is page-writable and moves `Page.Url` (cosmetic now: origin,
     cookie and initiator decisions use the host-side document URL); MCP
@@ -1259,6 +1267,32 @@ DEVIATION comment at the C# code that differs.
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
+
+- **CDP remote objects (L10):** handles and awaited outcomes live in the realm's bootstrap
+  closure (`_cdpHost`), handed to strict host wrappers as `__obscura_cdp`, not in the
+  page-visible `__obscura_objects`/`__obscura_await_*`/`__obscura_done_N`. Client source and
+  `callFunctionOn` declarations run through the eval captured at bootstrap, as an indirect
+  eval at global scope (sloppy mode, `var` on the global, as before). Metadata and by-value
+  serialization use built-ins captured at bootstrap. `unserializableValue` accepts only
+  `Infinity`, `-Infinity`, `NaN`, `-0` and BigInt literals instead of being pasted in as
+  source.
+- **Host snippets (L10):** CDP Input/DOM, the MCP tools, LP.getMarkdown and the library
+  `Element` API reach the DOM through `__obscura_host.dom`: prototype members as bootstrap
+  defined them, the shim's own event classes, the realm's own document. Rust calls the
+  page's current globals and prototypes.
+- **Shim internals (L10):** internal dispatches, internal `querySelector(All)`, node-list
+  building, JSON and event construction use the shim's own methods and classes, not the
+  page-writable globals. `_wrap` is no longer a global (`__obscura_host.dom.wrap` /
+  `__obscura_cdp.wrap`).
+- **Frame registries (L10):** private to the bootstrap, reached through
+  `__obscura_host.publishFrameObjects`, `forgetFrame`, `forgetFrameObjects` and
+  `frameRegistrySize`.
+- **dispatchEvent (L10):** a trusted mark covers only the dispatch it was made for, so a
+  later re-dispatch has `isTrusted` false, and re-dispatching an event in flight throws
+  `InvalidStateError`. Matches Chromium, measured.
+- **Hit testing (L10):** `elementFromPoint` and CDP clicks ignore page overrides of
+  `document.elementFromPoint`, `querySelectorAll` and `getBoundingClientRect`, as in
+  Chromium.
 
 - **ArrayBuffer cap (M7):** Rust sets no `ArrayBuffer` limit. Each runtime caps
   backing stores at 1 GiB (256 MiB on 32-bit) through ClearScript's

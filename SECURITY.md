@@ -60,13 +60,15 @@ Still open after the fixes:
   the per-process limit (`POCKETCALCULATOR_MAX_PROCESS_BYTES`) is opt-in.
 - **CDP isolated worlds** (M6): main-frame worlds are separate realms now, so page
   tampering no longer reaches Playwright's or Puppeteer's utility-world results.
-  Child-frame worlds still share the frame's realm, and main-world CDP snippets still
-  use page-visible built-ins (L10).
+  Child-frame worlds still share the frame's realm.
 - **Remaining page-writable surfaces:**
   - `__virtualUrl` still moves the URL the page reports and the one CDP and MCP
     show. Origin, cookie and initiator decisions no longer read it.
-  - The CDP object store and CDP/MCP host snippets use page globals (L10,
-    todo.md).
+  - A few host reads of page-writable values remain (`window.scrollX/Y`,
+    `location.assign`), and shim internals still use some page-replaceable built-ins
+    (`Array.prototype.push/forEach`, `Function.prototype.call`, string methods); see
+    todo.md. The CDP object store, frame registries, host snippets and event
+    construction no longer depend on page globals (L10).
   - MCP `browser_import_state` applies every origin's storage to the current page
     (L9).
 - **Not changed:**
@@ -381,7 +383,7 @@ contradict an entry `todo.md` marks done say so.
 | L7 | Low | Net | Tracker blocklist skips `op_fetch_url` and redirect hops | read; inherited | fixed |
 | L8 | Low | Net | `InterceptAction.ModifyHeaders` leaks headers into later requests | read | fixed |
 | L9 | Low | JS/MCP | Cross-origin `pushState` spoofs `location.origin`; MCP state export/import trusts it | tested | partial: `pushState` fixed; `__virtualUrl` and MCP state import/export open |
-| L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | partial: `Uint8Array` fixed; CDP/MCP snippets open |
+| L10 | Low | JS | Host ops and snippets call page-replaceable globals | read; partly in todo.md | fixed: host snippets, remote-object store, frame registries and event construction use bootstrap-captured built-ins; minor shim internals open |
 | L11 | Low | Browser | Latent integer overflow in `RgbImage.Decode` | read; not reachable today | fixed |
 | L12 | Low | CLI | Process backstop exists for `fetch` only, not `serve`/`mcp` | read | fixed: work inside ops is cancelled; opt-in exit (`POCKETCALCULATOR_HANG_EXIT_MS`) remains the backstop |
 | I1 to I10 | Info | various | See [Informational](#informational) | | I2 to I6, I9 fixed; I1, I7, I8, I10 open |
