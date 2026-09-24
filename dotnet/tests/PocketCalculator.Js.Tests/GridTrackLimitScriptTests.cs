@@ -9,8 +9,8 @@ namespace PocketCalculator.Js.Tests;
 /// Grid track limits as a page sees them: nested <c>repeat()</c> is an invalid declaration, and
 /// huge repeat counts, line numbers and auto-fill counts are clamped (Chromium's
 /// <c>kGridMaxTracks</c>) instead of expanding without a bound. Expected values are measured
-/// in Chromium 141. The port does not serialize resolved grid tracks in
-/// <c>getComputedStyle</c> (a pre-existing gap), so geometry is read instead.
+/// in Chromium 141. Geometry is read rather than <c>getComputedStyle</c>, which
+/// GridComputedStyleScriptTests covers.
 /// </summary>
 public sealed class GridTrackLimitScriptTests
 {

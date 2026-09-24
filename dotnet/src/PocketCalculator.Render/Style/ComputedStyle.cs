@@ -2792,6 +2792,7 @@ public static partial class ComputedStyle
 
                 style.GridTemplateColumnsSubgrid = IsSubgridTrackList(value);
                 style.GridTemplateColumns = tracks;
+                style.GridTemplateColumnsText = value.Trim();
                 GridCalcBuckets(style)[0] = calcExpressions;
                 style.GridColLineNames = names.Count != 0 ? BuildLineMap(names) : null;
                 return true;
@@ -2805,6 +2806,7 @@ public static partial class ComputedStyle
                 }
 
                 style.GridTemplateRows = tracks;
+                style.GridTemplateRowsText = value.Trim();
                 GridCalcBuckets(style)[1] = calcExpressions;
                 style.GridRowLineNames = names.Count != 0 ? BuildLineMap(names) : null;
                 return true;
