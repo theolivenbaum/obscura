@@ -473,7 +473,8 @@ internal sealed class GridItem
         AbstractAxis axis,
         TrackSlice axisTracks,
         Size<float?> gridAreaSize,
-        Size<float?> innerNodeSize)
+        Size<float?> innerNodeSize,
+        (bool AnyAutoMin, bool AnyFlexible) axisTrackFlags)
     {
         var calc = tree.CalcResolver();
         var padding = Padding.ResolveOrZero(gridAreaSize.Width, calc);
@@ -502,11 +503,13 @@ internal sealed class GridItem
             var itemAxisTracks = TrackRangeExcludingLines(axis, axisTracks);
 
             // It spans at least one track in that axis whose min track sizing function is auto.
-            bool spansAutoMinTrack = axisTracks.Any(static track => track.MinTrackSizingFunction.IsAuto());
+            // (taffy tests every track in the axis, not the spanned ones; the caller computes
+            // that once per axis.)
+            bool spansAutoMinTrack = axisTrackFlags.AnyAutoMin;
 
             // If it spans more than one track in that axis, none of those tracks are flexible.
             bool onlySpanOneTrack = itemAxisTracks.Count == 1;
-            bool spansAFlexibleTrack = axisTracks.Any(static track => track.MaxTrackSizingFunction.IsFr());
+            bool spansAFlexibleTrack = axisTrackFlags.AnyFlexible;
 
             bool useContentBasedMinimum = spansAutoMinTrack && (onlySpanOneTrack || !spansAFlexibleTrack);
 
@@ -546,7 +549,8 @@ internal sealed class GridItem
         AbstractAxis axis,
         TrackSlice axisTracks,
         Size<float?> gridAreaSize,
-        Size<float?> innerNodeSize)
+        Size<float?> innerNodeSize,
+        (bool AnyAutoMin, bool AnyFlexible) axisTrackFlags)
     {
         float? cached = MinimumContributionCache.Get(axis);
         if (cached.HasValue)
@@ -554,7 +558,7 @@ internal sealed class GridItem
             return cached.Value;
         }
 
-        float size = MinimumContribution(tree, axis, axisTracks, gridAreaSize, innerNodeSize);
+        float size = MinimumContribution(tree, axis, axisTracks, gridAreaSize, innerNodeSize, axisTrackFlags);
         MinimumContributionCache.Set(axis, size);
         return size;
     }

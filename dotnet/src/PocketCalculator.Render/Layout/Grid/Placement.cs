@@ -88,7 +88,7 @@ internal static class GridPlacementAlgorithm
 
         // Deviation from taffy, which places items at any line its 16-bit coordinates reach and
         // grows the occupancy matrix (rows x columns) to match: every span is pulled into a
-        // window of GridLimits.MaxTracks tracks per axis, as Chromium pulls items placed past
+        // window of GridLimits.MaxAxisTracks tracks per axis, as Chromium pulls items placed past
         // kGridMaxTracks back into the last track.
         var windows = new InBothAbsAxis<GridWindow>(
             PlacementWindow(cellOccupancyMatrix, placements, AbsoluteAxis.Horizontal, direction, explicitColCount),
@@ -265,21 +265,24 @@ internal static class GridPlacementAlgorithm
             var primaryAxisPlacement =
                 ResolveIndefiniteGridSpan(position, primaryAxisSpan, primaryAxisIsReversed);
 
-            // The search has left the window: stop in the last track it allows.
-            if (!primaryWindow.Contains(primaryAxisPlacement))
+            // Cells past the window are never occupied, so the search ends there at the latest;
+            // a position found past it is pulled into the last track, as Chromium pulls one
+            // found past kGridMaxTracks.
+            //
+            // taffy steps one track and re-tests. As in step 4, every candidate that still
+            // contains the furthest occupied track fails, and so does one whose own track is
+            // occupied, so jump past both: the same position is found in fewer probes.
+            if (cellOccupancyMatrix.OccupiedPrimaryTrackBounds(
+                    primaryAxis, primaryAxisPlacement, secondaryAxisPlacement) is not { } occupied)
             {
                 return (primaryWindow.Clamp(primaryAxisPlacement), secondaryAxisPlacement);
             }
 
-            bool doesFit = cellOccupancyMatrix.LineAreaIsUnoccupied(
-                primaryAxis, primaryAxisPlacement, secondaryAxisPlacement);
-
-            if (doesFit)
-            {
-                return (primaryAxisPlacement, secondaryAxisPlacement);
-            }
-
-            position = AdvancePosition(position, primaryAxisIsReversed);
+            position = cellOccupancyMatrix.NextFreePrimaryTrack(
+                primaryAxis,
+                primaryAxisIsReversed ? occupied.First - 1 : occupied.Last + 1,
+                secondaryAxisPlacement,
+                primaryAxisIsReversed);
         }
     }
 
@@ -349,19 +352,14 @@ internal static class GridPlacementAlgorithm
                 var secondarySpan =
                     ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount, secondaryAxisIsReversed);
 
-                // The search has left the window: stop in the last track it allows.
-                if (!secondaryWindow.Contains(secondarySpan))
-                {
-                    return (primarySpan, secondaryWindow.Clamp(secondarySpan));
-                }
-
                 if (LineAreaIsOccupied(primarySpan, secondarySpan))
                 {
                     secondaryIdx = AdvancePosition(secondaryIdx, secondaryAxisIsReversed);
                     continue;
                 }
 
-                return (primarySpan, secondarySpan);
+                // A position past the window is pulled into its last track.
+                return (primarySpan, secondaryWindow.Clamp(secondarySpan));
             }
         }
         else
@@ -376,12 +374,6 @@ internal static class GridPlacementAlgorithm
                     ResolveIndefiniteGridSpan(primaryIdx, primarySpanCount, primaryAxisIsReversed);
                 var secondarySpan =
                     ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount, secondaryAxisIsReversed);
-
-                // The search has left the window: stop in the last track it allows.
-                if (!secondaryWindow.Contains(secondarySpan))
-                {
-                    return (primaryWindow.Clamp(primarySpan), secondaryWindow.Clamp(secondarySpan));
-                }
 
                 bool primaryOutOfBounds = primaryAxisIsReversed
                     ? primarySpan.Start < primaryAxisGridStartLine
@@ -408,7 +400,8 @@ internal static class GridPlacementAlgorithm
                     continue;
                 }
 
-                return (primarySpan, secondarySpan);
+                // A position past the window is pulled into its last track.
+                return (primaryWindow.Clamp(primarySpan), secondaryWindow.Clamp(secondarySpan));
             }
         }
     }

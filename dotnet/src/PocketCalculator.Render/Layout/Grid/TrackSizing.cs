@@ -92,6 +92,8 @@ internal static class TrackSizing
         AbstractAxis axis,
         Size<float?> innerNodeSize)
     {
+        private (bool AnyAutoMin, bool AnyFlexible)? _axisTrackFlags;
+
         public ILayoutPartialTree Tree { get; } = tree;
 
         public CalcResolver Calc { get; } = tree.CalcResolver();
@@ -132,8 +134,13 @@ internal static class TrackSizing
             var gridAreaSize = GridAreaSize(item, axisTracks);
             var availableSpace = gridAreaSize.With(axis, null);
             var marginAxisSums = MarginsAxisSumsWithBaselineShims(item, availableSpace.Width);
-            float contribution =
-                item.MinimumContributionCached(Tree, axis, axisTracks, gridAreaSize, innerNodeSize);
+            // taffy asks both questions of every track in the axis, for every item; they do not
+            // depend on the item, so ask them once (an item-count x track-count cost otherwise).
+            _axisTrackFlags ??= (
+                axisTracks.Any(static track => track.MinTrackSizingFunction.IsAuto()),
+                axisTracks.Any(static track => track.MaxTrackSizingFunction.IsFr()));
+            float contribution = item.MinimumContributionCached(
+                Tree, axis, axisTracks, gridAreaSize, innerNodeSize, _axisTrackFlags.Value);
             return contribution + marginAxisSums.Get(axis);
         }
     }

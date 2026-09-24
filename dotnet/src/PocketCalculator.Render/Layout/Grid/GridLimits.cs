@@ -2,8 +2,8 @@
 namespace PocketCalculator.Render.Layout;
 
 /// <summary>
-/// The most tracks a grid may have in one axis, and the largest line number or span a
-/// placement may name.
+/// The most tracks a grid's template and placements may name, and the most tracks one axis of
+/// a grid may hold.
 /// </summary>
 /// <remarks>
 /// Chromium bounds a grid with <c>kGridMaxTracks</c> (10,000,000, measured in Chromium 141): a
@@ -13,15 +13,26 @@ namespace PocketCalculator.Render.Layout;
 /// taffy has no bound at all, and neither does the Rust engine beyond capping each
 /// <c>repeat()</c> at 1000; the result was an explicit grid of 2^20 tracks from nested
 /// <c>repeat()</c>, an auto-fill count computed by casting an unbounded float to <c>u16</c>
-/// (a hang), and 16-bit line arithmetic that wrapped. The port keeps Chromium's rules with a
-/// smaller limit, because taffy's grid lines are 16-bit: at 10,000 every sum the placement
-/// code forms (a negative offset, the explicit grid, an implicit end and a span) stays inside
-/// <see cref="short"/>, and the occupancy matrix stays bounded.
+/// (a hang), and 16-bit line arithmetic that wrapped.
+/// <para>
+/// The port keeps Chromium's rules with two smaller limits. What a stylesheet names (template
+/// tracks, auto-repeat count, line numbers, spans) stops at <see cref="MaxTracks"/>. What an
+/// axis holds, explicit and implicit together, stops at <see cref="MaxAxisTracks"/>: auto-placed
+/// items add implicit tracks one by one, and a grid of more items than 10,000 (a long list laid
+/// out as a one-column grid) must keep giving each its own track. Every track the port holds
+/// is an object the track sizing algorithm walks several times, unlike Chromium's collapsed
+/// track ranges, and a hundred items spanning 10,000 tracks each reach the axis limit, so it is
+/// set where that stays cheap. Measured on such a page: at 100,000 tracks the layout takes
+/// about 0.3 s and 25 MB over the page's baseline; at 1,000,000 it took 0.8 s and 300 MB.
+/// </para>
 /// </remarks>
 internal static class GridLimits
 {
-    /// <summary>The track, line and span limit per axis.</summary>
+    /// <summary>The template track, auto-repeat, line number and span limit.</summary>
     public const int MaxTracks = 10_000;
+
+    /// <summary>The most tracks, explicit and implicit together, one axis of a grid holds.</summary>
+    public const int MaxAxisTracks = 100_000;
 
     /// <summary>A span, clamped to the limit.</summary>
     public static ushort ClampSpan(ushort span) => span > MaxTracks ? (ushort)MaxTracks : span;
@@ -29,13 +40,13 @@ internal static class GridLimits
     /// <summary>
     /// The origin-zero lines an axis may occupy, given the earliest line any item asks for: as
     /// many negative implicit tracks as fit beside the explicit grid, then up to
-    /// <see cref="MaxTracks"/> tracks in all (or the explicit grid's end, should that be
+    /// <see cref="MaxAxisTracks"/> tracks in all (or the explicit grid's end, should that be
     /// further).
     /// </summary>
     public static GridWindow WindowFor(int earliestLine, int explicitCount)
     {
-        int negative = Math.Min(Math.Max(-earliestLine, 0), Math.Max(MaxTracks - explicitCount, 0));
-        return new GridWindow(-negative, -negative + Math.Max(MaxTracks, negative + explicitCount));
+        int negative = Math.Min(Math.Max(-earliestLine, 0), Math.Max(MaxAxisTracks - explicitCount, 0));
+        return new GridWindow(-negative, -negative + Math.Max(MaxAxisTracks, negative + explicitCount));
     }
 
     /// <summary>
@@ -44,7 +55,7 @@ internal static class GridLimits
     /// </summary>
     public static TrackCounts ClampCounts(TrackCounts counts)
     {
-        int room = Math.Max(MaxTracks - counts.Explicit, 0);
+        int room = Math.Max(MaxAxisTracks - counts.Explicit, 0);
         int negative = Math.Min(counts.NegativeImplicit, room);
         int positive = Math.Min(counts.PositiveImplicit, room - negative);
         return new TrackCounts(negative, counts.Explicit, positive);
