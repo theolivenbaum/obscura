@@ -22,8 +22,9 @@ namespace PocketCalculator.Render.Layout;
 /// out as a one-column grid) must keep giving each its own track. Every track the port holds
 /// is an object the track sizing algorithm walks several times, unlike Chromium's collapsed
 /// track ranges, and a hundred items spanning 10,000 tracks each reach the axis limit, so it is
-/// set where that stays cheap. Measured on such a page: at 100,000 tracks the layout takes
-/// about 0.3 s and 25 MB over the page's baseline; at 1,000,000 it took 0.8 s and 300 MB.
+/// set where that stays cheap. Measured on such a page (fixed-size rows): at 100,000 tracks a
+/// relayout takes about 0.12 s and 10 MB over the page's baseline; at 1,000,000 it took
+/// 0.8 s and 300 MB.
 /// </para>
 /// </remarks>
 internal static class GridLimits
