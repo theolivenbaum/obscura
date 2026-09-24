@@ -147,7 +147,7 @@ public sealed class GridCalcExpression
     private static readonly HashSet<string> AllowedWords = new(StringComparer.Ordinal)
     {
         "calc", "min", "max", "clamp", "round", "nearest", "up", "down", "to-zero",
-        "px", "pt", "em", "rem", "ex", "vw", "vh", "dvw", "dvh", "svw", "svh", "lvw", "lvh",
+        "px", "pt", "em", "rem", "ex", "ch", "vw", "vh", "dvw", "dvh", "svw", "svh", "lvw", "lvh",
         "vmin", "vmax",
     };
 
@@ -520,6 +520,11 @@ public static partial class ComputedStyle
             return Layout.MinTrackSizingFunction.FromPercent(percent / 100f);
         }
 
+        if (ContextualTrackLength(lower, calcExpressions) is { } contextual)
+        {
+            return Layout.MinTrackSizingFunction.FromRaw(contextual);
+        }
+
         if (PxValue(lower) is { } pixels)
         {
             return Layout.MinTrackSizingFunction.FromLength(pixels);
@@ -557,6 +562,11 @@ public static partial class ComputedStyle
             return Layout.MaxTrackSizingFunction.FromPercent(percent / 100f);
         }
 
+        if (ContextualTrackLength(lower, calcExpressions) is { } contextual)
+        {
+            return Layout.MaxTrackSizingFunction.FromRaw(contextual);
+        }
+
         if (PxValue(lower) is { } pixels)
         {
             return Layout.MaxTrackSizingFunction.FromLength(pixels);
@@ -569,6 +579,46 @@ public static partial class ComputedStyle
         }
 
         return Layout.MaxTrackSizingFunction.Auto;
+    }
+
+    /// <summary>
+    /// A track length in a font- or viewport-relative unit, as a late-resolved expression.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from Rust, whose <c>px_value</c> resolves every font-relative unit against a
+    /// flat 16px (and reads <c>10vw</c> as the bare number 10), so <c>grid-template-columns:
+    /// 2em</c> at <c>font-size: 40px</c> was 32px where Chromium gives 80px. The length becomes
+    /// the same opaque <c>calc()</c> handle a math function gets, which the top-down pass hands
+    /// the element's own font units, the root font size and the viewport
+    /// (<see cref="SetGridCalcContext"/>). <c>fit-content()</c> has no such handle in taffy,
+    /// so its argument still resolves against 16px.
+    /// </remarks>
+    private static Layout.CompactLength? ContextualTrackLength(string lower, List<object> calcExpressions)
+    {
+        if (!IsContextualLength(lower) || GridCalcExpression.Parse("calc(" + lower + ")") is not { } calc)
+        {
+            return null;
+        }
+
+        calcExpressions.Add(calc);
+        return Layout.CompactLength.Calc(calc.Handle);
+    }
+
+    private static readonly string[] ContextualUnits =
+        ["rem", "em", "ex", "ch", "vmin", "vmax", "dvw", "dvh", "svw", "svh", "lvw", "lvh", "vw", "vh"];
+
+    /// <summary>Whether a track token is a number followed by a font- or viewport-relative unit.</summary>
+    internal static bool IsContextualLength(string lower)
+    {
+        foreach (string unit in ContextualUnits)
+        {
+            if (lower.EndsWith(unit, StringComparison.Ordinal))
+            {
+                return ParseF32(lower[..^unit.Length].Trim()) is { } number && float.IsFinite(number);
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Rust <c>parse_grid_auto_track_list</c>.</summary>
@@ -681,7 +731,7 @@ public static partial class ComputedStyle
     }
 
     private static readonly string[] GridTrackUnits =
-        ["rem", "vmin", "vmax", "px", "pt", "em", "ex", "vw", "vh", "%"];
+        ["rem", "vmin", "vmax", "px", "pt", "em", "ex", "ch", "vw", "vh", "%"];
 
     /// <summary>Rust <c>apply_grid_auto_tracks</c>.</summary>
     internal static void ApplyGridAutoTracks(LayoutStyle style, string value, bool columns)

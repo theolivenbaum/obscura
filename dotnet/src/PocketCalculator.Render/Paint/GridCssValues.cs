@@ -168,11 +168,12 @@ internal static class GridCssValues
     /// The computed value of <c>grid-template-columns</c>/<c>-rows</c> on a box that is not a
     /// grid container: the declared list with lengths made absolute and <c>repeat()</c> kept.
     /// </summary>
-    public static string SpecifiedTrackList(string? text, IReadOnlyList<GridTemplateComponent> tracks)
+    public static string SpecifiedTrackList(
+        string? text, IReadOnlyList<GridTemplateComponent> tracks, in CalcUnits units)
     {
         if (text is null)
         {
-            return tracks.Count == 0 ? "none" : ExpandedTrackList(tracks);
+            return tracks.Count == 0 ? "none" : ExpandedTrackList(tracks, units);
         }
 
         string lower = CssText.AsciiLower(text.Trim());
@@ -185,13 +186,14 @@ internal static class GridCssValues
         List<object> calcScratch = [];
         foreach (string token in ComputedStyle.TokenizeTracks(text))
         {
-            AppendSpecifiedToken(sb, token.Trim(), calcScratch);
+            AppendSpecifiedToken(sb, token.Trim(), calcScratch, units);
         }
 
         return sb.Length == 0 ? "none" : sb.ToString();
     }
 
-    private static void AppendSpecifiedToken(StringBuilder sb, string token, List<object> calcScratch)
+    private static void AppendSpecifiedToken(
+        StringBuilder sb, string token, List<object> calcScratch, in CalcUnits units)
     {
         if (token.Length == 0)
         {
@@ -224,7 +226,7 @@ internal static class GridCssValues
             StringBuilder repeated = new();
             foreach (string sub in ComputedStyle.TokenizeTracks(inner[(comma + 1)..].Trim()))
             {
-                AppendSpecifiedToken(repeated, sub.Trim(), calcScratch);
+                AppendSpecifiedToken(repeated, sub.Trim(), calcScratch, units);
             }
 
             Separate(sb).Append("repeat(").Append(CssText.AsciiLower(inner[..comma].Trim())).Append(", ")
@@ -232,17 +234,26 @@ internal static class GridCssValues
             return;
         }
 
-        Separate(sb).Append(TrackFunction(ComputedStyle.Track(token, calcScratch)));
+        // taffy has no calc() form of fit-content(), so the parsed track keeps a px limit (or
+        // none); the argument is serialized from the declaration instead.
+        if (lower.StartsWith("fit-content(", StringComparison.Ordinal) && lower.EndsWith(')'))
+        {
+            Separate(sb).Append("fit-content(")
+                .Append(CssCalcSerializer.Serialize(lower["fit-content(".Length..^1], units)).Append(')');
+            return;
+        }
+
+        Separate(sb).Append(TrackFunction(ComputedStyle.Track(token, calcScratch), units));
     }
 
-    private static string ExpandedTrackList(IReadOnlyList<GridTemplateComponent> tracks)
+    private static string ExpandedTrackList(IReadOnlyList<GridTemplateComponent> tracks, in CalcUnits units)
     {
         StringBuilder sb = new();
         foreach (GridTemplateComponent component in tracks)
         {
             if (component.Kind == GridTemplateComponentKind.Single)
             {
-                Separate(sb).Append(TrackFunction(component.Single));
+                Separate(sb).Append(TrackFunction(component.Single, units));
                 continue;
             }
 
@@ -255,7 +266,7 @@ internal static class GridCssValues
             }).Append(", ");
             for (int i = 0; i < repetition.Tracks.Count; i++)
             {
-                sb.Append(i == 0 ? string.Empty : " ").Append(TrackFunction(repetition.Tracks[i]));
+                sb.Append(i == 0 ? string.Empty : " ").Append(TrackFunction(repetition.Tracks[i], units));
             }
 
             sb.Append(')');
@@ -265,7 +276,7 @@ internal static class GridCssValues
     }
 
     /// <summary>The computed value of <c>grid-auto-columns</c>/<c>-rows</c>.</summary>
-    public static string AutoTracks(IReadOnlyList<TrackSizingFunction> tracks)
+    public static string AutoTracks(IReadOnlyList<TrackSizingFunction> tracks, in CalcUnits units)
     {
         if (tracks.Count == 0)
         {
@@ -275,41 +286,43 @@ internal static class GridCssValues
         StringBuilder sb = new();
         foreach (TrackSizingFunction track in tracks)
         {
-            Separate(sb).Append(TrackFunction(track));
+            Separate(sb).Append(TrackFunction(track, units));
         }
 
         return sb.ToString();
     }
 
     /// <summary>One track sizing function, as specified.</summary>
-    public static string TrackFunction(TrackSizingFunction track)
+    public static string TrackFunction(TrackSizingFunction track, in CalcUnits units)
     {
         CompactLength min = track.Min.IntoRaw();
         CompactLength max = track.Max.IntoRaw();
         if (min.IsAuto && max.IsFr)
         {
-            return Length(max);
+            return Length(max, units);
         }
 
         if (min.IsAuto && max.IsFitContent)
         {
-            return "fit-content(" + Length(max) + ")";
+            return "fit-content(" + Length(max, units) + ")";
         }
 
         // A calc() track holds one handle per side, so compare what they serialize to.
-        string minText = Length(min);
-        string maxText = Length(max);
+        string minText = Length(min, units);
+        string maxText = Length(max, units);
         return minText == maxText ? minText : "minmax(" + minText + ", " + maxText + ")";
     }
 
-    private static string Length(CompactLength value) => value.Tag switch
+    private static string Length(CompactLength value, in CalcUnits units) => value.Tag switch
     {
         CompactLength.LengthTag or CompactLength.FitContentPxTag => PaintCssValues.CssPx(value.Value),
         CompactLength.PercentTag or CompactLength.FitContentPercentTag => PaintCssValues.CssNumber(value.Value * 100f) + "%",
         CompactLength.FrTag => PaintCssValues.CssNumber(value.Value) + "fr",
         CompactLength.MinContentTag => "min-content",
         CompactLength.MaxContentTag => "max-content",
-        _ when value.IsCalc => GridCalcExpression.FromHandle(value.CalcValue)?.Expression ?? "auto",
+        _ when value.IsCalc => GridCalcExpression.FromHandle(value.CalcValue) is { } calc
+            ? CssCalcSerializer.Serialize(calc.Expression, units)
+            : "auto",
         _ => "auto",
     };
 

@@ -993,6 +993,9 @@ public sealed partial class PreparedRender
     private void AppendGridStyle(
         Dictionary<string, string> output, NodeId id, LayoutStyle style, string display, bool isPseudo)
     {
+        // Computed lengths are absolute: font-relative units against this element's face.
+        CalcUnits units = new(
+            FontUnits.ForStyle(style), RootFontSize, ViewportSize.Width / 100f, ViewportSize.Height / 100f);
         if (!isPseudo
             && display is "grid" or "inline-grid"
             && Layout.GridTracks.TryGetValue(id, out GridTrackSizes? used))
@@ -1005,14 +1008,14 @@ public sealed partial class PreparedRender
         else
         {
             output["grid-template-columns"] = GridCssValues.SpecifiedTrackList(
-                style.GridTemplateColumnsText, style.GridTemplateColumns);
+                style.GridTemplateColumnsText, style.GridTemplateColumns, units);
             output["grid-template-rows"] = GridCssValues.SpecifiedTrackList(
-                style.GridTemplateRowsText, style.GridTemplateRows);
+                style.GridTemplateRowsText, style.GridTemplateRows, units);
         }
 
         output["grid-template-areas"] = GridCssValues.Areas(style.GridAreas);
-        output["grid-auto-columns"] = GridCssValues.AutoTracks(style.GridAutoColumns);
-        output["grid-auto-rows"] = GridCssValues.AutoTracks(style.GridAutoRows);
+        output["grid-auto-columns"] = GridCssValues.AutoTracks(style.GridAutoColumns, units);
+        output["grid-auto-rows"] = GridCssValues.AutoTracks(style.GridAutoRows, units);
 
         (string columnStart, string columnEnd) = GridCssValues.Sides(style, column: true);
         (string rowStart, string rowEnd) = GridCssValues.Sides(style, column: false);

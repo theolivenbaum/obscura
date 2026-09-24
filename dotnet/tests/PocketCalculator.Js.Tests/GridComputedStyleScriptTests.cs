@@ -130,4 +130,59 @@ public sealed class GridComputedStyleScriptTests
             """[getComputedStyle(document.getElementById("g")).gridTemplateColumns]""");
         Assert.Equal(["5px 7px 10px 20px 30px 5px 7px"], result);
     }
+
+    [Fact]
+    public void RelativeLengthsComputeToPx()
+    {
+        // em against the element's font-size, rem against the root's, vw against the viewport.
+        string[] result = Evaluate(
+            """
+            <html style="font-size: 20px"><head><style>
+              #n { font-size: 40px; grid-template-columns: 2em 1rem minmax(1em, 2em) repeat(2, 1em) fit-content(3em) 10vw;
+                   grid-template-rows: 1em; grid-auto-columns: 1em; grid-auto-rows: minmax(1em, auto) }
+            </style></head><body><div id="n"></div></body></html>
+            """,
+            """
+            (() => {
+              const cs = getComputedStyle(document.getElementById("n"));
+              return [cs.gridTemplateColumns, cs.gridTemplateRows, cs.gridAutoColumns, cs.gridAutoRows];
+            })()
+            """);
+        Assert.Equal(
+            ["80px 20px minmax(40px, 80px) repeat(2, 40px) fit-content(120px) 128px", "40px", "40px", "minmax(40px, auto)"],
+            result);
+    }
+
+    [Fact]
+    public void MathFunctionsSerializeInCanonicalOrder()
+    {
+        // Chromium's computed serialization: lengths made px, like terms summed, a sum ordered
+        // percentage, px, functions, and a lone term without calc().
+        string[] input =
+        [
+            "calc(50px + 10%)", "calc(1em + 10px)", "calc(10% + 5px - 5px)", "calc(5px - 10%)",
+            "calc(min(10%, 5px) + 2px)", "min(1em, 100px)", "max(1em, 10%)", "min(10% + 5px, 20px)",
+            "calc(2 * (10% + 1em))", "calc(10% / 3)", "clamp(1em, 10%, 30%)", "calc(1em - 1em)",
+            "minmax(calc(10% + 1em), max-content)", "fit-content(calc(1em + 1px))", "round(up, 10%, 3px)",
+        ];
+        string[] result = Evaluate(
+            """<html style="font-size: 20px"><body><div id="x" style="font-size: 40px"></div></body></html>""",
+            $$"""
+            (() => {
+              const e = document.getElementById("x");
+              return {{System.Text.Json.JsonSerializer.Serialize(input)}}.map(v => {
+                e.style.gridTemplateColumns = v;
+                return getComputedStyle(e).gridTemplateColumns;
+              });
+            })()
+            """);
+        Assert.Equal(
+            [
+                "calc(10% + 50px)", "50px", "10%", "calc(-10% + 5px)",
+                "calc(2px + min(10%, 5px))", "40px", "max(40px, 10%)", "min(10% + 5px, 20px)",
+                "calc(20% + 80px)", "3.33333%", "clamp(40px, 10%, 30%)", "0px",
+                "minmax(calc(10% + 40px), max-content)", "fit-content(41px)", "round(up, 10%, 3px)",
+            ],
+            result);
+    }
 }
