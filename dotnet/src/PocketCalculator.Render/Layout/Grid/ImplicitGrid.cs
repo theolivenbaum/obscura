@@ -152,9 +152,13 @@ internal static class ImplicitGrid
         }
         else if (endIsLine)
         {
+            // Deviation from taffy, whose (Auto, Line) arm returns the end line itself: the item
+            // occupies the track before it, so the estimate missed one negative implicit track
+            // (grid-row: auto / 1), and auto-placement then started a track late (Chromium
+            // counts every definite line into the implicit grid before placing).
             min = start.Kind == GenericGridPlacementKind.Span
                 ? end.LineValue - start.SpanValue
-                : end.LineValue;
+                : end.LineValue - 1;
         }
         else
         {

@@ -113,17 +113,6 @@ public class CellOccupancyMatrixTests
                     == sparse.NextFreePrimaryTrack(primary, p.Start, s, reversed),
                     $"NextFreePrimaryTrack reversed={reversed} " + where);
             }
-
-            foreach (var kind in new[]
-                { CellOccupancyState.Unoccupied, CellOccupancyState.DefinitelyPlaced, CellOccupancyState.AutoPlaced })
-            {
-                Assert.True(
-                    dense.LastOfType(primary, s.Start, kind) == sparse.LastOfType(primary, s.Start, kind),
-                    $"LastOfType {kind} " + where);
-                Assert.True(
-                    dense.FirstOfType(primary, s.Start, kind) == sparse.FirstOfType(primary, s.Start, kind),
-                    $"FirstOfType {kind} " + where);
-            }
         }
     }
 
@@ -279,35 +268,6 @@ public class CellOccupancyMatrixTests
             }
 
             return false;
-        }
-
-        public OriginZeroLine? LastOfType(AbsoluteAxis trackType, OriginZeroLine startAt, CellOccupancyState kind) =>
-            OfType(trackType, startAt, kind, last: true);
-
-        public OriginZeroLine? FirstOfType(AbsoluteAxis trackType, OriginZeroLine startAt, CellOccupancyState kind) =>
-            OfType(trackType, startAt, kind, last: false);
-
-        private OriginZeroLine? OfType(AbsoluteAxis trackType, OriginZeroLine startAt, CellOccupancyState kind, bool last)
-        {
-            var trackCounts = Counts(trackType.OtherAxis());
-            int index = trackCounts.OzLineToNextTrack(startAt);
-            if (index < 0 || index >= Length(trackType.OtherAxis()))
-            {
-                return null;
-            }
-
-            int length = Length(trackType);
-            for (int k = 0; k < length; k++)
-            {
-                int i = last ? length - 1 - k : k;
-                if (Cell(trackType, i, index) == kind)
-                {
-                    // taffy converts with the other axis's counts.
-                    return trackCounts.TrackToPrevOzLine(i);
-                }
-            }
-
-            return null;
         }
     }
 }

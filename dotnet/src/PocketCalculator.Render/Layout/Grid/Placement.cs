@@ -120,6 +120,14 @@ internal static class GridPlacementAlgorithm
         }
 
         // 2. Place remaining children with definite secondary axis positions
+        //
+        // Deviation from taffy, which starts the sparse search at the last auto-placed cell of
+        // the item's first row (so after any step 2 item that merely spans into that row) and
+        // reads that cell back with the other axis's track counts. Chromium keeps one cursor per
+        // start line, the end of the last item this step placed with that start line, which is
+        // the spec's "past any grid items previously placed in this row by this step".
+        Dictionary<int, OriginZeroLine>? cursors = gridAutoFlow.IsDense() ? null : [];
+        bool primaryIsReversed = AxisIsReversed(direction, primaryAxis);
         for (int i = 0; i < childCount; i++)
         {
             var placement = placements[i];
@@ -129,7 +137,11 @@ internal static class GridPlacementAlgorithm
             }
 
             var (primarySpan, secondarySpan) = PlaceDefiniteSecondaryAxisItem(
-                cellOccupancyMatrix, placement, gridAutoFlow, direction, explicitColCount, windows);
+                cellOccupancyMatrix, placement, gridAutoFlow, direction, explicitColCount, windows, cursors);
+            if (cursors is not null)
+            {
+                cursors[secondarySpan.Start.Value] = primaryIsReversed ? primarySpan.Start - 1 : primarySpan.End;
+            }
 
             RecordGridPlacement(
                 cellOccupancyMatrix,
@@ -225,7 +237,8 @@ internal static class GridPlacementAlgorithm
             GridAutoFlow autoFlow,
             Direction direction,
             ushort explicitColCount,
-            InBothAbsAxis<GridWindow> windows)
+            InBothAbsAxis<GridWindow> windows,
+            Dictionary<int, OriginZeroLine>? cursors)
     {
         var primaryAxis = autoFlow.PrimaryAxis();
         var secondaryAxis = primaryAxis.OtherAxis();
@@ -240,22 +253,10 @@ internal static class GridPlacementAlgorithm
             direction,
             explicitColCount));
 
-        OriginZeroLine startingPosition;
-        if (autoFlow.IsDense())
-        {
-            startingPosition =
-                SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed);
-        }
-        else
-        {
-            var lookupResult = primaryAxisIsReversed
-                ? cellOccupancyMatrix.FirstOfType(
-                    primaryAxis, secondaryAxisPlacement.Start, CellOccupancyState.AutoPlaced)
-                : cellOccupancyMatrix.LastOfType(
-                    primaryAxis, secondaryAxisPlacement.Start, CellOccupancyState.AutoPlaced);
-            startingPosition = lookupResult
-                ?? SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed);
-        }
+        var startingPosition =
+            cursors is not null && cursors.TryGetValue(secondaryAxisPlacement.Start.Value, out var cursor)
+                ? cursor
+                : SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed);
 
         ushort primaryAxisSpan = placement.Get(primaryAxis).IndefiniteSpan();
 

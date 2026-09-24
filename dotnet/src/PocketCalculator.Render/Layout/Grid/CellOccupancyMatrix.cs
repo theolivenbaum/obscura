@@ -28,11 +28,9 @@ internal enum CellOccupancyState : byte
 /// tracks there are and which are implicit/explicit.
 /// </summary>
 /// <remarks>
-/// A cell's state is the state of the last area marked over it, as in taffy. The sparse store
-/// resolves an overlap by precedence instead (<see cref="CellOccupancyState.AutoPlaced"/> over
-/// <see cref="CellOccupancyState.DefinitelyPlaced"/>), which is the same thing for every
-/// sequence placement produces: it marks all definitely placed items before any auto-placed
-/// one. Marking a definitely placed area after an auto-placed one is not supported.
+/// Only whether a cell is occupied is kept, not by what: taffy's one reader of the state
+/// (<c>last_of_type</c>, the step 2 cursor) is replaced by Chromium's per-line cursor in
+/// <see cref="GridPlacementAlgorithm"/>.
 /// </remarks>
 internal sealed class CellOccupancyMatrix
 {
@@ -44,7 +42,6 @@ internal sealed class CellOccupancyMatrix
     // for its flow direction.
     private OccupancyIndex? _columnsPrimary;
     private OccupancyIndex? _rowsPrimary;
-    private bool _sawAutoPlaced;
 
     private CellOccupancyMatrix(TrackCounts columns, TrackCounts rows)
     {
@@ -102,11 +99,7 @@ internal sealed class CellOccupancyMatrix
             return;
         }
 
-        bool auto = value == CellOccupancyState.AutoPlaced;
-        System.Diagnostics.Debug.Assert(auto || !_sawAutoPlaced, "definite area marked after an auto-placed one");
-        _sawAutoPlaced |= auto;
-        var area = new Area(
-            columnSpan.Start.Value, columnSpan.End.Value, rowSpan.Start.Value, rowSpan.End.Value, auto);
+        var area = new Area(columnSpan.Start.Value, columnSpan.End.Value, rowSpan.Start.Value, rowSpan.End.Value);
         _areas.Add(area);
         _columnsPrimary?.Add(area);
         _rowsPrimary?.Add(area);
@@ -198,44 +191,6 @@ internal sealed class CellOccupancyMatrix
     public TrackCounts TrackCountsFor(AbsoluteAxis trackType) =>
         trackType == AbsoluteAxis.Horizontal ? _columns : _rows;
 
-    /// <summary>
-    /// Search backwards from the end of the track and find the last grid cell matching the specified
-    /// state (if any).
-    /// </summary>
-    public OriginZeroLine? LastOfType(AbsoluteAxis trackType, OriginZeroLine startAt, CellOccupancyState kind) =>
-        OfType(trackType, startAt, kind, last: true);
-
-    /// <summary>
-    /// Search forwards from the start of the track and find the first grid cell matching the
-    /// specified state (if any).
-    /// </summary>
-    public OriginZeroLine? FirstOfType(AbsoluteAxis trackType, OriginZeroLine startAt, CellOccupancyState kind) =>
-        OfType(trackType, startAt, kind, last: false);
-
-    private OriginZeroLine? OfType(AbsoluteAxis trackType, OriginZeroLine startAt, CellOccupancyState kind, bool last)
-    {
-        // taffy searches the row (or column) of the matrix that startAt begins, and finds nothing
-        // when that track is outside the matrix or the matrix is empty.
-        var searchCounts = TrackCountsFor(trackType);
-        var otherCounts = TrackCountsFor(trackType.OtherAxis());
-        int track = otherCounts.OzLineToNextTrack(startAt);
-        if (track < 0 || track >= otherCounts.Len() || searchCounts.Len() == 0)
-        {
-            return null;
-        }
-
-        int start = searchCounts.ImplicitStartLine().Value;
-        int end = searchCounts.ImplicitEndLine().Value;
-        int? found = _areas.Count == 0
-            ? kind == CellOccupancyState.Unoccupied ? (last ? end - 1 : start) : null
-            : IndexFor(trackType).FindInTrack(startAt.Value, kind, last, start, end);
-        // taffy converts the index it found with the other axis's counts (track_counts is
-        // self.track_counts(track_type.other_axis()) for both the lookup and the result).
-        return found is { } line
-            ? otherCounts.TrackToPrevOzLine(searchCounts.OzLineToNextTrack(new OriginZeroLine(line)))
-            : null;
-    }
-
     private bool TrackIsOccupied(AbsoluteAxis axis, int index)
     {
         if (_areas.Count == 0)
@@ -287,7 +242,7 @@ internal sealed class CellOccupancyMatrix
     }
 
     /// <summary>An occupied area, in origin-zero lines.</summary>
-    private readonly record struct Area(int ColumnStart, int ColumnEnd, int RowStart, int RowEnd, bool Auto);
+    private readonly record struct Area(int ColumnStart, int ColumnEnd, int RowStart, int RowEnd);
 
     /// <summary>
     /// A segment tree over the secondary axis. Each area is stored, as its primary-axis interval,
@@ -300,7 +255,6 @@ internal sealed class CellOccupancyMatrix
     {
         private readonly bool _primaryIsColumns;
         private readonly List<IntervalSet> _scratch = [];
-        private readonly List<IntervalSet> _scratchAuto = [];
         private Node? _root;
         private int _lo;
         private int _size;
@@ -324,7 +278,7 @@ internal sealed class CellOccupancyMatrix
                 ? (area.ColumnStart, area.ColumnEnd, area.RowStart, area.RowEnd)
                 : (area.RowStart, area.RowEnd, area.ColumnStart, area.ColumnEnd);
             Cover(sLo, sHi);
-            Insert(_root!, _lo, _size, sLo, sHi, pLo, pHi, area.Auto);
+            Insert(_root!, _lo, _size, sLo, sHi, pLo, pHi);
         }
 
         public bool Intersects(int pLo, int pHi, int sLo, int sHi)
@@ -334,7 +288,7 @@ internal sealed class CellOccupancyMatrix
                 return false;
             }
 
-            var sets = Collect(sLo, sHi, auto: false);
+            var sets = Collect(sLo, sHi);
             foreach (var set in sets)
             {
                 if (set.Intersects(pLo, pHi))
@@ -352,7 +306,7 @@ internal sealed class CellOccupancyMatrix
             int last = int.MinValue;
             if (pHi > pLo)
             {
-                foreach (var set in Collect(sLo, sHi, auto: false))
+                foreach (var set in Collect(sLo, sHi))
                 {
                     if (set.BoundsWithin(pLo, pHi) is { } bounds)
                     {
@@ -366,7 +320,7 @@ internal sealed class CellOccupancyMatrix
         }
 
         public int NextFree(int from, int sLo, int sHi, bool reversed) =>
-            Uncovered(Collect(sLo, sHi, auto: false), from, reversed);
+            Uncovered(Collect(sLo, sHi), from, reversed);
 
         public bool TrackIsOccupied(bool axisIsPrimary, int line)
         {
@@ -375,78 +329,7 @@ internal sealed class CellOccupancyMatrix
                 return _root?.Sub is { } all && all.Intersects(line, line + 1);
             }
 
-            return Collect(line, line + 1, auto: false).Count > 0;
-        }
-
-        /// <summary>
-        /// The first (or last) primary-axis line in [start, end) of the secondary track at
-        /// <paramref name="secondaryLine"/> whose state is <paramref name="kind"/>.
-        /// </summary>
-        public int? FindInTrack(int secondaryLine, CellOccupancyState kind, bool last, int start, int end)
-        {
-            var all = Collect(secondaryLine, secondaryLine + 1, auto: false);
-            switch (kind)
-            {
-                case CellOccupancyState.Unoccupied:
-                {
-                    int free = Uncovered(all, last ? end - 1 : start, last);
-                    return free >= start && free < end ? free : null;
-                }
-
-                case CellOccupancyState.AutoPlaced:
-                    return Extreme(Collect(secondaryLine, secondaryLine + 1, auto: true), last);
-
-                default:
-                {
-                    // Occupied by a definitely placed item and by no auto-placed one.
-                    var auto = Collect(secondaryLine, secondaryLine + 1, auto: true);
-                    int? candidate = Extreme(all, last);
-                    while (candidate is { } p)
-                    {
-                        int q = Uncovered(auto, p, last);
-                        if (q == p)
-                        {
-                            return p;
-                        }
-
-                        candidate = NextCovered(all, q, last);
-                    }
-
-                    return null;
-                }
-            }
-        }
-
-        /// <summary>The first (last) line covered by any set, or null.</summary>
-        private static int? Extreme(List<IntervalSet> sets, bool last)
-        {
-            int? best = null;
-            foreach (var set in sets)
-            {
-                int value = last ? set.Last : set.First;
-                if (best is null || (last ? value > best.Value : value < best.Value))
-                {
-                    best = value;
-                }
-            }
-
-            return best;
-        }
-
-        /// <summary>The first line at or after (at or before, reversed) p covered by any set.</summary>
-        private static int? NextCovered(List<IntervalSet> sets, int p, bool reversed)
-        {
-            int? best = null;
-            foreach (var set in sets)
-            {
-                if ((reversed ? set.PrevCovered(p) : set.NextCovered(p)) is { } value
-                    && (best is null || (reversed ? value > best.Value : value < best.Value)))
-                {
-                    best = value;
-                }
-            }
-
-            return best;
+            return Collect(line, line + 1).Count > 0;
         }
 
         /// <summary>The first line at or after (at or before, reversed) p covered by no set.</summary>
@@ -470,20 +353,20 @@ internal sealed class CellOccupancyMatrix
             return p;
         }
 
-        private List<IntervalSet> Collect(int sLo, int sHi, bool auto)
+        private List<IntervalSet> Collect(int sLo, int sHi)
         {
-            var into = auto ? _scratchAuto : _scratch;
+            var into = _scratch;
             into.Clear();
             if (_root is not null && sHi > sLo)
             {
-                CollectFrom(_root, _lo, _size, sLo, sHi, auto, into);
+                CollectFrom(_root, _lo, _size, sLo, sHi, into);
             }
 
             return into;
         }
 
         private static void CollectFrom(
-            Node node, int lo, int size, int sLo, int sHi, bool auto, List<IntervalSet> into)
+            Node node, int lo, int size, int sLo, int sHi, List<IntervalSet> into)
         {
             while (true)
             {
@@ -495,7 +378,7 @@ internal sealed class CellOccupancyMatrix
 
                 if (sLo <= lo && hi <= sHi)
                 {
-                    if ((auto ? node.SubAuto : node.Sub) is { } whole)
+                    if (node.Sub is { } whole)
                     {
                         into.Add(whole);
                     }
@@ -503,7 +386,7 @@ internal sealed class CellOccupancyMatrix
                     return;
                 }
 
-                if ((auto ? node.OwnAuto : node.Own) is { } own)
+                if (node.Own is { } own)
                 {
                     into.Add(own);
                 }
@@ -511,7 +394,7 @@ internal sealed class CellOccupancyMatrix
                 int half = size >> 1;
                 if (node.Left is { } left)
                 {
-                    CollectFrom(left, lo, half, sLo, sHi, auto, into);
+                    CollectFrom(left, lo, half, sLo, sHi, into);
                 }
 
                 if (node.Right is not { } right)
@@ -526,24 +409,16 @@ internal sealed class CellOccupancyMatrix
         }
 
         private static void Insert(
-            Node node, int lo, int size, int sLo, int sHi, int pLo, int pHi, bool auto)
+            Node node, int lo, int size, int sLo, int sHi, int pLo, int pHi)
         {
             while (true)
             {
                 (node.Sub ??= new IntervalSet()).Add(pLo, pHi);
-                if (auto)
-                {
-                    (node.SubAuto ??= new IntervalSet()).Add(pLo, pHi);
-                }
 
                 int hi = lo + size;
                 if (sLo <= lo && hi <= sHi)
                 {
                     (node.Own ??= new IntervalSet()).Add(pLo, pHi);
-                    if (auto)
-                    {
-                        (node.OwnAuto ??= new IntervalSet()).Add(pLo, pHi);
-                    }
 
                     return;
                 }
@@ -554,7 +429,7 @@ internal sealed class CellOccupancyMatrix
                 bool goRight = sHi > mid;
                 if (goLeft && goRight)
                 {
-                    Insert(node.Left ??= new Node(), lo, half, sLo, sHi, pLo, pHi, auto);
+                    Insert(node.Left ??= new Node(), lo, half, sLo, sHi, pLo, pHi);
                 }
                 else if (goLeft)
                 {
@@ -587,7 +462,7 @@ internal sealed class CellOccupancyMatrix
 
             while (sLo < _lo)
             {
-                var grown = new Node { Right = _root, Sub = _root.Sub?.Clone(), SubAuto = _root.SubAuto?.Clone() };
+                var grown = new Node { Right = _root, Sub = _root.Sub?.Clone() };
                 _root = grown;
                 _lo -= _size;
                 _size <<= 1;
@@ -595,7 +470,7 @@ internal sealed class CellOccupancyMatrix
 
             while (sHi > _lo + _size)
             {
-                var grown = new Node { Left = _root, Sub = _root.Sub?.Clone(), SubAuto = _root.SubAuto?.Clone() };
+                var grown = new Node { Left = _root, Sub = _root.Sub?.Clone() };
                 _root = grown;
                 _size <<= 1;
             }
@@ -607,8 +482,6 @@ internal sealed class CellOccupancyMatrix
             public Node? Right;
             public IntervalSet? Own;
             public IntervalSet? Sub;
-            public IntervalSet? OwnAuto;
-            public IntervalSet? SubAuto;
         }
     }
 
@@ -621,10 +494,6 @@ internal sealed class CellOccupancyMatrix
         private int[] _starts = new int[2];
         private int[] _ends = new int[2];
         private int _count;
-
-        public int First => _starts[0];
-
-        public int Last => _ends[_count - 1] - 1;
 
         public IntervalSet Clone() => new()
         {
@@ -703,20 +572,6 @@ internal sealed class CellOccupancyMatrix
         {
             int i = FirstEndingAfter(p);
             return i < _count && _starts[i] <= p ? _starts[i] - 1 : p;
-        }
-
-        /// <summary>The smallest covered value at or after p, or null.</summary>
-        public int? NextCovered(int p)
-        {
-            int i = FirstEndingAfter(p);
-            return i < _count ? Math.Max(_starts[i], p) : null;
-        }
-
-        /// <summary>The largest covered value at or before p, or null.</summary>
-        public int? PrevCovered(int p)
-        {
-            int j = FirstStartingAtOrAfter(p + 1) - 1;
-            return j >= 0 ? Math.Min(_ends[j] - 1, p) : null;
         }
 
         private int FirstEndingAfter(int p) => FirstEndingAtOrAfter(p + 1);
