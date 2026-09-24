@@ -536,6 +536,22 @@ public static partial class FetchOps
             method = overrideMethod ?? method;
             body = overrideBody ?? body;
 
+            // SECURITY.md I7 (Rust has neither check). Everything this op loads (fetch,
+            // XHR, iframe documents, dynamic scripts, linked stylesheets, workers) is
+            // blockable mixed content from an https document; then HSTS moves a known
+            // host to https, reported as a redirect the way Chromium's internal 307 is.
+            if (MixedContentBlocked(httpClient, callbacks, document.Url, url, mode) is { } mixedInitial)
+            {
+                return mixedInitial;
+            }
+
+            string? hstsUpgradedFrom = null;
+            if (HstsUpgrade(httpClient, url) is { } secureInitial)
+            {
+                hstsUpgradedFrom = url;
+                url = secureInitial;
+            }
+
             var client = httpClient?.RequestClient ?? SharedRequestClient(allowPrivateNetwork);
 
             var initialRequestOrigin = RequestOrigin(url) ?? string.Empty;
@@ -654,6 +670,11 @@ public static partial class FetchOps
             var currentHeaders = new Dictionary<string, string>(customHeaders2, StringComparer.Ordinal);
             var redirectsFollowed = 0;
             List<Uri> redirectedFrom = [];
+            if (hstsUpgradedFrom is not null && Uri.TryCreate(hstsUpgradedFrom, UriKind.Absolute, out var hstsFrom))
+            {
+                redirectedFrom.Add(hstsFrom);
+                redirectsFollowed = 1;
+            }
             var crossedOrigin = isCrossOrigin;
             HttpResponseMessage? response = null;
 
@@ -868,6 +889,20 @@ public static partial class FetchOps
                     }
 
                     currentUrl = nextUrl.Href;
+                    if (MixedContentBlocked(httpClient, callbacks, document.Url, currentUrl, mode) is { } mixedHop)
+                    {
+                        return mixedHop;
+                    }
+
+                    if (HstsUpgrade(httpClient, currentUrl) is { } secureHop)
+                    {
+                        if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var insecureHop))
+                        {
+                            redirectedFrom.Add(insecureHop);
+                        }
+
+                        currentUrl = secureHop;
+                    }
                 }
 
                 var redirected = redirectsFollowed > 0;
@@ -1099,6 +1134,46 @@ public static partial class FetchOps
         result.Append('}');
         return result.ToString();
     }
+
+    /// <summary>
+    /// The blocked response for a mixed-content request from <paramref name="documentUrl"/>
+    /// to <paramref name="target"/>, or null when it may go out. It reuses the network
+    /// error shape a CORS failure has, so fetch() rejects with a TypeError as in Chromium,
+    /// and the page's console gets Chromium's message.
+    /// </summary>
+    private static string? MixedContentBlocked(
+        PocketCalculatorHttpClient? httpClient,
+        CallbackRegistry? callbacks,
+        string documentUrl,
+        string target,
+        string mode)
+    {
+        if ((httpClient?.AllowInsecureContent ?? MixedContent.EnvAllowsInsecureContent())
+            || !Uri.TryCreate(documentUrl, UriKind.Absolute, out var document)
+            || !Uri.TryCreate(target, UriKind.Absolute, out var targetUri))
+        {
+            return null;
+        }
+
+        var frame = string.Equals(mode, "navigate", StringComparison.Ordinal);
+        var type = frame ? ResourceType.Document : ResourceType.Fetch;
+        if (MixedContent.Check(document, targetUri, type, topLevelNavigation: false) == MixedContentDecision.Allow)
+        {
+            return null;
+        }
+
+        var message = MixedContent.BlockedMessage(
+            document.AbsoluteUri, MixedContent.RequestKind(type, nestedDocument: frame), targetUri.AbsoluteUri);
+        callbacks?.FireConsole("error", message);
+        return CorsBlocked(target, message);
+    }
+
+    private static string? HstsUpgrade(PocketCalculatorHttpClient? httpClient, string url) =>
+        httpClient is not null
+        && Uri.TryCreate(url, UriKind.Absolute, out var parsed)
+        && httpClient.Hsts.Upgrade(parsed) is { } secure
+            ? secure.AbsoluteUri
+            : null;
 
     private static string CorsBlocked(string url, string error)
     {

@@ -63,6 +63,21 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         AllowPrivateNetwork = allowPrivateNetwork;
     }
 
+    /// <summary>
+    /// This context's HSTS state (SECURITY.md I7). Filled from the
+    /// <c>Strict-Transport-Security</c> headers of https responses on this client; an
+    /// embedder can also seed it with <see cref="HstsStore.Add"/>. See
+    /// <see cref="HstsStore"/> for the rules.
+    /// </summary>
+    public HstsStore Hsts { get; } = new();
+
+    /// <summary>
+    /// Turn off the mixed-content check (<see cref="MixedContent"/>), Chromium's
+    /// <c>--allow-running-insecure-content</c>. Defaults to false, or to true when
+    /// <c>POCKETCALCULATOR_ALLOW_INSECURE_CONTENT=1</c> is set.
+    /// </summary>
+    public bool AllowInsecureContent { get; set; } = MixedContent.EnvAllowsInsecureContent();
+
     /// <summary>The cookie jar every request on this client reads and writes.</summary>
     public CookieJar CookieJar { get; }
 
@@ -356,6 +371,38 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The mixed-content decision for one hop: the URL to request (upgraded for an
+    /// image), or a <see cref="PocketCalculatorNetException"/> for blockable content.
+    /// Either way the page's console hears about it, with Chromium's text.
+    /// </summary>
+    private Uri ApplyMixedContent(ResourceRequest request, Uri target, CallbackRegistry? callbacks)
+    {
+        if (AllowInsecureContent)
+        {
+            return target;
+        }
+
+        var topLevel = request.ResourceType == ResourceType.Document && !request.NestedDocument;
+        switch (MixedContent.Check(request.Initiator, target, request.ResourceType, topLevel))
+        {
+            case MixedContentDecision.Upgrade:
+                callbacks?.FireConsole(
+                    "warning",
+                    MixedContent.UpgradedMessage(request.Initiator!.AbsoluteUri, target.AbsoluteUri));
+                return MixedContent.UpgradeUrl(target);
+            case MixedContentDecision.Block:
+                var message = MixedContent.BlockedMessage(
+                    request.Initiator!.AbsoluteUri,
+                    MixedContent.RequestKind(request.ResourceType, request.NestedDocument),
+                    target.AbsoluteUri);
+                callbacks?.FireConsole("error", message);
+                throw PocketCalculatorNetException.MixedContent(message);
+            default:
+                return target;
+        }
     }
 
     /// <summary>GET <paramref name="url"/> with the navigation profile.</summary>
@@ -664,6 +711,16 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
         for (var redirectCount = 0; redirectCount <= MaxRedirects; redirectCount++)
         {
+            // SECURITY.md I7 (Rust has neither check). Mixed content first, as Chromium
+            // decides it in the renderer before HSTS is consulted in the network stack;
+            // then HSTS, which rewrites the hop to https as an internal 307 redirect.
+            currentUrl = ApplyMixedContent(request, currentUrl, callbacks);
+            if (Hsts.Upgrade(currentUrl) is { } secure)
+            {
+                redirects.Add(currentUrl);
+                currentUrl = secure;
+            }
+
             // Deviation from client.rs, which checks the blocklist on the first URL only
             // (SECURITY.md L7): a redirect into a tracker is blocked the same way.
             if (IsBlockedTracker(currentUrl))

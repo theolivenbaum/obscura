@@ -435,6 +435,7 @@ internal sealed class PrivateCaHttpsFixture : IDisposable
         }
         var sanBuilder = new SubjectAlternativeNameBuilder();
         sanBuilder.AddIpAddress(IPAddress.Loopback);
+        sanBuilder.AddDnsName("localhost");
         leafRequest.CertificateExtensions.Add(sanBuilder.Build());
         leafRequest.CertificateExtensions.Add(
             new X509SubjectKeyIdentifierExtension(leafRequest.PublicKey, false));

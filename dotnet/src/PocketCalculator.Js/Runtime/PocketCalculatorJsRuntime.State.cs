@@ -149,7 +149,47 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Install the owning page's passive on_request/on_response callback
     /// registry so scripted fetch()/XHR observation is page-scoped (#408).
     /// </summary>
-    public void SetCallbacks(CallbackRegistry callbacks) => State.Callbacks = callbacks;
+    public void SetCallbacks(CallbackRegistry callbacks)
+    {
+        State.Callbacks = callbacks;
+        // Network-layer console messages (mixed content) arrive on transport threads;
+        // they queue here and join the console events on the next drain.
+        callbacks.ConsoleSink = EnqueueHostConsole;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Level, string Text, double Timestamp)>
+        _hostConsole = new();
+
+    private void EnqueueHostConsole(string level, string text)
+    {
+        while (_hostConsole.Count >= 1_024)
+        {
+            _hostConsole.TryDequeue(out _);
+        }
+
+        _hostConsole.Enqueue((level, text, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+    }
+
+    private void DrainHostConsole()
+    {
+        while (_hostConsole.TryDequeue(out var entry))
+        {
+            if (!State.RuntimeEventsEnabled)
+            {
+                continue;
+            }
+
+            while (State.PendingRuntimeEvents.Count >= 1_024)
+            {
+                State.PendingRuntimeEvents.Dequeue();
+            }
+
+            State.PendingRuntimeEvents.Enqueue(new RuntimeEvent.Console(new RuntimeConsoleEvent(
+                entry.Level,
+                [new JsonObject { ["type"] = "string", ["value"] = entry.Text }],
+                entry.Timestamp)));
+        }
+    }
 
     /// <summary>
     /// Install the stealth HTTP client so scripted fetch()/XHR is routed
@@ -263,6 +303,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     public IReadOnlyList<RuntimeEvent> TakePendingRuntimeEvents()
     {
+        DrainHostConsole();
         var events = State.PendingRuntimeEvents.ToArray();
         State.PendingRuntimeEvents.Clear();
         foreach (var entry in events)
