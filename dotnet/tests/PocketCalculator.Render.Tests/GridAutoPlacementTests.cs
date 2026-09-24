@@ -124,4 +124,31 @@ public class GridAutoPlacementTests
                 "grid-row:2 / 4;grid-column:span 2",
                 "grid-row:1"));
     }
+
+    [Theory]
+    // Two explicit columns with lines [x] 1, [y] 2, [x] 3. A name with too few lines counts
+    // the implicit lines as having it: past the end for a positive count, before the start
+    // for a negative one. Measured in Chromium 141; the port used to leave these auto-placed.
+    [InlineData("grid-area:a / b", "30,30,10,10")]
+    [InlineData("grid-column:foo", "30,0,10,10")]
+    [InlineData("grid-column:foo 2", "40,0,10,10")]
+    [InlineData("grid-column:x 3", "30,0,10,10")]
+    [InlineData("grid-column:1 / foo", "0,0,30,10")]
+    [InlineData("grid-column:foo / 1", "0,0,30,10")]
+    [InlineData("grid-column:2 / span foo", "10,0,20,10")]
+    [InlineData("grid-column:span x / 3", "0,0,20,10")]
+    [InlineData("grid-column:1 / span 2 x", "0,0,30,10")]
+    [InlineData("grid-column:y 2 / auto", "30,0,10,10")]
+    [InlineData("grid-column:foo / span 2", "30,0,20,10")]
+    [InlineData("grid-column:auto / foo", "20,0,10,10")]
+    [InlineData("grid-column:span foo / 2", "0,0,20,10")]
+    [InlineData("grid-column:foo -1 / bar", "0,0,40,10")]
+    public void UndeclaredLineNamesAreImplicitLines(string placement, string expected)
+    {
+        string[] rects = Place(
+            "grid-template-columns:[x] 10px [y] 10px [x];grid-template-rows:10px 10px;width:max-content",
+            placement,
+            string.Empty);
+        Assert.Equal(expected, rects[0]);
+    }
 }
