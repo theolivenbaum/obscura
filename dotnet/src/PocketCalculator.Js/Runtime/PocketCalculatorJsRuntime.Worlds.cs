@@ -207,7 +207,7 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         foreach (var world in _worlds.Values)
         {
-            TryRunIn(world.Scope, "<releaseGroup>", "globalThis.__obscura_objects = {};");
+            world.Scope.Clear();
             world.Scope.Store.Clear();
             world.Scope.Recipes.Clear();
         }

@@ -68,7 +68,7 @@ const _wrapIds = (ids, wrap) => {
   var _names = [
     // runtime-set by Rust (runtime.rs / page.rs)
     '__obscura_errors', '__obscura_init', '__obscura_hide_list',
-    '__obscura_objects', '__obscura_oid', '__obscura_ua',
+    '__obscura_ua',
     '__obscura_platform', '__obscura_ua_platform', '__obscura_ua_platform_version',
     // DEVIATION from crates/obscura-js/js/bootstrap.js, which also lists the host
     // helpers here (__obscura_markTrusted, __obscura_deliverMessage,
@@ -197,6 +197,9 @@ let _realmParentFrameId = 0;
 // the page's own document (IsolatedWorld.cs). Set once by __obscura_init from a flag
 // the host puts on that realm's global; page script has no path to that realm.
 let _realmIsolatedWorld = false;
+// The realm's document as __obscura_init made it; host snippets use this rather than the
+// page-writable globalThis.document (SECURITY.md L10).
+let _realmDocument = null;
 
 const _dom = (cmd, a1, a2) => {
   const result = __obscuraCore.ops.op_dom(cmd, String(a1 ?? ""), String(a2 ?? ""), _realmFrameId);
@@ -776,11 +779,16 @@ function _getElementsByClassName(root, classNames) {
   }
   return HTMLCollection._from(matched);
 }
+// The CDP remote-object store; see _cdpHost.
+const _cdpObjects = _objectCreate(null);
+const _cdpOutcomes = _objectCreate(null);
 let _consoleOid = 0;
 const _consoleObjectId = (value) => {
-  const objectId = "console-" + (globalThis.__obscura_frameId >>> 0) + "-" + (++_consoleOid);
-  const store = globalThis.__obscura_objects || (globalThis.__obscura_objects = {});
-  store[objectId] = value;
+  // DEVIATION from crates/obscura-js/js/bootstrap.js: the handle goes into the closure
+  // store the host's CDP wrappers use, not the page-visible __obscura_objects, and the
+  // frame id is the realm's own, not the page-writable __obscura_frameId (SECURITY.md L10).
+  const objectId = "console-" + _realmFrameId + "-" + (++_consoleOid);
+  _cdpObjects[objectId] = value;
   return objectId;
 };
 const _consoleRemoteObject = (value) => {
@@ -17627,6 +17635,7 @@ globalThis.__obscura_init = function() {
 
   const documentNid = +_dom("document_node_id");
   globalThis.document = new Document(documentNid);
+  _realmDocument = globalThis.document;
   // parentNode on <html> reaches the backing document node. Keep that wrapper
   // canonical so getRootNode(), isConnected, and identity comparisons return
   // the same Document object exposed as globalThis.document.
@@ -18540,6 +18549,259 @@ function _installIsolatedWorldBridges() {
   });
 }
 
+// Built-ins host script uses, as bootstrap left them (port addition, SECURITY.md L10).
+//
+// DEVIATION from crates/obscura-cdp and crates/obscura-mcp, whose snippets call
+// document.querySelector, el.getAttribute, new MouseEvent and the rest on whatever the
+// page has left on its globals and prototypes, and serialize with the page's
+// JSON.stringify. A page that replaced any of them could aim a CDP click or an MCP fill
+// at another element, stall a client, or answer for the host. Chromium does this work
+// natively, where page script cannot reach. Host snippets reach these through
+// __obscura_host.dom; page script calling the same names still gets its own versions.
+const _hostDom = (function () {
+  const apply = _reflectApply;
+  const EP = Element.prototype;
+  const NP = Node.prototype;
+  const DP = Document.prototype;
+  const FP = DocumentFragment.prototype;
+  const own = (proto, name) => _getOwnPropertyDescriptor(proto, name);
+  const find = (proto, name) => {
+    for (let p = proto; p; p = _getPrototypeOf(p)) {
+      const d = own(p, name);
+      if (d) return d;
+    }
+    return undefined;
+  };
+  const getterOf = (proto, name) => { const d = find(proto, name); return d && d.get ? d.get : null; };
+  const methodOf = (proto, name) => { const d = find(proto, name); return d && typeof d.value === 'function' ? d.value : null; };
+  const nodeType = getterOf(NP, 'nodeType');
+  const parentNode = getterOf(NP, 'parentNode');
+  const tagName = getterOf(EP, 'tagName');
+  const localName = getterOf(EP, 'localName');
+  const activeElement = getterOf(DP, 'activeElement');
+  const body = getterOf(DP, 'body');
+  const documentElement = getterOf(DP, 'documentElement');
+  const scrollingElement = getterOf(DP, 'scrollingElement');
+  const getAttribute = methodOf(EP, 'getAttribute');
+  const matches = methodOf(EP, 'matches');
+  const contains = methodOf(NP, 'contains');
+  const rect = methodOf(EP, 'getBoundingClientRect');
+  const fromPoint = methodOf(DP, 'elementFromPoint');
+  const query = { __proto__: null, 1: methodOf(EP, 'querySelector'), 9: methodOf(DP, 'querySelector'), 11: methodOf(FP, 'querySelector') };
+  const queryAll = { __proto__: null, 1: methodOf(EP, 'querySelectorAll'), 9: methodOf(DP, 'querySelectorAll'), 11: methodOf(FP, 'querySelectorAll') };
+  const dispatchFor = { __proto__: null, 1: methodOf(EP, 'dispatchEvent'), 9: methodOf(DP, 'dispatchEvent') };
+  const nodeDispatch = methodOf(NP, 'dispatchEvent');
+  const windowDispatch = globalThis.dispatchEvent;
+  const computedStyle = globalThis.getComputedStyle;
+  const setTimeoutAtBoot = globalThis.setTimeout;
+  const events = { __proto__: null };
+  for (const name of _worldEventClasses) {
+    if (typeof globalThis[name] === 'function') events[name] = globalThis[name];
+  }
+  const typeOf = (node) => {
+    if (node === null || typeof node !== 'object' || typeof node._nid !== 'number') return 0;
+    try { return apply(nodeType, node, []); } catch (_) { return 0; }
+  };
+  const doc = () => _realmDocument || globalThis.document;
+  const toArray = (list) => {
+    const out = [];
+    if (list) for (let i = 0; i < list.length; i++) out[out.length] = list[i];
+    return out;
+  };
+  // An accessor or method from the object's prototype chain, never an own property:
+  // frameworks (React's value tracker) and pages layer instance properties on
+  // elements, and the host means the element's own behaviour, as _setFieldValue does.
+  const inherited = (obj, name) => {
+    if (obj === null || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+    return find(_getPrototypeOf(obj), name);
+  };
+  return _objectFreeze({
+    __proto__: null,
+    document: doc,
+    wrap: (nid) => _wrap(nid),
+    activeElement: () => apply(activeElement, doc(), []),
+    body: () => apply(body, doc(), []),
+    documentElement: () => apply(documentElement, doc(), []),
+    scrollingElement: () => (scrollingElement ? apply(scrollingElement, doc(), []) : null),
+    elementFromPoint: (x, y) => apply(fromPoint, doc(), [x, y]),
+    querySelector: (root, selector) => {
+      const fn = query[typeOf(root)];
+      return fn ? apply(fn, root, [selector]) : null;
+    },
+    // A plain array, so the caller needs no NodeList or Array.prototype method.
+    querySelectorAll: (root, selector) => {
+      const fn = queryAll[typeOf(root)];
+      return fn ? toArray(apply(fn, root, [selector])) : [];
+    },
+    closest: (el, selector) => {
+      for (let n = el; n; n = apply(parentNode, n, [])) {
+        if (typeOf(n) === 1 && apply(matches, n, [selector])) return n;
+      }
+      return null;
+    },
+    matches: (el, selector) => typeOf(el) === 1 && apply(matches, el, [selector]),
+    contains: (a, b) => typeOf(a) !== 0 && apply(contains, a, [b]),
+    getAttribute: (el, name) => (typeOf(el) === 1 ? apply(getAttribute, el, [name]) : null),
+    nodeType: typeOf,
+    parentNode: (node) => (typeOf(node) ? apply(parentNode, node, []) : null),
+    parentElement: (node) => {
+      const p = typeOf(node) ? apply(parentNode, node, []) : null;
+      return typeOf(p) === 1 ? p : null;
+    },
+    tagName: (el) => (typeOf(el) === 1 ? apply(tagName, el, []) : ''),
+    localName: (el) => (typeOf(el) === 1 ? apply(localName, el, []) : ''),
+    rect: (el) => (typeOf(el) === 1 ? apply(rect, el, []) : null),
+    get: (obj, name) => {
+      const d = inherited(obj, name);
+      if (!d) return undefined;
+      return d.get ? apply(d.get, obj, []) : d.value;
+    },
+    set: (obj, name, value) => {
+      const d = inherited(obj, name);
+      if (d && d.set) apply(d.set, obj, [value]);
+    },
+    call: (obj, name, args) => {
+      const d = inherited(obj, name);
+      if (!d || typeof d.value !== 'function') return undefined;
+      return apply(d.value, obj, args || []);
+    },
+    has: (obj, name) => {
+      const d = inherited(obj, name);
+      return !!d && typeof d.value === 'function';
+    },
+    dispatch: (target, event) => {
+      if (target === globalThis) return apply(windowDispatch, target, [event]);
+      const fn = dispatchFor[typeOf(target)] || (typeof target?._nid === 'number' ? nodeDispatch : null);
+      if (fn) return apply(fn, target, [event]);
+      return target.dispatchEvent(event);
+    },
+    // A new event of one of the classes captured above; `trusted` marks it as the user
+    // agent's own.
+    event: (kind, type, init, trusted) => {
+      const Ctor = events[kind] || events.Event;
+      const ev = new Ctor(type, init);
+      return trusted ? _markTrusted(ev) : ev;
+    },
+    computedStyle: (el) => apply(computedStyle, globalThis, [el]),
+    setTimeout: (fn, delay) => apply(setTimeoutAtBoot, globalThis, [fn, delay]),
+    stringify: _JSONstringify,
+    parse: _JSONparse,
+    keys: _objectKeys,
+    isArray: _isArray,
+    min: _MathMin,
+    max: _MathMax,
+    lower: (s) => _stringToLowerCase(_String(s)),
+    slice: (s, start, end) => _stringSlice(_String(s), start, end),
+  });
+})();
+
+// The CDP remote-object store (port addition, SECURITY.md L10).
+//
+// DEVIATION from crates/obscura-js/src/runtime.rs, which keeps a client's handles in
+// the page-visible globalThis.__obscura_objects and reports an awaited result through
+// __obscura_await_meta, __obscura_await_rejected and __obscura_done_N: page script could
+// read any handle a client held, replace one, or settle an awaitPromise with a forged
+// result. Here they are closure state. The host's wrappers receive this object as an
+// argument (PocketCalculatorJsRuntime.Cdp.cs), and a client's own source reaches the
+// realm only through `eval` below, an indirect eval at global scope, so it runs as
+// Chromium runs it: sloppy, with `var` landing on the global, and without this object in
+// scope.
+const _cdpIndirectEval = globalThis.eval;
+// A value's description, the four fields of a RemoteObject Chromium computes natively:
+// [type, subtype, className, description].
+function _cdpMeta(v) {
+  let t = typeof v;
+  let st = null, cn = '', desc = '';
+  if (v === null) { t = 'object'; st = 'null'; }
+  else if (v === undefined) { t = 'undefined'; }
+  else if (_isArray(v)) {
+    st = 'array'; cn = 'Array';
+    desc = 'Array(' + v.length + ')';
+  }
+  else if (t === 'object' && typeof v._nid === 'number') {
+    st = 'node';
+    cn = v.constructor ? v.constructor.name : 'Node';
+    const tag = v.tagName;
+    if (v.nodeType === 9) cn = 'HTMLDocument';
+    else if (v.nodeType === 1) {
+      const name = _String(tag || 'Element');
+      cn = 'HTML' + _stringCharAt(name, 0) + _stringToLowerCase(_stringSlice(name, 1)) + 'Element';
+    }
+    desc = tag ? _stringToLowerCase(_String(tag)) : (v.nodeName || 'node');
+  }
+  else if (t === 'function') {
+    cn = 'Function';
+    desc = v.name ? 'function ' + v.name + '()' : 'function()';
+  }
+  else if (t === 'object' && v instanceof Error) {
+    st = 'error';
+    cn = (v.constructor && v.constructor.name) || 'Error';
+    desc = (typeof v.stack === 'string' && v.stack) ? v.stack
+      : (cn + (v.message ? ': ' + v.message : ''));
+  }
+  else if (t === 'object') {
+    cn = (v.constructor && v.constructor.name) || 'Object';
+    desc = cn;
+  }
+  else { desc = _String(v); }
+  return [t, st, cn, desc];
+}
+// Runtime.getProperties: one entry per own enumerable property, and a child handle for
+// each object-valued one.
+function _cdpProperties(parentId) {
+  const obj = _cdpObjects[parentId];
+  if (!obj || typeof obj !== 'object') return [];
+  const keys = _objectKeys(obj);
+  const out = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = obj[k];
+    const t = typeof v;
+    const item = { __proto__: null, name: k, type: t };
+    out[out.length] = item;
+    if (v === null) { item.value = null; continue; }
+    if (t !== 'object' && t !== 'function') { item.value = v; continue; }
+    const childOid = parentId + '::' + k;
+    _cdpObjects[childOid] = v;
+    item.childOid = childOid;
+    if (typeof v.nodeType === 'number') {
+      item.subtype = 'node';
+      const tag = v.tagName;
+      item.className = v.constructor && v.constructor.name ? v.constructor.name
+        : (tag ? 'HTML' + _stringCharAt(_String(tag), 0) + _stringToLowerCase(_stringSlice(_String(tag), 1)) + 'Element' : 'Node');
+      item.description = tag ? _stringToLowerCase(_String(tag)) : (v.nodeName || 'node');
+    } else if (_isArray(v)) {
+      item.subtype = 'array';
+      item.className = 'Array';
+      item.description = 'Array(' + v.length + ')';
+    } else {
+      item.className = (v.constructor && v.constructor.name) || 'Object';
+      item.description = item.className;
+    }
+  }
+  return out;
+}
+const _cdpHost = _objectFreeze({
+  __proto__: null,
+  objects: _cdpObjects,
+  // Awaited results by the wrapper's counter: [rejected, type, subtype, className, description].
+  outcomes: _cdpOutcomes,
+  eval: _cdpIndirectEval,
+  apply: _reflectApply,
+  settle: (rejected, v) => {
+    const m = _cdpMeta(v);
+    return [rejected, m[0], m[1], m[2], m[3]];
+  },
+  properties: _cdpProperties,
+  // The node id behind a handle, or -1.
+  nidOf: (id) => {
+    const o = _cdpObjects[id];
+    return (o && typeof o._nid === 'number') ? o._nid : -1;
+  },
+  wrap: (nid) => _wrap(nid),
+  clear: () => { for (const k in _cdpObjects) delete _cdpObjects[k]; },
+});
+
 // Host helpers: what the host's own scripts (CDP Input, DOM.setFileInputFiles, the
 // MCP form tools, frame messaging, navigation) need and page script must not have.
 //
@@ -18588,6 +18850,10 @@ globalThis.__obscura_host_handoff = Object.freeze({
   gcSurvivors: _gcSurvivors,
   gcForget: _gcForget,
   worldScheduleDrain: () => queueMicrotask(_worldDrainMutations),
+  // Port additions (SECURITY.md L10): the built-ins host snippets use, and the CDP
+  // remote-object store, both as bootstrap left them.
+  dom: _hostDom,
+  cdp: _cdpHost,
   externalMutation: (tree, type, nid, added, removed, attributeName, oldValue) => {
     _domMutationEpoch++;
     if (tree) _treeMutationEpoch++;

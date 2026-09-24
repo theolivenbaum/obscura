@@ -145,9 +145,9 @@ public static class Dom
                 }
                 else if (parameters.Get("objectId").AsString() is { } objectId)
                 {
-                    string code =
-                        $"(function() {{ var o = globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
-                        + "if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; })()";
+                    // The realm's closure store (SECURITY.md L10), not the Rust engine's
+                    // page-visible __obscura_objects.
+                    string code = $"__obscura_cdp.nidOf({CdpUtil.ObjectIdLiteral(objectId)})";
                     // The realm that minted the id: the page's, or an isolated world's.
                     double? resolved = page.EvaluateInObjectRealm(objectId, code).AsF64();
                     nodeId = resolved is { } value and >= 0 ? (ulong)value : 0UL;
@@ -177,9 +177,7 @@ public static class Dom
                 }
                 else if (parameters.Get("objectId").AsString() is { } objectId)
                 {
-                    string code =
-                        $"(function() {{ var o = globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
-                        + "return (o && typeof o._nid === 'number') ? o._nid : -1; })()";
+                    string code = $"__obscura_cdp.nidOf({CdpUtil.ObjectIdLiteral(objectId)})";
                     double? resolved = page.EvaluateInObjectRealm(objectId, code).AsF64();
                     nodeId = resolved is { } value and >= 0 ? (ulong)value : 0UL;
                 }
@@ -193,8 +191,12 @@ public static class Dom
                 // (the host-evaluated script runs in the page realm, so it can no
                 // longer call op_dom itself). `_wrap` also picks the element's own
                 // interface class, as upstream 94e857b does.
+                //
+                // The realm's own _wrap, handed to the host (SECURITY.md L10): the Rust
+                // engine's globalThis._wrap is page-visible, and a page could replace it or
+                // use it to reach any node, closed shadow roots included.
                 string jsCode =
-                    $"globalThis._wrap({nodeId.ToString(CultureInfo.InvariantCulture)})";
+                    $"__obscura_cdp.wrap({nodeId.ToString(CultureInfo.InvariantCulture)})";
 
                 if (page.Js is not { } js)
                 {
@@ -531,9 +533,7 @@ public static class Dom
 
         if (parameters.Get("objectId").AsString() is { } objectId)
         {
-            string code =
-                $"(function() {{ var o = globalThis.__obscura_objects && globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
-                + "return (o && typeof o._nid === 'number') ? o._nid : -1; })()";
+            string code = $"__obscura_cdp.nidOf({CdpUtil.ObjectIdLiteral(objectId)})";
             double? result = page.EvaluateInObjectRealm(objectId, code).AsF64();
             long resolved = result is { } value ? (long)value : -1L;
             if (resolved < 0)

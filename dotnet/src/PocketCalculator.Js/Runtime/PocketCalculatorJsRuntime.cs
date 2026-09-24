@@ -134,7 +134,6 @@ public sealed partial class PocketCalculatorJsRuntime
             // Main realm only, as upstream's expose_ops_for_tests.
             _engine.Script.__obscura_test_ops = _shim.Ops;
         }
-        InitializeObjectStore(_engine);
         _mainScope = new CdpScope(this, _engine, CdpScope.MainInjectedScriptId, _objectStore, _evaluationRecipes);
     }
 
@@ -234,8 +233,8 @@ public sealed partial class PocketCalculatorJsRuntime
         return engine;
     }
 
-    internal static void InitializeObjectStore(V8ScriptEngine engine) =>
-        engine.Execute("<obscura:init>", "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;");
+    /// <summary>The page realm's host helpers (bootstrap.js <c>__obscura_host</c>).</summary>
+    internal ScriptObject? MainHostHelpers => _shim.HostHelpers;
 
     // ------------------------------------------------------ array buffers
 

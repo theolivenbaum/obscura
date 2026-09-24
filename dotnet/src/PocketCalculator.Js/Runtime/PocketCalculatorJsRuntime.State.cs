@@ -280,10 +280,10 @@ public sealed partial class PocketCalculatorJsRuntime
                     continue;
                 }
                 var objectId = node.GetValue<string>();
-                var frameId = ConsoleObjectFrameId(objectId);
-                _objectStore[objectId] = frameId == 0
-                    ? $"globalThis.__obscura_objects['{objectId}']"
-                    : $"globalThis.__obscura_frameObjects[{frameId}]?.window?.__obscura_objects['{objectId}']";
+                // A frame's console handle stays in that frame's realm, which the page
+                // realm cannot reach (FrameRealm.PublishRealmObjects): it reads as
+                // undefined here, as it did through the Rust engine's frame registry.
+                _objectStore[objectId] = CdpScope.Retrieval(objectId);
             }
         }
         return events;

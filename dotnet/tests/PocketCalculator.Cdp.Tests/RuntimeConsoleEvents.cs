@@ -168,19 +168,17 @@ public sealed class RuntimeConsoleEvents
         await CoreCdp.CdpAsync(ctx, 7, "Runtime.releaseObjectGroup", new JsonObject(), second);
         await CoreCdp.CdpAsync(ctx, 8, "Runtime.disable", new JsonObject(), second);
         ctx.PendingEvents.Clear();
-        JsonNode retained = await CoreCdp.CdpAsync(
+        await CoreCdp.CdpAsync(
             ctx,
             9,
             "Runtime.evaluate",
-            new JsonObject
-            {
-                ["expression"] =
-                    "(() => { console.log({notRetained:true}); return Object.keys("
-                    + "globalThis.__obscura_objects).filter(k => k.startsWith('console-')).length; })()",
-                ["returnByValue"] = true,
-            },
+            new JsonObject { ["expression"] = "console.log({notRetained:true}); 1", ["returnByValue"] = true },
             second);
-        Assert.Equal(0.0, retained["result"]!["value"].AsF64());
+        // The store is the realm's closure state, reached by host code only (SECURITY.md L10).
+        JsonNode? retained = ctx.GetSessionPageMut(second)!.EvaluateInObjectRealm(
+            "retained-probe",
+            "Object.keys(__obscura_cdp.objects).filter(k => k.startsWith('console-')).length");
+        Assert.Equal(0.0, retained.AsF64());
         Assert.Empty(Events(ctx, "Runtime.consoleAPICalled"));
     }
 }

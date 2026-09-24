@@ -22,6 +22,15 @@ public static class BootstrapLoader
     /// </summary>
     internal static bool ExposeOpsForTests { get; set; }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<V8ScriptEngine, ScriptObject> Stringifiers = new();
+
+    /// <summary>
+    /// <paramref name="engine"/>'s <c>JSON.stringify</c> as bootstrap.js left it, or null for
+    /// an engine that never ran it.
+    /// </summary>
+    internal static ScriptObject? StringifyOf(V8ScriptEngine engine) =>
+        Stringifiers.TryGetValue(engine, out var stringify) ? stringify : null;
+
     public static DenoCoreShim Install(V8ScriptEngine engine, Action<ScriptObject> bindOps, uint frameId = 0) =>
         Install(engine, bindOps, frameId, isolatedWorld: false);
 
@@ -111,6 +120,13 @@ public static class BootstrapLoader
         // see the end of bootstrap.js. Host scripts receive this object as an argument
         // (HostScript), which is what keeps it unreachable from the page.
         shim.HostHelpers = engine.Evaluate("globalThis.__obscura_host_handoff") as ScriptObject;
+        // The serializer the host decodes values with, before any page script can replace
+        // it (SECURITY.md L10).
+        if (shim.HostHelpers?.GetProperty("dom") is ScriptObject dom
+            && dom.GetProperty("stringify") is ScriptObject stringify)
+        {
+            Stringifiers.AddOrUpdate(engine, stringify);
+        }
 
         // Drop the op-table handoff and `Deno` itself, exactly as
         // `take_ops_handoff` / `share_ops_with_realm` do in upstream runtime.rs

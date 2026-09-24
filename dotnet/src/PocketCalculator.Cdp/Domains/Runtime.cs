@@ -554,35 +554,12 @@ public static class Runtime
         // off a page object, so the page decides what ends up inside this literal. A JSON
         // literal covers the C0 controls a manual quote/backslash pair leaves alone.
         string oid = CdpUtil.ObjectIdLiteral(objectId);
-        string code =
-            "(function() {"
-            + $"var obj = globalThis.__obscura_objects[{oid}];"
-            + "if (!obj || typeof obj !== 'object') return [];"
-            + "var keys = Object.keys(obj);"
-            + "return keys.map(function(k) {"
-            + "var v = obj[k];"
-            + "var t = typeof v;"
-            + "var item = { name: k, type: t };"
-            + "if (v === null) { item.value = null; return item; }"
-            + "if (t !== 'object' && t !== 'function') { item.value = v; return item; }"
-            + $"var childOid = {oid} + '::' + k;"
-            + "globalThis.__obscura_objects[childOid] = v;"
-            + "item.childOid = childOid;"
-            + "if (typeof v.nodeType === 'number') {"
-            + "item.subtype = 'node';"
-            + "item.className = v.constructor && v.constructor.name ? v.constructor.name : (v.tagName ? 'HTML' + v.tagName.charAt(0) + v.tagName.slice(1).toLowerCase() + 'Element' : 'Node');"
-            + "item.description = v.tagName ? v.tagName.toLowerCase() : (v.nodeName || 'node');"
-            + "} else if (Array.isArray(v)) {"
-            + "item.subtype = 'array';"
-            + "item.className = 'Array';"
-            + "item.description = 'Array(' + v.length + ')';"
-            + "} else {"
-            + "item.className = (v.constructor && v.constructor.name) || 'Object';"
-            + "item.description = item.className;"
-            + "}"
-            + "return item;"
-            + "});"
-            + "})()";
+        // bootstrap.js _cdpProperties, over the realm's closure store and the built-ins
+        // bootstrap captured. DEVIATION from crates/obscura-cdp/src/domains/runtime.rs, whose
+        // snippet reads the page-visible __obscura_objects and calls the page's
+        // Object.keys and Array.prototype.map, so a page that replaced map answered every
+        // getProperties (Puppeteer's $$) with its own list (SECURITY.md L10).
+        string code = $"__obscura_cdp.properties({oid})";
 
         // The object lives in the realm that minted it: the page's, or an isolated world's.
         JsonNode? result = page.EvaluateInObjectRealm(objectId, code);

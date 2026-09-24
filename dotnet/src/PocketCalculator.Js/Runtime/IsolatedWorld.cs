@@ -206,7 +206,6 @@ public sealed class IsolatedWorld : IDisposable
         {
             world._shim = BootstrapLoader.Install(engine, ops => parent.BindWorldOps(ops, world), frameId: 0, isolatedWorld: true);
             world.CopyGlobalsFromPage();
-            PocketCalculatorJsRuntime.InitializeObjectStore(engine);
             world.Scope.Run(
                 "<obscura:world-init>",
                 "globalThis.__obscura_isolated_world = true; globalThis.__obscura_init();");
@@ -316,5 +315,77 @@ internal sealed class CdpScope(
     {
         world?.SyncBeforeRun();
         return runtime.ExecuteIn(Engine, name, source);
+    }
+
+    /// <summary>The name the host's CDP wrappers give the realm's store (bootstrap.js <c>_cdpHost</c>).</summary>
+    public const string Parameter = "__obscura_cdp";
+
+    /// <summary>The expression a wrapper reads handle <paramref name="objectId"/> with.</summary>
+    public static string Retrieval(string objectId) =>
+        $"{Parameter}.objects[{PocketCalculatorJsRuntime.JsStringLiteral(objectId)}]";
+
+    private ScriptObject? _helpers;
+    private ScriptObject? _cdp;
+
+    /// <summary>
+    /// The realm's CDP store object, taken from its host helpers: closure state of
+    /// bootstrap.js that page script has no reference to (SECURITY.md L10).
+    /// </summary>
+    public ScriptObject Cdp
+    {
+        get
+        {
+            var helpers = world is null ? runtime.MainHostHelpers : world.HostHelpers;
+            if (_cdp is null || !ReferenceEquals(helpers, _helpers))
+            {
+                _helpers = helpers;
+                _cdp = helpers?.GetProperty("cdp") as ScriptObject
+                    ?? throw new JsRuntimeException("the realm has no CDP store");
+            }
+            return _cdp;
+        }
+    }
+
+    /// <summary>Handle id to value.</summary>
+    public ScriptObject Objects => (ScriptObject)Cdp.GetProperty("objects");
+
+    /// <summary>Awaiting wrappers' outcomes, by counter.</summary>
+    public ScriptObject Outcomes => (ScriptObject)Cdp.GetProperty("outcomes");
+
+    /// <summary>
+    /// Runs host-authored <paramref name="body"/> as a strict function of the realm's store,
+    /// which it names <c>__obscura_cdp</c>, and returns what it returns. Client source goes
+    /// in as a string for <c>__obscura_cdp.eval</c>, never pasted into the body.
+    /// </summary>
+    public object? Call(string name, string body)
+    {
+        world?.SyncBeforeRun();
+        return runtime.InvokeIn(Engine, name, $"(function({Parameter}) {{ \"use strict\";\n{body}\n}})", Cdp);
+    }
+
+    /// <summary>Drops one handle.</summary>
+    public void Delete(string objectId)
+    {
+        try
+        {
+            Objects.DeleteProperty(objectId);
+        }
+        catch (Exception error) when (error is ScriptEngineException or JsRuntimeException or InvalidOperationException)
+        {
+            // A release of a handle the realm can no longer reach is a no-op.
+        }
+    }
+
+    /// <summary>Drops every handle.</summary>
+    public void Clear()
+    {
+        try
+        {
+            Cdp.InvokeMethod("clear");
+        }
+        catch (Exception error) when (error is ScriptEngineException or JsRuntimeException or InvalidOperationException)
+        {
+            // As Delete.
+        }
     }
 }

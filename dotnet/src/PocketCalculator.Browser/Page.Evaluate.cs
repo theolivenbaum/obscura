@@ -221,13 +221,14 @@ public sealed partial class Page
 
     /// <summary>
     /// <see cref="Evaluate"/> in the realm that minted <paramref name="objectId"/>: the page
-    /// realm for its own ids, or the isolated world that made it.
+    /// realm for its own ids, or the isolated world that made it. The expression names that
+    /// realm's CDP store as <c>__obscura_cdp</c>; host-authored code only.
     /// </summary>
     public JsonNode? EvaluateInObjectRealm(string objectId, string expression)
     {
-        if (Js is not { } js || PocketCalculatorJsRuntime.IsolatedWorldKeyOf(objectId) == 0)
+        if (Js is not { } js)
         {
-            return Evaluate(expression);
+            return null;
         }
         try
         {
