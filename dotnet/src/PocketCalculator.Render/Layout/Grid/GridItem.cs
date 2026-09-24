@@ -8,7 +8,7 @@ internal sealed class GridItem
     public NodeId Node;
 
     /// <summary>The order of the item in the children array.</summary>
-    public ushort SourceOrder;
+    public int SourceOrder;
 
     /// <summary>The item's definite row-start and row-end, in origin-zero coordinates.</summary>
     public Line<OriginZeroLine> Row;
@@ -65,10 +65,10 @@ internal sealed class GridItem
     public float BaselineShim;
 
     /// <summary>The item's row-start and row-end as indexes into the row track vector.</summary>
-    public Line<ushort> RowIndexes;
+    public Line<int> RowIndexes;
 
     /// <summary>The item's column-start and column-end as indexes into the column track vector.</summary>
-    public Line<ushort> ColumnIndexes;
+    public Line<int> ColumnIndexes;
 
     /// <summary>Whether the item crosses a flexible row.</summary>
     public bool CrossesFlexibleRow;
@@ -108,7 +108,7 @@ internal sealed class GridItem
         IGridItemStyle style,
         AlignItems parentAlignItems,
         AlignItems parentJustifyItems,
-        ushort sourceOrder) => new()
+        int sourceOrder) => new()
         {
             Node = node,
             SourceOrder = sourceOrder,
@@ -130,8 +130,8 @@ internal sealed class GridItem
             JustifySelf = style.JustifySelf ?? parentJustifyItems,
             Baseline = null,
             BaselineShim = 0.0f,
-            RowIndexes = new Line<ushort>(0, 0),
-            ColumnIndexes = new Line<ushort>(0, 0),
+            RowIndexes = new Line<int>(0, 0),
+            ColumnIndexes = new Line<int>(0, 0),
             CrossesFlexibleRow = false,
             CrossesFlexibleColumn = false,
             CrossesIntrinsicRow = false,
@@ -148,7 +148,7 @@ internal sealed class GridItem
     public Line<OriginZeroLine> Placement(AbstractAxis axis) => axis == AbstractAxis.Block ? Row : Column;
 
     /// <summary>This item's placement in the specified axis as track vector indices.</summary>
-    public Line<ushort> PlacementIndexes(AbstractAxis axis) =>
+    public Line<int> PlacementIndexes(AbstractAxis axis) =>
         axis == AbstractAxis.Block ? RowIndexes : ColumnIndexes;
 
     /// <summary>The start of the track range spanned by this item, excluding bounding lines.</summary>
@@ -162,7 +162,7 @@ internal sealed class GridItem
         axisTracks.Range(TrackRangeStart(axis), TrackRangeEnd(axis));
 
     /// <summary>Returns the number of tracks that this item spans in the specified axis.</summary>
-    public ushort Span(AbstractAxis axis) => axis == AbstractAxis.Block ? Row.Span() : Column.Span();
+    public int Span(AbstractAxis axis) => axis == AbstractAxis.Block ? Row.Span() : Column.Span();
 
     /// <summary>Whether the grid item crosses a flexible track in the specified axis.</summary>
     public bool CrossesFlexibleTrack(AbstractAxis axis) =>

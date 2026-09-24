@@ -45,9 +45,9 @@ internal static class GridLimits
     public static TrackCounts ClampCounts(TrackCounts counts)
     {
         int room = Math.Max(MaxTracks - counts.Explicit, 0);
-        int negative = Math.Min((int)counts.NegativeImplicit, room);
-        int positive = Math.Min((int)counts.PositiveImplicit, room - negative);
-        return new TrackCounts((ushort)negative, counts.Explicit, (ushort)positive);
+        int negative = Math.Min(counts.NegativeImplicit, room);
+        int positive = Math.Min(counts.PositiveImplicit, room - negative);
+        return new TrackCounts(negative, counts.Explicit, positive);
     }
 }
 
@@ -71,7 +71,7 @@ internal readonly record struct GridWindow(int Start, int End)
         end = Math.Min(end, End);
         start = Math.Max(Math.Min(start, End - 1), Start);
         end = Math.Max(end, start + 1);
-        return new Line<OriginZeroLine>(new OriginZeroLine((short)start), new OriginZeroLine((short)end));
+        return new Line<OriginZeroLine>(new OriginZeroLine(start), new OriginZeroLine(end));
     }
 
     /// <summary>Whether a span lies wholly inside the window.</summary>

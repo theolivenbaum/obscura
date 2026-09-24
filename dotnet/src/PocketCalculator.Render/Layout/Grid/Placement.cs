@@ -14,14 +14,14 @@ internal static class GridPlacementAlgorithm
     /// <summary>Advances the cursor by one track in the active search direction.</summary>
     private static OriginZeroLine AdvancePosition(OriginZeroLine position, bool axisIsReversed) =>
         axisIsReversed
-            ? new OriginZeroLine((short)(position.Value - 1))
-            : new OriginZeroLine((short)(position.Value + 1));
+            ? new OriginZeroLine(position.Value - 1)
+            : new OriginZeroLine(position.Value + 1);
 
     /// <summary>Returns the initial search line for sparse/dense placement in the given direction.</summary>
     private static OriginZeroLine SearchStartLine(
         OriginZeroLine gridStartLine,
         OriginZeroLine gridEndLine,
-        bool axisIsReversed) => axisIsReversed ? gridEndLine - (ushort)1 : gridStartLine;
+        bool axisIsReversed) => axisIsReversed ? gridEndLine - 1 : gridStartLine;
 
     /// <summary>Resolves an indefinite span at <paramref name="position"/>, respecting the direction.</summary>
     private static Line<OriginZeroLine> ResolveIndefiniteGridSpan(
@@ -29,7 +29,7 @@ internal static class GridPlacementAlgorithm
         ushort span,
         bool axisIsReversed) =>
         axisIsReversed
-            ? new Line<OriginZeroLine>((position - span) + (ushort)1, position + (ushort)1)
+            ? new Line<OriginZeroLine>((position - span) + 1, position + 1)
             : new Line<OriginZeroLine>(position, position + span);
 
     /// <summary>Mirrors a horizontal span around the explicit grid width.</summary>
@@ -37,10 +37,10 @@ internal static class GridPlacementAlgorithm
         Line<OriginZeroLine> span,
         ushort explicitColCount)
     {
-        short explicitColEndLine = (short)explicitColCount;
+        int explicitColEndLine = explicitColCount;
         return new Line<OriginZeroLine>(
-            new OriginZeroLine((short)(explicitColEndLine - span.End.Value)),
-            new OriginZeroLine((short)(explicitColEndLine - span.Start.Value)));
+            new OriginZeroLine(explicitColEndLine - span.End.Value),
+            new OriginZeroLine(explicitColEndLine - span.Start.Value));
     }
 
     /// <summary>Mirrors horizontal spans for RTL while leaving all other spans unchanged.</summary>
@@ -401,8 +401,8 @@ internal static class GridPlacementAlgorithm
                     is { } occupied)
                 {
                     var from = primaryAxisIsReversed
-                        ? new OriginZeroLine((short)(occupied.First.Value - 1))
-                        : new OriginZeroLine((short)(occupied.Last.Value + 1));
+                        ? new OriginZeroLine(occupied.First.Value - 1)
+                        : new OriginZeroLine(occupied.Last.Value + 1);
                     primaryIdx = cellOccupancyMatrix.NextFreePrimaryTrack(
                         primaryAxis, from, secondarySpan, primaryAxisIsReversed);
                     continue;
@@ -486,6 +486,6 @@ internal static class GridPlacementAlgorithm
         var rowSpan = primaryAxis == AbsoluteAxis.Horizontal ? secondarySpan : primarySpan;
 
         items.Add(GridItem.NewWithPlacementStyleAndOrder(
-            node, colSpan, rowSpan, style, parentAlignItems, parentJustifyItems, (ushort)index));
+            node, colSpan, rowSpan, style, parentAlignItems, parentJustifyItems, index));
     }
 }

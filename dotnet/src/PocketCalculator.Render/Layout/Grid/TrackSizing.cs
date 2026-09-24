@@ -33,7 +33,7 @@ internal static class TrackSizing
     {
         private readonly AbstractAxis _axis = axis;
         private int _indexOffset = 0;
-        private ushort _currentSpan = 1;
+        private int _currentSpan = 1;
         private bool _currentIsFlex = false;
 
         /// <summary>
@@ -239,12 +239,12 @@ internal static class TrackSizing
     {
         foreach (var item in items)
         {
-            item.ColumnIndexes = new Line<ushort>(
-                (ushort)item.Column.Start.IntoTrackVecIndex(columnCounts),
-                (ushort)item.Column.End.IntoTrackVecIndex(columnCounts));
-            item.RowIndexes = new Line<ushort>(
-                (ushort)item.Row.Start.IntoTrackVecIndex(rowCounts),
-                (ushort)item.Row.End.IntoTrackVecIndex(rowCounts));
+            item.ColumnIndexes = new Line<int>(
+                item.Column.Start.IntoTrackVecIndex(columnCounts),
+                item.Column.End.IntoTrackVecIndex(columnCounts));
+            item.RowIndexes = new Line<int>(
+                item.Row.Start.IntoTrackVecIndex(rowCounts),
+                item.Row.End.IntoTrackVecIndex(rowCounts));
         }
     }
 
@@ -548,7 +548,7 @@ internal static class TrackSizing
         while (batchedItemIterator.Next(items, out int batchStart, out int batchEnd, out bool isFlex))
         {
             // 2. Size tracks to fit non-spanning items.
-            ushort batchSpan = items[batchStart].Placement(axis).Span();
+            int batchSpan = items[batchStart].Placement(axis).Span();
             if (!isFlex && batchSpan == 1)
             {
                 for (int itemIndex = batchStart; itemIndex < batchEnd; itemIndex++)
