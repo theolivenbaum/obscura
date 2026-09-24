@@ -12,6 +12,49 @@ const __obscuraCore = globalThis.Deno.core;
 // JSON (internal loads, frames) use JSON.parse as it was before any page script ran, not
 // whatever the page has put on the global since (SECURITY.md C3).
 const _JSONparse = JSON.parse;
+// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the shim's own
+// paths and the host's snippets use the built-ins as they were before page script ran.
+// Chromium's DOM is native and never calls a page-replaced JSON.stringify or
+// Array.prototype.map; the shim called the page's current ones, so a page that replaced
+// them broke querySelectorAll, select.value and every op that sends JSON. Page script
+// calling these names still gets its own replacement.
+const _JSONstringify = JSON.stringify;
+const _uncurry = (fn) => Function.prototype.call.bind(fn);
+const _arrayPush = _uncurry(Array.prototype.push);
+const _arraySlice = _uncurry(Array.prototype.slice);
+const _arrayJoin = _uncurry(Array.prototype.join);
+const _arrayIndexOf = _uncurry(Array.prototype.indexOf);
+const _isArray = Array.isArray;
+const _mapGet = _uncurry(Map.prototype.get);
+const _mapSet = _uncurry(Map.prototype.set);
+const _mapHas = _uncurry(Map.prototype.has);
+const _mapDelete = _uncurry(Map.prototype.delete);
+const _setHas = _uncurry(Set.prototype.has);
+const _weakMapGet = _uncurry(WeakMap.prototype.get);
+const _stringSlice = _uncurry(String.prototype.slice);
+const _stringToLowerCase = _uncurry(String.prototype.toLowerCase);
+const _stringCharAt = _uncurry(String.prototype.charAt);
+const _objectKeys = Object.keys;
+const _objectCreate = Object.create;
+const _objectFreeze = Object.freeze;
+const _getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const _defineProperty = Object.defineProperty;
+const _getPrototypeOf = Object.getPrototypeOf;
+const _String = String;
+const _Number = Number;
+const _MathMin = Math.min;
+const _MathMax = Math.max;
+// `ids.map(wrap).filter(Boolean)` without either method: the wrappers for a list of node
+// ids, skipping any id that no longer names a node.
+const _wrapIds = (ids, wrap) => {
+  const out = [];
+  if (!ids) return out;
+  for (let i = 0; i < ids.length; i++) {
+    const node = wrap(ids[i]);
+    if (node) out[out.length] = node;
+  }
+  return out;
+};
 
 // Pre-declare all internal globals as non-enumerable so they are invisible
 // to Object.keys(window) / for-in enumeration. Must run before any var
@@ -516,7 +559,7 @@ const _linkElementSheets = new WeakMap();
 function _externalStylesheetGet(node) {
   if (!node || node._nid == null) return null;
   try {
-    return JSON.parse(__obscuraCore.ops.op_external_stylesheet_get(node._nid, _realmFrameId));
+    return _JSONparse(__obscuraCore.ops.op_external_stylesheet_get(node._nid, _realmFrameId));
   } catch(e) { return null; }
 }
 function _externalStylesheetSet(node, css, responseUrl, importsOriginClean) {
@@ -697,7 +740,7 @@ const _eventRegistry = globalThis._eventRegistry;
 const _formValues = globalThis._formValues;
 const _formChecked = globalThis._formChecked;
 const _formIndeterminate = globalThis._formIndeterminate;
-const _domParse = (cmd, a1, a2) => { try { return JSON.parse(_dom(cmd, a1, a2)); } catch { return null; } };
+const _domParse = (cmd, a1, a2) => { try { return _JSONparse(_dom(cmd, a1, a2)); } catch { return null; } };
 
 // HTML "ASCII whitespace": U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE.
 // Class token splitting (classList, getElementsByClassName) uses exactly this set.
@@ -796,14 +839,14 @@ const _consoleFn = (level, args) => {
       }
       if (typeof a === "object") {
         try {
-          const s = JSON.stringify(a);
+          const s = _JSONstringify(a);
           return s === "{}" && a.message ? a.message : s;
         } catch { return String(a); }
       }
       return String(a);
     }).join(" ");
     const eventArgs = __obscuraCore.ops.op_runtime_events_enabled()
-      ? JSON.stringify(args.map(a => {
+      ? _JSONstringify(args.map(a => {
           try { return _consoleRemoteObject(a); }
           catch { return { type: typeof a, description: "<unavailable>" }; }
         }))
@@ -2102,7 +2145,7 @@ class Node {
   get parentElement() { const p = this.parentNode; return p && p.nodeType === 1 ? p : null; }
   get childNodes() {
     const ids = _domParse("child_nodes", this._nid) || [];
-    return _nodeList(ids.map(_wrap).filter(Boolean));
+    return _nodeList(_wrapIds(ids, _wrap));
   }
   get firstChild() { return _wrap(+_dom("first_child", this._nid)); }
   get lastChild() { return _wrap(+_dom("last_child", this._nid)); }
@@ -3123,7 +3166,7 @@ class Animation {
         : this.effect._timing.iterations,
       iterationsInfinite: this.effect._timing.iterations === Infinity,
     };
-    try { this._registered = !!__obscuraCore.ops.op_waapi_create?.(JSON.stringify(input)); }
+    try { this._registered = !!__obscuraCore.ops.op_waapi_create?.(_JSONstringify(input)); }
     catch (_) { this._registered = false; }
     if (this._registered) {
       _waapiAnimations.add(this);
@@ -3357,7 +3400,7 @@ class Element extends Node {
   set innerText(v) { this.textContent = v; }
   get children() {
     const ids = _domParse("element_children", this._nid) || [];
-    return HTMLCollection._from(ids.map(_wrapEl).filter(Boolean));
+    return HTMLCollection._from(_wrapIds(ids, _wrapEl));
   }
   get content() {
     // <template>.content is a DocumentFragment; <meta>.content reflects
@@ -3559,7 +3602,7 @@ class Element extends Node {
   querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
   querySelectorAll(s) {
     const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
-    return _nodeList(ids.map(_wrapEl).filter(Boolean));
+    return _nodeList(_wrapIds(ids, _wrapEl));
   }
   getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
@@ -4608,7 +4651,7 @@ class Element extends Node {
     try {
       const raw = __obscuraCore.ops.op_layout_geometry(String(this._nid | 0));
       if (!raw) return { width: 0, height: 0 };
-      const geometry = JSON.parse(raw);
+      const geometry = _JSONparse(raw);
       if (geometry
           && Number.isFinite(geometry.clientWidth)
           && Number.isFinite(geometry.clientHeight)) {
@@ -4633,7 +4676,7 @@ class Element extends Node {
     try {
       const raw = __obscuraCore.ops.op_layout_geometry(String(this._nid | 0));
       if (!raw) return null;
-      const geometry = JSON.parse(raw);
+      const geometry = _JSONparse(raw);
       if (geometry
           && Number.isFinite(geometry.x)
           && Number.isFinite(geometry.y)
@@ -4692,7 +4735,7 @@ class Element extends Node {
     if (typeof __obscuraCore.ops.op_layout_metrics !== 'function') return null;
     try {
       const raw = __obscuraCore.ops.op_layout_metrics();
-      return raw ? JSON.parse(raw) : null;
+      return raw ? _JSONparse(raw) : null;
     } catch (_e) {
       return null;
     }
@@ -4702,7 +4745,7 @@ class Element extends Node {
     try {
       const raw = __obscuraCore.ops.op_element_scroll_metrics(String(this._nid | 0));
       if (!raw) return null;
-      const metrics = JSON.parse(raw);
+      const metrics = _JSONparse(raw);
       return metrics && metrics.hasBox !== false ? metrics : null;
     } catch (_e) {
       return null;
@@ -4712,7 +4755,7 @@ class Element extends Node {
     if (typeof __obscuraCore.ops.op_scroll_offset !== 'function') return null;
     try {
       const raw = __obscuraCore.ops.op_scroll_offset();
-      return raw ? JSON.parse(raw) : null;
+      return raw ? _JSONparse(raw) : null;
     } catch (_e) {
       return null;
     }
@@ -4721,7 +4764,7 @@ class Element extends Node {
     if (typeof __obscuraCore.ops.op_scroll_to !== 'function') return null;
     try {
       const raw = __obscuraCore.ops.op_scroll_to(+x || 0, +y || 0);
-      return raw ? JSON.parse(raw) : null;
+      return raw ? _JSONparse(raw) : null;
     } catch (_e) {
       return null;
     }
@@ -4730,7 +4773,7 @@ class Element extends Node {
     if (typeof __obscuraCore.ops.op_element_scroll_to !== 'function') return null;
     try {
       const raw = __obscuraCore.ops.op_element_scroll_to(String(this._nid | 0), +x || 0, +y || 0);
-      return raw ? JSON.parse(raw) : null;
+      return raw ? _JSONparse(raw) : null;
     } catch (_e) {
       return null;
     }
@@ -5365,7 +5408,7 @@ class Document extends Node {
   querySelector(s) { return _wrapEl(+_dom("query_selector", s)); }
   querySelectorAll(s) {
     const ids = _domParse("query_selector_all", s) || [];
-    return _nodeList(ids.map(_wrapEl).filter(Boolean));
+    return _nodeList(_wrapIds(ids, _wrapEl));
   }
   getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
@@ -5907,11 +5950,11 @@ class DocumentFragment extends Node {
   querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
   querySelectorAll(s) {
     const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
-    return _nodeList(ids.map(_wrapEl).filter(Boolean));
+    return _nodeList(_wrapIds(ids, _wrapEl));
   }
   get children() {
     const ids = _domParse("element_children", this._nid) || [];
-    return HTMLCollection._from(ids.map(_wrapEl).filter(Boolean));
+    return HTMLCollection._from(_wrapIds(ids, _wrapEl));
   }
   get firstElementChild() { return this.children[0] || null; }
   get lastElementChild() { const ch = this.children; return ch[ch.length - 1] || null; }
@@ -6241,7 +6284,7 @@ class HTMLImageElement extends Element {
         Promise.resolve(op(this._nid >>> 0)).then(
           raw => {
             let metadata = null;
-            try { metadata = JSON.parse(raw); }
+            try { metadata = _JSONparse(raw); }
             catch (_error) { metadata = { ok: false, currentSrc: this.src }; }
             finish(metadata);
           },
@@ -6262,7 +6305,7 @@ class HTMLImageElement extends Element {
     try {
       const op = __obscuraCore.ops.op_image_metadata;
       if (typeof op !== "function") return;
-      const metadata = JSON.parse(op(this._nid >>> 0, true));
+      const metadata = _JSONparse(op(this._nid >>> 0, true));
       if (!metadata) return;
       const selected = metadata.currentSrc ? String(metadata.currentSrc) : "";
       if (selected !== this._imageCurrentSrc) {
@@ -6637,7 +6680,7 @@ function _innerTextOf(el) {
   if (typeof innerTextOp === 'function' && el._nid != null && !_isXMLDocument(el.ownerDocument)) {
     let raw = '';
     try { raw = innerTextOp(String(el._nid | 0)); } catch (e) { raw = ''; }
-    if (raw) return JSON.parse(raw);
+    if (raw) return _JSONparse(raw);
   }
   const style = _innerTextStyle(el);
   const display = style ? String(style.display || 'block') : 'block';
@@ -7667,7 +7710,7 @@ globalThis.fetch = async (input, init = {}) => {
     ? init.body
     : (request ? request.body : undefined);
   const body = _serializeBody(initBody, _h, !(inheritsRequestBody && init.headers !== undefined));
-  const hdrs = JSON.stringify(_h);
+  const hdrs = _JSONstringify(_h);
   const fetchRedirect = init.redirect || (request ? request.redirect : "follow");
   const fetchCredentials = init.credentials !== undefined
     ? String(init.credentials)
@@ -7679,7 +7722,7 @@ globalThis.fetch = async (input, init = {}) => {
   // with the page's own URL global: op_fetch_url derives the requesting origin from the
   // calling realm's document host-side and ignores this argument (SECURITY.md C1).
   const raw = await __obscuraCore.ops.op_fetch_url(url, method, hdrs, body, "", fetchMode, fetchCredentials, false);
-  const parsed = JSON.parse(raw);
+  const parsed = _JSONparse(raw);
   if (parsed.blocked) {
     const err = new TypeError('net::ERR_FAILED');
     err.name = 'AbortError';
@@ -8054,7 +8097,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
 
       switch (xhr.responseType) {
         case 'json':
-          try { xhr.response = JSON.parse(text); } catch(e) { xhr.response = null; }
+          try { xhr.response = _JSONparse(text); } catch(e) { xhr.response = null; }
           break;
         case 'text':
         case '':
@@ -8169,14 +8212,14 @@ _markNative(XMLHttpRequest.prototype.getAllResponseHeaders);
 function _urlParseOp(url, base) {
   try {
     const s = __obscuraCore.ops.op_url_parse(String(url), (base === undefined || base === null) ? "" : String(base));
-    const c = JSON.parse(s);
+    const c = _JSONparse(s);
     return (c && c.ok) ? c : null;
   } catch (e) { return null; }
 }
 function _urlSetOp(href, part, value) {
   try {
     const s = __obscuraCore.ops.op_url_set(String(href), part, String(value));
-    const c = JSON.parse(s);
+    const c = _JSONparse(s);
     return (c && c.ok) ? c : null;
   } catch (e) { return null; }
 }
@@ -8293,7 +8336,7 @@ if (typeof Request === 'undefined') {
       });
     }
     async text() { return this.body ? String(this.body) : ''; }
-    async json() { return JSON.parse(await this.text()); }
+    async json() { return _JSONparse(await this.text()); }
     async arrayBuffer() { return new TextEncoder().encode(await this.text()).buffer; }
     async blob() {
       const ct = this.headers && this.headers.get ? (this.headers.get('content-type') || '') : '';
@@ -8366,13 +8409,13 @@ if (typeof Response === 'undefined') {
     }
     get bodyUsed() { return this._bodyUsed; }
     async text() { this._consumeBody(); return _decodeBodyWithCharset(this._bodyBytes, this.headers); }
-    async json() { this._consumeBody(); return JSON.parse(await _decodeBodyWithCharset(this._bodyBytes, this.headers)); }
+    async json() { this._consumeBody(); return _JSONparse(await _decodeBodyWithCharset(this._bodyBytes, this.headers)); }
     async arrayBuffer() { this._consumeBody(); return _arrayBufferFromBytes(this._bodyBytes); }
     async blob() { this._consumeBody(); return new Blob([this._bodyBytes]); }
     clone() { return new Response(this._bodyBytes, { status: this.status, statusText: this.statusText, headers: this.headers, type: this.type, url: this.url, redirected: this.redirected }); }
     static error() { return new Response(null, { status: 0 }); }
     static redirect(url, status) { return new Response(null, { status: status || 302, headers: { Location: url } }); }
-    static json(data, init) { return new Response(JSON.stringify(data), { ...init, headers: { 'content-type': 'application/json', ...(init?.headers || {}) } }); }
+    static json(data, init) { return new Response(_JSONstringify(data), { ...init, headers: { 'content-type': 'application/json', ...(init?.headers || {}) } }); }
   };
 }
 
@@ -8523,7 +8566,7 @@ function _roMeasurement(target, suppliedGeometry, suppliedByBatch = false) {
   if (!suppliedByBatch && hasRenderer && target?._nid != null) {
     try {
       const raw = __obscuraCore.ops.op_layout_geometry(String(target._nid | 0));
-      geometry = raw ? JSON.parse(raw) : null;
+      geometry = raw ? _JSONparse(raw) : null;
     } catch (_error) {}
   }
 
@@ -8624,8 +8667,8 @@ function _roMeasurements(targets) {
   if (typeof bulk === "function"
       && targets.every(target => target?._nid != null)) {
     try {
-      const raw = bulk(JSON.stringify(targets.map(target => target._nid | 0)));
-      const geometries = raw ? JSON.parse(raw) : null;
+      const raw = bulk(_JSONstringify(targets.map(target => target._nid | 0)));
+      const geometries = raw ? _JSONparse(raw) : null;
       if (Array.isArray(geometries) && geometries.length === targets.length) {
         for (let index = 0; index < targets.length; index++) {
           measurements.set(
@@ -8823,7 +8866,7 @@ if (typeof TextDecoder === 'undefined') {
         return _utf8DecodeBytes(bytes, off);
       }
       // Legacy encodings / fatal mode: encoding_rs via the op.
-      const r = JSON.parse(__obscuraCore.ops.op_text_decode(this.encoding, bytes, this.fatal, this.ignoreBOM));
+      const r = _JSONparse(__obscuraCore.ops.op_text_decode(this.encoding, bytes, this.fatal, this.ignoreBOM));
       if (!r.ok) throw new TypeError("Failed to execute 'decode' on 'TextDecoder': The encoded data was not valid.");
       return r.v;
     }
@@ -9081,7 +9124,7 @@ globalThis.getComputedStyle = (el, pseudoElt) => {
           const raw = pseudo
             ? op(String(el._nid | 0), pseudo)
             : op(String(el._nid | 0));
-          snapshot.rendered = raw ? JSON.parse(raw) : null;
+          snapshot.rendered = raw ? _JSONparse(raw) : null;
         } catch (e) {}
       }
     }
@@ -9877,8 +9920,8 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   const makeRecord = () => record || (record = {
     type: type, // 'childList', 'attributes', 'characterData'
     target: target,
-    addedNodes: (addedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
-    removedNodes: (removedNodes || []).map(nid => _wrap(nid)).filter(Boolean),
+    addedNodes: _wrapIds(addedNodes, _wrap),
+    removedNodes: _wrapIds(removedNodes, _wrap),
     attributeName: attributeName || null,
     oldValue: oldValue ?? null,
     previousSibling: null,
@@ -10269,8 +10312,8 @@ function _ioMeasurements(elements) {
   const nativeElements = elements.filter(element => element?._nid != null);
   if (typeof bulk !== "function" || !nativeElements.length) return measurements;
   try {
-    const raw = bulk(JSON.stringify(nativeElements.map(element => element._nid | 0)));
-    const geometries = raw ? JSON.parse(raw) : null;
+    const raw = bulk(_JSONstringify(nativeElements.map(element => element._nid | 0)));
+    const geometries = raw ? _JSONparse(raw) : null;
     if (Array.isArray(geometries) && geometries.length === nativeElements.length) {
       for (let index = 0; index < nativeElements.length; index++) {
         measurements.set(nativeElements[index], geometries[index]);
@@ -11646,7 +11689,7 @@ function _pullResourceTimings() {
   try {
     var raw = __obscuraCore.ops.op_resource_timings(_resourceTimingCursor);
     if (!raw || raw === "[]") return;
-    records = JSON.parse(raw);
+    records = _JSONparse(raw);
   } catch (e) { return; }
   if (!Array.isArray(records) || records.length === 0) return;
   _resourceTimingCursor += records.length;
@@ -14127,7 +14170,7 @@ function _sendRealmMessage(targetFrameId, data, targetOrigin) {
   // actually used for; anything else throws the same DataCloneError a browser
   // throws for an unclonable value, rather than arriving silently as null.
   try {
-    json = JSON.stringify({ v: data === undefined ? null : data });
+    json = _JSONstringify({ v: data === undefined ? null : data });
   } catch (_) {
     throw new DOMException('The object could not be cloned.', 'DataCloneError');
   }
@@ -14202,7 +14245,7 @@ function _deliverMessage(dataJson, origin, sourceFrameId, targetOrigin) {
   // drops the message silently.
   if (!_targetOriginAllows(targetOrigin, _realmOrigin(), origin)) return;
   let data = null;
-  try { data = JSON.parse(dataJson).v; } catch (_) {}
+  try { data = _JSONparse(dataJson).v; } catch (_) {}
   // Who to reply to: the frame above, or one of the frames below.
   const source = (_realmFrameId !== 0 && sourceFrameId === _realmParentFrameId)
     ? globalThis.parent
@@ -16134,7 +16177,7 @@ globalThis.postMessage = function(data, targetOrigin, _transfer) {
   // Match the cross-realm path: a value postMessage cannot carry is rejected
   // at the call, not delivered as something else.
   try {
-    clone = JSON.parse(JSON.stringify({ v: data === undefined ? null : data })).v;
+    clone = _JSONparse(_JSONstringify({ v: data === undefined ? null : data })).v;
   } catch (_) {
     throw new DOMException('The object could not be cloned.', 'DataCloneError');
   }
@@ -16632,7 +16675,7 @@ if (!globalThis.crypto.subtle) {
     async wrapKey(format, key, wrappingKey, wrapAlgorithm) {
       const exported = await this.exportKey(format, key);
       const bytes = format === "jwk"
-        ? new TextEncoder().encode(JSON.stringify(exported))
+        ? new TextEncoder().encode(_JSONstringify(exported))
         : new Uint8Array(exported);
       return this.encrypt(wrapAlgorithm, wrappingKey, bytes);
     },
@@ -16640,7 +16683,7 @@ if (!globalThis.crypto.subtle) {
     async unwrapKey(format, wrappedKey, unwrappingKey, unwrapAlgorithm, unwrappedKeyAlgorithm, extractable, keyUsages) {
       const decrypted = await this.decrypt(unwrapAlgorithm, unwrappingKey, wrappedKey);
       const keyData = format === "jwk"
-        ? JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)))
+        ? _JSONparse(new TextDecoder().decode(new Uint8Array(decrypted)))
         : decrypted;
       return this.importKey(format, keyData, unwrappedKeyAlgorithm, extractable, keyUsages);
     },
@@ -17323,7 +17366,7 @@ if (typeof FontFace === 'undefined') {
       if (!this._ownerDocument) return;
       const retained = new Set();
       for (const rule of _fontFaceAuthoredRules(this._ownerDocument)) {
-        const key = JSON.stringify([rule.family, rule.source, rule.descriptors]);
+        const key = _JSONstringify([rule.family, rule.source, rule.descriptors]);
         retained.add(key);
         if (this._cssFaces.has(key)) continue;
         try {
@@ -17361,7 +17404,7 @@ if (typeof FontFace === 'undefined') {
         weight: face.weight,
         unicodeRange: face.unicodeRange
       });
-      __obscuraCore.ops.op_set_dynamic_fonts(JSON.stringify(registrations.filter(face => !face.skip)));
+      __obscuraCore.ops.op_set_dynamic_fonts(_JSONstringify(registrations.filter(face => !face.skip)));
       _scheduleResizeRenderCheckpoint();
     }
     _faceChanged(face) {
@@ -17482,6 +17525,7 @@ if (typeof Element !== 'undefined' && !Element.prototype.toggleAttribute) {
 // in-viewport coords return <body> (or <html> as fallback), out-of-viewport returns null.
 // Wrong-but-non-throwing beats "undefined", which traps ad/analytics bootstraps in retry loops
 // (see issue #63).
+const _documentQuerySelectorAllAtBoot = Document.prototype.querySelectorAll;
 if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
   // Real hit testing against the synthetic bboxes from getBoundingClientRect.
   // Flat iteration over every element, NOT a tree walk: our synthetic rects
@@ -17497,7 +17541,10 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     var w = (typeof window !== 'undefined' && window.innerWidth) || 1280;
     var h = (typeof window !== 'undefined' && window.innerHeight) || 720;
     if (x < 0 || y < 0 || x > w || y > h) return null;
-    var all = this.querySelectorAll('*');
+    // The prototype's method, not the instance's: CDP hit testing runs through here, and
+    // a page that replaced document.querySelectorAll must not aim a real click
+    // (SECURITY.md L10). Chromium hit-tests natively.
+    var all = _reflectApply(_documentQuerySelectorAllAtBoot, this, ['*']);
     var best = null;
     var bestNid = -1;
     for (var i = 0; i < all.length; i++) {
@@ -18164,7 +18211,7 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
 }
 if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype.json) {
   Response.prototype.json = async function() {
-    return JSON.parse(await this.text());
+    return _JSONparse(await this.text());
   };
   _markNative(Response.prototype.json);
 }
@@ -18352,7 +18399,7 @@ function _worldSyncEpochs() {
 // microtask checkpoint where MutationObserver callbacks run anyway.
 function _worldDrainMutations() {
   _worldSyncEpochs();
-  const batch = JSON.parse(String(__obscuraCore.ops.op_world_call('drain', -1, '')) || '[]');
+  const batch = _JSONparse(String(__obscuraCore.ops.op_world_call('drain', -1, '')) || '[]');
   for (const r of batch) {
     _notifyMutationInternal(r[0], r[1], _worldNidList(r[2]), _worldNidList(r[3]), r[4] || null, r[5] ?? null);
   }
