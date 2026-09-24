@@ -10,9 +10,10 @@ JavaScript from arbitrary web pages. The review found that it did not hold the
 same-origin policy against a hostile page, let a page read local files, and let
 page-supplied inputs crash the whole process. Every Critical and High finding is
 now fixed, with a regression test each (see [Fix status](#fix-status)); several
-Medium and Low items are partial or open. Work inside ops now stops at the
-watchdog's deadline, but the engine still runs every page of a process in one
-address space with no per-page memory budget, so the
+Medium and Low items are partial or open. Work inside ops stops at the
+watchdog's deadline, and `ArrayBuffer`s and DOM data have per-page budgets, but
+the engine still runs every page of a process in one address space and the
+process-wide memory limit is opt-in, so the
 [Deployment guidance](#deployment-guidance) still applies: isolate tenants per
 process, keep secrets off its filesystem, and cap its resources from outside.
 
