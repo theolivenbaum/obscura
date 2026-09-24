@@ -1897,6 +1897,12 @@ internal static class DomTableSupport
         // establish a BFC, and viewport-propagated overflow leaves its source box visible.
         bool parentIsNativeBfc = parentStyle.OverflowScrollContainer
             && !parentStyle.OverflowPropagatedToViewport;
-        return sawFloat && (sawFlowAfterFloats || sawClearAfterFloats || parentIsNativeBfc);
+        // DEVIATION from crates/obscura-render/src/dom.rs, whose float-zone approximation lays a
+        // left and a right float out as one space-between row and every later float below it:
+        // left, right, left put the third float at 0,400 where Chromium 141 puts it at 100,0.
+        // Floats on both sides with nothing else in flow take the native float placement.
+        bool mixedSidesOnly = hasLeft && hasRight;
+        return sawFloat
+            && (sawFlowAfterFloats || sawClearAfterFloats || parentIsNativeBfc || mixedSidesOnly);
     }
 }
