@@ -42,6 +42,12 @@ public abstract record CliCommand
 
         /// <summary><c>--quiet</c>.</summary>
         public bool Quiet { get; init; }
+
+        /// <summary><c>--tls-cert</c> (no Rust counterpart).</summary>
+        public string? TlsCert { get; init; }
+
+        /// <summary><c>--tls-key</c> (no Rust counterpart).</summary>
+        public string? TlsKey { get; init; }
     }
 
     /// <summary><c>Command::Fetch</c>.</summary>
@@ -129,6 +135,12 @@ public abstract record CliCommand
 
         /// <summary><c>--user-agent</c>.</summary>
         public string? UserAgent { get; init; }
+
+        /// <summary><c>--tls-cert</c> (no Rust counterpart).</summary>
+        public string? TlsCert { get; init; }
+
+        /// <summary><c>--tls-key</c> (no Rust counterpart).</summary>
+        public string? TlsKey { get; init; }
     }
 }
 
@@ -212,6 +224,8 @@ public sealed record CliArgs
                     StorageDir = Path(result.GetValue(CliDefinition.Serve.StorageDir)),
                     FontDirs = result.GetValue(CliDefinition.Serve.FontDirs) ?? [],
                     Quiet = result.GetValue(CliDefinition.Serve.Quiet),
+                    TlsCert = Path(result.GetValue(CliDefinition.Serve.TlsCert)),
+                    TlsKey = Path(result.GetValue(CliDefinition.Serve.TlsKey)),
                 },
                 "fetch" => new CliCommand.Fetch
                 {
@@ -246,6 +260,8 @@ public sealed record CliArgs
                     Port = result.GetValue(CliDefinition.Mcp.Port),
                     Proxy = result.GetValue(CliDefinition.Mcp.Proxy),
                     UserAgent = result.GetValue(CliDefinition.Mcp.UserAgent),
+                    TlsCert = Path(result.GetValue(CliDefinition.Mcp.TlsCert)),
+                    TlsKey = Path(result.GetValue(CliDefinition.Mcp.TlsKey)),
                 },
                 _ => null,
             },

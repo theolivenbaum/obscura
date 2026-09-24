@@ -75,6 +75,8 @@ public sealed partial class PocketCalculatorJsRuntime
         // A runtime is about to initialize the V8 platform; from here on a
         // SetV8Flags call must be refused rather than changing nothing silently.
         V8Flags.MarkPlatformStarted();
+        // Before the first isolate exists, cap every WebAssembly memory V8 reserves.
+        V8Flags.ApplyWasmMemoryCap(WasmMemoryLimitFromEnvironment());
 
         var constraints = WithArrayBufferLimit(V8Flags.Constraints);
         _v8 = new V8Runtime("obscura", constraints, V8RuntimeFlags.EnableDynamicModuleImports)
@@ -128,13 +130,16 @@ public sealed partial class PocketCalculatorJsRuntime
         // bootstrap.js, which is what makes the runtime testable on its own.
         _ops.TaskSpawner = this;
         _ops.AsyncOps = this;
+        _ops.WasmMemoryLimit = WasmMemoryLimitBytes();
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
         if (BootstrapLoader.ExposeOpsForTests)
         {
             // Main realm only, as upstream's expose_ops_for_tests.
             _engine.Script.__obscura_test_ops = _shim.Ops;
+            // Port addition, test-only like the op table: the host helpers, so a test's
+            // page script can drive what the host drives (__obscura_host.vars).
+            _engine.Script.__obscura_test_host = _shim.HostHelpers;
         }
-        InitializeObjectStore(_engine);
         _mainScope = new CdpScope(this, _engine, CdpScope.MainInjectedScriptId, _objectStore, _evaluationRecipes);
     }
 
@@ -234,8 +239,8 @@ public sealed partial class PocketCalculatorJsRuntime
         return engine;
     }
 
-    internal static void InitializeObjectStore(V8ScriptEngine engine) =>
-        engine.Execute("<obscura:init>", "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;");
+    /// <summary>The page realm's host helpers (bootstrap.js <c>__obscura_host</c>).</summary>
+    internal ScriptObject? MainHostHelpers => _shim.HostHelpers;
 
     // ------------------------------------------------------ array buffers
 
@@ -303,6 +308,40 @@ public sealed partial class PocketCalculatorJsRuntime
 
         return constraints;
     }
+
+    // ------------------------------------------------------- wasm memory
+
+    /// <summary>
+    /// The ceiling on WebAssembly memory a runtime gets when
+    /// <c>POCKETCALCULATOR_MAX_WASM_MEMORY_BYTES</c> is unset: the same as the
+    /// <c>ArrayBuffer</c> default. Zero in the variable removes it.
+    /// </summary>
+    public static long DefaultWasmMemoryLimitBytes => DefaultArrayBufferLimitBytes;
+
+    /// <summary>The WebAssembly memory ceiling new runtimes get, in bytes; zero for none.</summary>
+    /// <remarks>
+    /// Two limits come from it (SECURITY.md M7). Every realm of an isolate together may
+    /// hold this much through <c>WebAssembly.Memory</c> (bootstrap.js asks
+    /// <c>op_wasm_memory_admit</c>), and no single memory may reserve more, which V8
+    /// enforces for module-declared memories and <c>memory.grow</c> as well
+    /// (<c>--wasm-max-mem-pages</c>, set once per process from the variable, see
+    /// <see cref="V8Flags.ApplyWasmMemoryCap"/>). Rust (deno_core) sets neither: a page
+    /// could reserve 1.3 GB with <c>new WebAssembly.Memory({initial: 20000})</c>.
+    /// </remarks>
+    public static long WasmMemoryLimitBytes() =>
+        WasmMemoryLimitForTests.Value ?? WasmMemoryLimitFromEnvironment();
+
+    private static long WasmMemoryLimitFromEnvironment()
+    {
+        string? raw = Environment.GetEnvironmentVariable("POCKETCALCULATOR_MAX_WASM_MEMORY_BYTES");
+        return long.TryParse(raw, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out long bytes) && bytes >= 0
+            ? bytes
+            : DefaultWasmMemoryLimitBytes;
+    }
+
+    /// <summary>Test seam: a per-isolate ceiling for runtimes created on this async flow.</summary>
+    internal static readonly AsyncLocal<long?> WasmMemoryLimitForTests = new();
 
     // ------------------------------------------------------------- heap cap
 
@@ -631,6 +670,21 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Runs a classic script, bounding a large one with the default five-second
     /// watchdog. Small scripts are not worth a watchdog thread.
     /// </summary>
+    /// <summary>
+    /// Runs one new-document entry: installs a <see cref="BindingPreload"/> binding, or
+    /// runs a script as <see cref="ExecuteScriptGuarded"/> does.
+    /// </summary>
+    public void ExecutePreloadScript(string source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (BindingPreload.NameOf(source) is { } binding)
+        {
+            ExecuteHostScript("<binding>", BindingPreload.InstallStatement(binding));
+            return;
+        }
+        ExecuteScriptGuarded("<preload>", source);
+    }
+
     public void ExecuteScriptGuarded(string name, string source)
     {
         if (source.Length < 10_000)
@@ -677,12 +731,17 @@ public sealed partial class PocketCalculatorJsRuntime
     private static DocumentInfo DocumentInfoFor(string name) =>
         Uri.TryCreate(name, UriKind.Absolute, out var uri) ? new DocumentInfo(uri) : new DocumentInfo(name);
 
-    /// <summary>Run <c>__obscura_init()</c> after every per-page property is set.</summary>
+    /// <summary>Run page init (<c>__obscura_host.init()</c>) after every per-page property is set.</summary>
+    /// <remarks>
+    /// DEVIATION from the Rust engine, which calls the page-visible global
+    /// <c>__obscura_init</c>. Page init and the values below are host helpers now
+    /// (<see cref="HostScript"/>, SECURITY.md I10).
+    /// </remarks>
     public void RunPageInit()
     {
         try
         {
-            ExecuteRuntimeScript("<obscura:page-init>", "globalThis.__obscura_init();");
+            InvokeHostScript("<obscura:page-init>", HostScript.WrapStatements("__obscura_host.init();"));
         }
         catch (JsRuntimeException)
         {
@@ -694,17 +753,17 @@ public sealed partial class PocketCalculatorJsRuntime
     // ---------------------------------------------------------- profile setters
 
     public void SetUserAgent(string userAgent) =>
-        RunSetter("<set-ua>", $"globalThis.__obscura_ua = {JsStringLiteral(userAgent)};");
+        RunSetter("<set-ua>", $"__obscura_host.vars.__obscura_ua = {JsStringLiteral(userAgent)};");
 
     public void SetPlatform(string platform, string uaPlatform, string uaPlatformVersion) =>
         RunSetter(
             "<set-platform>",
-            $"globalThis.__obscura_platform={JsStringLiteral(platform)};"
-            + $"globalThis.__obscura_ua_platform={JsStringLiteral(uaPlatform)};"
-            + $"globalThis.__obscura_ua_platform_version={JsStringLiteral(uaPlatformVersion)};");
+            $"__obscura_host.vars.__obscura_platform={JsStringLiteral(platform)};"
+            + $"__obscura_host.vars.__obscura_ua_platform={JsStringLiteral(uaPlatform)};"
+            + $"__obscura_host.vars.__obscura_ua_platform_version={JsStringLiteral(uaPlatformVersion)};");
 
     public void SetStealth(bool enabled) =>
-        RunSetter("<set-stealth>", $"globalThis.__obscura_stealth = {(enabled ? "true" : "false")};");
+        RunSetter("<set-stealth>", $"__obscura_host.vars.__obscura_stealth = {(enabled ? "true" : "false")};");
 
     /// <summary>
     /// Override the coordinates the <c>navigator.geolocation</c> shim reports.
@@ -713,7 +772,7 @@ public sealed partial class PocketCalculatorJsRuntime
     public void SetGeolocation(double latitude, double longitude) =>
         RunSetter(
             "<set-geo>",
-            $"globalThis.__obscura_geo_lat={Number(latitude)};globalThis.__obscura_geo_lon={Number(longitude)};");
+            $"__obscura_host.vars.__obscura_geo_lat={Number(latitude)};__obscura_host.vars.__obscura_geo_lon={Number(longitude)};");
 
     /// <summary>
     /// Set the CSS viewport exposed to page JavaScript. Must run before
@@ -729,18 +788,18 @@ public sealed partial class PocketCalculatorJsRuntime
         SetRenderViewport((float)width, (float)height);
         RunSetter(
             "<set-viewport>",
-            $"globalThis.__obscura_viewport_w={Number(width)};"
-            + $"globalThis.__obscura_viewport_h={Number(height)};"
+            $"__obscura_host.vars.__obscura_viewport_w={Number(width)};"
+            + $"__obscura_host.vars.__obscura_viewport_h={Number(height)};"
             + $"globalThis.innerWidth={Number(width)};globalThis.innerHeight={Number(height)};"
             + "if(globalThis.visualViewport){"
             + $"globalThis.visualViewport.width={Number(width)};"
             + $"globalThis.visualViewport.height={Number(height)};"
             + "}"
-            + "if(typeof globalThis.__obscura_recompute_intersections==='function'){"
-            + "globalThis.__obscura_recompute_intersections();"
+            + "if(typeof __obscura_host.vars.__obscura_recompute_intersections==='function'){"
+            + "__obscura_host.vars.__obscura_recompute_intersections();"
             + "}"
-            + "if(typeof globalThis.__obscura_recompute_resizes==='function'){"
-            + "globalThis.__obscura_recompute_resizes();"
+            + "if(typeof __obscura_host.vars.__obscura_recompute_resizes==='function'){"
+            + "__obscura_host.vars.__obscura_recompute_resizes();"
             + "}");
     }
 
@@ -770,11 +829,103 @@ public sealed partial class PocketCalculatorJsRuntime
         }
     }
 
+    /// <summary>
+    /// The value <c>document.readyState</c> reports (<c>loading</c>, <c>interactive</c>,
+    /// <c>complete</c>).
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from the Rust engine, which assigns the page-visible global
+    /// <c>__documentReadyState__</c>; bootstrap.js keeps it in <c>__obscura_host.vars</c>
+    /// (SECURITY.md I10).
+    /// </remarks>
+    public void SetDocumentReadyState(string state) => SetHostVar("__documentReadyState__", state);
+
+    /// <summary>
+    /// The node id <c>document.currentScript</c> answers for while a classic script runs;
+    /// 0 when none. Upstream's page-visible <c>__currentScriptNid</c> global.
+    /// </summary>
+    public void SetCurrentScriptNid(uint nid) => SetHostVar("__currentScriptNid", (double)nid);
+
+    /// <summary>
+    /// Records parser-inserted scripts as already started, so moving one does not run it
+    /// again. Upstream's page-visible <c>__markParserScripts</c> global.
+    /// </summary>
+    public void MarkParserScripts(IEnumerable<uint> nids)
+    {
+        ArgumentNullException.ThrowIfNull(nids);
+        RunSetter(
+            "<parser-scripts>",
+            "__obscura_host.vars.__markParserScripts(["
+            + string.Join(',', nids.Select(nid => nid.ToString(CultureInfo.InvariantCulture)))
+            + "]);");
+    }
+
+    /// <summary>
+    /// Runs document lifecycle steps in order, through the shim's own event class and
+    /// dispatch: <c>interactive</c> and <c>complete</c> set <c>readyState</c>;
+    /// <c>DOMContentLoaded</c> fires it at the document and the window;
+    /// <c>readystatechange</c> fires that at the document; <c>load</c> sets
+    /// <c>readyState</c> to <c>complete</c>, calls <c>window.onload</c> and fires
+    /// <c>load</c> at the window.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from the Rust engine, whose host snippets call the page's current
+    /// <c>Event</c>, <c>document.dispatchEvent</c> and <c>window.dispatchEvent</c>, so a page
+    /// that replaced one of them suppressed its own lifecycle events (SECURITY.md L10).
+    /// </remarks>
+    public void RunLifecycle(params string[] phases)
+    {
+        var script = LifecycleScript(phases);
+        try
+        {
+            ExecuteHostScript("<lifecycle>", script);
+        }
+        catch (JsRuntimeException)
+        {
+            // A broken page must degrade, never throw out of navigation.
+        }
+    }
+
+    internal static string LifecycleScript(string[] phases)
+    {
+        ArgumentNullException.ThrowIfNull(phases);
+        var builder = new System.Text.StringBuilder();
+        foreach (var phase in phases)
+        {
+            if (phase is not ("interactive" or "complete" or "DOMContentLoaded" or "readystatechange" or "load"))
+            {
+                throw new ArgumentException($"unknown lifecycle phase '{phase}'", nameof(phases));
+            }
+            builder.Append("__obscura_host.lifecycle('").Append(phase).Append("');");
+        }
+        return builder.ToString();
+    }
+
+    private ScriptObject? _hostVars;
+
+    /// <summary>Sets one of bootstrap.js's host variables (<c>__obscura_host.vars</c>).</summary>
+    internal void SetHostVar(string name, object value)
+    {
+        try
+        {
+            _hostVars ??= _shim.HostHelpers?.GetProperty("vars") as ScriptObject;
+            _hostVars?.SetProperty(name, value);
+        }
+        catch (ScriptEngineException)
+        {
+            // Discarded like every other profile setter.
+        }
+        catch (ScriptInterruptedException)
+        {
+            // The watchdog stopped the realm; the next script reports it.
+        }
+    }
+
     private void RunSetter(string name, string source)
     {
         try
         {
-            ExecuteRuntimeScript(name, source);
+            InvokeHostScript(name, HostScript.WrapStatements(source));
         }
         catch (JsRuntimeException)
         {
@@ -857,9 +1008,12 @@ public sealed partial class PocketCalculatorJsRuntime
     private ModuleNetworkContext ModuleNetwork()
     {
         var page = _ops.Page;
-        return page.HttpClient is { } client
+        var context = page.HttpClient is { } client
             ? ModuleNetworkContext.From(client, page.StealthClient, page.Callbacks)
             : ModuleNetworkContext.From(_standaloneModuleClient, null, null);
+        // The last policy the runtime thread computed for this document (the header when
+        // none was): this may run off that thread, so it does not walk the DOM itself.
+        return context with { ReferrerPolicy = page.ReferrerPolicyCache?.Policy ?? page.ReferrerPolicyHeader };
     }
 
     /// <summary>
@@ -939,5 +1093,9 @@ public sealed partial class PocketCalculatorJsRuntime
 
     internal void RegisterRealm(FrameRealm realm) => _realms.Add(realm);
 
-    internal void ForgetRealm(FrameRealm realm) => _realms.Remove(realm);
+    internal void ForgetRealm(FrameRealm realm)
+    {
+        _realms.Remove(realm);
+        ForgetFrameWorlds(realm.FrameId);
+    }
 }

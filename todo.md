@@ -241,25 +241,26 @@ Security follow-ups found while porting (not upstream fixes):
       apply the Fetch "request" / "request-no-cors" guards and op_fetch_url filters again
       host-side. Also closed: `mode: "same-origin"` or an unknown mode read a cross-origin
       body with no CORS check
-- [ ] `ImageAgent` has no SSRF check; it is reachable only from standalone `RenderPaint`
+- [x] `ImageAgent` has no SSRF check; it is reachable only from standalone `RenderPaint`
       callers with no page (as upstream), since `Obscura.Render` cannot see `SsrfGuard`
 - [x] `serve --workers` behind a DNS Host name: a156914's forwarded authority is ported as
       `POCKETCALCULATOR_CDP_FORWARDED_HOST/PORT`
-- [ ] The CDP remote-object store (`__obscura_objects`, `__obscura_oid`, `__obscura_await_meta`,
+- [x] The CDP remote-object store (`__obscura_objects`, `__obscura_oid`, `__obscura_await_meta`,
       `__obscura_await_rejected`, `__obscura_done_N`) and the frame registries
       (`__obscura_frameObjects/Elements/Windows`) are page-readable and page-writable, so a
       page can read or forge a client's handles and awaitPromise results. Moving them behind
       the host wrapper changes how client Runtime.evaluate code runs (sloppy mode, `var`)
-- [ ] `el.dispatchEvent(ev)` does not clear `isTrusted` as DOM requires, so page script can
+- [x] `el.dispatchEvent(ev)` does not clear `isTrusted` as DOM requires, so page script can
       re-dispatch a trusted event it received (check Chromium first)
-- [ ] Host snippets build events with the page's current `Event` / `MouseEvent`
+- [x] Host snippets build events with the page's current `Event` / `MouseEvent`
       constructors, which a page can replace; capture them at bootstrap
-- [ ] Every `__obscura_*` name is still detectable with `'name' in window`; the hide list
-      only filters reflection
-- [ ] Referrer policy: `<meta name=referrer>`, `referrerpolicy` and `rel=noreferrer` are not
-      supported (Chromium honours all three); meta refresh and followed `window.open` are
-      not implemented; third-party cookie blocking for cross-site iframes is not modelled
-- [ ] fetch: `User-Agent` stays settable from script (check whether Chromium ignores it);
+- [x] Every `__obscura_*` name is still detectable with `'name' in window`; the hide list
+      only filters reflection (moved into closure state, I10)
+- [x] Referrer policy: `<meta name=referrer>`, `referrerpolicy` and `rel=noreferrer` are not
+      supported (Chromium honours all three). Still not implemented: meta refresh and
+      followed `window.open`. Chromium 141's default does not block third-party cookies,
+      so the port matches it; `Partitioned` cookies are keyed by top-level site
+- [x] fetch: `User-Agent` stays settable from script (check whether Chromium ignores it);
       an `Origin` header is sent on no-cors GET/HEAD (Fetch and Chromium omit it);
       CONNECT/TRACE/TRACK are not refused (with open item `2e752b9`); response Headers are
       not immutable; XHR `setRequestHeader` with an invalid name fails at send, not with a
@@ -333,23 +334,31 @@ Found during the review, not from upstream:
     grid track counts (Chromium's `kGridMaxTracks` rules at 10,000 tracks; nested
     `repeat()` is invalid), `innerText`/`Range.toString()`/`contains()` (native,
     linear; 30 s to 12 ms)
-  - [ ] still slow: nested `display:table` is quadratic (`ApplyTableUsedWidths` lays
-    out each table's subtree and dirties every ancestor; ~1.7 s at 300); the first
-    style and layout pass on a 10k-deep or 50k-wide tree (4.7 s / 7 s); `innerHTML`
-    with many top-level nodes is quadratic inside AngleSharp's `ParseFragment` +
-    `AppendNodes` (50k siblings ~100 s); RTL, CJK and short lines still reshape the
-    rest of the line per line; `DomTree.AppendChild` from C# on deep chains
-  - [ ] a grid item spanning the whole 10,000 x 10,000 track limit fills an occupancy
-    matrix of 100M cells (~80 ms, 100-400 MB transient); more than 32,767 auto-placed
-    items in one grid still overflow taffy's 16-bit lines
+  - [x] nested tables: the fixed-width floor and the intrinsic measurements are
+    linear in the subtree walks (1,500 nested tables 4.0 s to 2.5 s)
+  - [ ] still slow: `ApplyTableUsedWidths` still relays out from the root per table
+    depth level (quadratic, ~110 ms warm at the box depth cap); the first layout of a
+    50k-wide tree (~4 s, GC-bound: ~45 objects per element); RTL, CJK and short lines
+    still reshape the rest of the line per line
+  - [x] grid: sparse occupancy (a byte per cell up to 1,024 cells, a segment tree of
+    interval sets beyond), 32-bit lines, 100,000 tracks per axis, Chromium's step-2
+    auto-placement cursor, `getComputedStyle` serializes the grid properties
+  - [ ] grid, found on the way: RTL auto-placement mirrors and searches in reverse
+    (Chromium places logically and mirrors after; 92 of 102 remaining random-grid
+    mismatches); `em` in grid tracks resolves against 16px; undefined named lines do
+    not create implicit lines; `calc()` is serialized as written; `grid-template` and
+    `grid` shorthands are not serialized; step 4 with a definite primary position
+    steps one track at a time
   - [ ] found on the way, not fixed: computed `visibility` does not inherit (innerText
     shows text inside a hidden subtree's children); closed `<details>`/`<dialog>`
-    content is not `display:none`; `getComputedStyle` does not serialize grid tracks;
-    a float after inline text starts a new line where Chromium keeps it on the line
-    (y/height differ); nested `padding:0 3px;margin:0 2px` spans land far from
-    Chromium's y
-  - [ ] deep markup parses quadratically in AngleSharp (`IsInButtonScope` scans the
-    open-element stack): 50k nested divs take ~20 s (M11)
+    content is not `display:none`; a float after inline text starts a new line where
+    Chromium keeps it on the line (y/height differ); nested `padding:0 3px;margin:0
+    2px` spans land far from Chromium's y
+  - [x] HTML tree construction is the port's own (`HtmlTreeBuilder`) over AngleSharp's
+    tokenizer (M11): 50k nested divs 20 s to 0.14 s, a 50k-sibling fragment 91 s to
+    0.13 s; html5lib tree-construction 1756/1765
+  - [ ] parser leftovers: the tokenizer drops U+0000 in the data state (no U+FFFD in
+    foreign content); `<selectedcontent>` is not implemented; `outerHTML` has no setter
   - [x] memory budgets (M7): `ArrayBuffer` cap per isolate, DOM byte budget per
     document, glyph lists sized up front, opt-in per-process backstop; op_fetch_url
     builds its result from the body bytes in one pass (M4)
@@ -357,20 +366,51 @@ Found during the review, not from upstream:
     boundaries (and in-op when the budget refuses a mutation), with generation-tagged
     node ids so a stale id never aliases a reused slot
   - [x] CDP isolated worlds in the main frame are their own realms (M6)
-  - [ ] WebAssembly memory is not counted by the `ArrayBuffer` cap
-  - [ ] child-frame isolated worlds still run in the frame's realm; page-dispatched
-    events do not reach world listeners; a world's `input.files` is not shared
-  - [ ] CDP main-world snippets and page-realm internals use page-visible built-ins
-    (L10): on a page that overrides `Array.prototype.map` or `JSON.stringify`,
-    Playwright `check`/`click` and Puppeteer's main-world `$`/`$eval`/`type`/`click`
-    still fail
-  - [ ] CDP idle timeout (L3)
-  - [ ] `__virtualUrl` is page-writable and moves `Page.Url` (cosmetic now: origin,
-    cookie and initiator decisions use the host-side document URL); MCP
-    `browser_import_state` applies every origin's storage to the current page (L9)
-  - [ ] CDP/MCP host snippets use page globals (L10)
-  - [ ] full public suffix list (L6), HSTS and mixed content (I7), custom-root EKU
-    and revocation (I8), ClearScript's non-configurable `EngineInternal` (I10)
+  - [x] WebAssembly memory is capped per isolate and per memory (M7)
+  - [x] child-frame execution contexts and isolated worlds are realms; page-dispatched
+    events reach world listeners; file input selection is held host-side (M6)
+  - [x] CDP main-world snippets, MCP tools and the shim's own DOM paths use built-ins
+    captured at bootstrap (L10): Playwright and Puppeteer pass on pages that override
+    `querySelector`, `Array.prototype.map/filter`, `Promise.prototype.then`, `JSON`,
+    `Object.keys`, `dispatchEvent`, `elementFromPoint` and the event constructors
+  - [x] host reads of page-writable values (`window.scrollX/Y`, `location.assign`,
+    `__obscura_click_target`, `__obscura_focused`), by-value `toJSON`, input helpers (L10)
+  - [ ] L10 leftovers: string/regex handling in the markdown script and shim,
+    `Array.prototype.push/forEach`, `Function.prototype.call` and `Set`/`Map` methods in
+    shim internals
+  - [ ] an inline `<a>` reports an empty rect, so CDP clicks by coordinates miss inline
+    links; Puppeteer `type` puts the caret at the end where Chromium puts it at the
+    start; Puppeteer `::-p-text` selectors do not work
+  - [x] CDP and MCP SSE idle timeouts (L3); optional TLS for `serve` and `mcp --http`,
+    including the balancer's own 503 (I1)
+  - [x] the History API URL is host-side; MCP storage state follows the committed
+    document origin (L9)
+  - [x] full public suffix list (L6), HSTS and mixed-content blocking (I7), serverAuth
+    EKU on custom roots (I8)
+  - [x] `ImageAgent` goes through the guarded transport; fetch methods, User-Agent,
+    Origin and immutable response headers; referrer policy (header, meta,
+    `referrerpolicy`, `rel=noreferrer`, fetch options, stylesheets, frames,
+    `Page.navigate`); CHIPS partitioned cookies and the site for cookies in frames
+  - [x] the shim's engine globals are closure state reached as `__obscura_host.vars`;
+    bindings install without a bridge global; module completion uses a random
+    top-level `const` (I10)
+  - [ ] ClearScript's non-configurable `EngineInternal` stays visible to `in`/`typeof`;
+    the global's shape differs from Chromium's (Object-based prototype chain, own index
+    getters `0`..`49`, own `addEventListener`/`dispatchEvent`/`constructor`,
+    `ContentIndex`, `FontFaceSet`, `SharedArrayBuffer`, `webkitAudioContext`)
+  - [x] child frames: init scripts and bindings run in frames, a frame's binding call
+    reports the frame's context, init scripts belong to the target that added them, a
+    frame's own GET navigation is followed, a click that loads a new document emits
+    the full navigation sequence
+  - [ ] found on the way: an awaited `Runtime.evaluate`/`callFunctionOn` that calls an
+    exposed binding deadlocks the connection (main frame too); a frame's POST
+    navigation is dropped
+  - [ ] network, found on the way: CDP `Network.getCookies` returns every cookie
+    (Chromium filters by URL and partition); `document.cookie` in about:srcdoc and
+    about:blank frames uses the about: URL; a partitioned `setCookie` for an http URL
+    is accepted with Secure forced where Chromium refuses it; images in an inline
+    `<style>` use the document policy where Chromium uses the default; the shim has no
+    `srcdoc` attribute
 
 - **A forced geometry read after a style write that *does* change layout still
   re-lays out the whole document.** The half that does not is fixed: a retained
@@ -1260,6 +1300,84 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
 
+- **I10 (engine globals):** Rust keeps the shim's state and host-set values as `globalThis.__obscura_*` / `__*` / `_*` globals and calls `__obscura_init`, `__markParserScripts`, `__documentReadyState__` and `__currentScriptNid` by name. The port keeps them in a closure object the host reaches as `__obscura_host.vars` (HostScript), and page init is `__obscura_host.init`. Only ClearScript's non-configurable `EngineInternal` remains, hidden from the global's reflection APIs; `in` and `typeof` still see it.
+- **I10 (bindings):** Rust's `Runtime.addBinding` shim calls the page-visible `__obscura_binding_called`. The port files the binding name (`BindingPreload`) and installs a native-looking function that closes over `op_binding_called`; no bridge global exists.
+- **I10 (modules):** module completion is recorded through a randomly named top-level `const`, not a `__obscura_moduleSettled_N` global.
+- **Child frames:** Rust processes only the page's own navigation and reports every binding call with the main context. The port follows a frame's own GET navigation by reloading its iframe (a POST frame navigation is dropped), reports a frame's binding call with the frame's default context, scopes init scripts and bindings to the target that registered them (removing them when it closes), and emits the full navigation sequence (new loaderId, lifecycle, loadEventFired) for a click that loads a new document.
+- **L10 (host invocation):** the by-value serializer is invoked as a method, because ClearScript routes a property-obtained function through its JS `invokeMethod`, which uses the page's `Array.from`/`apply`. Markdown escaping, the world bridge, the iframe loader, link referrer policy, the linked-stylesheet script, the form-state mirror, `op_dom` command checks and lifecycle events use built-ins captured at bootstrap.
+- **Public suffix list (L6):** the full Mozilla PSL (ICANN and PRIVATE) is embedded, as the Rust `psl` crate does; the earlier curated C# table is gone. As in `psl`, a TLD not on the list gets the implicit `*` rule. Chromium instead gives a host under an unknown TLD no registrable domain; the implicit rule is kept so `.test` and `.internal` hosts keep their current site and cookie Domain behaviour.
+- **SSL_CERT_FILE/SSL_CERT_DIR roots (I8):** the leaf must allow serverAuth (or anyExtendedKeyUsage, or have no EKU), as on the platform path and in Chromium. Revocation is not checked on either path (NoCheck, as Chromium does no online revocation checks).
+- **HSTS and mixed content (I7):** Rust has neither. Each BrowserContext's HTTP client keeps an in-memory HSTS store filled from Strict-Transport-Security with Chromium's rules (no IP hosts, one-year cap, first header only); http requests to known hosts are upgraded and reported as a redirect hop; there is no preload list. Requests from https documents to insecure http hosts (loopback and localhost are trustworthy) are blocked, except images, which are upgraded to https without an http fallback; top-level navigations are exempt. Blocked and upgraded requests are reported on the Runtime console with Chromium's text. `POCKETCALCULATOR_ALLOW_INSECURE_CONTENT=1` / `AllowInsecureContent` turns the check off. Differences from Chromium: XHR and worker loads are reported as 'resource', audio and video are not modelled, only the requesting document's scheme is checked (not its ancestors'), and the fetch rejection carries the reason after 'Failed to fetch'.
+- **History URL (L9):** Rust keeps it in the page-writable global `__virtualUrl`, which the host read back. C# keeps it in the bootstrap closure; moves reach the host through `op_history_url`, checked against the committed document URL, and `Page.SyncVirtualUrl` reads `PocketCalculatorState.HistoryUrl`.
+- **MCP storage (L9):** `browser_storage_state` labels storage with the host-side document origin instead of `location.origin`. `browser_set_storage_state` applies only entries whose origin equals the current document's (an opaque origin matches nothing) and appends a note naming the origins it skipped. The restore snippets run in a function body; upstream's expression wrapping made them a silent no-op.
+- **By-value serialization (L10):** Rust's `v8_to_json` is `JSON.stringify`, which calls `toJSON`. C# uses a bootstrap walker that never calls a page's `toJSON`, as Chromium does: Date/Map/nodes are `{}`, NaN/Infinity are null, undefined is dropped. Functions are dropped (Chromium gives `{}`), and URL/DOMRect/PerformanceEntry keep the shim's own `toJSON` while it is unchanged.
+- **Focus and click fallback (L10):** Rust uses the page-writable globals `__obscura_focused`/`__obscura_click_target`; C# keeps them in closure state and the host uses `__obscura_host.clickTarget`.
+- **CDP link click (L10):** Rust calls `location.assign(href)`; C# calls `__obscura_host.navigate` (the shim's own location path).
+- **Scroll reads (L10):** Rust's `getLayoutMetrics`, capture and MCP scroll read `window.scrollX/scrollY/innerHeight`; C# uses the host scroll offset and viewport, and MCP scrolls through the shim's own path.
+- **Input helpers (L10):** `setFieldValue`, `setInputFiles`, label activation, the disabled check, fragment navigation and listener calls use captured built-ins, `op_url_parse`/`op_url_set` and the History object as bootstrap left it; a replaced `Element.prototype.click` no longer receives the trusted-activation token. `Page.navigate` checks host-side that a target differs only in its fragment.
+- **WebAssembly memory (M7):** Rust has no limit. C# caps it per isolate (`POCKETCALCULATOR_MAX_WASM_MEMORY_BYTES`, default 1 GiB) through a shim wrapper and `op_wasm_memory_admit`, and per memory through `--wasm-max-mem-pages`, set via ClearScript's exported `v8::V8::SetFlagsFromString` before V8 initializes (not on Windows). Refusals are Chromium's RangeError messages. Chromium itself allows up to 4 GiB per memory.
+- **`ApplyTableUsedWidths` (`LayoutDomControls.cs`):** `crates/obscura-render/src/dom.rs` lays out with rounding for the table-width snapshot and every intrinsic measurement. C# uses `ComputeUnroundedLayoutWithMeasure`, since the pass reads only unrounded sizes and the tree is laid out and rounded again right after; `MaxDefiniteTableContentWidth` reads a one-pass `DefiniteContentWidthIndex` instead of walking every table's subtree. Output is identical. The per-depth relayout remains quadratic in table nesting depth, bounded by `MaxBoxDepth` (about 110 ms warm at the cap).
+- **`Layout/Cache.cs`:** unlike vendor/taffy, a node's nine measurement slots are allocated on the first measurement rather than when the node is created. Behaviour is identical.
+- **HTML tree construction is ours (M11):** `HtmlTreeBuilder` implements the WHATWG insertion-mode algorithm over AngleSharp's public `HtmlTokenizer` and builds straight into `DomTree`. Rust uses html5ever's tree builder; the port used AngleSharp's, whose scope checks and fragment moves were quadratic (50k nested divs took 20 s, a 50k-sibling fragment 91 s; now 0.14 s and 0.13 s). The stack of open elements links entries by name, scope and category so scope checks compare positions. It follows the current spec with the customizable-select changes Chromium 141 ships (no "in select" modes, `select` bounds "has an element in scope"; nested `<select>`/`<input>` close an open select; `hr`/`option`/`optgroup` imply end tags in a select), treats `menuitem`/`isindex` as ordinary and `search` as a block, parses SVG/MathML fragment contexts natively, applies Chromium's 512-deep `AttachLater` cap by stack depth, and checks `WorkCancellation` per token. html5lib tree-construction: 1756/1765 (the old adapter: 1659).
+- **Attributes per tag:** a tag keeps its first 512 distinct attributes (html5ever and Chromium keep all); duplicates are dropped in constant time before AngleSharp's pairwise dedupe, which took 3 s for 20k attributes and could not be cancelled.
+- **document.write is incremental, like Rust:** one tree builder stays alive across calls; a construct cut off at the end of a call waits for the next. Because `document.close()` is a no-op, a trailing `&`/`<`/CR in the last write never appears.
+- **The tokenizer still drops U+0000 in the data state** (AngleSharp), so foreign content gets no U+FFFD.
+- **ImageAgent:** paint.rs uses a bare HTTP agent. The port routes standalone image fetches through `PocketCalculatorHttpClient` (`PocketCalculator.Render` now references `PocketCalculator.Net`): SSRF on every hop, no ambient proxy, no `file:`, no cookies.
+- **Idle timeouts (L3):** Rust keeps silent CDP connections and SSE streams forever. The port closes a CDP connection after `POCKETCALCULATOR_CDP_IDLE_TIMEOUT_MS` (30 min; any inbound byte including pings counts; a command in flight keeps it open) and an SSE stream after `POCKETCALCULATOR_MCP_IDLE_TIMEOUT_MS` (30 min with no MCP request).
+- **TLS for control planes (I1):** Rust is plaintext only. The port offers `--tls-cert/--tls-key` (or `POCKETCALCULATOR_TLS_CERT/_KEY`) on `serve` and `mcp --http` via SslStream; discovery says `wss://`, workers terminate TLS, and the balancer probes them pinned to the certificate.
+- **fetch methods and headers:** Rust sends any method and uppercases all of them; the port refuses CONNECT/TRACE/TRACK (TypeError; SecurityError in XHR `open`) and normalizes only DELETE/GET/HEAD/OPTIONS/POST/PUT (SocketsHttpHandler still writes PATCH uppercase on the wire). Rust lets script set User-Agent; the port drops it, as Chromium does. Rust sends Origin on every cross-origin hop; the port sends it on CORS cross-origin requests ("null" once tainted by a redirect) and on non-GET/HEAD requests, same-origin POST included.
+- **Referrer policy:** Rust applies strict-origin-when-cross-origin to navigations and subresources only and sends no Referer on fetch/XHR/internal loads. The port implements all eight policies from the `Referrer-Policy` header, `<meta name=referrer>`, element `referrerpolicy`, `rel=noreferrer`, fetch options and redirect responses, with Chromium's parsing, the 4096-byte cap, and localhost as trustworthy for the downgrade check. The shim passes the referrer settings in `op_fetch_url`'s ignored `origin` slot; a link's policy reaches `op_navigate` through `op_dom` `set_navigation_referrer_policy`. A late meta applies to the whole document; an image's `referrerpolicy` on the layout path is matched by resolved `src` only; module fetches take the last computed document policy.
+- **Mixed content leftovers (I7):** non-secure frames are checked against their nearest secure ancestor; `new WebSocket('ws:...')` from a secure context throws SecurityError (`op_dom` `websocket_mixed_content`); HSTS upgrades `ws:`; media is classified as upgradeable.
+- **Child-frame execution contexts (M6):** each child frame gets a default context (its own realm) and a realm per isolated-world name over its document, announced with `executionContextCreated` and routed by object id; also `DOM.getFrameOwner`, `Node.frameId` on iframes, frame node boxes in page coordinates, input routed into the frame under the point, and key input to the last-focused realm. Rust announces frames with no contexts and runs everything in the page realm.
+- **Frame render ops:** they read the frame's own document and viewport (the iframe's content box; Rust passes the border box). Rust reads the page's state, so a frame's geometry described the page node that shared its node id.
+- **`Promise.prototype.then` captured at boot:** frame timers and async-op accounting use it; Rust calls the page's `then`.
+- **Cross-world event dispatch:** a document realm's dispatch runs isolated-world listeners interleaved by registration stamp, with world-side wrappers and `isTrusted`/`preventDefault`/stop flags carried both ways. World window listeners run around the node dispatch (capturing before, others after), because the engine's event model has no node capture phase and does not reach the window.
+- **File input selection:** held by the host per document (`op_dom` `set_input_files`/`input_files_version`/`get_input_files`, plus `note_focus`). Rust keeps it on the calling realm's wrapper.
+- **Grid occupancy:** taffy stores one state per cell in a dense `rows x columns` matrix. The port keeps the placed areas: a byte per cell up to 1,024 cells, a segment tree of interval sets beyond that. Only occupied/free is kept; answers are cell for cell the same (`CellOccupancyMatrixTests`).
+- **Grid coordinates are 32-bit:** taffy's lines are i16 and counts u16. `DetailedGridTracksInfo`/`DetailedGridItemsInfo` fields are `int`.
+- **Grid axis limit:** `GridLimits.MaxAxisTracks` = 100,000 explicit plus implicit tracks per axis (Chromium's `kGridMaxTracks` is 10,000,000; track sizing cost bounds it lower here). Template tracks, line numbers and spans still clamp at 10,000. A position found past the limit is pulled into the last track after the search (Chromium), not when the search first crosses it.
+- **Step 2 auto-placement cursor:** taffy starts after the last auto-placed cell in the item's first row, converting it with the other axis's track counts. The port keeps Chromium's cursor per start line and jumps over occupied tracks.
+- **Implicit-grid estimate:** taffy's `(Auto, Line(n))` gives min line n; the port uses n - 1, so `grid-row: auto / 1` counts its negative implicit track (Chromium).
+- **Minimum contribution:** taffy checks every track in the axis for an auto minimum and for fr per item; the port computes the same answer once per axis.
+- **`getComputedStyle` grid properties:** the snapshot carries `grid-template-columns`/`-rows` (used px on a grid container, the declared list elsewhere), `grid-template-areas`, `grid-auto-columns`/`-rows`, the placement longhands and `grid-column`/`grid-row`/`grid-area`. Rust reported none of them. New keys in `op_computed_style`; no existing key changed.
+- **`grid-row-start`/`grid-column-start` then a named `-end`:** the numeric start is kept; Rust resets it to `auto`.
+- **Balancer 503 over TLS (I1):** the multi-worker balancer terminates TLS for its own max-connections 503 (handshake, reply, close_notify), and past `maxConnections` refusals in flight closes refused clients without a reply. Upstream has no TLS and no cap.
+- **Referrer downgrade:** scheme-only (https to non-https), including http loopback, as Chromium's network layer does.
+- **CDP `Page.navigate` referrer:** `referrer` and `referrerPolicy` are honoured (Chromium 141): the policy is applied against the target, default strict-origin-when-cross-origin, and the navigation stays browser-initiated otherwise; an unknown policy is `Invalid referrerPolicy`. Upstream ignores both.
+- **Stylesheet subresource referrers:** a nested `@import` is referred by the importing sheet under its `Referrer-Policy` header, else the document's policy; images and fonts named by an external sheet are referred by the sheet under its header policy, else the default (the document policy does not apply), as in Chromium 141. Rust refers every stylesheet load from the document.
+- **Frame referrers:** about:srcdoc and about:blank frames inherit the parent's referrer policy; a srcdoc frame refers as its parent (requests, images, navigations) and its `document.referrer` is the parent under that policy; about:blank sends no Referer.
+- **Response and XHR headers:** fetched, cloned, `Response.error()` and `Response.redirect()` headers are immutable (TypeError as in Chromium). XHR `setRequestHeader` throws TypeError, InvalidStateError and SyntaxError synchronously with Chromium's messages, and combines repeated names. Rust accepts any header and overwrites.
+- **CHIPS:** Rust's jar has no partitions. The port parses `Partitioned`, rejects it without `Secure`, and keys the cookie by (top-level site, cross-site ancestor bit) of the setting context; it is sent and visible only in that partition, and a partitioned and an unpartitioned cookie of the same name coexist (Chromium 141). CDP cookies carry `partitionKey {topLevelSite, hasCrossSiteAncestor}` only when partitioned; `Network.setCookie` takes that object with both fields, reduces the site and forces Secure, and a malformed key fails the call; `deleteCookies` without `partitionKey` deletes only unpartitioned cookies. `cookies.json` and the MCP storage state write `partitionKey` / `partition_key` only for partitioned cookies, so older files load unchanged.
+- **Site for cookies:** Rust judges SameSite by the initiator alone. The port requires the initiating frame, all its ancestors and the target to be same-site with the top-level document, so a cross-site frame's `document.cookie`, fetches, scripts and subframe loads see and send only SameSite=None cookies, and a cross-site context can set only SameSite=None cookies. A top-level navigation's response may still set any cookie.
+- **Frame scripts:** Rust fetches a frame's `src=` scripts with the navigation profile. The port fetches them as no-cors script loads by the frame document: Referer from the frame URL (a srcdoc frame's parent) under the frame's referrer policy, Sec-Fetch-Dest script, and the frame's cookie scope.
+- **Frame Referrer-Policy header:** a frame document's own `Referrer-Policy` header applies to that frame's requests, and a cross-origin frame's or stylesheet's header is kept host-side even though page script is not shown it.
+
+- **CDP remote objects (L10):** handles and awaited outcomes live in the realm's bootstrap
+  closure (`_cdpHost`), handed to strict host wrappers as `__obscura_cdp`, not in the
+  page-visible `__obscura_objects`/`__obscura_await_*`/`__obscura_done_N`. Client source and
+  `callFunctionOn` declarations run through the eval captured at bootstrap, as an indirect
+  eval at global scope (sloppy mode, `var` on the global, as before). Metadata and by-value
+  serialization use built-ins captured at bootstrap. `unserializableValue` accepts only
+  `Infinity`, `-Infinity`, `NaN`, `-0` and BigInt literals instead of being pasted in as
+  source.
+- **Host snippets (L10):** CDP Input/DOM, the MCP tools, LP.getMarkdown and the library
+  `Element` API reach the DOM through `__obscura_host.dom`: prototype members as bootstrap
+  defined them, the shim's own event classes, the realm's own document. Rust calls the
+  page's current globals and prototypes.
+- **Shim internals (L10):** internal dispatches, internal `querySelector(All)`, node-list
+  building, JSON and event construction use the shim's own methods and classes, not the
+  page-writable globals. `_wrap` is no longer a global (`__obscura_host.dom.wrap` /
+  `__obscura_cdp.wrap`).
+- **Frame registries (L10):** private to the bootstrap, reached through
+  `__obscura_host.publishFrameObjects`, `forgetFrame`, `forgetFrameObjects` and
+  `frameRegistrySize`.
+- **dispatchEvent (L10):** a trusted mark covers only the dispatch it was made for, so a
+  later re-dispatch has `isTrusted` false, and re-dispatching an event in flight throws
+  `InvalidStateError`. Matches Chromium, measured.
+- **Hit testing (L10):** `elementFromPoint` and CDP clicks ignore page overrides of
+  `document.elementFromPoint`, `querySelectorAll` and `getBoundingClientRect`, as in
+  Chromium.
+
 - **ArrayBuffer cap (M7):** Rust sets no `ArrayBuffer` limit. Each runtime caps
   backing stores at 1 GiB (256 MiB on 32-bit) through ClearScript's
   `MaxArrayBufferAllocation` (`POCKETCALCULATOR_MAX_ARRAY_BUFFER_BYTES`, 0 for none).
@@ -1472,8 +1590,8 @@ Network:
   winning, `?1` only with transient activation (CDP Input, `userGesture`, MCP click/press; 5 s),
   Origin on document-initiated POST, Referer trimmed per hop and never restored. Iframe
   documents load through op_fetch_url mode `navigate`, credentials `include`. Measured against
-  Playwright's Chromium 140; it also blocks third-party cookies in cross-site iframes, which the
-  port does not model.
+  Playwright's Chromium 140. (An earlier note here said Chromium blocks third-party cookies in
+  cross-site iframes; Chromium 141's default does not, and the port matches it.)
 - The `Fetch.fulfillRequest` result for `op_fetch_url` omits `bodyBase64` (Rust has it since
   #912, not ported); the C# fulfill body is text only.
 - Cookies: an empty `Domain=` is ignored (host-only), not rejected; on an IP host only the exact

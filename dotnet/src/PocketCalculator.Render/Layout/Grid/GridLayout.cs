@@ -741,7 +741,7 @@ public static class GridLayout
                     }
 
                     var line = direction.IsRtl()
-                        ? new OriginZeroLine((short)((short)finalColCounts.Explicit - maybeGridLine.Value.Value))
+                        ? new OriginZeroLine(finalColCounts.Explicit - maybeGridLine.Value.Value)
                         : maybeGridLine.Value;
                     return line.TryIntoTrackVecIndex(finalColCounts);
                 });
@@ -805,7 +805,7 @@ public static class GridLayout
         // Determine the grid container baseline (currently we only compute the first baseline)
         GridSort.StableSort(items, static (a, b) => a.RowIndexes.Start.CompareTo(b.RowIndexes.Start));
 
-        ushort firstRow = items[0].RowIndexes.Start;
+        int firstRow = items[0].RowIndexes.Start;
         int firstRowEnd = items.Count;
         for (int i = 0; i < items.Count; i++)
         {
@@ -914,13 +914,13 @@ public sealed class DetailedGridInfo : DetailedLayoutInfo
 public sealed class DetailedGridTracksInfo
 {
     /// <summary>Number of leading implicit grid tracks.</summary>
-    public required ushort NegativeImplicitTracks { get; init; }
+    public required int NegativeImplicitTracks { get; init; }
 
     /// <summary>Number of explicit grid tracks.</summary>
     public required ushort ExplicitTracks { get; init; }
 
     /// <summary>Number of trailing implicit grid tracks.</summary>
-    public required ushort PositiveImplicitTracks { get; init; }
+    public required int PositiveImplicitTracks { get; init; }
 
     /// <summary>Gutters between tracks.</summary>
     public required List<float> Gutters { get; init; }
@@ -962,10 +962,10 @@ public sealed class DetailedGridTracksInfo
 /// area. This matches Chrome's and Firefox's format.
 /// </summary>
 public readonly record struct DetailedGridItemsInfo(
-    ushort RowStart,
-    ushort RowEnd,
-    ushort ColumnStart,
-    ushort ColumnEnd)
+    int RowStart,
+    int RowEnd,
+    int ColumnStart,
+    int ColumnEnd)
 {
     internal static DetailedGridItemsInfo FromGridItem(GridItem gridItem) => new(
         ToOneIndexedGridLine(gridItem.RowIndexes.Start),
@@ -973,7 +973,7 @@ public readonly record struct DetailedGridItemsInfo(
         ToOneIndexedGridLine(gridItem.ColumnIndexes.Start),
         ToOneIndexedGridLine(gridItem.ColumnIndexes.End));
 
-    private static ushort ToOneIndexedGridLine(ushort gridTrackIndex) => (ushort)((gridTrackIndex / 2) + 1);
+    private static int ToOneIndexedGridLine(int gridTrackIndex) => (gridTrackIndex / 2) + 1;
 }
 
 /// <summary>Size helpers used by the grid algorithm that the shared geometry helpers do not carry.</summary>

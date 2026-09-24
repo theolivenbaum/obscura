@@ -411,7 +411,7 @@ public static partial class RenderDom
                 ? anon.Style
                 : styles.TryGetValue(dom, out LayoutStyle? declared) ? declared : null;
 
-        Dictionary<NodeId, TaffyNodeId> taffyByDom = [];
+        Dictionary<NodeId, TaffyNodeId> taffyByDom = new(idMap.Count);
         List<(TaffyNodeId Taffy, NodeId Dom, int Depth)> tables = [];
         HashSet<TaffyNodeId> tableNodes = [];
         foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
@@ -445,6 +445,8 @@ public static partial class RenderDom
         {
             return;
         }
+
+        DomTableSupport.DefiniteContentWidthIndex definiteContentWidths = new(tree, styles);
 
         // Outer tables consume their nested tables' intrinsic sizes.
         tables = [.. tables.OrderBy(entry => entry.Depth)];
@@ -493,7 +495,13 @@ public static partial class RenderDom
             {
                 // This pass is gated to layout-dependent containing blocks and nested auto
                 // tables.
-                taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, measure);
+                //
+                // Deviation from crates/obscura-render/src/dom.rs, which lays out with rounding
+                // here and in every measurement below: this pass reads unrounded sizes only, and
+                // the whole tree is laid out (and rounded) again after it, so the rounding walk
+                // was pure cost. It walked the subtree of every measured node, which made a page
+                // of nested tables quadratic in its depth.
+                taffyTree.ComputeUnroundedLayoutWithMeasure(taffyRoot, available, measure);
                 foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
                 {
                     if (TableStyleOf(tnode, dom) is { } style && WantsSnapshot(tnode, dom, style))
@@ -631,7 +639,7 @@ public static partial class RenderDom
                     // what its columns need, so a percentage resolving narrower than the content
                     // must overflow its container rather than wrap every cell. Floor the box with
                     // the table's min-content width and let taffy resolve the percentage.
-                    taffyTree.ComputeLayoutWithMeasure(
+                    taffyTree.ComputeUnroundedLayoutWithMeasure(
                         tnode,
                         new Layout.Size<TaffyAvailableSpace>(
                             TaffyAvailableSpace.MinContent,
@@ -639,7 +647,7 @@ public static partial class RenderDom
                         measure);
                     float percentMin = F32.Max(
                         F32.Max(taffyTree.GetUnroundedLayout(tnode).Size.Width, 0f),
-                        DomTableSupport.MaxDefiniteTableContentWidth(tree, dom, styles) ?? 0f);
+                        definiteContentWidths.Get(dom) ?? 0f);
                     if (tableStyle.BoxSizing == BoxSizing.ContentBox)
                     {
                         percentMin = F32.Max(
@@ -665,7 +673,7 @@ public static partial class RenderDom
                 // by the caption's *min-content*. Taking the captions out of track sizing for
                 // the two intrinsic measurements is what separates the two.
                 List<TaffyNodeId> measuredCaptions = SuspendCaptions(taffyTree, ifcItems, tnode);
-                taffyTree.ComputeLayoutWithMeasure(
+                taffyTree.ComputeUnroundedLayoutWithMeasure(
                     tnode,
                     new Layout.Size<TaffyAvailableSpace>(
                         TaffyAvailableSpace.MinContent,
@@ -681,9 +689,9 @@ public static partial class RenderDom
                 // A table can never be narrower than an unshrinkable fixed-width descendant.
                 minC = F32.Max(
                     minC,
-                    DomTableSupport.MaxDefiniteTableContentWidth(tree, dom, styles) ?? 0f);
+                    definiteContentWidths.Get(dom) ?? 0f);
 
-                taffyTree.ComputeLayoutWithMeasure(
+                taffyTree.ComputeUnroundedLayoutWithMeasure(
                     tnode,
                     new Layout.Size<TaffyAvailableSpace>(
                         TaffyAvailableSpace.MaxContent,
@@ -692,7 +700,7 @@ public static partial class RenderDom
                 float maxC = taffyTree.GetUnroundedLayout(tnode).Size.Width;
                 foreach (TaffyNodeId caption in measuredCaptions)
                 {
-                    taffyTree.ComputeLayoutWithMeasure(
+                    taffyTree.ComputeUnroundedLayoutWithMeasure(
                         caption,
                         new Layout.Size<TaffyAvailableSpace>(
                             TaffyAvailableSpace.MinContent,
@@ -780,14 +788,14 @@ public static partial class RenderDom
                     List<(int Column, int Span, float Min, float Max)> measured = new(cells.Count);
                     foreach ((TaffyNodeId cell, int col, int span) in cells)
                     {
-                        taffyTree.ComputeLayoutWithMeasure(
+                        taffyTree.ComputeUnroundedLayoutWithMeasure(
                             cell,
                             new Layout.Size<TaffyAvailableSpace>(
                                 TaffyAvailableSpace.MinContent,
                                 TaffyAvailableSpace.MaxContent),
                             measure);
                         float cmin = taffyTree.GetUnroundedLayout(cell).Size.Width;
-                        taffyTree.ComputeLayoutWithMeasure(
+                        taffyTree.ComputeUnroundedLayoutWithMeasure(
                             cell,
                             new Layout.Size<TaffyAvailableSpace>(
                                 TaffyAvailableSpace.MaxContent,

@@ -343,10 +343,12 @@ public static partial class FetchOps
     {
         try
         {
-            // `origin` is the shim's argument slot and is ignored: see FetchUrlAsync.
-            _ = origin;
+            // `origin` is the shim's argument slot and is ignored as an origin: see
+            // FetchUrlAsync. The shim now passes the request's referrer settings in it
+            // (FetchReferrer.Parse); anything else means the defaults.
             return await FetchUrlAsync(
-                    state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad)
+                    state, document ?? state, url, method, headersJson, body, mode, credentials, internalLoad,
+                    referrer: FetchReferrer.Parse(origin))
                 .ConfigureAwait(false);
         }
         catch (OpException)
@@ -373,7 +375,8 @@ public static partial class FetchOps
         string mode,
         string credentials,
         bool internalLoad,
-        bool hostConsumesBody = false)
+        bool hostConsumesBody = false,
+        FetchReferrer? referrer = null)
     {
         ArgumentNullException.ThrowIfNull(gs);
         ArgumentNullException.ThrowIfNull(document);
@@ -392,6 +395,15 @@ public static partial class FetchOps
         if (!internalLoad)
         {
             mode = ScriptRequestMode(mode);
+
+            // Fetch forbids CONNECT, TRACE and TRACK in any case; the shim throws
+            // Chromium's TypeError first, and this holds when the op is reached without it.
+            // Rust sent them.
+            if (IsForbiddenMethod(method))
+            {
+                throw new OpException($"'{method}' HTTP method is unsupported.");
+            }
+
             if (string.Equals(mode, "no-cors", StringComparison.Ordinal) && !NoCorsAllowsMethod(method))
             {
                 throw new OpException($"'{method}' is unsupported in no-cors mode.");
@@ -536,7 +548,30 @@ public static partial class FetchOps
             method = overrideMethod ?? method;
             body = overrideBody ?? body;
 
+            // SECURITY.md I7 (Rust has neither check). Everything this op loads (fetch,
+            // XHR, iframe documents, dynamic scripts, linked stylesheets, workers) is
+            // blockable mixed content from an https document; then HSTS moves a known
+            // host to https, reported as a redirect the way Chromium's internal 307 is.
+            if (MixedContentBlocked(httpClient, callbacks, document, url, mode) is { } mixedInitial)
+            {
+                return mixedInitial;
+            }
+
+            string? hstsUpgradedFrom = null;
+            if (HstsUpgrade(httpClient, url) is { } secureInitial)
+            {
+                hstsUpgradedFrom = url;
+                url = secureInitial;
+            }
+
             var client = httpClient?.RequestClient ?? SharedRequestClient(allowPrivateNetwork);
+
+            // Referrer policy (port addition; Rust sends fetch()/XHR and internal loads
+            // with no Referer at all): fetch()'s referrerPolicy, else the element's, else
+            // the document's; the referrer is the document's URL unless fetch() named a
+            // same-origin one or asked for none.
+            var referrerPolicy = referrer?.Policy ?? StateHelpers.DocumentReferrerPolicy(document);
+            var referrerSource = (referrer ?? FetchReferrer.Client).Source(document);
 
             var initialRequestOrigin = RequestOrigin(url) ?? string.Empty;
             var pageOrigin = origin;
@@ -654,7 +689,13 @@ public static partial class FetchOps
             var currentHeaders = new Dictionary<string, string>(customHeaders2, StringComparer.Ordinal);
             var redirectsFollowed = 0;
             List<Uri> redirectedFrom = [];
+            if (hstsUpgradedFrom is not null && Uri.TryCreate(hstsUpgradedFrom, UriKind.Absolute, out var hstsFrom))
+            {
+                redirectedFrom.Add(hstsFrom);
+                redirectsFollowed = 1;
+            }
             var crossedOrigin = isCrossOrigin;
+            var taintedOrigin = false;
             HttpResponseMessage? response = null;
 
             // An iframe's document load reaches this transport with mode "navigate".
@@ -666,8 +707,17 @@ public static partial class FetchOps
             // cross-site with the embedding document.
             var frameNavigation = string.Equals(mode, "navigate", StringComparison.Ordinal)
                 && Uri.TryCreate(document.Url, UriKind.Absolute, out var frameInitiator)
-                    ? ResourceRequest.FrameNavigation(frameInitiator)
+                    ? ResourceRequest.FrameNavigation(frameInitiator) with
+                    {
+                        Referrer = referrerSource,
+                        ReferrerPolicy = referrerPolicy,
+                        // The embedding document's frame scope: a frame nested in a
+                        // cross-site frame has no site for cookies (port addition).
+                        TopLevel = StateHelpers.TopLevelUri(document),
+                        CrossSiteAncestor = document.CrossSiteAncestor,
+                    }
                     : null;
+            var hopReferrerSource = referrerSource;
 
             try
             {
@@ -689,9 +739,18 @@ public static partial class FetchOps
                                 + $"the request origin '{pageOrigin}'");
                     }
 
-                    if (currentIsCrossOrigin && frameNavigation is null)
+                    // Fetch "append a request Origin header", as Chromium sends it: on a
+                    // CORS request to another origin, and on any request whose method is
+                    // not GET or HEAD (a same-origin POST included). Deviation from Rust,
+                    // which sent Origin on every cross-origin hop, no-cors GET and HEAD
+                    // included, and never on a same-origin POST.
+                    // After a redirect from one foreign origin to another the origin is
+                    // tainted and serializes as "null".
+                    if (frameNavigation is null
+                        && ((isCors && crossedOrigin)
+                            || (currentMethod != HttpMethod.Get && currentMethod != HttpMethod.Head)))
                     {
-                        request.Headers.TryAddWithoutValidation("Origin", pageOrigin);
+                        request.Headers.TryAddWithoutValidation("Origin", taintedOrigin ? "null" : pageOrigin);
                     }
 
                     if (frameNavigation is not null
@@ -704,28 +763,44 @@ public static partial class FetchOps
                         }
                     }
 
+                    // The Referer, trimmed hop by hop as the navigation paths do (a frame
+                    // navigation got its own above).
+                    if (frameNavigation is null
+                        && hopReferrerSource is not null
+                        && Uri.TryCreate(currentUrl, UriKind.Absolute, out var refererTarget)
+                        && ReferrerPolicies.Referrer(hopReferrerSource, refererTarget, referrerPolicy) is { } referer
+                        && !ContainsHeader(currentHeaders, "referer"))
+                    {
+                        request.Headers.TryAddWithoutValidation("Referer", referer);
+                    }
+
                     var credentialsAllowed = credentialsMode.Allows(pageOrigin, currentUrl);
                     if (credentialsAllowed
                         && jar is not null
                         && Uri.TryCreate(currentUrl, UriKind.Absolute, out var cookieUri))
                     {
-                        var cookieHeader = jar.GetCookieHeaderInContext(
+                        // Deviation: Rust judges the document's origin alone. The site for
+                        // cookies also needs the frame's ancestors same-site with the page,
+                        // and partitioned (CHIPS) cookies go to their partition only.
+                        var cookieHeader = jar.GetCookieHeader(
                             cookieUri,
                             frameNavigation is not null
-                                ? PocketCalculatorHttpClient.NavigationSameSiteContext(
+                                ? PocketCalculatorHttpClient.CookieAccessFor(
                                     frameNavigation,
                                     cookieUri,
                                     currentMethod == HttpMethod.Get || currentMethod == HttpMethod.Head,
                                     redirectedFrom)
-                                : CookieJar.ContextForInitiator(pageOrigin, cookieUri));
+                                : StateHelpers.RequestCookieAccess(document, pageOrigin, cookieUri));
                         if (cookieHeader.Length != 0)
                         {
                             request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
                         }
                     }
 
-                    // Send a default User-Agent on fetch()/XHR requests; UA-gated
-                    // servers reject a request with none. Honor an explicit override.
+                    // Send the context's User-Agent on fetch()/XHR requests; UA-gated
+                    // servers reject a request with none. Page script cannot replace it
+                    // (FilterScriptRequestHeaders drops it, as Chromium does); an
+                    // interception rewrite or an internal load's header still can.
                     var hasUserAgent = false;
                     foreach (var key in currentHeaders.Keys)
                     {
@@ -738,7 +813,7 @@ public static partial class FetchOps
 
                     if (!hasUserAgent)
                     {
-                        request.Headers.TryAddWithoutValidation("User-Agent", DefaultUserAgent);
+                        request.Headers.TryAddWithoutValidation("User-Agent", httpClient?.UserAgent ?? DefaultUserAgent);
                     }
 
                     if (currentBody.Length != 0)
@@ -762,9 +837,12 @@ public static partial class FetchOps
                         && Uri.TryCreate(currentUrl, UriKind.Absolute, out var setCookieUri)
                         && hop.Headers.TryGetValues("Set-Cookie", out var setCookies))
                     {
+                        var setAccess = frameNavigation is not null
+                            ? PocketCalculatorHttpClient.CookieSetAccessFor(frameNavigation, setCookieUri, redirectedFrom)
+                            : StateHelpers.RequestCookieAccess(document, pageOrigin, setCookieUri);
                         foreach (var value in setCookies)
                         {
-                            jar.SetCookie(value, setCookieUri);
+                            jar.SetCookie(value, setCookieUri, setAccess);
                         }
                     }
 
@@ -830,6 +908,9 @@ public static partial class FetchOps
                         break;
                     }
 
+                    var redirectReferrerPolicy = hop.Headers.NonValidated.TryGetValues("Referrer-Policy", out var redirectPolicies)
+                        ? string.Join(',', redirectPolicies)
+                        : null;
                     hop.Dispose();
 
                     // Re-validate every redirect target against the SSRF policy.
@@ -862,12 +943,45 @@ public static partial class FetchOps
                         baseUrl.AsciiOrigin, nextUrl.AsciiOrigin, StringComparison.Ordinal);
                     SanitizeRedirectHeaders(currentHeaders, crossesOrigin, downgradedToGet);
 
+                    // The next hop is referred by what this one sent, and then under the
+                    // policy a Referrer-Policy on this redirect sets, if it names one.
+                    hopReferrerSource = hopReferrerSource is not null
+                        && Uri.TryCreate(currentUrl, UriKind.Absolute, out var redirectedFromUrl)
+                        && ReferrerPolicies.Referrer(hopReferrerSource, redirectedFromUrl, referrerPolicy) is { } sentBefore
+                        && Uri.TryCreate(sentBefore, UriKind.Absolute, out var sentBeforeUri)
+                            ? sentBeforeUri
+                            : null;
+                    if (ReferrerPolicies.ParseHeader(redirectReferrerPolicy) is { } redirectPolicy)
+                    {
+                        referrerPolicy = redirectPolicy;
+                        if (frameNavigation is not null)
+                        {
+                            frameNavigation = frameNavigation with { ReferrerPolicy = redirectPolicy };
+                        }
+                    }
+                    taintedOrigin |= crossesOrigin
+                        && !string.Equals(baseUrl.AsciiOrigin, pageOrigin, StringComparison.Ordinal);
+
                     if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var from))
                     {
                         redirectedFrom.Add(from);
                     }
 
                     currentUrl = nextUrl.Href;
+                    if (MixedContentBlocked(httpClient, callbacks, document, currentUrl, mode) is { } mixedHop)
+                    {
+                        return mixedHop;
+                    }
+
+                    if (HstsUpgrade(httpClient, currentUrl) is { } secureHop)
+                    {
+                        if (Uri.TryCreate(currentUrl, UriKind.Absolute, out var insecureHop))
+                        {
+                            redirectedFrom.Add(insecureHop);
+                        }
+
+                        currentUrl = secureHop;
+                    }
                 }
 
                 var redirected = redirectsFollowed > 0;
@@ -991,7 +1105,11 @@ public static partial class FetchOps
                         redirected,
                         requestId,
                         VisibleResponseHeaders(respHeaders, finalIsCrossOrigin, credentialsMode),
-                        hostConsumesBody);
+                        hostConsumesBody,
+                        // The host keeps the policy of every response, a cross-origin frame
+                        // document's or sheet's included, though page script is not shown
+                        // the header.
+                        ReferrerPolicyHeaderOf(respHeaders));
                 }
 
                 // Page script sees an opaque no-cors response as status 0 with no body
@@ -1060,6 +1178,20 @@ public static partial class FetchOps
     /// headers to itself. <c>sameOrigin</c> is the host's own verdict. <c>bodyBase64</c> is
     /// never sent: nothing that reads an internal load uses it.
     /// </remarks>
+    /// <summary>The response's <c>Referrer-Policy</c>, which governs what a stylesheet fetches.</summary>
+    private static ReferrerPolicy? ReferrerPolicyHeaderOf(IReadOnlyDictionary<string, string> headers)
+    {
+        foreach (var (name, value) in headers)
+        {
+            if (string.Equals(name, "referrer-policy", StringComparison.OrdinalIgnoreCase))
+            {
+                return ReferrerPolicies.ParseHeader(value);
+            }
+        }
+
+        return null;
+    }
+
     private static string InternalLoadResponse(
         PocketCalculatorState document,
         string mode,
@@ -1071,10 +1203,13 @@ public static partial class FetchOps
         bool redirected,
         string? requestId,
         IReadOnlyDictionary<string, string> headers,
-        bool hostConsumesBody)
+        bool hostConsumesBody,
+        ReferrerPolicy? referrerPolicyHeader = null)
     {
         var token = InternalLoads.Put(
-            document, new InternalLoad(mode, status, requestUrl, finalUrl, bodyText, tainted));
+            document,
+            new InternalLoad(
+                mode, status, requestUrl, finalUrl, bodyText, tainted, referrerPolicyHeader ?? ReferrerPolicyHeaderOf(headers)));
         // Only a frame document is read back by the shim (its parent-side copy for a
         // same-origin contentDocument); a script or a sheet is run or installed by the host.
         var visible = !tainted && !hostConsumesBody && string.Equals(mode, "navigate", StringComparison.Ordinal);
@@ -1099,6 +1234,82 @@ public static partial class FetchOps
         result.Append('}');
         return result.ToString();
     }
+
+    /// <summary>
+    /// The blocked response for a mixed-content request from <paramref name="documentUrl"/>
+    /// to <paramref name="target"/>, or null when it may go out. It reuses the network
+    /// error shape a CORS failure has, so fetch() rejects with a TypeError as in Chromium,
+    /// and the page's console gets Chromium's message.
+    /// </summary>
+    private static string? MixedContentBlocked(
+        PocketCalculatorHttpClient? httpClient,
+        CallbackRegistry? callbacks,
+        PocketCalculatorState state,
+        string target,
+        string mode)
+    {
+        if ((httpClient?.AllowInsecureContent ?? MixedContent.EnvAllowsInsecureContent())
+            || !Uri.TryCreate(target, UriKind.Absolute, out var targetUri)
+            || MixedContentContext(state) is not { } document)
+        {
+            return null;
+        }
+
+        var frame = string.Equals(mode, "navigate", StringComparison.Ordinal);
+        var type = frame ? ResourceType.Document : ResourceType.Fetch;
+        if (MixedContent.Check(document, targetUri, type, topLevelNavigation: false) == MixedContentDecision.Allow)
+        {
+            return null;
+        }
+
+        var message = MixedContent.BlockedMessage(
+            document.AbsoluteUri, MixedContent.RequestKind(type, nestedDocument: frame), targetUri.AbsoluteUri);
+        callbacks?.FireConsole("error", message);
+        return CorsBlocked(target, message);
+    }
+
+    /// <summary>
+    /// The document mixed content is decided against for a request from
+    /// <paramref name="state"/>: the document itself, or for a frame that is not secure
+    /// (srcdoc, about:blank, http) its nearest secure ancestor, as Chromium checks the
+    /// top frame too. The I7 fix checked only the calling document.
+    /// </summary>
+    internal static Uri? MixedContentContext(PocketCalculatorState state)
+    {
+        Uri.TryCreate(state.Url, UriKind.Absolute, out var document);
+        Uri? ancestor = state.SecureAncestorUrl is { } secure && Uri.TryCreate(secure, UriKind.Absolute, out var parsed)
+            ? parsed
+            : null;
+        return MixedContent.Context(document, ancestor);
+    }
+
+    /// <summary>
+    /// Chromium's check in the WebSocket constructor: a ws: URL from a secure context is
+    /// blocked (SecurityError), with a console error. Returns that message, or the empty
+    /// string when the socket may be created.
+    /// </summary>
+    internal static string WebSocketMixedContent(PocketCalculatorState state, string url)
+    {
+        if ((state.HttpClient?.AllowInsecureContent ?? MixedContent.EnvAllowsInsecureContent())
+            || !Uri.TryCreate(url, UriKind.Absolute, out var target)
+            || MixedContentContext(state) is not { } document
+            || MixedContent.Check(document, target, ResourceType.Other, topLevelNavigation: false)
+                == MixedContentDecision.Allow)
+        {
+            return string.Empty;
+        }
+
+        var message = MixedContent.BlockedWebSocketMessage(document.AbsoluteUri, target.AbsoluteUri);
+        state.Callbacks?.FireConsole("error", message);
+        return message;
+    }
+
+    private static string? HstsUpgrade(PocketCalculatorHttpClient? httpClient, string url) =>
+        httpClient is not null
+        && Uri.TryCreate(url, UriKind.Absolute, out var parsed)
+        && httpClient.Hsts.Upgrade(parsed) is { } secure
+            ? secure.AbsoluteUri
+            : null;
 
     private static string CorsBlocked(string url, string error)
     {
@@ -1200,6 +1411,25 @@ public static partial class FetchOps
 
         return headers;
     }
+
+    private static bool ContainsHeader(Dictionary<string, string> headers, string name)
+    {
+        foreach (var key in headers.Keys)
+        {
+            if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Fetch's forbidden methods: <c>CONNECT</c>, <c>TRACE</c> and <c>TRACK</c>, in any case.</summary>
+    internal static bool IsForbiddenMethod(string method) =>
+        method.Equals("CONNECT", StringComparison.OrdinalIgnoreCase)
+        || method.Equals("TRACE", StringComparison.OrdinalIgnoreCase)
+        || method.Equals("TRACK", StringComparison.OrdinalIgnoreCase);
 
     private static HttpMethod ParseMethod(string method)
     {

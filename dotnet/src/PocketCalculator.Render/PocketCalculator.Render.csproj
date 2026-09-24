@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../PocketCalculator.Dom/PocketCalculator.Dom.csproj" />
+    <!-- The image agent goes through the SSRF-guarded transport (SECURITY.md). -->
+    <ProjectReference Include="../PocketCalculator.Net/PocketCalculator.Net.csproj" />
   </ItemGroup>
 
   <ItemGroup>

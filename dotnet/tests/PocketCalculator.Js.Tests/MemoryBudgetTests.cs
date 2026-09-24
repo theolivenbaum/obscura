@@ -14,15 +14,16 @@ public sealed class MemoryBudgetTests
     public void BindingCallsFromASynchronousLoopAreCapped()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        fixture.Runtime.ExecutePreloadScript(BindingPreload.Source("b"));
         fixture.Runtime.Evaluate(
-            "for (let i = 0; i < 100000; i++) globalThis.__obscura_binding_called('b', 'payload ' + i);");
+            "for (let i = 0; i < 100000; i++) b('payload ' + i);");
 
         IReadOnlyList<(string Name, string Payload)> calls = fixture.Runtime.TakePendingBindingCalls();
         Assert.Equal(CoreOps.BindingQueueEntryLimit(), calls.Count);
 
         // Earlier calls are kept, newest dropped; draining frees the queue.
         Assert.Equal("payload 0", calls[0].Payload);
-        fixture.Runtime.Evaluate("globalThis.__obscura_binding_called('b', 'after');");
+        fixture.Runtime.Evaluate("b('after');");
         Assert.Equal("after", Assert.Single(fixture.Runtime.TakePendingBindingCalls()).Payload);
     }
 
@@ -30,8 +31,9 @@ public sealed class MemoryBudgetTests
     public void BindingCallPayloadBytesAreCapped()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        fixture.Runtime.ExecutePreloadScript(BindingPreload.Source("b"));
         fixture.Runtime.Evaluate(
-            "const big = 'x'.repeat(1024 * 1024); for (let i = 0; i < 64; i++) globalThis.__obscura_binding_called('b', big); 0");
+            "const big = 'x'.repeat(1024 * 1024); for (let i = 0; i < 64; i++) b(big); 0");
         IReadOnlyList<(string Name, string Payload)> calls = fixture.Runtime.TakePendingBindingCalls();
         long bytes = 0;
         foreach ((string name, string payload) in calls)

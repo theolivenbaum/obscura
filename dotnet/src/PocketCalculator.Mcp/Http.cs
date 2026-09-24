@@ -3,10 +3,12 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using PocketCalculator.Net;
 
 namespace PocketCalculator.Mcp;
 
@@ -68,6 +70,71 @@ public static class Http
 
     /// <summary>How often an open SSE stream is sent a keep-alive comment.</summary>
     internal static readonly TimeSpan SsePingInterval = TimeSpan.FromSeconds(15);
+
+    /// <summary>The default idle timeout for SSE streams: 30 minutes.</summary>
+    internal static readonly TimeSpan DefaultIdleTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// How long an SSE stream stays open with no MCP request on the server:
+    /// <c>POCKETCALCULATOR_MCP_IDLE_TIMEOUT_MS</c> (0 disables), or
+    /// <see cref="DefaultIdleTimeout"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md L3): upstream pings an SSE stream forever, so a client
+    /// that opened one and went away without closing held its slot for the life of the
+    /// process. A keep-alive connection already closes after
+    /// <see cref="RequestReadTimeout"/> with no request; an SSE stream's client never
+    /// sends on it, so its idle clock is the server's: any request on any connection
+    /// resets it. MCP clients reconnect a closed stream.
+    /// </remarks>
+    internal static TimeSpan IdleTimeoutFromEnv()
+    {
+        var configured = Environment.GetEnvironmentVariable("POCKETCALCULATOR_MCP_IDLE_TIMEOUT_MS");
+        return long.TryParse(configured, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
+            ? TimeSpan.FromMilliseconds(value)
+            : DefaultIdleTimeout;
+    }
+
+    /// <summary>Server options the CLI and tests set; defaults come from the environment.</summary>
+    internal sealed record ServerOptions
+    {
+        /// <summary>SSE idle timeout (<see cref="IdleTimeoutFromEnv"/>); zero disables it.</summary>
+        public TimeSpan IdleTimeout { get; init; } = IdleTimeoutFromEnv();
+
+        /// <summary>
+        /// The TLS certificate (<c>mcp --http --tls-cert/--tls-key</c>), or null for
+        /// plaintext. Deviation (SECURITY.md I1): upstream speaks plaintext only, so the
+        /// bearer token crossed the network in clear text on a non-loopback bind.
+        /// </summary>
+        public X509Certificate2? Certificate { get; init; }
+    }
+
+    /// <summary>
+    /// <see cref="RunAsync(string, ushort, string?, string?, bool, CancellationToken)"/>
+    /// over TLS with <paramref name="certificate"/> when it is set. A non-loopback bind
+    /// still requires the token.
+    /// </summary>
+    public static Task RunAsync(
+        string host,
+        ushort port,
+        string? proxy,
+        string? userAgent,
+        bool stealth,
+        X509Certificate2? certificate,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(
+            host, port, proxy, userAgent, stealth, AllowedOriginsEnv(), TokenFromEnv(),
+            new ServerOptions { Certificate = certificate }, cancellationToken);
+
+    /// <summary>When the server last read a request, on any connection.</summary>
+    private sealed class ServerActivity
+    {
+        private long _last = Environment.TickCount64;
+
+        internal void Touch() => Volatile.Write(ref _last, Environment.TickCount64);
+
+        internal long IdleMs => Environment.TickCount64 - Volatile.Read(ref _last);
+    }
 
     internal enum RequestBodyKind
     {
@@ -479,6 +546,18 @@ public static class Http
     /// browser session is single-threaded, so only the dispatcher ever touches it,
     /// and a slow or silent client holds a connection slot rather than the server.
     /// </remarks>
+    internal static Task RunAsync(
+        string host,
+        ushort port,
+        string? proxy,
+        string? userAgent,
+        bool stealth,
+        string? allowedOrigins,
+        string? authToken,
+        CancellationToken cancellationToken) =>
+        RunAsync(host, port, proxy, userAgent, stealth, allowedOrigins, authToken, new ServerOptions(), cancellationToken);
+
+    /// <summary>The server body, with <paramref name="options"/> passed in.</summary>
     internal static async Task RunAsync(
         string host,
         ushort port,
@@ -487,6 +566,7 @@ public static class Http
         bool stealth,
         string? allowedOrigins,
         string? authToken,
+        ServerOptions options,
         CancellationToken cancellationToken)
     {
         var address = IPAddress.Parse(host);
@@ -511,6 +591,7 @@ public static class Http
         var dispatcher = DispatchAsync(requests.Reader, state, stopping);
         using var slots = new SemaphoreSlim(MaxConnections, MaxConnections);
         using var sseSlots = new SemaphoreSlim(MaxSseStreams, MaxSseStreams);
+        var activity = new ServerActivity();
 
         try
         {
@@ -542,7 +623,8 @@ public static class Http
                     try
                     {
                         await HandleConnectionAsync(
-                                client, requests.Writer, address, sseSlots, allowedOrigins, authToken, stopping)
+                                client, requests.Writer, address, sseSlots, allowedOrigins, authToken,
+                                options, activity, stopping)
                             .ConfigureAwait(false);
                     }
                     catch (Exception)
@@ -612,9 +694,17 @@ public static class Http
         SemaphoreSlim sseSlots,
         string? allowedOrigins,
         string? authToken,
+        ServerOptions options,
+        ServerActivity activity,
         CancellationToken cancellationToken)
     {
-        var stream = client.GetStream();
+        Stream stream = client.GetStream();
+        if (options.Certificate is { } certificate)
+        {
+            // A failed or slow handshake ends here; the caller closes the client.
+            stream = await ServerTls.AuthenticateAsync(stream, certificate, cancellationToken).ConfigureAwait(false);
+        }
+
         var reader = new LineReader(stream);
 
         try
@@ -629,6 +719,7 @@ public static class Http
                 }
 
                 var request = read.Request!;
+                activity.Touch();
 
                 // -- routing ------------------------------------------------------
                 if (!string.Equals(request.Path, "/mcp", StringComparison.Ordinal))
@@ -711,20 +802,45 @@ public static class Http
                         // something it should not): either way the stream ends, and
                         // its slot is free at once rather than at the next ping.
                         var hangup = stream.ReadAsync(new byte[1], cancellationToken).AsTask();
+                        var idleMs = (long)options.IdleTimeout.TotalMilliseconds;
+                        var sincePing = 0L;
                         while (true)
                         {
-                            var ping = Task.Delay(SsePingInterval, cancellationToken);
-                            if (await Task.WhenAny(hangup, ping).ConfigureAwait(false) == hangup)
+                            // Wake for the next ping, or sooner when the idle timeout
+                            // falls first.
+                            var wait = (long)SsePingInterval.TotalMilliseconds - sincePing;
+                            if (idleMs > 0)
+                            {
+                                var left = idleMs - activity.IdleMs;
+                                if (left <= 0)
+                                {
+                                    break;
+                                }
+
+                                wait = Math.Min(wait, left);
+                            }
+
+                            var tick = Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, wait)), cancellationToken);
+                            if (await Task.WhenAny(hangup, tick).ConfigureAwait(false) == hangup)
                             {
                                 Observe(hangup);
                                 break;
                             }
 
-                            await ping.ConfigureAwait(false);
+                            await tick.ConfigureAwait(false);
+                            sincePing += Math.Max(1, wait);
+                            if (sincePing < (long)SsePingInterval.TotalMilliseconds)
+                            {
+                                continue;
+                            }
+
+                            sincePing = 0;
                             await stream.WriteAsync(": ping\n\n"u8.ToArray(), cancellationToken)
                                 .ConfigureAwait(false);
                             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         }
+
+                        Observe(hangup);
                     }
                     catch (Exception error) when (error is IOException or ObjectDisposedException
                         or OperationCanceledException or SocketException)

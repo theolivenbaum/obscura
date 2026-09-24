@@ -22,7 +22,8 @@ internal sealed record LoadedStylesheet(
     UrlRecord ResponseUrl,
     IReadOnlyList<StylesheetImport> Imports,
     string Rules,
-    bool RedirectLeftOrigin = false);
+    bool RedirectLeftOrigin = false,
+    PocketCalculator.Net.ReferrerPolicy? ReferrerPolicyHeader = null);
 
 /// <summary>
 /// Which element a fetched author sheet belongs to.
@@ -355,7 +356,8 @@ internal static partial class PageHelpers
         string key,
         IReadOnlyDictionary<string, LoadedStylesheet> sheets,
         IReadOnlyDictionary<string, string> aliases,
-        HashSet<string> active)
+        HashSet<string> active,
+        Action<LoadedStylesheet, List<string>>? onSheetUrls = null)
     {
         string actualKey = aliases.TryGetValue(key, out string? alias) ? alias : key;
         if (!active.Add(actualKey))
@@ -377,7 +379,7 @@ internal static partial class PageHelpers
                 continue;
             }
             (string importKey, _) = CanonicalStylesheetUrl(importUrl);
-            string? imported = MaterializeStylesheetGraph(importKey, sheets, aliases, active);
+            string? imported = MaterializeStylesheetGraph(importKey, sheets, aliases, active, onSheetUrls);
             if (imported is null)
             {
                 continue;
@@ -391,7 +393,13 @@ internal static partial class PageHelpers
                 output.Append(imported).Append('\n');
             }
         }
-        output.Append(RebaseCssUrls(sheet.Rules, sheet.ResponseUrl));
+        // The sheet's own http(s) url()s, for the referrer of the loads they cause.
+        List<string>? urls = onSheetUrls is null ? null : [];
+        output.Append(RebaseCssUrls(sheet.Rules, sheet.ResponseUrl, urls));
+        if (urls is { Count: > 0 })
+        {
+            onSheetUrls!(sheet, urls);
+        }
         active.Remove(actualKey);
         return output.ToString();
     }
@@ -450,7 +458,7 @@ internal static partial class PageHelpers
     /// browsers, not the document URL; failing to rebase them drops common
     /// background, mask, cursor and font assets from nested theme directories.
     /// </remarks>
-    internal static string RebaseCssUrls(string css, UrlRecord baseUrl)
+    internal static string RebaseCssUrls(string css, UrlRecord baseUrl, List<string>? urls = null)
     {
         var output = new StringBuilder(css.Length);
         int index = 0;
@@ -508,6 +516,16 @@ internal static partial class PageHelpers
                 && PageUrl.TryJoin(baseUrl, value) is { } joined)
             {
                 resolved = joined.Href;
+            }
+
+            if (urls is not null)
+            {
+                string named = resolved ?? value;
+                if (named.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || named.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    urls.Add(named);
+                }
             }
 
             if (resolved is not null)
@@ -1051,7 +1069,10 @@ internal static partial class PageHelpers
     /// page-visible <c>__obscura_linkedStylesheetCss</c> / <c>__obscura_setLinkedStylesheetCss</c>).
     ///
     /// Run it with <see cref="Page.TryExecuteHost"/>: <c>registerLinkedStylesheet</c> is a host
-    /// helper. DEVIATION from upstream 04418a5, which calls a page-visible
+    /// helper, and the query, attribute writes and load event go through
+    /// <c>__obscura_host.dom</c> (SECURITY.md L10), where upstream's script calls the page's
+    /// <c>querySelectorAll</c>, <c>Function.prototype.call</c>, <c>String.prototype.trim</c>,
+    /// <c>setAttribute</c>, <c>dispatchEvent</c> and <c>Event</c>. DEVIATION from upstream 04418a5, which calls a page-visible
     /// <c>globalThis.__obscura_registerLinkedStylesheet</c> and deletes it once static
     /// registration is done (never in a frame realm).
     ///
@@ -1065,24 +1086,25 @@ internal static partial class PageHelpers
         string response = responseUrl is null ? "undefined" : JsonSerializer.Serialize(responseUrl);
         return $$"""
             (function() {
-                        var links = document.querySelectorAll('link[rel~="stylesheet"]');
+                        var h = __obscura_host.dom;
+                        var links = h.querySelectorAll(h.document(), 'link[rel~="stylesheet"]');
                         var link = links[{{linkIndex.ToString(CultureInfo.InvariantCulture)}}];
                         if (!link) return;
                         function syncSheet() {
-                            if (Object.prototype.hasOwnProperty.call(link, 'media')) {
-                                var wanted = String(link.media || '').trim();
-                                if (wanted) link.setAttribute('media', wanted);
-                                else link.removeAttribute('media');
+                            if (h.hasOwn(link, 'media')) {
+                                var wanted = h.trim(link.media || '');
+                                if (wanted) h.call(link, 'setAttribute', ['media', wanted]);
+                                else h.call(link, 'removeAttribute', ['media']);
                             }
-                            if (Object.prototype.hasOwnProperty.call(link, 'disabled')) {
-                                if (link.disabled) link.setAttribute('disabled', '');
-                                else link.removeAttribute('disabled');
+                            if (h.hasOwn(link, 'disabled')) {
+                                if (link.disabled) h.call(link, 'setAttribute', ['disabled', '']);
+                                else h.call(link, 'removeAttribute', ['disabled']);
                             }
                         }
 
                         syncSheet();
                         __obscura_host.registerLinkedStylesheet(link, undefined, {{response}});
-                        try { link.dispatchEvent(new Event('load')); }
+                        try { h.dispatch(link, h.event('Event', 'load')); }
                         finally { syncSheet(); }
                     })()
             """;

@@ -15,7 +15,8 @@ namespace PocketCalculator.Js.Runtime;
 /// <c>globalThis.X = globalThis.X || {}</c>, so installing them ahead of bootstrap.js hands it
 /// these objects instead. They are ordinary objects behind a proxy whose write traps forward to
 /// <c>op_dom</c>; reads, key order and <c>undefined</c> semantics are unchanged, which is what
-/// bootstrap.js's <c>!== undefined</c> checks depend on.
+/// bootstrap.js's <c>!== undefined</c> checks depend on. bootstrap.js takes both off the
+/// global once it has adopted them (SECURITY.md I10).
 /// </para>
 /// <para>
 /// The alternative was to have bootstrap.js call an op itself. That file is shared verbatim with
@@ -41,11 +42,18 @@ internal static class FormStateMirror
             (function (frameId) {
               // Captured now: globalThis.Deno is deleted once bootstrap.js has run.
               const ops = globalThis.Deno.core.ops;
+              // Built-ins as they are before any page script runs (SECURITY.md L10): a page
+              // that replaced RegExp.prototype.test or String stopped every mirror write.
+              const digits = /^[0-9]+$/;
+              const test = RegExp.prototype.test;
+              const apply = Reflect.apply;
+              const toString = String;
+              const numeric = (key) => typeof key === 'string' && apply(test, digits, [key]);
               const mirror = (cmd, coerce) => new Proxy({}, {
                 set(target, key, value) {
                   target[key] = value;
                   const nid = typeof key === 'string' ? key : null;
-                  if (nid !== null && /^[0-9]+$/.test(nid)) {
+                  if (nid !== null && numeric(nid)) {
                     try {
                       ops.op_dom(
                         cmd, nid, coerce(value), frameId);
@@ -54,7 +62,7 @@ internal static class FormStateMirror
                   return true;
                 },
               });
-              globalThis._formValues = mirror('set_form_value', (v) => String(v));
+              globalThis._formValues = mirror('set_form_value', (v) => toString(v));
               globalThis._formChecked = mirror('set_form_checked', (v) => (v ? 'true' : 'false'));
             })
             """ + "(" + id + ");");
@@ -77,29 +85,37 @@ internal static class FormStateMirror
         engine.Execute("world-form-state", """
             (function () {
               const ops = globalThis.Deno.core.ops;
+              // Built-ins as they are before any page script runs (SECURITY.md L10).
+              const test = RegExp.prototype.test;
+              const apply = Reflect.apply;
+              const toString = String;
+              const toNumber = Number;
+              const charAt = String.prototype.charAt;
+              const slice = String.prototype.slice;
+              const digits = /^[0-9]+$/;
               const encode = (v) => v === undefined ? 'u' : v === null ? 'n'
                 : typeof v === 'boolean' ? (v ? 'b1' : 'b0')
-                : typeof v === 'number' ? 'd' + String(v) : 's' + String(v);
+                : typeof v === 'number' ? 'd' + toString(v) : 's' + toString(v);
               const decode = (s) => {
-                s = String(s);
-                switch (s.charAt(0)) {
+                s = toString(s);
+                switch (apply(charAt, s, [0])) {
                   case 'n': return null;
                   case 'b': return s === 'b1';
-                  case 'd': return Number(s.slice(1));
-                  case 's': return s.slice(1);
+                  case 'd': return toNumber(apply(slice, s, [1]));
+                  case 's': return apply(slice, s, [1]);
                   default: return undefined;
                 }
               };
-              const numeric = (key) => typeof key === 'string' && /^[0-9]+$/.test(key);
+              const numeric = (key) => typeof key === 'string' && apply(test, digits, [key]);
               const shared = (name) => new Proxy({}, {
                 get(target, key) {
                   if (!numeric(key)) return target[key];
-                  try { return decode(ops.op_world_call('map-get:' + name, Number(key), '')); }
+                  try { return decode(ops.op_world_call('map-get:' + name, toNumber(key), '')); }
                   catch (_) { return undefined; }
                 },
                 set(target, key, value) {
                   if (!numeric(key)) { target[key] = value; return true; }
-                  try { ops.op_world_call('map-set:' + name, Number(key), encode(value)); } catch (_) {}
+                  try { ops.op_world_call('map-set:' + name, toNumber(key), encode(value)); } catch (_) {}
                   return true;
                 },
               });

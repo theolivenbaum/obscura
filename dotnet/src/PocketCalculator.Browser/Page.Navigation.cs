@@ -62,6 +62,13 @@ public readonly record struct PageNavigationOutcome(PageNavigationKind Kind, str
     public bool IsSameDocument => Kind == PageNavigationKind.SameDocument;
 }
 
+/// <summary>
+/// A referrer an automation client named for a browser-initiated navigation (CDP
+/// <c>Page.navigate</c>). <see cref="Url"/> null means none. Port addition: Rust ignores
+/// both parameters.
+/// </summary>
+public sealed record ClientReferrer(Uri? Url, ReferrerPolicy Policy);
+
 public sealed partial class Page
 {
     public Task NavigateAsync(string url, CancellationToken cancellationToken = default) =>
@@ -97,12 +104,29 @@ public sealed partial class Page
     /// for a navigation a document started. <paramref name="initiator"/> is the queued
     /// navigation as <c>op_navigate</c> recorded it; null is a browser-initiated one.
     /// </summary>
+    public Task NavigateWithWaitPostAsync(
+        string url,
+        WaitUntil waitUntil,
+        string method,
+        string body,
+        PendingNavigation? initiator,
+        CancellationToken cancellationToken = default) =>
+        NavigateWithWaitPostAsync(url, waitUntil, method, body, initiator, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="NavigateWithWaitPostAsync(string, WaitUntil, string, string, PendingNavigation?, CancellationToken)"/>
+    /// with the referrer a client named (CDP <c>Page.navigate</c> <c>referrer</c> and
+    /// <c>referrerPolicy</c>). It changes only the Referer and <c>document.referrer</c>: the
+    /// navigation stays browser-initiated, as in Chromium 141. Ignored for a page-initiated
+    /// navigation.
+    /// </summary>
     public async Task NavigateWithWaitPostAsync(
         string url,
         WaitUntil waitUntil,
         string method,
         string body,
         PendingNavigation? initiator,
+        ClientReferrer? clientReferrer,
         CancellationToken cancellationToken = default)
     {
         // A document may not navigate from a non-file: URL into file: (SECURITY.md H2),
@@ -119,6 +143,10 @@ public sealed partial class Page
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             deadline.Token, cancellationToken);
         ResourceRequest profile = NavigationProfile(initiator);
+        if (initiator is null && clientReferrer is not null)
+        {
+            profile = profile with { Referrer = clientReferrer.Url, ReferrerPolicy = clientReferrer.Policy };
+        }
         string referrer = DocumentReferrer(profile, url);
         try
         {
@@ -213,6 +241,7 @@ public sealed partial class Page
         RetireRenderResources();
         Lifecycle = LifecycleState.Loading;
         Referrer = referrer;
+        ReferrerPolicyHeader = null;
         Url = url;
         NetworkEvents.Clear();
 
@@ -272,7 +301,7 @@ public sealed partial class Page
             {
                 foreach (string source in preloadSources)
                 {
-                    blankJs.ExecuteScriptGuarded("<preload>", source);
+                    blankJs.ExecutePreloadScript(source);
                 }
             }
             return;
@@ -345,6 +374,8 @@ public sealed partial class Page
         {
             Url = NetUrl.To(response.Url);
         }
+
+        ReferrerPolicyHeader = ReferrerPolicies.ParseHeader(response.Header("referrer-policy"));
 
         // Honor the response charset: HTTP Content-Type, then a <meta charset> sniff
         // in the first 1KB, then UTF-8. Without this every non-UTF-8 page came
@@ -796,6 +827,16 @@ public sealed partial class Page
             return PageNavigationOutcome.None;
         }
 
+        // The host checks first that the target differs from the document only in its
+        // fragment (port addition, SECURITY.md L10): the shim's answer runs in the page's
+        // realm, and a cross-document navigation must never be turned into a no-op there.
+        if (Url.Join(url) is not { Fragment: not null } target
+            || !string.Equals(
+                PageUrl.WithoutFragment(Url).Href, PageUrl.WithoutFragment(target).Href, StringComparison.Ordinal))
+        {
+            return PageNavigationOutcome.None;
+        }
+
         string literal = System.Text.Json.JsonSerializer.Serialize(url);
         JsonNode? handled;
         try
@@ -812,7 +853,7 @@ public sealed partial class Page
             return PageNavigationOutcome.None;
         }
 
-        // bootstrap.js moved __virtualUrl; adopt it host-side so page.url() and every CDP
+        // bootstrap.js moved the history URL (op_history_url); adopt it host-side so page.url() and every CDP
         // payload that reports it agree with what the page now thinks it is.
         SyncVirtualUrl();
 
@@ -908,7 +949,11 @@ public sealed partial class Page
         Uri source = Uri.TryCreate(initiator.Initiator, UriKind.Absolute, out Uri? parsed)
             ? parsed
             : new Uri("about:blank");
-        return ResourceRequest.PageNavigation(source, initiator.UserActivated);
+        // The link's or the document's referrer policy (port addition).
+        return ResourceRequest.PageNavigation(source, initiator.UserActivated) with
+        {
+            ReferrerPolicy = initiator.ReferrerPolicy,
+        };
     }
 
     /// <summary>
@@ -916,11 +961,15 @@ public sealed partial class Page
     /// strict-origin-when-cross-origin value the request's Referer header carries, and
     /// empty for a browser-initiated navigation.
     /// </summary>
+    /// <remarks>
+    /// Under the navigation's referrer policy (port addition): upstream always applies
+    /// strict-origin-when-cross-origin.
+    /// </remarks>
     private static string DocumentReferrer(ResourceRequest profile, string targetUrl) =>
         profile.Referrer is { } source
-            && UrlRecord.Parse(source.AbsoluteUri) is { } from
             && PageUrl.TryParse(targetUrl) is { } target
-            ? PageHelpers.NavigationReferrer(from, target)
+            && Uri.TryCreate(target.Href, UriKind.Absolute, out Uri? targetUri)
+            ? ReferrerPolicies.Referrer(source, targetUri, profile.ReferrerPolicy ?? ReferrerPolicies.Default) ?? string.Empty
             : string.Empty;
 
     private static ulong ElapsedMilliseconds(long startTimestamp) =>

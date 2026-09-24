@@ -94,6 +94,11 @@ public static class Network
 
             case "setCookie":
             {
+                if (!CookieParams.TryParsePartitionKey(parameters, out _))
+                {
+                    return DomainResult.Err("Deserializing cookie partition key failed");
+                }
+
                 if (CookieParams.ParseCdpCookie(parameters) is not { } cookie)
                 {
                     return DomainResult.Err("setCookie: missing required name/domain (or url)");
@@ -117,8 +122,10 @@ public static class Network
             {
                 if (CookieParams.ParseDeleteCookiesParams(parameters) is { } filter)
                 {
+                    // Chromium 141 deletes from the named partition only, and without a
+                    // partitionKey unpartitioned cookies only (port addition, CHIPS).
                     CookieJarFor(ctx, sessionId)
-                        .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path);
+                        .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path, filter.PartitionKey);
                 }
 
                 return DomainResult.Empty();
@@ -221,7 +228,7 @@ public static class Network
         long expires = cookie.Expires ?? SessionCookieExpires;
         bool session = cookie.Expires is null;
         string sameSite = cookie.SameSite.Length == 0 ? DefaultSameSite : cookie.SameSite;
-        return new JsonObject
+        var json = new JsonObject
         {
             ["name"] = cookie.Name,
             ["value"] = cookie.Value,
@@ -240,5 +247,18 @@ public static class Network
             ["sourcePort"] = cookie.Secure ? DefaultSecurePort : DefaultInsecurePort,
             ["priority"] = "Medium",
         };
+
+        // Chromium 141's shape, present only on a partitioned (CHIPS) cookie, so every
+        // other cookie serializes as it does in Rust.
+        if (cookie.PartitionKey is { } key)
+        {
+            json["partitionKey"] = new JsonObject
+            {
+                ["topLevelSite"] = key.TopLevelSite,
+                ["hasCrossSiteAncestor"] = key.HasCrossSiteAncestor,
+            };
+        }
+
+        return json;
     }
 }

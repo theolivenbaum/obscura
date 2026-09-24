@@ -297,6 +297,49 @@ public class GridTrackLimitTests
     }
 
     [Fact]
+    public void AGridFillingItemDoesNotAllocateACellPerTrackPair()
+    {
+        // The occupancy of one item covering 10,000 x 10,000 tracks was a dense matrix of
+        // 10^8 cells (100 MB, copied as it grew); it is now the item's own interval.
+        DomTree tree = HtmlParsing.ParseHtml(
+            "<!doctype html><style>#g{display:grid;width:1000px}#a{grid-column:1 / 99999999;"
+            + "grid-row:1 / 99999999}</style><div id=g><div id=a>a</div><div id=b>b</div></div>");
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        RenderDom.LayoutDom(tree, (1000f, 600f));
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(allocated < 60_000_000, $"layout allocated {allocated / 1_000_000} MB");
+    }
+
+    [Fact]
+    public void MoreAutoPlacedItemsThanSixteenBitLinesHoldGetTheirOwnRows()
+    {
+        // Chromium: the 33,000th item of a one-column grid sits in row 33,000. taffy's lines are
+        // i16, and a 10,000-track axis piled every item past it into the last row.
+        string items = string.Concat(Enumerable.Repeat("<div></div>", 32_998));
+        (Rect a, Rect b) = LayOut(
+            "#g{display:grid;width:300px;grid-auto-rows:10px}",
+            $"<div id=a>a</div>{items}<div id=b>b</div>");
+        Assert.Equal(0f, a.Y);
+        Assert.Equal(329_990f, b.Y);
+        Assert.Equal(10f, b.Height);
+    }
+
+    [Fact]
+    public void ItemsPastTheAxisLimitShareItsLastTrack()
+    {
+        // Ten items spanning 10,000 rows fill the axis; the eleventh is pulled into the last
+        // track, as Chromium pulls an item past kGridMaxTracks back.
+        string items = string.Concat(Enumerable.Repeat("<div></div>", 9));
+        (Rect a, Rect b) = LayOut(
+            "#g{display:grid;width:300px;grid-auto-rows:1px}#g>*{grid-row:span 10000}",
+            $"<div id=a>a</div>{items}<div id=b>b</div>");
+        Assert.Equal(100_000, GridLimits.MaxAxisTracks);
+        Assert.Equal(0f, a.Y);
+        Assert.Equal(99_999f, b.Y);
+        Assert.Equal(1f, b.Height);
+    }
+
+    [Fact]
     public void ManyAutoPlacedItemsStillFlowIntoRows()
     {
         string items = string.Concat(Enumerable.Range(0, 3000).Select(i => $"<div>{i}</div>"));

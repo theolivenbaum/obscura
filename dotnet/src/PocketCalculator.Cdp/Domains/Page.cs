@@ -8,6 +8,8 @@ using PocketCalculator.Js.Url;
 using PocketCalculator.Render;
 
 using BrowserPage = PocketCalculator.Browser.Page;
+using ReferrerPolicies = PocketCalculator.Net.ReferrerPolicies;
+using ReferrerPolicy = PocketCalculator.Net.ReferrerPolicy;
 
 namespace PocketCalculator.Cdp.Domains;
 
@@ -42,6 +44,17 @@ public static partial class Page
     /// </summary>
     internal static string ChildFrameId(string pageFrameId, uint frameId) =>
         $"{pageFrameId}-frame-{frameId.ToString(CultureInfo.InvariantCulture)}";
+
+    /// <summary>The realm id behind a <see cref="ChildFrameId"/>, or null when it is not one of this page's.</summary>
+    internal static uint? ChildFrameNumber(string pageFrameId, string protocolFrameId)
+    {
+        string prefix = pageFrameId + "-frame-";
+        return protocolFrameId.StartsWith(prefix, StringComparison.Ordinal)
+            && uint.TryParse(protocolFrameId.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out uint id)
+            && id != 0
+                ? id
+                : null;
+    }
 
     /// <summary>
     /// The Rust <c>is_localhost</c>: a <c>localhost</c> domain (or a subdomain of one),
@@ -726,6 +739,49 @@ public static partial class Page
             }
             : null;
 
+    /// <summary>
+    /// <c>Page.navigate</c>'s <c>referrer</c> and <c>referrerPolicy</c>, or null when the
+    /// client named neither. Port addition: upstream ignores both.
+    /// </summary>
+    /// <remarks>
+    /// Measured on Chromium 141: the referrer goes through the policy (default
+    /// strict-origin-when-cross-origin) against the target, loses userinfo and fragment, and
+    /// is dropped when it is empty or does not parse; it sets only the Referer and
+    /// <c>document.referrer</c>, the navigation staying browser-initiated. An unknown
+    /// <c>referrerPolicy</c> fails the command with <c>Invalid referrerPolicy</c>.
+    /// </remarks>
+    internal static ClientReferrer? ClientReferrerOf(JsonNode? parameters)
+    {
+        string? policyName = parameters.Get("referrerPolicy").AsString();
+        ReferrerPolicy policy = ReferrerPolicies.Default;
+        if (policyName is not null)
+        {
+            policy = policyName switch
+            {
+                "noReferrer" => ReferrerPolicy.NoReferrer,
+                "noReferrerWhenDowngrade" => ReferrerPolicy.NoReferrerWhenDowngrade,
+                "origin" => ReferrerPolicy.Origin,
+                "originWhenCrossOrigin" => ReferrerPolicy.OriginWhenCrossOrigin,
+                "sameOrigin" => ReferrerPolicy.SameOrigin,
+                "strictOrigin" => ReferrerPolicy.StrictOrigin,
+                "strictOriginWhenCrossOrigin" => ReferrerPolicy.StrictOriginWhenCrossOrigin,
+                "unsafeUrl" => ReferrerPolicy.UnsafeUrl,
+                _ => throw new DomainError("Invalid referrerPolicy"),
+            };
+        }
+
+        if (parameters.Get("referrer").AsString() is not { Length: > 0 } referrer)
+        {
+            return null;
+        }
+
+        return new ClientReferrer(
+            UrlRecord.Parse(referrer) is { } parsed && Uri.TryCreate(parsed.Href, UriKind.Absolute, out Uri? uri)
+                ? uri
+                : null,
+            policy);
+    }
+
     /// <summary>The operator's file-access switch refused this navigation.</summary>
     internal const string FileNavigationDisabled =
         "Page.navigate to file:// is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable.";
@@ -784,10 +840,11 @@ public static partial class Page
             throw new DomainError(refusal);
         }
 
-        List<string> preloadScripts = [.. ctx.PreloadScripts.Select(entry => entry.Source)];
+        ClientReferrer? clientReferrer = ClientReferrerOf(parameters);
 
         BrowserPage page = ctx.GetSessionPageMut(sessionId)
             ?? throw new DomainError("No page for session");
+        List<string> preloadScripts = ctx.PreloadSourcesFor(page.Id);
         string frameId = page.FrameId;
 
         // Navigating to the loaded document's own URL with a different fragment is a
@@ -832,12 +889,12 @@ public static partial class Page
         {
             if (string.Equals(navMethod, "POST", StringComparison.Ordinal) && navBody.Length != 0)
             {
-                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody, initiator)
+                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody, initiator, clientReferrer)
                     .ConfigureAwait(false);
             }
             else
             {
-                await page.NavigateWithWaitPostAsync(url, waitUntil, "GET", string.Empty, initiator)
+                await page.NavigateWithWaitPostAsync(url, waitUntil, "GET", string.Empty, initiator, clientReferrer)
                     .ConfigureAwait(false);
             }
         }
@@ -1078,14 +1135,14 @@ public static partial class Page
                 // ran it with the page's own scripts, beside page script.
                 if (parameters.Get("worldName").AsString() is { Length: > 0 } worldName)
                 {
-                    if (source.Length != 0)
-                    {
-                        ctx.WorldPreloadScripts.Add((identifier, worldName, source));
-                    }
+                    // Kept even when empty: the script names a world every new document,
+                    // child frames' included, gets a context for (Playwright registers its
+                    // utility world with an empty source).
+                    ctx.WorldPreloadScripts.Add((identifier, worldName, source, ctx.PreloadOwner(sessionId)));
                 }
                 else if (source.Length != 0)
                 {
-                    ctx.PreloadScripts.Add((identifier, source));
+                    ctx.PreloadScripts.Add((identifier, source, ctx.PreloadOwner(sessionId)));
                 }
 
                 return DomainResult.Ok(new JsonObject { ["identifier"] = identifier });
@@ -1120,18 +1177,26 @@ public static partial class Page
                 double pageY = 0.0;
                 double contentWidth = width;
                 double contentHeight = height;
-                JsonArray? values = JsonExt.AsJsonArray(ctx.GetSessionPageMut(sessionId)?.Evaluate(
-                    "[window.scrollX, window.scrollY, "
-                    + "document.documentElement && document.documentElement.scrollWidth, "
-                    + "document.documentElement && document.documentElement.scrollHeight]"));
+                // DEVIATION from page.rs, which reads window.scrollX/scrollY and the root's
+                // scrollWidth/scrollHeight through whatever the page left on its globals and
+                // prototypes (SECURITY.md L10): the offset is the host's, and the extent is
+                // read with the accessors bootstrap defined.
+                BrowserPage? live = ctx.GetSessionPageMut(sessionId);
+                if (live is not null)
+                {
+                    (float scrollX, float scrollY) = live.ScreenshotScrollOffset();
+                    pageX = scrollX;
+                    pageY = scrollY;
+                }
+                JsonArray? values = JsonExt.AsJsonArray(live?.EvaluateHost(
+                    "(function () { var h = __obscura_host.dom; var root = h.documentElement();"
+                    + " return root ? [h.get(root, 'scrollWidth'), h.get(root, 'scrollHeight')] : []; })()"));
                 if (values is not null)
                 {
-                    pageX = values.Count > 0 ? values[0].AsF64() ?? 0.0 : 0.0;
-                    pageY = values.Count > 1 ? values[1].AsF64() ?? 0.0 : 0.0;
-                    contentWidth = values.Count > 2 && values[2].AsF64() is { } cw && cw > 0.0
+                    contentWidth = values.Count > 0 && values[0].AsF64() is { } cw && cw > 0.0
                         ? cw
                         : width;
-                    contentHeight = values.Count > 3 && values[3].AsF64() is { } ch && ch > 0.0
+                    contentHeight = values.Count > 1 && values[1].AsF64() is { } ch && ch > 0.0
                         ? ch
                         : height;
                 }

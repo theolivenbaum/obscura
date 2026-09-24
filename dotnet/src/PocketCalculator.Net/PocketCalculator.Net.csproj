@@ -16,6 +16,16 @@
     </EmbeddedResource>
   </ItemGroup>
 
+  <!-- The full Mozilla Public Suffix List (MPL-2.0, license header kept in the file),
+       canonical URL https://publicsuffix.org/list/public_suffix_list.dat; this copy is
+       the publicsuffix/list repository main branch as of 2026-09-24.
+       Refresh it by fetching that URL over the file; nothing else changes. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources/public_suffix_list.dat">
+      <LogicalName>PocketCalculator.Net.public_suffix_list.dat</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="PocketCalculator.Net.Tests" />
   </ItemGroup>

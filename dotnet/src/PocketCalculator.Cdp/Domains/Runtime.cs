@@ -307,23 +307,16 @@ public static class Runtime
                 string name = parameters.Get("name").AsString() ?? string.Empty;
                 if (IsValidBindingName(name))
                 {
-                    // The shim forwards every call back to the host through the
-                    // frozen globalThis.__obscura_binding_called bridge (upstream
-                    // 04418a5), which calls op_binding_called; page script cannot
-                    // reach the op table itself. The CDP dispatcher then drains the queue and
-                    // emits Runtime.bindingCalled events the same way Chromium does.
                     // Chromium's V8InspectorImpl rejects calls without exactly one
                     // argument and ToString-coerces that argument before emitting it as
-                    // the payload - we match the coercion (`String(arg)`) and silently
-                    // drop calls with wrong arity, which is what Chrome does.
-                    string shim =
-                        $"globalThis['{name}'] = function (arg) {{"
-                        + "if (arguments.length !== 1) return;"
-                        + "try {"
-                        + "const payload = typeof arg === 'string' ? arg : String(arg);"
-                        + $"globalThis.__obscura_binding_called('{name}', payload);"
-                        + "} catch (e) { /* swallow: binding must not throw into page */ }"
-                        + "};";
+                    // the payload; the installed function does the same (bootstrap.js
+                    // _installBinding) and calls op_binding_called, which the CDP
+                    // dispatcher drains into Runtime.bindingCalled events.
+                    // DEVIATION from the Rust engine, whose shim is a script calling the
+                    // page-visible globalThis.__obscura_binding_called bridge: the entry is
+                    // the name, installed through the realm's host helpers (BindingPreload,
+                    // SECURITY.md I10).
+                    string shim = BindingPreload.Source(name);
                     // Re-install on every navigation: globalThis is wiped on each new
                     // document, and puppeteer registers bindings once-per-page rather
                     // than once-per-document.
@@ -332,20 +325,23 @@ public static class Runtime
                     // (executionContextName, or the id of one) is installed in that
                     // world, whose calls report the world's context id. Puppeteer asks
                     // for its utility world's bindings this way.
+                    string owner = ctx.PreloadOwner(sessionId);
                     if (IsolatedBindingWorld(parameters, ctx, sessionId) is { } worldName)
                     {
                         ctx.WorldPreloadScripts.RemoveAll(entry =>
                             string.Equals(entry.Identifier, key, StringComparison.Ordinal)
-                            && string.Equals(entry.WorldName, worldName, StringComparison.Ordinal));
-                        ctx.WorldPreloadScripts.Add((key, worldName, shim));
+                            && string.Equals(entry.WorldName, worldName, StringComparison.Ordinal)
+                            && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
+                        ctx.WorldPreloadScripts.Add((key, worldName, shim, owner));
                         RegisterBindingSession(ctx, name, sessionId);
                         ctx.GetSessionPageMut(sessionId)?.ExecuteInIsolatedWorlds(worldName, shim);
                         return DomainResult.Empty();
                     }
 
                     ctx.PreloadScripts.RemoveAll(entry =>
-                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
-                    ctx.PreloadScripts.Add((key, shim));
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                        && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
+                    ctx.PreloadScripts.Add((key, shim, owner));
                     // Remember who subscribed, so the call goes back to this session
                     // rather than to whichever session of the page a dictionary happens
                     // to yield first. A client discards an event addressed to a session
@@ -367,7 +363,7 @@ public static class Runtime
 
                     // Install on the current page so the binding is usable immediately,
                     // without waiting for the next navigation.
-                    ctx.GetSessionPageMut(sessionId)?.Evaluate(shim);
+                    ctx.GetSessionPageMut(sessionId)?.InstallPreloadNow(shim);
                 }
 
                 return DomainResult.Empty();
@@ -379,12 +375,15 @@ public static class Runtime
                 if (IsValidBindingName(name))
                 {
                     string key = Dispatcher.BindingPreloadPrefix + name;
+                    string owner = ctx.PreloadOwner(sessionId);
                     ctx.PreloadScripts.RemoveAll(entry =>
-                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                        && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
                     List<string> worldNames = [];
-                    foreach (var (identifier, worldName, _) in ctx.WorldPreloadScripts)
+                    foreach (var (identifier, worldName, _, entryOwner) in ctx.WorldPreloadScripts)
                     {
                         if (string.Equals(identifier, key, StringComparison.Ordinal)
+                            && string.Equals(entryOwner, owner, StringComparison.Ordinal)
                             && !worldNames.Contains(worldName, StringComparer.Ordinal))
                         {
                             worldNames.Add(worldName);
@@ -392,7 +391,8 @@ public static class Runtime
                     }
 
                     ctx.WorldPreloadScripts.RemoveAll(entry =>
-                        string.Equals(entry.Identifier, key, StringComparison.Ordinal));
+                        string.Equals(entry.Identifier, key, StringComparison.Ordinal)
+                        && string.Equals(entry.Owner, owner, StringComparison.Ordinal));
                     foreach (string worldName in worldNames)
                     {
                         ctx.GetSessionPageMut(sessionId)?.ExecuteInIsolatedWorlds(
@@ -554,35 +554,12 @@ public static class Runtime
         // off a page object, so the page decides what ends up inside this literal. A JSON
         // literal covers the C0 controls a manual quote/backslash pair leaves alone.
         string oid = CdpUtil.ObjectIdLiteral(objectId);
-        string code =
-            "(function() {"
-            + $"var obj = globalThis.__obscura_objects[{oid}];"
-            + "if (!obj || typeof obj !== 'object') return [];"
-            + "var keys = Object.keys(obj);"
-            + "return keys.map(function(k) {"
-            + "var v = obj[k];"
-            + "var t = typeof v;"
-            + "var item = { name: k, type: t };"
-            + "if (v === null) { item.value = null; return item; }"
-            + "if (t !== 'object' && t !== 'function') { item.value = v; return item; }"
-            + $"var childOid = {oid} + '::' + k;"
-            + "globalThis.__obscura_objects[childOid] = v;"
-            + "item.childOid = childOid;"
-            + "if (typeof v.nodeType === 'number') {"
-            + "item.subtype = 'node';"
-            + "item.className = v.constructor && v.constructor.name ? v.constructor.name : (v.tagName ? 'HTML' + v.tagName.charAt(0) + v.tagName.slice(1).toLowerCase() + 'Element' : 'Node');"
-            + "item.description = v.tagName ? v.tagName.toLowerCase() : (v.nodeName || 'node');"
-            + "} else if (Array.isArray(v)) {"
-            + "item.subtype = 'array';"
-            + "item.className = 'Array';"
-            + "item.description = 'Array(' + v.length + ')';"
-            + "} else {"
-            + "item.className = (v.constructor && v.constructor.name) || 'Object';"
-            + "item.description = item.className;"
-            + "}"
-            + "return item;"
-            + "});"
-            + "})()";
+        // bootstrap.js _cdpProperties, over the realm's closure store and the built-ins
+        // bootstrap captured. DEVIATION from crates/obscura-cdp/src/domains/runtime.rs, whose
+        // snippet reads the page-visible __obscura_objects and calls the page's
+        // Object.keys and Array.prototype.map, so a page that replaced map answered every
+        // getProperties (Puppeteer's $$) with its own list (SECURITY.md L10).
+        string code = $"__obscura_cdp.properties({oid})";
 
         // The object lives in the realm that minted it: the page's, or an isolated world's.
         JsonNode? result = page.EvaluateInObjectRealm(objectId, code);

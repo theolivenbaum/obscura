@@ -376,4 +376,45 @@ public sealed class IsolatedWorlds
         Assert.Equal("hello", called.Params.Get("payload").AsString());
         Assert.Equal(world, called.Params.Get("executionContextId").AsI64());
     }
+
+    /// <summary>
+    /// <c>DOM.setFileInputFiles</c> on a node handle from the utility world (Playwright's
+    /// setInputFiles) selects files both worlds see, and the page's trusted
+    /// <c>change</c> reaches listeners in both.
+    /// </summary>
+    [Fact]
+    public async Task FileSelectionsAreSharedBetweenWorlds()
+    {
+        var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
+        Attached page = await OpenAsync(
+            ctx,
+            "data:text/html,<input id=f type=file><script>window.pageChanges = [];"
+            + "document.getElementById('f').addEventListener('change', e => pageChanges.push(e.isTrusted + ':' + e.target.files.length));</script>");
+        ctx.GetSessionPageMut(page.Session)!.Context.AllowFileAccess = true;
+        long world = await CreateWorldAsync(page, "utility");
+        await EvaluateAsync(page, "globalThis.worldChanges = []; document.getElementById('f').addEventListener('change', e => worldChanges.push(e.isTrusted + ':' + e.target.files.length)); 1", world);
+
+        string path = Path.Combine(Path.GetTempPath(), "pc-world-upload-" + Guid.NewGuid().ToString("N") + ".txt");
+        await File.WriteAllTextAsync(path, "hello");
+        try
+        {
+            JsonNode handle = await EvaluateAsync(page, "document.getElementById('f')", world, byValue: false);
+            await CoreCdp.CdpAsync(
+                ctx, 95, "DOM.setFileInputFiles",
+                new JsonObject { ["objectId"] = handle["result"]!["objectId"]!.GetValue<string>(), ["files"] = new JsonArray(path) },
+                page.Session);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+
+        string name = Path.GetFileName(path);
+        Assert.Equal(name, Value(await EvaluateAsync(page, "document.getElementById('f').files[0].name")).AsString());
+        Assert.Equal(name, Value(await EvaluateAsync(page, "document.getElementById('f').files[0].name", world)).AsString());
+        Assert.Equal("hello", Value(await EvaluateAsync(page, "document.getElementById('f').files[0].text()", world)).AsString());
+        Assert.Equal("true:1", Value(await EvaluateAsync(page, "pageChanges.join()")).AsString());
+        Assert.Equal("true:1", Value(await EvaluateAsync(page, "worldChanges.join()", world)).AsString());
+    }
 }

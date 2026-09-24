@@ -174,7 +174,7 @@ public sealed class BindingCalledSessionTests
     }
 
     /// <summary>
-    /// SECURITY.md M6: page script can call the frozen bridge itself. A name no
+    /// SECURITY.md M6: page script could call the frozen bridge itself. A name no
     /// client registered, or one that was removed, is not reported, so a page
     /// cannot fire <c>Runtime.bindingCalled</c> for a handler of its choosing.
     /// </summary>
@@ -197,9 +197,13 @@ public sealed class BindingCalledSessionTests
             "Runtime.evaluate",
             new JsonObject
             {
-                ["expression"] = "globalThis.__obscura_binding_called('__playwright__binding__controller__', '{}');"
-                    + "globalThis.__obscura_binding_called('obscuraGone', 'x');"
-                    + "globalThis.__obscura_binding_called('obscuraProbe', 'direct');",
+                // The bridge upstream publishes is gone (SECURITY.md I10); were it back, the
+                // names it reports would still be filtered.
+                ["expression"] = "const bridge = globalThis.__obscura_binding_called;"
+                    + "if (typeof bridge === 'function') {"
+                    + "  bridge('__playwright__binding__controller__', '{}'); bridge('obscuraGone', 'x');"
+                    + "}"
+                    + "obscuraProbe('direct');",
             },
             session);
 

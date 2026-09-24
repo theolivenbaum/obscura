@@ -138,6 +138,7 @@ public static class Dom
                 long depth = parameters.Get("depth").AsI64() ?? 0;
 
                 ulong nodeId;
+                uint document = 0;
                 if ((parameters.Get("nodeId").AsU64()
                     ?? parameters.Get("backendNodeId").AsU64()) is { } explicitId)
                 {
@@ -145,12 +146,14 @@ public static class Dom
                 }
                 else if (parameters.Get("objectId").AsString() is { } objectId)
                 {
-                    string code =
-                        $"(function() {{ var o = globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
-                        + "if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; })()";
-                    // The realm that minted the id: the page's, or an isolated world's.
+                    // The realm's closure store (SECURITY.md L10), not the Rust engine's
+                    // page-visible __obscura_objects.
+                    string code = $"__obscura_cdp.nidOf({CdpUtil.ObjectIdLiteral(objectId)})";
+                    // The realm that minted the id: the page's, an isolated world's, or a
+                    // child frame's, whose node ids are its own document's.
                     double? resolved = page.EvaluateInObjectRealm(objectId, code).AsF64();
                     nodeId = resolved is { } value and >= 0 ? (ulong)value : 0UL;
+                    document = page.FrameIdOfObject(objectId);
                 }
                 else
                 {
@@ -158,11 +161,12 @@ public static class Dom
                 }
 
                 JsonNode? node = null;
-                page.WithDom(dom =>
+                page.WithFrameDom(document, dom =>
                 {
                     node = SerializeNode(dom, NodeId.New((uint)nodeId), unchecked((uint)depth), 0, ctx);
                     return true;
                 });
+                AddContentFrameId(page, document, node);
                 return DomainResult.Ok(new JsonObject { ["node"] = node });
             }
 
@@ -177,9 +181,7 @@ public static class Dom
                 }
                 else if (parameters.Get("objectId").AsString() is { } objectId)
                 {
-                    string code =
-                        $"(function() {{ var o = globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
-                        + "return (o && typeof o._nid === 'number') ? o._nid : -1; })()";
+                    string code = $"__obscura_cdp.nidOf({CdpUtil.ObjectIdLiteral(objectId)})";
                     double? resolved = page.EvaluateInObjectRealm(objectId, code).AsF64();
                     nodeId = resolved is { } value and >= 0 ? (ulong)value : 0UL;
                 }
@@ -193,8 +195,12 @@ public static class Dom
                 // (the host-evaluated script runs in the page realm, so it can no
                 // longer call op_dom itself). `_wrap` also picks the element's own
                 // interface class, as upstream 94e857b does.
+                //
+                // The realm's own _wrap, handed to the host (SECURITY.md L10): the Rust
+                // engine's globalThis._wrap is page-visible, and a page could replace it or
+                // use it to reach any node, closed shadow roots included.
                 string jsCode =
-                    $"globalThis._wrap({nodeId.ToString(CultureInfo.InvariantCulture)})";
+                    $"__obscura_cdp.wrap({nodeId.ToString(CultureInfo.InvariantCulture)})";
 
                 if (page.Js is not { } js)
                 {
@@ -212,7 +218,14 @@ public static class Dom
                 PocketCalculator.Js.Runtime.RemoteObjectInfo info;
                 try
                 {
-                    info = world is null ? js.StoreObjectWithMeta(jsCode) : js.StoreObjectWithMeta(jsCode, world);
+                    // Without a context, a handle named by objectId is resolved in the
+                    // realm that minted it, whose document its node id belongs to.
+                    info = world is not null ? js.StoreObjectWithMeta(jsCode, world)
+                        : parameters.Get("objectId").AsString() is { } source
+                            && parameters.Get("nodeId").AsU64() is null
+                            && parameters.Get("backendNodeId").AsU64() is null
+                            ? js.StoreObjectWithMetaInRealmOf(source, jsCode)
+                            : js.StoreObjectWithMeta(jsCode);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -272,10 +285,12 @@ public static class Dom
                 // nothing and the field stays empty.
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
                 ulong nodeId = ResolveNodeId(page, parameters);
+                // __obscura_host.dom, not the page's globalThis._wrap and el.focus
+                // (SECURITY.md L10); the same for the snippets below.
                 string code =
-                    $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
-                    + "if (el && typeof el.focus === 'function') { el.focus(); return true; } return false; })()";
-                page.Evaluate(code);
+                    $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({nodeId}); "
+                    + "if (el && h.has(el, 'focus')) { h.call(el, 'focus', []); return true; } return false; })()";
+                page.EvaluateHostIn(DocumentOf(page, parameters), code);
                 return DomainResult.Empty();
             }
 
@@ -286,10 +301,10 @@ public static class Dom
                 // Obscura has no layout viewport to move, but the JS shim records this
                 // element for the hit testing used by subsequent input events.
                 string code =
-                    $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
-                    + "if (!el || typeof el.scrollIntoView !== 'function') return false; "
-                    + "el.scrollIntoView(); return true; })()";
-                bool didScroll = page.Evaluate(code).AsBool() ?? false;
+                    $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({nodeId}); "
+                    + "if (!el || !h.has(el, 'scrollIntoView')) return false; "
+                    + "h.call(el, 'scrollIntoView', []); return true; })()";
+                bool didScroll = page.EvaluateHostIn(DocumentOf(page, parameters), code).AsBool() ?? false;
                 if (!didScroll)
                 {
                     throw new DomainError(
@@ -354,11 +369,11 @@ public static class Dom
 
                 string specsJson = CdpJson.Serialize(specs);
                 string code =
-                    $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
+                    $"(function() {{ var el = __obscura_host.dom.wrap({nodeId}); "
                     + $"if (el) {{ __obscura_host.setInputFiles(el, {specsJson}); return true; }} return false; }})()";
                 // A host helper; upstream calls the page-visible __obscura_setInputFiles global,
                 // which let page script fill a file input and fire trusted input and change.
-                page.EvaluateHost(code);
+                page.EvaluateHostIn(DocumentOf(page, parameters), code);
                 return DomainResult.Empty();
             }
 
@@ -377,13 +392,13 @@ public static class Dom
 
                 string code =
                     "(function() {"
-                    + $"var el = globalThis._wrap && globalThis._wrap({nodeId});"
-                    + "if (!el || typeof el.getBoundingClientRect !== 'function') return null;"
-                    + "var r = el.getBoundingClientRect();"
+                    + $"var h = __obscura_host.dom; var el = h.wrap({nodeId});"
+                    + "var r = el && h.rect(el);"
+                    + "if (!r) return null;"
                     + "return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom,"
                     + "r.width, r.height];"
                     + "})()";
-                JsonNode? value = page.Evaluate(code);
+                JsonNode? value = page.EvaluateHostIn(DocumentOf(page, parameters), code);
                 List<double> numbers = [];
                 foreach (JsonNode? item in JsonExt.AsJsonArray(value) ?? [])
                 {
@@ -396,6 +411,7 @@ public static class Dom
                 JsonArray quad;
                 double width;
                 double height;
+                numbers = ToPageCoordinates(page, DocumentOf(page, parameters), numbers, 4);
                 if (numbers.Count >= 10)
                 {
                     quad = [];
@@ -428,6 +444,36 @@ public static class Dom
                 });
             }
 
+            // The iframe element that owns a child frame, in its parent's document:
+            // Playwright's frame.frameElement(). Port addition (SECURITY.md M6, child-frame
+            // contexts); the Rust engine has no DOM.getFrameOwner.
+            case "getFrameOwner":
+            {
+                BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
+                string frameIdParam = parameters.Get("frameId").AsString() ?? string.Empty;
+                if (Page.ChildFrameNumber(page.FrameId, frameIdParam) is not { } frameId
+                    || page.FrameById(frameId) is not { } frame)
+                {
+                    throw new DomainError("Frame with the given id was not found.");
+                }
+
+                double? owner = page.EvaluateHostIn(
+                    frame.ParentFrameId,
+                    $"__obscura_host.frameOwner({frameId.ToString(CultureInfo.InvariantCulture)})").AsF64();
+                if (owner is not { } nid || nid < 0)
+                {
+                    throw new DomainError("Frame with the given id was not found.");
+                }
+
+                ulong ownerId = (ulong)nid;
+                page.WithFrameDom(frame.ParentFrameId, dom => Pinned(dom, ctx, NodeId.New((uint)ownerId)));
+                return DomainResult.Ok(new JsonObject
+                {
+                    ["backendNodeId"] = ownerId,
+                    ["nodeId"] = ownerId,
+                });
+            }
+
             case "getContentQuads":
             {
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
@@ -443,12 +489,12 @@ public static class Dom
 
                 string code =
                     "(function() {"
-                    + $"var el = globalThis._wrap && globalThis._wrap({nodeId});"
-                    + "if (!el || typeof el.getBoundingClientRect !== 'function') return null;"
-                    + "var r = el.getBoundingClientRect();"
+                    + $"var h = __obscura_host.dom; var el = h.wrap({nodeId});"
+                    + "var r = el && h.rect(el);"
+                    + "if (!r) return null;"
                     + "return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom];"
                     + "})()";
-                JsonNode? value = page.Evaluate(code);
+                JsonNode? value = page.EvaluateHostIn(DocumentOf(page, parameters), code);
                 List<double> numbers = [];
                 foreach (JsonNode? item in JsonExt.AsJsonArray(value) ?? [])
                 {
@@ -459,6 +505,7 @@ public static class Dom
                 }
 
                 JsonArray quad;
+                numbers = ToPageCoordinates(page, DocumentOf(page, parameters), numbers, 4);
                 if (numbers.Count == 8)
                 {
                     quad = [];
@@ -481,6 +528,65 @@ public static class Dom
     }
 
     private static JsonArray DefaultQuad() => [8, 8, 108, 8, 108, 28, 8, 28];
+
+    /// <summary>
+    /// The document a node-addressed command acts on: the child frame an
+    /// <c>objectId</c> was minted in, and the page's (0) for a bare node id.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (SECURITY.md M6, child-frame contexts). A child frame's node ids are
+    /// its own document's, so an object from a frame realm has to be looked up there; the
+    /// Rust engine has only the page's document to look in.
+    /// </remarks>
+    private static uint DocumentOf(BrowserPage page, JsonNode? parameters) =>
+        parameters.Get("nodeId").AsU64() is null
+        && parameters.Get("backendNodeId").AsU64() is null
+        && parameters.Get("objectId").AsString() is { } objectId
+            ? page.FrameIdOfObject(objectId)
+            : 0;
+
+    /// <summary>
+    /// Chromium's <c>Node.frameId</c> on an iframe element that owns a live child frame,
+    /// which is how Playwright's and Puppeteer's <c>contentFrame()</c> find the frame.
+    /// </summary>
+    private static void AddContentFrameId(BrowserPage page, uint document, JsonNode? node)
+    {
+        if (page.Frames.Count == 0
+            || node is not JsonObject value
+            || value["localName"]?.GetValue<string>() is not ("iframe" or "frame")
+            || value["backendNodeId"]?.GetValue<ulong>() is not { } nid)
+        {
+            return;
+        }
+
+        double? child = page.EvaluateHostIn(
+            document,
+            $"__obscura_host.frameIdOf(__obscura_host.dom.wrap({nid.ToString(CultureInfo.InvariantCulture)}))").AsF64();
+        if (child is { } id and > 0 && page.FrameById((uint)id) is not null)
+        {
+            value["frameId"] = Page.ChildFrameId(page.FrameId, (uint)id);
+        }
+    }
+
+    /// <summary>
+    /// A box a frame realm measured, moved into the page's viewport: CDP quads are in the
+    /// main frame's coordinates. The page's own boxes pass through unchanged.
+    /// </summary>
+    private static List<double> ToPageCoordinates(BrowserPage page, uint document, List<double> numbers, int points)
+    {
+        if (document == 0 || page.FrameViewportOffset(document) is not { } offset)
+        {
+            return numbers;
+        }
+
+        for (int i = 0; i < points * 2 && i < numbers.Count; i += 2)
+        {
+            numbers[i] += offset.X;
+            numbers[i + 1] += offset.Y;
+        }
+
+        return numbers;
+    }
 
     /// <summary>Rust's <c>str::to_ascii_uppercase</c>: non-ASCII is left alone.</summary>
     private static string AsciiUpper(string value)
@@ -531,9 +637,7 @@ public static class Dom
 
         if (parameters.Get("objectId").AsString() is { } objectId)
         {
-            string code =
-                $"(function() {{ var o = globalThis.__obscura_objects && globalThis.__obscura_objects[{CdpUtil.ObjectIdLiteral(objectId)}]; "
-                + "return (o && typeof o._nid === 'number') ? o._nid : -1; })()";
+            string code = $"__obscura_cdp.nidOf({CdpUtil.ObjectIdLiteral(objectId)})";
             double? result = page.EvaluateInObjectRealm(objectId, code).AsF64();
             long resolved = result is { } value ? (long)value : -1L;
             if (resolved < 0)

@@ -24,12 +24,12 @@ internal static class ImplicitGrid
         var (colMin, colMax, colMaxSpan, rowMin, rowMax, rowMaxSpan) =
             GetKnownChildPositions(childStylesIter, explicitColCount, explicitRowCount, direction);
 
-        ushort negativeImplicitInlineTracks = colMin.ImpliedNegativeImplicitTracks();
+        int negativeImplicitInlineTracks = colMin.ImpliedNegativeImplicitTracks();
         ushort explicitInlineTracks = explicitColCount;
-        ushort positiveImplicitInlineTracks = colMax.ImpliedPositiveImplicitTracks(explicitColCount);
-        ushort negativeImplicitBlockTracks = rowMin.ImpliedNegativeImplicitTracks();
+        int positiveImplicitInlineTracks = colMax.ImpliedPositiveImplicitTracks(explicitColCount);
+        int negativeImplicitBlockTracks = rowMin.ImpliedNegativeImplicitTracks();
         ushort explicitBlockTracks = explicitRowCount;
-        ushort positiveImplicitBlockTracks = rowMax.ImpliedPositiveImplicitTracks(explicitRowCount);
+        int positiveImplicitBlockTracks = rowMax.ImpliedPositiveImplicitTracks(explicitRowCount);
 
         // In each axis, adjust the positive track estimate if any items have a span that does not fit
         // within the total number of tracks in the estimate.
@@ -38,14 +38,14 @@ internal static class ImplicitGrid
         if (totInlineTracks < colMaxSpan)
         {
             positiveImplicitInlineTracks =
-                (ushort)(colMaxSpan - explicitInlineTracks - negativeImplicitInlineTracks);
+                colMaxSpan - explicitInlineTracks - negativeImplicitInlineTracks;
         }
 
         int totBlockTracks = negativeImplicitBlockTracks + explicitBlockTracks + positiveImplicitBlockTracks;
         if (totBlockTracks < rowMaxSpan)
         {
             positiveImplicitBlockTracks =
-                (ushort)(rowMaxSpan - explicitBlockTracks - negativeImplicitBlockTracks);
+                rowMaxSpan - explicitBlockTracks - negativeImplicitBlockTracks;
         }
 
         // Deviation from taffy: the estimate sizes the occupancy matrix, so it is held to the
@@ -97,9 +97,9 @@ internal static class ImplicitGrid
             if (direction.IsRtl()
                 && (childColMin != new OriginZeroLine(0) || childColMax != new OriginZeroLine(0)))
             {
-                short explicitColEndLine = (short)explicitColCount;
-                var mirroredMin = new OriginZeroLine((short)(explicitColEndLine - childColMax.Value));
-                var mirroredMax = new OriginZeroLine((short)(explicitColEndLine - childColMin.Value));
+                int explicitColEndLine = explicitColCount;
+                var mirroredMin = new OriginZeroLine(explicitColEndLine - childColMax.Value);
+                var mirroredMax = new OriginZeroLine(explicitColEndLine - childColMin.Value);
                 childColMin = mirroredMin;
                 childColMax = mirroredMax;
             }
@@ -152,9 +152,13 @@ internal static class ImplicitGrid
         }
         else if (endIsLine)
         {
+            // Deviation from taffy, whose (Auto, Line) arm returns the end line itself: the item
+            // occupies the track before it, so the estimate missed one negative implicit track
+            // (grid-row: auto / 1), and auto-placement then started a track late (Chromium
+            // counts every definite line into the implicit grid before placing).
             min = start.Kind == GenericGridPlacementKind.Span
                 ? end.LineValue - start.SpanValue
-                : end.LineValue;
+                : end.LineValue - 1;
         }
         else
         {
@@ -165,14 +169,14 @@ internal static class ImplicitGrid
         if (startIsLine && endIsLine)
         {
             max = start.LineValue == end.LineValue
-                ? start.LineValue + (ushort)1
+                ? start.LineValue + 1
                 : OriginZeroLine.Max(start.LineValue, end.LineValue);
         }
         else if (startIsLine)
         {
             max = end.Kind == GenericGridPlacementKind.Span
                 ? start.LineValue + end.SpanValue
-                : start.LineValue + (ushort)1;
+                : start.LineValue + 1;
         }
         else if (endIsLine)
         {

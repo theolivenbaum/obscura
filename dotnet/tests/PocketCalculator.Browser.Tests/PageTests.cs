@@ -1135,7 +1135,7 @@ public sealed class PageTests
         Assert.Equal(
             1.0,
             PageFixtures.AsDouble(
-                page.Js!.Evaluate("Object.keys(globalThis.__obscura_frameObjects).length")));
+                page.Js!.EvaluateHost("__obscura_host.frameRegistrySize()[2]")));
     }
 
     /// <summary>
@@ -1157,10 +1157,8 @@ public sealed class PageTests
         Assert.Empty(page.Frames);
         Assert.Equal(
             0.0,
-            PageFixtures.AsDouble(page.Js!.Evaluate(
-                "Object.keys(globalThis.__obscura_frameObjects).length"
-                + " + Object.keys(globalThis.__obscura_frameWindows).length"
-                + " + Object.keys(globalThis.__obscura_frameElements).length")));
+            PageFixtures.AsDouble(page.Js!.EvaluateHost(
+                "(function (s) { return s[0] + s[1] + s[2]; })(__obscura_host.frameRegistrySize())")));
     }
 
     [Fact]
@@ -1259,9 +1257,9 @@ public sealed class PageTests
         page.Dom = HtmlParsing.ParseHtml(
             "<html><head></head><body><script id=old></script></body></html>");
         page.InitJs();
-        page.Js!.Evaluate(
-            "var setup = true; const old = document.getElementById('old');"
-            + " globalThis.__markParserScripts([old._nid]); return old._nid;");
+        page.Js!.Evaluate("var setup = true; document.getElementById('old')._nid");
+        page.Js!.ExecuteHostScript(
+            "mark", "__obscura_host.vars.__markParserScripts([document.getElementById('old')._nid]);");
         page.SuspendJs();
 
         page.Url = UrlRecord.Parse("http://example.com/new.html")!;
@@ -1656,10 +1654,10 @@ public sealed class PageTests
             "load-delayer-deadline",
             "http://127.0.0.1:9",
             "<html><head></head><body></body></html>");
+        page.Js!.SetDocumentReadyState("loading");
         page.Js!.ExecuteScript(
             "install-load-delayer",
-            "globalThis.__documentReadyState__ = 'loading'; "
-            + "const script = document.createElement('script'); "
+            "const script = document.createElement('script'); "
             + $"script.src = '{server.Origin}/slow-dynamic.js'; "
             + "document.head.appendChild(script);");
         Assert.True(page.Js!.HasPendingLoadDelayingScripts());
@@ -1697,10 +1695,10 @@ public sealed class PageTests
         // The throw is deferred through a timer so it lands on a pump tick. Thrown
         // during the installing script's own microtask drain it would clear the
         // pending-script bookkeeping before the fetch even starts.
+        page.Js!.SetDocumentReadyState("loading");
         page.Js!.ExecuteScript(
             "install-load-delayer",
-            "globalThis.__documentReadyState__ = 'loading'; "
-            + "const script = document.createElement('script'); "
+            "const script = document.createElement('script'); "
             + $"script.src = '{server.Origin}/slow-dynamic.js'; "
             + "document.head.appendChild(script); "
             + "setTimeout(() => { "
@@ -1744,10 +1742,10 @@ public sealed class PageTests
             $"post-load enhancement must not extend navigation; elapsed={navigationElapsed}");
         PageFixtures.AssertJson(
             """["complete", false, true, false]""",
-            page.Js!.Evaluate(
+            page.Js!.EvaluateHost(
                 "[document.readyState, globalThis.__postLoadDynamicRan === true,"
-                + " globalThis.__obscura_hasPendingDynamicScripts(),"
-                + " globalThis.__obscura_hasPendingLoadDelayingScripts()]"));
+                + " __obscura_host.vars.__obscura_hasPendingDynamicScripts(),"
+                + " __obscura_host.vars.__obscura_hasPendingLoadDelayingScripts()]"));
 
         await page.SettleForDurationAsync(700);
 

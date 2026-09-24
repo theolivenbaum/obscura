@@ -132,7 +132,8 @@ public sealed class FormSubmitMethodBypassesListener
         using (owned)
         {
             // Point the CDP click resolver at the submit button explicitly so the test does
-            // not depend on layout coordinates.
+            // not depend on layout coordinates: measuring an element makes it the target a
+            // click that hits nothing falls back to.
             await CoreCdp.CdpAsync(
                 ctx,
                 2,
@@ -140,7 +141,7 @@ public sealed class FormSubmitMethodBypassesListener
                 new JsonObject
                 {
                     ["expression"] =
-                        "globalThis.__obscura_click_target = document.getElementById('b')",
+                        "document.getElementById('b').getBoundingClientRect(), 1",
                 },
                 session);
 

@@ -116,8 +116,42 @@ public sealed class CdpContext
 
     public Dictionary<string, BrowserContext> BrowserContexts { get; } = new(StringComparer.Ordinal);
 
-    /// <summary>(identifier, source) pairs, in insertion order.</summary>
-    public List<(string Identifier, string Source)> PreloadScripts { get; } = [];
+    /// <summary>
+    /// (identifier, source, owner) entries, in insertion order. The owner is the page id of
+    /// the session that registered the script, or empty for one registered without a page,
+    /// which every page runs.
+    /// </summary>
+    /// <remarks>
+    /// Port fix: Chromium scopes <c>Page.addScriptToEvaluateOnNewDocument</c> and
+    /// <c>Runtime.addBinding</c> to the target they were sent to. Kept per connection, a
+    /// Playwright or Puppeteer client opening several pages ran every page's init scripts
+    /// in every page, once per page that registered them, and kept them after the page
+    /// closed.
+    /// </remarks>
+    public List<(string Identifier, string Source, string Owner)> PreloadScripts { get; } = [];
+
+    /// <summary>The page id a script registered by <paramref name="sessionId"/> belongs to; empty for none.</summary>
+    public string PreloadOwner(string? sessionId) =>
+        sessionId is not null && Sessions.TryGetValue(sessionId, out string? pageId) ? pageId : string.Empty;
+
+    /// <summary>Whether an entry registered for <paramref name="owner"/> runs in page <paramref name="pageId"/>.</summary>
+    public static bool PreloadAppliesTo(string owner, string? pageId) =>
+        owner.Length == 0 || string.Equals(owner, pageId, StringComparison.Ordinal);
+
+    /// <summary>The new-document sources page <paramref name="pageId"/> runs, in registration order.</summary>
+    public List<string> PreloadSourcesFor(string? pageId)
+    {
+        List<string> sources = [];
+        foreach (var (_, source, owner) in PreloadScripts)
+        {
+            if (PreloadAppliesTo(owner, pageId))
+            {
+                sources.Add(source);
+            }
+        }
+
+        return sources;
+    }
 
     public uint PreloadCounter { get; set; }
 
@@ -131,15 +165,15 @@ public sealed class CdpContext
     /// Port addition (SECURITY.md M6). The Rust engine files a <c>worldName</c> script
     /// with the page's own, so it ran beside page script.
     /// </remarks>
-    public List<(string Identifier, string WorldName, string Source)> WorldPreloadScripts { get; } = [];
+    public List<(string Identifier, string WorldName, string Source, string Owner)> WorldPreloadScripts { get; } = [];
 
-    /// <summary>The init scripts of the world named <paramref name="worldName"/>.</summary>
-    public IReadOnlyList<string> WorldPreloadSources(string worldName)
+    /// <summary>The init scripts of the world named <paramref name="worldName"/> in page <paramref name="pageId"/>.</summary>
+    public IReadOnlyList<string> WorldPreloadSources(string worldName, string? pageId)
     {
         List<string> sources = [];
-        foreach (var (_, world, source) in WorldPreloadScripts)
+        foreach (var (_, world, source, owner) in WorldPreloadScripts)
         {
-            if (string.Equals(world, worldName, StringComparison.Ordinal))
+            if (string.Equals(world, worldName, StringComparison.Ordinal) && PreloadAppliesTo(owner, pageId))
             {
                 sources.Add(source);
             }
@@ -153,21 +187,87 @@ public sealed class CdpContext
     /// null for the page realm.
     /// </summary>
     /// <remarks>
-    /// Only the main frame's worlds are realms of their own: a child frame's
-    /// commands run in the page realm, isolated or not, as they did before.
+    /// A child frame's contexts run in that frame: its default context in the frame's own
+    /// realm, an isolated one in a world over the frame's document (port addition,
+    /// SECURITY.md M6; before, every child-frame command ran in the page realm).
     /// </remarks>
     public IsolatedWorldTarget? WorldTargetFor(ExecutionContextRecord? context, Page page)
     {
         ArgumentNullException.ThrowIfNull(page);
-        if (context is null
-            || context.IsDefault
-            || context.Id <= 1
-            || !string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal))
+        if (context is null || context.Id <= 1)
         {
             return null;
         }
 
-        return new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName));
+        if (string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal))
+        {
+            return context.IsDefault
+                ? null
+                : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName, page.Id));
+        }
+
+        if (Domains.Page.ChildFrameNumber(page.FrameId, context.FrameId) is not { } frameId)
+        {
+            return null;
+        }
+
+        return context.IsDefault
+            ? IsolatedWorldTarget.ForFrameMainWorld(context.Id, frameId)
+            : new IsolatedWorldTarget(context.Id, context.WorldName, WorldPreloadSources(context.WorldName, page.Id), frameId);
+    }
+
+    /// <summary>
+    /// The world names a new document gets a context for: every name
+    /// <c>Page.addScriptToEvaluateOnNewDocument</c> or <c>Runtime.addBinding</c> registered
+    /// a world script under, in first-registration order.
+    /// </summary>
+    public List<string> NewDocumentWorldNames(string? pageId)
+    {
+        List<string> names = [];
+        foreach (var (_, world, _, owner) in WorldPreloadScripts)
+        {
+            if (world.Length != 0 && PreloadAppliesTo(owner, pageId) && !names.Contains(world, StringComparer.Ordinal))
+            {
+                names.Add(world);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Gives a child frame that has just been announced its execution contexts: the
+    /// default one and one per <see cref="NewDocumentWorldNames"/>, as Chromium creates
+    /// them on the frame's new document. Existing ones are kept.
+    /// </summary>
+    internal List<ExecutionContextRecord> CreateFrameContexts(string pageId, string frameId, string origin)
+    {
+        List<ExecutionContextRecord> created = [];
+        bool hasDefault = false;
+        foreach (var context in ContextsForPage(pageId))
+        {
+            if (context.IsDefault && string.Equals(context.FrameId, frameId, StringComparison.Ordinal))
+            {
+                hasDefault = true;
+                break;
+            }
+        }
+
+        if (!hasDefault)
+        {
+            created.Add(AllocateContext(pageId, frameId, origin, string.Empty, true));
+        }
+
+        foreach (var world in NewDocumentWorldNames(pageId))
+        {
+            (ExecutionContextRecord context, bool fresh) = CreateIsolatedContext(pageId, frameId, origin, world, false);
+            if (fresh)
+            {
+                created.Add(context);
+            }
+        }
+
+        return created;
     }
 
     /// <summary>
@@ -485,6 +585,9 @@ public sealed class CdpContext
 
         CurrentLoaderIds.Remove(id);
         AnnouncedFrames.Remove(id);
+        // A closed page's init scripts and bindings go with it, as its target's do in Chromium.
+        PreloadScripts.RemoveAll(entry => string.Equals(entry.Owner, id, StringComparison.Ordinal));
+        WorldPreloadScripts.RemoveAll(entry => string.Equals(entry.Owner, id, StringComparison.Ordinal));
         foreach (var sessionId in removedSessions)
         {
             Screencasts.Remove(sessionId);
@@ -563,7 +666,7 @@ public sealed class CdpContext
     {
         foreach (var context in ContextsForPage(pageId))
         {
-            if (context.IsDefault)
+            if (context.IsDefault && !IsChildFrameContext(context))
             {
                 return context;
             }
@@ -592,6 +695,10 @@ public sealed class CdpContext
             }
         }
 
+        // The old document's child frames went with it, and so did their contexts: the new
+        // document's frames are announced afresh, with contexts of their own, even where
+        // a realm id repeats.
+        AnnouncedFrames.Remove(pageId);
         List<ExecutionContextRecord> contexts =
             [AllocateContext(pageId, frameId, origin, string.Empty, true)];
         List<string> worlds = [.. IsolatedWorlds];
@@ -687,11 +794,12 @@ public sealed class CdpContext
         return (AllocateContext(pageId, frameId, origin, worldName, false), true);
     }
 
-    public long? DefaultContextId(string pageId)
+    /// <summary>The default execution context of frame <paramref name="frameId"/> of the page, if it has one.</summary>
+    internal long? FrameDefaultContextId(string pageId, string frameId)
     {
         foreach (var context in ContextsForPage(pageId))
         {
-            if (context.IsDefault)
+            if (context.IsDefault && string.Equals(context.FrameId, frameId, StringComparison.Ordinal))
             {
                 return context.Id;
             }
@@ -699,6 +807,24 @@ public sealed class CdpContext
 
         return null;
     }
+
+    public long? DefaultContextId(string pageId)
+    {
+        foreach (var context in ContextsForPage(pageId))
+        {
+            if (context.IsDefault && !IsChildFrameContext(context))
+            {
+                return context.Id;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether a context belongs to one of its page's child frames rather than the main frame.</summary>
+    private bool IsChildFrameContext(ExecutionContextRecord context) =>
+        GetPage(context.PageId) is { } page
+        && !string.Equals(context.FrameId, page.FrameId, StringComparison.Ordinal);
 
     internal List<ExecutionContextRecord> RemoveFrameContexts(string pageId, string frameId)
     {

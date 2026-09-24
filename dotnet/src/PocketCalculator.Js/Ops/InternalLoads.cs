@@ -1,3 +1,5 @@
+using PocketCalculator.Net;
+
 namespace PocketCalculator.Js.Ops;
 
 /// <summary>
@@ -18,7 +20,8 @@ public sealed record InternalLoad(
     string RequestUrl,
     string FinalUrl,
     string Body,
-    bool Tainted);
+    bool Tainted,
+    ReferrerPolicy? ReferrerPolicyHeader = null);
 
 /// <summary>
 /// The host-side store of <see cref="InternalLoad"/> bodies, per document.

@@ -25,7 +25,7 @@ public static class Lp
             return DomainResult.Err("No page");
         }
 
-        var result = page.Evaluate(MarkdownScript.HtmlToMarkdown);
+        var result = page.EvaluateHost(MarkdownScript.HtmlToMarkdown);
         var markdown = result.AsString() ?? string.Empty;
         return DomainResult.Ok(new JsonObject { ["markdown"] = markdown });
     }

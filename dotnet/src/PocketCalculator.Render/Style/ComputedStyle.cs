@@ -399,6 +399,33 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>apply_declarations_with_locked_color_scheme</c>.</summary>
     public static void ApplyDeclarationsWithLockedColorScheme(LayoutStyle style, string css)
     {
+        if (css.Length == 0)
+        {
+            return;
+        }
+
+        foreach ((string name, string value) in SplitDeclarationPairs(css))
+        {
+            if (name != "color-scheme")
+            {
+                ApplyValue(style, name, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A declaration block as trimmed <c>(lower-cased name, value)</c> pairs, memoized by
+    /// content: the cascade applies the same rule bodies to every element they match, and
+    /// splitting them again for each one was a large share of what the cascade allocated.
+    /// </summary>
+    private static (string Name, string Value)[] SplitDeclarationPairs(string css)
+    {
+        if (DeclarationPairs.TryGetValue(css, out (string Name, string Value)[]? cached))
+        {
+            return cached;
+        }
+
+        List<(string Name, string Value)> pairs = [];
         foreach (string raw in CssDeclarations.Split(css))
         {
             string declaration = raw.Trim();
@@ -413,13 +440,29 @@ public static partial class ComputedStyle
                 continue;
             }
 
-            string name = CssText.AsciiLower(declaration[..separator].Trim());
-            if (name != "color-scheme")
-            {
-                ApplyValue(style, name, declaration[(separator + 1)..].Trim());
-            }
+            pairs.Add((
+                CssText.AsciiLower(declaration[..separator].Trim()),
+                declaration[(separator + 1)..].Trim()));
         }
+
+        (string Name, string Value)[] result = [.. pairs];
+
+        // Bounded, so a page whose every element carries a distinct inline style cannot grow
+        // it without limit; past the bound blocks are split as before.
+        if (css.Length <= MaxMemoizedDeclarationLength && DeclarationPairs.Count < MaxMemoizedDeclarations)
+        {
+            DeclarationPairs.TryAdd(css, result);
+        }
+
+        return result;
     }
+
+    private const int MaxMemoizedDeclarations = 4096;
+
+    private const int MaxMemoizedDeclarationLength = 1024;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Name, string Value)[]>
+        DeclarationPairs = new(StringComparer.Ordinal);
 
     /// <summary>Rust <c>apply_animation_declarations</c>.</summary>
     public static void ApplyAnimationDeclarations(LayoutStyle style, string css)
@@ -2749,6 +2792,7 @@ public static partial class ComputedStyle
 
                 style.GridTemplateColumnsSubgrid = IsSubgridTrackList(value);
                 style.GridTemplateColumns = tracks;
+                style.GridTemplateColumnsText = value.Trim();
                 GridCalcBuckets(style)[0] = calcExpressions;
                 style.GridColLineNames = names.Count != 0 ? BuildLineMap(names) : null;
                 return true;
@@ -2762,6 +2806,7 @@ public static partial class ComputedStyle
                 }
 
                 style.GridTemplateRows = tracks;
+                style.GridTemplateRowsText = value.Trim();
                 GridCalcBuckets(style)[1] = calcExpressions;
                 style.GridRowLineNames = names.Count != 0 ? BuildLineMap(names) : null;
                 return true;

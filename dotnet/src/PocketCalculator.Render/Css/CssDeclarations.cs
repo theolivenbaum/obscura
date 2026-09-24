@@ -150,6 +150,13 @@ public readonly record struct DeclarationStreamFlags(
 {
     public static DeclarationStreamFlags Compute(string css)
     {
+        // Most elements have no inline style and no shadow-scope declarations, and an empty
+        // stream sets no flag; skip the split's allocation for them.
+        if (css.Length == 0)
+        {
+            return default;
+        }
+
         var hasCustomProperties = false;
         var hasVar = false;
         var hasColorScheme = false;

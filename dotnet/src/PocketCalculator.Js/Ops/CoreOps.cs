@@ -221,7 +221,9 @@ public static class CoreOps
                 return string.Empty;
             }
 
-            return jar.GetJsVisibleCookies(url);
+            // A frame reads in its own cookie context: a cross-site frame sees SameSite=None
+            // cookies only, and partitioned ones of its partition (port addition, CHIPS).
+            return jar.GetJsVisibleCookies(url, StateHelpers.DocumentCookieAccess(state, url));
         },
         string.Empty);
 
@@ -236,8 +238,64 @@ public static class CoreOps
                 return;
             }
 
-            jar.SetCookieFromJs(cookieStr, url);
+            jar.SetCookieFromJs(cookieStr, url, StateHelpers.DocumentCookieAccess(state, url));
         });
+
+    /// <summary>
+    /// <c>op_history_url</c>: records a History API move of the realm's document URL, or
+    /// clears it when <paramref name="url"/> is empty.
+    /// </summary>
+    /// <returns>False, and nothing recorded, when the document may not take that URL.</returns>
+    /// <remarks>
+    /// Port addition (SECURITY.md L9). The check is HTML's "can have its URL rewritten",
+    /// against the URL the host committed rather than anything the page reports: the same
+    /// scheme, credentials, host and port, and outside http(s) the same path, and the same
+    /// query too unless the scheme is <c>file</c>. It is the check that makes Chromium
+    /// throw <c>SecurityError</c> from <c>pushState</c>.
+    /// </remarks>
+    public static bool OpHistoryUrl(PocketCalculatorState state, string url) => OpGuard.Run(
+        "op_history_url",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (url.Length == 0)
+            {
+                state.HistoryUrl = null;
+                return true;
+            }
+
+            if (Url.UrlRecord.Parse(url) is not { } target
+                || Url.UrlRecord.Parse(state.Url) is not { } document
+                || !CanRewriteUrl(document, target))
+            {
+                return false;
+            }
+
+            state.HistoryUrl = target.Href;
+            return true;
+        },
+        false);
+
+    /// <summary>HTML's "can have its URL rewritten".</summary>
+    internal static bool CanRewriteUrl(Url.UrlRecord document, Url.UrlRecord target)
+    {
+        if (!string.Equals(document.Scheme, target.Scheme, StringComparison.Ordinal)
+            || !string.Equals(document.Username, target.Username, StringComparison.Ordinal)
+            || !string.Equals(document.Password, target.Password, StringComparison.Ordinal)
+            || !string.Equals(document.HostStr, target.HostStr, StringComparison.Ordinal)
+            || document.PortNumber != target.PortNumber)
+        {
+            return false;
+        }
+
+        if (target.Scheme is "http" or "https")
+        {
+            return true;
+        }
+
+        return string.Equals(document.Path, target.Path, StringComparison.Ordinal)
+            && (target.Scheme == "file" || string.Equals(document.Query, target.Query, StringComparison.Ordinal));
+    }
 
     /// <summary>
     /// <c>op_navigate</c>. A frame that navigates itself must not move the top
@@ -254,10 +312,14 @@ public static class CoreOps
             // 4778192, #940).
             // The initiator is recorded with it (deviation: upstream queues only the
             // target), so the request is judged against the document that asked.
+            var policy = state.NextNavigationReferrerPolicy ?? StateHelpers.DocumentReferrerPolicy(state);
+            state.NextNavigationReferrerPolicy = null;
             state.PendingNavigation = new PendingNavigation(url, method, body)
             {
-                Initiator = state.Url,
+                // A srcdoc document initiates as its parent (port addition).
+                Initiator = state.ReferrerSourceUrl ?? state.Url,
                 UserActivated = state.HasTransientActivation,
+                ReferrerPolicy = policy,
             };
         });
 
@@ -343,7 +405,7 @@ public static class CoreOps
         string html,
         ulong viewportWidth,
         ulong viewportHeight) =>
-        QueueFrameDocument(page, parentFrameId, url, html, viewportWidth, viewportHeight, opaqueOrigin: false);
+        QueueFrameDocument(page, parentFrameId, url, html, viewportWidth, viewportHeight, opaqueOrigin: false, referrerPolicyHeader: null);
 
     /// <summary>
     /// <c>op_frame_document_from_load</c>. <see cref="OpFrameDocumentReady"/> for a document
@@ -377,7 +439,8 @@ public static class CoreOps
             }
 
             return QueueFrameDocument(
-                page, document.FrameId, load.FinalUrl, load.Body, viewportWidth, viewportHeight, sandboxed);
+                page, document.FrameId, load.FinalUrl, load.Body, viewportWidth, viewportHeight, sandboxed,
+                load.ReferrerPolicyHeader);
         },
         0u);
 
@@ -388,7 +451,8 @@ public static class CoreOps
         string html,
         ulong viewportWidth,
         ulong viewportHeight,
-        bool opaqueOrigin) => OpGuard.Run(
+        bool opaqueOrigin,
+        ReferrerPolicy? referrerPolicyHeader) => OpGuard.Run(
         "op_frame_document_ready",
         () =>
         {
@@ -417,6 +481,7 @@ public static class CoreOps
                 ViewportHeight = viewportHeight,
                 ParentFrameId = parentFrameId,
                 OpaqueOrigin = opaqueOrigin,
+                ReferrerPolicyHeader = referrerPolicyHeader,
             });
             return frameId;
         },
@@ -458,18 +523,32 @@ public static class CoreOps
     /// message queue, dropping the newest call over the cap.
     /// </remarks>
     public static void OpBindingCalled(PocketCalculatorState page, string name, string payload) =>
+        OpBindingCalled(page, 0, name, payload);
+
+    /// <summary>
+    /// <see cref="OpBindingCalled(PocketCalculatorState, string, string)"/> from the realm of
+    /// child frame <paramref name="frameId"/> (0 for the page's own realm).
+    /// </summary>
+    public static void OpBindingCalled(PocketCalculatorState page, uint frameId, string name, string payload) =>
         OpGuard.Run("op_binding_called", () =>
         {
             ArgumentNullException.ThrowIfNull(page);
             long size = (long)name.Length + payload.Length;
-            if (page.PendingBindingCalls.Count >= BindingQueueEntryLimit()
+            if (page.PendingBindingCalls.Count + page.PendingFrameBindingCalls.Count >= BindingQueueEntryLimit()
                 || page.PendingBindingCallBytes + size > BindingQueueByteLimit())
             {
                 return;
             }
 
             page.PendingBindingCallBytes += size;
-            page.PendingBindingCalls.Add((name, payload));
+            if (frameId == 0)
+            {
+                page.PendingBindingCalls.Add((name, payload));
+            }
+            else
+            {
+                page.PendingFrameBindingCalls.Add((frameId, name, payload));
+            }
         });
 
     internal static int BindingQueueEntryLimit() =>

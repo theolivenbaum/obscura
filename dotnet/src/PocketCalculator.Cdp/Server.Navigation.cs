@@ -43,6 +43,7 @@ public static partial class CdpServer
         if (parsed is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}");
+            replyTx.TryWrite(ServerSupport.UnansweredMarker);
             return;
         }
 
@@ -129,11 +130,7 @@ public static partial class CdpServer
         var navBody = req.Params.Get("__body").AsStringOr(string.Empty);
         var navInitiator = Domains.Page.PageInitiator(url, navMethod, navBody, req.Params);
 
-        List<string> preloadScripts = [];
-        foreach (var (_, source) in ctx.PreloadScripts)
-        {
-            preloadScripts.Add(source);
-        }
+        List<string> preloadScripts = ctx.PreloadSourcesFor(page.Id);
 
         if (ctx.InterceptSink is { } sink)
         {
@@ -414,6 +411,7 @@ public static partial class CdpServer
         if (req is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}: {ServerSupport.Utf8Preview(text, 200)}");
+            replyTx.TryWrite(ServerSupport.UnansweredMarker);
             return;
         }
 

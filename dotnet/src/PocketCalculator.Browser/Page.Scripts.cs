@@ -33,6 +33,9 @@ public sealed partial class Page
 
         /// <summary>Document base URL at this element's parser encounter point.</summary>
         internal required string BaseUrl { get; init; }
+
+        /// <summary>The element's valid <c>referrerpolicy</c>, or null (port addition).</summary>
+        internal ReferrerPolicy? ReferrerPolicy { get; init; }
     }
 
     private abstract record ScheduledScript
@@ -148,10 +151,7 @@ public sealed partial class Page
         // those nodes without appendChild executing them a second time.
         if (Js is { } marker)
         {
-            string ids = string.Join(
-                ',',
-                allScripts.Select(script => script.Nid.ToString(CultureInfo.InvariantCulture)));
-            TryExecute(marker, "<parser-scripts>", $"globalThis.__markParserScripts([{ids}]);");
+            marker.MarkParserScripts(allScripts.Select(script => script.Nid));
         }
 
         List<(int Index, string Url)> fetchTasks = [];
@@ -187,6 +187,9 @@ public sealed partial class Page
         }
 
         UrlRecord scriptInitiator = Url ?? PageUrl.TryParse("about:blank")!;
+        // The document's referrer policy (header, then <meta name=referrer>), for scripts
+        // without their own referrerpolicy. Port addition.
+        ReferrerPolicy documentReferrerPolicy = Js?.DocumentReferrerPolicy ?? ReferrerPolicies.Default;
         var fetchFactories =
             new List<Func<Task<(int Index, string Url, Response Response)?>>>(fetchTasks.Count);
         foreach ((int index, string url) in fetchTasks)
@@ -223,6 +226,7 @@ public sealed partial class Page
 
                 ResourceRequest request =
                     ResourceRequest.Subresource(ResourceType.Script, NetUrl.From(scriptInitiator));
+                request.ReferrerPolicy = allScripts[index].ReferrerPolicy ?? documentReferrerPolicy;
                 double startedAt = PerformanceOps.UnixMilliseconds();
                 try
                 {
@@ -294,7 +298,7 @@ public sealed partial class Page
         // listeners instead of calling their callback immediately.
         if (Js is { } readyState)
         {
-            TryExecute(readyState, "<ready-state>", "globalThis.__documentReadyState__ = 'loading';");
+            readyState.SetDocumentReadyState("loading");
         }
 
         // CDP `Page.addScriptToEvaluateOnNewDocument` contract: preload sources must
@@ -306,7 +310,7 @@ public sealed partial class Page
         {
             foreach (string source in preloadSources)
             {
-                preloadRuntime.ExecuteScriptGuarded("<preload>", source);
+                preloadRuntime.ExecutePreloadScript(source);
             }
         }
 
@@ -473,10 +477,7 @@ public sealed partial class Page
         // readyState while they execute.
         if (Js is { } interactive)
         {
-            TryExecute(
-                interactive,
-                "<ready-state-interactive>",
-                "globalThis.__documentReadyState__ = 'interactive';");
+            interactive.RunLifecycle("interactive");
         }
 
         foreach (ScheduledScript scheduled in postParse)
@@ -505,28 +506,14 @@ public sealed partial class Page
             // script elements do not gate it. They do remain in the document's
             // load-event delay set, including scripts inserted by a DOMContentLoaded
             // listener.
-            TryExecute(
-                lifecycle,
-                "<dom-content-loaded>",
-                "try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n"
-                + "try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}");
+            lifecycle.RunLifecycle("DOMContentLoaded");
 
             await DriveLoadDelayingScriptsAsync(lifecycle, scriptDeadline).ConfigureAwait(false);
 
             // readyState becomes complete before the load event. A script inserted by
             // an onload handler is therefore post-load work and remains pending until
             // an explicit caller settle/wait.
-            TryExecute(
-                lifecycle,
-                "<load-event>",
-                "globalThis.__documentReadyState__ = 'complete';\n"
-                + "try {\n"
-                + "  const loadEvent = new Event('load', {bubbles:false,cancelable:false});\n"
-                + "  if (typeof window.onload === 'function') {\n"
-                + "    try { window.onload.call(window, loadEvent); } catch(e) {}\n"
-                + "  }\n"
-                + "  try { window.dispatchEvent(loadEvent); } catch(e) {}\n"
-                + "} catch(e) {}");
+            lifecycle.RunLifecycle("load");
         }
 
         execDisarm.Dispose();
@@ -605,10 +592,7 @@ public sealed partial class Page
                 value.Response.Headers,
                 value.Response.Body,
                 base64Encoded: false);
-            TryExecute(
-                js,
-                "<current-script>",
-                $"globalThis.__currentScriptNid={script.Nid.ToString(CultureInfo.InvariantCulture)};");
+            js.SetCurrentScriptNid(script.Nid);
             // A page script that throws is a page problem, not a navigation failure:
             // the reference logs `Script error (url): ...` and runs the next script.
             // Letting it escape here failed the whole navigation (and therefore
@@ -622,14 +606,11 @@ public sealed partial class Page
                 // Reported to the page through the runtime's uncaught-exception queue.
             }
 
-            TryExecute(js, "<current-script>", "globalThis.__currentScriptNid=0;");
+            js.SetCurrentScriptNid(0);
         }
         else if (script.Inline.Length != 0 && Js is { } inlineJs)
         {
-            TryExecute(
-                inlineJs,
-                "<current-script>",
-                $"globalThis.__currentScriptNid={script.Nid.ToString(CultureInfo.InvariantCulture)};");
+            inlineJs.SetCurrentScriptNid(script.Nid);
             try
             {
                 inlineJs.ExecuteScriptGuarded(script.BaseUrl, script.Inline);
@@ -640,7 +621,7 @@ public sealed partial class Page
                 // must not abort the navigation.
             }
 
-            TryExecute(inlineJs, "<current-script>", "globalThis.__currentScriptNid=0;");
+            inlineJs.SetCurrentScriptNid(0);
         }
     }
 
@@ -716,6 +697,7 @@ public sealed partial class Page
                     Kind = kind,
                     Nid = sid.Raw,
                     BaseUrl = basesAtScript.TryGetValue(sid.Raw, out string? baseUrl) ? baseUrl : documentUrl,
+                    ReferrerPolicy = ReferrerPolicies.ParseAttribute(node.GetAttribute("referrerpolicy")),
                 });
             }
         }

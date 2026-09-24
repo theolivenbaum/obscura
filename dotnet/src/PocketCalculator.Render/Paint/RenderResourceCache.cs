@@ -3,6 +3,7 @@
 using System.Globalization;
 using System.Text;
 using PocketCalculator.Dom;
+using PocketCalculator.Net;
 using NodeId = PocketCalculator.Dom.NodeId;
 
 namespace PocketCalculator.Render;
@@ -826,35 +827,69 @@ public sealed class RenderResourceCache
 /// One shared HTTP agent for all image fetches in the process, with a browser User-Agent and
 /// keep-alive connection pooling.
 /// </summary>
+/// <remarks>
+/// Deviation from paint.rs, whose agent is a bare HTTP client (SECURITY.md, todo.md
+/// "ImageAgent has no SSRF check"): a standalone <c>RenderPaint</c> caller with no page
+/// fetched <c>http://169.254.169.254/</c> or <c>http://127.0.0.1/</c> for any image URL a
+/// document named. The agent now goes through a <see cref="PocketCalculatorHttpClient"/>, so
+/// every request and redirect hop passes <see cref="SsrfGuard.ValidateUrl"/> and the
+/// connect-time resolver check, ambient proxies are ignored, and <c>file:</c> is refused.
+/// <c>POCKETCALCULATOR_ALLOW_PRIVATE_NETWORK=1</c> lifts the guard, as for every other path.
+/// It sends no cookies, as before.
+/// </remarks>
 internal static class ImageAgent
 {
     private const string UserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
-    private static readonly Lazy<HttpClient> Client = new(() =>
+    private static readonly Lazy<PocketCalculatorHttpClient> Client = new(() =>
     {
-        HttpClient client = new()
+        PocketCalculatorHttpClient client = new(new CookieJar(), null, allowPrivateNetwork: false)
         {
             Timeout = TimeSpan.FromSeconds(10),
         };
-        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgent);
+        client.SetUserAgent(UserAgent);
         return client;
     });
 
+    private static readonly ResourceRequest Profile = new()
+    {
+        ResourceType = ResourceType.Image,
+        Mode = RequestMode.NoCors,
+        Credentials = RequestCredentials.Omit,
+        MaxResponseBytes = 64L * 1024 * 1024,
+    };
+
     /// <summary>
     /// Fetch with a bounded timeout, retrying on rate-limit / transient errors with backoff.
+    /// A URL the SSRF guard refuses is not retried.
     /// </summary>
     internal static byte[]? Get(string url)
     {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? target))
+        {
+            return null;
+        }
+
+        try
+        {
+            SsrfGuard.ValidateUrl(target, allowPrivateNetwork: false);
+        }
+        catch (PocketCalculatorNetException)
+        {
+            return null;
+        }
+
         TimeSpan backoff = TimeSpan.FromMilliseconds(200);
         for (int attempt = 0; attempt < 3; attempt++)
         {
             try
             {
-                using HttpRequestMessage request = new(HttpMethod.Get, url);
-                request.Headers.TryAddWithoutValidation("Accept", RenderResourceCache.ImageAccept);
-                using HttpResponseMessage response = Client.Value.Send(request);
-                int code = (int)response.StatusCode;
+                Response response = Client.Value
+                    .FetchResourceWithCallbacksAsync(target, Profile, callbacks: null)
+                    .GetAwaiter()
+                    .GetResult();
+                int code = response.Status;
                 if (code is 429 or 500 or 502 or 503 or 504 && attempt < 2)
                 {
                     Thread.Sleep(backoff);
@@ -862,14 +897,14 @@ internal static class ImageAgent
                     continue;
                 }
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    return null;
-                }
-
-                using MemoryStream buffer = new();
-                response.Content.ReadAsStream().CopyTo(buffer);
-                return buffer.ToArray();
+                return code is >= 200 and <= 299 ? response.Body : null;
+            }
+            catch (PocketCalculatorNetException ex) when (ex.Message.Contains("SSRF", StringComparison.Ordinal)
+                || ex.Message.Contains("not allowed", StringComparison.Ordinal)
+                || ex.Message.Contains("Forbidden URL scheme", StringComparison.Ordinal)
+                || ex.Message.Contains("local resource", StringComparison.Ordinal))
+            {
+                return null;
             }
             catch (Exception) when (attempt < 2)
             {

@@ -221,13 +221,14 @@ public sealed partial class Page
 
     /// <summary>
     /// <see cref="Evaluate"/> in the realm that minted <paramref name="objectId"/>: the page
-    /// realm for its own ids, or the isolated world that made it.
+    /// realm for its own ids, or the isolated world that made it. The expression names that
+    /// realm's CDP store as <c>__obscura_cdp</c>; host-authored code only.
     /// </summary>
     public JsonNode? EvaluateInObjectRealm(string objectId, string expression)
     {
-        if (Js is not { } js || PocketCalculatorJsRuntime.IsolatedWorldKeyOf(objectId) == 0)
+        if (Js is not { } js)
         {
-            return Evaluate(expression);
+            return null;
         }
         try
         {
@@ -258,7 +259,7 @@ public sealed partial class Page
             }
             try
             {
-                world.ExecuteScript("<world-script>", source);
+                world.ExecutePreloadScript(source);
             }
             catch (JsRuntimeException)
             {
@@ -274,6 +275,40 @@ public sealed partial class Page
     public void ReleaseObject(string objectId) => Js?.ReleaseObject(objectId);
 
     public void ReleaseObjectGroup() => Js?.ReleaseObjectGroup();
+
+    /// <summary>
+    /// Runs a new-document entry (a script, or a <see cref="BindingPreload"/> binding) in
+    /// the current document's main realm and in every child frame's, as Chromium does for
+    /// a <c>Runtime.addBinding</c> made after the document loaded. A failure in one realm
+    /// does not stop the others.
+    /// </summary>
+    public void InstallPreloadNow(string source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (Js is not { } js)
+        {
+            return;
+        }
+        try
+        {
+            js.ExecutePreloadScript(source);
+        }
+        catch (JsRuntimeException)
+        {
+            // The same as a failing init script.
+        }
+        foreach (FrameRealm frame in Frames.ToArray())
+        {
+            try
+            {
+                frame.ExecutePreloadScript(source);
+            }
+            catch (JsRuntimeException)
+            {
+                // The same as a failing init script.
+            }
+        }
+    }
 
     public void ExecutePreloadScript(string source)
     {
@@ -343,6 +378,10 @@ public sealed partial class Page
 
     public IReadOnlyList<(string Name, string Payload)> TakePendingBindingCalls() =>
         Js?.TakePendingBindingCalls() ?? [];
+
+    /// <summary>Binding calls made in child frames' realms, with each frame's realm id.</summary>
+    public IReadOnlyList<(uint FrameId, string Name, string Payload)> TakePendingFrameBindingCalls() =>
+        Js?.TakePendingFrameBindingCalls() ?? [];
 
     public IReadOnlyList<RuntimeEvent> TakePendingRuntimeEvents() =>
         Js?.TakePendingRuntimeEvents() ?? [];

@@ -35,6 +35,64 @@ public static partial class CdpServer
             : DefaultMaxMessageBytes;
     }
 
+    /// <summary>The default idle timeout: 30 minutes.</summary>
+    internal static readonly TimeSpan DefaultIdleTimeout = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// How long a connection may sit with no traffic from its client and no command in
+    /// flight before the server closes it: <c>POCKETCALCULATOR_CDP_IDLE_TIMEOUT_MS</c>
+    /// (0 disables), or <see cref="DefaultIdleTimeout"/>.
+    /// </summary>
+    /// <remarks>
+    /// Deviation (SECURITY.md L3): upstream keeps a silent connection, and the page and
+    /// isolate behind it, open for the life of the process, so a client that connected
+    /// and went away without closing held a connection slot and its memory forever.
+    /// Any inbound byte counts as traffic, WebSocket ping frames included, and a
+    /// command still being processed keeps the connection open, so a long evaluation
+    /// or a client that pings is never cut off. Puppeteer and Playwright send no pings
+    /// over CDP, hence the generous default. Chromium has no such timeout.
+    /// </remarks>
+    internal static readonly TimeSpan IdleTimeout = ReadIdleTimeout();
+
+    private static TimeSpan ReadIdleTimeout()
+    {
+        var configured = Environment.GetEnvironmentVariable("POCKETCALCULATOR_CDP_IDLE_TIMEOUT_MS");
+        return long.TryParse(configured, System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out var value)
+            ? TimeSpan.FromMilliseconds(value)
+            : DefaultIdleTimeout;
+    }
+
+    /// <summary>
+    /// Close the connection once <paramref name="activity"/> has been idle for
+    /// <paramref name="timeout"/>, by cancelling its read.
+    /// </summary>
+    private static async Task WatchIdleAsync(
+        ConnectionActivity activity,
+        TimeSpan timeout,
+        CancellationTokenSource closeRead,
+        CancellationToken stop)
+    {
+        var timeoutMs = (long)timeout.TotalMilliseconds;
+        var period = TimeSpan.FromMilliseconds(Math.Clamp(timeoutMs / 4, 10, 15_000));
+        try
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                await Task.Delay(period, stop).ConfigureAwait(false);
+                if (activity.IsIdle(timeoutMs))
+                {
+                    CdpLog.Info($"WS closed: idle for {timeoutMs} ms");
+                    await closeRead.CancelAsync().ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     /// <summary>
     /// Complete the WebSocket upgrade and pump frames between the socket and this
     /// connection's processor.
@@ -56,8 +114,11 @@ public static partial class CdpServer
     internal static async Task HandleConnectionWsAsync(
         Stream stream,
         ChannelWriter<ServerMessage> msgTx,
-        CancellationToken processorStopped)
+        CancellationToken processorStopped,
+        TimeSpan? idleTimeout = null)
     {
+        var activity = new ConnectionActivity(stream);
+        stream = activity;
         var key = await ReadHandshakeAsync(stream).ConfigureAwait(false);
         var accept = ComputeWebSocketAccept(key);
         var response = Encoding.ASCII.GetBytes(
@@ -95,7 +156,15 @@ public static partial class CdpServer
         }
 
         using var sendStop = new CancellationTokenSource();
-        var sendTask = SendLoopAsync(ws, replies.Reader, sendStop.Token);
+        var sendTask = SendLoopAsync(ws, replies.Reader, activity, sendStop.Token);
+
+        // The read ends when the client stops taking its replies (ReplyQueue) or the
+        // connection has been idle too long.
+        using var closeRead = CancellationTokenSource.CreateLinkedTokenSource(replies.Overflowed);
+        var idle = idleTimeout ?? IdleTimeout;
+        var idleTask = idle > TimeSpan.Zero
+            ? WatchIdleAsync(activity, idle, closeRead, sendStop.Token)
+            : Task.CompletedTask;
 
         try
         {
@@ -108,7 +177,7 @@ public static partial class CdpServer
                 {
                     // The overflow token ends the read when this client has stopped
                     // taking its replies (ReplyQueue), which closes the connection.
-                    result = await ws.ReceiveAsync(buffer.AsMemory(), replies.Overflowed)
+                    result = await ws.ReceiveAsync(buffer.AsMemory(), closeRead.Token)
                         .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -175,6 +244,7 @@ public static partial class CdpServer
                     break;
                 }
 
+                activity.CommandReceived();
                 if (ServerSupport.FastPathResponse(text) is { } fast)
                 {
                     replies.Writer.TryWrite(fast);
@@ -199,6 +269,8 @@ public static partial class CdpServer
             catch (OperationCanceledException)
             {
             }
+
+            await idleTask.ConfigureAwait(false);
         }
     }
 
@@ -227,6 +299,7 @@ public static partial class CdpServer
     private static async Task SendLoopAsync(
         WebSocket ws,
         ChannelReader<string> replies,
+        ConnectionActivity activity,
         CancellationToken stop)
     {
         try
@@ -235,7 +308,9 @@ public static partial class CdpServer
             {
                 while (replies.TryRead(out var message))
                 {
-                    if (message.Contains("\"__init\"", StringComparison.Ordinal))
+                    activity.MessageSent(message);
+                    if (ReferenceEquals(message, ServerSupport.UnansweredMarker)
+                        || message.Contains("\"__init\"", StringComparison.Ordinal))
                     {
                         continue;
                     }

@@ -961,6 +961,7 @@ public sealed partial class PreparedRender
             TaffyGridAutoFlow.RowDense => "row dense",
             _ => "column dense",
         };
+        AppendGridStyle(output, id, style, display, isPseudo);
 
         output["transform"] = PaintCssValues.TransformCss(style, rect, RootFontSize, ViewportSize);
         output["transform-origin"] = PaintCssValues.TransformOriginCss(style, rect);
@@ -981,6 +982,47 @@ public sealed partial class PreparedRender
             ? "normal"
             : PseudoContentCss(style, generatedContentPseudo);
         return output;
+    }
+
+    /// <summary>
+    /// The CSS Grid properties. On a grid container with a box, <c>grid-template-columns</c> and
+    /// <c>-rows</c> resolve to the used track sizes (CSSOM's resolved value); elsewhere they
+    /// are the computed, as-specified list. The placement longhands and shorthands are as
+    /// specified, the way Chromium 141 serializes them.
+    /// </summary>
+    private void AppendGridStyle(
+        Dictionary<string, string> output, NodeId id, LayoutStyle style, string display, bool isPseudo)
+    {
+        if (!isPseudo
+            && display is "grid" or "inline-grid"
+            && Layout.GridTracks.TryGetValue(id, out GridTrackSizes? used))
+        {
+            output["grid-template-columns"] = GridCssValues.UsedTrackList(
+                used.Columns, used.NegativeColumns, used.ExplicitColumns, style.GridTemplateColumnsText, style.GridColLineNames);
+            output["grid-template-rows"] = GridCssValues.UsedTrackList(
+                used.Rows, used.NegativeRows, used.ExplicitRows, style.GridTemplateRowsText, style.GridRowLineNames);
+        }
+        else
+        {
+            output["grid-template-columns"] = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateColumnsText, style.GridTemplateColumns);
+            output["grid-template-rows"] = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateRowsText, style.GridTemplateRows);
+        }
+
+        output["grid-template-areas"] = GridCssValues.Areas(style.GridAreas);
+        output["grid-auto-columns"] = GridCssValues.AutoTracks(style.GridAutoColumns);
+        output["grid-auto-rows"] = GridCssValues.AutoTracks(style.GridAutoRows);
+
+        (string columnStart, string columnEnd) = GridCssValues.Sides(style, column: true);
+        (string rowStart, string rowEnd) = GridCssValues.Sides(style, column: false);
+        output["grid-column-start"] = columnStart;
+        output["grid-column-end"] = columnEnd;
+        output["grid-row-start"] = rowStart;
+        output["grid-row-end"] = rowEnd;
+        output["grid-column"] = GridCssValues.LineShorthand(columnStart, columnEnd);
+        output["grid-row"] = GridCssValues.LineShorthand(rowStart, rowEnd);
+        output["grid-area"] = GridCssValues.AreaShorthand(rowStart, columnStart, rowEnd, columnEnd);
     }
 
     /// <summary>

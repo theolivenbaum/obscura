@@ -149,7 +149,47 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Install the owning page's passive on_request/on_response callback
     /// registry so scripted fetch()/XHR observation is page-scoped (#408).
     /// </summary>
-    public void SetCallbacks(CallbackRegistry callbacks) => State.Callbacks = callbacks;
+    public void SetCallbacks(CallbackRegistry callbacks)
+    {
+        State.Callbacks = callbacks;
+        // Network-layer console messages (mixed content) arrive on transport threads;
+        // they queue here and join the console events on the next drain.
+        callbacks.ConsoleSink = EnqueueHostConsole;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Level, string Text, double Timestamp)>
+        _hostConsole = new();
+
+    private void EnqueueHostConsole(string level, string text)
+    {
+        while (_hostConsole.Count >= 1_024)
+        {
+            _hostConsole.TryDequeue(out _);
+        }
+
+        _hostConsole.Enqueue((level, text, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+    }
+
+    private void DrainHostConsole()
+    {
+        while (_hostConsole.TryDequeue(out var entry))
+        {
+            if (!State.RuntimeEventsEnabled)
+            {
+                continue;
+            }
+
+            while (State.PendingRuntimeEvents.Count >= 1_024)
+            {
+                State.PendingRuntimeEvents.Dequeue();
+            }
+
+            State.PendingRuntimeEvents.Enqueue(new RuntimeEvent.Console(new RuntimeConsoleEvent(
+                entry.Level,
+                [new JsonObject { ["type"] = "string", ["value"] = entry.Text }],
+                entry.Timestamp)));
+        }
+    }
 
     /// <summary>
     /// Install the stealth HTTP client so scripted fetch()/XHR is routed
@@ -229,6 +269,22 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     public void SetReferrer(string referrer) => State.Referrer = referrer;
 
+    /// <summary>
+    /// The document's <c>Referrer-Policy</c> header policy (null for none). Port addition.
+    /// </summary>
+    public void SetReferrerPolicyHeader(ReferrerPolicy? policy) => State.ReferrerPolicyHeader = policy;
+
+    /// <summary>The document's effective referrer policy (header, then meta).</summary>
+    public ReferrerPolicy DocumentReferrerPolicy => StateHelpers.DocumentReferrerPolicy(State);
+
+    /// <summary>
+    /// Record that the external sheet <paramref name="sheet"/> references
+    /// <paramref name="urls"/>, so their loads carry it as referrer under
+    /// <paramref name="policy"/> (see <see cref="CssSubresourceReferrers"/>).
+    /// </summary>
+    public void RecordCssSubresourceReferrers(Uri sheet, ReferrerPolicy policy, IEnumerable<string> urls) =>
+        State.CssSubresourceReferrers.Record(State.DocumentGeneration, sheet, policy, urls);
+
     public void SetBlockedUrls(IEnumerable<string> patterns)
     {
         State.BlockedUrls.Clear();
@@ -252,7 +308,16 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         var calls = State.PendingBindingCalls.ToArray();
         State.PendingBindingCalls.Clear();
-        State.PendingBindingCallBytes = 0;
+        State.PendingBindingCallBytes = State.PendingFrameBindingCalls.Count == 0 ? 0 : State.PendingBindingCallBytes;
+        return calls;
+    }
+
+    /// <summary>Binding calls made in child frames' realms, with each frame's id.</summary>
+    public IReadOnlyList<(uint FrameId, string Name, string Payload)> TakePendingFrameBindingCalls()
+    {
+        var calls = State.PendingFrameBindingCalls.ToArray();
+        State.PendingFrameBindingCalls.Clear();
+        State.PendingBindingCallBytes = State.PendingBindingCalls.Count == 0 ? 0 : State.PendingBindingCallBytes;
         return calls;
     }
 
@@ -263,6 +328,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     public IReadOnlyList<RuntimeEvent> TakePendingRuntimeEvents()
     {
+        DrainHostConsole();
         var events = State.PendingRuntimeEvents.ToArray();
         State.PendingRuntimeEvents.Clear();
         foreach (var entry in events)
@@ -280,10 +346,10 @@ public sealed partial class PocketCalculatorJsRuntime
                     continue;
                 }
                 var objectId = node.GetValue<string>();
-                var frameId = ConsoleObjectFrameId(objectId);
-                _objectStore[objectId] = frameId == 0
-                    ? $"globalThis.__obscura_objects['{objectId}']"
-                    : $"globalThis.__obscura_frameObjects[{frameId}]?.window?.__obscura_objects['{objectId}']";
+                // A frame's console handle stays in that frame's realm, which the page
+                // realm cannot reach (FrameRealm.PublishRealmObjects): it reads as
+                // undefined here, as it did through the Rust engine's frame registry.
+                _objectStore[objectId] = CdpScope.Retrieval(objectId);
             }
         }
         return events;
@@ -596,6 +662,12 @@ public sealed partial class PocketCalculatorJsRuntime
             frame.RenderResources.SetSyncLoadingEnabled(false);
         }
     }
+
+    /// <summary>
+    /// The URL the main document moved itself to through the History API, as the host
+    /// checked and recorded it (<c>op_history_url</c>); null while it has not moved.
+    /// </summary>
+    public string? HistoryUrl => State.HistoryUrl;
 
     // -------------------------------------------------------------- render state
 

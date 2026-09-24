@@ -458,7 +458,8 @@ public sealed class OpsTests
         }
 
         Assert.False(FetchOps.IsForbiddenRequestHeader("Authorization", "Bearer x"));
-        Assert.False(FetchOps.IsForbiddenRequestHeader("User-Agent", "ua"));
+        // Chromium drops User-Agent from script requests, though Fetch no longer lists it.
+        Assert.True(FetchOps.IsForbiddenRequestHeader("User-Agent", "ua"));
         Assert.False(FetchOps.IsForbiddenRequestHeader("X-Custom", "1"));
         Assert.False(FetchOps.IsForbiddenRequestHeader("Secret", "1"));
 

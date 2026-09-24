@@ -115,16 +115,23 @@ public sealed class PageFrameContract
             .Params.Get("frame");
         AssertFrameContract(childEventFrame);
 
-        await CoreCdp.CdpAsync(
+        // Aimed at the link's own box, made an inline-block because the port reports an
+        // empty rect for an inline box. The Rust test stubs document.elementFromPoint,
+        // which the port's hit testing no longer consults, as Chromium's does not
+        // (SECURITY.md L10).
+        JsonNode center = await CoreCdp.CdpAsync(
             ctx,
             7,
             "Runtime.evaluate",
             new JsonObject
             {
                 ["expression"] =
-                    "document.elementFromPoint = () => document.getElementById('route')",
+                    "(() => { const a = document.getElementById('route'); a.style.cssText = 'display:inline-block;width:40px;height:20px'; const r = a.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()",
+                ["returnByValue"] = true,
             },
             sessionId);
+        double routeX = center["result"]!["value"]![0].AsF64() ?? 0;
+        double routeY = center["result"]!["value"]![1].AsF64() ?? 0;
         await CoreCdp.CdpAsync(
             ctx,
             8,
@@ -132,8 +139,8 @@ public sealed class PageFrameContract
             new JsonObject
             {
                 ["type"] = "mousePressed",
-                ["x"] = 0,
-                ["y"] = 0,
+                ["x"] = routeX,
+                ["y"] = routeY,
                 ["button"] = "left",
             },
             sessionId);
@@ -145,8 +152,8 @@ public sealed class PageFrameContract
             new JsonObject
             {
                 ["type"] = "mouseReleased",
-                ["x"] = 0,
-                ["y"] = 0,
+                ["x"] = routeX,
+                ["y"] = routeY,
                 ["button"] = "left",
             },
             sessionId);

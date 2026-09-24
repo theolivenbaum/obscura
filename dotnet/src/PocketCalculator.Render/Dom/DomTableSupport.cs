@@ -1493,28 +1493,130 @@ internal static class DomTableSupport
         float? best = null;
         foreach (NodeId descendant in tree.Descendants(id))
         {
-            // An authored internal-table `display` is structural for the same reason the
-            // element names are: Chromium 141 leaves a `display: table-row; width: 300px` div
-            // holding `Hello world` at its 105.97 shrink-to-fit width, so the 300 is a hint
-            // about a band, not a definite content box that can floor the table.
-            bool structural = (styles.TryGetValue(descendant, out LayoutStyle? style)
-                    && RoleOf(style) != TableInternalRole.None)
-                || DomTraversal.IsAnyLocal(
-                    tree,
-                    descendant,
-                    "caption", "col", "colgroup", "thead", "tbody", "tfoot", "tr", "td", "th");
-            if (structural)
+            if (DefiniteContentWidthOf(tree, descendant, styles) is { } width)
             {
-                continue;
-            }
-
-            if (style is not null && style.Width.Kind == DimensionKind.Px && style.Width.Value > 0f)
-            {
-                best = best is { } current ? F32.Max(current, style.Width.Value) : style.Width.Value;
+                best = best is { } current ? F32.Max(current, width) : width;
             }
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// What one node contributes to <see cref="MaxDefiniteTableContentWidth"/>: its definite
+    /// positive px width, unless it is a table-internal box.
+    /// </summary>
+    private static float? DefiniteContentWidthOf(
+        DomTree tree,
+        NodeId descendant,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        // An authored internal-table `display` is structural for the same reason the
+        // element names are: Chromium 141 leaves a `display: table-row; width: 300px` div
+        // holding `Hello world` at its 105.97 shrink-to-fit width, so the 300 is a hint
+        // about a band, not a definite content box that can floor the table.
+        bool structural = (styles.TryGetValue(descendant, out LayoutStyle? style)
+                && RoleOf(style) != TableInternalRole.None)
+            || DomTraversal.IsAnyLocal(
+                tree,
+                descendant,
+                "caption", "col", "colgroup", "thead", "tbody", "tfoot", "tr", "td", "th");
+        if (structural)
+        {
+            return null;
+        }
+
+        return style is not null && style.Width.Kind == DimensionKind.Px && style.Width.Value > 0f
+            ? style.Width.Value
+            : null;
+    }
+
+    /// <summary>
+    /// <see cref="MaxDefiniteTableContentWidth"/> for every node of the document at once.
+    /// </summary>
+    /// <remarks>
+    /// The per-table walk visits the table's whole subtree, so a page of nested tables walked
+    /// every descendant once per table above it. This computes the same subtree maxima in one
+    /// post-order pass over the light tree; a node the pass did not reach (one in a shadow
+    /// tree) falls back to the walk.
+    /// </remarks>
+    internal sealed class DefiniteContentWidthIndex(
+        DomTree tree,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        private Dictionary<NodeId, float>? _subtreeMax;
+        private HashSet<NodeId>? _visited;
+
+        internal float? Get(NodeId id)
+        {
+            if (_visited is null)
+            {
+                Build();
+            }
+
+            if (!_visited!.Contains(id))
+            {
+                return MaxDefiniteTableContentWidth(tree, id, styles);
+            }
+
+            return _subtreeMax!.TryGetValue(id, out float best) ? best : null;
+        }
+
+        private void Build()
+        {
+            _subtreeMax = [];
+            _visited = [];
+            var stack = new Stack<(NodeId Node, bool Exit)>();
+            stack.Push((tree.Document, false));
+            while (stack.Count > 0)
+            {
+                WorkCancellation.ThrowIfCancellationRequested();
+                (NodeId node, bool exit) = stack.Pop();
+                if (!exit)
+                {
+                    // The same cycle guard as `DomTree.Descendants`: a node is entered once.
+                    if (!_visited.Add(node))
+                    {
+                        continue;
+                    }
+
+                    stack.Push((node, true));
+                    for (NodeId? child = tree.GetNode(node)?.FirstChild;
+                         child is { } id;
+                         child = tree.GetNode(id)?.NextSibling)
+                    {
+                        if (!_visited.Contains(id))
+                        {
+                            stack.Push((id, false));
+                        }
+                    }
+
+                    continue;
+                }
+
+                float? best = null;
+                for (NodeId? child = tree.GetNode(node)?.FirstChild;
+                     child is { } id;
+                     child = tree.GetNode(id)?.NextSibling)
+                {
+                    float? own = DefiniteContentWidthOf(tree, id, styles);
+                    if (own is { } width)
+                    {
+                        best = best is { } current ? F32.Max(current, width) : width;
+                    }
+
+                    if (_subtreeMax.TryGetValue(id, out float below))
+                    {
+                        best = best is { } current ? F32.Max(current, below) : below;
+                    }
+                }
+
+                if (best is { } found)
+                {
+                    _subtreeMax[node] = found;
+                }
+            }
+        }
     }
 
     /// <summary>

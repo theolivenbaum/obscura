@@ -21,57 +21,61 @@ internal static partial class Tools
         var page = state.PageMut();
         const string js = """
             (function(){
-                var forms = document.querySelectorAll('form');
+                var h = __obscura_host.dom;
+                var forms = h.querySelectorAll(h.document(), 'form');
                 var out = [];
                 for (var i = 0; i < forms.length; i++) {
                     var f = forms[i];
                     var fields = [];
-                    var inputs = f.querySelectorAll('input, select, textarea, button');
+                    var inputs = h.querySelectorAll(f, 'input, select, textarea, button');
                     for (var j = 0; j < inputs.length; j++) {
                         var el = inputs[j];
-                        var tag = el.tagName.toLowerCase();
-                        var type = (el.getAttribute('type') || (tag === 'input' ? 'text' : tag)).toLowerCase();
+                        var tag = h.lower(h.tagName(el));
+                        var type = h.lower(h.getAttribute(el, 'type') || (tag === 'input' ? 'text' : tag));
                         if (tag === 'input' && type === 'hidden') continue;
-                        var name = el.getAttribute('name') || '';
+                        var name = h.getAttribute(el, 'name') || '';
                         var label = '';
-                        if (el.id) {
-                            var lab = document.querySelector('label[for="' + el.id + '"]');
-                            if (lab) label = (lab.innerText || lab.textContent || '').trim();
+                        var id = h.get(el, 'id');
+                        if (id) {
+                            var lab = h.querySelector(h.document(), 'label[for="' + id + '"]');
+                            if (lab) label = h.trim(h.get(lab, 'innerText') || h.get(lab, 'textContent') || '');
                         }
-                        if (!label) label = el.getAttribute('aria-label') || el.getAttribute('placeholder') || '';
+                        if (!label) label = h.getAttribute(el, 'aria-label') || h.getAttribute(el, 'placeholder') || '';
                         var opts = null;
                         if (tag === 'select') {
                             opts = [];
-                            var os = el.querySelectorAll('option');
+                            var os = h.querySelectorAll(el, 'option');
                             for (var k = 0; k < os.length; k++) {
-                                opts.push({ value: os[k].value, text: (os[k].textContent || '').trim() });
+                                opts[opts.length] = { __proto__: null, value: h.get(os[k], 'value'), text: h.trim(h.get(os[k], 'textContent') || '') };
                             }
                         }
-                        fields.push({
+                        fields[fields.length] = {
+                            __proto__: null,
                             tag: tag,
                             type: type,
                             name: name,
-                            value: el.value || '',
-                            checked: el.checked || false,
-                            required: el.required || false,
-                            label: label.trim().slice(0, 100),
-                            ref: el.getAttribute('data-obscura-ref') || null,
+                            value: h.get(el, 'value') || '',
+                            checked: h.get(el, 'checked') || false,
+                            required: h.get(el, 'required') || false,
+                            label: h.slice(h.trim(label), 0, 100),
+                            ref: h.getAttribute(el, 'data-obscura-ref') || null,
                             options: opts,
-                        });
+                        };
                     }
-                    out.push({
+                    out[out.length] = {
+                        __proto__: null,
                         index: i,
-                        id: f.id || '',
-                        name: f.getAttribute('name') || '',
-                        action: f.action || '',
-                        method: (f.method || 'get').toLowerCase(),
+                        id: h.get(f, 'id') || '',
+                        name: h.getAttribute(f, 'name') || '',
+                        action: h.get(f, 'action') || '',
+                        method: h.lower(h.get(f, 'method') || 'get'),
                         fields: fields,
-                    });
+                    };
                 }
                 return out;
             })()
             """;
-        var val = page.Evaluate(js);
+        var val = page.EvaluateHost(js);
         if (val.IsNull())
         {
             return "No forms found.";
@@ -119,51 +123,56 @@ internal static partial class Tools
             {
                 "check" => $$"""
                     (function(){
-                        var el = document.querySelector({{sel}});
+                        var h = __obscura_host.dom;
+                        var el = h.querySelector(h.document(), {{sel}});
                         if (!el) return "error:not found";
                         __obscura_host.setFieldValue(el, 'checked', true);
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
+                        h.dispatch(el, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));
+                        h.dispatch(el, h.event('Event', 'change', {__proto__:null,bubbles:true}, true));
                         return "ok";
                     })()
                     """,
                 "uncheck" => $$"""
                     (function(){
-                        var el = document.querySelector({{sel}});
+                        var h = __obscura_host.dom;
+                        var el = h.querySelector(h.document(), {{sel}});
                         if (!el) return "error:not found";
                         __obscura_host.setFieldValue(el, 'checked', false);
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
+                        h.dispatch(el, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));
+                        h.dispatch(el, h.event('Event', 'change', {__proto__:null,bubbles:true}, true));
                         return "ok";
                     })()
                     """,
                 "select" => $$"""
                     (function(){
-                        var el = document.querySelector({{sel}});
+                        var h = __obscura_host.dom;
+                        var el = h.querySelector(h.document(), {{sel}});
                         if (!el) return "error:not found";
                         var want = {{val}};
                         var matched = false;
-                        for (var i = 0; i < el.options.length; i++) {
-                            var o = el.options[i];
-                            if (o.value === want || (o.textContent || '').trim() === want) {
-                                el.selectedIndex = i;
+                        var options = h.get(el, 'options') || [];
+                        for (var i = 0; i < options.length; i++) {
+                            var o = options[i];
+                            if (h.get(o, 'value') === want || h.trim(h.get(o, 'textContent') || '') === want) {
+                                h.set(el, 'selectedIndex', i);
                                 matched = true;
                                 break;
                             }
                         }
                         if (!matched) return "error:no matching option";
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
+                        h.dispatch(el, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));
+                        h.dispatch(el, h.event('Event', 'change', {__proto__:null,bubbles:true}, true));
                         return "ok";
                     })()
                     """,
                 _ => $$"""
                     (function(){
-                        var el = document.querySelector({{sel}});
+                        var h = __obscura_host.dom;
+                        var el = h.querySelector(h.document(), {{sel}});
                         if (!el) return "error:not found";
                         __obscura_host.setFieldValue(el, 'value', {{val}});
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));
-                        el.dispatchEvent(__obscura_host.markTrusted(new Event('change', {bubbles:true})));
+                        h.dispatch(el, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));
+                        h.dispatch(el, h.event('Event', 'change', {__proto__:null,bubbles:true}, true));
                         return "ok";
                     })()
                     """,
@@ -208,13 +217,14 @@ internal static partial class Tools
         {
             var js = $$"""
                 (function(){
-                    var el = document.querySelector({{McpJson.String(target)}});
+                    var h = __obscura_host.dom;
+                    var el = h.querySelector(h.document(), {{McpJson.String(target)}});
                     if (!el) return "error:not found";
-                    el.click();
+                    h.call(el, 'click', []);
                     return "ok";
                 })()
                 """;
-            state.PageMut().Evaluate(js);
+            state.PageMut().EvaluateHost(js);
             state.InteractiveRefs.Clear();
         }
 
@@ -240,13 +250,15 @@ internal static partial class Tools
             var selector = ResolveTarget(args, state);
             var js = $$"""
                 (function(){
-                    var el = document.querySelector({{McpJson.String(selector)}});
+                    var h = __obscura_host.dom;
+                    var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                     if (!el) return "error:not found";
-                    el.scrollIntoView({behavior:'instant', block:'center'});
-                    return JSON.stringify({x: window.scrollX, y: window.scrollY});
+                    h.call(el, 'scrollIntoView', [{__proto__:null, behavior:'instant', block:'center'}]);
+                    var at = h.scrollOffset();
+                    return h.stringify({__proto__:null, x: at[0], y: at[1]});
                 })()
                 """;
-            var elementResult = state.PageMut().Evaluate(js);
+            var elementResult = state.PageMut().EvaluateHost(js);
             if (elementResult.AsString() == "error:not found")
             {
                 throw new ToolException($"Element not found: {selector}");
@@ -259,24 +271,31 @@ internal static partial class Tools
         // handlers fire (we don't have a real layout engine, so the window.scrollY
         // value won't change but the event is what matters).
         var amt = amount ?? 720.0;
+        // DEVIATION from tool_scroll, which scrolls and reads the offset through
+        // window.scrollTo/scrollBy/scrollX/scrollY/innerHeight: all page-replaceable, so a
+        // page could fake where it had scrolled to (SECURITY.md L10). The shim's own scroll
+        // path, the host's offset and the host's viewport are used instead.
+        var viewportHeight = McpJson.Display(state.PageMut().Viewport.Height);
         var scrollJs = $$"""
             (function(){
+                var h = __obscura_host.dom;
                 var dir = {{McpJson.String(direction)}};
                 var amt = {{McpJson.Display(amt)}};
                 switch (dir) {
-                    case 'top': window.scrollTo(0, 0); break;
-                    case 'bottom': window.scrollTo(0, document.body.scrollHeight); break;
-                    case 'up': window.scrollBy(0, -amt); break;
-                    case 'down': window.scrollBy(0, amt); break;
-                    case 'left': window.scrollBy(-amt, 0); break;
-                    case 'right': window.scrollBy(amt, 0); break;
+                    case 'top': h.scrollTo(0, 0); break;
+                    case 'bottom': h.scrollTo(0, h.get(h.body(), 'scrollHeight')); break;
+                    case 'up': h.scrollBy(0, -amt); break;
+                    case 'down': h.scrollBy(0, amt); break;
+                    case 'left': h.scrollBy(-amt, 0); break;
+                    case 'right': h.scrollBy(amt, 0); break;
                 }
-                try { window.dispatchEvent(new Event('scroll', {bubbles:true})); } catch(e) {}
-                try { document.dispatchEvent(new Event('scroll', {bubbles:true})); } catch(e) {}
-                return JSON.stringify({x: window.scrollX, y: window.scrollY, max_y: document.body.scrollHeight, viewport_h: window.innerHeight});
+                try { h.dispatch(globalThis, h.event('Event', 'scroll', {__proto__:null,bubbles:true}, false)); } catch(e) {}
+                try { h.dispatch(h.document(), h.event('Event', 'scroll', {__proto__:null,bubbles:true}, false)); } catch(e) {}
+                var at = h.scrollOffset();
+                return h.stringify({__proto__:null, x: at[0], y: at[1], max_y: h.get(h.body(), 'scrollHeight'), viewport_h: {{viewportHeight}}});
             })()
             """;
-        var res = state.PageMut().Evaluate(scrollJs);
+        var res = state.PageMut().EvaluateHost(scrollJs);
         // A scroll can reveal new DOM (infinite scroll); invalidate refs.
         state.InteractiveRefs.Clear();
         return $"Scrolled {direction}. {res.AsString() ?? string.Empty}";
@@ -289,14 +308,15 @@ internal static partial class Tools
         var attrLiteral = McpJson.String(attr);
         var js = $$"""
             (function(){
-                var el = document.querySelector({{McpJson.String(selector)}});
+                var h = __obscura_host.dom;
+                var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                 if (!el) return null;
-                var v = el.getAttribute({{attrLiteral}});
-                if (v === null && {{attrLiteral}} === 'value') v = el.value || '';
+                var v = h.getAttribute(el, {{attrLiteral}});
+                if (v === null && {{attrLiteral}} === 'value') v = h.get(el, 'value') || '';
                 return v == null ? '' : v;
             })()
             """;
-        var res = state.PageMut().Evaluate(js);
+        var res = state.PageMut().EvaluateHost(js);
         if (res.IsNull())
         {
             throw new ToolException($"Element not found: {selector}");
@@ -308,8 +328,8 @@ internal static partial class Tools
     internal static string Count(JsonNode? args, BrowserState state)
     {
         var selector = RequireString(args, "selector", "Missing selector parameter");
-        var js = $"document.querySelectorAll({McpJson.String(selector)}).length";
-        var res = state.PageMut().Evaluate(js);
+        var js = $"__obscura_host.dom.querySelectorAll(__obscura_host.dom.document(), {McpJson.String(selector)}).length";
+        var res = state.PageMut().EvaluateHost(js);
         // V8 numbers come back as f64 even when they are integer-valued; as_u64
         // returns None for f64 in serde_json, so coerce via f64.
         var n = res.AsU64() ?? (res.AsF64() is { } f ? SaturatingU64(f) : 0);
@@ -328,39 +348,41 @@ internal static partial class Tools
         var schemaJson = McpJson.Serialize(schema);
         var js = $$"""
             (function(){
+                var h = __obscura_host.dom;
                 var schema = {{schemaJson}};
-                var out = {};
-                for (var key in schema) {
-                    if (!Object.prototype.hasOwnProperty.call(schema, key)) continue;
+                var out = h.record();
+                var keys = h.keys(schema);
+                for (var ki = 0; ki < keys.length; ki++) {
+                    var key = keys[ki];
                     var spec = schema[key];
-                    var is_array = key.endsWith('[]');
-                    var name = is_array ? key.slice(0, -2) : key;
+                    var is_array = h.slice(key, -2) === '[]';
+                    var name = is_array ? h.slice(key, 0, -2) : key;
                     // Selector may end with `@attr` to read an attribute.
                     var attr = null;
                     var sel = spec;
-                    var at = spec.lastIndexOf('@');
-                    if (at > 0 && spec.indexOf(' ', at) < 0) {
-                        attr = spec.slice(at + 1);
-                        sel = spec.slice(0, at);
+                    var at = h.lastIndexOf(spec, '@');
+                    if (at > 0 && h.indexOf(spec, ' ', at) < 0) {
+                        attr = h.slice(spec, at + 1);
+                        sel = h.slice(spec, 0, at);
                     }
                     var get = function(el) {
                         if (!el) return null;
-                        if (attr) return el.getAttribute(attr) || '';
-                        return ((el.innerText || el.textContent) || '').trim();
+                        if (attr) return h.getAttribute(el, attr) || '';
+                        return h.trim((h.get(el, 'innerText') || h.get(el, 'textContent')) || '');
                     };
                     if (is_array) {
-                        var els = document.querySelectorAll(sel);
+                        var els = h.querySelectorAll(h.document(), sel);
                         var arr = [];
-                        for (var i = 0; i < els.length; i++) arr.push(get(els[i]));
+                        for (var i = 0; i < els.length; i++) arr[arr.length] = get(els[i]);
                         out[name] = arr;
                     } else {
-                        out[name] = get(document.querySelector(sel));
+                        out[name] = get(h.querySelector(h.document(), sel));
                     }
                 }
                 return out;
             })()
             """;
-        var res = state.PageMut().Evaluate(js);
+        var res = state.PageMut().EvaluateHost(js);
         return McpJson.SerializePretty(res);
     }
 
@@ -629,22 +651,66 @@ internal static partial class Tools
                 ["same_site"] = c.SameSite,
                 ["expires"] = c.Expires is { } expires ? JsonExt.Int(expires) : null,
             });
+
+            // Port addition (CHIPS): only a partitioned cookie carries its key, so a
+            // restore does not widen it to an ordinary third-party cookie.
+            if (c.PartitionKey is { } key)
+            {
+                ((JsonObject)cookies[^1]!)["partition_key"] = new JsonObject
+                {
+                    ["top_level_site"] = key.TopLevelSite,
+                    ["has_cross_site_ancestor"] = key.HasCrossSiteAncestor,
+                };
+            }
         }
 
         // Pull localStorage + sessionStorage for the current page's origin.
+        //
+        // DEVIATION from tool_storage_state, which labels the storage with the page's own
+        // location.origin: a page that had pushState'd, or replaced location, could label
+        // its storage with another site's origin (SECURITY.md L9). The label is the
+        // document origin the host committed; only the pairs come from the page, built
+        // with bootstrap's own built-ins and serialized without the page's toJSON.
         const string storageJs = """
             (function(){
-                var ls = [], ss = [];
-                try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); ls.push([k, localStorage.getItem(k)]); } } catch(e) {}
-                try { for (var j = 0; j < sessionStorage.length; j++) { var k2 = sessionStorage.key(j); ss.push([k2, sessionStorage.getItem(k2)]); } } catch(e) {}
-                return { origin: location.origin || '', localStorage: ls, sessionStorage: ss };
+                var h = __obscura_host.dom;
+                var read = function (area) {
+                    var out = [];
+                    try {
+                        var store = globalThis[area];
+                        var n = store.length;
+                        for (var i = 0; i < n; i++) {
+                            var k = store.key(i);
+                            out[out.length] = [k, store.getItem(k)];
+                        }
+                    } catch(e) {}
+                    return out;
+                };
+                return h.stringify([read('localStorage'), read('sessionStorage')]);
             })()
             """;
-        var storage = state.ActiveTab is not null ? state.PageMut().Evaluate(storageJs) : null;
         var origins = new JsonArray();
-        if (storage.IsObject())
+        if (state.ActiveTab is not null)
         {
-            origins.Add(storage!.DeepClone());
+            var page = state.PageMut();
+            JsonNode? pairs = null;
+            if (page.EvaluateHost(storageJs).AsString() is { } text)
+            {
+                try
+                {
+                    pairs = JsonNode.Parse(text);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // Nothing the page reported is kept.
+                }
+            }
+            origins.Add(new JsonObject
+            {
+                ["origin"] = page.DocumentOrigin(),
+                ["localStorage"] = StoragePairs(pairs.Get(0)),
+                ["sessionStorage"] = StoragePairs(pairs.Get(1)),
+            });
         }
 
         var output = new JsonObject
@@ -687,6 +753,11 @@ internal static partial class Tools
                     HttpOnly = c.Get("http_only").AsBool() ?? false,
                     SameSite = c.Get("same_site").AsString() ?? string.Empty,
                     Expires = c.Get("expires").AsI64(),
+                    PartitionKey = c.Get("partition_key") is { } key
+                        ? new CookiePartitionKey(
+                            key.Get("top_level_site").AsString() ?? string.Empty,
+                            key.Get("has_cross_site_ancestor").AsBool() ?? true)
+                        : null,
                 });
             }
 
@@ -694,25 +765,79 @@ internal static partial class Tools
             state.Context.CookieJar.SetCookiesFromCdp(parsed);
         }
 
-        // Storage (per origin). Only applies if there's an active page; we restore
-        // on whatever origin is currently loaded, which usually matches because
-        // agents navigate before restoring state.
+        // Storage (per origin). Only applies if there's an active page.
+        //
+        // DEVIATION from tool_set_storage_state, which writes every origin's entries into
+        // whatever page is loaded: one site's session tokens restored into another site's
+        // storage, where its script reads them (SECURITY.md L9). An entry is applied only
+        // when its origin is the loaded document's (as the host committed it; an opaque
+        // origin matches nothing), and the result says what was left out.
+        var skipped = new List<string>();
         if (state.ActiveTab is not null && s.Get("origins").ArrayOrNull() is { } origins)
         {
+            string current = state.PageMut().DocumentOrigin();
             foreach (var originEntry in origins)
             {
+                string entryOrigin = originEntry.Get("origin").AsString() ?? string.Empty;
+                if (current == "null" || !string.Equals(entryOrigin, current, StringComparison.Ordinal))
+                {
+                    if (CountStorageEntries(originEntry) != 0)
+                    {
+                        skipped.Add(entryOrigin.Length == 0 ? "(no origin)" : entryOrigin);
+                    }
+
+                    continue;
+                }
+
                 var snippets = new List<string>();
                 applied += CollectStorageSnippets(originEntry, "localStorage", snippets);
                 applied += CollectStorageSnippets(originEntry, "sessionStorage", snippets);
                 if (snippets.Count != 0)
                 {
-                    state.PageMut().Evaluate(string.Join("\n", snippets));
+                    // In a function body: Evaluate takes an expression, and these
+                    // statements (upstream's too) were a syntax error there, so nothing
+                    // was ever restored.
+                    state.PageMut().EvaluateHost("(function () {\n" + string.Join("\n", snippets) + "\nreturn 0; })()");
                 }
             }
         }
 
-        return $"Restored {applied.ToString(CultureInfo.InvariantCulture)} state entries.";
+        string restored = $"Restored {applied.ToString(CultureInfo.InvariantCulture)} state entries.";
+        if (skipped.Count == 0)
+        {
+            return restored;
+        }
+
+        return restored + " Skipped storage for "
+            + string.Join(", ", skipped)
+            + ": it does not match the current page's origin ("
+            + state.PageMut().DocumentOrigin()
+            + "). Navigate to that origin and restore again.";
     }
+
+    /// <summary>A page-reported storage list, kept only as [string, string] pairs.</summary>
+    private static JsonArray StoragePairs(JsonNode? list)
+    {
+        var pairs = new JsonArray();
+        if (list.ArrayOrNull() is not { } items)
+        {
+            return pairs;
+        }
+
+        foreach (var pair in items)
+        {
+            if (pair.Get(0).AsString() is { } key && pair.Get(1).AsString() is { } value)
+            {
+                pairs.Add(new JsonArray(JsonValue.Create(key), JsonValue.Create(value)));
+            }
+        }
+
+        return pairs;
+    }
+
+    private static int CountStorageEntries(JsonNode? originEntry) =>
+        (originEntry.Get("localStorage").ArrayOrNull()?.Count ?? 0)
+        + (originEntry.Get("sessionStorage").ArrayOrNull()?.Count ?? 0);
 
     private static uint CollectStorageSnippets(JsonNode? originEntry, string area, List<string> snippets)
     {

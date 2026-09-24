@@ -799,6 +799,7 @@ public static partial class ComputedStyle
         else if (rowsPart.Length != 0)
         {
             style.GridTemplateRows = rowTracks;
+            style.GridTemplateRowsText = rowsPart;
             GridCalcBuckets(style)[1] = rowCalc;
             style.GridRowLineNames = rowNames.Count != 0 ? BuildLineMap(rowNames) : null;
         }
@@ -807,6 +808,7 @@ public static partial class ComputedStyle
         {
             style.GridTemplateColumnsSubgrid = IsSubgridTrackList(columns);
             style.GridTemplateColumns = columnTracks;
+            style.GridTemplateColumnsText = columns;
             GridCalcBuckets(style)[0] = columnCalc;
             style.GridColLineNames = columnNames.Count != 0 ? BuildLineMap(columnNames) : null;
         }
@@ -832,9 +834,11 @@ public static partial class ComputedStyle
             }
 
             style.ClearGridTemplateRows();
+            style.GridTemplateRowsText = null;
             GridCalcBuckets(style)[1].Clear();
             style.GridTemplateColumnsSubgrid = IsSubgridTrackList(columns);
             style.GridTemplateColumns = tracks;
+            style.GridTemplateColumnsText = columns;
             GridCalcBuckets(style)[0] = calcExpressions;
             style.GridColLineNames = names.Count != 0 ? BuildLineMap(names) : null;
             style.GridAutoFlow = CssText.AsciiLower(rows).Contains("dense", StringComparison.Ordinal)
@@ -849,9 +853,11 @@ public static partial class ComputedStyle
             }
 
             style.ClearGridTemplateColumns();
+            style.GridTemplateColumnsText = null;
             GridCalcBuckets(style)[0].Clear();
             style.GridTemplateColumnsSubgrid = false;
             style.GridTemplateRows = tracks;
+            style.GridTemplateRowsText = rows;
             GridCalcBuckets(style)[1] = calcExpressions;
             style.GridRowLineNames = names.Count != 0 ? BuildLineMap(names) : null;
             style.GridAutoFlow = CssText.AsciiLower(columns).Contains("dense", StringComparison.Ordinal)
@@ -984,6 +990,13 @@ public static partial class ComputedStyle
                 start = single.Trim();
                 end = single.Trim();
             }
+            else if ((isColumn ? style.GridColumn : style.GridRow) is { } numeric)
+            {
+                // The other side was set without a name (grid-row-start: 2 before
+                // grid-row-end: foo); keep it rather than resetting it to auto. Rust drops it.
+                start = PlacementText(numeric.Start);
+                end = PlacementText(numeric.End);
+            }
             else
             {
                 start = "auto";
@@ -1080,6 +1093,16 @@ public static partial class ComputedStyle
 
         return false;
     }
+
+    /// <summary>A numeric or span placement as <c>&lt;grid-line&gt;</c> text.</summary>
+    private static string PlacementText(Layout.GridPlacement placement) => placement.Kind switch
+    {
+        Layout.GridPlacementKind.Line when placement.LineIndex != 0 =>
+            placement.LineIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        Layout.GridPlacementKind.Span =>
+            "span " + placement.SpanCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        _ => "auto",
+    };
 
     /// <summary>Rust <c>parse_grid_line</c>.</summary>
     internal static Layout.Line<Layout.GridPlacement> ParseGridLine(string value)

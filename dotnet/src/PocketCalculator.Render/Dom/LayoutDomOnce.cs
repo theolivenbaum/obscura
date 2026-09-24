@@ -286,6 +286,7 @@ public static partial class RenderDom
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns = [];
         Dictionary<int, Rect> anonRects = [];
         Rect?[] generatedRects = [];
+        Dictionary<NodeId, GridTrackSizes> gridTracks = [];
 
         if (root is { } rootId)
         {
@@ -825,6 +826,16 @@ public static partial class RenderDom
                     anonRects,
                     generatedNodes,
                     generatedRects);
+
+                // The used track sizes getComputedStyle() reports for a grid container.
+                foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+                {
+                    if (taffyTree.GetDetailedLayoutInfo(taffyId) is Layout.DetailedGridInfo gridInfo)
+                    {
+                        gridTracks[domId] = GridTrackSizes.From(gridInfo);
+                    }
+                }
+
                 inlineFragments = SynthesizeOrdinaryInlineFragments(rects, styles, engine);
                 DomTableSupport.SynthesizeRowRects(tree, rects);
             }
@@ -957,6 +968,7 @@ public static partial class RenderDom
             RunIfcItems = ifcItems.Runs,
             WordIfcItems = ifcItems.WordItems,
             GeneratedBoxes = generatedBoxes,
+            GridTracks = gridTracks,
         };
 
         return (layout, signature, queryStats);

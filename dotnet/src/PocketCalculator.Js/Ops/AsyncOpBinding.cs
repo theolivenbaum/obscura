@@ -83,13 +83,24 @@ internal static class AsyncOpBinding
         // The parameter list is spelled out rather than forwarded with `arguments`,
         // because `inner` is a host delegate of fixed arity and calling it with a
         // different count fails at the marshaller.
+        // Promise.prototype.then and Reflect.apply are taken when the table is bound, before
+        // any page script runs: a page that replaced `then` with one that never calls back
+        // left every async op counted forever, so the realm never went idle and a frame's
+        // timers (op_sleep continuations) never fired.
         var source = $$"""
             (function (inner, started, settled) {
+                var then = Promise.prototype.then, apply = Reflect.apply;
                 return function ({{parameters}}) {
                     var promise = inner({{parameters}});
-                    if (promise && typeof promise.then === "function") {
-                        started();
-                        promise.then(function () { settled(); }, function () { settled(); });
+                    if (promise !== null && typeof promise === "object") {
+                        // A reaction never runs synchronously, so counting after it is
+                        // attached cannot miss the settle; a non-promise throws here.
+                        var attached = false;
+                        try {
+                            apply(then, promise, [function () { settled(); }, function () { settled(); }]);
+                            attached = true;
+                        } catch (e) {}
+                        if (attached) started();
                     }
                     return promise;
                 };

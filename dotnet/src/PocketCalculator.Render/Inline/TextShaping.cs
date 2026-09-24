@@ -598,6 +598,35 @@ public sealed class TextShaper(FontDatabase database)
         return word;
     }
 
+    /// <summary>
+    /// <see cref="FontDatabase.FallbackOrder"/> for a run's attributes, memoized per database
+    /// version: it walks every face with case-insensitive family comparisons, and every run
+    /// of a document asks it again with the same few attribute sets.
+    /// </summary>
+    private FaceRecord[] FallbackOrderFor(TextAttrs attrs)
+    {
+        bool italic = attrs.Style != FaceStyle.Normal;
+        if (_fallbackOrdersVersion != _database.Version)
+        {
+            _fallbackOrders.Clear();
+            _fallbackOrdersVersion = _database.Version;
+        }
+
+        var key = (attrs.FontId, attrs.Family, attrs.Weight, italic);
+        if (!_fallbackOrders.TryGetValue(key, out FaceRecord[]? order))
+        {
+            order = [.. _database.FallbackOrder(attrs.FontId, attrs.Family, attrs.Weight, italic)];
+            _fallbackOrders[key] = order;
+        }
+
+        return order;
+    }
+
+    private readonly Dictionary<(FontId? Id, string? Family, ushort Weight, bool Italic), FaceRecord[]>
+        _fallbackOrders = [];
+
+    private int _fallbackOrdersVersion = -1;
+
     /// <summary>Shape one attribute-uniform run, falling back per cluster for missing glyphs.</summary>
     private void ShapeRun(List<ShapeGlyph> glyphs, string line, AttrsList attrsList, int startRun, int endRun, bool spanRtl)
     {
@@ -608,25 +637,26 @@ public sealed class TextShaper(FontDatabase database)
 
         TextAttrs attrs = attrsList.GetSpan(startRun);
         FaceRecord? selected = attrs.FontId is { } id ? _database.Face(id) : null;
-        List<FaceRecord> order = [.. _database.FallbackOrder(
-            attrs.FontId,
-            attrs.Family,
-            attrs.Weight,
-            attrs.Style != FaceStyle.Normal)];
-        if (order.Count == 0)
+
+        // The fallback order walks every face of the database, and a run with a selected face
+        // only reads past it when that face is missing a glyph, which almost no run is. Build it
+        // on demand then; it is the same list either way.
+        FaceRecord[]? order = selected is null ? FallbackOrderFor(attrs) : null;
+        if (order is { Length: 0 })
         {
             return;
         }
 
-        FaceRecord first = selected ?? order[0];
+        FaceRecord first = selected ?? order![0];
         int glyphStart = glyphs.Count;
         List<int> missing = ShapeFallback(glyphs, first, line, attrsList, startRun, endRun, spanRtl);
 
         int next = 0;
         while (missing.Count > 0)
         {
+            order ??= FallbackOrderFor(attrs);
             FaceRecord? font = null;
-            while (next < order.Count)
+            while (next < order.Length)
             {
                 FaceRecord candidate = order[next++];
                 if (!ReferenceEquals(candidate, first))
@@ -718,24 +748,62 @@ public sealed class TextShaper(FontDatabase database)
         FontVariations? shapingVariations = ShapingVariations(font, attrs);
         HbFont hbFont = font.HarfBuzzFontFor(shapingVariations);
 
-        float fontScale = font.UnitsPerEm;
-
-        using var buffer = new HbBuffer();
-        buffer.Direction = spanRtl ? Direction.RightToLeft : Direction.LeftToRight;
-        buffer.ClusterLevel = ClusterLevel.MonotoneCharacters;
-        buffer.AddUtf16(run.Contains('\t', StringComparison.Ordinal) ? run.Replace('\t', ' ') : run);
-        buffer.GuessSegmentProperties();
-        buffer.Direction = spanRtl ? Direction.RightToLeft : Direction.LeftToRight;
-
-        Feature[] features = new Feature[attrs.Features.Length];
-        for (int i = 0; i < attrs.Features.Length; i++)
+        // One HarfBuzz buffer serves every run this shaper shapes: creating and destroying a
+        // native buffer per run was a measurable share of shaping a large document. Cleared
+        // contents reset the segment properties; the cluster level and direction are set
+        // again below, so each run starts from the same state a fresh buffer would.
+        HbBuffer buffer = Interlocked.Exchange(ref _spareBuffer, null) ?? new HbBuffer();
+        try
         {
-            features[i] = new Feature((Tag)attrs.Features[i].Tag, attrs.Features[i].Value, 0, uint.MaxValue);
-        }
+            buffer.ClearContents();
+            buffer.Direction = spanRtl ? Direction.RightToLeft : Direction.LeftToRight;
+            buffer.ClusterLevel = ClusterLevel.MonotoneCharacters;
+            buffer.AddUtf16(run.Contains('\t', StringComparison.Ordinal) ? run.Replace('\t', ' ') : run);
+            buffer.GuessSegmentProperties();
+            buffer.Direction = spanRtl ? Direction.RightToLeft : Direction.LeftToRight;
 
-        hbFont.Shape(buffer, features);
-        GlyphInfo[] infos = buffer.GlyphInfos;
-        GlyphPosition[] positions = buffer.GlyphPositions;
+            Feature[] features = attrs.Features.Length == 0 ? [] : new Feature[attrs.Features.Length];
+            for (int i = 0; i < attrs.Features.Length; i++)
+            {
+                features[i] = new Feature((Tag)attrs.Features[i].Tag, attrs.Features[i].Value, 0, uint.MaxValue);
+            }
+
+            hbFont.Shape(buffer, features);
+            return ReadShapedGlyphs(
+                glyphs,
+                font,
+                line,
+                attrsList,
+                startRun,
+                endRun,
+                spanRtl,
+                buffer.GetGlyphInfoSpan(),
+                buffer.GetGlyphPositionSpan());
+        }
+        finally
+        {
+            if (Interlocked.CompareExchange(ref _spareBuffer, buffer, null) is not null)
+            {
+                buffer.Dispose();
+            }
+        }
+    }
+
+    private HbBuffer? _spareBuffer;
+
+    /// <summary>Turn one shaped HarfBuzz run into glyphs, returning the clusters it missed.</summary>
+    private static List<int> ReadShapedGlyphs(
+        List<ShapeGlyph> glyphs,
+        FaceRecord font,
+        string line,
+        AttrsList attrsList,
+        int startRun,
+        int endRun,
+        bool spanRtl,
+        ReadOnlySpan<GlyphInfo> infos,
+        ReadOnlySpan<GlyphPosition> positions)
+    {
+        float fontScale = font.UnitsPerEm;
 
         List<int> missing = [];
         int glyphStart = glyphs.Count;

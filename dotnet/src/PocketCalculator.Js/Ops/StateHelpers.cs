@@ -1,5 +1,6 @@
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Url;
+using PocketCalculator.Net;
 
 namespace PocketCalculator.Js.Ops;
 
@@ -446,6 +447,130 @@ public static class StateHelpers
             RawHref = rawHref,
         };
         return (resolved, rawHref);
+    }
+
+    /// <summary>
+    /// The cookie context of <paramref name="state"/>'s own document at
+    /// <paramref name="url"/> (<c>document.cookie</c>): same-site unless the document is a
+    /// frame with a cross-site ancestor, partitioned by the page's site. Port addition
+    /// (CHIPS; Rust reads and writes every document's cookies as a top-level document's).
+    /// </summary>
+    public static CookieAccess DocumentCookieAccess(PocketCalculatorState state, Uri url)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(url);
+        var topLevel = TopLevelUri(state) ?? url;
+        return new CookieAccess(
+            state.CrossSiteAncestor ? SameSiteContext.CrossSite : SameSiteContext.SameSite,
+            CookiePartitionKey.For(topLevel, state.CrossSiteAncestor, url));
+    }
+
+    /// <summary>
+    /// The cookie context of a scripted request (fetch, XHR, an internal load) by
+    /// <paramref name="state"/>'s document, whose origin is <paramref name="origin"/>, to
+    /// <paramref name="target"/>: same-site only when the document, its ancestors and the
+    /// target are all same-site with the page. Port addition (the site for cookies and
+    /// CHIPS; Rust judges the document's origin alone).
+    /// </summary>
+    public static CookieAccess RequestCookieAccess(PocketCalculatorState state, string origin, Uri target)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(target);
+        var sameSite = CookieJar.ContextForInitiator(origin, target);
+        var topLevel = TopLevelUri(state);
+        if (topLevel is not null && (state.CrossSiteAncestor || !CookieJar.IsSameSite(topLevel, target)))
+        {
+            sameSite = SameSiteContext.CrossSite;
+        }
+
+        topLevel ??= Uri.TryCreate(state.Url, UriKind.Absolute, out var own) ? own : null;
+        return new CookieAccess(
+            sameSite,
+            topLevel is null ? null : CookiePartitionKey.For(topLevel, state.CrossSiteAncestor, target));
+    }
+
+    /// <summary>
+    /// Give a request <paramref name="state"/>'s document starts the frame scope its cookies
+    /// are judged in (<see cref="ResourceRequest.TopLevel"/>,
+    /// <see cref="ResourceRequest.CrossSiteAncestor"/>). A no-op for the page's own document.
+    /// </summary>
+    public static ResourceRequest WithFrameScope(ResourceRequest request, PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(state);
+        request.TopLevel = TopLevelUri(state);
+        request.CrossSiteAncestor = state.CrossSiteAncestor;
+        return request;
+    }
+
+    /// <summary>The page's URL for a frame's document; null for the page's own.</summary>
+    public static Uri? TopLevelUri(PocketCalculatorState state) =>
+        state.TopLevelUrl is { } top && Uri.TryCreate(top, UriKind.Absolute, out var parsed) ? parsed : null;
+
+    /// <summary>
+    /// The document's referrer policy: the last valid <c>&lt;meta name=referrer&gt;</c> in
+    /// tree order, else the <c>Referrer-Policy</c> header, else the default. Memoized on the
+    /// document's generations.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (Rust has no referrer policy). Chromium applies a meta from the moment
+    /// the parser inserts it, so an image before a late meta still gets the earlier policy;
+    /// here the whole document is parsed before any subresource loads, so a meta anywhere
+    /// applies to every load.
+    /// </remarks>
+    public static ReferrerPolicy DocumentReferrerPolicy(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        if (state.ReferrerPolicyCache is { } cached
+            && cached.Activity == state.ActivityGeneration
+            && cached.Document == state.DocumentGeneration
+            && cached.Header == state.ReferrerPolicyHeader)
+        {
+            return cached.Policy;
+        }
+
+        var policy = state.ReferrerPolicyHeader ?? ReferrerPolicies.Default;
+        if (state.Dom is { } dom && dom.TryQuerySelectorAll("meta[name]", out var metas, out _))
+        {
+            foreach (var id in metas)
+            {
+                if (dom.GetNode(id) is { } node
+                    && string.Equals(node.GetAttribute("name"), "referrer", StringComparison.OrdinalIgnoreCase)
+                    && ReferrerPolicies.ParseMeta(node.GetAttribute("content")) is { } meta)
+                {
+                    policy = meta;
+                }
+            }
+        }
+
+        state.ReferrerPolicyCache = (state.ActivityGeneration, state.DocumentGeneration, state.ReferrerPolicyHeader, policy);
+        return policy;
+    }
+
+    /// <summary>
+    /// An element's own referrer policy: <c>rel=noreferrer</c> (on links), else a valid
+    /// <c>referrerpolicy</c> attribute, else null for the document's.
+    /// </summary>
+    public static ReferrerPolicy? ElementReferrerPolicy(DomTree dom, NodeId id, bool honourNoreferrer = false)
+    {
+        ArgumentNullException.ThrowIfNull(dom);
+        if (dom.GetNode(id) is not { } node)
+        {
+            return null;
+        }
+
+        if (honourNoreferrer && node.GetAttribute("rel") is { } rel)
+        {
+            foreach (var token in rel.Split([' ', '\t', '\n', '\f', '\r'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (token.Equals("noreferrer", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ReferrerPolicy.NoReferrer;
+                }
+            }
+        }
+
+        return ReferrerPolicies.ParseAttribute(node.GetAttribute("referrerpolicy"));
     }
 
     public static string? DocumentBaseUrlMemoized(PocketCalculatorState state)

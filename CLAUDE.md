@@ -173,7 +173,7 @@ dotnet/
 | Rust | .NET | Notes |
 |---|---|---|
 | `deno_core` + `v8` | `Microsoft.ClearScript.V8` | Ops are bound onto a plain object exposed as `Deno.core.ops`; `DenoCoreShim` supplies the four non-op `Deno.core` members the shim uses. |
-| `html5ever` / `markup5ever` | `AngleSharp` | Used as a spec HTML5 tokenizer/tree builder; its output is adapted into Obscura's arena tree. We do not expose AngleSharp's DOM. |
+| `html5ever` / `markup5ever` | `AngleSharp` (tokenizer) + in-tree tree builder | AngleSharp's `HtmlTokenizer` only. Tree construction is `HtmlTreeBuilder` (PocketCalculator.Dom), a WHATWG insertion-mode port that builds straight into the arena; AngleSharp's own tree builder was quadratic on deep and wide markup. We do not expose AngleSharp's DOM. |
 | `selectors` / `cssparser` | in-tree port | `PocketCalculator.Dom.Selectors`, `PocketCalculator.Render.Css`. Ported, not delegated to AngleSharp, because the cascade needs specificity and matching internals. |
 | `taffy` (vendored) | in-tree port | `PocketCalculator.Render.Layout`, including the vendored grid shrink-to-fit fix. |
 | `tiny-skia` | `SkiaSharp` | tiny-skia is a port of Skia, so this is the closest available match for path filling, anti-aliasing, and blending. Also supplies the PNG/JPEG/WebP/GIF codecs, so no separate image package is needed. |
