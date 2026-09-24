@@ -1857,7 +1857,7 @@ public sealed partial class RuntimeTests
             result);
     }
 
-    [Fact(Skip = "AngleSharp's fragment parser ignores the context element's namespace: parsing '<linearGradient>' with an SVG context element yields an xhtml <lineargradient>, so svg.innerHTML and Range.createContextualFragment lose the SVG namespace. Full-document parsing is correct, so the fix belongs in PocketCalculator.Dom.HtmlParsing.ParseFragmentWithContext (wrap a foreign-namespace fragment in its root element and unwrap), which is outside PocketCalculator.Js")]
+    [Fact]
     public void ForeignInnerHtmlAndContextualFragmentsKeepSvgNamespace()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test
@@ -1878,6 +1878,12 @@ public sealed partial class RuntimeTests
                 );
             }
         */
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var result = fixture.Runtime.Evaluate(
+            "(function(){const ns='http://www.w3.org/2000/svg';const svg=document.createElementNS(ns,'svg');svg.innerHTML='<linearGradient id=paint></linearGradient>';const range=document.createRange();range.selectNodeContents(svg);const fragment=range.createContextualFragment('<circle></circle>');const circle=fragment.firstElementChild;return [svg.firstElementChild.namespaceURI,svg.firstElementChild.localName,circle.namespaceURI,circle.localName].join('|');})()");
+        AssertJson(
+            "\"http://www.w3.org/2000/svg|linearGradient|http://www.w3.org/2000/svg|circle\"",
+            result);
     }
 
     [Fact]

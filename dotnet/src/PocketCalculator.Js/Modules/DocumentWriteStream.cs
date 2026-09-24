@@ -30,9 +30,8 @@ public readonly record struct Placement(NodeId? Parent, NodeId Node);
 /// <para>
 /// <b>Port note.</b> The Rust stream owns a live <c>html5ever</c> parser and feeds
 /// it each call's argument, so the tokenizer's state persists and nothing is
-/// re-tokenized. AngleSharp exposes no resumable tree builder - only
-/// <c>HtmlTokenizer</c> is public, and the tree construction stage is internal -
-/// so this port keeps the concatenated input stream and re-parses it per call. The
+/// re-tokenized. AngleSharp's tokenizer cannot be resumed once it has reached the end
+/// of its input, so this port keeps the concatenated input stream and re-parses it per call. The
 /// parser is deterministic and the input only ever grows at the end, so every node
 /// keeps its position; nodes are therefore identified by their path from the
 /// fragment root rather than by an arena id, and the handed-over map, the
@@ -44,13 +43,6 @@ public readonly record struct Placement(NodeId? Parent, NodeId Node);
 /// </remarks>
 public sealed class DocumentWriteStream
 {
-    /// <summary>
-    /// Appended to a copy of the stream to locate the insertion point. Private-use
-    /// code points, so it cannot collide with markup a page actually wrote, and no
-    /// character in it can terminate a tag, a comment, or raw text.
-    /// </summary>
-    private const string InsertionPointProbe = "obscura-write-stream-probe";
-
     private readonly StringBuilder _input = new();
 
     /// <summary>
@@ -98,9 +90,14 @@ public sealed class DocumentWriteStream
         _input.Append(html);
         var stream = _input.ToString();
 
-        var source = HtmlParsing.ParseFragmentWithContext(stream, QualName.Html("body"));
+        // The elements still open at the end of the stream, which the parser would still be
+        // able to add to. html5ever answers this through TreeSink::trace_handles; the tree
+        // builder reports its stack of open elements as the input runs out. That includes a
+        // raw-text element such as an unterminated <script>. When the stream ends inside a
+        // tag, the tag produces no node, so there is nothing of it to hold back.
+        var retained = new HashSet<NodeId>();
+        var source = HtmlParsing.ParseFragmentWithContext(stream, QualName.Html("body"), retained);
         var root = source.FragmentRoot();
-        var retained = OpenElementPaths(stream);
 
         var placements = new List<Placement>();
         var stack = new List<Entry>();
@@ -157,7 +154,7 @@ public sealed class DocumentWriteStream
 
             if (NeedsToBeComplete(source, entry.Node))
             {
-                if (retained.Contains(entry.Path))
+                if (retained.Contains(entry.Node))
                 {
                     continue;
                 }
@@ -255,127 +252,6 @@ public sealed class DocumentWriteStream
             {
                 pairs.Add((fromChildren[i], ChildPath(fromPath, i), toChildren[i]));
             }
-        }
-    }
-
-    /// <summary>
-    /// The paths of the elements still open at the end of the stream, which the
-    /// parser would still be able to add to.
-    /// </summary>
-    /// <remarks>
-    /// html5ever answers this through <c>TreeSink::trace_handles</c>, which reports
-    /// the tree builder's stack of open elements. AngleSharp's tree builder is
-    /// internal and reports nothing, so the same question is asked of the parser
-    /// itself: parse the stream with a probe appended and see where the probe lands.
-    /// Its ancestors are exactly the open elements, including a raw-text element
-    /// such as an unterminated <c>&lt;script&gt;</c>, whose content the probe joins.
-    /// When the stream ends inside a construct the probe cannot complete either -
-    /// an unterminated tag, say - nothing lands and no element is open, which is
-    /// also correct: an unterminated tag produces no node to hold back.
-    /// </remarks>
-    private static HashSet<string> OpenElementPaths(string stream)
-    {
-        var open = new HashSet<string>(StringComparer.Ordinal);
-        var probed = HtmlParsing.ParseFragmentWithContext(
-            stream + InsertionPointProbe,
-            QualName.Html("body"));
-
-        var found = FindProbe(probed, probed.FragmentRoot(), string.Empty);
-        if (found is null)
-        {
-            return open;
-        }
-
-        // The probe's own path is dropped: it is either a text or comment node,
-        // which is never held back, or a node the unprobed stream does not contain.
-        var path = found;
-        while (true)
-        {
-            var separator = path.LastIndexOf('/');
-            if (separator < 0)
-            {
-                break;
-            }
-
-            path = path[..separator];
-            open.Add(path);
-        }
-
-        return open;
-    }
-
-    private static string? FindProbe(DomTree tree, NodeId parent, string parentPath)
-    {
-        var children = tree.Children(parent);
-        for (var i = 0; i < children.Count; i++)
-        {
-            var child = children[i];
-            var path = ChildPath(parentPath, i);
-            var node = tree.GetNode(child);
-            if (node is null)
-            {
-                continue;
-            }
-
-            if (CarriesProbe(node))
-            {
-                return path;
-            }
-
-            // A template's children hang off its own contents document, which the
-            // child walk never reaches. The segment used for them is arbitrary: only
-            // the template's own path has to line up with the unprobed parse, and it
-            // already does.
-            if (node.Data is ElementData { TemplateContents: { } contents })
-            {
-                var inContents = FindProbe(tree, contents, path + "/#");
-                if (inContents is not null)
-                {
-                    return inContents;
-                }
-            }
-
-            var deeper = FindProbe(tree, child, path);
-            if (deeper is not null)
-            {
-                return deeper;
-            }
-        }
-
-        return null;
-    }
-
-    private static bool CarriesProbe(Node node)
-    {
-        switch (node.Data)
-        {
-            case TextData text:
-                return text.Contents.Contains(InsertionPointProbe, StringComparison.Ordinal);
-            case CommentData comment:
-                return comment.Contents.Contains(InsertionPointProbe, StringComparison.Ordinal);
-            case ProcessingInstructionData pi:
-                return pi.Target.Contains(InsertionPointProbe, StringComparison.Ordinal)
-                    || pi.Data.Contains(InsertionPointProbe, StringComparison.Ordinal);
-            case DoctypeData doctype:
-                return doctype.Name.Contains(InsertionPointProbe, StringComparison.Ordinal);
-            case ElementData element:
-                if (element.Name.Local.Contains(InsertionPointProbe, StringComparison.Ordinal))
-                {
-                    return true;
-                }
-
-                foreach (var attribute in element.Attrs)
-                {
-                    if (attribute.Name.Local.Contains(InsertionPointProbe, StringComparison.Ordinal)
-                        || attribute.Value.Contains(InsertionPointProbe, StringComparison.Ordinal))
-                    {
-                        return true;
-                    }
-                }
-
-                return false;
-            default:
-                return false;
         }
     }
 
