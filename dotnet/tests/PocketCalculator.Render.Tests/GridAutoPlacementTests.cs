@@ -98,4 +98,30 @@ public class GridAutoPlacementTests
                 string.Empty,
                 "grid-column:span 2"));
     }
+
+    [Fact]
+    public void StepFourWithADefinitePrimaryPositionSkipsOccupiedTracks()
+    {
+        // Items with a definite column and an auto row search the rows below the cursor; the
+        // search jumps over occupied runs instead of probing each row, and finds the same row.
+        Assert.Equal(
+            ["0,0,20,20", "0,30,10,10", "10,20,10,10", "0,20,10,10", "0,40,20,10", "10,30,10,10", "10,50,10,30"],
+            Place(
+                "grid-auto-flow:row dense;grid-template-columns:10px 10px",
+                "grid-column:1 / 3;grid-row:1 / 3",
+                "grid-column:1;grid-row:4",
+                "grid-column:2;grid-row:3",
+                "grid-column:1",
+                "grid-column:1 / span 2",
+                "grid-column:2",
+                "grid-column:2;grid-row:span 3"));
+        Assert.Equal(
+            ["0,0,20,30", "20,10,10,10", "30,10,20,20", "40,0,10,10"],
+            Place(
+                "grid-auto-flow:column;grid-template-rows:10px 10px 10px",
+                "grid-row:1 / 4;grid-column:1 / 3",
+                "grid-row:2",
+                "grid-row:2 / 4;grid-column:span 2",
+                "grid-row:1"));
+    }
 }

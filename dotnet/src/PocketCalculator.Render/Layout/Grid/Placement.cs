@@ -254,17 +254,24 @@ internal static class GridPlacementAlgorithm
 
             // Item has a fixed primary axis position: increment the secondary axis position until we
             // find a space that the item fits in.
+            //
+            // taffy steps one secondary track and re-tests. Every candidate that still contains
+            // an occupied secondary track fails the same way, so jump past the furthest one and
+            // then past every track occupied across the item's primary span, as the free search
+            // does along the primary axis: the same position, found in a handful of probes
+            // rather than one per occupied row.
             while (true)
             {
                 var secondarySpan = ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount);
-                if (!cellOccupancyMatrix.LineAreaIsUnoccupied(primaryAxis, primarySpan, secondarySpan))
+                if (cellOccupancyMatrix.OccupiedPrimaryTrackBounds(secondaryAxis, secondarySpan, primarySpan)
+                    is not { } occupied)
                 {
-                    secondaryIdx += 1;
-                    continue;
+                    // A position past the window is pulled into its last track.
+                    return (primarySpan, secondaryWindow.Clamp(secondarySpan));
                 }
 
-                // A position past the window is pulled into its last track.
-                return (primarySpan, secondaryWindow.Clamp(secondarySpan));
+                secondaryIdx = cellOccupancyMatrix.NextFreePrimaryTrack(
+                    secondaryAxis, occupied.Last + 1, primarySpan, false);
             }
         }
         else
