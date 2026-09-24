@@ -18973,6 +18973,13 @@ function _hostValueJson(value) {
   const t = typeof value;
   if (t === 'function' || t === 'undefined' || t === 'symbol') return undefined;
   const ancestors = [];
+  // Keys repeat across the objects of one result; quote each once.
+  const quoted = new Map();
+  const quoteKey = (key) => {
+    let q = _mapGet(quoted, key);
+    if (q === undefined) { q = _JSONstringify(key) + ':'; _mapSet(quoted, key, q); }
+    return q;
+  };
   // The shim's own toJSON for v's interface, as { r: result }, or null.
   const shimJson = (v) => {
     if (_shimToJson === null) return null;
@@ -18990,7 +18997,8 @@ function _hostValueJson(value) {
   const walk = (v) => {
     switch (typeof v) {
       case 'string': return _JSONstringify(v);
-      case 'number': return (v === v && v !== Infinity && v !== -Infinity) ? _JSONstringify(v) : 'null';
+      // A finite number's JSON is its ToString, -0 included.
+      case 'number': return (v === v && v !== Infinity && v !== -Infinity) ? '' + v : 'null';
       case 'boolean': return v ? 'true' : 'false';
       case 'bigint': throw new TypeError('Do not know how to serialize a BigInt');
       case 'undefined':
@@ -19024,7 +19032,7 @@ function _hostValueJson(value) {
       for (let i = 0; i < keys.length; i++) {
         const item = walk(v[keys[i]]);
         if (item === undefined) continue;
-        out += (first ? '' : ',') + _JSONstringify(keys[i]) + ':' + item;
+        out += (first ? '' : ',') + quoteKey(keys[i]) + item;
         first = false;
       }
       out += '}';
