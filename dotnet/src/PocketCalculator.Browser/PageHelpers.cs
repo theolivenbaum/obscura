@@ -22,7 +22,8 @@ internal sealed record LoadedStylesheet(
     UrlRecord ResponseUrl,
     IReadOnlyList<StylesheetImport> Imports,
     string Rules,
-    bool RedirectLeftOrigin = false);
+    bool RedirectLeftOrigin = false,
+    PocketCalculator.Net.ReferrerPolicy? ReferrerPolicyHeader = null);
 
 /// <summary>
 /// Which element a fetched author sheet belongs to.
@@ -355,7 +356,8 @@ internal static partial class PageHelpers
         string key,
         IReadOnlyDictionary<string, LoadedStylesheet> sheets,
         IReadOnlyDictionary<string, string> aliases,
-        HashSet<string> active)
+        HashSet<string> active,
+        Action<LoadedStylesheet, List<string>>? onSheetUrls = null)
     {
         string actualKey = aliases.TryGetValue(key, out string? alias) ? alias : key;
         if (!active.Add(actualKey))
@@ -377,7 +379,7 @@ internal static partial class PageHelpers
                 continue;
             }
             (string importKey, _) = CanonicalStylesheetUrl(importUrl);
-            string? imported = MaterializeStylesheetGraph(importKey, sheets, aliases, active);
+            string? imported = MaterializeStylesheetGraph(importKey, sheets, aliases, active, onSheetUrls);
             if (imported is null)
             {
                 continue;
@@ -391,7 +393,13 @@ internal static partial class PageHelpers
                 output.Append(imported).Append('\n');
             }
         }
-        output.Append(RebaseCssUrls(sheet.Rules, sheet.ResponseUrl));
+        // The sheet's own http(s) url()s, for the referrer of the loads they cause.
+        List<string>? urls = onSheetUrls is null ? null : [];
+        output.Append(RebaseCssUrls(sheet.Rules, sheet.ResponseUrl, urls));
+        if (urls is { Count: > 0 })
+        {
+            onSheetUrls!(sheet, urls);
+        }
         active.Remove(actualKey);
         return output.ToString();
     }
@@ -450,7 +458,7 @@ internal static partial class PageHelpers
     /// browsers, not the document URL; failing to rebase them drops common
     /// background, mask, cursor and font assets from nested theme directories.
     /// </remarks>
-    internal static string RebaseCssUrls(string css, UrlRecord baseUrl)
+    internal static string RebaseCssUrls(string css, UrlRecord baseUrl, List<string>? urls = null)
     {
         var output = new StringBuilder(css.Length);
         int index = 0;
@@ -508,6 +516,16 @@ internal static partial class PageHelpers
                 && PageUrl.TryJoin(baseUrl, value) is { } joined)
             {
                 resolved = joined.Href;
+            }
+
+            if (urls is not null)
+            {
+                string named = resolved ?? value;
+                if (named.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || named.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    urls.Add(named);
+                }
             }
 
             if (resolved is not null)

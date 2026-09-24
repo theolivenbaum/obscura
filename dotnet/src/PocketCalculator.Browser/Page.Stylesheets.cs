@@ -244,14 +244,7 @@ public sealed partial class Page
                     }
                 }
                 ReferrerPolicy? sheetPolicy = ReferrerPolicies.ParseHeader(response.Header("referrer-policy"));
-                sheets[key] = new LoadedStylesheet(canonicalResponseUrl, imports, rules, redirectLeftOrigin);
-                // Its images and fonts are referred by this sheet under its header policy,
-                // else the default; the document's policy does not reach them (Chromium 141).
-                List<string> resourceUrls = PageHelpers.CssResourceUrls(rules, canonicalResponseUrl);
-                if (resourceUrls.Count != 0)
-                {
-                    js.RecordCssSubresourceReferrers(response.Url, sheetPolicy ?? ReferrerPolicies.Default, resourceUrls);
-                }
+                sheets[key] = new LoadedStylesheet(canonicalResponseUrl, imports, rules, redirectLeftOrigin, sheetPolicy);
 
                 if (depth >= PageHelpers.MaxStylesheetImportDepth)
                 {
@@ -283,6 +276,18 @@ public sealed partial class Page
             }
         }
 
+        // The images and fonts a sheet names are referred by that sheet under its header
+        // policy, else the default; the document's policy does not reach them (Chromium 141).
+        HashSet<string> recordedSheets = new(StringComparer.Ordinal);
+        void RecordSheetUrls(LoadedStylesheet sheet, List<string> urls)
+        {
+            if (recordedSheets.Add(sheet.ResponseUrl.Href))
+            {
+                js.RecordCssSubresourceReferrers(
+                    NetUrl.From(sheet.ResponseUrl), sheet.ReferrerPolicyHeader ?? ReferrerPolicies.Default, urls);
+            }
+        }
+
         List<(AuthorStylesheetTarget, string, bool, string)> materialized = [];
         foreach ((AuthorStylesheetTarget target, string key, string? media) in roots)
         {
@@ -291,7 +296,7 @@ public sealed partial class Page
             {
                 continue;
             }
-            string? css = PageHelpers.MaterializeStylesheetGraph(key, sheets, aliases, []);
+            string? css = PageHelpers.MaterializeStylesheetGraph(key, sheets, aliases, [], RecordSheetUrls);
             if (css is null)
             {
                 continue;
