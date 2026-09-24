@@ -438,7 +438,21 @@ public static class Input
             + ",button:" + button + ",buttons:" + mask + ",detail:" + detail
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
             + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}, true);"
-            + "h.dispatch(target, evt);"
+            // A primary press that the page does not cancel focuses the focusable element
+            // under it, as Chromium 141 does, so a click then keys types into a field.
+            // Deviation from the Rust engine, whose press never moved focus.
+            + "if (!h.dispatch(target, evt) || " + button + " !== 0) return;"
+            + "for (var f = target; f; f = h.parentElement(f)) {"
+            + "var ft = h.tagName(f);"
+            + "var focusable = ft === 'TEXTAREA' || ft === 'SELECT' || ft === 'BUTTON'"
+            + " || (ft === 'INPUT' && h.lower(h.getAttribute(f, 'type') || '') !== 'hidden')"
+            + " || (ft === 'A' && h.getAttribute(f, 'href') !== null)"
+            + " || h.getAttribute(f, 'tabindex') !== null"
+            + " || (h.getAttribute(f, 'contenteditable') !== null && h.getAttribute(f, 'contenteditable') !== 'false');"
+            + "if (!focusable) continue;"
+            + "if (!__obscura_host.isDisabled(f) && h.activeElement() !== f) h.call(f, 'focus', []);"
+            + "break;"
+            + "}"
             + "})()";
     }
 
@@ -548,6 +562,15 @@ public static class Input
             + "var len = value ? value.length : 0;"
             + "if (h.has(clickTarget, 'setSelectionRange')) h.call(clickTarget, 'setSelectionRange', [0, len]);"
             + "else { h.set(clickTarget, 'selectionStart', 0); h.set(clickTarget, 'selectionEnd', len); }"
+            // A single or double click on a text control puts the caret where it lands.
+            // Deviation from the Rust engine, which leaves the selection untracked (so typing
+            // appended); the caret goes to the end of the value, which is where a click past
+            // the text lands in Chromium. A click on the text itself is not measured.
+            + "} else if (" + detail + " < 3 && (tag === 'INPUT' || tag === 'TEXTAREA')"
+            + " && h.get(clickTarget, 'selectionStart') !== null) {"
+            + "var caretValue = h.get(clickTarget, 'value');"
+            + "var caretAt = caretValue ? caretValue.length : 0;"
+            + "h.call(clickTarget, 'setSelectionRange', [caretAt, caretAt]);"
             + "}"
             + "})()";
     }

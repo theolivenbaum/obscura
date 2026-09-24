@@ -4264,10 +4264,12 @@ class Element extends Node {
       }
       return;
     }
+    const before = this.value;
     _formValues[this._nid] = String(v);
     if (tag === 'textarea') {
       this.textContent = String(v);
     }
+    _caretToEndOnValueChange(this, _String(before), String(v));
   }
   get min() { return this.getAttribute('min') || ''; }
   set min(v) { this.setAttribute('min', v); }
@@ -13531,7 +13533,12 @@ globalThis.HTMLSpanElement = Element;
 globalThis.HTMLParagraphElement = Element;
 globalThis.HTMLAnchorElement = Element;
 globalThis.HTMLImageElement = HTMLImageElement;
-globalThis.HTMLInputElement = Element;
+// Port addition: real subclasses, so `instanceof HTMLInputElement` and
+// `instanceof HTMLSelectElement` discriminate as in Chromium (the Rust shim aliases both to
+// Element, so every element was an input and a select). Puppeteer's ::-p-text() reads a
+// form control's value instead of its text, so with the alias it matched nothing. Mapped
+// in _htmlTagClasses below.
+globalThis.HTMLInputElement = class HTMLInputElement extends Element {};
 globalThis.HTMLButtonElement = Element;
 globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   get elements() { return HTMLCollection._from(_qsa(this, "input, select, textarea, button, fieldset, output, object")); }
@@ -13540,7 +13547,7 @@ globalThis.HTMLFormElement = class HTMLFormElement extends Element {
   // 'submit' event and (if not prevented) builds form data and navigates.
   reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
 };
-globalThis.HTMLSelectElement = Element;
+globalThis.HTMLSelectElement = class HTMLSelectElement extends Element {};
 globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
   // `rows`/`cols` reflect the content attributes and drive the control's
   // intrinsic box (the renderer sizes a textarea from them). The attributes
@@ -13732,7 +13739,7 @@ for (const _ctor of [
   HTMLSourceElement, HTMLOptGroupElement, HTMLOutputElement, HTMLMeterElement,
   HTMLTimeElement, HTMLQuoteElement, HTMLDListElement, HTMLBaseElement,
   HTMLTitleElement, HTMLMapElement, HTMLAreaElement, HTMLObjectElement,
-  HTMLEmbedElement,
+  HTMLEmbedElement, globalThis.HTMLInputElement, globalThis.HTMLSelectElement,
 ]) _markNative(_ctor);
 
 // Tag -> wrapper class for the interfaces above. `_elementClassFor` and
@@ -13765,6 +13772,8 @@ _htmlTagClasses = {
   AREA: HTMLAreaElement,
   OBJECT: HTMLObjectElement,
   EMBED: HTMLEmbedElement,
+  INPUT: globalThis.HTMLInputElement,
+  SELECT: globalThis.HTMLSelectElement,
 };
 // SVGAnimatedString backs the className and href reflections on SVG elements.
 // baseVal and animVal both read the live attribute (no SMIL animation), and
@@ -18773,11 +18782,38 @@ const _ns_selectionStart = new WeakMap();
 const _ns_selectionEnd = new WeakMap();
 const _ns_selectionDir = new WeakMap();
 
+// Port addition: a text control that has no selection yet has its caret at 0, as in
+// Chromium 141, where the Rust shim answers null; Input.insertText then appended at the
+// end, so Puppeteer's type() (focus(), then keys) wrote "preX" where Chromium writes
+// "Xpre". Other elements still answer null.
+const _TEXT_SELECTION_INPUT_TYPES = { __proto__: null, text: 1, search: 1, url: 1, tel: 1, password: 1 };
+function _hasTextSelection(el) {
+  const tag = el.localName;
+  if (tag === 'textarea') return true;
+  if (tag !== 'input') return false;
+  const type = _stringToLowerCase(_String(_hostDom.getAttribute(el, 'type') || 'text'));
+  return _TEXT_SELECTION_INPUT_TYPES[type] === 1
+    || !(type in _INPUT_KNOWN_TYPES);
+}
+const _INPUT_KNOWN_TYPES = { __proto__: null, hidden: 1, text: 1, search: 1, tel: 1, url: 1, email: 1,
+  password: 1, date: 1, month: 1, week: 1, time: 1, 'datetime-local': 1, number: 1, range: 1,
+  color: 1, checkbox: 1, radio: 1, file: 1, submit: 1, image: 1, reset: 1, button: 1 };
+// Setting a text control's value moves its caret to the end of the new value (HTML, and
+// Chromium 141), when the value changes.
+function _caretToEndOnValueChange(el, before, after) {
+  if (before === after || !_hasTextSelection(el)) return;
+  _ns_selectionStart.set(el, after.length);
+  _ns_selectionEnd.set(el, after.length);
+  _ns_selectionDir.set(el, 'none');
+}
+
 // Element.prototype.selectionStart - get/set selection start position
 if (!Element.prototype.selectionStart) {
   Object.defineProperty(Element.prototype, 'selectionStart', {
     get: function() {
-      return _ns_selectionStart.get(this) ?? null;
+      const start = _ns_selectionStart.get(this);
+      if (start !== undefined) return start;
+      return _hasTextSelection(this) ? 0 : null;
     },
     set: function(v) {
       _ns_selectionStart.set(this, v == null ? null : Math.max(0, parseInt(v, 10) || 0));
@@ -18791,7 +18827,9 @@ if (!Element.prototype.selectionStart) {
 if (!Element.prototype.selectionEnd) {
   Object.defineProperty(Element.prototype, 'selectionEnd', {
     get: function() {
-      return _ns_selectionEnd.get(this) ?? null;
+      const end = _ns_selectionEnd.get(this);
+      if (end !== undefined) return end;
+      return _hasTextSelection(this) ? 0 : null;
     },
     set: function(v) {
       _ns_selectionEnd.set(this, v == null ? null : Math.max(0, parseInt(v, 10) || 0));
