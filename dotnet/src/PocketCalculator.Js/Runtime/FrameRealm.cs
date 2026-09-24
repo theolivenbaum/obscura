@@ -158,7 +158,7 @@ public sealed class FrameRealm : IDisposable
             // this frame's state, which is what makes an op called from the
             // frame resolve against the frame's own document.
             shim = BootstrapLoader.Install(engine, ops => parent.BindRealmOps(ops, state), frameId);
-            CopyIdentityToRealm(parent, engine);
+            HostVariables.Copy(parent.MainHostHelpers, shim.HostHelpers, IdentityGlobals);
         }
         catch (ScriptEngineException)
         {
@@ -187,10 +187,10 @@ public sealed class FrameRealm : IDisposable
         // top-level has already taken the wrong branch.
         try
         {
-            realm.Run(
-                $"globalThis.__obscura_frameId = {frameId.ToString(CultureInfo.InvariantCulture)};"
-                + $"globalThis.__obscura_parentFrameId = {parentFrameId.ToString(CultureInfo.InvariantCulture)};"
-                + "globalThis.__obscura_init();");
+            realm.ExecuteHostScript(
+                $"__obscura_host.vars.__obscura_frameId = {frameId.ToString(CultureInfo.InvariantCulture)};"
+                + $"__obscura_host.vars.__obscura_parentFrameId = {parentFrameId.ToString(CultureInfo.InvariantCulture)};"
+                + "__obscura_host.init();");
         }
         catch (JsRuntimeException)
         {
@@ -279,20 +279,12 @@ public sealed class FrameRealm : IDisposable
     /// defer until then. That is most of what a widget does: a frame can talk
     /// to its parent perfectly and still never build its interface, which looks
     /// like a rendering problem and is a lifecycle one.
+    /// Through the shim's own event class and dispatch (SECURITY.md L10); see
+    /// <see cref="PocketCalculatorJsRuntime.RunLifecycle"/>.
     /// </remarks>
     public void DispatchLoadEvents() =>
-        ExecuteScript(
-            "globalThis.__documentReadyState__ = 'interactive';"
-            + "try { document.dispatchEvent(new Event('DOMContentLoaded', "
-            + "{ bubbles: false, cancelable: false })); } catch (_) {}"
-            + "try { window.dispatchEvent(new Event('DOMContentLoaded', "
-            + "{ bubbles: false, cancelable: false })); } catch (_) {}"
-            + "globalThis.__documentReadyState__ = 'complete';"
-            + "try { document.dispatchEvent(new Event('readystatechange')); } catch (_) {}"
-            + "try { const loadEvent = new Event('load', "
-            + "{ bubbles: false, cancelable: false }); "
-            + "if (typeof window.onload === 'function') { try { window.onload.call(window, loadEvent); } catch (_) {} } "
-            + "try { window.dispatchEvent(loadEvent); } catch (_) {} } catch (_) {}");
+        ExecuteHostScript(PocketCalculatorJsRuntime.LifecycleScript(
+            ["interactive", "DOMContentLoaded", "complete", "readystatechange", "load"]));
 
     /// <summary>Delivers a <c>postMessage</c> that another realm sent to this one.</summary>
     /// <remarks>
@@ -350,6 +342,21 @@ public sealed class FrameRealm : IDisposable
     /// Runs a script inside the frame, reporting a script error as a throw.
     /// </summary>
     public void ExecuteScript(string source) => Run(source);
+
+    /// <summary>
+    /// Runs one new-document entry in the frame: installs a <see cref="BindingPreload"/>
+    /// binding, or runs a script.
+    /// </summary>
+    public void ExecutePreloadScript(string source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (BindingPreload.NameOf(source) is { } binding)
+        {
+            ExecuteHostScript(BindingPreload.InstallStatement(binding));
+            return;
+        }
+        ExecuteScript(source);
+    }
 
     /// <summary>
     /// <see cref="ExecuteScript"/> for host-authored statements that use this realm's host
@@ -608,25 +615,6 @@ public sealed class FrameRealm : IDisposable
         {
             // The registry is best-effort; a page without it simply cannot
             // reach into the frame.
-        }
-    }
-
-    private static void CopyIdentityToRealm(PocketCalculatorJsRuntime parent, V8ScriptEngine realm)
-    {
-        foreach (var name in IdentityGlobals)
-        {
-            var value = parent.Engine.Evaluate($"globalThis.{name}");
-            if (value is null or Undefined or VoidResult)
-            {
-                continue;
-            }
-            var literal = value switch
-            {
-                bool flag => flag ? "true" : "false",
-                string text => JsonSerializer.Serialize(text),
-                _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "undefined",
-            };
-            realm.Execute("<copy-identity>", $"globalThis.{name} = {literal};");
         }
     }
 

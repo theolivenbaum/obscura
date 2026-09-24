@@ -8,6 +8,13 @@
 // DenoCoreShim, installed by BootstrapLoader.Install, which deletes
 // globalThis.Deno once this file has run.)
 const __obscuraCore = globalThis.Deno.core;
+// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md I10): the engine's own
+// state and the values the host sets (__obscura_ua, __obscura_frameId, the observer
+// lists, __documentReadyState__, __currentScriptNid, ...) live here, not on globalThis.
+// Upstream keeps them as globals, which any page can detect with `'name' in window`
+// (Chromium has none of them) and several of which it could call or overwrite. The host
+// reaches this object as `__obscura_host.vars` (HostScript); nothing on the global does.
+const _hostVars = { __proto__: null };
 // DEVIATION from crates/obscura-js/js/bootstrap.js: the privileged paths that read an op's
 // JSON (internal loads, frames) use JSON.parse as it was before any page script ran, not
 // whatever the page has put on the global since (SECURITY.md C3).
@@ -180,42 +187,11 @@ const _wrapIds = (ids, wrap) => {
 // writable:true and configurable:true.
 (function _preHideInternals() {
   var _names = [
-    // runtime-set by Rust (runtime.rs / page.rs)
-    '__obscura_errors', '__obscura_init', '__obscura_hide_list',
-    '__obscura_ua',
-    '__obscura_platform', '__obscura_ua_platform', '__obscura_ua_platform_version',
-    // DEVIATION from crates/obscura-js/js/bootstrap.js, which also lists the host
-    // helpers here (__obscura_markTrusted, __obscura_deliverMessage,
-    // __obscura_activateLabel and the rest of __obscura_host at the end of this file)
-    // because it leaves them on the global. They are closure-private here, and
-    // pre-declaring them would put an own `undefined` property back on globalThis.
-    '__obscura_stealth', '__obscura_core_handoff',
-    '__obscura_frameId', '__obscura_parentFrameId',
-    '_rawFragment',
-    '__markParserScripts', '__obscura_hasPendingDynamicScripts',
-    '__obscura_hasPendingLoadDelayingScripts',
-    '__obscura_nextPendingTimeoutDelay',
-    '__obscura_hw', '__obscura_mem',
-    '__documentReadyState__', '__currentUrl',
-    // internal helpers (var-declared throughout the file)
-    '__processDynScriptQueue', '_decodeDataScriptUrl', '_markNative', '_fpRand', '_fpNoise',
-    '_fpCache', '_getFp', '_fp', '_splitAsciiWhitespace',
-    '_getElementsByClassName', '_docEncoding', '_docIsUtf8',
-    '_isSpecialScheme', '_applyDocQueryEncoding', '_anchorBase',
-    '_elemHrefURL', '_setElemHrefPart', '_pad', '_daysInMonth',
-    '_isoWeek1Monday', '_inputParseNumber', '_inputFormatNumber',
-    '_htmlAttrName', '_convertNodes', '_fragmentContextPayload', '_parseHTMLFragment', '_xmlWellFormed', '_elementClassFor', '_wrapEl',
-    '_resolveUrl', '_registerIframe', '_base64ToUint8Array',
-    '_bodyToUint8Array', '_arrayBufferFromBytes',
-    '_installWasmStreamingFallback', '_urlParseOp', '_urlSetOp',
-    '_urlResolveOp', '_decodeBodyWithCharset', '_utf8DecodeBytes',
-    '_selectionFor', '_isConstructorCE', '_isValidCustomElementName', '_shadowRootForHost',
-    '_blobPartToBytes', '_bytesToBinaryString', '_formEncode', '_hexv',
-    '_commonFonts', '_isXMLDocument', '_isValidPITarget', '_isHTMLEl',
-    '_nodeList', '_rngNodeLength', '_rngNodeIndex', '_rngSame', '_rngRoot',
-    '_rngAncestors', '_rngOrder', '_rngCmp', '_rngCheckOffset',
-    '_idbRequest', '_idbObjectStore', '_idbTransaction', '_idbDatabase',
-    '_makeListenerBox',
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, which also pre-declares the
+    // engine's own globals here (__obscura_ua, __obscura_init, __documentReadyState__,
+    // _formValues, and ~80 internal helper names). They are closure state now
+    // (_hostVars, SECURITY.md I10), and pre-declaring a name puts an own `undefined`
+    // property on globalThis, which `'name' in window` detects.
     // WebIDL interfaces. A real browser exposes these on the global as
     // enumerable:false; here they were assigned with `globalThis.X = X`, which
     // defaults to enumerable:true and is detectable in one line:
@@ -248,37 +224,46 @@ const _wrapIds = (ids, wrap) => {
 // table it bound and only deletes this (BootstrapLoader.Install).
 globalThis.__obscura_core_handoff = __obscuraCore;
 
-// Runtime.addBinding installs a named page function which forwards through
-// this narrow bridge. Calling it grants no capability beyond calling the
-// installed binding itself; the full op table remains unreachable.
-Object.defineProperty(globalThis, "__obscura_binding_called", {
-  value: (name, payload) => __obscuraCore.ops.op_binding_called(String(name), String(payload)),
-  writable: false,
-  enumerable: false,
-  configurable: false,
-});
+// Runtime.addBinding installs a named page function which forwards to
+// op_binding_called. DEVIATION from crates/obscura-js/js/bootstrap.js, where the
+// binding calls a frozen global bridge, globalThis.__obscura_binding_called, that any
+// page can call and detect (SECURITY.md I10). The host installs each binding through
+// __obscura_host.installBinding, and the function closes over the op.
+function _installBinding(name) {
+  name = _String(name);
+  // Chromium's binding is a native function of one argument: a call with any other
+  // arity is dropped, and the argument is converted with ToString.
+  const binding = [function (arg) {
+    if (arguments.length !== 1) return;
+    try {
+      __obscuraCore.ops.op_binding_called(name, typeof arg === 'string' ? arg : _String(arg));
+    } catch (e) { /* a binding must not throw into the page */ }
+  }][0];
+  _nativeStr.set(binding, 'function () { [native code] }');
+  globalThis[name] = binding;
+}
 
-globalThis.__obscura_errors = [];
+_hostVars.__obscura_errors = [];
 
 globalThis.addEventListener = globalThis.addEventListener || function(){};
 globalThis.onunhandledrejection = function(e) { if (e?.preventDefault) e.preventDefault(); };
 
 globalThis.onerror = function(msg, src, line, col, error) {
-  globalThis.__obscura_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
+  _hostVars.__obscura_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
 };
-globalThis.__windowListeners = {};
+_hostVars.__windowListeners = {};
 globalThis.addEventListener = function(type, fn) {
-  if (!globalThis.__windowListeners[type]) globalThis.__windowListeners[type] = [];
-  globalThis.__windowListeners[type].push(fn);
+  if (!_hostVars.__windowListeners[type]) _hostVars.__windowListeners[type] = [];
+  _hostVars.__windowListeners[type].push(fn);
 };
 globalThis.removeEventListener = function(type, fn) {
-  if (globalThis.__windowListeners[type]) {
-    globalThis.__windowListeners[type] = globalThis.__windowListeners[type].filter(h => h !== fn);
+  if (_hostVars.__windowListeners[type]) {
+    _hostVars.__windowListeners[type] = _hostVars.__windowListeners[type].filter(h => h !== fn);
   }
 };
 globalThis.dispatchEvent = function(event) {
   if (!event) return true;
-  const handlers = globalThis.__windowListeners[event.type] || [];
+  const handlers = _hostVars.__windowListeners[event.type] || [];
   for (let i = 0; i < handlers.length; i++) { try { _reflectApply(handlers[i], globalThis, [event]); } catch(e) { console.error(e); } }
   return !event.defaultPrevented;
 };
@@ -326,14 +311,14 @@ const _dom = (cmd, a1, a2) => {
     _domMutationEpoch++;
     // Resize observation is tied to rendering-invalidating DOM work. The
     // hook is installed later in bootstrap, before page script can run.
-    if (typeof globalThis.__obscura_recompute_resizes === "function") {
-      globalThis.__obscura_recompute_resizes();
+    if (typeof _hostVars.__obscura_recompute_resizes === "function") {
+      _hostVars.__obscura_recompute_resizes();
     }
     // Intersection geometry is invalidated synchronously as well. Deferring
     // this solely through MutationObserver misses the IO phase of the current
     // rendering opportunity when an rAF callback changes layout.
-    if (typeof globalThis.__obscura_recompute_intersections === "function") {
-      globalThis.__obscura_recompute_intersections();
+    if (typeof _hostVars.__obscura_recompute_intersections === "function") {
+      _hostVars.__obscura_recompute_intersections();
     }
   }
   // Native mutation ops report their verified postcondition. Only a real tree
@@ -373,23 +358,24 @@ function _markNative(fn) { if (typeof fn === 'function') _nativeFns.add(fn); ret
 function _markNativeAs(fn, str) { if (typeof fn === 'function') _nativeStr.set(fn, str); return fn; }
 _nativeFns.add(_functionToString);
 
-// unusualWindowProperties: obscura's internal globals are made non-enumerable
-// (see _preHideInternals and __obscura_init), which hides them from
-// Object.keys / for-in. But fingerprinting scripts enumerate the global object
-// with Object.getOwnPropertyNames and Reflect.ownKeys, which return
-// non-enumerable properties too, so the internals still leak (pixelscan's
-// unusualWindowProperties check). Filter the engine's own globals out of the
-// reflection APIs when they target the global object. The canonical name set is
-// __obscura_hide_list, precomputed at snapshot-build time; referencing it lazily
-// means the list is already populated by the time any page calls these.
+// unusualWindowProperties: fingerprinting scripts enumerate the global object with
+// Object.getOwnPropertyNames and Reflect.ownKeys (pixelscan's unusualWindowProperties
+// check). Filter the names in _hideList out of the reflection APIs when they target the
+// global object.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose list is the page-visible global
+// __obscura_hide_list of every `_*` / `*obscura*` global the shim leaves behind. Those
+// are closure state now (_hostVars, SECURITY.md I10), so the list holds only what cannot
+// be removed: ClearScript's non-configurable EngineInternal. `in` and a descriptor
+// lookup still see that one (see EngineInternalHidden). The filter uses Set.prototype.has
+// and Array.prototype.push as bootstrap found them (SECURITY.md L10).
+let _hideList = null;
 (function _hideInternalsFromReflection() {
   var _cache = null, _cacheLen = -1;
   function _set() {
-    var list = globalThis.__obscura_hide_list;
+    var list = _hideList;
     if (!list) { return null; }
     if (_cache && _cacheLen === list.length) { return _cache; }
     _cache = new Set(list);
-    _cache.add('__obscura_hide_list');
     _cacheLen = list.length;
     return _cache;
   }
@@ -399,7 +385,7 @@ _nativeFns.add(_functionToString);
     var set = _set();
     if (!set) { return names; }
     var out = [];
-    for (var i = 0; i < names.length; i++) { if (!set.has(names[i])) { out.push(names[i]); } }
+    for (var i = 0; i < names.length; i++) { if (!_setHas(set, names[i])) { out[out.length] = names[i]; } }
     return out;
   }
   var _oGOPN = Object.getOwnPropertyNames;
@@ -416,7 +402,7 @@ _nativeFns.add(_functionToString);
     var all = _oGOPDs(t);
     if (_isGlobal(t)) {
       var set = _set();
-      if (set) { var ks = _oGOPN(all); for (var i = 0; i < ks.length; i++) { if (set.has(ks[i])) { delete all[ks[i]]; } } }
+      if (set) { var ks = _oGOPN(all); for (var i = 0; i < ks.length; i++) { if (_setHas(set, ks[i])) { delete all[ks[i]]; } } }
     }
     return all;
   });
@@ -454,7 +440,7 @@ let __dynScriptQueue = [];
 let __dynScriptBusy = false;
 let __dynClassicPending = 0;
 let __dynLoadDelayingPending = 0;
-Object.defineProperty(globalThis, '__obscura_hasPendingDynamicScripts', {
+Object.defineProperty(_hostVars, '__obscura_hasPendingDynamicScripts', {
   value: function() {
     return __dynClassicPending > 0 || __dynScriptBusy || __dynScriptQueue.length > 0;
   },
@@ -467,7 +453,7 @@ Object.defineProperty(globalThis, '__obscura_hasPendingDynamicScripts', {
 // before `load` joins that set until its load/error processing finishes;
 // dynamic import() and scripts created by a load handler are post-load work.
 // Keep this bridge hidden for the same reason as the general queue status.
-Object.defineProperty(globalThis, '__obscura_hasPendingLoadDelayingScripts', {
+Object.defineProperty(_hostVars, '__obscura_hasPendingLoadDelayingScripts', {
   value: function() { return __dynLoadDelayingPending > 0; },
   writable: false,
   enumerable: false,
@@ -521,7 +507,7 @@ function _decodeDataScriptUrl(url) {
 // A script element executes at most once.  The authoritative flag lives in
 // native per-document state so it survives wrapper churn, fragment parsing,
 // moves, and cloneNode().
-globalThis.__markParserScripts = function(nids) {
+_hostVars.__markParserScripts = function(nids) {
   for (const nid of nids || []) __obscuraCore.ops.op_script_mark_started(+nid);
 };
 async function __fetchDynClassicScript(task) {
@@ -574,10 +560,10 @@ async function __runDynScriptTask(task) {
         // the same reason as below.
         await new Promise(resolve => {
           const execute = () => {
-            globalThis.__currentScriptNid = task.nid;
+            _hostVars.__currentScriptNid = task.nid;
             try { __obscuraCore.ops.op_run_fetched_script(body.token, task.url); }
             catch(e) { console.error('Dynamic script error (' + task.url + '):', e.message); }
-            finally { globalThis.__currentScriptNid = task.prevNid || 0; }
+            finally { _hostVars.__currentScriptNid = task.prevNid || 0; }
             resolve();
           };
           if (_scheduleAfter(0, execute) === undefined) execute();
@@ -590,10 +576,10 @@ async function __runDynScriptTask(task) {
         // parser script happened to trigger the microtask checkpoint.
         await new Promise(resolve => {
           const execute = () => {
-            globalThis.__currentScriptNid = task.nid;
+            _hostVars.__currentScriptNid = task.nid;
             try { (0, eval)(body); }
             catch(e) { console.error('Dynamic script error (' + task.url + '):', e.message); }
-            finally { globalThis.__currentScriptNid = task.prevNid || 0; }
+            finally { _hostVars.__currentScriptNid = task.prevNid || 0; }
             resolve();
           };
           if (_scheduleAfter(0, execute) === undefined) execute();
@@ -779,7 +765,7 @@ function _fpNoise(x, y, channel) {
 var _fpCache = null;
 function _getFp() {
   if (_fpCache) return _fpCache;
-  const _uaPlat = globalThis.__obscura_ua_platform || 'Windows';
+  const _uaPlat = _hostVars.__obscura_ua_platform || 'Windows';
   const isMac = _uaPlat === 'macOS';
   const isLinux = _uaPlat === 'Linux';
   const gpuPool = isMac ? [
@@ -847,14 +833,17 @@ function _getFp() {
   return _fpCache;
 }
 function _fp(key) { return _getFp()[key]; }
-globalThis._eventRegistry = globalThis._eventRegistry || {};
-globalThis._formValues = globalThis._formValues || {};
-globalThis._formChecked = globalThis._formChecked || {};
-globalThis._formIndeterminate = globalThis._formIndeterminate || {};
-const _eventRegistry = globalThis._eventRegistry;
-const _formValues = globalThis._formValues;
-const _formChecked = globalThis._formChecked;
-const _formIndeterminate = globalThis._formIndeterminate;
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which leaves these four on the
+// global: the listener registry and the dirty form state were page-readable and
+// page-writable there, and detectable by name (SECURITY.md I10). The form maps the
+// host installed ahead of this file (FormStateMirror) are adopted and taken off it.
+const _eventRegistry = {};
+const _formValues = globalThis._formValues || {};
+const _formChecked = globalThis._formChecked || {};
+const _formIndeterminate = globalThis._formIndeterminate || {};
+delete globalThis._formValues;
+delete globalThis._formChecked;
+delete globalThis._formIndeterminate;
 const _domParse = (cmd, a1, a2) => { try { return _JSONparse(_dom(cmd, a1, a2)); } catch { return null; } };
 
 // HTML "ASCII whitespace": U+0009 TAB, U+000A LF, U+000C FF, U+000D CR, U+0020 SPACE.
@@ -991,7 +980,7 @@ const _nativeTimerIds = new Map();
 const _timerStates = new Map();
 const _frameTimerStates = new Map();
 const __obscuraPendingTimeoutDeadlines = new Map();
-Object.defineProperty(globalThis, '__obscura_nextPendingTimeoutDelay', {
+Object.defineProperty(_hostVars, '__obscura_nextPendingTimeoutDelay', {
   value: function() {
     const now = performance.now();
     let nearest = Infinity;
@@ -2075,7 +2064,7 @@ function __prepareInsertedScript(script) {
   const src = script.getAttribute('src');
   const code = src ? "" : script.textContent;
   if (!src && !code) return;
-  const prevNid = globalThis.__currentScriptNid;
+  const prevNid = _hostVars.__currentScriptNid;
   if (src) {
     let baseHref;
     try {
@@ -2148,10 +2137,10 @@ function __prepareInsertedScript(script) {
     __dynScriptQueue.push(task);
     __processDynScriptQueue();
   } else {
-    globalThis.__currentScriptNid = script._nid;
+    _hostVars.__currentScriptNid = script._nid;
     try { (0, eval)(code); }
     catch(e) { console.error('Dynamic inline script error:', e.message); }
-    finally { globalThis.__currentScriptNid = prevNid || 0; }
+    finally { _hostVars.__currentScriptNid = prevNid || 0; }
   }
 }
 
@@ -2243,8 +2232,8 @@ class Node {
     // Real MutationObserver fires childList for the children swap.
     // Without this React 18+ hydration mismatch detection and many polling
     // libs (intersection-driven lazy load, content sync) silently stall.
-    if (globalThis.__mutationObservers?.length) {
-      globalThis.__notifyMutation('childList', this._nid, added, oldChildren);
+    if (_hostVars.__mutationObservers?.length) {
+      _hostVars.__notifyMutation('childList', this._nid, added, oldChildren);
     }
   }
   get nodeValue() {
@@ -2308,7 +2297,7 @@ class Node {
     _seedUnchangedConnection(this, parentConnected);
     _seedInsertedTreeState(c, this, parentConnected);
     _registerWindowNamedTree(c);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [c._nid], []);
+    if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('childList', this._nid, [c._nid], []);
     __prepareInsertedSubtree(c);
     if (c instanceof Element && c.tagName === 'LINK') {
       _loadLinkedStylesheet(c);
@@ -2338,7 +2327,7 @@ class Node {
     _seedDetachedTreeState(c);
     _detachStyleSheetsInSubtree(c);
     _reconcileWindowNamedProperties(removedWindowNames);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [], [c._nid]);
+    if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('childList', this._nid, [], [c._nid]);
     return c;
   }
   replaceChild(newChild, oldChild) {
@@ -2377,8 +2366,8 @@ class Node {
     _reconcileWindowNamedProperties(removedWindowNames);
     // As in appendChild and removeChild. A replacement is an insertion and a removal. An
     // observer saw neither so far.
-    if (globalThis.__mutationObservers?.length) {
-      globalThis.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid]);
+    if (_hostVars.__mutationObservers?.length) {
+      _hostVars.__notifyMutation('childList', this._nid, [newChild._nid], [oldChild._nid]);
     }
     __prepareInsertedSubtree(newChild);
     if (newChild instanceof Element && newChild.tagName === 'LINK') {
@@ -2416,7 +2405,7 @@ class Node {
     _registerWindowNamedTree(n);
     // The same steps as in appendChild. Where a node is inserted does not decide whether an
     // observer sees it and whether a <link> loads its stylesheet.
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [n._nid], []);
+    if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('childList', this._nid, [n._nid], []);
     __prepareInsertedSubtree(n);
     if (n instanceof Element && n.tagName === 'LINK') {
       _loadLinkedStylesheet(n);
@@ -2557,8 +2546,8 @@ class CharacterData extends Node {
   set data(v) {
     const oldValue = _domParse("text_content", this._nid) ?? "";
     _dom("set_text_content", this._nid, String(v ?? ""));
-    if (globalThis.__mutationObservers?.length) {
-      globalThis.__notifyMutation('characterData', this._nid, [], [], null, oldValue);
+    if (_hostVars.__mutationObservers?.length) {
+      _hostVars.__notifyMutation('characterData', this._nid, [], [], null, oldValue);
     }
   }
   get length() { return this.data.length; }
@@ -3532,7 +3521,7 @@ class Element extends Node {
     _reconcileWindowNamedProperties(previousWindowNames);
     if (observed) {
       newChildren = _domParse("child_nodes", this._nid) || [];
-      globalThis.__notifyMutation('childList', this._nid, newChildren, oldChildren);
+      _hostVars.__notifyMutation('childList', this._nid, newChildren, oldChildren);
     }
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
@@ -3676,7 +3665,7 @@ class Element extends Node {
       if (this.__inlineHandlerCache) delete this.__inlineHandlerCache.onload;
     }
     if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev);
-    if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('attributes', this._nid, [], [], n);
+    if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('attributes', this._nid, [], [], n);
     if (this.localName === "source"
         && (n === "srcset" || n === "sizes" || n === "media" || n === "type")) {
       const picture = this.parentElement;
@@ -4983,9 +4972,9 @@ class Element extends Node {
     this._scrollTop = actual;
     if (changed && !this._scrollSuppress) this._fireScroll();
     if (changed &&
-        typeof globalThis.__obscura_recompute_intersections === "function") {
+        typeof _hostVars.__obscura_recompute_intersections === "function") {
       // Scrolling changes target positions, not ResizeObserver box sizes.
-      globalThis.__obscura_recompute_intersections();
+      _hostVars.__obscura_recompute_intersections();
     }
   }
   get scrollLeft() {
@@ -5019,8 +5008,8 @@ class Element extends Node {
     this._scrollLeft = actual;
     if (changed && !this._scrollSuppress) this._fireScroll();
     if (changed &&
-        typeof globalThis.__obscura_recompute_intersections === "function") {
-      globalThis.__obscura_recompute_intersections();
+        typeof _hostVars.__obscura_recompute_intersections === "function") {
+      _hostVars.__obscura_recompute_intersections();
     }
   }
   getBoundingClientRect() {
@@ -5178,8 +5167,8 @@ class Element extends Node {
       this._scrollLeft = actualLeft;
       this._scrollTop = actualTop;
       if (actualLeft !== oldLeft || actualTop !== oldTop) {
-        if (typeof globalThis.__obscura_recompute_intersections === "function") {
-          globalThis.__obscura_recompute_intersections();
+        if (typeof _hostVars.__obscura_recompute_intersections === "function") {
+          _hostVars.__obscura_recompute_intersections();
         }
         this._fireScroll();
       }
@@ -5565,12 +5554,12 @@ class Document extends Node {
     if (/\.(?:xml|svg)(?:[?#]|$)/i.test(url)) return "application/xml";
     return "text/html";
   }
-  get readyState() { return globalThis.__documentReadyState__ || 'complete'; }
+  get readyState() { return _hostVars.__documentReadyState__ || 'complete'; }
   get currentScript() {
     // Next.js / Turbopack chunk loader reads document.currentScript.src to
     // derive its base path. page.rs sets __currentScriptNid before each
     // <script> body runs and clears it after, mirroring real Chrome.
-    const nid = globalThis.__currentScriptNid;
+    const nid = _hostVars.__currentScriptNid;
     return nid ? _wrapEl(+nid) : null;
   }
   get hidden() { return false; }
@@ -6046,7 +6035,7 @@ class Document extends Node {
     // behind it, not at the end of the body. The point moves along with every node placed,
     // even across calls, so that a script's second call lands behind the first instead of
     // directly behind the script again.
-    var scriptNid = globalThis.__currentScriptNid || 0;
+    var scriptNid = _hostVars.__currentScriptNid || 0;
     var after = null;
     if (scriptNid) {
       var anchorNid = this._writeAnchorScript === scriptNid && this._writeAnchorNid
@@ -7457,7 +7446,7 @@ globalThis.NetworkInformation = NetworkInformation;
 globalThis.ContentIndex = class ContentIndex {};
 
 function _chromeMajor() {
-  var m = (globalThis.__obscura_ua || '').match(/Chrome\/(\d+)/);
+  var m = (_hostVars.__obscura_ua || '').match(/Chrome\/(\d+)/);
   return m ? (m[1] | 0) : 145;
 }
 // Chromium derives the sec-ch-ua GREASE brand, version, and brand order
@@ -7495,7 +7484,7 @@ globalThis.navigator = {
   userAgentData: {
     mobile: false,
     get brands() { return _uaBrands(); },
-    get platform() { return globalThis.__obscura_ua_platform || "Windows"; },
+    get platform() { return _hostVars.__obscura_ua_platform || "Windows"; },
     getHighEntropyValues(hints) {
       var brands = _uaBrands();
       return Promise.resolve({
@@ -7505,8 +7494,8 @@ globalThis.navigator = {
         fullVersionList: brands.map(function(b) { return {brand: b.brand, version: b.version + ".0.0.0"}; }),
         mobile: false,
         model: "",
-        platform: globalThis.__obscura_ua_platform || "Windows",
-        platformVersion: globalThis.__obscura_ua_platform_version || "15.0.0",
+        platform: _hostVars.__obscura_ua_platform || "Windows",
+        platformVersion: _hostVars.__obscura_ua_platform_version || "15.0.0",
         uaFullVersion: _chromeMajor() + ".0.0.0",
         wow64: false,
       });
@@ -7543,8 +7532,8 @@ globalThis.navigator = {
   geolocation: {
     getCurrentPosition(success, error) {
       const coords = {
-        latitude: (globalThis.__obscura_geo_lat ?? 50.1109) + (_fpRand(500) - 0.5) * 0.1,
-        longitude: (globalThis.__obscura_geo_lon ?? 8.6821) + (_fpRand(501) - 0.5) * 0.1,
+        latitude: (_hostVars.__obscura_geo_lat ?? 50.1109) + (_fpRand(500) - 0.5) * 0.1,
+        longitude: (_hostVars.__obscura_geo_lon ?? 8.6821) + (_fpRand(501) - 0.5) * 0.1,
         accuracy: 10 + _fpRand(502) * 40,
         altitude: null,
         altitudeAccuracy: null,
@@ -7557,8 +7546,8 @@ globalThis.navigator = {
     watchPosition(success, error) {
       if (typeof success === 'function') {
         const coords = {
-          latitude: (globalThis.__obscura_geo_lat ?? 50.1109) + (_fpRand(503) - 0.5) * 0.1,
-          longitude: (globalThis.__obscura_geo_lon ?? 8.6821) + (_fpRand(504) - 0.5) * 0.1,
+          latitude: (_hostVars.__obscura_geo_lat ?? 50.1109) + (_fpRand(503) - 0.5) * 0.1,
+          longitude: (_hostVars.__obscura_geo_lon ?? 8.6821) + (_fpRand(504) - 0.5) * 0.1,
           accuracy: 10 + _fpRand(505) * 40,
           altitude: null,
           altitudeAccuracy: null,
@@ -7593,17 +7582,17 @@ globalThis.navigator = {
 
   defGetter('webdriver', function() { return false; });
   defGetter('userAgent', function() {
-    return globalThis.__obscura_ua ||
+    return _hostVars.__obscura_ua ||
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
   });
   defGetter('appVersion', function() {
-    return (globalThis.__obscura_ua ||
+    return (_hostVars.__obscura_ua ||
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36").replace('Mozilla/', '');
   });
   defGetter('platform', function() {
-    return globalThis.__obscura_platform || "Win32";
+    return _hostVars.__obscura_platform || "Win32";
   });
   defGetter('language', function() { return "en-US"; });
   defGetter('languages', function() { return ["en-US", "en"]; });
@@ -7624,8 +7613,8 @@ globalThis.navigator = {
   defGetter('mimeTypes', function() { return _mimeTypes; });
 
   // Values set per-page by __obscura_init (avoids own data props on navigator).
-  defGetter('hardwareConcurrency', function() { return globalThis.__obscura_hw || 8; });
-  defGetter('deviceMemory', function() { return globalThis.__obscura_mem || 8; });
+  defGetter('hardwareConcurrency', function() { return _hostVars.__obscura_hw || 8; });
+  defGetter('deviceMemory', function() { return _hostVars.__obscura_mem || 8; });
 
   _navProto.share = _markNative(function share(data) {
     return Promise.reject(new DOMException('Not allowed', 'NotAllowedError'));
@@ -7704,15 +7693,15 @@ function _applyScreenSize(w, h, emulated) {
 // Host-only (__obscura_host.setScreenOverride); upstream's global
 // __obscura_set_screen_override.
 function _setScreenOverride(w, h, emulated) {
-  globalThis.__obscura_screen_emulated = !!emulated;
+  _hostVars.__obscura_screen_emulated = !!emulated;
   if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-    globalThis.__obscura_screen_w = w;
-    globalThis.__obscura_screen_h = h;
+    _hostVars.__obscura_screen_w = w;
+    _hostVars.__obscura_screen_h = h;
     _applyScreenSize(w, h, !!emulated);
     return;
   }
-  delete globalThis.__obscura_screen_w;
-  delete globalThis.__obscura_screen_h;
+  delete _hostVars.__obscura_screen_w;
+  delete _hostVars.__obscura_screen_h;
   const fallback = _fp('screen');
   _applyScreenSize(fallback[0], fallback[1], !!emulated);
 }
@@ -7723,8 +7712,8 @@ globalThis.outerWidth = 1920; globalThis.outerHeight = 1080;
 globalThis.scrollX = 0; globalThis.scrollY = 0;
 globalThis.pageXOffset = 0; globalThis.pageYOffset = 0;
 
-globalThis.__fetchInterceptEnabled = false;
-globalThis.__fetchInterceptCallback = null; // Set by CDP to handle paused requests
+_hostVars.__fetchInterceptEnabled = false;
+_hostVars.__fetchInterceptCallback = null; // Set by CDP to handle paused requests
 
 // charCode -> 6-bit value reverse table for base64 decode. -1 for any byte not
 // in the standard alphabet, which mirrors String.indexOf's miss exactly, so the
@@ -8932,21 +8921,21 @@ if (!('isConnected' in Node.prototype)) {
 // last delivered size for each observed box and perform one coalesced geometry
 // checkpoint after DOM/viewport work. This follows the browser lifecycle and,
 // importantly, does not keep the event loop alive with speculative re-fires.
-globalThis.__resizeObservers = [];
+_hostVars.__resizeObservers = [];
 let _resizeRenderCheckpointPending = false;
 let _resizeRenderCheckpointRunning = false;
 let _resizeRenderCheckpointRerun = false;
 function _registerResizeObserver(observer) {
-  if (!globalThis.__resizeObservers.includes(observer)) {
-    globalThis.__resizeObservers.push(observer);
+  if (!_hostVars.__resizeObservers.includes(observer)) {
+    _hostVars.__resizeObservers.push(observer);
   }
 }
 function _unregisterResizeObserver(observer) {
-  const index = globalThis.__resizeObservers.indexOf(observer);
-  if (index >= 0) globalThis.__resizeObservers.splice(index, 1);
+  const index = _hostVars.__resizeObservers.indexOf(observer);
+  if (index >= 0) _hostVars.__resizeObservers.splice(index, 1);
 }
 function _scheduleResizeRenderCheckpoint() {
-  if (!globalThis.__resizeObservers.length) return;
+  if (!_hostVars.__resizeObservers.length) return;
   if (_resizeRenderCheckpointRunning) {
     _resizeRenderCheckpointRerun = true;
     return;
@@ -8965,7 +8954,7 @@ function _runResizeRenderCheckpoint() {
   // that manufacture an ever-deeper subtree during one delivery cycle.
   for (let iteration = 0; iteration < 64; iteration++) {
     _resizeRenderCheckpointRerun = false;
-    const observers = [...globalThis.__resizeObservers];
+    const observers = [..._hostVars.__resizeObservers];
     const targets = [];
     const seenTargets = new Set();
     for (const observer of observers) {
@@ -9005,7 +8994,7 @@ function _runResizeRenderCheckpoint() {
     } catch (_error) {}
   }
 }
-globalThis.__obscura_recompute_resizes = _scheduleResizeRenderCheckpoint;
+_hostVars.__obscura_recompute_resizes = _scheduleResizeRenderCheckpoint;
 function _roNumber(value) {
   const number = Number.parseFloat(value);
   return Number.isFinite(number) ? number : 0;
@@ -10264,7 +10253,7 @@ Object.defineProperty(Document.prototype, 'adoptedStyleSheets', {
   },
 });
 
-globalThis.__mutationObservers = [];
+_hostVars.__mutationObservers = [];
 // DEVIATION from crates/obscura-js/js/bootstrap.js: the MutationObserver
 // registration and notify-set rules below are fixed here and not in the Rust
 // tree, which is read-only. Rust still lists an observer once per observe()
@@ -10319,8 +10308,8 @@ globalThis.MutationObserver = class MutationObserver {
     const existing = this._targets.find(entry => entry.target === target);
     if (existing) existing.options = normalized;
     else this._targets.push({ target, options: normalized });
-    if (globalThis.__mutationObservers.indexOf(this) < 0) {
-      globalThis.__mutationObservers.push(this);
+    if (_hostVars.__mutationObservers.indexOf(this) < 0) {
+      _hostVars.__mutationObservers.push(this);
     }
   }
   disconnect() {
@@ -10329,10 +10318,10 @@ globalThis.MutationObserver = class MutationObserver {
     // recorded this turn is not delivered after the observer was disconnected.
     this._records.length = 0;
     _mutationNotifySet.delete(this);
-    for (let idx = globalThis.__mutationObservers.indexOf(this);
+    for (let idx = _hostVars.__mutationObservers.indexOf(this);
          idx >= 0;
-         idx = globalThis.__mutationObservers.indexOf(this)) {
-      globalThis.__mutationObservers.splice(idx, 1);
+         idx = _hostVars.__mutationObservers.indexOf(this)) {
+      _hostVars.__mutationObservers.splice(idx, 1);
     }
   }
   takeRecords() {
@@ -10346,7 +10335,7 @@ globalThis.MutationObserver = class MutationObserver {
 };
 // Whether some observer registration would see a childList mutation of `node`.
 function _childListObserved(node) {
-  const observers = globalThis.__mutationObservers;
+  const observers = _hostVars.__mutationObservers;
   if (!observers || !observers.length) return false;
   for (const obs of observers) {
     for (const t of obs._targets) {
@@ -10361,8 +10350,8 @@ function _childListObserved(node) {
   }
   return false;
 }
-globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
-  if (!globalThis.__mutationObservers.length) return;
+_hostVars.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
+  if (!_hostVars.__mutationObservers.length) return;
   // Use `_wrap` (the canonical node-id → wrapper resolver) instead of a
   // direct cache poke. The previous code referenced `globalThis._cache`,
   // but `_cache` is a module-local Map — the lookup always returned
@@ -10393,7 +10382,7 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
   // `target.contains` and `target.closest` were defined (always true on
   // any Element), so subtree=true silently behaved like subtree=false and
   // every nested mutation missed its subscriber.
-  for (const obs of globalThis.__mutationObservers) {
+  for (const obs of _hostVars.__mutationObservers) {
     let matched = false;
     for (const t of obs._targets) {
       const root = t.target;
@@ -10427,7 +10416,7 @@ globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNode
 
 // Port addition (SECURITY.md M6): the notifier as bootstrap defined it, for the host
 // helper that delivers a mutation another realm over this document made.
-const _notifyMutationInternal = globalThis.__notifyMutation;
+const _notifyMutationInternal = _hostVars.__notifyMutation;
 
 globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {
   constructor(nid, host, options) {
@@ -10514,7 +10503,7 @@ Object.defineProperty(globalThis.ShadowRoot.prototype, 'adoptedStyleSheets', {
   set(sheets) { _replaceAdoptedStyleSheets(this, sheets); },
   configurable: true,
 });
-globalThis.__obscura_shadowHostNames = new Set(['article','aside','blockquote','body','div','footer','h1','h2','h3','h4','h5','h6','header','main','nav','p','section','span']);
+_hostVars.__obscura_shadowHostNames = new Set(['article','aside','blockquote','body','div','footer','h1','h2','h3','h4','h5','h6','header','main','nav','p','section','span']);
 function _isConstructorCE(v) {
   if (typeof v !== 'function') return false;
   try { Reflect.construct(function () {}, [], v); return true; } catch (e) { return false; }
@@ -10657,7 +10646,7 @@ globalThis.NodeFilter = {
 //
 // IntersectionObserver. Render builds provide real, scroll-relative target,
 // element-root, and overflow-ancestor boxes from one prepared layout snapshot.
-globalThis.__intersectionObservers = [];
+_hostVars.__intersectionObservers = [];
 let _intersectionRenderCheckpointPending = false;
 const _intersectionDeliveryObservers = new Set();
 let _intersectionDeliveryTaskPending = false;
@@ -10700,7 +10689,7 @@ function _scheduleIntersectionObserverDelivery(observer) {
 }
 
 function _scheduleIntersectionRenderCheckpoint() {
-  if (!globalThis.__intersectionObservers.some(
+  if (!_hostVars.__intersectionObservers.some(
     observer => observer._connected && observer._targets.size,
   )) return;
   if (_intersectionRenderCheckpointPending) return;
@@ -10709,7 +10698,7 @@ function _scheduleIntersectionRenderCheckpoint() {
 }
 function _runIntersectionRenderCheckpoint() {
   _intersectionRenderCheckpointPending = false;
-  const observers = globalThis.__intersectionObservers.filter(
+  const observers = _hostVars.__intersectionObservers.filter(
     observer => observer._connected && observer._targets.size,
   );
   const elements = [];
@@ -10842,7 +10831,7 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     this._records = [];
     this._documentGeneration = _browserPostedTaskGeneration();
     this._connected = true;
-    globalThis.__intersectionObservers.push(this);
+    _hostVars.__intersectionObservers.push(this);
   }
   _rootBounds(measurements) {
     let x = 0, y = 0;
@@ -10973,8 +10962,8 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     // geometry recomputation list forever.
     if (!this._connected) {
       this._connected = true;
-      if (!globalThis.__intersectionObservers.includes(this)) {
-        globalThis.__intersectionObservers.push(this);
+      if (!_hostVars.__intersectionObservers.includes(this)) {
+        _hostVars.__intersectionObservers.push(this);
       }
     }
     this._targets.add(el);
@@ -10991,8 +10980,8 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     this._previous.clear();
     this._records.length = 0;
     _intersectionDeliveryObservers.delete(this);
-    const index = globalThis.__intersectionObservers.indexOf(this);
-    if (index >= 0) globalThis.__intersectionObservers.splice(index, 1);
+    const index = _hostVars.__intersectionObservers.indexOf(this);
+    if (index >= 0) _hostVars.__intersectionObservers.splice(index, 1);
   }
   takeRecords() { return this._records.splice(0); }
   get root() { return this._root; }
@@ -11008,7 +10997,7 @@ globalThis.IntersectionObserver = class IntersectionObserver {
   };
   // Scrolling calls the IO-only hook. Actual viewport resizing remains a full
   // rendering update and schedules both observer families.
-  globalThis.__obscura_recompute_intersections = _scheduleIntersectionRenderCheckpoint;
+  _hostVars.__obscura_recompute_intersections = _scheduleIntersectionRenderCheckpoint;
   globalThis.addEventListener("resize", renderingUpdate);
   const wireUp = () => {
     if (!globalThis.document) return;
@@ -12306,7 +12295,7 @@ function _installNavigationTimingHooks() {
 // instead of copies of navigationStart.
 var _documentReadyStateValue;
 try {
-  Object.defineProperty(globalThis, '__documentReadyState__', {
+  Object.defineProperty(_hostVars, '__documentReadyState__', {
     get() { return _documentReadyStateValue; },
     set(value) {
       _documentReadyStateValue = value;
@@ -12573,8 +12562,8 @@ function _structuredClone(value, seen) {
   // Platform objects that carry internal slots opt into cloning via a hook
   // (CryptoKey re-registers its key material so the clone stays usable by
   // crypto.subtle). Anything else with a registered hook takes that path.
-  if (typeof value[Symbol.toStringTag] === "string" && globalThis.__obscura_clone_hooks) {
-    const hook = globalThis.__obscura_clone_hooks[value[Symbol.toStringTag]];
+  if (typeof value[Symbol.toStringTag] === "string" && _hostVars.__obscura_clone_hooks) {
+    const hook = _hostVars.__obscura_clone_hooks[value[Symbol.toStringTag]];
     if (typeof hook === "function") return hook(value, seen);
   }
   // Plain objects clone onto Object.prototype (like Chrome), not the source's
@@ -14635,8 +14624,8 @@ function _crossOriginWindowFor(el) {
 // handed to the host, which delivers it into the target realm. These are
 // declared rather than assigned by the host so the snapshot-time hide list
 // picks them up; a global added later would stay enumerable on `window`.
-globalThis.__obscura_frameId = 0;        // 0 is the page's own realm
-globalThis.__obscura_parentFrameId = 0;
+_hostVars.__obscura_frameId = 0;        // 0 is the page's own realm
+_hostVars.__obscura_parentFrameId = 0;
 // The frame registries (_frameWindows, _frameElements, _frameObjects) are declared at
 // the top of this file.
 // The frames of this realm whose element is still in the document.
@@ -14830,9 +14819,9 @@ function _remoteWindow(frameId) {
 // window` is how a document decides it is top-level, and one script taking
 // that branch wrongly is enough to change everything after it.
 function _installFramingRelationships() {
-  if (!globalThis.__obscura_frameId) return; // the page really is the top
+  if (!_hostVars.__obscura_frameId) return; // the page really is the top
   for (const [name, frameId] of [
-    ['parent', globalThis.__obscura_parentFrameId],
+    ['parent', _hostVars.__obscura_parentFrameId],
     ['top', 0], // the top browsing context is always the page's realm
   ]) {
     try {
@@ -15002,8 +14991,8 @@ function _encodePNG(w, h, rgba) {
   return b64;
 }
 
-globalThis.__ariaQuerySelector = function(root, selector) { return null; };
-globalThis.__ariaQuerySelectorAll = async function*(root, selector) { /* yields nothing */ };
+_hostVars.__ariaQuerySelector = function(root, selector) { return null; };
+_hostVars.__ariaQuerySelectorAll = async function*(root, selector) { /* yields nothing */ };
 // ---------------------------------------------------------------- canvas 2D
 // The 2D context is a software rasterizer written here rather than in the host,
 // so both engines share it verbatim. Everything below supports _Canvas2D.
@@ -16099,7 +16088,7 @@ Element.prototype.attachShadow = function attachShadow(opts) {
     throw new TypeError('Failed to execute attachShadow on Element: the mode value is not a valid ShadowRootMode.');
   }
   var _ln = (this.localName || '').toLowerCase();
-  if (!globalThis.__obscura_shadowHostNames.has(_ln) && _ln.indexOf('-') === -1) {
+  if (!_hostVars.__obscura_shadowHostNames.has(_ln) && _ln.indexOf('-') === -1) {
     throw new DOMException('Failed to execute attachShadow on Element: this element does not support attachShadow', 'NotSupportedError');
   }
   if (__obscuraCore.ops.op_shadow_root_info(this._nid)) {
@@ -16457,7 +16446,7 @@ globalThis.Worker = class Worker {
 
     let resolvedUrl = url;
     if (typeof url === 'string') {
-      const blob = globalThis.__blobStore?.[url];
+      const blob = _hostVars.__blobStore?.[url];
       if (blob) {
         worker._code = blob;
         // Auto-start on next tick so caller can set onmessage first.
@@ -16569,7 +16558,7 @@ globalThis.Worker = class Worker {
   }
 };
 
-globalThis.__blobStore = globalThis.__blobStore || {};
+_hostVars.__blobStore = _hostVars.__blobStore || {};
 URL.createObjectURL = function(blob) {
   // Chrome mints blob:<document-origin>/<v4-uuid> (blob:null/<uuid> on an opaque
   // origin) and throws a TypeError on missing/non-Blob input. The old code named
@@ -16611,17 +16600,17 @@ URL.createObjectURL = function(blob) {
     if (blob._bytes) {
       let text = '';
       try { text = new TextDecoder().decode(blob._bytes); } catch (e) {}
-      globalThis.__blobStore[id] = text;
+      _hostVars.__blobStore[id] = text;
     } else if (typeof blob.text === 'function') {
-      blob.text().then(text => { globalThis.__blobStore[id] = text; });
+      blob.text().then(text => { _hostVars.__blobStore[id] = text; });
     } else {
-      globalThis.__blobStore[id] = '';
+      _hostVars.__blobStore[id] = '';
     }
     return id;
   }
 };
 URL.revokeObjectURL = function(url) {
-  delete globalThis.__blobStore[url];
+  delete _hostVars.__blobStore[url];
 };
 
 // Window-level scrolling (issue #468). #431 gave elements functional
@@ -16997,11 +16986,11 @@ if (!globalThis.crypto.subtle) {
   // material so the clone stays usable. The clone hook is dispatched by
   // _structuredClone via Symbol.toStringTag ("CryptoKey"); registered lazily
   // because structuredClone is defined before this block (issue #389).
-  globalThis.__obscura_clone_hooks = globalThis.__obscura_clone_hooks || {};
+  _hostVars.__obscura_clone_hooks = _hostVars.__obscura_clone_hooks || {};
   // `seen` is the clone memo _structuredClone hands every hook. Populate it so
   // one key reached twice in a graph clones to one shared object (and its key
   // material is registered once), matching structuredClone's identity rules.
-  globalThis.__obscura_clone_hooks["CryptoKey"] = function (src, seen) {
+  _hostVars.__obscura_clone_hooks["CryptoKey"] = function (src, seen) {
     if (seen && seen.has(src)) return seen.get(src);
     const copy = makeKey(src.type, src.extractable, src.algorithm, src.usages, keyBytes(src));
     if (seen) seen.set(src, copy);
@@ -18147,12 +18136,14 @@ if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint)
   };
 }
 
-globalThis.__obscura_init = function() {
+// DEVIATION from crates/obscura-js/js/bootstrap.js: a host helper (__obscura_host.init),
+// not the page-visible global __obscura_init (SECURITY.md I10).
+function _pageInit() {
   // The host sets __obscura_frameId on a frame realm before calling this.
-  _realmFrameId = globalThis.__obscura_frameId >>> 0;
-  _realmParentFrameId = globalThis.__obscura_parentFrameId >>> 0;
-  _realmIsolatedWorld = globalThis.__obscura_isolated_world === true;
-  delete globalThis.__obscura_isolated_world;
+  _realmFrameId = _hostVars.__obscura_frameId >>> 0;
+  _realmParentFrameId = _hostVars.__obscura_parentFrameId >>> 0;
+  _realmIsolatedWorld = _hostVars.__obscura_isolated_world === true;
+  delete _hostVars.__obscura_isolated_world;
   _browserPostedTaskWakePending = false;
   for (const queue of _browserPostedTaskQueues) _browserPostedTaskDiscardQueue(queue);
   _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
@@ -18175,19 +18166,19 @@ globalThis.__obscura_init = function() {
   _reconcileWindowNamedProperties(previousWindowNames);
 
   const scr = _fp('screen');
-  const sw = Number.isFinite(globalThis.__obscura_screen_w) && globalThis.__obscura_screen_w > 0
-    ? globalThis.__obscura_screen_w : scr[0];
-  const sh = Number.isFinite(globalThis.__obscura_screen_h) && globalThis.__obscura_screen_h > 0
-    ? globalThis.__obscura_screen_h : scr[1];
+  const sw = Number.isFinite(_hostVars.__obscura_screen_w) && _hostVars.__obscura_screen_w > 0
+    ? _hostVars.__obscura_screen_w : scr[0];
+  const sh = Number.isFinite(_hostVars.__obscura_screen_h) && _hostVars.__obscura_screen_h > 0
+    ? _hostVars.__obscura_screen_h : scr[1];
   // The OS screen and the page viewport are different browser concepts.
   // Keep the fingerprinted screen, but let the embedding browser provide the
   // actual CSS viewport so responsive JavaScript, layout, and screenshots all
   // observe the same dimensions.
-  const vw = Number.isFinite(globalThis.__obscura_viewport_w) && globalThis.__obscura_viewport_w > 0
-    ? globalThis.__obscura_viewport_w : sw;
-  const vh = Number.isFinite(globalThis.__obscura_viewport_h) && globalThis.__obscura_viewport_h > 0
-    ? globalThis.__obscura_viewport_h : sh - 80;
-  _applyScreenSize(sw, sh, !!globalThis.__obscura_screen_emulated);
+  const vw = Number.isFinite(_hostVars.__obscura_viewport_w) && _hostVars.__obscura_viewport_w > 0
+    ? _hostVars.__obscura_viewport_w : sw;
+  const vh = Number.isFinite(_hostVars.__obscura_viewport_h) && _hostVars.__obscura_viewport_h > 0
+    ? _hostVars.__obscura_viewport_h : sh - 80;
+  _applyScreenSize(sw, sh, !!_hostVars.__obscura_screen_emulated);
   globalThis.visualViewport = { width:vw, height:vh, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
   // Screen dimensions do not determine the output device scale. The embedding
   // browser applies an explicit device metric after page initialization; the
@@ -18196,10 +18187,10 @@ globalThis.__obscura_init = function() {
   globalThis.innerWidth = vw; globalThis.innerHeight = vh;
   globalThis.outerWidth = sw; globalThis.outerHeight = sh - 40;
 
-  var hwValues = globalThis.__obscura_stealth ? [4, 6, 8, 12, 16] : [2, 4, 6, 8, 12, 16];
-  globalThis.__obscura_hw = hwValues[Math.floor(_fpRand(400) * hwValues.length)];
-  var memValues = globalThis.__obscura_stealth ? [4, 8] : [0.25, 0.5, 1, 2, 4, 8];
-  globalThis.__obscura_mem = memValues[Math.floor(_fpRand(401) * memValues.length)];
+  var hwValues = _hostVars.__obscura_stealth ? [4, 6, 8, 12, 16] : [2, 4, 6, 8, 12, 16];
+  _hostVars.__obscura_hw = hwValues[Math.floor(_fpRand(400) * hwValues.length)];
+  var memValues = _hostVars.__obscura_stealth ? [4, 8] : [0.25, 0.5, 1, 2, 4, 8];
+  _hostVars.__obscura_mem = memValues[Math.floor(_fpRand(401) * memValues.length)];
 
   // A navigation start precedes the wall clock, so skew into the past only: an
   // origin ahead of it makes performance.now() and the rAF timestamp negative.
@@ -18248,12 +18239,9 @@ globalThis.__obscura_init = function() {
     _installIsolatedWorldBridges();
   }
 
-  // Hide internals (_*, obscura, Obscura). The set of keys is static at
-  // snapshot-build time, so we precompute it ONCE below (after this
-  // function definition) and reuse it on every page init. Was an
-  // Object.keys + filter on every navigation, ~5-40ms per page on
-  // SPAs that load 1000+ globals.
-  const toHide = globalThis.__obscura_hide_list || [];
+  // Hide internals (_*, obscura, Obscura) from enumeration. The set of keys is static
+  // at snapshot-build time, so it is precomputed ONCE below.
+  const toHide = _hideList || [];
   // Own properties only: defineProperty on a missing name creates it, which put
   // __obscura_core_handoff back on the global (as undefined) after the host had
   // deleted it. Upstream has the same loop without the guard.
@@ -18261,21 +18249,16 @@ globalThis.__obscura_init = function() {
     if (!_objectHasOwn(globalThis, toHide[i])) continue;
     try { Object.defineProperty(globalThis, toHide[i], { enumerable: false }); } catch(e) {}
   }
-  delete globalThis.__obscura_init;
-};
+}
 
-// Snapshot-time pre-computation of the hide list. Bootstrap.js runs once
-// during the V8 snapshot build (build.rs); this line captures the set of
-// globals defined by bootstrap that we want to hide and stashes them
-// for __obscura_init to consume on every subsequent page. The snapshot
-// preserves the array as a regular global.
-// Use getOwnPropertyNames, not Object.keys: the internal globals declared by
-// _preHideInternals are already non-enumerable, so Object.keys would omit them
-// and leave them out of the hide list (and thus visible to the reflection-API
-// filter and to fingerprinting scripts). getOwnPropertyNames captures them.
-globalThis.__obscura_hide_list = Object.getOwnPropertyNames(globalThis).filter(k =>
-  k.startsWith('_') || k.includes('obscura') || k.includes('Obscura')
-);
+// Pre-computation of the hide list: whatever engine name is still on the global once
+// bootstrap has run. EngineInternal (ClearScript) is the only one expected; anything
+// else matching is a leak for GlobalObjectFingerprint to report, hidden from reflection
+// meanwhile. Use getOwnPropertyNames as bootstrap found it, not Object.keys: the
+// filter above is installed already, and non-enumerable names matter too.
+_hideList = _objectFreeze(Object.getOwnPropertyNames(globalThis).filter(k =>
+  k === 'EngineInternal' || k.startsWith('_') || k.includes('obscura') || k.includes('Obscura')
+));
 
 /* ===== WPT conformance shims: batch 2 ===== */
 
@@ -19900,6 +19883,37 @@ const _cdpHost = _objectFreeze({
 // name on globalThis reaches it. See dotnet/docs/op-protocol.md, "Host helpers".
 globalThis.__obscura_host_handoff = Object.freeze({
   __proto__: null,
+  // Port additions (SECURITY.md I10): what upstream keeps as page-visible globals. The
+  // values the host sets and reads (vars.__obscura_ua, vars.__documentReadyState__,
+  // vars.__obscura_hasPendingDynamicScripts(), ...), page init, and Runtime.addBinding.
+  vars: _hostVars,
+  init: _pageInit,
+  installBinding: _installBinding,
+  // Document lifecycle steps (PocketCalculatorJsRuntime.RunLifecycle), through the shim's
+  // own Event and dispatch rather than the page-writable globals (SECURITY.md L10).
+  lifecycle: (phase) => {
+    const fire = (target, event) => { try { _dispatch(target, event); } catch (e) {} };
+    const plain = (type) => new Event(type, { bubbles: false, cancelable: false });
+    switch (_String(phase)) {
+      case 'interactive': _hostVars.__documentReadyState__ = 'interactive'; return;
+      case 'complete': _hostVars.__documentReadyState__ = 'complete'; return;
+      case 'DOMContentLoaded':
+        if (_realmDocument) fire(_realmDocument, plain('DOMContentLoaded'));
+        fire(globalThis, plain('DOMContentLoaded'));
+        return;
+      case 'readystatechange':
+        if (_realmDocument) fire(_realmDocument, plain('readystatechange'));
+        return;
+      case 'load': {
+        _hostVars.__documentReadyState__ = 'complete';
+        const loadEvent = plain('load');
+        const onload = globalThis.onload;
+        if (typeof onload === 'function') { try { _reflectApply(onload, globalThis, [loadEvent]); } catch (e) {} }
+        fire(globalThis, loadEvent);
+        return;
+      }
+    }
+  },
   markTrusted: _markTrusted,
   setFieldValue: _setFieldValue,
   setInputFiles: _setInputFiles,
@@ -20007,8 +20021,8 @@ globalThis.__obscura_host_handoff = Object.freeze({
   externalMutation: (tree, type, nid, added, removed, attributeName, oldValue) => {
     _domMutationEpoch++;
     if (tree) _treeMutationEpoch++;
-    if (typeof globalThis.__obscura_recompute_resizes === "function") globalThis.__obscura_recompute_resizes();
-    if (typeof globalThis.__obscura_recompute_intersections === "function") globalThis.__obscura_recompute_intersections();
+    if (typeof _hostVars.__obscura_recompute_resizes === "function") _hostVars.__obscura_recompute_resizes();
+    if (typeof _hostVars.__obscura_recompute_intersections === "function") _hostVars.__obscura_recompute_intersections();
     if (!type) return;
     _notifyMutationInternal(String(type), Number(nid), _worldNidList(added), _worldNidList(removed),
       attributeName ? String(attributeName) : null, oldValue == null ? null : String(oldValue));

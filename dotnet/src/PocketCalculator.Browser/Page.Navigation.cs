@@ -301,7 +301,7 @@ public sealed partial class Page
             {
                 foreach (string source in preloadSources)
                 {
-                    blankJs.ExecuteScriptGuarded("<preload>", source);
+                    blankJs.ExecutePreloadScript(source);
                 }
             }
             return;

@@ -90,7 +90,7 @@ public sealed partial class Page
             {
                 try
                 {
-                    realm.ExecuteScript(source);
+                    realm.ExecutePreloadScript(source);
                 }
                 catch (JsRuntimeException)
                 {

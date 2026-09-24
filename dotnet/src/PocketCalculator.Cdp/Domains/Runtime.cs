@@ -307,23 +307,16 @@ public static class Runtime
                 string name = parameters.Get("name").AsString() ?? string.Empty;
                 if (IsValidBindingName(name))
                 {
-                    // The shim forwards every call back to the host through the
-                    // frozen globalThis.__obscura_binding_called bridge (upstream
-                    // 04418a5), which calls op_binding_called; page script cannot
-                    // reach the op table itself. The CDP dispatcher then drains the queue and
-                    // emits Runtime.bindingCalled events the same way Chromium does.
                     // Chromium's V8InspectorImpl rejects calls without exactly one
                     // argument and ToString-coerces that argument before emitting it as
-                    // the payload - we match the coercion (`String(arg)`) and silently
-                    // drop calls with wrong arity, which is what Chrome does.
-                    string shim =
-                        $"globalThis['{name}'] = function (arg) {{"
-                        + "if (arguments.length !== 1) return;"
-                        + "try {"
-                        + "const payload = typeof arg === 'string' ? arg : String(arg);"
-                        + $"globalThis.__obscura_binding_called('{name}', payload);"
-                        + "} catch (e) { /* swallow: binding must not throw into page */ }"
-                        + "};";
+                    // the payload; the installed function does the same (bootstrap.js
+                    // _installBinding) and calls op_binding_called, which the CDP
+                    // dispatcher drains into Runtime.bindingCalled events.
+                    // DEVIATION from the Rust engine, whose shim is a script calling the
+                    // page-visible globalThis.__obscura_binding_called bridge: the entry is
+                    // the name, installed through the realm's host helpers (BindingPreload,
+                    // SECURITY.md I10).
+                    string shim = BindingPreload.Source(name);
                     // Re-install on every navigation: globalThis is wiped on each new
                     // document, and puppeteer registers bindings once-per-page rather
                     // than once-per-document.
@@ -367,7 +360,7 @@ public static class Runtime
 
                     // Install on the current page so the binding is usable immediately,
                     // without waiting for the next navigation.
-                    ctx.GetSessionPageMut(sessionId)?.Evaluate(shim);
+                    ctx.GetSessionPageMut(sessionId)?.InstallPreloadNow(shim);
                 }
 
                 return DomainResult.Empty();

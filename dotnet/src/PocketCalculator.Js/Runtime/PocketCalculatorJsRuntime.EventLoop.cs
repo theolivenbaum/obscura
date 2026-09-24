@@ -653,7 +653,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// with or overwrite the queue itself.
     /// </remarks>
     public bool HasPendingDynamicScripts() =>
-        EvaluateBool("globalThis.__obscura_hasPendingDynamicScripts?.() === true")
+        EvaluateBool("__obscura_host.vars.__obscura_hasPendingDynamicScripts?.() === true")
         || _moduleLoader.Activity.IsPendingOrRecent(TimeSpan.FromMilliseconds(100));
 
     /// <summary>
@@ -666,13 +666,13 @@ public sealed partial class PocketCalculatorJsRuntime
     /// driven when an automation caller explicitly asks the page to settle.
     /// </remarks>
     public bool HasPendingLoadDelayingScripts() =>
-        EvaluateBool("globalThis.__obscura_hasPendingLoadDelayingScripts?.() === true");
+        EvaluateBool("__obscura_host.vars.__obscura_hasPendingLoadDelayingScripts?.() === true");
 
     internal double? NextPendingTimeoutDelayMs()
     {
         try
         {
-            var value = Evaluate("globalThis.__obscura_nextPendingTimeoutDelay?.() ?? -1");
+            var value = EvaluateHost("__obscura_host.vars.__obscura_nextPendingTimeoutDelay?.() ?? -1");
             if (value?.GetValueKind() == System.Text.Json.JsonValueKind.Number)
             {
                 var delay = value.GetValue<double>();
@@ -692,7 +692,9 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         try
         {
-            return Evaluate(expression)?.GetValueKind() == System.Text.Json.JsonValueKind.True;
+            // A host expression: the status functions are bootstrap's host variables, not
+            // page-visible globals as upstream (SECURITY.md I10).
+            return EvaluateHost(expression)?.GetValueKind() == System.Text.Json.JsonValueKind.True;
         }
         catch (JsRuntimeException)
         {

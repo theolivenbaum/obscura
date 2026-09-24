@@ -259,7 +259,7 @@ public sealed partial class Page
             }
             try
             {
-                world.ExecuteScript("<world-script>", source);
+                world.ExecutePreloadScript(source);
             }
             catch (JsRuntimeException)
             {
@@ -275,6 +275,40 @@ public sealed partial class Page
     public void ReleaseObject(string objectId) => Js?.ReleaseObject(objectId);
 
     public void ReleaseObjectGroup() => Js?.ReleaseObjectGroup();
+
+    /// <summary>
+    /// Runs a new-document entry (a script, or a <see cref="BindingPreload"/> binding) in
+    /// the current document's main realm and in every child frame's, as Chromium does for
+    /// a <c>Runtime.addBinding</c> made after the document loaded. A failure in one realm
+    /// does not stop the others.
+    /// </summary>
+    public void InstallPreloadNow(string source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (Js is not { } js)
+        {
+            return;
+        }
+        try
+        {
+            js.ExecutePreloadScript(source);
+        }
+        catch (JsRuntimeException)
+        {
+            // The same as a failing init script.
+        }
+        foreach (FrameRealm frame in Frames.ToArray())
+        {
+            try
+            {
+                frame.ExecutePreloadScript(source);
+            }
+            catch (JsRuntimeException)
+            {
+                // The same as a failing init script.
+            }
+        }
+    }
 
     public void ExecutePreloadScript(string source)
     {

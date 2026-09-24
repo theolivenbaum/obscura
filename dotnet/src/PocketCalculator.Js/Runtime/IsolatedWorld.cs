@@ -254,12 +254,12 @@ public sealed class IsolatedWorld : IDisposable
             // ops that take one resolve the frame's document, and the frame's viewport.
             var frameIds = frame is null
                 ? string.Empty
-                : $"globalThis.__obscura_frameId = {frame.FrameId.ToString(CultureInfo.InvariantCulture)};"
-                    + $"globalThis.__obscura_parentFrameId = {frame.ParentFrameId.ToString(CultureInfo.InvariantCulture)};"
+                : $"__obscura_host.vars.__obscura_frameId = {frame.FrameId.ToString(CultureInfo.InvariantCulture)};"
+                    + $"__obscura_host.vars.__obscura_parentFrameId = {frame.ParentFrameId.ToString(CultureInfo.InvariantCulture)};"
                     + world.FrameViewportGlobals();
-            world.Scope.Run(
+            world.Scope.RunHost(
                 "<obscura:world-init>",
-                frameIds + "globalThis.__obscura_isolated_world = true; globalThis.__obscura_init();");
+                frameIds + "__obscura_host.vars.__obscura_isolated_world = true; __obscura_host.init();");
         }
         catch (Exception error) when (error is ScriptEngineException or JsRuntimeException)
         {
@@ -278,7 +278,7 @@ public sealed class IsolatedWorld : IDisposable
             }
             try
             {
-                world.Scope.Run("<preload>", source);
+                world.ExecutePreloadScript(source);
             }
             catch (JsRuntimeException)
             {
@@ -290,6 +290,21 @@ public sealed class IsolatedWorld : IDisposable
 
     /// <summary>Runs a classic script in the world, reporting a throw as a <see cref="JsRuntimeException"/>.</summary>
     public void ExecuteScript(string name, string source) => Scope.Run(name, source);
+
+    /// <summary>
+    /// Runs one new-document entry in the world: installs a <see cref="BindingPreload"/>
+    /// binding, or runs a script.
+    /// </summary>
+    public void ExecutePreloadScript(string source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (BindingPreload.NameOf(source) is { } binding)
+        {
+            Scope.RunHost("<binding>", BindingPreload.InstallStatement(binding));
+            return;
+        }
+        Scope.Run("<preload>", source);
+    }
 
     public void Dispose()
     {
@@ -317,40 +332,18 @@ public sealed class IsolatedWorld : IDisposable
         {
             if (_frame.Engine.Evaluate($"globalThis.{from}") is double number && double.IsFinite(number) && number > 0)
             {
-                builder.Append(CultureInfo.InvariantCulture, $"globalThis.{to} = {number.ToString("R", CultureInfo.InvariantCulture)};");
+                builder.Append(CultureInfo.InvariantCulture, $"__obscura_host.vars.{to} = {number.ToString("R", CultureInfo.InvariantCulture)};");
             }
             else if (_frame.Engine.Evaluate($"globalThis.{from}") is int whole && whole > 0)
             {
-                builder.Append(CultureInfo.InvariantCulture, $"globalThis.{to} = {whole.ToString(CultureInfo.InvariantCulture)};");
+                builder.Append(CultureInfo.InvariantCulture, $"__obscura_host.vars.{to} = {whole.ToString(CultureInfo.InvariantCulture)};");
             }
         }
         return builder.ToString();
     }
 
-    private void CopyGlobalsFromPage()
-    {
-        foreach (var name in CopiedGlobals)
-        {
-            var value = _parent.Engine.Evaluate($"globalThis.{name}");
-            if (value is null or Undefined or VoidResult)
-            {
-                continue;
-            }
-            var literal = value switch
-            {
-                bool flag => flag ? "true" : "false",
-                string text => JsonSerializer.Serialize(text),
-                double number when double.IsFinite(number) => number.ToString("R", CultureInfo.InvariantCulture),
-                int or long or float => Convert.ToString(value, CultureInfo.InvariantCulture),
-                _ => null,
-            };
-            if (literal is null)
-            {
-                continue;
-            }
-            _engine.Execute("<copy-identity>", $"globalThis.{name} = {literal};");
-        }
-    }
+    private void CopyGlobalsFromPage() =>
+        HostVariables.Copy(_parent.MainHostHelpers, _shim?.HostHelpers, CopiedGlobals);
 }
 
 /// <summary>
@@ -396,6 +389,19 @@ internal sealed class CdpScope(
     {
         world?.SyncBeforeRun();
         return AsRealm(() => runtime.ExecuteIn(Engine, name, source));
+    }
+
+    /// <summary>
+    /// <see cref="Run"/> for host-authored statements that use this realm's host helpers as
+    /// <c>__obscura_host</c> (<see cref="HostScript"/>). Never client- or page-supplied code.
+    /// </summary>
+    public object? RunHost(string name, string source)
+    {
+        world?.SyncBeforeRun();
+        var realmHelpers = world is not null ? world.HostHelpers
+            : helpers is not null ? helpers()
+            : runtime.MainHostHelpers;
+        return AsRealm(() => runtime.InvokeIn(Engine, name, HostScript.WrapStatements(source), realmHelpers));
     }
 
     /// <summary>Runs <paramref name="call"/> with the realm's state as the running one, when it has its own.</summary>

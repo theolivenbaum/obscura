@@ -202,14 +202,12 @@ public sealed partial class RuntimeTests
             "function",
             rt.Evaluate("(() => { setTimeout(() => {}, 0); console.log('x'); return typeof getComputedStyle(document.body).display === 'string' ? 'function' : 'no'; })()")!
                 .GetValue<string>());
-        // The Runtime.addBinding bridge is the only op-backed global left, and it
-        // cannot be replaced by page script.
+        // DEVIATION from upstream, which keeps a frozen Runtime.addBinding bridge
+        // (__obscura_binding_called) on the global: a binding closes over the op itself, so
+        // no op-backed global is left (SECURITY.md I10).
         Assert.Equal(
-            """["function",false,false]""",
-            rt.Evaluate(
-                "(() => { const d = Object.getOwnPropertyDescriptor(globalThis, '__obscura_binding_called');"
-                + " return [typeof d.value, d.writable, d.configurable]; })()")!
-                .ToJsonString());
+            "undefined",
+            rt.Evaluate("typeof __obscura_binding_called")!.GetValue<string>());
     }
 
     // SEC-301 / SEC-302 / #792 — the profile setters must embed values safely.
@@ -229,11 +227,11 @@ public sealed partial class RuntimeTests
         Assert.NotEqual(1.0, rt.Evaluate("globalThis.__pwned")?.GetValue<double>());
         Assert.Equal(
             "Win\\';globalThis.__pwned=1;//",
-            rt.Evaluate("globalThis.__obscura_platform")!.GetValue<string>());
+            rt.EvaluateHost("__obscura_host.vars.__obscura_platform")!.GetValue<string>());
 
         // SEC-302: a UA with a literal newline used to SyntaxError into a silent no-op.
         rt.SetUserAgent("Mozilla/5.0 line1\nline2");
-        Assert.Equal("Mozilla/5.0 line1\nline2", rt.Evaluate("globalThis.__obscura_ua")!.GetValue<string>());
+        Assert.Equal("Mozilla/5.0 line1\nline2", rt.EvaluateHost("__obscura_host.vars.__obscura_ua")!.GetValue<string>());
     }
 
     [Fact]
@@ -2753,7 +2751,7 @@ public sealed partial class RuntimeTests
             + "globalThis.__topInterval = setInterval("
             + "  () => {"
             + "    const nested = setTimeout(() => {}, 0);"
-            + "    __nestedTimerDelays.push(__obscura_nextPendingTimeoutDelay());"
+            + "    __nestedTimerDelays.push(__obscura_test_host.vars.__obscura_nextPendingTimeoutDelay());"
             + "    clearTimeout(nested);"
             + "  }, 0);");
 
@@ -4499,7 +4497,7 @@ public sealed partial class RuntimeTests
             const detached = document.createElement('div');
             detached.style.cssText = 'width:100px;height:80px;overflow:auto';
             let recomputes = 0;
-            globalThis.__obscura_recompute_intersections = () => { recomputes++; };
+            __obscura_test_host.vars.__obscura_recompute_intersections = () => { recomputes++; };
             detached.scrollTo(30, 20);
             scroller.scrollTo(11, 12);
             return {
@@ -6282,7 +6280,7 @@ public sealed partial class RuntimeTests
         AssertJson(
             "[[102,120],[122,140]]",
             rt.Evaluate("__resizeRecords.map(record => [record.content[0], record.border[0]])"));
-        Assert.Equal(-1.0, rt.Evaluate("__obscura_nextPendingTimeoutDelay()")!.GetValue<double>());
+        Assert.Equal(-1.0, rt.Evaluate("__obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()")!.GetValue<double>());
     }
 
     [Fact]
@@ -6494,7 +6492,7 @@ public sealed partial class RuntimeTests
                         observer.observe(document.getElementById("inline"));
                     } else {
                         observer.disconnect();
-                        resolve([deliveries, __resizeObservers.length]);
+                        resolve([deliveries, __obscura_test_host.vars.__resizeObservers.length]);
                     }
                 });
                 observer.observe(document.getElementById("first"));
@@ -6546,7 +6544,7 @@ public sealed partial class RuntimeTests
         await rt.RunEventLoopBoundedAsync(40);
         AssertJson(
             "[1,1,-1]",
-            rt.Evaluate("[__resizeCallbacks, __resizeLoopErrors, __obscura_nextPendingTimeoutDelay()]"));
+            rt.Evaluate("[__resizeCallbacks, __resizeLoopErrors, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"));
 
         // A later external rendering change starts a fresh bounded cycle; the
         // suppressed same-depth observation did not poison future delivery.
@@ -7222,7 +7220,7 @@ public sealed partial class RuntimeTests
                         observer.disconnect();
                         resolve([
                             deliveries,
-                            globalThis.__intersectionObservers.length,
+                            __obscura_test_host.vars.__intersectionObservers.length,
                         ]);
                     }
                 });
@@ -10673,7 +10671,7 @@ public sealed partial class RuntimeTests
                 rt.run_event_loop_bounded(100).await.unwrap();
                 assert_eq!(
                     rt.evaluate(
-                        "[__stableGetterResizeRecords, __obscura_nextPendingTimeoutDelay()]"
+                        "[__stableGetterResizeRecords, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"
                     )
                     .unwrap(),
                     serde_json::json!([1, -1])
@@ -10695,7 +10693,7 @@ public sealed partial class RuntimeTests
                 // must not enqueue a rendering checkpoint (and its geometry walk).
                 assert_eq!(
                     rt.evaluate(
-                        "[__stableGetterResizeRecords, __obscura_nextPendingTimeoutDelay()]"
+                        "[__stableGetterResizeRecords, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"
                     )
                     .unwrap(),
                     serde_json::json!([1, -1])
@@ -10733,7 +10731,7 @@ public sealed partial class RuntimeTests
         await rt.RunEventLoopBoundedAsync(100);
         AssertJsonEquals(
             "[1, -1]",
-            rt.Evaluate("[__stableGetterResizeRecords, __obscura_nextPendingTimeoutDelay()]"));
+            rt.Evaluate("[__stableGetterResizeRecords, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"));
 
         rt.ExecuteScript(
             "read-stable-image-cache",
@@ -10749,7 +10747,7 @@ public sealed partial class RuntimeTests
         // must not enqueue a rendering checkpoint (and its geometry walk).
         AssertJsonEquals(
             "[1, -1]",
-            rt.Evaluate("[__stableGetterResizeRecords, __obscura_nextPendingTimeoutDelay()]"));
+            rt.Evaluate("[__stableGetterResizeRecords, __obscura_test_host.vars.__obscura_nextPendingTimeoutDelay()]"));
     }
 
     [Fact]
@@ -15669,7 +15667,7 @@ public sealed partial class RuntimeTests
                                 return {
                                     asyncOrder,
                                     inOrder,
-                                    pending: globalThis.__obscura_hasPendingDynamicScripts(),
+                                    pending: __obscura_test_host.vars.__obscura_hasPendingDynamicScripts(),
                                 };
                             } finally {
                                 Deno.core.ops.op_fetch_url = originalFetchOp;
@@ -15725,7 +15723,7 @@ public sealed partial class RuntimeTests
                     return {
                         asyncOrder,
                         inOrder,
-                        pending: globalThis.__obscura_hasPendingDynamicScripts(),
+                        pending: __obscura_test_host.vars.__obscura_hasPendingDynamicScripts(),
                     };
                 } finally {
                     __obscura_test_ops.op_fetch_url = originalFetchOp;
@@ -18477,7 +18475,7 @@ public sealed partial class RuntimeTests
                         var scriptTestSetup = true;
                         globalThis.__cloneScriptRuns = 0;
                         const parser = document.getElementById("parser");
-                        globalThis.__markParserScripts([parser._nid]);
+                        __obscura_test_host.vars.__markParserScripts([parser._nid]);
                         document.head.appendChild(parser);
                         document.body.appendChild(parser.cloneNode(true));
 
@@ -18506,7 +18504,7 @@ public sealed partial class RuntimeTests
             var scriptTestSetup = true;
             globalThis.__cloneScriptRuns = 0;
             const parser = document.getElementById("parser");
-            globalThis.__markParserScripts([parser._nid]);
+            __obscura_test_host.vars.__markParserScripts([parser._nid]);
             document.head.appendChild(parser);
             document.body.appendChild(parser.cloneNode(true));
 
@@ -18705,7 +18703,7 @@ public sealed partial class RuntimeTests
                         var scriptTestSetup = true;
                         // What the production path sets while a script runs; bootstrap.js
                         // assigns __currentScriptNid around every script it prepares.
-                        globalThis.__currentScriptNid = document.getElementById('writer')._nid;
+                        __obscura_test_host.vars.__currentScriptNid = document.getElementById('writer')._nid;
                         document.write('<span id="written"></span>');
                         return JSON.stringify({
                           head: Array.from(document.head.children).map(e => e.id || e.tagName),
@@ -18726,7 +18724,7 @@ public sealed partial class RuntimeTests
             var scriptTestSetup = true;
             // What the production path sets while a script runs; bootstrap.js
             // assigns __currentScriptNid around every script it prepares.
-            globalThis.__currentScriptNid = document.getElementById('writer')._nid;
+            __obscura_test_host.vars.__currentScriptNid = document.getElementById('writer')._nid;
             document.write('<span id="written"></span>');
             return JSON.stringify({
               head: Array.from(document.head.children).map(e => e.id || e.tagName),
@@ -19038,7 +19036,7 @@ public sealed partial class RuntimeTests
                     .evaluate(
                         r#"
                         var scriptTestSetup = true;
-                        globalThis.__currentScriptNid = document.getElementById('writer')._nid;
+                        __obscura_test_host.vars.__currentScriptNid = document.getElementById('writer')._nid;
                         document.write('<span id="one"></span>');
                         document.write('<span id="two"></span>');
                         return Array.from(document.head.children).map(e => e.id).join(',');
@@ -19052,7 +19050,7 @@ public sealed partial class RuntimeTests
             """<html><head><script id="writer"></script></head><body></body></html>""");
         var result = fixture.Runtime.Evaluate("""
             var scriptTestSetup = true;
-            globalThis.__currentScriptNid = document.getElementById('writer')._nid;
+            __obscura_test_host.vars.__currentScriptNid = document.getElementById('writer')._nid;
             document.write('<span id="one"></span>');
             document.write('<span id="two"></span>');
             return Array.from(document.head.children).map(e => e.id).join(',');
