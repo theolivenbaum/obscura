@@ -647,19 +647,52 @@ internal static partial class Tools
         }
 
         // Pull localStorage + sessionStorage for the current page's origin.
+        //
+        // DEVIATION from tool_storage_state, which labels the storage with the page's own
+        // location.origin: a page that had pushState'd, or replaced location, could label
+        // its storage with another site's origin (SECURITY.md L9). The label is the
+        // document origin the host committed; only the pairs come from the page, built
+        // with bootstrap's own built-ins and serialized without the page's toJSON.
         const string storageJs = """
             (function(){
-                var ls = [], ss = [];
-                try { for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); ls.push([k, localStorage.getItem(k)]); } } catch(e) {}
-                try { for (var j = 0; j < sessionStorage.length; j++) { var k2 = sessionStorage.key(j); ss.push([k2, sessionStorage.getItem(k2)]); } } catch(e) {}
-                return { origin: location.origin || '', localStorage: ls, sessionStorage: ss };
+                var h = __obscura_host.dom;
+                var read = function (area) {
+                    var out = [];
+                    try {
+                        var store = globalThis[area];
+                        var n = store.length;
+                        for (var i = 0; i < n; i++) {
+                            var k = store.key(i);
+                            out[out.length] = [k, store.getItem(k)];
+                        }
+                    } catch(e) {}
+                    return out;
+                };
+                return h.stringify([read('localStorage'), read('sessionStorage')]);
             })()
             """;
-        var storage = state.ActiveTab is not null ? state.PageMut().Evaluate(storageJs) : null;
         var origins = new JsonArray();
-        if (storage.IsObject())
+        if (state.ActiveTab is not null)
         {
-            origins.Add(storage!.DeepClone());
+            var page = state.PageMut();
+            JsonNode? pairs = null;
+            if (page.EvaluateHost(storageJs).AsString() is { } text)
+            {
+                try
+                {
+                    pairs = JsonNode.Parse(text);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // Nothing the page reported is kept.
+                }
+            }
+            origins.Add(new JsonObject
+            {
+                ["origin"] = page.DocumentOrigin(),
+                ["localStorage"] = StoragePairs(pairs.Get(0)),
+                ["sessionStorage"] = StoragePairs(pairs.Get(1)),
+            });
         }
 
         var output = new JsonObject
@@ -709,25 +742,79 @@ internal static partial class Tools
             state.Context.CookieJar.SetCookiesFromCdp(parsed);
         }
 
-        // Storage (per origin). Only applies if there's an active page; we restore
-        // on whatever origin is currently loaded, which usually matches because
-        // agents navigate before restoring state.
+        // Storage (per origin). Only applies if there's an active page.
+        //
+        // DEVIATION from tool_set_storage_state, which writes every origin's entries into
+        // whatever page is loaded: one site's session tokens restored into another site's
+        // storage, where its script reads them (SECURITY.md L9). An entry is applied only
+        // when its origin is the loaded document's (as the host committed it; an opaque
+        // origin matches nothing), and the result says what was left out.
+        var skipped = new List<string>();
         if (state.ActiveTab is not null && s.Get("origins").ArrayOrNull() is { } origins)
         {
+            string current = state.PageMut().DocumentOrigin();
             foreach (var originEntry in origins)
             {
+                string entryOrigin = originEntry.Get("origin").AsString() ?? string.Empty;
+                if (current == "null" || !string.Equals(entryOrigin, current, StringComparison.Ordinal))
+                {
+                    if (CountStorageEntries(originEntry) != 0)
+                    {
+                        skipped.Add(entryOrigin.Length == 0 ? "(no origin)" : entryOrigin);
+                    }
+
+                    continue;
+                }
+
                 var snippets = new List<string>();
                 applied += CollectStorageSnippets(originEntry, "localStorage", snippets);
                 applied += CollectStorageSnippets(originEntry, "sessionStorage", snippets);
                 if (snippets.Count != 0)
                 {
-                    state.PageMut().Evaluate(string.Join("\n", snippets));
+                    // In a function body: Evaluate takes an expression, and these
+                    // statements (upstream's too) were a syntax error there, so nothing
+                    // was ever restored.
+                    state.PageMut().EvaluateHost("(function () {\n" + string.Join("\n", snippets) + "\nreturn 0; })()");
                 }
             }
         }
 
-        return $"Restored {applied.ToString(CultureInfo.InvariantCulture)} state entries.";
+        string restored = $"Restored {applied.ToString(CultureInfo.InvariantCulture)} state entries.";
+        if (skipped.Count == 0)
+        {
+            return restored;
+        }
+
+        return restored + " Skipped storage for "
+            + string.Join(", ", skipped)
+            + ": it does not match the current page's origin ("
+            + state.PageMut().DocumentOrigin()
+            + "). Navigate to that origin and restore again.";
     }
+
+    /// <summary>A page-reported storage list, kept only as [string, string] pairs.</summary>
+    private static JsonArray StoragePairs(JsonNode? list)
+    {
+        var pairs = new JsonArray();
+        if (list.ArrayOrNull() is not { } items)
+        {
+            return pairs;
+        }
+
+        foreach (var pair in items)
+        {
+            if (pair.Get(0).AsString() is { } key && pair.Get(1).AsString() is { } value)
+            {
+                pairs.Add(new JsonArray(JsonValue.Create(key), JsonValue.Create(value)));
+            }
+        }
+
+        return pairs;
+    }
+
+    private static int CountStorageEntries(JsonNode? originEntry) =>
+        (originEntry.Get("localStorage").ArrayOrNull()?.Count ?? 0)
+        + (originEntry.Get("sessionStorage").ArrayOrNull()?.Count ?? 0);
 
     private static uint CollectStorageSnippets(JsonNode? originEntry, string area, List<string> snippets)
     {

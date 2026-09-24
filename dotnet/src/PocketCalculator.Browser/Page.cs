@@ -509,6 +509,15 @@ public sealed partial class Page : IDisposable
 
     public string UrlString() => Url?.Href ?? "about:blank";
 
+    /// <summary>
+    /// The serialized origin of the loaded document as the host committed it, <c>"null"</c>
+    /// when opaque. Nothing the page does moves it (<c>history.pushState</c> cannot leave
+    /// the origin, and <c>location.origin</c> is page-replaceable).
+    /// </summary>
+    public string DocumentOrigin() => Js is { } js
+        ? StateHelpers.DocumentOrigin(js.State)
+        : Url?.AsciiOrigin ?? "null";
+
     public T? WithDom<T>(Func<DomTree, T> body)
     {
         ArgumentNullException.ThrowIfNull(body);
