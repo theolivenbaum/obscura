@@ -11,6 +11,13 @@ namespace PocketCalculator.Cdp.Domains;
 /// <c>pointer.down</c>. DEVIATION from crates/obscura-cdp/src/domains/input.rs, which
 /// names them as page-visible <c>globalThis.__obscura_*</c> globals, so page script could
 /// mark its own events trusted and aim the click a real mouseup produces.
+/// <para>
+/// Every DOM call, event constructor and built-in the snippets use comes from
+/// <c>__obscura_host.dom</c>, as bootstrap.js left them (SECURITY.md L10). The Rust
+/// snippets call <c>document.elementFromPoint</c>, <c>el.dispatchEvent</c>,
+/// <c>new MouseEvent</c> and the rest on whatever the page has put there, so a page could
+/// swallow or redirect a real click, or build the trusted event itself.
+/// </para>
 /// </remarks>
 public static class Input
 {
@@ -44,22 +51,24 @@ public static class Input
     {
         string literal = JsStr(text);
         return "(function() {"
-            + "var t = document.activeElement;"
-            + "if (!t || (t.localName !== 'input' && t.localName !== 'textarea')) return;"
+            + "var h = __obscura_host.dom;"
+            + "var t = h.activeElement();"
+            + "var tag = h.localName(t);"
+            + "if (!t || (tag !== 'input' && tag !== 'textarea')) return;"
             + "var ins = " + literal + ";"
-            + "var v = t.value || '';"
-            + "var s = t.selectionStart, e = t.selectionEnd;"
+            + "var v = h.get(t, 'value') || '';"
+            + "var s = h.get(t, 'selectionStart'), e = h.get(t, 'selectionEnd');"
             + "if (s == null) {"
             + "__obscura_host.setFieldValue(t, 'value', v + ins);"
             + "} else {"
-            + "s = Math.max(0, Math.min(s, v.length));"
-            + "e = (e == null) ? s : Math.max(0, Math.min(e, v.length));"
-            + "var lo = Math.min(s, e), hi = Math.max(s, e);"
-            + "__obscura_host.setFieldValue(t, 'value', v.slice(0, lo) + ins + v.slice(hi));"
+            + "s = h.max(0, h.min(s, v.length));"
+            + "e = (e == null) ? s : h.max(0, h.min(e, v.length));"
+            + "var lo = h.min(s, e), hi = h.max(s, e);"
+            + "__obscura_host.setFieldValue(t, 'value', h.slice(v, 0, lo) + ins + h.slice(v, hi));"
             + "var caret = lo + ins.length;"
-            + "t.setSelectionRange(caret, caret);"
+            + "h.call(t, 'setSelectionRange', [caret, caret]);"
             + "}"
-            + "t.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));"
+            + "h.dispatch(t, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));"
             + "})()";
     }
 
@@ -72,39 +81,42 @@ public static class Input
     /// tracked it falls back to trimming the last character (legacy).
     /// </remarks>
     private const string BackspaceJs = "(function() {"
-        + "var t = document.activeElement;"
-        + "if (!t || (t.localName !== 'input' && t.localName !== 'textarea')) return;"
-        + "var v = t.value || '';"
-        + "var s = t.selectionStart, e = t.selectionEnd;"
+        + "var h = __obscura_host.dom;"
+        + "var t = h.activeElement();"
+        + "var tag = h.localName(t);"
+        + "if (!t || (tag !== 'input' && tag !== 'textarea')) return;"
+        + "var v = h.get(t, 'value') || '';"
+        + "var s = h.get(t, 'selectionStart'), e = h.get(t, 'selectionEnd');"
         + "if (s == null) {"
-        + "__obscura_host.setFieldValue(t, 'value', v.slice(0, -1));"
+        + "__obscura_host.setFieldValue(t, 'value', h.slice(v, 0, -1));"
         + "} else {"
-        + "s = Math.max(0, Math.min(s, v.length));"
-        + "e = (e == null) ? s : Math.max(0, Math.min(e, v.length));"
+        + "s = h.max(0, h.min(s, v.length));"
+        + "e = (e == null) ? s : h.max(0, h.min(e, v.length));"
         + "if (s !== e) {"
-        + "var lo = Math.min(s, e), hi = Math.max(s, e);"
-        + "__obscura_host.setFieldValue(t, 'value', v.slice(0, lo) + v.slice(hi));"
-        + "t.setSelectionRange(lo, lo);"
+        + "var lo = h.min(s, e), hi = h.max(s, e);"
+        + "__obscura_host.setFieldValue(t, 'value', h.slice(v, 0, lo) + h.slice(v, hi));"
+        + "h.call(t, 'setSelectionRange', [lo, lo]);"
         + "} else if (s > 0) {"
-        + "__obscura_host.setFieldValue(t, 'value', v.slice(0, s - 1) + v.slice(s));"
-        + "t.setSelectionRange(s - 1, s - 1);"
+        + "__obscura_host.setFieldValue(t, 'value', h.slice(v, 0, s - 1) + h.slice(v, s));"
+        + "h.call(t, 'setSelectionRange', [s - 1, s - 1]);"
         + "}"
         + "}"
-        + "t.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));"
+        + "h.dispatch(t, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));"
         + "})()";
 
     private const string EnterJs = "(function() {"
-        + "var target = document.activeElement;"
+        + "var h = __obscura_host.dom;"
+        + "var target = h.activeElement();"
         + "if (!target) return;"
-        + "target.dispatchEvent(__obscura_host.markTrusted("
-        + "new KeyboardEvent('keypress', {bubbles:true,key:'Enter',code:'Enter'})));"
-        + "if (target.localName === 'textarea') {"
-        + "__obscura_host.setFieldValue(target, 'value', (target.value || '') + '\\n');"
-        + "target.dispatchEvent(__obscura_host.markTrusted(new Event('input', {bubbles:true})));"
+        + "h.dispatch(target, h.event('KeyboardEvent', 'keypress', "
+        + "{__proto__:null,bubbles:true,key:'Enter',code:'Enter'}, true));"
+        + "if (h.localName(target) === 'textarea') {"
+        + "__obscura_host.setFieldValue(target, 'value', (h.get(target, 'value') || '') + '\\n');"
+        + "h.dispatch(target, h.event('Event', 'input', {__proto__:null,bubbles:true}, true));"
         + "} else {"
-        + "var form = target.form || (target.closest && target.closest('form'));"
-        + "if (form) { try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(); }"
-        + " else { form.submit(); } } catch(e) {} }"
+        + "var form = h.get(target, 'form') || h.closest(target, 'form');"
+        + "if (form) { try { if (h.has(form, 'requestSubmit')) { h.call(form, 'requestSubmit', []); }"
+        + " else { h.call(form, 'submit', []); } } catch(e) {} }"
         + "}"
         + "})()";
 
@@ -321,11 +333,12 @@ public static class Input
                             // a key like "\" - Chrome's backslash key - doesn't escape the closing
                             // quote and produce a syntax error that drops the event.
                             page.EvaluateHost("(function() {"
-                                + "var target = document.activeElement || document.body;"
-                                + "var evt = __obscura_host.markTrusted(new KeyboardEvent('keydown', "
-                                + "{bubbles:true,cancelable:true,key:" + JsStr(key)
-                                + ",code:" + JsStr(code) + "}));"
-                                + "target.dispatchEvent(evt);"
+                                + "var h = __obscura_host.dom;"
+                                + "var target = h.activeElement() || h.body();"
+                                + "var evt = h.event('KeyboardEvent', 'keydown', "
+                                + "{__proto__:null,bubbles:true,cancelable:true,key:" + JsStr(key)
+                                + ",code:" + JsStr(code) + "}, true);"
+                                + "h.dispatch(target, evt);"
                                 + "})()");
 
                             if (text.Length != 0 && text != "\r" && text != "\n")
@@ -352,10 +365,11 @@ public static class Input
 
                         case "keyUp":
                             page.EvaluateHost("(function() {"
-                                + "var target = document.activeElement || document.body;"
-                                + "var evt = __obscura_host.markTrusted(new KeyboardEvent('keyup', "
-                                + "{bubbles:true,key:" + JsStr(key) + ",code:" + JsStr(code) + "}));"
-                                + "target.dispatchEvent(evt);"
+                                + "var h = __obscura_host.dom;"
+                                + "var target = h.activeElement() || h.body();"
+                                + "var evt = h.event('KeyboardEvent', 'keyup', "
+                                + "{__proto__:null,bubbles:true,key:" + JsStr(key) + ",code:" + JsStr(code) + "}, true);"
+                                + "h.dispatch(target, evt);"
                                 + "})()");
                             break;
 
@@ -403,18 +417,19 @@ public static class Input
         string mask = buttons.ToString(CultureInfo.InvariantCulture);
         string detail = clickCount.ToString(CultureInfo.InvariantCulture);
         return "(function() {"
-            + "var target = (document.elementFromPoint && document.elementFromPoint(" + sx + "," + sy
-            + ")) || globalThis.__obscura_click_target || document.activeElement || document.body;"
+            + "var h = __obscura_host.dom;"
+            + "var target = h.elementFromPoint(" + sx + "," + sy
+            + ") || globalThis.__obscura_click_target || h.activeElement() || h.body();"
             + "if (!target) return;"
             + "globalThis.__obscura_click_target = target;"
-            + "__obscura_host.pointer.down = {target:target,button:" + button
+            + "__obscura_host.pointer.down = {__proto__:null,target:target,button:" + button
             + ",clickCount:" + detail + "};"
-            + "var evt = __obscura_host.markTrusted(new MouseEvent('mousedown', "
-            + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + "var evt = h.event('MouseEvent', 'mousedown', "
+            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:" + button + ",buttons:" + mask + ",detail:" + detail
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
-            + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}));"
-            + "target.dispatchEvent(evt);"
+            + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}, true);"
+            + "h.dispatch(target, evt);"
             + "})()";
     }
 
@@ -435,95 +450,94 @@ public static class Input
         string modifiers = ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
             + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey);
         return "(function() {"
-            + "var target = (document.elementFromPoint && document.elementFromPoint(" + sx + "," + sy
-            + ")) || globalThis.__obscura_click_target || document.activeElement || document.body;"
+            + "var h = __obscura_host.dom;"
+            + "var target = h.elementFromPoint(" + sx + "," + sy
+            + ") || globalThis.__obscura_click_target || h.activeElement() || h.body();"
             + "if (!target) return;"
             + "var down = __obscura_host.pointer.down;"
             + "__obscura_host.pointer.down = null;"
-            + "var evt = __obscura_host.markTrusted(new MouseEvent('mouseup', "
-            + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
-            + ",button:" + button + ",buttons:0,detail:" + detail + modifiers + "}));"
-            + "target.dispatchEvent(evt);"
+            + "var evt = h.event('MouseEvent', 'mouseup', "
+            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + ",button:" + button + ",buttons:0,detail:" + detail + modifiers + "}, true);"
+            + "h.dispatch(target, evt);"
             + "if (!down || down.button !== " + button + " || " + button + " !== 0) return;"
             + "var clickTarget = down.target;"
-            + "while (clickTarget && clickTarget !== target && "
-            + "!(clickTarget.contains && clickTarget.contains(target))) {"
-            + "clickTarget = clickTarget.parentElement;"
+            + "while (clickTarget && clickTarget !== target && !h.contains(clickTarget, target)) {"
+            + "clickTarget = h.parentElement(clickTarget);"
             + "}"
             + "if (!clickTarget) return;"
-            + "var tag = clickTarget.tagName;"
-            + "var type = (clickTarget.getAttribute && clickTarget.getAttribute('type') || '').toLowerCase();"
+            + "var tag = h.tagName(clickTarget);"
+            + "var type = h.lower(h.getAttribute(clickTarget, 'type') || '');"
             + "if (__obscura_host.isDisabled(clickTarget)) return;"
             + "var checkable = tag === 'INPUT' && (type === 'checkbox' || type === 'radio');"
-            + "var oldChecked = checkable ? !!clickTarget.checked : false;"
-            + "var oldIndeterminate = checkable ? !!clickTarget.indeterminate : false;"
+            + "var oldChecked = checkable ? !!h.get(clickTarget, 'checked') : false;"
+            + "var oldIndeterminate = checkable ? !!h.get(clickTarget, 'indeterminate') : false;"
             + "var radioStates = null;"
             + "if (checkable && type === 'radio') {"
-            + "var radioName = clickTarget.getAttribute('name') || '';"
+            + "var radioName = h.getAttribute(clickTarget, 'name') || '';"
             + "if (radioName) {"
-            + "var candidates = document.querySelectorAll('input');"
+            + "var candidates = h.querySelectorAll(h.document(), 'input');"
             + "radioStates = [];"
+            + "var ownForm = h.get(clickTarget, 'form');"
             + "for (var ri = 0; ri < candidates.length; ri++) {"
             + "var radio = candidates[ri];"
-            + "if ((radio.getAttribute('type') || '').toLowerCase() !== 'radio' || "
-            + "(radio.getAttribute('name') || '') !== radioName || radio.form !== clickTarget.form) continue;"
-            + "radioStates.push([radio, !!radio.checked]);"
-            + "if (radio !== clickTarget) radio.checked = false;"
+            + "if (h.lower(h.getAttribute(radio, 'type') || '') !== 'radio' || "
+            + "(h.getAttribute(radio, 'name') || '') !== radioName || h.get(radio, 'form') !== ownForm) continue;"
+            + "radioStates[radioStates.length] = [radio, !!h.get(radio, 'checked')];"
+            + "if (radio !== clickTarget) h.set(radio, 'checked', false);"
             + "}"
             + "}"
-            + "clickTarget.checked = true;"
+            + "h.set(clickTarget, 'checked', true);"
             + "} else if (checkable) {"
-            + "clickTarget.checked = !oldChecked;"
-            + "clickTarget.indeterminate = false;"
+            + "h.set(clickTarget, 'checked', !oldChecked);"
+            + "h.set(clickTarget, 'indeterminate', false);"
             + "}"
-            + "var click = __obscura_host.markTrusted(new MouseEvent('click', "
-            + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
-            + ",button:0,buttons:0,detail:" + detail + modifiers + "}));"
-            + "var cancelled = !clickTarget.dispatchEvent(click);"
+            + "var click = h.event('MouseEvent', 'click', "
+            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + ",button:0,buttons:0,detail:" + detail + modifiers + "}, true);"
+            + "var cancelled = !h.dispatch(clickTarget, click);"
             + "if (cancelled) {"
             + "if (radioStates) {"
-            + "for (var rr = 0; rr < radioStates.length; rr++) radioStates[rr][0].checked = radioStates[rr][1];"
-            + "} else if (checkable) { clickTarget.checked = oldChecked; "
-            + "clickTarget.indeterminate = oldIndeterminate; }"
+            + "for (var rr = 0; rr < radioStates.length; rr++) h.set(radioStates[rr][0], 'checked', radioStates[rr][1]);"
+            + "} else if (checkable) { h.set(clickTarget, 'checked', oldChecked); "
+            + "h.set(clickTarget, 'indeterminate', oldIndeterminate); }"
             + "return;"
             + "}"
-            + "if (checkable && clickTarget.checked !== oldChecked) {"
-            + "try { clickTarget.dispatchEvent(__obscura_host.markTrusted("
-            + "new Event('input', {bubbles:true}))); } catch(e) {}"
-            + "try { clickTarget.dispatchEvent(__obscura_host.markTrusted("
-            + "new Event('change', {bubbles:true}))); } catch(e) {}"
+            + "if (checkable && h.get(clickTarget, 'checked') !== oldChecked) {"
+            + "try { h.dispatch(clickTarget, h.event('Event', 'input', {__proto__:null,bubbles:true}, true)); } catch(e) {}"
+            + "try { h.dispatch(clickTarget, h.event('Event', 'change', {__proto__:null,bubbles:true}, true)); } catch(e) {}"
             + "return;"
             + "}"
-            + "var labelHost = tag === 'LABEL' ? clickTarget : "
-            + "(clickTarget.closest ? clickTarget.closest('label') : null);"
+            + "var labelHost = tag === 'LABEL' ? clickTarget : h.closest(clickTarget, 'label');"
             + "var interactiveHost = __obscura_host.interactiveHost(clickTarget);"
-            + "if (labelHost && !(interactiveHost && labelHost.contains(interactiveHost))) {"
+            + "if (labelHost && !(interactiveHost && h.contains(labelHost, interactiveHost))) {"
             + "var ctl = __obscura_host.labeledControl(labelHost);"
             + "if (ctl && ctl !== clickTarget && __obscura_host.activateLabel(labelHost, ctl, true)) { return; }"
             + "}"
-            + "var link = clickTarget.closest ? clickTarget.closest('a[href]') : null;"
-            + "if (!link && tag === 'A' && clickTarget.getAttribute('href')) link = clickTarget;"
+            + "var link = h.closest(clickTarget, 'a[href]');"
+            + "if (!link && tag === 'A' && h.getAttribute(clickTarget, 'href')) link = clickTarget;"
             + "if (link) {"
-            + "var href = link.getAttribute('href');"
+            + "var href = h.getAttribute(link, 'href');"
             // Deviation from crates/obscura-cdp/src/domains/input.rs, which skips a
             // fragment href here: it did so because location.assign used to tear the
             // document down, so an in-page link would have rebooted the realm. Fragment
             // navigation is same-document now, and skipping it made a real mouse click on
             // an SPA's own link do nothing at all. Same fix as the el.click() path in
             // bootstrap.js.
-            + "if (href && !href.startsWith('javascript:')) location.assign(href);"
+            + "if (href && h.slice(href, 0, 11) !== 'javascript:') location.assign(href);"
             + "} else if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {"
-            + "var form = clickTarget.closest ? clickTarget.closest('form') : null;"
-            + "if (form) { try { if (typeof form.requestSubmit === 'function') { form.requestSubmit(clickTarget); }"
-            + " else { form.submit(clickTarget); } } catch(e) {} }"
+            + "var form = h.closest(clickTarget, 'form');"
+            + "if (form) { try { if (h.has(form, 'requestSubmit')) { h.call(form, 'requestSubmit', [clickTarget]); }"
+            + " else { h.call(form, 'submit', [clickTarget]); } } catch(e) {} }"
             + "} else if (tag === 'INPUT' && (type === 'submit' || type === 'image')) {"
-            + "var form2 = clickTarget.closest ? clickTarget.closest('form') : null;"
-            + "if (form2) { try { if (typeof form2.requestSubmit === 'function') { form2.requestSubmit(clickTarget); }"
-            + " else { form2.submit(clickTarget); } } catch(e) {} }"
+            + "var form2 = h.closest(clickTarget, 'form');"
+            + "if (form2) { try { if (h.has(form2, 'requestSubmit')) { h.call(form2, 'requestSubmit', [clickTarget]); }"
+            + " else { h.call(form2, 'submit', [clickTarget]); } } catch(e) {} }"
             + "} else if (" + detail + " >= 3 && (tag === 'INPUT' || tag === 'TEXTAREA')) {"
-            + "var len = clickTarget.value ? clickTarget.value.length : 0;"
-            + "if (clickTarget.setSelectionRange) clickTarget.setSelectionRange(0, len);"
-            + "else { clickTarget.selectionStart = 0; clickTarget.selectionEnd = len; }"
+            + "var value = h.get(clickTarget, 'value');"
+            + "var len = value ? value.length : 0;"
+            + "if (h.has(clickTarget, 'setSelectionRange')) h.call(clickTarget, 'setSelectionRange', [0, len]);"
+            + "else { h.set(clickTarget, 'selectionStart', 0); h.set(clickTarget, 'selectionEnd', len); }"
             + "}"
             + "})()";
     }
@@ -543,43 +557,44 @@ public static class Input
         string dx = Num(deltaX);
         string dy = Num(deltaY);
         return "(function() {"
-            + "var target = (document.elementFromPoint && document.elementFromPoint(" + sx + "," + sy
-            + ")) || document.body || document.documentElement;"
+            + "var h = __obscura_host.dom;"
+            + "var body = h.body(), html = h.documentElement();"
+            + "var target = h.elementFromPoint(" + sx + "," + sy + ") || body || html;"
             + "if (!target) return;"
-            + "var wheel = __obscura_host.markTrusted(new WheelEvent('wheel', "
-            + "{bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + "var wheel = h.event('WheelEvent', 'wheel', "
+            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",deltaX:" + dx + ",deltaY:" + dy + ",deltaMode:0"
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
-            + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}));"
-            + "if (!target.dispatchEvent(wheel)) return;"
+            + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}, true);"
+            + "if (!h.dispatch(target, wheel)) return;"
             + "var dx = " + dx + ", dy = " + dy + ";"
-            + "var root = document.scrollingElement || document.documentElement || document.body;"
+            + "var root = h.scrollingElement() || html || body;"
             + "var scrollTarget = null;"
             + "var el = target;"
-            + "while (el && el.nodeType === 1 && el !== root && el !== document.body && "
-            + "el !== document.documentElement) {"
-            + "var maxX = Math.max(0, (el.scrollWidth || 0) - (el.clientWidth || 0));"
-            + "var maxY = Math.max(0, (el.scrollHeight || 0) - (el.clientHeight || 0));"
+            + "while (el && h.nodeType(el) === 1 && el !== root && el !== body && el !== html) {"
+            + "var maxX = h.max(0, (h.get(el, 'scrollWidth') || 0) - (h.get(el, 'clientWidth') || 0));"
+            + "var maxY = h.max(0, (h.get(el, 'scrollHeight') || 0) - (h.get(el, 'clientHeight') || 0));"
             + "var style = null;"
-            + "try { style = getComputedStyle(el); } catch (_e) {}"
+            + "try { style = h.computedStyle(el); } catch (_e) {}"
             + "var ox = style ? (style.overflowX || style.overflow || '') : '';"
             + "var oy = style ? (style.overflowY || style.overflow || '') : '';"
             + "var allowX = ox === 'auto' || ox === 'scroll' || ox === 'overlay';"
             + "var allowY = oy === 'auto' || oy === 'scroll' || oy === 'overlay';"
-            + "var consumesX = allowX && ((dx > 0 && el.scrollLeft < maxX) || (dx < 0 && el.scrollLeft > 0));"
-            + "var consumesY = allowY && ((dy > 0 && el.scrollTop < maxY) || (dy < 0 && el.scrollTop > 0));"
+            + "var left = h.get(el, 'scrollLeft'), top = h.get(el, 'scrollTop');"
+            + "var consumesX = allowX && ((dx > 0 && left < maxX) || (dx < 0 && left > 0));"
+            + "var consumesY = allowY && ((dy > 0 && top < maxY) || (dy < 0 && top > 0));"
             + "if (consumesX || consumesY) { scrollTarget = el; break; }"
-            + "el = el.parentElement;"
+            + "el = h.parentElement(el);"
             + "}"
             + "if (!scrollTarget) scrollTarget = root;"
-            + "if (scrollTarget === root && root && typeof root.scrollBy === 'function') {"
-            + "var beforeX = root.scrollLeft, beforeY = root.scrollTop;"
-            + "root.scrollBy(dx, dy);"
-            + "if (root.scrollLeft !== beforeX || root.scrollTop !== beforeY) setTimeout(function() {"
-            + "try { document.dispatchEvent(new Event('scroll', {bubbles:false})); } catch (_e) {}"
-            + "try { globalThis.dispatchEvent(new Event('scroll', {bubbles:false})); } catch (_e) {}"
+            + "if (scrollTarget === root && root && h.has(root, 'scrollBy')) {"
+            + "var beforeX = h.get(root, 'scrollLeft'), beforeY = h.get(root, 'scrollTop');"
+            + "h.call(root, 'scrollBy', [dx, dy]);"
+            + "if (h.get(root, 'scrollLeft') !== beforeX || h.get(root, 'scrollTop') !== beforeY) h.setTimeout(function() {"
+            + "try { h.dispatch(h.document(), h.event('Event', 'scroll', {__proto__:null,bubbles:false}, false)); } catch (_e) {}"
+            + "try { h.dispatch(globalThis, h.event('Event', 'scroll', {__proto__:null,bubbles:false}, false)); } catch (_e) {}"
             + "}, 0);"
-            + "} else if (scrollTarget && typeof scrollTarget.scrollBy === 'function') scrollTarget.scrollBy(dx, dy);"
+            + "} else if (scrollTarget && h.has(scrollTarget, 'scrollBy')) h.call(scrollTarget, 'scrollBy', [dx, dy]);"
             + "})()";
     }
 }

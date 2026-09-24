@@ -16405,7 +16405,7 @@ public sealed partial class RuntimeTests
     public void TestHtmlToMarkdownHeadings()
     {
         using var fixture = RuntimeFixture.Setup("<html><body><h1>Title</h1><h2>Sub</h2><p>Body</p></body></html>");
-        var md = fixture.Runtime.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        var md = fixture.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
         Assert.Contains("# Title", md, StringComparison.Ordinal);
         Assert.Contains("## Sub", md, StringComparison.Ordinal);
         Assert.Contains("Body", md, StringComparison.Ordinal);
@@ -16438,7 +16438,7 @@ public sealed partial class RuntimeTests
         */
         using var fixture = RuntimeFixture.Setup(
             """<html><body><p>Hello <strong>world</strong> <a href="https://x.test/">link</a> <em>em</em></p></body></html>""");
-        var md = fixture.Runtime.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        var md = fixture.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
         Assert.True(md.Contains("**world**", StringComparison.Ordinal), $"missing strong: {md}");
         Assert.True(md.Contains("*em*", StringComparison.Ordinal), $"missing em: {md}");
         Assert.True(md.Contains("[link](https://x.test/)", StringComparison.Ordinal), $"missing link: {md}");
@@ -16467,7 +16467,7 @@ public sealed partial class RuntimeTests
         */
         using var fixture = RuntimeFixture.Setup(
             "<html><body><ul><li>A</li><li>B</li></ul><ol><li>X</li><li>Y</li></ol></body></html>");
-        var md = fixture.Runtime.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        var md = fixture.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
         Assert.True(md.Contains("- A", StringComparison.Ordinal), $"missing unordered A: {md}");
         Assert.True(md.Contains("- B", StringComparison.Ordinal), $"missing unordered B: {md}");
         Assert.True(md.Contains("1. X", StringComparison.Ordinal), $"missing ordered X: {md}");
@@ -16496,7 +16496,7 @@ public sealed partial class RuntimeTests
         */
         using var fixture = RuntimeFixture.Setup(
             "<html><body><p>Text</p><script>alert(1)</script><style>body{color:red}</style></body></html>");
-        var md = fixture.Runtime.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        var md = fixture.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
         Assert.True(md.Contains("Text", StringComparison.Ordinal), $"missing visible text: {md}");
         Assert.False(md.Contains("alert", StringComparison.Ordinal), $"leaked script content: {md}");
         Assert.False(md.Contains("color:red", StringComparison.Ordinal), $"leaked style content: {md}");

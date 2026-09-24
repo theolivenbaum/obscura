@@ -66,14 +66,16 @@ public sealed class Page : IDisposable
     /// <summary>The page's HTML content.</summary>
     public string Content()
     {
-        var value = Evaluate("document.documentElement.outerHTML");
+        // Host snippets here use __obscura_host.dom, the built-ins as bootstrap left them,
+        // not what the page has put on document and the element prototypes (SECURITY.md L10).
+        var value = Inner.EvaluateHost("(function() { var h = __obscura_host.dom; var root = h.documentElement(); return root ? h.get(root, 'outerHTML') : null; })()");
         return AsString(value) ?? string.Empty;
     }
 
     /// <summary>Query a single element by CSS selector.</summary>
     public Element? QuerySelector(string selector)
     {
-        var value = Evaluate(QuerySelectorScript(selector));
+        var value = Inner.EvaluateHost(QuerySelectorScript(selector));
         return NidFromValue(value) is { } nid ? new Element(nid, this) : null;
     }
 
@@ -84,7 +86,7 @@ public sealed class Page : IDisposable
         var script = QuerySelectorScript(selector);
         while (true)
         {
-            var value = Evaluate(script);
+            var value = Inner.EvaluateHost(script);
             if (NidFromValue(value) is { } nid)
             {
                 return new Element(nid, this);
@@ -138,7 +140,7 @@ public sealed class Page : IDisposable
              .Replace("'", "\\'", StringComparison.Ordinal);
 
     private static string QuerySelectorScript(string selector) =>
-        $"(function() {{ var el = document.querySelector('{EscapeJsSingleQuoted(selector)}'); return el ? el._nid : null; }})()";
+        $"(function() {{ var h = __obscura_host.dom; var el = h.querySelector(h.document(), '{EscapeJsSingleQuoted(selector)}'); return el ? el._nid : null; }})()";
 
     internal static string? AsString(JsonNode? value) =>
         value?.GetValueKind() == JsonValueKind.String ? value.GetValue<string>() : null;
@@ -189,8 +191,8 @@ public sealed class Element
     /// <summary>The element's text content.</summary>
     public string Text()
     {
-        var value = _page.Evaluate(
-            $"(function() {{ var el = globalThis._wrap && globalThis._wrap({Nid}); return el ? el.textContent : ''; }})()");
+        var value = _page.Inner.EvaluateHost(
+            $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({Nid}); return el ? h.get(el, 'textContent') : ''; }})()");
         return Page.AsString(value) ?? string.Empty;
     }
 
@@ -198,8 +200,8 @@ public sealed class Element
     public string? Attribute(string name)
     {
         var escaped = Page.EscapeJsSingleQuoted(name);
-        var value = _page.Evaluate(
-            $"(function() {{ var el = globalThis._wrap && globalThis._wrap({Nid}); return el ? el.getAttribute('{escaped}') : null; }})()");
+        var value = _page.Inner.EvaluateHost(
+            $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({Nid}); return el ? h.getAttribute(el, '{escaped}') : null; }})()");
         if (value is null || value.GetValueKind() == JsonValueKind.Null)
         {
             return null;
@@ -210,10 +212,10 @@ public sealed class Element
     /// <summary>Scroll the element into view and click it.</summary>
     public void Click()
     {
-        _page.Evaluate(
-            $"(function() {{ var el = globalThis._wrap && globalThis._wrap({Nid}); if (el) el.scrollIntoView({{block:'center'}}); }})()");
-        var result = _page.Evaluate(
-            $"(function() {{ var el = globalThis._wrap && globalThis._wrap({Nid}); if (el) {{ el.click(); return true; }} return false; }})()");
+        _page.Inner.EvaluateHost(
+            $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({Nid}); if (el) h.call(el, 'scrollIntoView', [{{__proto__:null,block:'center'}}]); }})()");
+        var result = _page.Inner.EvaluateHost(
+            $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({Nid}); if (el && h.has(el, 'click')) {{ h.call(el, 'click', []); return true; }} return false; }})()");
         var clicked = result?.GetValueKind() == JsonValueKind.True;
         if (!clicked)
         {

@@ -74,7 +74,7 @@ public sealed class BrowserDomainTests
 
         // The domain is the CDP face of the shared extraction script, not a second copy of it.
         Assert.Equal(
-            ctx.GetSessionPageMut(session)!.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>(),
+            ctx.GetSessionPageMut(session)!.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>(),
             markdown);
 
         Assert.Contains(

@@ -209,7 +209,6 @@ public sealed class InputMouseEventParity
                 (() => {
                     globalThis.wheelProbe = null;
                     const page = document.getElementById('page');
-                    document.elementFromPoint = () => page;
                     page.addEventListener('wheel', event => {
                         wheelProbe = {
                             x: event.clientX, y: event.clientY,
@@ -289,7 +288,9 @@ public sealed class InputMouseEventParity
                 """
                 (() => {
                     const target = document.getElementById('check');
-                    document.elementFromPoint = () => target;
+                    // Placed under the pointer: hit testing does not consult a page's
+                    // document.elementFromPoint, as Chromium's does not (SECURITY.md L10).
+                    target.style.cssText = 'position:absolute;left:20px;top:30px;width:22px;height:22px;margin:0';
                     globalThis.mouseLog = [];
                     for (const type of ['mousedown', 'mouseup', 'click', 'input', 'change']) {
                         target.addEventListener(type, event => mouseLog.push({
@@ -366,7 +367,7 @@ public sealed class InputMouseEventParity
                 (() => {
                     const a = document.getElementById('radio-a');
                     const b = document.getElementById('radio-b');
-                    document.elementFromPoint = () => b;
+                    b.style.cssText = 'position:absolute;left:0;top:0;width:20px;height:20px;margin:0';
                     globalThis.radioEvents = [];
                     for (const radio of [a, b]) {
                         for (const type of ['mousedown', 'mouseup', 'click', 'input', 'change']) {

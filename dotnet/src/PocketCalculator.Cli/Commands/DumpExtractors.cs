@@ -291,7 +291,7 @@ public static class DumpExtractors
     /// <summary><c>dump_markdown</c>: the shared extraction script, run in the page.</summary>
     public static string DumpMarkdown(Page page)
     {
-        var result = page.Evaluate(MarkdownScript.HtmlToMarkdown);
+        var result = page.EvaluateHost(MarkdownScript.HtmlToMarkdown);
         return result?.GetValueKind() == JsonValueKind.String ? result.GetValue<string>() : string.Empty;
     }
 

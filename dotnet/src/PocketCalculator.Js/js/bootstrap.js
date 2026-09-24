@@ -34,6 +34,11 @@ const _weakMapGet = _uncurry(WeakMap.prototype.get);
 const _stringSlice = _uncurry(String.prototype.slice);
 const _stringToLowerCase = _uncurry(String.prototype.toLowerCase);
 const _stringCharAt = _uncurry(String.prototype.charAt);
+const _stringCharCodeAt = _uncurry(String.prototype.charCodeAt);
+const _stringTrim = _uncurry(String.prototype.trim);
+const _stringIndexOf = _uncurry(String.prototype.indexOf);
+const _stringLastIndexOf = _uncurry(String.prototype.lastIndexOf);
+const _objectHasOwn = Object.hasOwn;
 const _objectKeys = Object.keys;
 const _objectCreate = Object.create;
 const _objectFreeze = Object.freeze;
@@ -44,6 +49,52 @@ const _String = String;
 const _Number = Number;
 const _MathMin = Math.min;
 const _MathMax = Math.max;
+// The shim's own event classes. DEVIATION from crates/obscura-js/js/bootstrap.js, whose
+// internal `new Event(...)`, `new MouseEvent(...)` and the rest name the page-writable
+// globals, so a page that replaced window.MouseEvent broke el.click() and could hand
+// the shim an object of its own making to mark trusted (SECURITY.md L10). Each is
+// assigned where its class is defined; page script still sees the globals.
+let Event, CustomEvent, MouseEvent, KeyboardEvent, FocusEvent, InputEvent, ErrorEvent, PointerEvent, AnimationEvent, TransitionEvent, UIEvent, WheelEvent, CompositionEvent, PopStateEvent, HashChangeEvent, MessageEvent, ProgressEvent, ClipboardEvent, SubmitEvent, ToggleEvent, PromiseRejectionEvent, StorageEvent;
+// Dispatch by the shim's own dispatchEvent for the target's kind, as bootstrap left it
+// (captured by _captureDispatchImpls). DEVIATION from crates/obscura-js/js/bootstrap.js,
+// whose internal dispatches (el.click(), form submission, bubbling to the parent, load
+// and error events) call the page-writable target.dispatchEvent, so a page that
+// replaced Element.prototype.dispatchEvent swallowed every click (SECURITY.md L10).
+// Other event targets (XHR, ports, ...) keep their own method.
+let _elementDispatchImpl = null, _documentDispatchImpl = null, _nodeDispatchImpl = null, _windowDispatchImpl = null;
+let _elementProtoAtBoot = null, _documentProtoAtBoot = null;
+const _isPrototypeOf = _uncurry(Object.prototype.isPrototypeOf);
+function _dispatchImplFor(target) {
+  if (target === globalThis) return _windowDispatchImpl;
+  if (target === null || typeof target !== 'object' || typeof target._nid !== 'number' || !_nodeDispatchImpl) return null;
+  if (_isPrototypeOf(_elementProtoAtBoot, target)) return _elementDispatchImpl;
+  if (_isPrototypeOf(_documentProtoAtBoot, target)) return _documentDispatchImpl;
+  return _nodeDispatchImpl;
+}
+function _dispatch(target, event) {
+  const impl = _dispatchImplFor(target);
+  return impl ? _reflectApply(impl, target, [event]) : target.dispatchEvent(event);
+}
+// querySelector / querySelectorAll by the shim's own methods for the root's kind, for the
+// same reason as _dispatch: the shim's own queries (select.options, form.elements,
+// getElementsByTagName, hit testing, label lookup) must not call a page's replacement.
+let _queryImpls = null;
+let _fragmentProtoAtBoot = null;
+function _queryImpl(root, all) {
+  if (!_queryImpls || root === null || typeof root !== 'object' || typeof root._nid !== 'number') return null;
+  if (_isPrototypeOf(_elementProtoAtBoot, root)) return all ? _queryImpls.elementAll : _queryImpls.element;
+  if (_isPrototypeOf(_documentProtoAtBoot, root)) return all ? _queryImpls.documentAll : _queryImpls.document;
+  if (_isPrototypeOf(_fragmentProtoAtBoot, root)) return all ? _queryImpls.fragmentAll : _queryImpls.fragment;
+  return null;
+}
+function _qs(root, selector) {
+  const impl = _queryImpl(root, false);
+  return impl ? _reflectApply(impl, root, [selector]) : root.querySelector(selector);
+}
+function _qsa(root, selector) {
+  const impl = _queryImpl(root, true);
+  return impl ? _reflectApply(impl, root, [selector]) : root.querySelectorAll(selector);
+}
 // `ids.map(wrap).filter(Boolean)` without either method: the wrappers for a list of node
 // ids, skipping any id that no longer names a node.
 const _wrapIds = (ids, wrap) => {
@@ -91,7 +142,7 @@ const _wrapIds = (ids, wrap) => {
     '_isSpecialScheme', '_applyDocQueryEncoding', '_anchorBase',
     '_elemHrefURL', '_setElemHrefPart', '_pad', '_daysInMonth',
     '_isoWeek1Monday', '_inputParseNumber', '_inputFormatNumber',
-    '_htmlAttrName', '_convertNodes', '_fragmentContextPayload', '_parseHTMLFragment', '_xmlWellFormed', '_elementClassFor', '_wrap', '_wrapEl',
+    '_htmlAttrName', '_convertNodes', '_fragmentContextPayload', '_parseHTMLFragment', '_xmlWellFormed', '_elementClassFor', '_wrapEl',
     '_resolveUrl', '_registerIframe', '_base64ToUint8Array',
     '_bodyToUint8Array', '_arrayBufferFromBytes',
     '_installWasmStreamingFallback', '_urlParseOp', '_urlSetOp',
@@ -236,7 +287,7 @@ const _dom = (cmd, a1, a2) => {
 let _documentQuerySelector = null;
 const _reflectApply = Reflect.apply;
 const _documentQuery = (doc, selector) =>
-  _documentQuerySelector ? _reflectApply(_documentQuerySelector, doc, [selector]) : doc.querySelector(selector);
+  _documentQuerySelector ? _reflectApply(_documentQuerySelector, doc, [selector]) : _qs(doc, selector);
 
 const _nativeFns = new Set();
 // Exact toString override for members whose native form is not just
@@ -491,10 +542,10 @@ async function __runDynScriptTask(task) {
     // Fire load via dispatchEvent only: it invokes the element's onload
     // property handler and any addEventListener('load') listeners, read live
     // off the element. Calling onload separately would double-fire it.
-    try { task.dispatchEvent(new Event('load')); } catch(e) {}
+    try { _dispatch(task, new Event('load')); } catch(e) {}
   } catch(e) {
     console.error('Dynamic script fetch error:', e.message);
-    try { task.dispatchEvent(new Event('error')); } catch(ex) {}
+    try { _dispatch(task, new Event('error')); } catch(ex) {}
   } finally {
     if (task.delaysLoad) {
       task.delaysLoad = false;
@@ -648,9 +699,9 @@ async function _loadLinkedStylesheet(c) {
     const loaded = _JSONparse(await __obscuraCore.ops.op_load_stylesheet(c._nid, fullUrl));
     if (!loaded || loaded.ok !== true) throw new Error("Stylesheet fetch failed: " + fullUrl);
     _registerLinkedStylesheet(c, fullUrl, String(loaded.responseUrl || fullUrl));
-    try { c.dispatchEvent(new Event('load', { bubbles: true })); } catch(e) {}
+    try { _dispatch(c, new Event('load', { bubbles: true })); } catch(e) {}
   } catch(e) {
-    try { c.dispatchEvent(new Event('error', { bubbles: true })); } catch(e) {}
+    try { _dispatch(c, new Event('error', { bubbles: true })); } catch(e) {}
   }
 }
 
@@ -764,9 +815,9 @@ function _getElementsByClassName(root, classNames) {
   // selector engine (the common case). Only multi-token sets or exotic class
   // names (NBSP, leading digits, etc.) fall back to the O(n) JS scan below.
   if (tokens.length === 1 && /^[A-Za-z_-][\w-]*$/.test(tokens[0])) {
-    return HTMLCollection._from(root.querySelectorAll("." + tokens[0]));
+    return HTMLCollection._from(_qsa(root, "." + tokens[0]));
   }
-  const all = root.querySelectorAll("*");
+  const all = _qsa(root, "*");
   const matched = [];
   for (let i = 0; i < all.length; i++) {
     const el = all[i];
@@ -1950,7 +2001,7 @@ function __prepareInsertedScript(script) {
     if (error) {
       console.error('Import map error:', error);
       queueMicrotask(() => {
-        try { script.dispatchEvent(new Event('error')); } catch (_) {}
+        try { _dispatch(script, new Event('error')); } catch (_) {}
       });
     }
     return;
@@ -1988,7 +2039,7 @@ function __prepareInsertedScript(script) {
       nid: script._nid,
       prevNid,
       pageOrigin,
-      dispatchEvent: (ev) => { try { script.dispatchEvent(ev); } catch(e) {} },
+      dispatchEvent: (ev) => { try { _dispatch(script, ev); } catch(e) {} },
     };
     // Non-parser-inserted external scripts are async by default, but scripts
     // prepared while the document is still loading still delay window.load.
@@ -2026,7 +2077,7 @@ function __prepareInsertedScript(script) {
       nid: script._nid,
       prevNid,
       pageOrigin: "",
-      dispatchEvent: (ev) => { try { script.dispatchEvent(ev); } catch(e) {} },
+      dispatchEvent: (ev) => { try { _dispatch(script, ev); } catch(e) {} },
       delaysLoad: globalThis.document?.readyState !== 'complete',
     };
     if (task.delaysLoad) __dynLoadDelayingPending++;
@@ -2787,7 +2838,7 @@ function _labeledControl(label) {
     if (!el) return null;
     return el.matches && el.matches(_LABELABLE) ? el : null;
   }
-  return label.querySelector ? label.querySelector(_LABELABLE) : null;
+  return label.querySelector ? _qs(label, _LABELABLE) : null;
 }
 
 // Run a label's activation behaviour once, and report whether it ran. The set
@@ -3247,7 +3298,7 @@ class Animation {
     if (this._finishTimer != null) clearTimeout(this._finishTimer);
     this._resolveFinished(this);
     const event = new Event('finish');
-    this.dispatchEvent(event);
+    _dispatch(this, event);
     if (typeof this.onfinish === 'function') { try { this.onfinish.call(this, event); } catch (e) { console.error(e); } }
   }
   cancel() {
@@ -3260,7 +3311,7 @@ class Animation {
     _waapiAnimations.delete(this);
     this._rejectFinished(new DOMException('The animation was canceled', 'AbortError'));
     const event = new Event('cancel');
-    this.dispatchEvent(event);
+    _dispatch(this, event);
     if (typeof this.oncancel === 'function') { try { this.oncancel.call(this, event); } catch (e) { console.error(e); } }
     this._resetFinishedPromise();
   }
@@ -3374,7 +3425,7 @@ class Element extends Node {
     // Native fragment replacement bypasses Node.removeChild. Disassociate
     // descendant style sheets before the backing nodes leave the document so
     // retained CSSStyleSheet wrappers cannot keep stale owner/source nodes.
-    for (const style of this.querySelectorAll("style")) _detachStyleSheet(style);
+    for (const style of _qsa(this, "style")) _detachStyleSheet(style);
     let oldChildren = [];
     let newChildren = [];
     // Only when an observer can see this element's child list: the ids read here are held
@@ -3541,7 +3592,7 @@ class Element extends Node {
         && (n === "srcset" || n === "sizes" || n === "media" || n === "type")) {
       const picture = this.parentElement;
       const image = picture && picture.localName === "picture"
-        ? picture.querySelector("img")
+        ? _qs(picture, "img")
         : null;
       if (image && typeof image._imageSourceChanged === "function") {
         image._imageSourceChanged();
@@ -3585,7 +3636,7 @@ class Element extends Node {
         && (n === "srcset" || n === "sizes" || n === "media" || n === "type")) {
       const picture = this.parentElement;
       const image = picture && picture.localName === "picture"
-        ? picture.querySelector("img")
+        ? _qs(picture, "img")
         : null;
       if (image && typeof image._imageSourceChanged === "function") {
         image._imageSourceChanged();
@@ -3612,7 +3663,7 @@ class Element extends Node {
     const ids = _domParse("query_selector_all_scoped", this._nid, s) || [];
     return _nodeList(_wrapIds(ids, _wrapEl));
   }
-  getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
+  getElementsByTagName(t) { return HTMLCollection._from(_qsa(this, t)); }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
   matches(s) {
     // :popover-open is a JS-observable popover state, not understood by the
@@ -3750,7 +3801,7 @@ class Element extends Node {
       if (event._immediatePropagationStopped) break;
     }
     if (event.bubbles && !event._propagationStopped && this.parentNode) {
-      this.parentNode.dispatchEvent(event);
+      _dispatch(this.parentNode, event);
     }
     return !event.defaultPrevented;
   }
@@ -3795,7 +3846,7 @@ class Element extends Node {
         const _name = this.getAttribute('name') || '';
         if (_name) {
           _radioStates = [];
-          const _all = (this.ownerDocument || globalThis.document).querySelectorAll('input');
+          const _all = _qsa(this.ownerDocument || globalThis.document, 'input');
           for (let i = 0; i < _all.length; i++) {
             const r = _all[i];
             if (((r.getAttribute('type') || '').toLowerCase()) !== 'radio') continue;
@@ -3816,7 +3867,7 @@ class Element extends Node {
     }
     const _clickEvent = new MouseEvent("click", {bubbles: true, cancelable: true});
     if (_trusted) _markTrusted(_clickEvent);
-    const cancelled = !this.dispatchEvent(_clickEvent);
+    const cancelled = !_dispatch(this, _clickEvent);
     if (cancelled) {
       if (_radioStates) { for (let i = 0; i < _radioStates.length; i++) _radioStates[i][0].checked = _radioStates[i][1]; }
       else if (_checkable) { this.checked = _oldChecked; this.indeterminate = _oldIndeterminate; }
@@ -3826,7 +3877,7 @@ class Element extends Node {
       for (const _type of ['input', 'change']) {
         const _e = new Event(_type, {bubbles: true});
         if (_trusted) _markTrusted(_e);
-        try { this.dispatchEvent(_e); } catch (e) {}
+        try { _dispatch(this, _e); } catch (e) {}
       }
       return;
     }
@@ -3926,19 +3977,19 @@ class Element extends Node {
   showPopover() {
     if (!this._checkPopoverValidity(/*expectedToBeShowing*/false)) return;
     const beforeEvent = new ToggleEvent("beforetoggle", { cancelable: true, oldState: "closed", newState: "open" });
-    if (!this.dispatchEvent(beforeEvent)) return;
+    if (!_dispatch(this, beforeEvent)) return;
     // The beforetoggle handler may have changed our type or shown us; re-check.
     if (!this._checkPopoverValidity(/*expectedToBeShowing*/false)) return;
     this._popoverState = "showing";
     const target = this;
-    setTimeout(() => { try { target.dispatchEvent(new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
+    setTimeout(() => { try { _dispatch(target, new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
   }
   hidePopover() {
     if (!this._checkPopoverValidity(/*expectedToBeShowing*/true)) return;
-    this.dispatchEvent(new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
+    _dispatch(this, new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
     this._popoverState = "hidden";
     const target = this;
-    setTimeout(() => { try { target.dispatchEvent(new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
+    setTimeout(() => { try { _dispatch(target, new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
   }
   togglePopover(force) {
     let options = force;
@@ -3960,10 +4011,10 @@ class Element extends Node {
       // Hide directly. Do not call hidePopover(): it re-validates against the
       // popover attribute, which may now be removed (No Popover), and would
       // throw NotSupportedError. This mirrors the spec hide with throw=false.
-      this.dispatchEvent(new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
+      _dispatch(this, new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
       this._popoverState = "hidden";
       const target = this;
-      setTimeout(() => { try { target.dispatchEvent(new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
+      setTimeout(() => { try { _dispatch(target, new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
     }
   }
   // HTMLDialogElement members (live on Element.prototype like popover/input;
@@ -3983,28 +4034,28 @@ class Element extends Node {
   show() {
     if (this.hasAttribute('open')) { if (this._dialogModal) throw new DOMException("The dialog is already open as a modal dialog.", "InvalidStateError"); return; }
     const before = new ToggleEvent("beforetoggle", { cancelable: true, oldState: "closed", newState: "open" });
-    if (!this.dispatchEvent(before)) return;
+    if (!_dispatch(this, before)) return;
     if (this.hasAttribute('open')) return;
     this.setAttribute('open', ''); this._dialogModal = false;
-    const self = this; setTimeout(() => { try { self.dispatchEvent(new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
+    const self = this; setTimeout(() => { try { _dispatch(self, new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
   }
   showModal() {
     if (this.hasAttribute('open')) throw new DOMException("The dialog is already open.", "InvalidStateError");
     if (!this.isConnected) throw new DOMException("The dialog is not connected to a document.", "InvalidStateError");
     const before = new ToggleEvent("beforetoggle", { cancelable: true, oldState: "closed", newState: "open" });
-    if (!this.dispatchEvent(before)) return;
+    if (!_dispatch(this, before)) return;
     if (this.hasAttribute('open')) return;
     this.setAttribute('open', ''); this._dialogModal = true;
-    const self = this; setTimeout(() => { try { self.dispatchEvent(new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
+    const self = this; setTimeout(() => { try { _dispatch(self, new ToggleEvent("toggle", { oldState: "closed", newState: "open" })); } catch (e) {} }, 0);
   }
   _dialogClose(result, fireClose) {
     if (!this.hasAttribute('open')) return;
-    this.dispatchEvent(new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
+    _dispatch(this, new ToggleEvent("beforetoggle", { oldState: "open", newState: "closed" }));
     this.removeAttribute('open'); this._dialogModal = false;
     if (result !== undefined) this._returnValue = String(result);
     const self = this;
-    setTimeout(() => { try { self.dispatchEvent(new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
-    if (fireClose) setTimeout(() => { try { self.dispatchEvent(new Event('close', { bubbles: false, cancelable: false })); } catch (e) {} }, 0);
+    setTimeout(() => { try { _dispatch(self, new ToggleEvent("toggle", { oldState: "open", newState: "closed" })); } catch (e) {} }, 0);
+    if (fireClose) setTimeout(() => { try { _dispatch(self, new Event('close', { bubbles: false, cancelable: false })); } catch (e) {} }, 0);
   }
   close(result) { this._dialogClose(result, true); }
   requestClose(result) {
@@ -4012,7 +4063,7 @@ class Element extends Node {
     if (this._dialogCancelFiring) return; // no re-entrant cancel
     this._dialogCancelFiring = true;
     let canceled = false;
-    try { const ev = new Event('cancel', { bubbles: false, cancelable: true }); this.dispatchEvent(ev); canceled = ev.defaultPrevented; }
+    try { const ev = new Event('cancel', { bubbles: false, cancelable: true }); _dispatch(this, ev); canceled = ev.defaultPrevented; }
     finally { this._dialogCancelFiring = false; }
     if (canceled) return;
     this._dialogClose(result, true);
@@ -4029,7 +4080,7 @@ class Element extends Node {
     const tag = this.localName;
     if (tag === 'select') {
       // Selected option wins; otherwise first option (HTML default).
-      const opts = this.querySelectorAll('option');
+      const opts = _qsa(this, 'option');
       for (let i = 0; i < opts.length; i++) {
         if (opts[i].selected) {
           return opts[i].getAttribute('value') !== null ? opts[i].getAttribute('value') : opts[i].textContent;
@@ -4081,7 +4132,7 @@ class Element extends Node {
       // itself. Dispatching here fed pages that assign inside a change
       // handler back into that handler in an infinite loop.
       const wanted = String(v);
-      const opts = this.querySelectorAll('option');
+      const opts = _qsa(this, 'option');
       for (let i = 0; i < opts.length; i++) {
         const attrV = opts[i].getAttribute('value');
         const optVal = attrV !== null ? attrV : opts[i].textContent;
@@ -4393,11 +4444,11 @@ class Element extends Node {
       // Dispatch through the element so the onload property/attribute and any
       // addEventListener('load', ...) listeners all run. Calling el.onload()
       // directly bypasses listeners registered via addEventListener.
-      el.dispatchEvent(new Event('load'));
+      _dispatch(el, new Event('load'));
     }).catch(() => {
       if (_iframeStates.get(el) !== st) return;
       _failIframeLoad(el, st, fullUrl, sandboxed);
-      el.dispatchEvent(new Event('load'));
+      _dispatch(el, new Event('load'));
     });
   }
   get contentDocument() {
@@ -4451,7 +4502,7 @@ class Element extends Node {
     if (id) {
       // Filter in JS rather than building a selector: an id containing a
       // quote would break out of label[for="..."].
-      const all = doc.querySelectorAll('label');
+      const all = _qsa(doc, 'label');
       for (let i = 0; i < all.length; i++) {
         if (all[i].getAttribute('for') === id) out.push(all[i]);
       }
@@ -4472,7 +4523,7 @@ class Element extends Node {
       const target = doc.getElementById(forId);
       return target && _isLabelable(target) ? target : null;
     }
-    const candidates = this.querySelectorAll('button, input, meter, output, progress, select, textarea');
+    const candidates = _qsa(this, 'button, input, meter, output, progress, select, textarea');
     for (let i = 0; i < candidates.length; i++) {
       if (_isLabelable(candidates[i])) return candidates[i];
     }
@@ -4480,7 +4531,7 @@ class Element extends Node {
   }
   get options() {
     if (this.localName !== 'select') return [];
-    return HTMLCollection._from(this.querySelectorAll('option'));
+    return HTMLCollection._from(_qsa(this, 'option'));
   }
   add(item, before = null) {
     if (this.localName !== 'select') {
@@ -4540,13 +4591,13 @@ class Element extends Node {
         );
       }
     }
-    const cancelled = !this.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    const cancelled = !_dispatch(this, new Event('submit', { bubbles: true, cancelable: true }));
     if (cancelled) return;
     this._navigateSubmit(submitter);
   }
   _navigateSubmit(submitter) {
     const pairs = [];
-    const fields = this.querySelectorAll('input, select, textarea');
+    const fields = _qsa(this, 'input, select, textarea');
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i];
       const name = f.getAttribute('name');
@@ -4564,7 +4615,7 @@ class Element extends Node {
 
       let val;
       if (tag === 'select') {
-        const opt = f.querySelector('option[selected]') || f.querySelector('option');
+        const opt = _qs(f, 'option[selected]') || _qs(f, 'option');
         val = opt ? (opt.getAttribute('value') !== null ? opt.getAttribute('value') : opt.textContent) : '';
       } else if (tag === 'textarea') {
         val = f.value || f.textContent || '';
@@ -4590,7 +4641,7 @@ class Element extends Node {
     }
   }
   reset() {
-    this.dispatchEvent(new Event('reset', { bubbles: true }));
+    _dispatch(this, new Event('reset', { bubbles: true }));
   }
   get dataset() {
     if (this._dataset) return this._dataset;
@@ -5044,7 +5095,7 @@ class Element extends Node {
     const self = this;
     setTimeout(() => {
       self._scrollEventPending = false;
-      try { self.dispatchEvent(new Event('scroll', { bubbles: false })); } catch (e) {}
+      try { _dispatch(self, new Event('scroll', { bubbles: false })); } catch (e) {}
     }, 0);
   }
   animate(keyframes, options) {
@@ -5233,7 +5284,7 @@ function _xpathFindNodes(expression, contextNode) {
     }
   }
   const source = typeof contextNode.querySelectorAll === "function"
-    ? contextNode.querySelectorAll(tag)
+    ? _qsa(contextNode, tag)
     : [];
   return Array.prototype.filter.call(source, (node) => {
     for (const pred of predicates) {
@@ -5329,7 +5380,7 @@ class Document extends Node {
   get title() { return _domParse("document_title") ?? ""; }
   set title(v) {
     const value = String(v);
-    let title = this.querySelector("title");
+    let title = _qs(this, "title");
     if (!title) {
       let head = this.head;
       const root = this.documentElement;
@@ -5418,9 +5469,9 @@ class Document extends Node {
     const ids = _domParse("query_selector_all", s) || [];
     return _nodeList(_wrapIds(ids, _wrapEl));
   }
-  getElementsByTagName(t) { return HTMLCollection._from(this.querySelectorAll(t)); }
+  getElementsByTagName(t) { return HTMLCollection._from(_qsa(this, t)); }
   getElementsByClassName(c) { return _getElementsByClassName(this, c); }
-  getElementsByName(name) { return this.querySelectorAll('[name="' + String(name).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]'); }
+  getElementsByName(name) { return _qsa(this, '[name="' + String(name).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]'); }
   evaluate(expression, contextNode, namespaceResolver, type, result) {
     return _makeXPathResult(type, _xpathFindNodes(expression, contextNode || this));
   }
@@ -5849,10 +5900,10 @@ class Document extends Node {
     if (!this._styleSheetList) this._styleSheetList = new StyleSheetList(this);
     return this._styleSheetList;
   }
-  get forms() { return this.querySelectorAll("form"); }
-  get images() { return this.querySelectorAll("img"); }
-  get links() { return this.querySelectorAll("a[href], area[href]"); }
-  get scripts() { return this.querySelectorAll("script"); }
+  get forms() { return _qsa(this, "form"); }
+  get images() { return _qsa(this, "img"); }
+  get links() { return _qsa(this, "a[href], area[href]"); }
+  get scripts() { return _qsa(this, "script"); }
   get cookie() {
     return __obscuraCore.ops.op_get_cookies();
   }
@@ -6372,7 +6423,7 @@ class HTMLImageElement extends Element {
       this._imageNaturalHeight = Number.isFinite(height) && height > 0 ? Math.round(height) : 0;
       this._resolveImageDecodes(request);
       if (dispatchEvent) {
-        try { this.dispatchEvent(new Event("load")); } catch (_error) {}
+        try { _dispatch(this, new Event("load")); } catch (_error) {}
       }
     } else {
       this._imageDecoded = false;
@@ -6380,7 +6431,7 @@ class HTMLImageElement extends Element {
       this._imageNaturalHeight = 0;
       this._rejectImageDecodes(request);
       if (dispatchEvent) {
-        try { this.dispatchEvent(new Event("error")); } catch (_error) {}
+        try { _dispatch(this, new Event("error")); } catch (_error) {}
       }
     }
     const lifecycleChanged =
@@ -6483,7 +6534,7 @@ class HTMLMediaElement extends Element {
   get currentSrc() { return ""; }
   get textTracks() {
     return TextTrackList.from(
-      Array.from(this.querySelectorAll("track")).map((element) => element.track)
+      Array.from(_qsa(this, "track")).map((element) => element.track)
     );
   }
   addTextTrack(kind, label = "", language = "") {
@@ -6861,7 +6912,10 @@ function _gcForget() {
   }
 }
 
-globalThis._wrap = _wrap;
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which publishes _wrap as a global:
+// page script could wrap any node id, a closed shadow root's included, and a page that
+// replaced it answered every CDP and MCP lookup by node id. The host reaches it as
+// __obscura_host.dom.wrap (SECURITY.md L10).
 globalThis.self = globalThis;
 
 globalThis.document = null;
@@ -6923,7 +6977,7 @@ function _isFragmentOnlyChange(current, target) {
 // `window.onhashchange = fn` / `window.onpopstate = fn` form (still common in
 // hash routers) would never be called.
 function _dispatchWindowEventWithHandler(ev, handlerName) {
-  try { globalThis.dispatchEvent(ev); } catch (e) { console.error(e); }
+  try { _dispatch(globalThis, ev); } catch (e) { console.error(e); }
   try {
     if (typeof globalThis[handlerName] === 'function') globalThis[handlerName].call(globalThis, ev);
   } catch (e) { console.error(e); }
@@ -7071,7 +7125,7 @@ let _windowOnloadOverrideSet = false;
 let _windowOnloadOverride = null;
 function _windowReflectingBodyElement() {
   const document = globalThis.document;
-  return document && (document.body || document.querySelector('frameset'));
+  return document && (document.body || _qs(document, 'frameset'));
 }
 function _isWindowReflectingBodyElement(element) {
   return element === _windowReflectingBodyElement();
@@ -7130,7 +7184,7 @@ Object.defineProperty(globalThis, 'constructor', {
 // Remove the static _iframeRegistry and replace with dynamic getters.
 Object.defineProperty(globalThis, 'length', {
   get() {
-    return document.querySelectorAll('iframe').length;
+    return _qsa(document, 'iframe').length;
   },
   configurable: true,
   enumerable: true
@@ -7140,7 +7194,7 @@ Object.defineProperty(globalThis, 'length', {
 for (let i = 0; i < 50; i++) {
   Object.defineProperty(globalThis, i, {
     get() {
-      const iframes = document.querySelectorAll('iframe');
+      const iframes = _qsa(document, 'iframe');
       if (i < iframes.length) {
         return iframes[i].contentWindow;
       }
@@ -8546,7 +8600,7 @@ function _runResizeRenderCheckpoint() {
     // Match the standardized loop-limit signal without queuing another
     // internal task that could keep a pathological page permanently busy.
     try {
-      globalThis.dispatchEvent(new ErrorEvent("error", {
+      _dispatch(globalThis, new ErrorEvent("error", {
         message: "ResizeObserver loop completed with undelivered notifications."
       }));
     } catch (_error) {}
@@ -9650,8 +9704,8 @@ function _detachStyleSheetsInSubtree(root) {
   if (root.nodeType === 1 && root.localName === "style") _detachStyleSheet(root);
   if (root.nodeType === 1 && root.localName === "link") _detachLinkedStyleSheet(root);
   if (!root.querySelectorAll) return;
-  for (const style of root.querySelectorAll("style")) _detachStyleSheet(style);
-  for (const link of root.querySelectorAll('link[rel~="stylesheet"]')) {
+  for (const style of _qsa(root, "style")) _detachStyleSheet(style);
+  for (const link of _qsa(root, 'link[rel~="stylesheet"]')) {
     _detachLinkedStyleSheet(link);
   }
 }
@@ -9676,7 +9730,7 @@ class StyleSheetList {
   }
   _sheets() {
     const nodes = this._root.querySelectorAll
-      ? this._root.querySelectorAll('style, link[rel~="stylesheet"]')
+      ? _qsa(this._root, 'style, link[rel~="stylesheet"]')
       : [];
     const out = [];
     for (const style of nodes) {
@@ -10145,7 +10199,7 @@ class CustomElementRegistry {
   upgrade(root) {
     if (!root || !root.querySelectorAll) return;
     for (const [name, cls] of this._registry.entries()) {
-      const matches = root.querySelectorAll(name);
+      const matches = _qsa(root, name);
       for (const el of matches) this._upgradeElement(el, cls);
     }
   }
@@ -10695,10 +10749,10 @@ function _setInputFiles(el, specs) {
   // trusted events; upload flows that gate their change handler on
   // event.isTrusted (common in frameworks and anti-bot code) ignore untrusted
   // ones, which would silently break the exact case this feature targets.
-  try { el.dispatchEvent(_markTrusted(new Event("input", { bubbles: true }))); } catch (_e) {}
-  try { el.dispatchEvent(_markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
+  try { _dispatch(el, _markTrusted(new Event("input", { bubbles: true }))); } catch (_e) {}
+  try { _dispatch(el, _markTrusted(new Event("change", { bubbles: true }))); } catch (_e) {}
 }
-globalThis.Event = class Event {
+Event = globalThis.Event = class Event {
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
   get isTrusted() { return _trustedHas(_trustedEvents, this); }
   preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
@@ -10713,7 +10767,7 @@ globalThis.Event = class Event {
   }
 };
 _markNative(Event);
-globalThis.CustomEvent = class extends Event {
+CustomEvent = globalThis.CustomEvent = class extends Event {
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'CustomEvent': 1 argument required, but only 0 present."); super(t,o);this.detail=o.detail!==undefined?o.detail:null; }
   // Legacy DOM Level 2 init; some libraries (Starbucks China bundle, older
   // analytics shims) still call createEvent('CustomEvent') + initCustomEvent
@@ -10725,7 +10779,7 @@ globalThis.CustomEvent = class extends Event {
     this.detail = detail;
   }
 };
-globalThis.MouseEvent = class extends Event {
+MouseEvent = globalThis.MouseEvent = class extends Event {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.screenX=o.screenX||0;this.screenY=o.screenY||0;this.clientX=o.clientX||0;this.clientY=o.clientY||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.button=o.button||0;this.buttons=o.buttons||0;this.relatedTarget=o.relatedTarget||null; }
   // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
   initMouseEvent(type,canBubble,cancelable,view,detail,screenX,screenY,clientX,clientY,ctrlKey,altKey,shiftKey,metaKey,button,relatedTarget) {
@@ -10745,7 +10799,7 @@ globalThis.MouseEvent = class extends Event {
     this.relatedTarget=relatedTarget===undefined?null:relatedTarget;
   }
 };
-globalThis.KeyboardEvent = class extends Event {
+KeyboardEvent = globalThis.KeyboardEvent = class extends Event {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.key=o.key||"";this.code=o.code||"";this.location=o.location||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.repeat=!!o.repeat; }
   // Legacy DOM Level 3 initializer. Positional signature per the WebKit/Gecko form.
   initKeyboardEvent(type,canBubble,cancelable,view,key,location,ctrlKey,altKey,shiftKey,metaKey) {
@@ -10760,13 +10814,13 @@ globalThis.KeyboardEvent = class extends Event {
     this.metaKey=!!metaKey;
   }
 };
-globalThis.FocusEvent = class extends Event { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
-globalThis.InputEvent = class extends Event { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
-globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.error=o.error||null; } };
-globalThis.PointerEvent = class extends Event { constructor(t,o={}) { super(t,o); } };
-globalThis.AnimationEvent = class extends Event {};
-globalThis.TransitionEvent = class extends Event {};
-globalThis.UIEvent = class extends Event {
+FocusEvent = globalThis.FocusEvent = class extends Event { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
+InputEvent = globalThis.InputEvent = class extends Event { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
+ErrorEvent = globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.error=o.error||null; } };
+PointerEvent = globalThis.PointerEvent = class extends Event { constructor(t,o={}) { super(t,o); } };
+AnimationEvent = globalThis.AnimationEvent = class extends Event {};
+TransitionEvent = globalThis.TransitionEvent = class extends Event {};
+UIEvent = globalThis.UIEvent = class extends Event {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0; }
   // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
   initUIEvent(type,canBubble,cancelable,view,detail) {
@@ -10779,11 +10833,11 @@ globalThis.UIEvent = class extends Event {
 // WheelEvent inherits all MouseEvent coordinates and modifier state. CDP
 // Input.dispatchMouseEvent supplies those fields and automation libraries use
 // them to distinguish wheel gestures over nested panes.
-globalThis.WheelEvent = class extends MouseEvent {
+WheelEvent = globalThis.WheelEvent = class extends MouseEvent {
   constructor(t,o={}) { super(t,o);this.deltaX=o.deltaX||0;this.deltaY=o.deltaY||0;this.deltaZ=o.deltaZ||0;this.deltaMode=o.deltaMode||0; }
 };
 
-globalThis.CompositionEvent = class extends Event {
+CompositionEvent = globalThis.CompositionEvent = class extends Event {
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.data=o.data||""; }
   // Legacy DOM Level 3 initializer. Positional signature per UI Events spec.
   initCompositionEvent(type,canBubble,cancelable,view,data) {
@@ -10793,7 +10847,7 @@ globalThis.CompositionEvent = class extends Event {
     this.data=data===undefined?"":String(data);
   }
 };
-globalThis.PopStateEvent = class extends Event {
+PopStateEvent = globalThis.PopStateEvent = class extends Event {
   constructor(type, init) {
     super(type, init || {});
     // Real PopStateEvent exposes `state` from the entry being navigated to.
@@ -10803,7 +10857,7 @@ globalThis.PopStateEvent = class extends Event {
     this.state = init && 'state' in init ? init.state : null;
   }
 };
-globalThis.HashChangeEvent = class HashChangeEvent extends Event {
+HashChangeEvent = globalThis.HashChangeEvent = class HashChangeEvent extends Event {
   constructor(type, init) {
     super(type, init || {});
     // The stub dropped its init dictionary, so a constructed hashchange event
@@ -10812,7 +10866,7 @@ globalThis.HashChangeEvent = class HashChangeEvent extends Event {
     this.newURL = init && init.newURL != null ? String(init.newURL) : "";
   }
 };
-globalThis.MessageEvent = class extends Event {
+MessageEvent = globalThis.MessageEvent = class extends Event {
   constructor(t,o={}) {
     super(t,o);
     this.data = Object.prototype.hasOwnProperty.call(o, "data") ? o.data : null;
@@ -10822,7 +10876,7 @@ globalThis.MessageEvent = class extends Event {
     this.ports = Array.isArray(o.ports) ? o.ports.slice() : [];
   }
 };
-globalThis.ProgressEvent = class ProgressEvent extends Event {
+ProgressEvent = globalThis.ProgressEvent = class ProgressEvent extends Event {
   constructor(type, init) {
     super(type, init || {});
     const i = init || {};
@@ -10831,14 +10885,14 @@ globalThis.ProgressEvent = class ProgressEvent extends Event {
     this.total = i.total != null ? Number(i.total) : 0;
   }
 };
-globalThis.ClipboardEvent = class extends Event {};
-globalThis.SubmitEvent = class extends Event {};
+ClipboardEvent = globalThis.ClipboardEvent = class extends Event {};
+SubmitEvent = globalThis.SubmitEvent = class extends Event {};
 
 // ToggleEvent backs the popover beforetoggle/toggle events. oldState and
 // newState are "open"/"closed". These events do not bubble; beforetoggle is
 // cancelable only for the closed -> open (show) transition, toggle is never
 // cancelable. See HTML "popover" and html/semantics/popovers WPT.
-globalThis.ToggleEvent = class ToggleEvent extends Event {
+ToggleEvent = globalThis.ToggleEvent = class ToggleEvent extends Event {
   constructor(type, init = {}) {
     super(type, init);
     this.oldState = init.oldState !== undefined ? String(init.oldState) : "";
@@ -10847,7 +10901,7 @@ globalThis.ToggleEvent = class ToggleEvent extends Event {
 };
 _markNative(globalThis.ToggleEvent);
 
-globalThis.PromiseRejectionEvent = class PromiseRejectionEvent extends Event {
+PromiseRejectionEvent = globalThis.PromiseRejectionEvent = class PromiseRejectionEvent extends Event {
   constructor(type, init) {
     if (arguments.length < 2 || init == null || !('promise' in Object(init))) {
       throw new TypeError(
@@ -10867,7 +10921,7 @@ __obscuraCore.setUnhandledPromiseRejectionHandler((promise, reason) => {
     reason,
     cancelable: true,
   });
-  globalThis.dispatchEvent(event);
+  _dispatch(globalThis, event);
   if (typeof globalThis.onunhandledrejection === "function") {
     try { globalThis.onunhandledrejection.call(globalThis, event); }
     catch (error) { console.error(error); }
@@ -10879,14 +10933,14 @@ __obscuraCore.setUnhandledPromiseRejectionHandler((promise, reason) => {
 
 __obscuraCore.setHandledPromiseRejectionHandler((promise, reason) => {
   const event = new PromiseRejectionEvent("rejectionhandled", { promise, reason });
-  globalThis.dispatchEvent(event);
+  _dispatch(globalThis, event);
   if (typeof globalThis.onrejectionhandled === "function") {
     try { globalThis.onrejectionhandled.call(globalThis, event); }
     catch (error) { console.error(error); }
   }
 });
 
-globalThis.StorageEvent = class StorageEvent extends Event {
+StorageEvent = globalThis.StorageEvent = class StorageEvent extends Event {
   constructor(type, init = {}) {
     super(type, init);
     this.key = init.key !== undefined ? init.key : null;
@@ -11063,7 +11117,7 @@ if (typeof FormData === "undefined") globalThis.FormData = class FormData {
       throw new TypeError("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
     }
     if (typeof form.querySelectorAll === "function") {
-      const controls = form.querySelectorAll("input,select,textarea");
+      const controls = _qsa(form, "input,select,textarea");
       for (let i = 0; i < controls.length; i++) {
         const el = controls[i];
         const name = el.getAttribute ? el.getAttribute("name") : el.name;
@@ -11374,20 +11428,20 @@ globalThis.DOMParser = class DOMParser {
       querySelector(s) {
         // For XML parsererror docs, check the root element as well —
         // the <parsererror> is the documentElement, not a descendant.
-        return root.querySelector(s) || (isParserError && root.matches(s) ? root : null);
+        return _qs(root, s) || (isParserError && root.matches(s) ? root : null);
       },
-      querySelectorAll(s) { return root.querySelectorAll(s); },
+      querySelectorAll(s) { return _qsa(root, s); },
       getElementById(id) {
         return walk(root, n => n.getAttribute && n.getAttribute("id") === id);
       },
       getElementsByTagName(t) {
-        return root.querySelectorAll(t);
+        return _qsa(root, t);
       },
       getElementsByClassName(c) {
         return _getElementsByClassName(root, c);
       },
       getElementsByName(n) {
-        return root.querySelectorAll(`[name="${n}"]`);
+        return _qsa(root, `[name="${n}"]`);
       },
       createElement: (t) => document.createElement(t),
       createElementNS: (ns, t) => document.createElement(t),
@@ -12326,7 +12380,7 @@ globalThis.atob = globalThis.atob || ((s) => {
     try {
       const ev = new Event("currententrychange");
       ev.from = old;
-      nav.dispatchEvent(ev);
+      _dispatch(nav, ev);
     } catch {}
     return entry;
   };
@@ -12964,7 +13018,7 @@ globalThis.HTMLImageElement = HTMLImageElement;
 globalThis.HTMLInputElement = Element;
 globalThis.HTMLButtonElement = Element;
 globalThis.HTMLFormElement = class HTMLFormElement extends Element {
-  get elements() { return HTMLCollection._from(this.querySelectorAll("input, select, textarea, button, fieldset, output, object")); }
+  get elements() { return HTMLCollection._from(_qsa(this, "input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
   // 'submit' event and (if not prevented) builds form data and navigates.
@@ -13047,7 +13101,7 @@ class HTMLTableRowElement extends Element {
     let table = this.parentNode;
     while (table && table.nodeType === 1 && table.tagName !== "TABLE") table = table.parentNode;
     if (!table || table.nodeType !== 1) return -1;
-    const rows = table.querySelectorAll("tr");
+    const rows = _qsa(table, "tr");
     for (let i = 0; i < rows.length; i++) {
       if (rows[i] === this) return i;
     }
@@ -13131,7 +13185,7 @@ class HTMLTitleElement extends Element {
   set text(v) { this.textContent = v == null ? "" : String(v); }
 }
 class HTMLMapElement extends Element {
-  get areas() { return HTMLCollection._from(this.querySelectorAll("area")); }
+  get areas() { return HTMLCollection._from(_qsa(this, "area")); }
 }
 class HTMLAreaElement extends Element {}
 class HTMLObjectElement extends Element {}
@@ -13379,7 +13433,7 @@ function _windowNamedSupportedNames(element) {
 function _windowNamedCandidates(name) {
   const doc = globalThis.document;
   if (!doc || !name) return [];
-  const elements = doc.querySelectorAll(
+  const elements = _qsa(doc,
     "[id],embed[name],form[name],iframe[name],img[name],object[name]"
   );
   const matches = [];
@@ -13433,7 +13487,7 @@ function _windowNamedNamesInTree(root) {
     for (const name of _windowNamedSupportedNames(root)) names.add(name);
   }
   if (typeof root.querySelectorAll === "function") {
-    const elements = root.querySelectorAll(
+    const elements = _qsa(root,
       "[id],embed[name],form[name],iframe[name],img[name],object[name]"
     );
     for (let i = 0; i < elements.length; i++) {
@@ -13458,7 +13512,7 @@ function _reconcileWindowNamedProperties(names) {
   const doc = globalThis.document;
   if (!doc) return;
   const present = new Set();
-  const elements = doc.querySelectorAll(
+  const elements = _qsa(doc,
     "[id],embed[name],form[name],iframe[name],img[name],object[name]"
   );
   for (let i = 0; i < elements.length; i++) {
@@ -13817,7 +13871,7 @@ class _IframeDocument {
 
     this._title = '';
     if (this._head) {
-      const titleEl = this._head.querySelector('title');
+      const titleEl = _qs(this._head, 'title');
       if (titleEl) this._title = titleEl.textContent;
     }
   }
@@ -13836,16 +13890,16 @@ class _IframeDocument {
   get activeElement() { return this._body; }
 
   getElementById(id) {
-    return this._root.querySelector('#' + id);
+    return _qs(this._root, '#' + id);
   }
   querySelector(sel) {
-    return this._root.querySelector(sel);
+    return _qs(this._root, sel);
   }
   querySelectorAll(sel) {
-    return this._root.querySelectorAll(sel);
+    return _qsa(this._root, sel);
   }
   getElementsByTagName(tag) {
-    return this._root.querySelectorAll(tag);
+    return _qsa(this._root, tag);
   }
   getElementsByClassName(cls) {
     return _getElementsByClassName(this._root, cls);
@@ -14263,7 +14317,7 @@ function _deliverMessage(dataJson, origin, sourceFrameId, targetOrigin) {
     // postMessage, it did not dispatch this. Real embedders check the flag and
     // drop anything untrusted, so an untrusted event is not merely suspicious,
     // it is silently discarded and the widget waits forever.
-    globalThis.dispatchEvent(_markTrusted(
+    _dispatch(globalThis, _markTrusted(
       new MessageEvent('message', { data, origin, source })));
   } catch (error) {
     console.error('message listener failed:', error && error.message || error);
@@ -16143,8 +16197,8 @@ function _windowScroll(x, y, relative) {
   setTimeout(() => {
     try {
       const doc = globalThis.document;
-      if (doc) doc.dispatchEvent(new Event('scroll', { bubbles: false }));
-      globalThis.dispatchEvent(new Event('scroll', { bubbles: false }));
+      if (doc) _dispatch(doc, new Event('scroll', { bubbles: false }));
+      _dispatch(globalThis, new Event('scroll', { bubbles: false }));
     } catch (e) {}
   }, 0);
 }
@@ -16195,7 +16249,7 @@ globalThis.postMessage = function(data, targetOrigin, _transfer) {
   if (!_targetOriginAllows(targetOrigin, origin, origin)) return;
   setTimeout(() => {
     try {
-      globalThis.dispatchEvent(_markTrusted(
+      _dispatch(globalThis, _markTrusted(
         new MessageEvent('message', { data: clone, origin, source: globalThis })));
     } catch (error) {
       console.error('message listener failed:', error && error.message || error);
@@ -16891,7 +16945,7 @@ if (typeof EventSource === 'undefined') {
         this.readyState = 1; // OPEN
         const ev = new Event('open');
         if (typeof this.onopen === 'function') { try { this.onopen(ev); } catch (e) {} }
-        try { this.dispatchEvent(ev); } catch (e) {}
+        try { _dispatch(this, ev); } catch (e) {}
       });
     }
     close() { this.readyState = 2; }
@@ -16922,7 +16976,7 @@ if (typeof WebSocket === 'undefined') {
         this.readyState = 1; // OPEN
         const ev = new Event('open');
         if (typeof this.onopen === 'function') { try { this.onopen(ev); } catch (e) {} }
-        try { this.dispatchEvent(ev); } catch (e) {}
+        try { _dispatch(this, ev); } catch (e) {}
       });
     }
     send(data) { /* drop; no real socket */ }
@@ -16932,7 +16986,7 @@ if (typeof WebSocket === 'undefined') {
       const ev = new Event('close');
       ev.code = code || 1000; ev.reason = reason || ''; ev.wasClean = true;
       if (typeof this.onclose === 'function') { try { this.onclose(ev); } catch (e) {} }
-      try { this.dispatchEvent(ev); } catch (e) {}
+      try { _dispatch(this, ev); } catch (e) {}
     }
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
   };
@@ -17220,7 +17274,7 @@ if (typeof FontFace === 'undefined') {
   };
   const _fontFaceAuthoredRules = doc => {
     const out = [];
-    for (const style of doc.querySelectorAll('style')) {
+    for (const style of _qsa(doc, 'style')) {
       const css = style.textContent || '';
       const pattern = /@font-face\s*\{([\s\S]*?)\}/gi;
       let match;
@@ -17395,7 +17449,7 @@ if (typeof FontFace === 'undefined') {
     _dispatch(type, faces) {
       const event = new Event(type);
       event.fontfaces = faces;
-      this.dispatchEvent(event);
+      _dispatch(this, event);
       const handler = this['on' + type];
       if (typeof handler === 'function') {
         try { handler.call(this, event); } catch (error) { console.error(error); }
@@ -17534,6 +17588,7 @@ if (typeof Element !== 'undefined' && !Element.prototype.toggleAttribute) {
 // Wrong-but-non-throwing beats "undefined", which traps ad/analytics bootstraps in retry loops
 // (see issue #63).
 const _documentQuerySelectorAllAtBoot = Document.prototype.querySelectorAll;
+const _elementRectAtBoot = Element.prototype.getBoundingClientRect;
 if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
   // Real hit testing against the synthetic bboxes from getBoundingClientRect.
   // Flat iteration over every element, NOT a tree walk: our synthetic rects
@@ -17557,11 +17612,11 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     var bestNid = -1;
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
-      if (!el || !el.getBoundingClientRect) continue;
+      if (!el) continue;
       // documentElement / body span the viewport; skip them so we pick a
       // real descendant instead of falling back to <html>/<body>.
       if (el === this.documentElement || el === this.body) continue;
-      var r = el.getBoundingClientRect();
+      var r = _reflectApply(_elementRectAtBoot, el, []);
       if (r.width === 0 || r.height === 0) continue;
       if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
         // A descendant's layout rect can extend beyond an overflow clip. It
@@ -17578,7 +17633,7 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
           var clipsX = ox === 'auto' || ox === 'scroll' || ox === 'hidden' || ox === 'clip';
           var clipsY = oy === 'auto' || oy === 'scroll' || oy === 'hidden' || oy === 'clip';
           if (clipsX || clipsY) {
-            var ar = ancestor.getBoundingClientRect();
+            var ar = _reflectApply(_elementRectAtBoot, ancestor, []);
             // Overflow clips at the padding box, inside the border. Renderer
             // client metrics expose that box's size; computed border widths
             // locate it within the border-box rect.
@@ -17710,7 +17765,7 @@ globalThis.__obscura_init = function() {
   // An isolated world shares the page's document, and the page realm already
   // loaded its frames.
   if (!_realmIsolatedWorld) {
-    for (const frame of globalThis.document.querySelectorAll('iframe')) {
+    for (const frame of _qsa(globalThis.document, 'iframe')) {
       const src = frame.getAttribute('src');
       if (src && src !== 'about:blank') frame._loadIframeSrc(src);
     }
@@ -17812,7 +17867,7 @@ _markNative(Node.prototype.isDefaultNamespace);
 // getElementsByTagNameNS on Element and Document
 if (!Element.prototype.getElementsByTagNameNS) {
   Element.prototype.getElementsByTagNameNS = function(namespaceURI, localName) {
-    const all = this.querySelectorAll('*');
+    const all = _qsa(this, '*');
     const filtered = [];
     const nsMatch = namespaceURI === '*';
     const tagMatch = localName === '*';
@@ -17833,7 +17888,7 @@ if (!Element.prototype.getElementsByTagNameNS) {
 }
 if (!Document.prototype.getElementsByTagNameNS) {
   Document.prototype.getElementsByTagNameNS = function(namespaceURI, localName) {
-    const all = this.querySelectorAll('*');
+    const all = _qsa(this, '*');
     const filtered = [];
     const nsMatch = namespaceURI === '*';
     const tagMatch = localName === '*';
@@ -18533,6 +18588,7 @@ function _installIsolatedWorldBridges() {
   };
   dispatcher(EP);
   dispatcher(NP);
+  _captureDispatchImpls();
 
   // Mutations another realm makes reach this world's observers once it has one. The
   // host is told the first time, so a world nobody observes from costs nothing.
@@ -18548,6 +18604,25 @@ function _installIsolatedWorldBridges() {
     }.observe,
   });
 }
+
+// The dispatchEvent _dispatch uses. Called once bootstrap has defined them, and again
+// by an isolated world once its bridges have replaced them.
+function _captureDispatchImpls() {
+  _elementProtoAtBoot = Element.prototype;
+  _documentProtoAtBoot = Document.prototype;
+  _elementDispatchImpl = Element.prototype.dispatchEvent;
+  _documentDispatchImpl = Document.prototype.dispatchEvent;
+  _nodeDispatchImpl = Node.prototype.dispatchEvent;
+  _windowDispatchImpl = globalThis.dispatchEvent;
+  _fragmentProtoAtBoot = DocumentFragment.prototype;
+  _queryImpls = {
+    __proto__: null,
+    element: Element.prototype.querySelector, elementAll: Element.prototype.querySelectorAll,
+    document: Document.prototype.querySelector, documentAll: Document.prototype.querySelectorAll,
+    fragment: DocumentFragment.prototype.querySelector, fragmentAll: DocumentFragment.prototype.querySelectorAll,
+  };
+}
+_captureDispatchImpls();
 
 // Built-ins host script uses, as bootstrap left them (port addition, SECURITY.md L10).
 //
@@ -18589,9 +18664,6 @@ const _hostDom = (function () {
   const fromPoint = methodOf(DP, 'elementFromPoint');
   const query = { __proto__: null, 1: methodOf(EP, 'querySelector'), 9: methodOf(DP, 'querySelector'), 11: methodOf(FP, 'querySelector') };
   const queryAll = { __proto__: null, 1: methodOf(EP, 'querySelectorAll'), 9: methodOf(DP, 'querySelectorAll'), 11: methodOf(FP, 'querySelectorAll') };
-  const dispatchFor = { __proto__: null, 1: methodOf(EP, 'dispatchEvent'), 9: methodOf(DP, 'dispatchEvent') };
-  const nodeDispatch = methodOf(NP, 'dispatchEvent');
-  const windowDispatch = globalThis.dispatchEvent;
   const computedStyle = globalThis.getComputedStyle;
   const setTimeoutAtBoot = globalThis.setTimeout;
   const events = { __proto__: null };
@@ -18608,12 +18680,54 @@ const _hostDom = (function () {
     if (list) for (let i = 0; i < list.length; i++) out[out.length] = list[i];
     return out;
   };
+  // The members of the node interfaces' prototypes as bootstrap defined them, so a page
+  // that replaces HTMLElement.prototype.click or the `value` accessor changes what its
+  // own script calls and not what the host calls. Only the names host snippets use.
+  const hostNames = ['value', 'checked', 'indeterminate', 'form', 'options', 'text',
+    'selectedIndex', 'id', 'action', 'method', 'required', 'href', 'innerText',
+    'textContent', 'outerHTML', 'childNodes', 'scrollWidth', 'scrollHeight', 'clientWidth',
+    'clientHeight', 'scrollLeft', 'scrollTop', 'selectionStart', 'selectionEnd', 'click',
+    'focus', 'setSelectionRange', 'scrollIntoView', 'scrollBy', 'setAttribute',
+    'requestSubmit', 'submit'];
+  const snapshots = new WeakMap();
+  const snapshotGet = _uncurry(WeakMap.prototype.get);
+  const snapshot = (proto) => {
+    if (!proto || snapshots.has(proto)) return;
+    const record = _objectCreate(null);
+    for (let i = 0; i < hostNames.length; i++) {
+      const d = own(proto, hostNames[i]);
+      if (d) record[hostNames[i]] = d;
+    }
+    snapshots.set(proto, record);
+  };
+  const globals = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < globals.length; i++) {
+    // Interfaces only, and read as data: a global's getter is not run here.
+    const first = _stringCharCodeAt(globals[i], 0);
+    if (first < 65 || first > 90) continue;
+    const d = own(globalThis, globals[i]);
+    const C = d ? d.value : undefined;
+    const proto = typeof C === 'function' ? C.prototype : null;
+    if (proto && (proto === NP || NP.isPrototypeOf(proto))) snapshot(proto);
+  }
+  const hostName = { __proto__: null };
+  for (let i = 0; i < hostNames.length; i++) hostName[hostNames[i]] = true;
   // An accessor or method from the object's prototype chain, never an own property:
   // frameworks (React's value tracker) and pages layer instance properties on
   // elements, and the host means the element's own behaviour, as _setFieldValue does.
+  // A prototype bootstrap defined answers from its snapshot for the names above.
   const inherited = (obj, name) => {
     if (obj === null || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
-    return find(_getPrototypeOf(obj), name);
+    for (let p = _getPrototypeOf(obj); p; p = _getPrototypeOf(p)) {
+      const record = hostName[name] ? snapshotGet(snapshots, p) : undefined;
+      if (record) {
+        if (record[name]) return record[name];
+        continue;
+      }
+      const d = own(p, name);
+      if (d) return d;
+    }
+    return undefined;
   };
   return _objectFreeze({
     __proto__: null,
@@ -18669,12 +18783,7 @@ const _hostDom = (function () {
       const d = inherited(obj, name);
       return !!d && typeof d.value === 'function';
     },
-    dispatch: (target, event) => {
-      if (target === globalThis) return apply(windowDispatch, target, [event]);
-      const fn = dispatchFor[typeOf(target)] || (typeof target?._nid === 'number' ? nodeDispatch : null);
-      if (fn) return apply(fn, target, [event]);
-      return target.dispatchEvent(event);
-    },
+    dispatch: (target, event) => _dispatch(target, event),
     // A new event of one of the classes captured above; `trusted` marks it as the user
     // agent's own.
     event: (kind, type, init, trusted) => {
@@ -18692,6 +18801,29 @@ const _hostDom = (function () {
     max: _MathMax,
     lower: (s) => _stringToLowerCase(_String(s)),
     slice: (s, start, end) => _stringSlice(_String(s), start, end),
+    trim: (s) => _stringTrim(_String(s)),
+    indexOf: (s, part, from) => _stringIndexOf(_String(s), part, from),
+    lastIndexOf: (s, part) => _stringLastIndexOf(_String(s), part),
+    // `s.trim().replace(/\s+/g, ' ')`, cut to `max` UTF-16 units when given, without
+    // String.prototype.replace, which consults the page's RegExp.prototype.
+    squash: (s, max) => {
+      const text = _stringTrim(_String(s));
+      let out = '';
+      let space = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = _stringCharCodeAt(text, i);
+        const ws = c === 32 || (c >= 9 && c <= 13) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a)
+          || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+        if (ws) { space = true; continue; }
+        if (space) { out += ' '; space = false; }
+        out += text[i];
+      }
+      return max === undefined ? out : _stringSlice(out, 0, max);
+    },
+    hasOwn: (obj, key) => _objectHasOwn(obj, key),
+    // A plain record for a host result, with no prototype for the page's
+    // Object.prototype.toJSON to answer through.
+    record: () => _objectCreate(null),
   });
 })();
 

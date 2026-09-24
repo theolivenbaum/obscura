@@ -254,6 +254,113 @@ public sealed class MainWorldTampering
         }
     }
 
+    /// <summary>Tampering that reaches the Input and DOM domains' snippets.</summary>
+    private const string TamperInput = """
+        <script>
+          window.__log = [];
+          for (const type of ['mousedown', 'mouseup', 'click', 'keydown', 'input', 'change']) {
+            document.addEventListener(type, e => { __log[__log.length] = e.type + ':' + e.isTrusted + ':' + (e.target && e.target.id); }, true);
+          }
+          document.elementFromPoint = () => null;
+          Document.prototype.elementFromPoint = () => null;
+          Object.defineProperty(document, 'activeElement', { get: () => null, configurable: true });
+          Element.prototype.dispatchEvent = function () { return true; };
+          EventTarget.prototype.dispatchEvent = function () { return true; };
+          Element.prototype.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1, bottom: 1, width: 1, height: 1 });
+          Element.prototype.focus = function () {};
+          window.Event = function () { throw new Error('tampered'); };
+          window.MouseEvent = function () { throw new Error('tampered'); };
+          window.KeyboardEvent = function () { throw new Error('tampered'); };
+          window.InputEvent = function () { throw new Error('tampered'); };
+          window._wrap = () => null;
+        </script>
+        """;
+
+    private static async Task<(CdpContext Ctx, CdpTestServer Server)> OpenInputAsync()
+    {
+        CdpTestServer server = CdpTestServer.ServeHtml(Body + Tamper + TamperInput + "</body></html>");
+        var ctx = CdpContext.New();
+        string pageId = ctx.CreatePage();
+        ctx.Sessions[SessionId] = pageId;
+        await CdpAsync(ctx, "Page.navigate", new JsonObject { ["url"] = server.Url, ["waitUntil"] = "load" });
+        return (ctx, server);
+    }
+
+    private static async Task ClickAsync(CdpContext ctx, double x, double y)
+    {
+        await CdpAsync(ctx, "Input.dispatchMouseEvent", (JsonObject)JsonNode.Parse(Mouse("mousePressed", x, y))!);
+        await CdpAsync(ctx, "Input.dispatchMouseEvent", (JsonObject)JsonNode.Parse(Mouse("mouseReleased", x, y))!);
+    }
+
+    [Fact]
+    public async Task InputClicksReachTheElementUnderThePointer()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenInputAsync();
+        using (server)
+        {
+            await ClickAsync(ctx, 20, 20);
+            Assert.Equal("true", await PageStringAsync(ctx, "String(document.getElementById('cb').checked)"));
+            await ClickAsync(ctx, 60, 65);
+            Assert.Equal("clicked", await PageStringAsync(ctx, "document.getElementById('out').textContent"));
+            string log = await PageStringAsync(ctx, "__log.join(',')") ?? string.Empty;
+            Assert.Contains("click:true:cb", log, StringComparison.Ordinal);
+            Assert.Contains("change:true:cb", log, StringComparison.Ordinal);
+            Assert.Contains("click:true:btn", log, StringComparison.Ordinal);
+            Assert.DoesNotContain(":false:", log, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task InputKeysReachTheFocusedField()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenInputAsync();
+        using (server)
+        {
+            // The page cannot focus through its no-op focus(); the client clicks the field.
+            await ClickAsync(ctx, 30, 110);
+            JsonNode node = await EvaluateAsync(ctx, "document.getElementById('field')", byValue: false);
+            JsonNode described = await CdpAsync(ctx, "DOM.describeNode", new JsonObject
+            {
+                ["objectId"] = node["result"]!["objectId"]!.GetValue<string>(),
+            });
+            await CdpAsync(ctx, "DOM.focus", new JsonObject { ["backendNodeId"] = described["node"]!["backendNodeId"]!.DeepClone() });
+            await CdpAsync(ctx, "Input.insertText", new JsonObject { ["text"] = "hi" });
+            await CdpAsync(ctx, "Input.dispatchKeyEvent", new JsonObject { ["type"] = "keyDown", ["key"] = "a", ["code"] = "KeyA", ["text"] = "a" });
+            await CdpAsync(ctx, "Input.dispatchKeyEvent", new JsonObject { ["type"] = "keyUp", ["key"] = "a", ["code"] = "KeyA" });
+            Assert.Equal("hia", await PageStringAsync(ctx, "document.getElementById('field').value"));
+            string log = await PageStringAsync(ctx, "__log.join(',')") ?? string.Empty;
+            Assert.Contains("keydown:true:field", log, StringComparison.Ordinal);
+            Assert.Contains("input:true:field", log, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task DomGeometryAnswersFromTheLayout()
+    {
+        (CdpContext ctx, CdpTestServer server) = await OpenInputAsync();
+        using (server)
+        {
+            JsonNode node = await EvaluateAsync(ctx, "document.getElementById('btn')", byValue: false);
+            JsonNode described = await CdpAsync(ctx, "DOM.describeNode", new JsonObject
+            {
+                ["objectId"] = node["result"]!["objectId"]!.GetValue<string>(),
+            });
+            JsonNode box = await CdpAsync(ctx, "DOM.getBoxModel", new JsonObject
+            {
+                ["backendNodeId"] = described["node"]!["backendNodeId"]!.DeepClone(),
+            });
+            Assert.Equal(100, box["model"]!["width"].AsF64());
+            Assert.Equal(10, box["model"]!["content"]![0].AsF64());
+            Assert.Equal(50, box["model"]!["content"]![1].AsF64());
+
+            JsonNode resolved = await CdpAsync(ctx, "DOM.resolveNode", new JsonObject
+            {
+                ["backendNodeId"] = described["node"]!["backendNodeId"]!.DeepClone(),
+            });
+            Assert.Equal("button", resolved["object"]!["description"]!.GetValue<string>());
+        }
+    }
+
     internal static string Mouse(string type, double x, double y) => string.Create(
         CultureInfo.InvariantCulture,
         $$"""{"type": "{{type}}", "x": {{x}}, "y": {{y}}, "button": "left", "clickCount": 1}""");

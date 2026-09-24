@@ -274,10 +274,12 @@ public static class Dom
                 // nothing and the field stays empty.
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
                 ulong nodeId = ResolveNodeId(page, parameters);
+                // __obscura_host.dom, not the page's globalThis._wrap and el.focus
+                // (SECURITY.md L10); the same for the snippets below.
                 string code =
-                    $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
-                    + "if (el && typeof el.focus === 'function') { el.focus(); return true; } return false; })()";
-                page.Evaluate(code);
+                    $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({nodeId}); "
+                    + "if (el && h.has(el, 'focus')) { h.call(el, 'focus', []); return true; } return false; })()";
+                page.EvaluateHost(code);
                 return DomainResult.Empty();
             }
 
@@ -288,10 +290,10 @@ public static class Dom
                 // Obscura has no layout viewport to move, but the JS shim records this
                 // element for the hit testing used by subsequent input events.
                 string code =
-                    $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
-                    + "if (!el || typeof el.scrollIntoView !== 'function') return false; "
-                    + "el.scrollIntoView(); return true; })()";
-                bool didScroll = page.Evaluate(code).AsBool() ?? false;
+                    $"(function() {{ var h = __obscura_host.dom; var el = h.wrap({nodeId}); "
+                    + "if (!el || !h.has(el, 'scrollIntoView')) return false; "
+                    + "h.call(el, 'scrollIntoView', []); return true; })()";
+                bool didScroll = page.EvaluateHost(code).AsBool() ?? false;
                 if (!didScroll)
                 {
                     throw new DomainError(
@@ -356,7 +358,7 @@ public static class Dom
 
                 string specsJson = CdpJson.Serialize(specs);
                 string code =
-                    $"(function() {{ var el = globalThis._wrap && globalThis._wrap({nodeId}); "
+                    $"(function() {{ var el = __obscura_host.dom.wrap({nodeId}); "
                     + $"if (el) {{ __obscura_host.setInputFiles(el, {specsJson}); return true; }} return false; }})()";
                 // A host helper; upstream calls the page-visible __obscura_setInputFiles global,
                 // which let page script fill a file input and fire trusted input and change.
@@ -379,13 +381,13 @@ public static class Dom
 
                 string code =
                     "(function() {"
-                    + $"var el = globalThis._wrap && globalThis._wrap({nodeId});"
-                    + "if (!el || typeof el.getBoundingClientRect !== 'function') return null;"
-                    + "var r = el.getBoundingClientRect();"
+                    + $"var h = __obscura_host.dom; var el = h.wrap({nodeId});"
+                    + "var r = el && h.rect(el);"
+                    + "if (!r) return null;"
                     + "return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom,"
                     + "r.width, r.height];"
                     + "})()";
-                JsonNode? value = page.Evaluate(code);
+                JsonNode? value = page.EvaluateHost(code);
                 List<double> numbers = [];
                 foreach (JsonNode? item in JsonExt.AsJsonArray(value) ?? [])
                 {
@@ -445,12 +447,12 @@ public static class Dom
 
                 string code =
                     "(function() {"
-                    + $"var el = globalThis._wrap && globalThis._wrap({nodeId});"
-                    + "if (!el || typeof el.getBoundingClientRect !== 'function') return null;"
-                    + "var r = el.getBoundingClientRect();"
+                    + $"var h = __obscura_host.dom; var el = h.wrap({nodeId});"
+                    + "var r = el && h.rect(el);"
+                    + "if (!r) return null;"
                     + "return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom];"
                     + "})()";
-                JsonNode? value = page.Evaluate(code);
+                JsonNode? value = page.EvaluateHost(code);
                 List<double> numbers = [];
                 foreach (JsonNode? item in JsonExt.AsJsonArray(value) ?? [])
                 {
