@@ -1164,6 +1164,20 @@ public static partial class FetchOps
     /// headers to itself. <c>sameOrigin</c> is the host's own verdict. <c>bodyBase64</c> is
     /// never sent: nothing that reads an internal load uses it.
     /// </remarks>
+    /// <summary>The response's <c>Referrer-Policy</c>, which governs what a stylesheet fetches.</summary>
+    private static ReferrerPolicy? ReferrerPolicyHeaderOf(IReadOnlyDictionary<string, string> headers)
+    {
+        foreach (var (name, value) in headers)
+        {
+            if (string.Equals(name, "referrer-policy", StringComparison.OrdinalIgnoreCase))
+            {
+                return ReferrerPolicies.ParseHeader(value);
+            }
+        }
+
+        return null;
+    }
+
     private static string InternalLoadResponse(
         PocketCalculatorState document,
         string mode,
@@ -1178,7 +1192,8 @@ public static partial class FetchOps
         bool hostConsumesBody)
     {
         var token = InternalLoads.Put(
-            document, new InternalLoad(mode, status, requestUrl, finalUrl, bodyText, tainted));
+            document,
+            new InternalLoad(mode, status, requestUrl, finalUrl, bodyText, tainted, ReferrerPolicyHeaderOf(headers)));
         // Only a frame document is read back by the shim (its parent-side copy for a
         // same-origin contentDocument); a script or a sheet is run or installed by the host.
         var visible = !tainted && !hostConsumesBody && string.Equals(mode, "navigate", StringComparison.Ordinal);

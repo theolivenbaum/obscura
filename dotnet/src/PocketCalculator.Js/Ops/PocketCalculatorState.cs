@@ -101,6 +101,16 @@ public sealed class PocketCalculatorState
     /// <summary>Memo of <see cref="StateHelpers.DocumentReferrerPolicy"/>.</summary>
     internal (ulong Activity, ulong Document, ReferrerPolicy? Header, ReferrerPolicy Policy)? ReferrerPolicyCache { get; set; }
 
+    /// <summary>
+    /// For an <c>about:srcdoc</c> document, the URL its requests take their referrer from:
+    /// its parent's (Fetch "determine request's referrer" walks out of srcdoc documents, and
+    /// Chromium 141 sends the parent's URL). Null for any other document. Port addition.
+    /// </summary>
+    public string? ReferrerSourceUrl { get; set; }
+
+    /// <summary>The external stylesheet that referenced each CSS image and font URL.</summary>
+    public CssSubresourceReferrers CssSubresourceReferrers { get; } = new();
+
     /// <summary>CDP <c>Network.setBlockedURLs</c> patterns, matched with <c>glob_match</c>.</summary>
     public List<string> BlockedUrls { get; } = [];
 

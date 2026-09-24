@@ -96,10 +96,11 @@ public sealed partial class Page
         var discovered = js.WithDom(dom => (
             Links: PageHelpers.LinkedStylesheetRequests(dom),
             Imports: PageHelpers.InlineStylesheetImportRequests(dom)));
-        // Referrer policy (port addition): a <link>'s own referrerpolicy, else the
-        // document's. Nested @imports and inline imports use the document's.
+        // Referrer policy (port addition), as Chromium 141 does it: a <link> is referred by
+        // the document under its own referrerpolicy, else the document's; an inline
+        // @import by the document under the document's; a nested @import by the sheet
+        // that imports it, under that sheet's Referrer-Policy header, else the document's.
         ReferrerPolicy documentReferrerPolicy = js.DocumentReferrerPolicy;
-        Dictionary<string, ReferrerPolicy> linkPolicies = new(StringComparer.Ordinal);
         List<(int LinkIndex, NodeId Node, string Href)> allLinks = discovered.Links ?? [];
         List<(NodeId Node, StylesheetImport Import)> inlineImports = discovered.Imports ?? [];
 
@@ -111,7 +112,7 @@ public sealed partial class Page
 
         List<(AuthorStylesheetTarget Target, string Key, string? Media)> roots = [];
         HashSet<string> scheduled = new(StringComparer.Ordinal);
-        List<(string Key, UrlRecord Url, byte Depth)> pending = [];
+        List<(string Key, UrlRecord Url, byte Depth, Uri? Referrer, ReferrerPolicy Policy)> pending = [];
 
         foreach ((int linkIndex, NodeId linkNode, string href) in allLinks)
         {
@@ -129,14 +130,12 @@ public sealed partial class Page
                 continue;
             }
             roots.Add((new AuthorStylesheetTarget.Linked(linkIndex, linkNode), key, null));
-            if (js.WithDom(dom => ReferrerPolicies.ParseAttribute(dom.GetNode(linkNode)?.GetAttribute("referrerpolicy")))
-                is { } linkPolicy)
-            {
-                linkPolicies.TryAdd(key, linkPolicy);
-            }
             if (scheduled.Add(key) && scheduled.Count <= PageHelpers.MaxStylesheetResources)
             {
-                pending.Add((key, resolved, 0));
+                ReferrerPolicy linkPolicy =
+                    js.WithDom(dom => ReferrerPolicies.ParseAttribute(dom.GetNode(linkNode)?.GetAttribute("referrerpolicy")))
+                    ?? documentReferrerPolicy;
+                pending.Add((key, resolved, 0, null, linkPolicy));
             }
         }
 
@@ -155,7 +154,7 @@ public sealed partial class Page
             roots.Add((new AuthorStylesheetTarget.InlineImport(styleNode), key, import.Media));
             if (scheduled.Add(key) && scheduled.Count <= PageHelpers.MaxStylesheetResources)
             {
-                pending.Add((key, resolved, 1));
+                pending.Add((key, resolved, 1, null, documentReferrerPolicy));
             }
         }
 
@@ -163,18 +162,17 @@ public sealed partial class Page
         Dictionary<string, string> aliases = new(StringComparer.Ordinal);
         while (pending.Count != 0)
         {
-            List<(string Key, UrlRecord Url, byte Depth)> batch = pending;
+            List<(string Key, UrlRecord Url, byte Depth, Uri? Referrer, ReferrerPolicy Policy)> batch = pending;
             pending = [];
             var factories = new List<Func<Task<(string Key, UrlRecord Url, byte Depth, Response? Response)>>>(batch.Count);
-            foreach ((string key, UrlRecord requestedUrl, byte depth) in batch)
+            foreach ((string key, UrlRecord requestedUrl, byte depth, Uri? referrer, ReferrerPolicy policy) in batch)
             {
                 factories.Add(async () =>
                 {
                     ResourceRequest request =
                         ResourceRequest.Subresource(ResourceType.Stylesheet, NetUrl.From(documentUrl));
-                    request.ReferrerPolicy = depth == 0 && linkPolicies.TryGetValue(key, out ReferrerPolicy own)
-                        ? own
-                        : documentReferrerPolicy;
+                    request.Referrer = referrer;
+                    request.ReferrerPolicy = policy;
                     double startedAt = PerformanceOps.UnixMilliseconds();
                     try
                     {
@@ -245,7 +243,15 @@ public sealed partial class Page
                         break;
                     }
                 }
+                ReferrerPolicy? sheetPolicy = ReferrerPolicies.ParseHeader(response.Header("referrer-policy"));
                 sheets[key] = new LoadedStylesheet(canonicalResponseUrl, imports, rules, redirectLeftOrigin);
+                // Its images and fonts are referred by this sheet under its header policy,
+                // else the default; the document's policy does not reach them (Chromium 141).
+                List<string> resourceUrls = PageHelpers.CssResourceUrls(rules, canonicalResponseUrl);
+                if (resourceUrls.Count != 0)
+                {
+                    js.RecordCssSubresourceReferrers(response.Url, sheetPolicy ?? ReferrerPolicies.Default, resourceUrls);
+                }
 
                 if (depth >= PageHelpers.MaxStylesheetImportDepth)
                 {
@@ -272,7 +278,7 @@ public sealed partial class Page
                         continue;
                     }
                     scheduled.Add(importKey);
-                    pending.Add((importKey, importUrl, (byte)(depth + 1)));
+                    pending.Add((importKey, importUrl, (byte)(depth + 1), response.Url, sheetPolicy ?? documentReferrerPolicy));
                 }
             }
         }

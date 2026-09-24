@@ -314,7 +314,8 @@ public static class CoreOps
             state.NextNavigationReferrerPolicy = null;
             state.PendingNavigation = new PendingNavigation(url, method, body)
             {
-                Initiator = state.Url,
+                // A srcdoc document initiates as its parent (port addition).
+                Initiator = state.ReferrerSourceUrl ?? state.Url,
                 UserActivated = state.HasTransientActivation,
                 ReferrerPolicy = policy,
             };

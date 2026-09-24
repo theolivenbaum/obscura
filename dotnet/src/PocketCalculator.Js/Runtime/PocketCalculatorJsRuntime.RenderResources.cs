@@ -204,12 +204,26 @@ public sealed partial class PocketCalculatorJsRuntime
         Dictionary<string, ReferrerPolicy>? imagePolicies = ImageReferrerPolicies(state);
         foreach (RenderResourceMiss request in requests)
         {
-            ReferrerPolicy policy = !request.IsFont && imagePolicies is not null
-                && imagePolicies.TryGetValue(request.Url, out ReferrerPolicy own)
-                    ? own
-                    : documentPolicy;
+            // An <img>'s own referrerpolicy; else, for a URL an external sheet named, that
+            // sheet as referrer under its policy; else the document under its policy.
+            Uri? referrer = null;
+            ReferrerPolicy policy;
+            if (!request.IsFont && imagePolicies is not null
+                && imagePolicies.TryGetValue(request.Url, out ReferrerPolicy own))
+            {
+                policy = own;
+            }
+            else if (state.CssSubresourceReferrers.Find(generation, request.Url) is { } css)
+            {
+                referrer = css.Sheet;
+                policy = css.Policy;
+            }
+            else
+            {
+                policy = documentPolicy;
+            }
             _ = LoadRenderResourceAsync(
-                request, initiator, httpClient, stealthClient, callbacks, generation, limiter, loads, policy);
+                request, initiator, httpClient, stealthClient, callbacks, generation, limiter, loads, policy, referrer);
         }
 
         return requests.Count;
@@ -256,7 +270,8 @@ public sealed partial class PocketCalculatorJsRuntime
         ulong generation,
         SemaphoreSlim limiter,
         RenderResourceLoads loads,
-        ReferrerPolicy referrerPolicy = ReferrerPolicies.Default)
+        ReferrerPolicy referrerPolicy = ReferrerPolicies.Default,
+        Uri? referrer = null)
     {
         Response? response = null;
         double startedAt = 0;
@@ -276,6 +291,7 @@ public sealed partial class PocketCalculatorJsRuntime
                     request.IsFont ? ResourceType.Font : ResourceType.Image,
                     initiator);
                 resourceRequest.ReferrerPolicy = referrerPolicy;
+                resourceRequest.Referrer = referrer;
                 switch (request.Profile)
                 {
                     case ImageRequestProfile.CorsSameOrigin:

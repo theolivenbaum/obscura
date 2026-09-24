@@ -20,6 +20,13 @@ public sealed record FetchReferrer(ReferrerPolicy? Policy, string Referrer)
 {
     private const string Prefix = "ref\n";
 
+    /// <summary>
+    /// Whether <see cref="Referrer"/> was named by the host rather than by page script (a
+    /// stylesheet importing another names itself), so it is used even when it is of another
+    /// origin than the document. <see cref="Parse"/> never sets it.
+    /// </summary>
+    public bool Trusted { get; init; }
+
     /// <summary>The defaults: the document's policy and the document as referrer.</summary>
     public static readonly FetchReferrer Client = new(null, "about:client");
 
@@ -49,22 +56,28 @@ public sealed record FetchReferrer(ReferrerPolicy? Policy, string Referrer)
     public Uri? Source(PocketCalculatorState document)
     {
         ArgumentNullException.ThrowIfNull(document);
-        var documentUrl = document.HistoryUrl ?? document.Url;
+        // A srcdoc document refers as its parent does (port addition).
+        var documentUrl = document.ReferrerSourceUrl ?? document.HistoryUrl ?? document.Url;
         Uri.TryCreate(documentUrl, UriKind.Absolute, out var client);
         if (Referrer.Length == 0)
         {
             return null;
         }
 
+        if (Trusted)
+        {
+            return Uri.TryCreate(Referrer, UriKind.Absolute, out var named) ? named : client;
+        }
+
         if (string.Equals(Referrer, "about:client", StringComparison.Ordinal)
-            || UrlRecord.Parse(Referrer) is not { } named)
+            || UrlRecord.Parse(Referrer) is not { } record)
         {
             return client;
         }
 
         // Fetch: a referrer URL of another origin is replaced by the client.
-        return string.Equals(named.AsciiOrigin, StateHelpers.DocumentOrigin(document), StringComparison.Ordinal)
-            && Uri.TryCreate(named.Href, UriKind.Absolute, out var parsed)
+        return string.Equals(record.AsciiOrigin, StateHelpers.DocumentOrigin(document), StringComparison.Ordinal)
+            && Uri.TryCreate(record.Href, UriKind.Absolute, out var parsed)
                 ? parsed
                 : client;
     }

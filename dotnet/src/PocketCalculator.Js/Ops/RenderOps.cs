@@ -1030,6 +1030,8 @@ public static class RenderOps
         // The image's referrerpolicy, else the document's (port addition; Rust has none).
         resourceRequest.ReferrerPolicy = StateHelpers.ElementReferrerPolicy(dom, nodeId)
             ?? StateHelpers.DocumentReferrerPolicy(shared);
+        // A srcdoc document refers as its parent does (port addition).
+        resourceRequest.Referrer = shared.ReferrerSourceUrl is { } referrerSource ? TryUri(referrerSource) : null;
         switch (profile)
         {
             case ImageRequestProfile.CorsInclude:

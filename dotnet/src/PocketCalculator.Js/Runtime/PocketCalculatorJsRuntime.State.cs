@@ -277,6 +277,14 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>The document's effective referrer policy (header, then meta).</summary>
     public ReferrerPolicy DocumentReferrerPolicy => StateHelpers.DocumentReferrerPolicy(State);
 
+    /// <summary>
+    /// Record that the external sheet <paramref name="sheet"/> references
+    /// <paramref name="urls"/>, so their loads carry it as referrer under
+    /// <paramref name="policy"/> (see <see cref="CssSubresourceReferrers"/>).
+    /// </summary>
+    public void RecordCssSubresourceReferrers(Uri sheet, ReferrerPolicy policy, IEnumerable<string> urls) =>
+        State.CssSubresourceReferrers.Record(State.DocumentGeneration, sheet, policy, urls);
+
     public void SetBlockedUrls(IEnumerable<string> patterns)
     {
         State.BlockedUrls.Clear();

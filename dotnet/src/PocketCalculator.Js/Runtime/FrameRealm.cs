@@ -143,6 +143,7 @@ public sealed class FrameRealm : IDisposable
             && MixedContent.ProhibitsMixedContent(parentUri)
                 ? parentState.Url
                 : parentState.SecureAncestorUrl;
+        InheritReferrerFromParent(state, parentState, url);
 
         var engine = parent.CreateRealmEngine();
         DenoCoreShim? shim = null;
@@ -197,6 +198,46 @@ public sealed class FrameRealm : IDisposable
             realm.PublishRealmObjects();
         }
         return realm;
+    }
+
+    /// <summary>
+    /// An <c>about:srcdoc</c> or <c>about:blank</c> frame inherits its parent's referrer
+    /// policy (the policy container), which the frame's own <c>&lt;meta name=referrer&gt;</c>
+    /// can still override, and a srcdoc frame also refers as its parent does: its requests
+    /// carry the parent's URL, and its <c>document.referrer</c> is that URL under the parent's
+    /// policy. An about:blank frame's requests carry no Referer, as in Chromium 141.
+    /// Port addition: Rust has no referrer policy and sends frame requests from the frame URL.
+    /// </summary>
+    internal static void InheritReferrerFromParent(PocketCalculatorState state, PocketCalculatorState parentState, string url)
+    {
+        var srcdoc = string.Equals(url, "about:srcdoc", StringComparison.Ordinal);
+        if (!srcdoc && !url.StartsWith("about:blank", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var policy = StateHelpers.DocumentReferrerPolicy(parentState);
+        state.ReferrerPolicyHeader = policy;
+        if (!srcdoc)
+        {
+            return;
+        }
+
+        var source = parentState.ReferrerSourceUrl ?? parentState.HistoryUrl ?? parentState.Url;
+        state.ReferrerSourceUrl = source;
+        // document.referrer: the parent under its policy, towards a document that is not
+        // same-origin by URL and not a downgrade (Chromium 141 reports the parent's origin
+        // by default).
+        state.Referrer = Uri.TryCreate(source, UriKind.Absolute, out var parentUri)
+            && ReferrerPolicies.Referrer(parentUri, new Uri("http://srcdoc.invalid/"), policy switch
+            {
+                ReferrerPolicy.StrictOrigin or ReferrerPolicy.StrictOriginWhenCrossOrigin => ReferrerPolicy.Origin,
+                ReferrerPolicy.NoReferrerWhenDowngrade => ReferrerPolicy.UnsafeUrl,
+                ReferrerPolicy.SameOrigin => ReferrerPolicy.NoReferrer,
+                _ => policy,
+            }) is { } referrer
+                ? referrer
+                : string.Empty;
     }
 
     /// <summary>
