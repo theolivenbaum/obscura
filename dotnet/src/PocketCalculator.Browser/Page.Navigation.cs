@@ -62,6 +62,13 @@ public readonly record struct PageNavigationOutcome(PageNavigationKind Kind, str
     public bool IsSameDocument => Kind == PageNavigationKind.SameDocument;
 }
 
+/// <summary>
+/// A referrer an automation client named for a browser-initiated navigation (CDP
+/// <c>Page.navigate</c>). <see cref="Url"/> null means none. Port addition: Rust ignores
+/// both parameters.
+/// </summary>
+public sealed record ClientReferrer(Uri? Url, ReferrerPolicy Policy);
+
 public sealed partial class Page
 {
     public Task NavigateAsync(string url, CancellationToken cancellationToken = default) =>
@@ -97,12 +104,29 @@ public sealed partial class Page
     /// for a navigation a document started. <paramref name="initiator"/> is the queued
     /// navigation as <c>op_navigate</c> recorded it; null is a browser-initiated one.
     /// </summary>
+    public Task NavigateWithWaitPostAsync(
+        string url,
+        WaitUntil waitUntil,
+        string method,
+        string body,
+        PendingNavigation? initiator,
+        CancellationToken cancellationToken = default) =>
+        NavigateWithWaitPostAsync(url, waitUntil, method, body, initiator, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="NavigateWithWaitPostAsync(string, WaitUntil, string, string, PendingNavigation?, CancellationToken)"/>
+    /// with the referrer a client named (CDP <c>Page.navigate</c> <c>referrer</c> and
+    /// <c>referrerPolicy</c>). It changes only the Referer and <c>document.referrer</c>: the
+    /// navigation stays browser-initiated, as in Chromium 141. Ignored for a page-initiated
+    /// navigation.
+    /// </summary>
     public async Task NavigateWithWaitPostAsync(
         string url,
         WaitUntil waitUntil,
         string method,
         string body,
         PendingNavigation? initiator,
+        ClientReferrer? clientReferrer,
         CancellationToken cancellationToken = default)
     {
         // A document may not navigate from a non-file: URL into file: (SECURITY.md H2),
@@ -119,6 +143,10 @@ public sealed partial class Page
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             deadline.Token, cancellationToken);
         ResourceRequest profile = NavigationProfile(initiator);
+        if (initiator is null && clientReferrer is not null)
+        {
+            profile = profile with { Referrer = clientReferrer.Url, ReferrerPolicy = clientReferrer.Policy };
+        }
         string referrer = DocumentReferrer(profile, url);
         try
         {

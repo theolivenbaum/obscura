@@ -8,6 +8,8 @@ using PocketCalculator.Js.Url;
 using PocketCalculator.Render;
 
 using BrowserPage = PocketCalculator.Browser.Page;
+using ReferrerPolicies = PocketCalculator.Net.ReferrerPolicies;
+using ReferrerPolicy = PocketCalculator.Net.ReferrerPolicy;
 
 namespace PocketCalculator.Cdp.Domains;
 
@@ -737,6 +739,49 @@ public static partial class Page
             }
             : null;
 
+    /// <summary>
+    /// <c>Page.navigate</c>'s <c>referrer</c> and <c>referrerPolicy</c>, or null when the
+    /// client named neither. Port addition: upstream ignores both.
+    /// </summary>
+    /// <remarks>
+    /// Measured on Chromium 141: the referrer goes through the policy (default
+    /// strict-origin-when-cross-origin) against the target, loses userinfo and fragment, and
+    /// is dropped when it is empty or does not parse; it sets only the Referer and
+    /// <c>document.referrer</c>, the navigation staying browser-initiated. An unknown
+    /// <c>referrerPolicy</c> fails the command with <c>Invalid referrerPolicy</c>.
+    /// </remarks>
+    internal static ClientReferrer? ClientReferrerOf(JsonNode? parameters)
+    {
+        string? policyName = parameters.Get("referrerPolicy").AsString();
+        ReferrerPolicy policy = ReferrerPolicies.Default;
+        if (policyName is not null)
+        {
+            policy = policyName switch
+            {
+                "noReferrer" => ReferrerPolicy.NoReferrer,
+                "noReferrerWhenDowngrade" => ReferrerPolicy.NoReferrerWhenDowngrade,
+                "origin" => ReferrerPolicy.Origin,
+                "originWhenCrossOrigin" => ReferrerPolicy.OriginWhenCrossOrigin,
+                "sameOrigin" => ReferrerPolicy.SameOrigin,
+                "strictOrigin" => ReferrerPolicy.StrictOrigin,
+                "strictOriginWhenCrossOrigin" => ReferrerPolicy.StrictOriginWhenCrossOrigin,
+                "unsafeUrl" => ReferrerPolicy.UnsafeUrl,
+                _ => throw new DomainError("Invalid referrerPolicy"),
+            };
+        }
+
+        if (parameters.Get("referrer").AsString() is not { Length: > 0 } referrer)
+        {
+            return null;
+        }
+
+        return new ClientReferrer(
+            UrlRecord.Parse(referrer) is { } parsed && Uri.TryCreate(parsed.Href, UriKind.Absolute, out Uri? uri)
+                ? uri
+                : null,
+            policy);
+    }
+
     /// <summary>The operator's file-access switch refused this navigation.</summary>
     internal const string FileNavigationDisabled =
         "Page.navigate to file:// is disabled. Restart with `pocket-calculator serve --allow-file-access` to enable.";
@@ -795,6 +840,8 @@ public static partial class Page
             throw new DomainError(refusal);
         }
 
+        ClientReferrer? clientReferrer = ClientReferrerOf(parameters);
+
         List<string> preloadScripts = [.. ctx.PreloadScripts.Select(entry => entry.Source)];
 
         BrowserPage page = ctx.GetSessionPageMut(sessionId)
@@ -843,12 +890,12 @@ public static partial class Page
         {
             if (string.Equals(navMethod, "POST", StringComparison.Ordinal) && navBody.Length != 0)
             {
-                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody, initiator)
+                await page.NavigateWithWaitPostAsync(url, waitUntil, navMethod, navBody, initiator, clientReferrer)
                     .ConfigureAwait(false);
             }
             else
             {
-                await page.NavigateWithWaitPostAsync(url, waitUntil, "GET", string.Empty, initiator)
+                await page.NavigateWithWaitPostAsync(url, waitUntil, "GET", string.Empty, initiator, clientReferrer)
                     .ConfigureAwait(false);
             }
         }
