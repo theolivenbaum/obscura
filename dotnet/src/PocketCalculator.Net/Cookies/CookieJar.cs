@@ -607,6 +607,55 @@ public sealed class CookieJar
         return string.Join("; ", matching);
     }
 
+    /// <summary>
+    /// The cookies a request to <paramref name="url"/> in <paramref name="partition"/> could
+    /// carry, whatever their SameSite and HttpOnly attributes: CDP <c>Network.getCookies</c>,
+    /// which Chromium answers with an all-inclusive cookie list per URL. Unpartitioned
+    /// cookies, and partitioned ones of <paramref name="partition"/> only. Empty for a URL
+    /// that is not http(s) or ws(s).
+    /// </summary>
+    public List<CookieInfo> GetCookiesForUrl(Uri url, CookiePartitionKey? partition)
+    {
+        ArgumentNullException.ThrowIfNull(url);
+        var result = new List<CookieInfo>();
+        var scheme = url.Scheme;
+        var isSecure = scheme is "https" or "wss";
+        if (!isSecure && scheme is not ("http" or "ws"))
+        {
+            return result;
+        }
+
+        var host = HostOf(url);
+        var path = url.AbsolutePath;
+        var now = Now();
+        lock (_lock)
+        {
+            foreach (var (domain, domainCookies) in _cookies)
+            {
+                if (!DomainMatches(host, domain))
+                {
+                    continue;
+                }
+
+                foreach (var entry in domainCookies.Values)
+                {
+                    if ((entry.HostOnly && !host.Equals(domain, StringComparison.OrdinalIgnoreCase))
+                        || (entry.Partition is { } entryPartition && entryPartition != partition)
+                        || (entry.Expires is { } exp && exp <= now)
+                        || (entry.Secure && !isSecure)
+                        || !PathMatches(path, entry.Path))
+                    {
+                        continue;
+                    }
+
+                    result.Add(ToInfo(entry));
+                }
+            }
+        }
+
+        return result;
+    }
+
     /// <summary>Every non-expired cookie in the jar.</summary>
     public List<CookieInfo> GetAllCookies()
     {
