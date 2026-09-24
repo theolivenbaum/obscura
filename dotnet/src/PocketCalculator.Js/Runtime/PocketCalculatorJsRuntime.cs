@@ -75,6 +75,8 @@ public sealed partial class PocketCalculatorJsRuntime
         // A runtime is about to initialize the V8 platform; from here on a
         // SetV8Flags call must be refused rather than changing nothing silently.
         V8Flags.MarkPlatformStarted();
+        // Before the first isolate exists, cap every WebAssembly memory V8 reserves.
+        V8Flags.ApplyWasmMemoryCap(WasmMemoryLimitFromEnvironment());
 
         var constraints = WithArrayBufferLimit(V8Flags.Constraints);
         _v8 = new V8Runtime("obscura", constraints, V8RuntimeFlags.EnableDynamicModuleImports)
@@ -128,6 +130,7 @@ public sealed partial class PocketCalculatorJsRuntime
         // bootstrap.js, which is what makes the runtime testable on its own.
         _ops.TaskSpawner = this;
         _ops.AsyncOps = this;
+        _ops.WasmMemoryLimit = WasmMemoryLimitBytes();
         _shim = BootstrapLoader.Install(_engine, ops => BindOps(ops, mainRealm: true));
         if (BootstrapLoader.ExposeOpsForTests)
         {
@@ -302,6 +305,40 @@ public sealed partial class PocketCalculatorJsRuntime
 
         return constraints;
     }
+
+    // ------------------------------------------------------- wasm memory
+
+    /// <summary>
+    /// The ceiling on WebAssembly memory a runtime gets when
+    /// <c>POCKETCALCULATOR_MAX_WASM_MEMORY_BYTES</c> is unset: the same as the
+    /// <c>ArrayBuffer</c> default. Zero in the variable removes it.
+    /// </summary>
+    public static long DefaultWasmMemoryLimitBytes => DefaultArrayBufferLimitBytes;
+
+    /// <summary>The WebAssembly memory ceiling new runtimes get, in bytes; zero for none.</summary>
+    /// <remarks>
+    /// Two limits come from it (SECURITY.md M7). Every realm of an isolate together may
+    /// hold this much through <c>WebAssembly.Memory</c> (bootstrap.js asks
+    /// <c>op_wasm_memory_admit</c>), and no single memory may reserve more, which V8
+    /// enforces for module-declared memories and <c>memory.grow</c> as well
+    /// (<c>--wasm-max-mem-pages</c>, set once per process from the variable, see
+    /// <see cref="V8Flags.ApplyWasmMemoryCap"/>). Rust (deno_core) sets neither: a page
+    /// could reserve 1.3 GB with <c>new WebAssembly.Memory({initial: 20000})</c>.
+    /// </remarks>
+    public static long WasmMemoryLimitBytes() =>
+        WasmMemoryLimitForTests.Value ?? WasmMemoryLimitFromEnvironment();
+
+    private static long WasmMemoryLimitFromEnvironment()
+    {
+        string? raw = Environment.GetEnvironmentVariable("POCKETCALCULATOR_MAX_WASM_MEMORY_BYTES");
+        return long.TryParse(raw, System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out long bytes) && bytes >= 0
+            ? bytes
+            : DefaultWasmMemoryLimitBytes;
+    }
+
+    /// <summary>Test seam: a per-isolate ceiling for runtimes created on this async flow.</summary>
+    internal static readonly AsyncLocal<long?> WasmMemoryLimitForTests = new();
 
     // ------------------------------------------------------------- heap cap
 

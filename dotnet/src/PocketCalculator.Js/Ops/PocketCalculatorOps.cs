@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using Microsoft.ClearScript;
 using Microsoft.ClearScript.JavaScript;
 using PocketCalculator.Js.Url;
@@ -97,6 +98,63 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     /// page itself. A page with no frames pays only an emptiness check.
     /// </summary>
     public PocketCalculatorState RealmState() => Realms.IsEmpty ? Page : Realms.Current ?? Page;
+
+    /// <summary>
+    /// The ceiling on the <c>WebAssembly.Memory</c> bytes all realms of this isolate hold
+    /// at once; zero for none. Set by the runtime before bootstrap.js runs.
+    /// </summary>
+    public long WasmMemoryLimit { get; set; }
+
+    // One entry per realm bound to this table: the WebAssembly.Memory bytes it last
+    // reported. Weak, so a realm that is gone stops counting once it is collected.
+    private readonly ConditionalWeakTable<StrongBox<double>, StrongBox<double>> _wasmRealms = new();
+
+    /// <summary>
+    /// <c>op_wasm_memory_admit</c>: whether a realm holding <paramref name="current"/> bytes
+    /// of WebAssembly memory may take <paramref name="delta"/> more.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (SECURITY.md M7). WebAssembly memory is reserved by V8 itself, outside
+    /// the <c>ArrayBuffer</c> allocator the per-isolate ceiling counts, so bootstrap.js asks
+    /// here before <c>new WebAssembly.Memory</c> or <c>grow</c>, and the answer covers every
+    /// realm of the isolate. A refusal is the <c>RangeError</c> Chromium throws when it
+    /// cannot reserve the memory.
+    /// </remarks>
+    internal bool OpWasmMemoryAdmit(StrongBox<double> realm, double current, double delta)
+    {
+        if (!double.IsFinite(current) || current < 0)
+        {
+            current = 0;
+        }
+
+        realm.Value = current;
+        if (WasmMemoryLimit <= 0)
+        {
+            return true;
+        }
+
+        if (!double.IsFinite(delta) || delta < 0)
+        {
+            return false;
+        }
+
+        double total = current + delta;
+        foreach (var entry in _wasmRealms)
+        {
+            if (!ReferenceEquals(entry.Key, realm))
+            {
+                total += entry.Value.Value;
+            }
+        }
+
+        if (total > WasmMemoryLimit)
+        {
+            return false;
+        }
+
+        realm.Value = current + delta;
+        return true;
+    }
 
     /// <summary><c>op_posted_task</c>. Queues one posted-task delivery.</summary>
     /// <returns>
@@ -216,6 +274,12 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
         Bind(ops, "op_realm_origin", (Func<object?, string>)(
             frameId => OpGuard.Run(
                 "op_realm_origin", () => StateHelpers.DocumentOrigin(FrameState(U32(frameId))), "null")));
+        // Port addition: the isolate's WebAssembly.Memory budget (see OpWasmMemoryAdmit).
+        var wasmRealm = new StrongBox<double>(0);
+        _wasmRealms.Add(wasmRealm, wasmRealm);
+        Bind(ops, "op_wasm_memory_admit", (Func<object?, object?, bool>)(
+            (current, delta) => OpGuard.Run(
+                "op_wasm_memory_admit", () => OpWasmMemoryAdmit(wasmRealm, D(current), D(delta)), false)));
         Bind(ops, "op_frame_document_ready", (Func<object?, object?, object?, object?, double>)(
             (url, html, width, height) => CoreOps.OpFrameDocumentReady(
                 Page, RealmState().FrameId, S(url), S(html), U64(width), U64(height))));

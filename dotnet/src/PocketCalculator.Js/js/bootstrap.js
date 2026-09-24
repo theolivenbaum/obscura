@@ -7673,6 +7673,142 @@ function _installWasmStreamingFallback() {
 }
 _installWasmStreamingFallback();
 
+// WebAssembly memory budget (port addition, SECURITY.md M7). V8 reserves a
+// Memory's pages itself, outside the ArrayBuffer allocator the per-isolate
+// ceiling counts, so `new WebAssembly.Memory({initial: 20000})` took 1.3 GB.
+// Before creating or growing one, ask the host whether the isolate's realms,
+// with the memories this realm still holds, may take that much more; a refusal
+// is the RangeError Chromium throws when it cannot reserve the memory. Exported
+// memories of new instances are tracked too, so later requests see them. One
+// memory is also capped by V8 itself (--wasm-max-mem-pages), which covers what
+// no wrapper sees: memory a module declares and keeps, and memory.grow in wasm.
+// Rust (deno_core) has neither limit.
+(function _installWasmMemoryBudget() {
+  const WA = globalThis.WebAssembly;
+  const admitOp = __obscuraCore.ops.op_wasm_memory_admit;
+  if (!WA || typeof WA.Memory !== 'function' || typeof admitOp !== 'function') return;
+  const NativeMemory = WA.Memory;
+  const MP = NativeMemory.prototype;
+  const nativeGrow = MP.grow;
+  const bufferOf = _getOwnPropertyDescriptor(MP, 'buffer').get;
+  const abLength = _getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
+  const sabLength = typeof SharedArrayBuffer === 'function'
+    ? _getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength').get : null;
+  const sabProto = sabLength ? SharedArrayBuffer.prototype : null;
+  const isShared = (buffer) => sabProto !== null && _isPrototypeOf(sabProto, buffer);
+  // Swap a member for its wrapper, keeping the attributes V8 gave it.
+  const replace = (obj, name, value) => {
+    const d = _getOwnPropertyDescriptor(obj, name);
+    _defineProperty(obj, name, { value, writable: d ? d.writable : true,
+      enumerable: d ? d.enumerable : false, configurable: d ? d.configurable : true });
+  };
+  const deref = _uncurry(WeakRef.prototype.deref);
+  const weakHas = _uncurry(WeakSet.prototype.has);
+  const weakAdd = _uncurry(WeakSet.prototype.add);
+  const construct = Reflect.construct;
+  const PAGE = 65536;
+  let live = [];
+  const known = new WeakSet();
+  const bytesOf = (memory) => {
+    try {
+      const buffer = _reflectApply(bufferOf, memory, []);
+      return _reflectApply(isShared(buffer) ? sabLength : abLength, buffer, []);
+    } catch (e) { return 0; }
+  };
+  const track = (memory) => {
+    if (weakHas(known, memory)) return;
+    weakAdd(known, memory);
+    live[live.length] = new WeakRef(memory);
+  };
+  // The bytes this realm's live memories hold now, as V8 reports them, so a grow
+  // run inside wasm is counted too. Collected memories drop out.
+  const held = () => {
+    let total = 0;
+    const kept = [];
+    for (let i = 0; i < live.length; i++) {
+      const memory = deref(live[i]);
+      if (memory === undefined) continue;
+      kept[kept.length] = live[i];
+      total += bytesOf(memory);
+    }
+    live = kept;
+    return total;
+  };
+  const admit = (pages) => {
+    const n = _Number(pages);
+    if (!(n >= 0) || n === Infinity) return true; // V8 rejects it with its own error
+    return !!admitOp(held(), n * PAGE);
+  };
+  const pagesOf = (descriptor) => {
+    if (descriptor === null || (typeof descriptor !== 'object' && typeof descriptor !== 'function')) return NaN;
+    const initial = descriptor.initial;
+    return initial !== undefined ? initial : descriptor.minimum;
+  };
+  const Memory = function Memory(descriptor) {
+    if (new.target === undefined) {
+      throw new TypeError("WebAssembly.Memory must be invoked with 'new'");
+    }
+    if (!admit(pagesOf(descriptor))) {
+      throw new RangeError('WebAssembly.Memory(): could not allocate memory');
+    }
+    const memory = construct(NativeMemory, [descriptor], new.target);
+    track(memory);
+    return memory;
+  };
+  _defineProperty(Memory, 'prototype', { value: MP, writable: false, enumerable: false, configurable: false });
+  _defineProperty(Memory, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
+  replace(MP, 'constructor', Memory);
+  const grow = {
+    grow(delta) {
+      if (this !== null && typeof this === 'object' && _isPrototypeOf(MP, this)) track(this);
+      if (weakHas(known, this) && !admit(delta)) {
+        throw new RangeError('WebAssembly.Memory.grow(): Maximum memory size exceeded');
+      }
+      return _reflectApply(nativeGrow, this, [delta]);
+    },
+  }.grow;
+  replace(MP, 'grow', grow);
+  // An instance's exported memories count from the moment they exist.
+  const trackExports = (instance) => {
+    try {
+      const exports = instance && instance.exports;
+      if (!exports) return;
+      const names = _objectKeys(exports);
+      for (let i = 0; i < names.length; i++) {
+        const value = exports[names[i]];
+        if (value !== null && typeof value === 'object' && _isPrototypeOf(MP, value)) track(value);
+      }
+    } catch (e) {}
+  };
+  const NativeInstance = WA.Instance;
+  const Instance = function Instance(module, imports) {
+    if (new.target === undefined) {
+      throw new TypeError("WebAssembly.Instance must be invoked with 'new'");
+    }
+    const instance = construct(NativeInstance, arguments, new.target);
+    trackExports(instance);
+    return instance;
+  };
+  _defineProperty(Instance, 'prototype', { value: NativeInstance.prototype, writable: false, enumerable: false, configurable: false });
+  _defineProperty(Instance, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
+  replace(NativeInstance.prototype, 'constructor', Instance);
+  const nativeInstantiate = WA.instantiate;
+  const thenOf = Promise.prototype.then;
+  const instantiate = {
+    instantiate(source, imports) {
+      const pending = _reflectApply(nativeInstantiate, WA, arguments);
+      return _reflectApply(thenOf, pending, [(result) => {
+        trackExports(result && result.instance ? result.instance : result);
+        return result;
+      }]);
+    },
+  }.instantiate;
+  replace(WA, 'Memory', Memory);
+  replace(WA, 'Instance', Instance);
+  replace(WA, 'instantiate', instantiate);
+  _markNative(Memory); _markNative(grow); _markNative(Instance); _markNative(instantiate);
+})();
+
 // Serialize a FormData into a multipart/form-data body the way a browser does
 // when it is passed as fetch()/XHR body. The previous shim did String(body),
 // so a FormData became the literal "[object Object]" and the multipart payload
