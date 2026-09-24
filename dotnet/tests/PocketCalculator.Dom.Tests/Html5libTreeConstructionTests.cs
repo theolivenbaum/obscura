@@ -22,14 +22,6 @@ public class Html5libTreeConstructionTests
     /// </summary>
     private static readonly Dictionary<string, string> KnownFailures = new(StringComparer.Ordinal)
     {
-        // AngleSharp's tokenizer drops U+0000 in the data state instead of emitting it, so
-        // foreign content has nothing to turn into U+FFFD.
-        ["plain-text-unsafe.dat:14"] = "tokenizer drops NUL",
-        ["plain-text-unsafe.dat:15"] = "tokenizer drops NUL",
-        ["plain-text-unsafe.dat:16"] = "tokenizer drops NUL",
-        ["plain-text-unsafe.dat:17"] = "tokenizer drops NUL",
-        ["plain-text-unsafe.dat:20"] = "tokenizer drops NUL",
-
         // <selectedcontent> mirrors the selected option's content; that is DOM behaviour
         // (option insertion steps), not tree construction.
         ["webkit02.dat:44"] = "selectedcontent",

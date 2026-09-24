@@ -223,12 +223,37 @@ internal sealed partial class HtmlTreeBuilder
         _tokenizer = NewTokenizer(html);
     }
 
-    private HtmlTokenizer NewTokenizer(string html) =>
-        new(new TextSource(new StringTextSource(html)), HtmlEntityProvider.ResolverExtended)
+    private HtmlTokenizer NewTokenizer(string html)
+    {
+        if (html.Contains('\0'))
+        {
+            _nulEscaped = true;
+            html = html.Replace('\0', NulStandIn);
+        }
+
+        return new(new TextSource(new StringTextSource(html)), HtmlEntityProvider.ResolverExtended)
         {
             DisableElementPositionTracking = true,
             ShouldEmitAttribute = ShouldEmitAttribute,
         };
+    }
+
+    /// <summary>
+    /// What U+0000 is handed to the tokenizer as. AngleSharp's tokenizer drops U+0000 in the
+    /// data state (it is a parse error there) rather than emitting it, so foreign content,
+    /// where the tree builder turns it into U+FFFD, never saw it: "&lt;svg&gt;\0a" lost the
+    /// character. A lone low surrogate passes through every tokenizer state unchanged and has
+    /// the same length, so input positions still line up; it becomes U+0000 again in a data
+    /// character token and U+FFFD everywhere else, which is what the tokenizer would have made
+    /// of U+0000 there. A lone surrogate cannot come from decoded bytes, only from script, so
+    /// the one input it misreads is script-built markup holding both U+0000 and U+DFFF.
+    /// </summary>
+    private const char NulStandIn = '\uDFFF';
+
+    private bool _nulEscaped;
+
+    private string Unescape(string value, char nul) =>
+        _nulEscaped && value.Contains(NulStandIn) ? value.Replace(NulStandIn, nul) : value;
 
     /// <summary>
     /// How many attributes one tag keeps.
@@ -398,6 +423,13 @@ internal sealed partial class HtmlTreeBuilder
             case HtmlTokenType.Character:
                 tok.Kind = TokKind.Character;
                 tok.Chars = token.Data.Memory;
+                if (_nulEscaped && tok.Chars.Span.Contains(NulStandIn))
+                {
+                    tok.Chars = Unescape(
+                        tok.Chars.ToString(),
+                        _tokenizer.State == HtmlParseMode.PCData ? '\0' : '\uFFFD').AsMemory();
+                }
+
                 return !tok.Chars.IsEmpty;
 
             case HtmlTokenType.StartTag:
@@ -405,6 +437,11 @@ internal sealed partial class HtmlTreeBuilder
             {
                 tok.Kind = token.Type == HtmlTokenType.StartTag ? TokKind.StartTag : TokKind.EndTag;
                 var name = token.Name.Memory.Span;
+                if (_nulEscaped && name.Contains(NulStandIn))
+                {
+                    name = Unescape(name.ToString(), '\uFFFD');
+                }
+
                 if (TagsBySpan.TryGetValue(name, out var tag))
                 {
                     tok.Tag = tag;
@@ -425,10 +462,15 @@ internal sealed partial class HtmlTreeBuilder
                     {
                         var attribute = attributes[i];
                         var attrName = attribute.Name.Memory.Span;
+                        if (_nulEscaped && attrName.Contains(NulStandIn))
+                        {
+                            attrName = Unescape(attrName.ToString(), '\uFFFD');
+                        }
+
                         var local = CommonAttributeNamesBySpan.TryGetValue(attrName, out var common)
                             ? common
                             : Intern(attrName);
-                        list.Add(new Attribute(QualName.Attr(local), attribute.Value.ToString()));
+                        list.Add(new Attribute(QualName.Attr(local), Unescape(attribute.Value.ToString(), '\uFFFD')));
                     }
 
                     tok.Attrs = list;
@@ -443,7 +485,7 @@ internal sealed partial class HtmlTreeBuilder
 
             case HtmlTokenType.Comment:
                 tok.Kind = TokKind.Comment;
-                tok.Text = token.Data.ToString();
+                tok.Text = Unescape(token.Data.ToString(), '\uFFFD');
                 return true;
 
             case HtmlTokenType.Doctype:
@@ -492,9 +534,9 @@ internal sealed partial class HtmlTreeBuilder
 
         FlushText();
         var doctype = _tree.NewNode(NodeData.Doctype(
-            token.Name.ToString(),
-            token.IsPublicIdentifierMissing ? "" : token.PublicIdentifier.ToString(),
-            token.IsSystemIdentifierMissing ? "" : token.SystemIdentifier.ToString()));
+            Unescape(token.Name.ToString(), '\uFFFD'),
+            token.IsPublicIdentifierMissing ? "" : Unescape(token.PublicIdentifier.ToString(), '\uFFFD'),
+            token.IsSystemIdentifierMissing ? "" : Unescape(token.SystemIdentifier.ToString(), '\uFFFD')));
         _tree.AppendChild(_tree.Document, doctype);
 
         // Only full quirks mode changes parsing (a table no longer closes a p) or selector
