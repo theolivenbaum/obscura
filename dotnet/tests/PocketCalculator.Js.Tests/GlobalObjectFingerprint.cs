@@ -82,6 +82,32 @@ public sealed class GlobalObjectFingerprint
         Assert.Equal(string.Empty, frame.Evaluate(UpstreamNames)!.GetValue<string>());
     }
 
+    /// <summary>
+    /// A module's completion used to be marked with a <c>__obscura_moduleSettled_N</c>
+    /// global that the module's own continuations (and any page script running meanwhile)
+    /// could see.
+    /// </summary>
+    [Fact]
+    public async Task AModuleSeesNoEngineNamesWhileItRuns()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("strip", "delete globalThis.__obscura_test_ops; delete globalThis.__obscura_test_host;");
+        await runtime.LoadInlineModuleAsync(
+            """
+            const names = () => Reflect.ownKeys(new Proxy(globalThis, {}))
+              .filter((k) => typeof k === 'string' && (k.startsWith('_') || /obscura/i.test(k))).join(',');
+            globalThis.seenBefore = names();
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            queueMicrotask(() => { globalThis.seenAfter = names(); });
+            """,
+            "https://example.com/",
+            5_000);
+        await runtime.RunEventLoopBoundedAsync(100);
+        Assert.Equal("seenBefore", runtime.Evaluate("globalThis.seenBefore === '' ? 'seenBefore' : globalThis.seenBefore")!.GetValue<string>());
+        Assert.Equal("seenAfter", runtime.Evaluate("globalThis.seenAfter === '' ? 'seenAfter' : String(globalThis.seenAfter)")!.GetValue<string>());
+    }
+
     [Fact]
     public void AnInstalledBindingAddsOnlyItsOwnName()
     {

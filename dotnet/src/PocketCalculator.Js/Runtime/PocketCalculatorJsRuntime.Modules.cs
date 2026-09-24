@@ -185,7 +185,7 @@ public sealed partial class PocketCalculatorJsRuntime
         var info = Uri.TryCreate(name, UriKind.Absolute, out var uri)
             ? new DocumentInfo(uri) { Category = ModuleCategory.Standard }
             : new DocumentInfo(name) { Category = ModuleCategory.Standard };
-        var settledKey = $"__obscura_moduleSettled_{prepared.ModuleId}";
+        var settledKey = JsStringLiteral(prepared.ModuleId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         var loadMark = RequestedModuleUrlMark;
 
         string? outcome;
@@ -197,7 +197,7 @@ public sealed partial class PocketCalculatorJsRuntime
         using var staticGraph = _moduleLoader.BeginStaticGraph();
         try
         {
-            _engine.Execute(info, Instrument(source, name, settledKey));
+            _engine.Execute(info, Instrument(source, name, ModuleMarker, settledKey));
             // Top-level await leaves the module's promise pending, so the graph
             // is only finished once the settled marker has run.
             var remaining = budgetMs > (ulong)clock.ElapsedMilliseconds
@@ -245,7 +245,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// a future ClearScript that does populate it authoritative.
     /// </para>
     /// <para>
-    /// The trailing assignment is the port's stand-in for deno_core's module
+    /// The trailing call (see <see cref="ModuleMarker"/>) is the port's stand-in for deno_core's module
     /// evaluation promise, which ClearScript's entry point does not hand back:
     /// it runs when the module body finishes, which for a top-level-await
     /// module is after its awaits resolve.
@@ -256,9 +256,9 @@ public sealed partial class PocketCalculatorJsRuntime
     /// that opens with a hashbang, which must stay at offset zero.
     /// </para>
     /// </remarks>
-    private static string Instrument(string source, string moduleUrl, string settledKey)
+    private static string Instrument(string source, string moduleUrl, string markerName, string settledKey)
     {
-        var marker = $"\n;globalThis[{JsStringLiteral(settledKey)}] = true;";
+        var marker = $"\n;{markerName}({settledKey});";
         return source.StartsWith("#!", StringComparison.Ordinal)
             ? source + marker
             : $"import.meta.url ??= {JsStringLiteral(moduleUrl)};" + source + marker;
@@ -311,11 +311,41 @@ public sealed partial class PocketCalculatorJsRuntime
         }
     }
 
+    private string? _moduleMarker;
+
+    /// <summary>
+    /// The name of the function a module body calls when it finishes: a global lexical
+    /// binding with a random name, made on first use.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from the port's earlier marker, a <c>globalThis.__obscura_moduleSettled_N</c>
+    /// property that page script could see with <c>in</c> or <c>getOwnPropertyNames</c>, and
+    /// set itself (SECURITY.md I10). A <c>const</c> at script top level is no property of the
+    /// global object, so neither sees it, and its name is unguessable. The record it keeps
+    /// has no prototype, so a page's <c>Set</c> or <c>Object.prototype</c> is not consulted.
+    /// </remarks>
+    private string ModuleMarker
+    {
+        get
+        {
+            if (_moduleMarker is null)
+            {
+                string name = "__m" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+                _engine.Execute(
+                    "<module-marker>",
+                    $"const {name} = (() => {{ const done = Object.create(null);"
+                    + " const mark = (id) => { done[id] = true; }; mark.done = done; return Object.freeze(mark); })();");
+                _moduleMarker = name;
+            }
+            return _moduleMarker;
+        }
+    }
+
     private bool ModuleSettled(string settledKey)
     {
         try
         {
-            return _engine.Global.GetProperty(settledKey) is bool flag && flag;
+            return _engine.Evaluate("<module-settled>", $"{ModuleMarker}.done[{settledKey}] === true") is bool flag && flag;
         }
         catch (ScriptEngineException)
         {
@@ -327,7 +357,7 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         try
         {
-            _engine.Global.DeleteProperty(settledKey);
+            _engine.Execute("<module-settled>", $"delete {ModuleMarker}.done[{settledKey}];");
         }
         catch (ScriptEngineException)
         {
