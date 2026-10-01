@@ -44,8 +44,12 @@ public static class Storage
                 {
                     if (parameters.Get("cookies").AsJsonArray() is { } cookies)
                     {
-                        CookieJarFor(ctx, parameters, sessionId)
-                            .SetCookiesFromCdpWithScope(Network.ParseCookies(cookies));
+                        if (Network.ParseCookies(cookies) is not { } parsed)
+                        {
+                            return DomainResult.Err("Invalid cookie fields");
+                        }
+
+                        CookieJarFor(ctx, parameters, sessionId).SetCookiesFromCdpWithScope(parsed);
                     }
 
                     return DomainResult.Empty();
@@ -60,7 +64,7 @@ public static class Storage
                     if (CookieParams.ParseDeleteCookiesParams(parameters) is { } filter)
                     {
                         CookieJarFor(ctx, parameters, sessionId)
-                            .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path);
+                            .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path, filter.PartitionKey);
                     }
 
                     return DomainResult.Empty();

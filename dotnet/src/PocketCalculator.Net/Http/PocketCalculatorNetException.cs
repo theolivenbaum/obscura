@@ -45,6 +45,14 @@ public class PocketCalculatorNetException : Exception
     public static PocketCalculatorNetException Blocked(string url) =>
         new(PocketCalculatorNetErrorKind.Blocked, $"Request blocked: {url}");
 
+    /// <summary>
+    /// A request refused as blockable mixed content (SECURITY.md I7). It is a
+    /// <see cref="PocketCalculatorNetErrorKind.Blocked"/> error, so callers treat it like
+    /// any other refused load; the message is Chromium's console text.
+    /// </summary>
+    public static PocketCalculatorNetException MixedContent(string message) =>
+        new(PocketCalculatorNetErrorKind.Blocked, message);
+
     /// <summary><c>PocketCalculatorNetError::Cors</c>.</summary>
     public static PocketCalculatorNetException Cors(string message) =>
         new(PocketCalculatorNetErrorKind.Cors, $"CORS error: {message}");

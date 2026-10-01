@@ -31,6 +31,12 @@ public static partial class RenderDom
 
     private sealed class Inherited
     {
+        // The two lists below are only ever replaced, never changed in place, so a clone
+        // shares them. Copying both per element, on top of the field initializers' own two,
+        // was four lists for every element (about 20 MB on 50k elements).
+        private static readonly List<FontVariationSetting> NoVariations = [];
+        private static readonly List<string> NoContainerNames = [];
+
         internal Display Display = Display.Inline;
         internal TaffyDirection Direction = TaffyDirection.Ltr;
         internal bool DisplayContents;
@@ -48,11 +54,11 @@ public static partial class RenderDom
         internal string? Cursor = "auto";
         internal string? PointerEvents = "auto";
         internal FontOpticalSizing FontOpticalSizing = Render.FontOpticalSizing.Auto;
-        internal List<FontVariationSetting> FontVariationSettings = [];
+        internal List<FontVariationSetting> FontVariationSettings = NoVariations;
         internal float LetterSpacing;
         internal bool LetterSpacingNonNormal;
         internal ContainerType ContainerType = ContainerType.Normal;
-        internal List<string> ContainerNames = [];
+        internal List<string> ContainerNames = NoContainerNames;
         internal TaffyAlignItems? TextAlign;
         internal Dimension TextIndent = Dimension.Px(0f);
         internal bool LegacyCenter;
@@ -130,11 +136,11 @@ public static partial class RenderDom
             Cursor = Cursor,
             PointerEvents = PointerEvents,
             FontOpticalSizing = FontOpticalSizing,
-            FontVariationSettings = [.. FontVariationSettings],
+            FontVariationSettings = FontVariationSettings,
             LetterSpacing = LetterSpacing,
             LetterSpacingNonNormal = LetterSpacingNonNormal,
             ContainerType = ContainerType,
-            ContainerNames = [.. ContainerNames],
+            ContainerNames = ContainerNames,
             TextAlign = TextAlign,
             TextIndent = TextIndent,
             LegacyCenter = LegacyCenter,
@@ -188,9 +194,14 @@ public static partial class RenderDom
         DomLayout? previousLayout = null)
     {
         Matcher matcher = tree.CreateMatcher();
-        Dictionary<NodeId, LayoutStyle> styles = retained?.Maps.Styles ?? [];
+        // Per-element maps are sized up front: growing them by doubling on a 50k-element page
+        // left about 25 MB of discarded bucket arrays. About half a document's nodes are
+        // elements; the rest are text. Capacity never changes what a map holds or the order
+        // it enumerates in.
+        int elementEstimate = (tree.SlotCount / 2) + 16;
+        Dictionary<NodeId, LayoutStyle> styles = retained?.Maps.Styles ?? new(elementEstimate);
         Dictionary<NodeId, IReadOnlyDictionary<string, string>> customProperties =
-            retained?.Maps.CustomProperties ?? [];
+            retained?.Maps.CustomProperties ?? new(elementEstimate);
         HashSet<NodeId>? freshStyles = retained?.Fresh;
         Dictionary<string, string> rootProps = new(StringComparer.Ordinal);
         ContainerQueryEvaluator? evaluator = snapshot is not null
@@ -258,8 +269,8 @@ public static partial class RenderDom
             }
         }
 
-        TaffyTree taffyTree = TaffyStyleMapping.NewTaffyTree<int?>();
-        Dictionary<TaffyNodeId, NodeId> idMap = [];
+        TaffyTree taffyTree = TaffyStyleMapping.NewTaffyTree<int?>(tree.SlotCount + 16);
+        Dictionary<TaffyNodeId, NodeId> idMap = new(styles.Count);
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
         TextEngine engine = new(fonts, needsEmojiFont);
 
@@ -281,11 +292,12 @@ public static partial class RenderDom
             }
         }
 
-        Dictionary<NodeId, Rect> rects = [];
+        Dictionary<NodeId, Rect> rects = new(styles.Count);
         Dictionary<NodeId, List<Rect>> inlineFragments = [];
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns = [];
         Dictionary<int, Rect> anonRects = [];
         Rect?[] generatedRects = [];
+        Dictionary<NodeId, GridTrackSizes> gridTracks = [];
 
         if (root is { } rootId)
         {
@@ -825,6 +837,16 @@ public static partial class RenderDom
                     anonRects,
                     generatedNodes,
                     generatedRects);
+
+                // The used track sizes getComputedStyle() reports for a grid container.
+                foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+                {
+                    if (taffyTree.GetDetailedLayoutInfo(taffyId) is Layout.DetailedGridInfo gridInfo)
+                    {
+                        gridTracks[domId] = GridTrackSizes.From(gridInfo);
+                    }
+                }
+
                 inlineFragments = SynthesizeOrdinaryInlineFragments(rects, styles, engine);
                 DomTableSupport.SynthesizeRowRects(tree, rects);
             }
@@ -832,7 +854,7 @@ public static partial class RenderDom
 
         DomPasses.SyncPositionedPseudoPercentagePadding(rects, styles);
 
-        Dictionary<NodeId, OverflowClip?> clipRects = [];
+        Dictionary<NodeId, OverflowClip?> clipRects = new(styles.Count);
         Dictionary<NodeId, (float X, float Y)> translates = [];
         Dictionary<NodeId, Affine2> transforms = [];
         if (root is { } clipRootId)
@@ -928,6 +950,11 @@ public static partial class RenderDom
             }
         }
 
+        if (ifcItems.SplicedInlines.Count != 0)
+        {
+            SynthesizeSplicedInlineRects(tree, ifcItems.SplicedInlines, rects, styles, textRuns);
+        }
+
         List<GeneratedBox> generatedBoxes = [];
         for (int index = 0; index < ifcItems.Generated.Count; index++)
         {
@@ -957,6 +984,7 @@ public static partial class RenderDom
             RunIfcItems = ifcItems.Runs,
             WordIfcItems = ifcItems.WordItems,
             GeneratedBoxes = generatedBoxes,
+            GridTracks = gridTracks,
         };
 
         return (layout, signature, queryStats);
@@ -1045,6 +1073,76 @@ public static partial class RenderDom
         }
 
         return fragments;
+    }
+
+    /// <summary>
+    /// Give a spliced inline wrapper that owns no shaped range the union of its content.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, where a decoration-free inline wrapper
+    /// spliced out of a block's child list has no layout box at all, so
+    /// <c>getBoundingClientRect()</c> reported 0,0,0,0 and a click by coordinates could not
+    /// reach it. Where its run folds into a shaped item it gets its line fragments from
+    /// shaping; where the run does not fold (it holds an image or a form control) this takes
+    /// the union of what its children laid out to. Chromium 141 reports
+    /// <c>&lt;a&gt;&lt;img width=20 height=20&gt;&lt;/a&gt;</c> as the image's width over the
+    /// link's font box, 20x17; this gives the image's box, 20x20. <paramref name="spliced"/>
+    /// lists outer wrappers before inner ones, so walking it backwards sees every nested
+    /// wrapper's union before its parent reads it, and each child is visited once.
+    /// </remarks>
+    internal static void SynthesizeSplicedInlineRects(
+        DomTree tree,
+        List<NodeId> spliced,
+        Dictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns)
+    {
+        for (int index = spliced.Count - 1; index >= 0; index--)
+        {
+            NodeId wrapper = spliced[index];
+            if (rects.ContainsKey(wrapper))
+            {
+                continue;
+            }
+
+            WorkCancellation.ThrowIfCancellationRequested();
+            float left = float.PositiveInfinity;
+            float top = float.PositiveInfinity;
+            float right = float.NegativeInfinity;
+            float bottom = float.NegativeInfinity;
+            void Include(Rect rect)
+            {
+                left = F32.Min(left, rect.X);
+                top = F32.Min(top, rect.Y);
+                right = F32.Max(right, rect.X + rect.Width);
+                bottom = F32.Max(bottom, rect.Y + rect.Height);
+            }
+
+            for (NodeId? child = tree.GetNode(wrapper)?.FirstChild;
+                child is { } cid;
+                child = tree.GetNode(cid)?.NextSibling)
+            {
+                if (textRuns.TryGetValue(cid, out List<(Rect Rect, string Text)>? words))
+                {
+                    foreach ((Rect rect, _) in words)
+                    {
+                        Include(rect);
+                    }
+                }
+                else if (rects.TryGetValue(cid, out Rect rect)
+                    && styles.TryGetValue(cid, out LayoutStyle? style)
+                    && style.Display != Display.None
+                    && style.Position != TaffyPosition.Absolute)
+                {
+                    Include(rect);
+                }
+            }
+
+            if (left <= right && top <= bottom)
+            {
+                rects[wrapper] = new Rect(left, top, right - left, bottom - top);
+            }
+        }
     }
 
     internal static Dictionary<NodeId, List<Rect>> SynthesizeShapedInlineFragments(

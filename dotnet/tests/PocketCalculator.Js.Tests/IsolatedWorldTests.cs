@@ -177,7 +177,7 @@ public sealed class IsolatedWorldTests
 
         // DOM.describeNode's lookup runs in the object's own realm.
         var nid = runtime.EvaluateInObjectRealm(
-            handle.ObjectId!, $"globalThis.__obscura_objects[{System.Text.Json.JsonSerializer.Serialize(handle.ObjectId)}]._nid");
+            handle.ObjectId!, $"__obscura_cdp.objects[{System.Text.Json.JsonSerializer.Serialize(handle.ObjectId)}]._nid");
         Assert.Equal(runtime.Evaluate("document.getElementById('a')._nid")?.GetValue<double>(), nid?.GetValue<double>());
     }
 

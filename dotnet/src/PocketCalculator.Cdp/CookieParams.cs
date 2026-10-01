@@ -12,6 +12,9 @@ public sealed class DeleteCookiesFilter
     public required string Domain { get; init; }
 
     public required string? Path { get; init; }
+
+    /// <summary>The partition to delete from; null deletes unpartitioned cookies only.</summary>
+    public CookiePartitionKey? PartitionKey { get; init; }
 }
 
 /// <summary>
@@ -51,10 +54,17 @@ public static class CookieParams
                    ?? (urlParsed is null ? null : CookieJar.DefaultCookiePath(urlParsed.Path))
                    ?? DefaultCookiePath;
 
-        var secure = value.Get("secure").AsBoolOr(false);
+        // Chromium 141 makes a cookie set for an https (or wss) url Secure whatever
+        // `secure` says. Deviation from crates/obscura-cdp, which reads the flag alone.
+        var secure = value.Get("secure").AsBoolOr(false)
+                     || urlParsed?.Scheme is "https" or "wss";
         var httpOnly = value.Get("httpOnly").AsBoolOr(false);
         var sameSite = value.Get("sameSite").AsStringOr(string.Empty);
         var expires = value.Get("expires").AsF64() is { } seconds ? SaturatingI64(seconds) : (long?)null;
+        if (!TryParsePartitionKey(value, out var partitionKey))
+        {
+            return null;
+        }
 
         return new ParsedCookie(
             new CookieInfo
@@ -67,8 +77,50 @@ public static class CookieParams
                 HttpOnly = httpOnly,
                 SameSite = sameSite,
                 Expires = expires,
+                PartitionKey = partitionKey,
             },
             HostOnly: explicitDomain is null);
+    }
+
+    /// <summary>
+    /// Whether Chromium 141 refuses <paramref name="cookie"/> as it sanitizes a CDP cookie:
+    /// a partitioned cookie that is not Secure (set for an http url, or with a domain and
+    /// no <c>secure</c>). <c>Network.setCookie</c> fails with "Sanitizing cookie failed" and
+    /// <c>setCookies</c> with "Invalid cookie fields". Port addition: the jar used to force
+    /// Secure on such a cookie and accept it.
+    /// </summary>
+    public static bool FailsSanitizing(CookieInfo cookie)
+    {
+        ArgumentNullException.ThrowIfNull(cookie);
+        return cookie.PartitionKey is not null && !cookie.Secure;
+    }
+
+    /// <summary>
+    /// Read a payload's <c>partitionKey</c>, Chromium 141's
+    /// <c>{topLevelSite, hasCrossSiteAncestor}</c>, both required, with the site reduced
+    /// to a schemeful site. False when it is present and not that shape; an absent key
+    /// is an unpartitioned cookie. Port addition (CHIPS).
+    /// </summary>
+    public static bool TryParsePartitionKey(JsonNode? value, out CookiePartitionKey? key)
+    {
+        key = null;
+        var node = value.Get("partitionKey");
+        if (node is null)
+        {
+            return true;
+        }
+
+        if (node is not JsonObject
+            || node.Get("topLevelSite").AsString() is not { } site
+            || node.Get("hasCrossSiteAncestor") is not JsonValue bit
+            || !bit.TryGetValue<bool>(out var crossSite)
+            || !CookiePartitionKey.TryNormalize(site, crossSite, out var normalized))
+        {
+            return false;
+        }
+
+        key = normalized;
+        return true;
     }
 
     /// <summary>
@@ -100,6 +152,8 @@ public static class CookieParams
         var domain = parameters.Get("domain").AsString() ?? urlParsed?.HostStr ?? string.Empty;
         var path = parameters.Get("path").AsString() ?? urlParsed?.Path;
 
-        return new DeleteCookiesFilter { Name = name, Domain = domain, Path = path };
+        return TryParsePartitionKey(parameters, out var partitionKey)
+            ? new DeleteCookiesFilter { Name = name, Domain = domain, Path = path, PartitionKey = partitionKey }
+            : null;
     }
 }

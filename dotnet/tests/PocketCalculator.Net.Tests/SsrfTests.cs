@@ -763,6 +763,40 @@ public class SsrfTests
         }
     }
 
+    // SECURITY.md I8: a leaf the configured root issued for another purpose (here
+    // clientAuth only) must not authenticate a server, as the platform path and Chromium
+    // refuse it. No EKU at all, or anyExtendedKeyUsage, still passes.
+    [Theory]
+    [InlineData(new[] { "1.3.6.1.5.5.7.3.2" }, false)]
+    [InlineData(new[] { "1.3.6.1.5.5.7.3.4", "1.3.6.1.5.5.7.3.3" }, false)]
+    [InlineData(new string[0], true)]
+    [InlineData(new[] { "2.5.29.37.0" }, true)]
+    [InlineData(new[] { "1.3.6.1.5.5.7.3.2", "1.3.6.1.5.5.7.3.1" }, true)]
+    public async Task ConfiguredRootsRequireAServerAuthLeaf(string[] eku, bool accepted)
+    {
+        using var fixture = PrivateCaHttpsFixture.Serve(eku);
+        var caFile = Path.Combine(Path.GetTempPath(), $"obscura-ca-{Guid.NewGuid():N}.pem");
+        await File.WriteAllTextAsync(caFile, fixture.CaPem);
+        try
+        {
+            using var env = new EnvironmentScope().Set("SSL_CERT_FILE", caFile).Set("SSL_CERT_DIR", null);
+            using var client = new PocketCalculatorHttpClient(new CookieJar(), null, true);
+            var url = new Uri($"https://127.0.0.1:{fixture.Port}/");
+            if (accepted)
+            {
+                Assert.Equal(200, (await client.FetchAsync(url)).Status);
+            }
+            else
+            {
+                await Assert.ThrowsAsync<PocketCalculatorNetException>(() => client.FetchAsync(url));
+            }
+        }
+        finally
+        {
+            File.Delete(caFile);
+        }
+    }
+
     [Fact]
     public async Task PrivateCaIsStillRejectedWithoutSslCertFile()
     {

@@ -63,6 +63,21 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         AllowPrivateNetwork = allowPrivateNetwork;
     }
 
+    /// <summary>
+    /// This context's HSTS state (SECURITY.md I7). Filled from the
+    /// <c>Strict-Transport-Security</c> headers of https responses on this client; an
+    /// embedder can also seed it with <see cref="HstsStore.Add"/>. See
+    /// <see cref="HstsStore"/> for the rules.
+    /// </summary>
+    public HstsStore Hsts { get; } = new();
+
+    /// <summary>
+    /// Turn off the mixed-content check (<see cref="MixedContent"/>), Chromium's
+    /// <c>--allow-running-insecure-content</c>. Defaults to false, or to true when
+    /// <c>POCKETCALCULATOR_ALLOW_INSECURE_CONTENT=1</c> is set.
+    /// </summary>
+    public bool AllowInsecureContent { get; set; } = MixedContent.EnvAllowsInsecureContent();
+
     /// <summary>The cookie jar every request on this client reads and writes.</summary>
     public CookieJar CookieJar { get; }
 
@@ -219,6 +234,14 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 }
             };
 
+            // Revocation: Chromium does no online OCSP/CRL checks for ordinary
+            // certificates (it relies on CRLSets pushed with the browser), and an online
+            // check would leak every visited host to the CA and stall on a slow
+            // responder. Both validation paths (the platform one here and the
+            // SSL_CERT_FILE / SSL_CERT_DIR one below) therefore use NoCheck; this states
+            // the SocketsHttpHandler default explicitly so the two cannot drift.
+            handler.SslOptions.CertificateRevocationCheckMode = X509RevocationMode.NoCheck;
+
             if (CertificateRoots.AnyCertEnvSet())
             {
                 handler.SslOptions.RemoteCertificateValidationCallback = ValidateWithConfiguredRoots;
@@ -308,7 +331,81 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
 
         using var leaf = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-        return custom.Build(leaf);
+
+        // SECURITY.md I8: the platform path requires the leaf to be usable for TLS server
+        // authentication, and so does Chromium; the custom-root path did not, so a
+        // clientAuth or code-signing certificate from a configured CA authenticated a
+        // server. The chain's ApplicationPolicy is not used for this because it also
+        // applies the policy to the intermediates, which Chromium does not require of a
+        // locally trusted root.
+        return HasServerAuthUsage(leaf) && custom.Build(leaf);
+    }
+
+    private const string ServerAuthOid = "1.3.6.1.5.5.7.3.1";
+    private const string AnyExtendedKeyUsageOid = "2.5.29.37.0";
+
+    /// <summary>
+    /// RFC 5280 4.2.1.12 as Chromium applies it to a TLS server leaf: no EKU extension
+    /// means any purpose; otherwise it must list serverAuth or anyExtendedKeyUsage.
+    /// </summary>
+    internal static bool HasServerAuthUsage(X509Certificate2 leaf)
+    {
+        foreach (var extension in leaf.Extensions)
+        {
+            if (extension.Oid?.Value != "2.5.29.37")
+            {
+                continue;
+            }
+
+            var usages = extension as X509EnhancedKeyUsageExtension
+                ?? new X509EnhancedKeyUsageExtension(extension, extension.Critical);
+            foreach (var oid in usages.EnhancedKeyUsages)
+            {
+                if (oid.Value is ServerAuthOid or AnyExtendedKeyUsageOid)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The mixed-content decision for one hop: the URL to request (upgraded for an
+    /// image), or a <see cref="PocketCalculatorNetException"/> for blockable content.
+    /// Either way the page's console hears about it, with Chromium's text.
+    /// </summary>
+    private Uri ApplyMixedContent(ResourceRequest request, Uri target, CallbackRegistry? callbacks)
+    {
+        if (AllowInsecureContent)
+        {
+            return target;
+        }
+
+        var topLevel = request.ResourceType == ResourceType.Document && !request.NestedDocument;
+        var context = MixedContent.Context(request.Initiator, request.SecureAncestor);
+        switch (MixedContent.Check(context, target, request.ResourceType, topLevel))
+        {
+            case MixedContentDecision.Upgrade:
+                // Chromium names the initiating frame here (about:srcdoc for a srcdoc
+                // frame), and the secure page in the blocked message below.
+                callbacks?.FireConsole(
+                    "warning",
+                    MixedContent.UpgradedMessage((request.Initiator ?? context)!.AbsoluteUri, target.AbsoluteUri));
+                return MixedContent.UpgradeUrl(target);
+            case MixedContentDecision.Block:
+                var message = MixedContent.BlockedMessage(
+                    context!.AbsoluteUri,
+                    MixedContent.RequestKind(request.ResourceType, request.NestedDocument),
+                    target.AbsoluteUri);
+                callbacks?.FireConsole("error", message);
+                throw PocketCalculatorNetException.MixedContent(message);
+            default:
+                return target;
+        }
     }
 
     /// <summary>GET <paramref name="url"/> with the navigation profile.</summary>
@@ -416,7 +513,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             }
         }
 
-        if (request.SendsCredentialsTo(url) && CookieJar.GetCookieHeaderSameSite(url).Length != 0)
+        if (request.SendsCredentialsTo(url)
+            && CookieJar.GetCookieHeader(url, CookieAccessFor(request, url, methodIsSafe: true, [])).Length != 0)
         {
             return null;
         }
@@ -432,6 +530,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             request.Credentials,
             request.Initiator?.ToString(),
             request.Referrer?.ToString(),
+            request.TopLevel?.ToString(),
+            request.CrossSiteAncestor,
             UserAgent,
             headerFingerprint,
             request.MaxResponseBytes);
@@ -617,6 +717,16 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
         for (var redirectCount = 0; redirectCount <= MaxRedirects; redirectCount++)
         {
+            // SECURITY.md I7 (Rust has neither check). Mixed content first, as Chromium
+            // decides it in the renderer before HSTS is consulted in the network stack;
+            // then HSTS, which rewrites the hop to https as an internal 307 redirect.
+            currentUrl = ApplyMixedContent(request, currentUrl, callbacks);
+            if (Hsts.Upgrade(currentUrl) is { } secure)
+            {
+                redirects.Add(currentUrl);
+                currentUrl = secure;
+            }
+
             // Deviation from client.rs, which checks the blocklist on the first URL only
             // (SECURITY.md L7): a redirect into a tracker is blocked the same way.
             if (IsBlockedTracker(currentUrl))
@@ -717,9 +827,10 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                 if (request.SendsCredentialsTo(currentUrl)
                     && resp.Headers.NonValidated.TryGetValues("Set-Cookie", out var setCookies))
                 {
+                    var setAccess = CookieSetAccessFor(request, currentUrl, redirects);
                     foreach (var value in setCookies)
                     {
-                        CookieJar.SetCookie(value, currentUrl);
+                        CookieJar.SetCookie(value, currentUrl, setAccess);
                     }
                 }
 
@@ -736,6 +847,14 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
                         SsrfGuard.ValidateUrl(nextUrl, AllowPrivateNetwork);
                         ValidateRequestMode(request, nextUrl);
+
+                        // Fetch "set request's referrer policy on redirect": a policy on
+                        // the redirect response governs the following hops. Rust ignores it.
+                        if (ReferrerPolicies.ParseHeader(responseHeaders.GetValueOrDefault("referrer-policy")) is { } redirectPolicy)
+                        {
+                            request = request with { ReferrerPolicy = redirectPolicy };
+                        }
+
                         redirectTainted |= RedirectTaintsOrigin(request, currentUrl, nextUrl);
                         redirects.Add(currentUrl);
                         currentUrl = nextUrl;
@@ -846,9 +965,9 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         }
 
         var cookieHeader = request.SendsCredentialsTo(currentUrl)
-            ? CookieJar.GetCookieHeaderInContext(
+            ? CookieJar.GetCookieHeader(
                 currentUrl,
-                SameSiteContextFor(
+                CookieAccessFor(
                     request, currentUrl, method == HttpMethod.Get || method == HttpMethod.Head, redirects))
             : string.Empty;
         if (cookieHeader.Length != 0)
@@ -1287,6 +1406,17 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             }
         }
 
+        // A request from inside a frame is same-site only when the frame and every
+        // ancestor are same-site with the top-level document, which the target must be
+        // too: Chromium's site for cookies. Deviation: Rust judges the initiator alone,
+        // so a cross-site frame's requests to its own site carried Lax and Strict cookies
+        // (Chromium 141 sends SameSite=None cookies only).
+        if (sameSite && !IsTopLevelNavigation(request) && request.TopLevel is { } topLevel
+            && (request.CrossSiteAncestor || !CookieJar.IsSameSite(topLevel, target)))
+        {
+            sameSite = false;
+        }
+
         if (sameSite)
         {
             return SameSiteContext.SameSite;
@@ -1295,6 +1425,45 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         return request.Mode == RequestMode.Navigate && !request.NestedDocument && methodIsSafe
             ? SameSiteContext.CrossSiteTopLevelSafe
             : SameSiteContext.CrossSite;
+    }
+
+    private static bool IsTopLevelNavigation(ResourceRequest request) =>
+        request.Mode == RequestMode.Navigate && !request.NestedDocument;
+
+    /// <summary>
+    /// The cookie context of one hop of <paramref name="request"/>: its SameSite context and
+    /// its partition key. A top-level navigation is keyed by its own target; any other
+    /// request by the top-level document (<see cref="ResourceRequest.TopLevel"/>, else the
+    /// initiator), with the cross-site bit when the initiating frame had a cross-site
+    /// ancestor or the target is cross-site with the top level. Port addition (CHIPS).
+    /// </summary>
+    public static CookieAccess CookieAccessFor(
+        ResourceRequest request,
+        Uri target,
+        bool methodIsSafe,
+        IReadOnlyList<Uri> redirects)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var sameSite = SameSiteContextFor(request, target, methodIsSafe, redirects);
+        var topLevel = IsTopLevelNavigation(request) ? null : request.TopLevel ?? request.Initiator;
+        var partition = topLevel is null
+            ? CookiePartitionKey.ForTopLevel(target)
+            : CookiePartitionKey.For(topLevel, request.CrossSiteAncestor, target);
+        return new CookieAccess(sameSite, partition);
+    }
+
+    /// <summary>
+    /// The context a <c>Set-Cookie</c> on the response to one hop of <paramref name="request"/>
+    /// is stored in: <see cref="CookieAccessFor"/>, except that the response to a top-level
+    /// navigation may set any cookie, as Chromium lets it.
+    /// </summary>
+    public static CookieAccess CookieSetAccessFor(
+        ResourceRequest request,
+        Uri target,
+        IReadOnlyList<Uri> redirects)
+    {
+        var access = CookieAccessFor(request, target, methodIsSafe: true, redirects);
+        return IsTopLevelNavigation(request) ? access with { SameSite = SameSiteContext.SameSite } : access;
     }
 
     /// <summary>
@@ -1341,7 +1510,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         SameSiteContextFor(request, target, methodIsSafe, redirects);
 
     internal static string? RequestReferrer(ResourceRequest request, Uri target) =>
-        ReferrerFor(request.Referrer ?? request.Initiator, target);
+        ReferrerFor(request.Referrer ?? request.Initiator, target, request.ReferrerPolicy);
 
     /// <summary>
     /// The Referer of one hop of a redirect chain. The policy is applied at every hop to
@@ -1360,33 +1529,24 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         var source = request.Referrer ?? request.Initiator;
         foreach (var hop in redirects)
         {
-            if (ReferrerFor(source, hop) is not { } sent || !Uri.TryCreate(sent, UriKind.Absolute, out source))
+            if (ReferrerFor(source, hop, request.ReferrerPolicy) is not { } sent
+                || !Uri.TryCreate(sent, UriKind.Absolute, out source))
             {
                 return null;
             }
         }
 
-        return ReferrerFor(source, target);
+        return ReferrerFor(source, target, request.ReferrerPolicy);
     }
 
-    private static string? ReferrerFor(Uri? source, Uri target)
-    {
-        if (source is null)
-        {
-            return null;
-        }
-
-        if (!IsHttpScheme(source) || !IsHttpScheme(target)
-            || (string.Equals(source.Scheme, "https", StringComparison.Ordinal)
-                && string.Equals(target.Scheme, "http", StringComparison.Ordinal)))
-        {
-            return null;
-        }
-
-        return UrlOrigin.SameOrigin(source, target)
-            ? UrlOrigin.WithoutCredentialsOrFragment(source)
-            : $"{UrlOrigin.AsciiSerialization(source)}/";
-    }
+    /// <summary>
+    /// The Referer under <paramref name="policy"/> (the default when null). Deviation:
+    /// upstream hard-codes strict-origin-when-cross-origin and treats any https to http
+    /// request as a downgrade; the policy now comes from the document, the element or
+    /// fetch(), and http://localhost is potentially trustworthy, as in Chromium.
+    /// </summary>
+    private static string? ReferrerFor(Uri? source, Uri target, ReferrerPolicy? policy) =>
+        ReferrerPolicies.Referrer(source, target, policy ?? ReferrerPolicies.Default);
 
     private static bool IsHttpScheme(Uri url) =>
         string.Equals(url.Scheme, "http", StringComparison.Ordinal)
@@ -1508,6 +1668,8 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         RequestCredentials Credentials,
         string? Initiator,
         string? Referrer,
+        string? TopLevel,
+        bool CrossSiteAncestor,
         string UserAgent,
         string ExtraHeaders,
         long MaxResponseBytes);

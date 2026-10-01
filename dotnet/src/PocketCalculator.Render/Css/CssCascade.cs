@@ -1043,8 +1043,15 @@ public sealed class Stylesheet
                 return null;
             }
 
-            SortCascade(normalMatched, index => rules.Rules[index].Layer, important: false);
-            SortCascade(importantMatched, index => rules.Rules[index].Layer, important: true);
+            if (normalMatched.Count > 1)
+            {
+                SortCascade(normalMatched, index => rules.Rules[index].Layer, important: false);
+            }
+
+            if (importantMatched.Count > 1)
+            {
+                SortCascade(importantMatched, index => rules.Rules[index].Layer, important: true);
+            }
 
             // Generated ::before/::after boxes have an inline outer display by
             // default. LayoutStyle's general default is block because it
@@ -1236,8 +1243,15 @@ public sealed class Stylesheet
         List<(uint Specificity, int Order, int Index)> normal,
         List<(uint Specificity, int Order, int Index)> important)
     {
-        SortCascade(normal, index => Rules[index].Layer, important: false);
-        SortCascade(important, index => Rules[index].Layer, important: true);
+        if (normal.Count > 1)
+        {
+            SortCascade(normal, index => Rules[index].Layer, important: false);
+        }
+
+        if (important.Count > 1)
+        {
+            SortCascade(important, index => Rules[index].Layer, important: true);
+        }
 
         var declarations = new ShadowScopeDeclarations();
         foreach (var (_, _, index) in normal)
@@ -1253,6 +1267,8 @@ public sealed class Stylesheet
         return declarations;
     }
 
+    // Callers test the count first: the layer lambda captures the sheet, so building it for a
+    // list with nothing to sort allocated two delegates per element.
     private static void SortCascade(
         List<(uint Specificity, int Order, int Index)> matched,
         Func<int, LayerOrder?> layerOf,
@@ -1461,39 +1477,48 @@ public sealed class Stylesheet
         ArgumentNullException.ThrowIfNull(slottedScopes);
         ArgumentNullException.ThrowIfNull(animationTimeline);
 
-        var shadowHostDeclarations = shadowHostSheet?.ShadowHostDeclarations(tree, matcher, nid, evaluator)
-            ?? new ShadowScopeDeclarations();
-        var shadowScopeDeclarations = new ShadowScopeDeclarations();
-        CssDeclarations.AppendDeclarationStream(
-            shadowScopeDeclarations.Normal,
-            shadowHostDeclarations.Normal.ToString());
-        var slottedDeclarations = new List<ShadowScopeDeclarations>(slottedScopes.Count);
-        foreach (var scope in slottedScopes)
+        // Outside a shadow tree there are no host or slotted declarations, and the two streams
+        // are empty: skip the builders (two StringBuilders per element, 35 MB on 50k elements).
+        string shadowNormalText = string.Empty;
+        string shadowImportantText = string.Empty;
+        if (shadowHostSheet is not null || slottedScopes.Count != 0)
         {
-            slottedDeclarations.Add(
-                scope.Sheet.ShadowSlottedDeclarations(tree, matcher, nid, scope.Host, evaluator));
-        }
-
-        // Match Gecko's ShadowCascadeOrder: normal declarations progress from
-        // the host's own (innermost) tree through outer slot scopes toward the
-        // document. Important declarations reverse that order.
-        for (var index = slottedDeclarations.Count - 1; index >= 0; index--)
-        {
+            var shadowHostDeclarations = shadowHostSheet?.ShadowHostDeclarations(tree, matcher, nid, evaluator)
+                ?? new ShadowScopeDeclarations();
+            var shadowScopeDeclarations = new ShadowScopeDeclarations();
             CssDeclarations.AppendDeclarationStream(
                 shadowScopeDeclarations.Normal,
-                slottedDeclarations[index].Normal.ToString());
-        }
+                shadowHostDeclarations.Normal.ToString());
+            var slottedDeclarations = new List<ShadowScopeDeclarations>(slottedScopes.Count);
+            foreach (var scope in slottedScopes)
+            {
+                slottedDeclarations.Add(
+                    scope.Sheet.ShadowSlottedDeclarations(tree, matcher, nid, scope.Host, evaluator));
+            }
 
-        foreach (var declarations in slottedDeclarations)
-        {
+            // Match Gecko's ShadowCascadeOrder: normal declarations progress from
+            // the host's own (innermost) tree through outer slot scopes toward the
+            // document. Important declarations reverse that order.
+            for (var index = slottedDeclarations.Count - 1; index >= 0; index--)
+            {
+                CssDeclarations.AppendDeclarationStream(
+                    shadowScopeDeclarations.Normal,
+                    slottedDeclarations[index].Normal.ToString());
+            }
+
+            foreach (var declarations in slottedDeclarations)
+            {
+                CssDeclarations.AppendDeclarationStream(
+                    shadowScopeDeclarations.Important,
+                    declarations.Important.ToString());
+            }
+
             CssDeclarations.AppendDeclarationStream(
                 shadowScopeDeclarations.Important,
-                declarations.Important.ToString());
+                shadowHostDeclarations.Important.ToString());
+            shadowNormalText = shadowScopeDeclarations.Normal.ToString();
+            shadowImportantText = shadowScopeDeclarations.Important.ToString();
         }
-
-        CssDeclarations.AppendDeclarationStream(
-            shadowScopeDeclarations.Important,
-            shadowHostDeclarations.Important.ToString());
 
         // Keep the two cascade priorities separate from the outset. A typical
         // stylesheet has very few important declarations, so cloning and
@@ -1573,8 +1598,15 @@ public sealed class Stylesheet
             Consider(Universal);
         }
 
-        SortCascade(normalMatched, index => Rules[index].Layer, important: false);
-        SortCascade(importantMatched, index => Rules[index].Layer, important: true);
+        if (normalMatched.Count > 1)
+        {
+            SortCascade(normalMatched, index => Rules[index].Layer, important: false);
+        }
+
+        if (importantMatched.Count > 1)
+        {
+            SortCascade(importantMatched, index => Rules[index].Layer, important: true);
+        }
 
         var (inlineNormal, inlineImportant) = inlineCss is null
             ? (string.Empty, string.Empty)
@@ -1585,8 +1617,6 @@ public sealed class Stylesheet
         // properties cascade fully before any `var()` is substituted.
         var inlineNormalFlags = DeclarationStreamFlags.Compute(inlineNormal);
         var inlineImportantFlags = DeclarationStreamFlags.Compute(inlineImportant);
-        var shadowNormalText = shadowScopeDeclarations.Normal.ToString();
-        var shadowImportantText = shadowScopeDeclarations.Important.ToString();
         var shadowNormalFlags = DeclarationStreamFlags.Compute(shadowNormalText);
         var shadowImportantFlags = DeclarationStreamFlags.Compute(shadowImportantText);
         var hasOwnCustomProperties = shadowNormalFlags.HasCustomProperties
@@ -1805,12 +1835,7 @@ public sealed class Stylesheet
         // !important. Keeping the renderer-side effect separate from the
         // authored declaration block lets cancel() reveal the exact underlying
         // value, and CSSOM never observes a synthetic inline rewrite.
-        var hasWaapi = false;
-        foreach (var _ in animationTimeline.WaapiForNode(nid, animationSample.Time))
-        {
-            hasWaapi = true;
-            break;
-        }
+        var hasWaapi = animationTimeline.HasWaapiForNode(nid);
 
         var waapiUnderlyingTransformOps = hasWaapi ? new List<TransformOp>(style.TransformOps) : null;
         var waapiUnderlyingOpacity = style.Opacity;

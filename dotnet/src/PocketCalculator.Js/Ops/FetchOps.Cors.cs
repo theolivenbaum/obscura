@@ -167,9 +167,10 @@ public static partial class FetchOps
     /// <summary>The forbidden request-header names (Fetch), matched case-insensitively.</summary>
     /// <remarks>
     /// <c>access-control-request-private-network</c> is not in the Fetch list; Chromium
-    /// forbids it too (<c>net::HttpUtil::IsSafeHeader</c>). <c>user-agent</c> is not
-    /// forbidden: Fetch dropped it from the list, and the transport already honours an
-    /// explicit override.
+    /// forbids it too (<c>net::HttpUtil::IsSafeHeader</c>). Neither is <c>user-agent</c>
+    /// any more, but Chromium still drops it from a Request's headers and from XHR
+    /// (measured on Chromium 141), so page script cannot replace the browser's
+    /// User-Agent. Rust let it.
     /// </remarks>
     private static readonly string[] ForbiddenRequestHeaderNames =
     [
@@ -194,6 +195,7 @@ public static partial class FetchOps
         "trailer",
         "transfer-encoding",
         "upgrade",
+        "user-agent",
         "via",
     ];
 

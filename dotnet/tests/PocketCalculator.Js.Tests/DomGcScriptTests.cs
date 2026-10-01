@@ -253,7 +253,7 @@ public sealed class DomGcScriptTests
         // The freed slot is reused with a new generation, so the bare id names nothing.
         var fresh = Eval(runtime, "(() => { const s = document.createElement('section'); globalThis.fresh = s; return String(s._nid); })()");
         Assert.NotEqual(stale, fresh);
-        Assert.Equal("false", Eval(runtime, $"String(_wrap({stale}) === fresh)"));
+        Assert.Equal("false", runtime.EvaluateHost($"String(__obscura_host.dom.wrap({stale}) === fresh)")?.ToString());
         Assert.Equal("SECTION", Eval(runtime, "fresh.tagName"));
     }
 }

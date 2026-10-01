@@ -57,6 +57,10 @@ page-supplied code must never go through these entry points.
 | `setScreenOverride(w, h, emulated)` | `__obscura_set_screen_override` | `Emulation.setDeviceMetricsOverride` |
 | `liveFrameIds() -> number[]`, `forgetFrame(id)` | `__obscura_liveFrameIds`, `__obscura_forgetFrame` | detached-frame release |
 | `pointer.down` | `globalThis.__obscura_mouse_down` | CDP mousePressed / mouseReleased |
+| `clickTarget.get()`, `clickTarget.set(el)` | `globalThis.__obscura_click_target` | CDP mousePressed / mouseReleased fallback target |
+| `navigate(url)` | the page's `location.assign` | CDP mouseReleased on a link |
+| `dom.scrollOffset() -> [x, y]`, `dom.scrollTo(x, y)`, `dom.scrollBy(x, y)` | `window.scrollX/scrollY`, `window.scrollTo/scrollBy` | MCP `browser_scroll` |
+| `dom.value(v) -> json` | the page's `JSON.stringify` (toJSON included) | every by-value result the host decodes |
 | `gcCachedNids() -> csv`, `gcWeaken(componentsCsv)`, `gcSurvivors() -> csv`, `gcForget()` | none (port addition) | the DOM collector (`RealmDomGc`, `DomTree.Gc.cs`) |
 
 op_dom node ids are the full `NodeId.Value`: the slot index in the low 24 bits and the
@@ -103,6 +107,7 @@ shown with the deno_core attribute markers stripped: `String` is a JS string,
 | `op_layout_metrics` | sync | `(none)` | `String` |
 | `op_load_image_metadata` | async | `nid: u32` | `String` |
 | `op_navigate` | fast | `url: &str, method: &str, body: &str` | `(void)` |
+| `op_navigate_frame` | fast | `url: &str, method: &str, body: &str, target: &str` | `(void)` |
 | `op_post_frame_message` | fast | `target_frame_id: u32, source_frame_id: u32, origin: &str, target_origin: &str, data_json: &str` | `(void)` |
 | `op_posted_task` | sync | `frame_id: u32, callback: v8::Global<v8::Function>` | `f64` |
 | `op_posted_task_generation` | fast | `frame_id: u32` | `f64` |
@@ -306,14 +311,30 @@ so these are called unguarded:
 | `op_realm_origin` | fast | `frame_id: u32` | `String` (the realm's origin, `"null"` when opaque) |
 | `op_run_fetched_script` | sync | `body_token: f64, url: String` | `(void)`; throws like `op_run_classic_script` |
 | `op_frame_document_from_load` | fast | `body_token: f64, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
+| `op_frame_document_srcdoc` | fast | `iframe_nid: u32, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_load_stylesheet` | async | `owner_nid: u32, url: String` | `String`: `{"ok":true,"responseUrl":...}` or `{"ok":false}` |
 | `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
+| `op_history_url` | fast | `url: String, frame_id: u32` | `bool`: false, and nothing kept, when the document may not be rewritten to `url`; `""` clears it |
+| `op_wasm_memory_admit` | fast | `held_bytes: f64, delta_bytes: f64` | `bool`: whether the isolate's WebAssembly memory budget allows `delta_bytes` more |
+
+`op_get_cookies` and `op_set_cookie` answer a document with an opaque origin (a frame
+sandboxed without `allow-same-origin`) with the string `"\u0000sandboxed"`, on which
+the shim throws `SecurityError`; `op_set_cookie` otherwise returns `null`. Both read
+and write an `about:srcdoc` or `about:blank` frame's cookies for its creator's URL.
+
+`op_history_url` replaces upstream's page-writable `__virtualUrl` global: the
+History API reports each move of the document URL, the host checks it against the
+committed URL ("can have its URL rewritten") and keeps it, and `Page.Url` reads
+only that. `op_wasm_memory_admit` is asked before `new WebAssembly.Memory` and
+`grow`; the shim guards both with a `typeof` test.
 
 `op_run_fetched_script` runs the host-held body of a 2xx `no-cors` internal load
 of the calling realm, named by its request URL. `op_frame_document_from_load`
 queues a frame from the host-held body and final URL of a `navigate` internal load
 (what `op_frame_document_ready` did from shim-supplied values; the shim no longer
-calls that op). `op_load_stylesheet` fetches a dynamic `<link rel=stylesheet>` and
+calls that op). `op_frame_document_srcdoc` queues an `about:srcdoc` frame from the
+`srcdoc` attribute of the calling realm's `<iframe>` node, read host-side; the frame
+takes its origin from the calling realm. `op_load_stylesheet` fetches a dynamic `<link rel=stylesheet>` and
 its `@import` graph host-side, rebases its `url()`s, computes origin-clean from the
 responses and installs the result in the stylesheet store. A token is taken once,
 only by the realm that loaded it and only in the mode it was loaded with.

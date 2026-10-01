@@ -83,6 +83,9 @@ public enum ResourceType
 
     /// <summary>Anything else.</summary>
     Other,
+
+    /// <summary>Audio or video. Port addition, for the mixed-content upgrade.</summary>
+    Media,
 }
 
 /// <summary>
@@ -137,6 +140,36 @@ public sealed record ResourceRequest
     /// module while its credentials mode is still relative to the owning document.
     /// </summary>
     public Uri? Referrer { get; set; }
+
+    /// <summary>
+    /// The nearest secure ancestor of the initiating document, when the initiator itself
+    /// is not secure (a srcdoc or http frame in an https page). Mixed content is decided
+    /// against it (<see cref="MixedContent.Context"/>). Port addition.
+    /// </summary>
+    public Uri? SecureAncestor { get; set; }
+
+    /// <summary>
+    /// The referrer policy the Referer is computed under; null is the default,
+    /// strict-origin-when-cross-origin. Port addition: Rust applies the default to every
+    /// request (see <see cref="ReferrerPolicies"/>).
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicy { get; set; }
+
+    /// <summary>
+    /// The URL of the top-level document when the initiating document is a frame; null
+    /// when the initiator is itself the top-level document (or there is none). With
+    /// <see cref="CrossSiteAncestor"/> it decides the request's site for cookies and its
+    /// cookie partition. Port addition: Rust has neither.
+    /// </summary>
+    public Uri? TopLevel { get; set; }
+
+    /// <summary>
+    /// Whether the initiating document, or a frame between it and the top-level document,
+    /// is cross-site with the top-level document. Such a document has no site for cookies:
+    /// its requests carry SameSite=None cookies only, and its partitioned cookies are keyed
+    /// with the cross-site bit. Port addition.
+    /// </summary>
+    public bool CrossSiteAncestor { get; set; }
 
     /// <summary>Fetch mode.</summary>
     public RequestMode Mode { get; set; }
@@ -284,6 +317,7 @@ public sealed record ResourceRequest
         ResourceType.Stylesheet => "style",
         ResourceType.Image => "image",
         ResourceType.Font => "font",
+        ResourceType.Media => "video",
         _ => "empty",
     };
 

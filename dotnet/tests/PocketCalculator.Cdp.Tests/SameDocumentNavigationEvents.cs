@@ -121,6 +121,29 @@ public sealed class SameDocumentNavigationEvents
     }
 
     /// <summary>
+    /// L9: the URL the host reports moves only through the History API. A page that
+    /// writes upstream's page-visible <c>__virtualUrl</c> global does not move it.
+    /// </summary>
+    [Fact]
+    public async Task APageWritingTheVirtualUrlGlobalDoesNotMoveTheReportedUrl()
+    {
+        CoreCdp.AllowLoopback();
+        using CoreCdpServer server = CoreCdpServer.Html("<html><body><p>spa</p></body></html>");
+        var ctx = CdpContext.New();
+        using IDisposable owned = CoreCdp.Owned(ctx);
+        await LoadAsync(ctx, server.Url);
+        ctx.PendingEvents.Clear();
+
+        await CoreCdp.EvalAsync(ctx, 3, "globalThis.__virtualUrl = 'https://bank.example/login'; 1", Session);
+
+        List<string> methods = [.. ctx.PendingEvents.Select(e => e.Method)];
+        Assert.DoesNotContain("Page.navigatedWithinDocument", methods);
+        Assert.DoesNotContain("Target.targetInfoChanged", methods);
+        JsonNode targets = await CoreCdp.CdpAsync(ctx, 4, "Target.getTargets", new JsonObject(), Session);
+        Assert.DoesNotContain("bank.example", targets.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A <c>Page.navigate</c> that differs from the loaded document only in its fragment is
     /// a same-document navigation, not a load.
     /// </summary>

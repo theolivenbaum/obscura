@@ -38,11 +38,32 @@ public sealed class PocketCalculatorState
     public string Url { get; set; } = "about:blank";
 
     /// <summary>
+    /// The URL <c>history.pushState</c>/<c>replaceState</c> (or a fragment navigation)
+    /// moved this document to, null while it is still at <see cref="Url"/>.
+    /// </summary>
+    /// <remarks>
+    /// Port addition (SECURITY.md L9). Rust keeps this in the page-writable global
+    /// <c>__virtualUrl</c> and the host reads it back from there. Here bootstrap.js reports
+    /// each move through <c>op_history_url</c>, which refuses a URL the document could not
+    /// rewrite itself to, and the host reads only this.
+    /// </remarks>
+    public string? HistoryUrl { get; set; }
+
+    /// <summary>
     /// Whether the document has an opaque origin whatever its URL says, as a frame
     /// sandboxed without <c>allow-same-origin</c> does. Port addition: Rust derives
     /// no origin host-side at all (see <see cref="StateHelpers.DocumentOrigin"/>).
     /// </summary>
     public bool OpaqueOrigin { get; set; }
+
+    /// <summary>
+    /// The URL of the nearest ancestor document loaded over https (or wss), or null when
+    /// no ancestor is. A frame whose own URL is not secure (<c>about:srcdoc</c>,
+    /// <c>about:blank</c>, <c>data:</c>, or an http frame) still has its requests checked
+    /// for mixed content against it, as Chromium checks the frame and the top frame
+    /// (SECURITY.md I7). Port addition.
+    /// </summary>
+    public string? SecureAncestorUrl { get; set; }
 
     /// <summary>Bodies of this document's internal loads, held for the host (see <see cref="InternalLoads"/>).</summary>
     public InternalLoadStore InternalLoadStore { get; } = new();
@@ -63,6 +84,69 @@ public sealed class PocketCalculatorState
     /// set it to the source document URL.
     /// </summary>
     public string Referrer { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The policy of the document's <c>Referrer-Policy</c> response header, or null. A
+    /// <c>&lt;meta name=referrer&gt;</c> overrides it (<see cref="StateHelpers.DocumentReferrerPolicy"/>).
+    /// Port addition: Rust has no referrer policy.
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicyHeader { get; set; }
+
+    /// <summary>
+    /// A link's own policy (<c>referrerpolicy</c>, <c>rel=noreferrer</c>) for the navigation
+    /// the shim is about to queue; taken by <c>op_navigate</c>.
+    /// </summary>
+    public ReferrerPolicy? NextNavigationReferrerPolicy { get; set; }
+
+    /// <summary>Memo of <see cref="StateHelpers.DocumentReferrerPolicy"/>.</summary>
+    internal (ulong Activity, ulong Document, ReferrerPolicy? Header, ReferrerPolicy Policy)? ReferrerPolicyCache { get; set; }
+
+    /// <summary>
+    /// For an <c>about:srcdoc</c> document, the URL its requests take their referrer from:
+    /// its parent's (Fetch "determine request's referrer" walks out of srcdoc documents, and
+    /// Chromium 141 sends the parent's URL). Null for any other document. Port addition.
+    /// </summary>
+    public string? ReferrerSourceUrl { get; set; }
+
+    /// <summary>
+    /// For a frame's document, the URL of the page's (top-level) document; null for the
+    /// page's own. Port addition: with <see cref="CrossSiteAncestor"/> it is the frame's
+    /// site for cookies and cookie partition (CHIPS), which Rust does not have.
+    /// </summary>
+    public string? TopLevelUrl { get; set; }
+
+    /// <summary>
+    /// Whether this frame's document, or a frame between it and the page, is cross-site
+    /// with the page (an opaque-origin frame always is). Such a document sees and sends
+    /// SameSite=None cookies only, and its partitioned cookies carry the cross-site bit.
+    /// False for the page. Port addition.
+    /// </summary>
+    public bool CrossSiteAncestor { get; set; }
+
+    /// <summary>
+    /// The URL a srcdoc or about:blank frame takes its origin, site and cookie URL from (its
+    /// parent's, which is the creator's); null for any other document, whose origin, site
+    /// and cookie URL are its own URL's. Port addition.
+    /// </summary>
+    public string? SiteUrl { get; set; }
+
+    /// <summary>
+    /// For a srcdoc or about:blank frame, the frame id of the document whose origin it
+    /// inherited (through any chain of such frames); null for any other document, which owns
+    /// its origin. Tells an inherited opaque origin from a new one (<see cref="StateHelpers.SameOrigin"/>).
+    /// Port addition.
+    /// </summary>
+    public uint? OriginOwnerFrameId { get; set; }
+
+    /// <summary>
+    /// A srcdoc or about:blank frame's fallback base URL: its parent's document base URL
+    /// when the frame was created (HTML "fallback base URL"). Null for any other document,
+    /// whose fallback base URL is its own URL. Port addition.
+    /// </summary>
+    public string? FallbackBaseUrl { get; set; }
+
+    /// <summary>The external stylesheet that referenced each CSS image and font URL.</summary>
+    public CssSubresourceReferrers CssSubresourceReferrers { get; } = new();
 
     /// <summary>CDP <c>Network.setBlockedURLs</c> patterns, matched with <c>glob_match</c>.</summary>
     public List<string> BlockedUrls { get; } = [];
@@ -86,6 +170,22 @@ public sealed class PocketCalculatorState
 
     /// <summary>A navigation recorded by <c>op_navigate</c>, drained by the Page.</summary>
     public PendingNavigation? PendingNavigation { get; set; }
+
+    /// <summary>
+    /// Navigations of a child frame by name that this realm's document started (a form
+    /// with <c>target</c> naming an iframe), recorded by <c>op_navigate_frame</c> and
+    /// followed by the Page as it follows a frame's own navigation. Port addition: the
+    /// Rust shim ignores <c>target</c> and navigates the realm's own document.
+    /// </summary>
+    public List<PendingNavigation> PendingFrameNavigations { get; } = [];
+
+    /// <summary>
+    /// The document the next frame document load (<c>op_fetch_url</c> in mode
+    /// <c>navigate</c>) is initiated by, set by the host around one
+    /// <c>navigateFrame</c> call and taken by that load. Host-only; null means the
+    /// calling realm's document. Port addition, see <see cref="FrameNavigationInitiator"/>.
+    /// </summary>
+    public FrameNavigationInitiator? NextFrameNavigation { get; set; }
 
     /// <summary>
     /// <see cref="Stopwatch"/> timestamp of the last activation-triggering input the host
@@ -118,7 +218,15 @@ public sealed class PocketCalculatorState
     /// </summary>
     public List<(string Name, string Payload)> PendingBindingCalls { get; } = [];
 
-    /// <summary>UTF-16 length of the payloads in <see cref="PendingBindingCalls"/>.</summary>
+    /// <summary>
+    /// Binding calls made in a child frame's realm, with that frame's id, so the CDP layer
+    /// reports them with the frame's execution context as Chromium does. Port addition:
+    /// the Rust engine has no frame realm that runs bindings. Shares the limits of
+    /// <see cref="PendingBindingCalls"/>.
+    /// </summary>
+    public List<(uint FrameId, string Name, string Payload)> PendingFrameBindingCalls { get; } = [];
+
+    /// <summary>UTF-16 length of the payloads in <see cref="PendingBindingCalls"/> and <see cref="PendingFrameBindingCalls"/>.</summary>
     public long PendingBindingCallBytes { get; set; }
 
     /// <summary>
@@ -179,6 +287,13 @@ public sealed class PocketCalculatorState
 
     /// <summary>Which frame this state belongs to; 0 is the page's own realm.</summary>
     public uint FrameId { get; set; }
+
+    /// <summary>
+    /// When this realm last took focus, on a clock shared by every document; 0 never.
+    /// Port addition (child-frame CDP contexts): CDP key input goes to the realm with the
+    /// latest stamp, the way Chromium sends it to the focused frame.
+    /// </summary>
+    public long FocusStamp { get; set; }
 
     /// <summary>
     /// postMessage traffic between realms, waiting to be delivered. Queued on the
@@ -558,6 +673,12 @@ public sealed class PendingFrame
     /// sandboxed without <c>allow-same-origin</c> does. Port addition.
     /// </summary>
     public bool OpaqueOrigin { get; init; }
+
+    /// <summary>
+    /// The policy of the frame document's <c>Referrer-Policy</c> response header, or null.
+    /// Port addition: Rust has no referrer policy.
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicyHeader { get; init; }
 }
 
 /// <summary>One <c>postMessage</c> in flight between two realms.</summary>
@@ -674,10 +795,26 @@ public sealed class ByteArrayJsBuffer(byte[] bytes) : IJsBuffer
 /// initiator. <see cref="Initiator"/> and <see cref="UserActivated"/> are what the
 /// request needs to apply SameSite, <c>Sec-Fetch-*</c> and Referer as Chromium does.
 /// </remarks>
+/// <summary>
+/// Who starts a child frame's navigation, when that is not the document embedding it: a
+/// frame navigating itself (a POST form) is its own initiator, so Chromium 141 sends its
+/// origin, its URL as the Referer and fetch metadata judged from it.
+/// </summary>
+public sealed record FrameNavigationInitiator(PocketCalculatorState Initiator, bool UserActivated, ReferrerPolicy Policy);
+
 public sealed record PendingNavigation(string Url, string Method, string Body)
 {
+    /// <summary>The browsing context name a navigation targets (<c>target</c>), or null for the realm's own.</summary>
+    public string? Target { get; init; }
+
     /// <summary>The URL of the document that started the navigation.</summary>
     public string Initiator { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The referrer policy of the navigation: the link's own, else the document's. Port
+    /// addition.
+    /// </summary>
+    public ReferrerPolicy ReferrerPolicy { get; init; } = ReferrerPolicies.Default;
 
     /// <summary>Whether the initiating realm had transient user activation.</summary>
     public bool UserActivated { get; init; }

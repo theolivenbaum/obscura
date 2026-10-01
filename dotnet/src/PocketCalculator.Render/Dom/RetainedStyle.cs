@@ -173,6 +173,7 @@ public static class RetainedStylePlanner
             || (local is "input" && name is "size" or "type" or "value")
             || (local is "select" && name is "size")
             || (local is "textarea" && name is "cols" or "rows" or "wrap")
+            || (local is "dialog" && name is "open")
             || name is "dir" or "lang" or "xml:lang")
         {
             return RetainedAttributeMutationKind.Subtree;

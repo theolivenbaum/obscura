@@ -523,21 +523,15 @@ internal static class DomStyleFixups
             }
 
             List<List<string>>? areas = style.GridAreas is { Count: > 0 } gridAreas ? gridAreas : null;
-            Dictionary<string, short>? colLines = style.GridColLineNames;
-            Dictionary<string, short>? rowLines = style.GridRowLineNames;
-            if (areas is null && colLines is null && rowLines is null)
-            {
-                continue;
-            }
-
             List<EffectiveGridChild> gridChildren = [];
             CollectEffectiveGridChildren(
                 tree, DomTraversal.RenderedChildren(tree, id), styles, gridChildren);
 
+            // name -> (rowStart, rowEnd, colStart, colEnd) in 0-based track indices.
+            Dictionary<string, (int R0, int R1, int C0, int C1)>? spans = null;
             if (areas is not null)
             {
-                // name -> (rowStart, rowEnd, colStart, colEnd) in 0-based track indices.
-                Dictionary<string, (int R0, int R1, int C0, int C1)> spans = new(StringComparer.Ordinal);
+                spans = new(StringComparer.Ordinal);
                 for (int r = 0; r < areas.Count; r++)
                 {
                     List<string> row = areas[r];
@@ -588,25 +582,34 @@ internal static class DomStyleFixups
                 }
             }
 
-            if (colLines is not null || rowLines is not null)
+            // Deviation from Rust, which resolves a name only when the container declares it
+            // (one line per name, a lone name or `name / name`) and otherwise leaves the item
+            // auto-placed. css-grid-2 8.3 (Chromium): the nth line of a name, counted from
+            // either end, spans to a named line, and every implicit line counts as having any
+            // name there are too few lines of, so `grid-area: a / b` with neither name declared
+            // places the item past the explicit grid.
+            GridLineNames? columnNames = null;
+            GridLineNames? rowNames = null;
+            foreach (EffectiveGridChild child in gridChildren)
             {
-                foreach (EffectiveGridChild child in gridChildren)
+                if (EffectiveGridChildStyle(child, styles) is not { } childStyle)
                 {
-                    if (EffectiveGridChildStyle(child, styles) is not { } childStyle)
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    if (childStyle.GridColumnRaw is { } columnRaw
-                        && colLines is not null
-                        && ResolveNamedPlacement(columnRaw, colLines) is { } column)
+                if (childStyle.GridColumnRaw is { } columnRaw)
+                {
+                    columnNames ??= GridLineNames.For(style, spans, column: true);
+                    if (ResolveNamedPlacement(columnRaw, columnNames) is { } column)
                     {
                         childStyle.GridColumn = column;
                     }
+                }
 
-                    if (childStyle.GridRowRaw is { } rowRaw
-                        && rowLines is not null
-                        && ResolveNamedPlacement(rowRaw, rowLines) is { } line)
+                if (childStyle.GridRowRaw is { } rowRaw)
+                {
+                    rowNames ??= GridLineNames.For(style, spans, column: false);
+                    if (ResolveNamedPlacement(rowRaw, rowNames) is { } line)
                     {
                         childStyle.GridRow = line;
                     }
@@ -622,64 +625,272 @@ internal static class DomStyleFixups
     private static short AreaLine(int line) => (short)Math.Min(line, Layout.GridLimits.MaxTracks);
 
     /// <summary>
-    /// Resolve a raw <c>grid-column</c>/<c>grid-row</c> value that names grid lines into a
-    /// numeric taffy line. Returns <c>null</c> when a referenced name is absent.
+    /// The named lines of one axis of a grid container, each name's lines ascending, and the
+    /// explicit track count its implicit lines are counted from.
     /// </summary>
-    internal static TaffyLine? ResolveNamedPlacement(string raw, Dictionary<string, short> map)
+    internal sealed class GridLineNames(Dictionary<string, List<int>> lines, int explicitCount)
     {
-        TaffyGridPlacement? Side(string token, bool isStart)
+        public Dictionary<string, List<int>> Lines { get; } = lines;
+
+        public int ExplicitCount { get; } = explicitCount;
+
+        internal static GridLineNames For(
+            LayoutStyle style,
+            Dictionary<string, (int R0, int R1, int C0, int C1)>? areas,
+            bool column)
         {
-            string t = token.Trim();
-            if (t.Length == 0 || string.Equals(t, "auto", StringComparison.OrdinalIgnoreCase))
+            Dictionary<string, List<int>> lines = new(StringComparer.Ordinal);
+            void Add(string name, int line)
             {
-                return TaffyGridPlacement.Auto;
+                if (!lines.TryGetValue(name, out List<int>? list))
+                {
+                    lines[name] = list = [];
+                }
+
+                if (!list.Contains(line))
+                {
+                    list.Add(line);
+                }
             }
 
-            // Integers are clamped to the grid limit as ParseGridPlacement clamps them; Rust
-            // parses i16/u16 and drops the whole placement on overflow.
-            if (t.StartsWith("span", StringComparison.Ordinal)
-                && ComputedStyle.ParseIntegerClamped(t[4..].Trim(), Layout.GridLimits.MaxTracks) is { } span
-                && span >= 0)
+            string? text = column ? style.GridTemplateColumnsText : style.GridTemplateRowsText;
+            if (text is not null)
             {
-                return TaffyGridPlacement.FromSpan((ushort)span);
+                foreach ((string name, short line) in ComputedStyle.ParseTrackListNamed(text).Names)
+                {
+                    Add(name, line);
+                }
+            }
+            else if ((column ? style.GridColLineNames : style.GridRowLineNames) is { } map)
+            {
+                foreach ((string name, short line) in map)
+                {
+                    Add(name, line);
+                }
             }
 
-            if (ComputedStyle.ParseIntegerClamped(t, Layout.GridLimits.MaxTracks) is { } index)
+            int areaCount = 0;
+            if (areas is not null)
             {
-                return TaffyGridPlacement.FromLineIndex((short)index);
+                foreach ((string name, (int r0, int r1, int c0, int c1)) in areas)
+                {
+                    int first = column ? c0 : r0;
+                    int last = column ? c1 : r1;
+                    Add(name + "-start", first + 1);
+                    Add(name + "-end", last + 2);
+                    areaCount = Math.Max(areaCount, last + 1);
+                }
             }
 
-            if (map.TryGetValue(t, out short direct))
+            foreach (List<int> list in lines.Values)
             {
-                return TaffyGridPlacement.FromLineIndex(direct);
+                list.Sort();
             }
 
-            string suffixed = t + (isStart ? "-start" : "-end");
-            return map.TryGetValue(suffixed, out short suffix)
-                ? TaffyGridPlacement.FromLineIndex(suffix)
-                : null;
+            // An auto-fill/auto-fit repetition counts once here; its real count is known only
+            // at layout.
+            int trackCount = 0;
+            foreach (TaffyGridTemplateComponent component in column ? style.GridTemplateColumns : style.GridTemplateRows)
+            {
+                trackCount += component.Kind == TaffyGridTemplateComponentKind.Single
+                    ? 1
+                    : component.Repetition!.Tracks.Count
+                        * (component.Repetition.Count.Kind == Layout.RepetitionCountKind.Count
+                            ? component.Repetition.Count.Count
+                            : 1);
+            }
+
+            return new GridLineNames(lines, Math.Min(Math.Max(trackCount, areaCount), Layout.GridLimits.MaxTracks));
+        }
+    }
+
+    private enum GridSideKind : byte
+    {
+        Auto,
+        Line,
+        Span,
+        NamedLine,
+        NamedSpan,
+    }
+
+    private readonly record struct GridSide(GridSideKind Kind, int Count, string? Name);
+
+    /// <summary>One <c>&lt;grid-line&gt;</c>, or null when it is not one.</summary>
+    private static GridSide? ParseGridSide(string text)
+    {
+        bool span = false;
+        int? count = null;
+        string? name = null;
+        foreach (string part in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (CssText.EqualsAscii(part, "span") && !span)
+            {
+                span = true;
+            }
+            else if (CssText.EqualsAscii(part, "auto"))
+            {
+                return span || count is not null || name is not null ? null : new GridSide(GridSideKind.Auto, 0, null);
+            }
+            else if (ComputedStyle.ParseIntegerClamped(part, Layout.GridLimits.MaxTracks) is { } value && count is null)
+            {
+                count = (int)value;
+            }
+            else if (name is null && ComputedStyle.ParseIntegerClamped(part, Layout.GridLimits.MaxTracks) is null)
+            {
+                name = part;
+            }
+            else
+            {
+                return null;
+            }
         }
 
+        if (span)
+        {
+            return count is <= 0 ? null : new GridSide(name is null ? GridSideKind.Span : GridSideKind.NamedSpan, count ?? 1, name);
+        }
+
+        if (name is null)
+        {
+            return count is null or 0 ? count is null ? new GridSide(GridSideKind.Auto, 0, null) : null : new GridSide(GridSideKind.Line, count.Value, null);
+        }
+
+        return count == 0 ? null : new GridSide(GridSideKind.NamedLine, count ?? 0, name);
+    }
+
+    /// <summary>
+    /// The line a named line resolves to, 1-based from the start of the explicit grid; lines
+    /// before it are 0 and below.
+    /// </summary>
+    private static int NamedLine(GridSide side, bool isStart, GridLineNames names)
+    {
+        int n = side.Count;
+        if (n == 0)
+        {
+            // A lone name first matches the edge of a named area.
+            if (names.Lines.TryGetValue(side.Name + (isStart ? "-start" : "-end"), out List<int>? edge))
+            {
+                return edge[0];
+            }
+
+            n = 1;
+        }
+
+        int count = names.Lines.TryGetValue(side.Name!, out List<int>? lines) ? lines.Count : 0;
+        int last = names.ExplicitCount + 1;
+        if (n > 0)
+        {
+            return n <= count ? lines![n - 1] : last + (n - count);
+        }
+
+        return -n <= count ? lines![count + n] : 1 - (-n - count);
+    }
+
+    /// <summary>A 1-based line (0 and below before the explicit grid) as a taffy line index.</summary>
+    private static TaffyGridPlacement TaffyLineAt(int line, GridLineNames names) =>
+        TaffyGridPlacement.FromLineIndex((short)Math.Clamp(
+            line >= 1 ? line : line - names.ExplicitCount - 2,
+            -Layout.GridLimits.MaxTracks,
+            Layout.GridLimits.MaxTracks));
+
+    /// <summary>A numeric taffy line index as a 1-based line.</summary>
+    private static int NormalizedLine(int line, GridLineNames names) =>
+        line > 0 ? line : names.ExplicitCount + 2 + line;
+
+    /// <summary>
+    /// Resolve a raw <c>grid-column</c>/<c>grid-row</c> value that names grid lines into a
+    /// numeric taffy line. Returns <c>null</c> when it is not a valid placement.
+    /// </summary>
+    internal static TaffyLine? ResolveNamedPlacement(string raw, GridLineNames names)
+    {
         int slash = raw.IndexOf('/', StringComparison.Ordinal);
+        if (ParseGridSide(slash >= 0 ? raw[..slash] : raw) is not { } start)
+        {
+            return null;
+        }
+
+        GridSide end;
         if (slash >= 0)
         {
-            TaffyGridPlacement? start = Side(raw[..slash], true);
-            TaffyGridPlacement? end = Side(raw[(slash + 1)..], false);
-            return start is { } s && end is { } e ? new TaffyLine(s, e) : null;
-        }
+            if (ParseGridSide(raw[(slash + 1)..]) is not { } parsed)
+            {
+                return null;
+            }
 
-        string name = raw.Trim();
-        if (map.TryGetValue(name + "-start", out short areaStart))
+            end = parsed;
+        }
+        else
         {
-            TaffyGridPlacement end = map.TryGetValue(name + "-end", out short areaEnd)
-                ? TaffyGridPlacement.FromLineIndex(areaEnd)
-                : TaffyGridPlacement.Auto;
-            return new TaffyLine(TaffyGridPlacement.FromLineIndex(areaStart), end);
+            // grid-column: <name> sets both ends to the name; anything else leaves the end auto.
+            end = start is { Kind: GridSideKind.NamedLine, Count: 0 } ? start : new GridSide(GridSideKind.Auto, 0, null);
         }
 
-        return map.TryGetValue(name, out short only)
-            ? new TaffyLine(TaffyGridPlacement.FromLineIndex(only), TaffyGridPlacement.Auto)
-            : null;
+        int? startLine = start.Kind switch
+        {
+            GridSideKind.Line => NormalizedLine(start.Count, names),
+            GridSideKind.NamedLine => NamedLine(start, true, names),
+            _ => null,
+        };
+        int? endLine = end.Kind switch
+        {
+            GridSideKind.Line => NormalizedLine(end.Count, names),
+            GridSideKind.NamedLine => NamedLine(end, false, names),
+            _ => null,
+        };
+
+        // A named span counts the lines of that name away from the definite other side.
+        if (end.Kind == GridSideKind.NamedSpan && startLine is { } from)
+        {
+            endLine = NamedSpanEnd(from, end, names);
+        }
+        else if (start.Kind == GridSideKind.NamedSpan && endLine is { } to)
+        {
+            startLine = NamedSpanStart(to, start, names);
+        }
+
+        TaffyGridPlacement Placement(GridSide side, int? line) =>
+            line is { } resolved ? TaffyLineAt(resolved, names)
+            : side.Kind == GridSideKind.Span ? TaffyGridPlacement.FromSpan((ushort)side.Count)
+            // A named span against an automatic position is a span of one.
+            : side.Kind == GridSideKind.NamedSpan ? TaffyGridPlacement.FromSpan(1)
+            : TaffyGridPlacement.Auto;
+
+        return new TaffyLine(Placement(start, startLine), Placement(end, endLine));
+    }
+
+    private static int NamedSpanEnd(int from, GridSide span, GridLineNames names)
+    {
+        int last = names.ExplicitCount + 1;
+        int found = 0;
+        if (names.Lines.TryGetValue(span.Name!, out List<int>? lines))
+        {
+            foreach (int line in lines)
+            {
+                if (line > from && ++found == span.Count)
+                {
+                    return line;
+                }
+            }
+        }
+
+        return Math.Max(from, last) + (span.Count - found);
+    }
+
+    private static int NamedSpanStart(int to, GridSide span, GridLineNames names)
+    {
+        int found = 0;
+        if (names.Lines.TryGetValue(span.Name!, out List<int>? lines))
+        {
+            for (int i = lines.Count - 1; i >= 0; i--)
+            {
+                if (lines[i] < to && ++found == span.Count)
+                {
+                    return lines[i];
+                }
+            }
+        }
+
+        return Math.Min(to, 1) - (span.Count - found);
     }
 
     /// <summary>

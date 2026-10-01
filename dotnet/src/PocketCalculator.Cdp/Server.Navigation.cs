@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using PocketCalculator.Browser;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Runtime;
 
 namespace PocketCalculator.Cdp;
 
@@ -43,6 +44,7 @@ public static partial class CdpServer
         if (parsed is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}");
+            replyTx.TryWrite(ServerSupport.UnansweredMarker);
             return;
         }
 
@@ -129,11 +131,7 @@ public static partial class CdpServer
         var navBody = req.Params.Get("__body").AsStringOr(string.Empty);
         var navInitiator = Domains.Page.PageInitiator(url, navMethod, navBody, req.Params);
 
-        List<string> preloadScripts = [];
-        foreach (var (_, source) in ctx.PreloadScripts)
-        {
-            preloadScripts.Add(source);
-        }
+        List<string> preloadScripts = ctx.PreloadSourcesFor(page.Id);
 
         if (ctx.InterceptSink is { } sink)
         {
@@ -414,6 +412,7 @@ public static partial class CdpServer
         if (req is null)
         {
             CdpLog.Warn($"Invalid CDP: {parseError}: {ServerSupport.Utf8Preview(text, 200)}");
+            replyTx.TryWrite(ServerSupport.UnansweredMarker);
             return;
         }
 
@@ -429,7 +428,16 @@ public static partial class CdpServer
         CdpLog.Debug($"CDP: {req.Method} (id={req.Id}, s={req.SessionId ?? "None"})");
 
         ServiceLivePageRenderResources(ctx);
+        // An awaited evaluate may park when the connection has other work, and be
+        // answered by the processor when its promise settles (ParkedCommand). Only a
+        // processor sets ConnectionHasWork; a direct caller always awaits inline.
+        if (ctx.ConnectionHasWork is { } hasWork)
+        {
+            CdpAwaitParking.YieldWhen = () => hasWork() || ctx.AnyPendingBindingCalls();
+        }
+
         var response = await Dispatcher.DispatchAsync(req, ctx).ConfigureAwait(false);
+        CdpAwaitParking.YieldWhen = null;
         ServiceLivePageRenderResources(ctx);
 
         // Chromium CDP semantics: events emitted as a side-effect of a command
@@ -439,9 +447,27 @@ public static partial class CdpServer
         // those events; if the response lands first, accessing the page errors
         // with "Cannot read properties of undefined".
         ForwardPendingEvents(ctx, replyTx);
-        replyTx.TryWrite(response.ToJson());
+        if (response.Parked)
+        {
+            foreach (var parked in ctx.ParkedCommands)
+            {
+                parked.ReplyTx ??= replyTx;
+            }
 
-        if (CheckPendingNavigation(ctx, req.SessionId) is { } pending)
+            return;
+        }
+
+        replyTx.TryWrite(response.ToJson());
+        await FollowPendingNavigationAsync(ctx, req.SessionId, replyTx).ConfigureAwait(false);
+    }
+
+    /// <summary>Run the navigation a command queued (a form submit, <c>location.assign</c>), if any.</summary>
+    private static async Task FollowPendingNavigationAsync(
+        CdpContext ctx,
+        string? sessionId,
+        ChannelWriter<string> replyTx)
+    {
+        if (CheckPendingNavigation(ctx, sessionId) is { } pending)
         {
             var (navUrl, navMethod, navBody) = pending;
             CdpLog.Info(
@@ -451,12 +477,57 @@ public static partial class CdpServer
                 Id = 0,
                 Method = "Page.navigate",
                 Params = Domains.Page.JsNavigationParams(pending),
-                SessionId = req.SessionId,
+                SessionId = sessionId,
                 HostInitiated = true,
             };
             _ = await Dispatcher.DispatchAsync(navRequest, ctx).ConfigureAwait(false);
             ForwardPendingEvents(ctx, replyTx);
         }
+    }
+
+    /// <summary>
+    /// Answer every parked awaited command whose promise has settled, failed or run out
+    /// of time, in the order they parked (see <see cref="ParkedCommand"/>).
+    /// </summary>
+    internal static async Task ResumeParkedCommandsAsync(CdpContext ctx)
+    {
+        for (var i = 0; i < ctx.ParkedCommands.Count;)
+        {
+            var parked = ctx.ParkedCommands[i];
+            var response = await Dispatcher.TryResumeParkedAsync(parked, ctx).ConfigureAwait(false);
+            if (response is null)
+            {
+                i++;
+                continue;
+            }
+
+            ctx.ParkedCommands.RemoveAt(i);
+            if (parked.ReplyTx is not { } replyTx)
+            {
+                continue;
+            }
+
+            ForwardPendingEvents(ctx, replyTx);
+            replyTx.TryWrite(response.ToJson());
+            await FollowPendingNavigationAsync(ctx, parked.SessionId, replyTx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Milliseconds until the first parked command's deadline, or null when none is parked.</summary>
+    private static long? NextParkedDeadlineMs(CdpContext ctx)
+    {
+        if (ctx.ParkedCommands.Count == 0)
+        {
+            return null;
+        }
+
+        var next = long.MaxValue;
+        foreach (var parked in ctx.ParkedCommands)
+        {
+            next = Math.Min(next, parked.Await.Deadline);
+        }
+
+        return Math.Max(0, next - Environment.TickCount64);
     }
 
     private static PendingNavigation? CheckPendingNavigation(

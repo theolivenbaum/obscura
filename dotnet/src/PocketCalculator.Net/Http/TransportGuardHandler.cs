@@ -29,6 +29,14 @@ namespace PocketCalculator.Net;
 /// not be configured for untrusted content.
 /// </para>
 /// </remarks>
+/// <para>
+/// HSTS (SECURITY.md I7). The <c>Strict-Transport-Security</c> header of every https
+/// response is recorded in the client's <see cref="HstsStore"/>, whichever path sent the
+/// request; this handler only sees responses that passed certificate validation. It is
+/// also the backstop for the upgrade: the request paths rewrite a known host's http URL
+/// to https themselves (and report it as a redirect), and anything that reaches here
+/// still on http is rewritten silently.
+/// </para>
 internal sealed class TransportGuardHandler(
     PocketCalculatorHttpClient owner,
     bool proxied,
@@ -38,6 +46,11 @@ internal sealed class TransportGuardHandler(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
+        if (request.RequestUri is { } requested && owner.Hsts.Upgrade(requested) is { } upgraded)
+        {
+            request.RequestUri = upgraded;
+        }
+
         if (request.RequestUri is { } target)
         {
             if (owner.IsBlockedTracker(target))
@@ -51,7 +64,20 @@ internal sealed class TransportGuardHandler(
             }
         }
 
-        return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (request.RequestUri is { } answered
+            && string.Equals(answered.Scheme, "https", StringComparison.Ordinal)
+            && response.Headers.NonValidated.TryGetValues("Strict-Transport-Security", out var sts))
+        {
+            // RFC 6797 8.1: only the first header is processed.
+            foreach (var value in sts)
+            {
+                owner.Hsts.ProcessHeader(answered, value);
+                break;
+            }
+        }
+
+        return response;
     }
 
     private async Task VetProxiedTargetAsync(Uri target, CancellationToken cancellationToken)

@@ -131,11 +131,17 @@ internal static partial class Tools
     {
         var selector = ResolveTarget(args, state);
 
+        // Every snippet in this file reaches the DOM through __obscura_host.dom, the
+        // built-ins as bootstrap.js left them (SECURITY.md L10). DEVIATION from
+        // crates/obscura-mcp, whose snippets call document.querySelector, el.click and
+        // new Event on whatever the page has put there, so a page could send an agent's
+        // click or fill to another element, or answer for it.
         var js = $$"""
             (function(){
-                var el = document.querySelector({{McpJson.String(selector)}});
+                var h = __obscura_host.dom;
+                var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                 if (!el) return "error:element not found";
-                el.click();
+                h.call(el, 'click', []);
                 return "ok";
             })()
             """;
@@ -143,7 +149,7 @@ internal static partial class Tools
         // The agent's click stands for a user's, so it gives the page user activation:
         // a link it follows reports Sec-Fetch-User: ?1, as a real click in Chromium does.
         state.PageMut().NoteUserActivation();
-        var result = state.PageMut().Evaluate(js);
+        var result = state.PageMut().EvaluateHost(js);
         if (result.AsString() == "error:element not found")
         {
             throw new ToolException($"Element not found: {selector}");
@@ -163,11 +169,12 @@ internal static partial class Tools
 
         var js = $$"""
             (function(){
-                var el = document.querySelector({{McpJson.String(selector)}});
+                var h = __obscura_host.dom;
+                var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                 if (!el) return "error:element not found";
                 __obscura_host.setFieldValue(el, "value", {{McpJson.String(value)}});
-                el.dispatchEvent(__obscura_host.markTrusted(new Event("input", {bubbles:true})));
-                el.dispatchEvent(__obscura_host.markTrusted(new Event("change", {bubbles:true})));
+                h.dispatch(el, h.event("Event", "input", {__proto__:null,bubbles:true}, true));
+                h.dispatch(el, h.event("Event", "change", {__proto__:null,bubbles:true}, true));
                 return "ok";
             })()
             """;
@@ -191,10 +198,11 @@ internal static partial class Tools
 
         var js = $$"""
             (function(){
-                var el = document.querySelector({{McpJson.String(selector)}});
+                var h = __obscura_host.dom;
+                var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                 if (!el) return "error:element not found";
-                __obscura_host.setFieldValue(el, "value", (el.value || "") + {{McpJson.String(text)}});
-                el.dispatchEvent(__obscura_host.markTrusted(new Event("input", {bubbles:true})));
+                __obscura_host.setFieldValue(el, "value", (h.get(el, "value") || "") + {{McpJson.String(text)}});
+                h.dispatch(el, h.event("Event", "input", {__proto__:null,bubbles:true}, true));
                 return "ok";
             })()
             """;
@@ -215,21 +223,23 @@ internal static partial class Tools
         var selector = args.Get("selector").AsString();
 
         var target = selector is not null
-            ? $"document.querySelector({McpJson.String(selector)})"
-            : "document";
+            ? $"h.querySelector(h.document(), {McpJson.String(selector)})"
+            : "h.document()";
 
+        // Untrusted, as upstream: only the CDP Input domain marks key events trusted.
         var js = $$"""
             (function(){
+                var h = __obscura_host.dom;
                 var t = {{target}};
                 if (!t) return "error:element not found";
-                t.dispatchEvent(new KeyboardEvent("keydown", {key:{{McpJson.String(key)}},bubbles:true}));
-                t.dispatchEvent(new KeyboardEvent("keyup", {key:{{McpJson.String(key)}},bubbles:true}));
+                h.dispatch(t, h.event("KeyboardEvent", "keydown", {__proto__:null,key:{{McpJson.String(key)}},bubbles:true}, false));
+                h.dispatch(t, h.event("KeyboardEvent", "keyup", {__proto__:null,key:{{McpJson.String(key)}},bubbles:true}, false));
                 return "ok";
             })()
             """;
 
         state.PageMut().NoteUserActivation();
-        state.PageMut().Evaluate(js);
+        state.PageMut().EvaluateHost(js);
         await state.SettleSyntheticNavigationAsync().ConfigureAwait(false);
         return $"Pressed key '{key}'";
     }
@@ -241,18 +251,23 @@ internal static partial class Tools
 
         var js = $$"""
             (function(){
-                var el = document.querySelector({{McpJson.String(selector)}});
+                var h = __obscura_host.dom;
+                var el = h.querySelector(h.document(), {{McpJson.String(selector)}});
                 if (!el) return "error:element not found";
-                var opts = Array.from(el.options);
-                var opt = opts.find(function(o){ return o.value === {{McpJson.String(value)}} || o.text === {{McpJson.String(value)}}; });
+                var opts = h.get(el, "options") || [];
+                var opt = null;
+                for (var i = 0; i < opts.length; i++) {
+                    var o = opts[i];
+                    if (h.get(o, "value") === {{McpJson.String(value)}} || h.get(o, "text") === {{McpJson.String(value)}}) { opt = o; break; }
+                }
                 if (!opt) return "error:option not found";
-                el.value = opt.value;
-                el.dispatchEvent(new Event("change", {bubbles:true}));
+                h.set(el, "value", h.get(opt, "value"));
+                h.dispatch(el, h.event("Event", "change", {__proto__:null,bubbles:true}, false));
                 return "ok";
             })()
             """;
 
-        var result = state.PageMut().Evaluate(js);
+        var result = state.PageMut().EvaluateHost(js);
         return result.AsString() switch
         {
             "error:element not found" => throw new ToolException($"Element not found: {selector}"),
@@ -384,7 +399,7 @@ internal static partial class Tools
     {
         var maxChars = ClampToInt(args.Get("max_chars").AsU64()) ?? McpServer.DefaultTextLimit;
         var page = state.PageMut();
-        var result = page.Evaluate(MarkdownScript.HtmlToMarkdown);
+        var result = page.EvaluateHost(MarkdownScript.HtmlToMarkdown);
         var md = result.AsString() ?? string.Empty;
         return TextExtraction.Truncate(md, maxChars);
     }
@@ -402,22 +417,23 @@ internal static partial class Tools
 
         const string js = """
             (function(){
+                var h = __obscura_host.dom;
                 var out = [];
-                var seen = new Set();
-                var as = document.querySelectorAll('a[href]');
+                var seen = h.record();
+                var as = h.querySelectorAll(h.document(), 'a[href]');
                 for (var i = 0; i < as.length; i++) {
                     var a = as[i];
-                    var href = a.href || '';
-                    if (!href || href === '#' || href.startsWith('javascript:')) continue;
-                    if (seen.has(href)) continue;
-                    seen.add(href);
-                    var t = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 200);
-                    out.push({text: t, href: href});
+                    var href = h.get(a, 'href') || '';
+                    if (!href || href === '#' || h.slice(href, 0, 11) === 'javascript:') continue;
+                    if (h.hasOwn(seen, href)) continue;
+                    seen[href] = true;
+                    var t = h.squash(h.get(a, 'innerText') || h.get(a, 'textContent') || '', 200);
+                    out[out.length] = {__proto__: null, text: t, href: href};
                 }
                 return out;
             })()
             """;
-        var val = page.Evaluate(js);
+        var val = page.EvaluateHost(js);
         var arr = val.ArrayOrNull();
         var lines = new List<string>();
         if (arr is not null)
@@ -493,26 +509,28 @@ internal static partial class Tools
         var page = state.PageMut();
         var js = $$"""
             (function(){
-                var els = document.querySelectorAll('[data-obscura-ref]');
+                var h = __obscura_host.dom;
+                var els = h.querySelectorAll(h.document(), '[data-obscura-ref]');
                 var out = [];
                 for (var i = 0; i < els.length && out.length < {{limit.ToString(CultureInfo.InvariantCulture)}}; i++) {
                     var e = els[i];
-                    var label = (e.innerText || e.textContent || e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.getAttribute('value') || e.getAttribute('name') || '').trim().replace(/\s+/g, ' ').slice(0, 80);
-                    var role = e.getAttribute('role') || '';
-                    var typeAttr = e.getAttribute('type') || '';
-                    out.push({
-                        ref: e.getAttribute('data-obscura-ref'),
-                        tag: e.tagName.toLowerCase(),
+                    var label = h.squash(h.get(e, 'innerText') || h.get(e, 'textContent') || h.getAttribute(e, 'aria-label') || h.getAttribute(e, 'placeholder') || h.getAttribute(e, 'value') || h.getAttribute(e, 'name') || '', 80);
+                    var role = h.getAttribute(e, 'role') || '';
+                    var typeAttr = h.getAttribute(e, 'type') || '';
+                    out[out.length] = {
+                        __proto__: null,
+                        ref: h.getAttribute(e, 'data-obscura-ref'),
+                        tag: h.lower(h.tagName(e)),
                         type: typeAttr,
                         role: role,
-                        name: e.getAttribute('name') || '',
+                        name: h.getAttribute(e, 'name') || '',
                         label: label,
-                    });
+                    };
                 }
                 return out;
             })()
             """;
-        var val = page.Evaluate(js);
+        var val = page.EvaluateHost(js);
         var arr = val.ArrayOrNull();
         var lines = new List<string>();
         if (arr is not null)
@@ -553,17 +571,18 @@ internal static partial class Tools
         const string tagJs = """
             (function(){
                 var sel = 'a[href], button, input:not([type=hidden]), select, textarea, [role=button], [role=link], [role=checkbox], [role=tab], [role=menuitem], [role=option], [onclick], [tabindex]:not([tabindex="-1"])';
-                var els = document.querySelectorAll(sel);
+                var h = __obscura_host.dom;
+                var els = h.querySelectorAll(h.document(), sel);
                 var refs = [];
                 for (var i = 0; i < els.length; i++) {
                     var ref = 'e' + (i + 1);
-                    els[i].setAttribute('data-obscura-ref', ref);
-                    refs.push(ref);
+                    h.call(els[i], 'setAttribute', ['data-obscura-ref', ref]);
+                    refs[refs.length] = ref;
                 }
                 return refs;
             })()
             """;
-        var val = page.Evaluate(tagJs);
+        var val = page.EvaluateHost(tagJs);
         var refs = new List<string>();
         if (val.ArrayOrNull() is { } array)
         {
@@ -744,15 +763,17 @@ internal static partial class Tools
         var escaped = McpJson.String(needle);
         var js = $$"""
             (function(){
-                var t = (document.body && (document.body.innerText || document.body.textContent)) || '';
-                return t.indexOf({{escaped}}) >= 0;
+                var h = __obscura_host.dom;
+                var body = h.body();
+                var t = (body && (h.get(body, 'innerText') || h.get(body, 'textContent'))) || '';
+                return h.indexOf(t, {{escaped}}) >= 0;
             })()
             """;
         // Exponential backoff like browser_wait_for (see comment there).
         ulong tickMs = 5;
         while (true)
         {
-            var found = state.PageMut().Evaluate(js).AsBool() ?? false;
+            var found = state.PageMut().EvaluateHost(js).AsBool() ?? false;
             if (found)
             {
                 return $"Found text {TextExtraction.RustDebugString(needle)}";

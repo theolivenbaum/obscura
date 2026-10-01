@@ -192,7 +192,7 @@ internal static class GridPlacementExtensions
         if (start.Kind == GenericGridPlacementKind.Line && end.Kind == GenericGridPlacementKind.Line)
         {
             return start.LineValue == end.LineValue
-                ? new Line<OriginZeroLine>(start.LineValue, start.LineValue + (ushort)1)
+                ? new Line<OriginZeroLine>(start.LineValue, start.LineValue + 1)
                 : new Line<OriginZeroLine>(
                     OriginZeroLine.Min(start.LineValue, end.LineValue),
                     OriginZeroLine.Max(start.LineValue, end.LineValue));
@@ -205,7 +205,7 @@ internal static class GridPlacementExtensions
 
         if (start.Kind == GenericGridPlacementKind.Line && end.Kind == GenericGridPlacementKind.Auto)
         {
-            return new Line<OriginZeroLine>(start.LineValue, start.LineValue + (ushort)1);
+            return new Line<OriginZeroLine>(start.LineValue, start.LineValue + 1);
         }
 
         if (start.Kind == GenericGridPlacementKind.Span && end.Kind == GenericGridPlacementKind.Line)
@@ -215,7 +215,7 @@ internal static class GridPlacementExtensions
 
         if (start.Kind == GenericGridPlacementKind.Auto && end.Kind == GenericGridPlacementKind.Line)
         {
-            return new Line<OriginZeroLine>(end.LineValue - (ushort)1, end.LineValue);
+            return new Line<OriginZeroLine>(end.LineValue - 1, end.LineValue);
         }
 
         throw new InvalidOperationException(
@@ -235,7 +235,7 @@ internal static class GridPlacementExtensions
         if (start.Kind == GenericGridPlacementKind.Line && end.Kind == GenericGridPlacementKind.Line)
         {
             return start.LineValue == end.LineValue
-                ? new Line<OriginZeroLine?>(start.LineValue, start.LineValue + (ushort)1)
+                ? new Line<OriginZeroLine?>(start.LineValue, start.LineValue + 1)
                 : new Line<OriginZeroLine?>(
                     OriginZeroLine.Min(start.LineValue, end.LineValue),
                     OriginZeroLine.Max(start.LineValue, end.LineValue));

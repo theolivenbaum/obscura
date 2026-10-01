@@ -248,6 +248,9 @@ public sealed class FontDatabase : IDisposable
     /// <summary>Every live face, in load order. Load order is the font-fallback order.</summary>
     public IReadOnlyList<FaceRecord> Faces => _faces;
 
+    /// <summary>Bumped whenever the face list changes, so derived orders can be cached.</summary>
+    public int Version { get; private set; }
+
     /// <summary>Load one font resource; returns the ids of the faces it contributed.</summary>
     public List<FontId> LoadFontSource(byte[] data)
     {
@@ -280,6 +283,7 @@ public sealed class FontDatabase : IDisposable
 
             var record = new FaceRecord(new FontId(_nextId++), decoded, index, typeface);
             _faces.Add(record);
+            Version++;
             ids.Add(record.Id);
 
             // Only TrueType collections carry more than one face, and Skia returns null past
@@ -320,6 +324,7 @@ public sealed class FontDatabase : IDisposable
             {
                 _faces[i].Dispose();
                 _faces.RemoveAt(i);
+                Version++;
                 return;
             }
         }
@@ -465,5 +470,6 @@ public sealed class FontDatabase : IDisposable
         }
 
         _faces.Clear();
+        Version++;
     }
 }

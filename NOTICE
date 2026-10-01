@@ -19,8 +19,13 @@ The text layout layer follows cosmic-text (https://github.com/pop-os/cosmic-text
 Copyright (c) 2022 System76, licensed under the MIT License or the Apache License,
 Version 2.0 (.reference/obscura/vendor/cosmic-text/LICENSE-MIT and LICENSE-APACHE).
 
-The fonts embedded in dotnet/src/Obscura.Render/Assets/ are byte-identical
+The fonts embedded in dotnet/src/PocketCalculator.Render/Assets/ are byte-identical
 copies of the ones Obscura bundles, and keep their own licenses: Liberation
 (SIL Open Font License 1.1), DejaVu (Bitstream Vera / DejaVu license), and Noto
 Color Emoji (SIL Open Font License 1.1, see LICENSE-NOTO-COLOR-EMOJI.txt and
 FONT-PROVENANCE.md in that folder).
+
+The Public Suffix List (dotnet/src/PocketCalculator.Net/Resources/public_suffix_list.dat,
+https://publicsuffix.org/) is subject to the terms of the Mozilla Public License,
+v. 2.0. A copy of the MPL is available at https://mozilla.org/MPL/2.0/. The file
+is included unmodified.

@@ -139,7 +139,7 @@ public class GridImplicitGridTests
         ];
 
         var (inline, block) = ImplicitGrid.ComputeGridSizeEstimate(
-            explicitColCount, explicitRowCount, Direction.Ltr, childStyles);
+            explicitColCount, explicitRowCount, childStyles);
 
         Assert.Equal(0, inline.NegativeImplicit);
         Assert.Equal(explicitColCount, inline.Explicit);
@@ -165,7 +165,7 @@ public class GridImplicitGridTests
         ];
 
         var (inline, block) = ImplicitGrid.ComputeGridSizeEstimate(
-            explicitColCount, explicitRowCount, Direction.Ltr, childStyles);
+            explicitColCount, explicitRowCount, childStyles);
 
         Assert.Equal(1, inline.NegativeImplicit);
         Assert.Equal(explicitColCount, inline.Explicit);
@@ -200,7 +200,7 @@ public class GridPlacementTests
         }
 
         var estimatedSizes = ImplicitGrid.ComputeGridSizeEstimate(
-            explicitColCount, explicitRowCount, Direction.Ltr, childStylesIter);
+            explicitColCount, explicitRowCount, childStylesIter);
         var items = new List<GridItem>();
         var cellOccupancyMatrix =
             CellOccupancyMatrix.WithTrackCounts(estimatedSizes.Columns, estimatedSizes.Rows);
@@ -213,7 +213,6 @@ public class GridPlacementTests
             cellOccupancyMatrix,
             items,
             childrenIter,
-            Direction.Ltr,
             flow,
             AlignItems.Start,
             AlignItems.Start,

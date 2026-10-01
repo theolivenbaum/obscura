@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using PocketCalculator.Dom;
+using PocketCalculator.Net;
 using PocketCalculator.Js.Url;
 using PocketCalculator.Render.Css;
 
@@ -60,7 +62,12 @@ internal static partial class LinkedStylesheetLoader
     {
         try
         {
-            var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal))
+            // The link's referrerpolicy, else the document's (port addition).
+            var policy = document.Dom is { } linkDom
+                ? StateHelpers.ElementReferrerPolicy(linkDom, NodeId.New(ownerNid))
+                : null;
+            var referrer = policy is null ? null : FetchReferrer.Client with { Policy = policy };
+            var loaded = await LoadAsync(transport, document, url, 0, new HashSet<string>(StringComparer.Ordinal), referrer)
                 .ConfigureAwait(false);
             if (!StylesheetOps.SetLoadedExternalStylesheet(document, ownerNid, loaded.Css, loaded.OriginClean))
             {
@@ -84,7 +91,8 @@ internal static partial class LinkedStylesheetLoader
         PocketCalculatorState document,
         string url,
         int depth,
-        HashSet<string> seen)
+        HashSet<string> seen,
+        FetchReferrer? referrer = null)
     {
         if (depth > MaxImportDepth || !seen.Add(url))
         {
@@ -93,7 +101,7 @@ internal static partial class LinkedStylesheetLoader
 
         var raw = await FetchOps.FetchUrlAsync(
                 transport, document, url, "GET", "{}", [], "no-cors", "same-origin",
-                internalLoad: true, hostConsumesBody: true)
+                internalLoad: true, hostConsumesBody: true, referrer: referrer)
             .ConfigureAwait(false);
         var load = TakeLoad(document, raw)
             ?? throw new InvalidOperationException("Stylesheet fetch failed: " + url);
@@ -120,11 +128,14 @@ internal static partial class LinkedStylesheetLoader
             return string.Empty;
         });
 
+        var responseUrl = load.FinalUrl.Length != 0 ? load.FinalUrl : url;
+        // An @import is referred by the sheet that imports it, under that sheet's
+        // Referrer-Policy header, else the document's (Chromium 141; port addition).
+        var importReferrer = new FetchReferrer(load.ReferrerPolicyHeader, responseUrl) { Trusted = true };
         var imported = await Task.WhenAll(imports.ConvertAll(importUrl =>
-                LoadAsync(transport, document, importUrl, depth + 1, new HashSet<string>(seen, StringComparer.Ordinal))))
+                LoadAsync(transport, document, importUrl, depth + 1, new HashSet<string>(seen, StringComparer.Ordinal), importReferrer)))
             .ConfigureAwait(false);
 
-        var responseUrl = load.FinalUrl.Length != 0 ? load.FinalUrl : url;
         var text = new StringBuilder(css.Length + 64);
         var originClean = !load.Tainted;
         foreach (var sheet in imported)
@@ -136,7 +147,16 @@ internal static partial class LinkedStylesheetLoader
             }
         }
 
-        var own = RebaseCssUrls(css, responseUrl);
+        var urls = new List<string>();
+        var own = RebaseCssUrls(css, responseUrl, urls);
+        // Its images and fonts are referred by this sheet under its header policy, else
+        // the default: the document's policy does not reach them (Chromium 141).
+        if (urls.Count != 0 && Uri.TryCreate(responseUrl, UriKind.Absolute, out var sheetUri))
+        {
+            document.CssSubresourceReferrers.Record(
+                document.DocumentGeneration, sheetUri, load.ReferrerPolicyHeader ?? ReferrerPolicies.Default, urls);
+        }
+
         if (own.Length != 0)
         {
             Append(text, own);
@@ -205,7 +225,7 @@ internal static partial class LinkedStylesheetLoader
     /// sheet's URL, skipping comments and strings. A scan rather than a regular expression,
     /// because data URLs and quoted URLs can hold parentheses, quotes and whitespace.
     /// </summary>
-    internal static string RebaseCssUrls(string css, string baseUrl)
+    internal static string RebaseCssUrls(string css, string baseUrl, List<string>? urls = null)
     {
         if (css.IndexOf('(') < 0)
         {
@@ -320,6 +340,13 @@ internal static partial class LinkedStylesheetLoader
                 && baseRecord?.Join(value) is { } joined)
             {
                 resolved = joined.Href;
+            }
+
+            if (urls is not null
+                && (resolved.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || resolved.StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+            {
+                urls.Add(resolved);
             }
 
             output.Append("url(\"")

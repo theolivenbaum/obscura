@@ -19,9 +19,10 @@ namespace PocketCalculator.Render;
 
 internal static class TaffyStyleMapping
 {
-    internal static Layout.TaffyTree<TNodeContext> NewTaffyTree<TNodeContext>()
+    internal static Layout.TaffyTree<TNodeContext> NewTaffyTree<TNodeContext>(int capacity = 16)
     {
-        Layout.TaffyTree<TNodeContext> tree = new();
+        // Capacity only reserves slots; node ids are assigned the same way whatever it is.
+        Layout.TaffyTree<TNodeContext> tree = new(capacity);
         // Every opaque handle is backed by an expression retained in the LayoutStyle
         // map/input tree, which outlives all computations on this tree. Without this
         // resolver taffy falls back to its default, which returns 0 for every calc()
@@ -210,6 +211,14 @@ internal static class TaffyStyleMapping
             {
                 s.GridAutoFlow = gridAutoFlow;
             }
+
+            // Deviation from Rust, which resolves grid-area names itself (DomStyleFixups) and
+            // never hands taffy the areas, so they did not size the explicit grid: `"a b" "c d"`
+            // with no track lists gave one column and one row where Chromium has two of each.
+            if (style.GridAreas is { Count: > 0 } areas)
+            {
+                s.GridTemplateAreas = GridTemplateAreas(areas);
+            }
         }
 
         float columnGap = style.ColumnGap ?? 0f;
@@ -307,6 +316,23 @@ internal static class TaffyStyleMapping
     /// used containing block, so it reaches layout as an opaque calc() handle rather than as
     /// the px value the style pass flattened for the non-layout readers.
     /// </summary>
+    /// <summary>
+    /// The extent of a <c>grid-template-areas</c> value, as one unnamed area over the whole
+    /// template: taffy reads areas only to size the explicit grid, since placements reach it
+    /// with their names already resolved.
+    /// </summary>
+    private static List<Layout.GridTemplateArea> GridTemplateAreas(List<List<string>> rows)
+    {
+        int width = 0;
+        foreach (List<string> row in rows)
+        {
+            width = Math.Max(width, row.Count);
+        }
+
+        static ushort Line(int line) => (ushort)Math.Min(line, Layout.GridLimits.MaxTracks + 1);
+        return [new Layout.GridTemplateArea(string.Empty, 1, Line(rows.Count + 1), 1, Line(width + 1))];
+    }
+
     private static TaffyDimension SizeDimension(LayoutStyle style, int slot, Dimension value) =>
         style.SizeCalc?[slot] is { } late
             ? TaffyDimension.FromCalc(late.Handle)

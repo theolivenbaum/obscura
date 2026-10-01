@@ -225,7 +225,8 @@ public class InlineNestingPerformanceTests
     /// 40 nested spans with em-sized padding (4.8px, not a short binary fraction, so any
     /// reassociation of the f32 edge sums shows) in a narrow centred block: enough events for
     /// the cached sums, and several wrapped lines. The expected values were taken from the scan
-    /// the cache replaced, before the change.
+    /// the cache replaced, before the change, and re-taken when a continuing fragment stopped
+    /// covering the white space that hangs at a soft wrap (Chromium ends it at the last glyph).
     /// </summary>
     [Fact]
     public void NestedEdgeGeometryAndPixelsAreUnchanged()
@@ -238,14 +239,15 @@ public class InlineNestingPerformanceTests
             i => $"w{i} ",
             Host + ";width:300px;text-align:center");
         DomLayout laid = RenderDom.LayoutDom(tree, (400f, 400f));
-        Assert.Equal((132, 913039963u), Fingerprint(laid, spans));
-        Assert.Equal(836482515u, PixelHash(RenderPaint.PaintDom(tree, (400f, 400f), null)!));
+        Assert.Equal((132, 998606822u), Fingerprint(laid, spans));
+        Assert.Equal(3552515651u, PixelHash(RenderPaint.PaintDom(tree, (400f, 400f), null)!));
     }
 
     /// <summary>
     /// A 7000-character paragraph of sibling spans with em-sized edges, negative margins and
     /// relative offsets: it takes the windowed first-line probe, the cached edge sums and the
-    /// per-run relative ranges. Expected values from the engine before the change.
+    /// per-run relative ranges. Expected values from the engine before the change, re-taken
+    /// when a continuing fragment stopped covering the white space that hangs at a soft wrap.
     /// </summary>
     [Fact]
     public void SiblingParagraphGeometryAndPixelsAreUnchanged()
@@ -264,7 +266,7 @@ public class InlineNestingPerformanceTests
             i => $"lorem{i} ipsum ",
             Host + ";width:500px;text-align:justify");
         DomLayout laid = RenderDom.LayoutDom(tree, (600f, 800f));
-        Assert.Equal((424, 4229691653u), Fingerprint(laid, spans));
-        Assert.Equal(1543167602u, PixelHash(RenderPaint.PaintDom(tree, (600f, 800f), null)!));
+        Assert.Equal((424, 2247376737u), Fingerprint(laid, spans));
+        Assert.Equal(1196706098u, PixelHash(RenderPaint.PaintDom(tree, (600f, 800f), null)!));
     }
 }

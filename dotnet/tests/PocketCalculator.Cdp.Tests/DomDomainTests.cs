@@ -138,13 +138,13 @@ public sealed class DomDomainTests
         ];
         foreach (JsonObject parameters in identifiers)
         {
-            ctx.GetSessionPageMut(session)!.Evaluate("globalThis.__obscura_click_target = null");
+            ctx.GetSessionPageMut(session)!.EvaluateHost("__obscura_host.clickTarget.set(null)");
 
             CdpDomainFixtures.Unwrap(
                 await DomDomain.HandleAsync("scrollIntoViewIfNeeded", parameters, ctx, session));
 
-            JsonNode? targetId = ctx.GetSessionPageMut(session)!.Evaluate(
-                "globalThis.__obscura_click_target && globalThis.__obscura_click_target.id");
+            JsonNode? targetId = ctx.GetSessionPageMut(session)!.EvaluateHost(
+                "(function () { var t = __obscura_host.clickTarget.get(); return t && t.id; })()");
             Assert.Equal("target", targetId.AsString());
         }
     }

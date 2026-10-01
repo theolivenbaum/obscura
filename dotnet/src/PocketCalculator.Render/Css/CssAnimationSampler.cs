@@ -1039,6 +1039,11 @@ public static class CssAnimationSampler
         LayoutStyle style,
         AnimationSample sample)
     {
+        if (!timeline.HasWaapiForNode(node))
+        {
+            return;
+        }
+
         foreach (var (animation, localTime) in timeline.WaapiForNode(node, sample.Time))
         {
             if (DirectedProgress(animation.Timing, localTime) is not { } progress)

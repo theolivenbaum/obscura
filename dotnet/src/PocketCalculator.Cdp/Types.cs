@@ -153,6 +153,12 @@ public sealed class CdpResponse
 
     public string? SessionId { get; init; }
 
+    /// <summary>
+    /// The command parked on a pending promise (<see cref="ParkedCommand"/>): nothing
+    /// goes on the wire now, and the processor answers it when the promise settles.
+    /// </summary>
+    internal bool Parked { get; init; }
+
     public static CdpResponse Success(ulong id, JsonNode? result, string? sessionId) => new()
     {
         Id = id,

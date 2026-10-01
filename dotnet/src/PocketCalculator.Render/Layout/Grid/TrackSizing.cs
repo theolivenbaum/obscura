@@ -33,7 +33,7 @@ internal static class TrackSizing
     {
         private readonly AbstractAxis _axis = axis;
         private int _indexOffset = 0;
-        private ushort _currentSpan = 1;
+        private int _currentSpan = 1;
         private bool _currentIsFlex = false;
 
         /// <summary>
@@ -92,6 +92,8 @@ internal static class TrackSizing
         AbstractAxis axis,
         Size<float?> innerNodeSize)
     {
+        private (bool AnyAutoMin, bool AnyFlexible)? _axisTrackFlags;
+
         public ILayoutPartialTree Tree { get; } = tree;
 
         public CalcResolver Calc { get; } = tree.CalcResolver();
@@ -132,8 +134,13 @@ internal static class TrackSizing
             var gridAreaSize = GridAreaSize(item, axisTracks);
             var availableSpace = gridAreaSize.With(axis, null);
             var marginAxisSums = MarginsAxisSumsWithBaselineShims(item, availableSpace.Width);
-            float contribution =
-                item.MinimumContributionCached(Tree, axis, axisTracks, gridAreaSize, innerNodeSize);
+            // taffy asks both questions of every track in the axis, for every item; they do not
+            // depend on the item, so ask them once (an item-count x track-count cost otherwise).
+            _axisTrackFlags ??= (
+                axisTracks.Any(static track => track.MinTrackSizingFunction.IsAuto()),
+                axisTracks.Any(static track => track.MaxTrackSizingFunction.IsFr()));
+            float contribution = item.MinimumContributionCached(
+                Tree, axis, axisTracks, gridAreaSize, innerNodeSize, _axisTrackFlags.Value);
             return contribution + marginAxisSums.Get(axis);
         }
     }
@@ -239,12 +246,12 @@ internal static class TrackSizing
     {
         foreach (var item in items)
         {
-            item.ColumnIndexes = new Line<ushort>(
-                (ushort)item.Column.Start.IntoTrackVecIndex(columnCounts),
-                (ushort)item.Column.End.IntoTrackVecIndex(columnCounts));
-            item.RowIndexes = new Line<ushort>(
-                (ushort)item.Row.Start.IntoTrackVecIndex(rowCounts),
-                (ushort)item.Row.End.IntoTrackVecIndex(rowCounts));
+            item.ColumnIndexes = new Line<int>(
+                item.Column.Start.IntoTrackVecIndex(columnCounts),
+                item.Column.End.IntoTrackVecIndex(columnCounts));
+            item.RowIndexes = new Line<int>(
+                item.Row.Start.IntoTrackVecIndex(rowCounts),
+                item.Row.End.IntoTrackVecIndex(rowCounts));
         }
     }
 
@@ -548,7 +555,7 @@ internal static class TrackSizing
         while (batchedItemIterator.Next(items, out int batchStart, out int batchEnd, out bool isFlex))
         {
             // 2. Size tracks to fit non-spanning items.
-            ushort batchSpan = items[batchStart].Placement(axis).Span();
+            int batchSpan = items[batchStart].Placement(axis).Span();
             if (!isFlex && batchSpan == 1)
             {
                 for (int itemIndex = batchStart; itemIndex < batchEnd; itemIndex++)

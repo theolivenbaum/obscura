@@ -11,6 +11,48 @@ public static class Compute
         Size<AvailableSpace> availableSpace)
     {
         var calc = tree.CalcResolver();
+        var knownDimensions = RootKnownDimensions(tree, root, availableSpace);
+
+        // Recursively compute node layout
+        var output = tree.PerformChildLayout(
+            root,
+            knownDimensions,
+            availableSpace.IntoOptions(),
+            availableSpace,
+            SizingMode.InherentSize,
+            GeometryExtensions.LineFalse);
+
+        FinishRootLayout(tree, root, availableSpace, calc, output);
+    }
+
+    /// <summary>
+    /// The size of <paramref name="root"/> laid out as a root under
+    /// <paramref name="availableSpace"/>, without performing its layout.
+    /// </summary>
+    /// <remarks>
+    /// Not in vendor/taffy. It asks what <see cref="ComputeRootLayout"/> asks, in
+    /// <see cref="RunMode.ComputeSize"/>: the question a parent asks of a child, answered from
+    /// the size caches the ancestors' own sizing already filled. A full layout of every nested
+    /// table at min-content relaid out its whole subtree, quadratic in the nesting depth.
+    /// </remarks>
+    public static Size<float> MeasureRootSize(
+        ILayoutPartialTree tree,
+        NodeId root,
+        Size<AvailableSpace> availableSpace) =>
+        tree.MeasureChildSizeBoth(
+            root,
+            RootKnownDimensions(tree, root, availableSpace),
+            availableSpace.IntoOptions(),
+            availableSpace,
+            SizingMode.InherentSize,
+            GeometryExtensions.LineFalse);
+
+    private static Size<float?> RootKnownDimensions(
+        ILayoutPartialTree tree,
+        NodeId root,
+        Size<AvailableSpace> availableSpace)
+    {
+        var calc = tree.CalcResolver();
         var knownDimensions = GeometryExtensions.SizeNone;
 
         {
@@ -62,15 +104,16 @@ public static class Compute
             }
         }
 
-        // Recursively compute node layout
-        var output = tree.PerformChildLayout(
-            root,
-            knownDimensions,
-            availableSpace.IntoOptions(),
-            availableSpace,
-            SizingMode.InherentSize,
-            GeometryExtensions.LineFalse);
+        return knownDimensions;
+    }
 
+    private static void FinishRootLayout(
+        ILayoutPartialTree tree,
+        NodeId root,
+        Size<AvailableSpace> availableSpace,
+        CalcResolver calc,
+        LayoutOutput output)
+    {
         var style = tree.GetCoreContainerStyle(root);
         var rootPadding = style.Padding.ResolveOrZero(availableSpace.Width.IntoOption(), calc);
         var rootBorder = style.Border.ResolveOrZero(availableSpace.Width.IntoOption(), calc);
@@ -200,3 +243,4 @@ public static class Compute
         return LayoutOutput.Hidden;
     }
 }
+

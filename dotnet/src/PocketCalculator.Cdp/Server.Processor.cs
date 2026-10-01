@@ -33,8 +33,8 @@ public static partial class CdpServer
         CancellationToken stop)
     {
         var ctx = CdpContext.NewWithSharedContext(defaultContext);
-        var intercepted = Channel.CreateUnbounded<InterceptedRequest>(
-            new UnboundedChannelOptions { SingleReader = true });
+        // Not SingleReader, so the channel can count (see ConnectionHasWork below).
+        var intercepted = Channel.CreateUnbounded<InterceptedRequest>();
         ctx.InterceptSink = new ChannelInterceptSink(intercepted.Writer);
         var interceptRx = intercepted.Reader;
         Dictionary<string, TaskCompletionSource<InterceptResolution>> interceptedPaused =
@@ -59,10 +59,22 @@ public static partial class CdpServer
         var runtimePumpErrorStreak = 0;
 
         using var loopStop = CancellationTokenSource.CreateLinkedTokenSource(shutdown, stop);
+
+        // What an awaited command must not hold up (ParkedCommand): a parked command
+        // lets these through, as Chromium serves other commands while a promise is awaited.
+        ctx.ConnectionHasWork = () =>
+            deferred.Count != 0
+            || (rx.CanCount && rx.Count != 0)
+            || (interceptRx.CanCount && interceptRx.Count != 0);
         try
         {
             while (true)
             {
+                if (ctx.ParkedCommands.Count != 0)
+                {
+                    await ResumeParkedCommandsAsync(ctx).ConfigureAwait(false);
+                }
+
                 // Drain any deferred messages from the previous interception window
                 // before pulling new ones off the wire. Each is processed with no
                 // navigation task in flight, so the only isolate this connection
@@ -167,6 +179,12 @@ public static partial class CdpServer
                     {
                         var delay = Math.Max(0, screencastDue - Environment.TickCount64);
                         arms.Add(Task.Delay((int)delay, loopStop.Token));
+                    }
+
+                    if (NextParkedDeadlineMs(ctx) is { } parkedDelay)
+                    {
+                        // A parked command times out even when nothing else happens.
+                        arms.Add(Task.Delay((int)Math.Min(parkedDelay + 1, int.MaxValue), loopStop.Token));
                     }
 
                     try

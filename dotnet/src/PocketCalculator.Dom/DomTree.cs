@@ -938,6 +938,26 @@ public sealed partial class DomTree
     }
 
     /// <summary>
+    /// <see cref="Children"/> into a caller-owned list, which is cleared first, so a walk over
+    /// a large tree can reuse one list instead of allocating one per node.
+    /// </summary>
+    public void CopyChildrenTo(NodeId nodeId, List<NodeId> result)
+    {
+        result.Clear();
+        var current = Slot(nodeId)?.FirstChild;
+        while (current is { } childId)
+        {
+            result.Add(childId);
+            if (result.Count > _nodes.Count)
+            {
+                break;
+            }
+
+            current = Slot(childId)?.NextSibling;
+        }
+    }
+
+    /// <summary>
     /// Snapshot the direct children of <paramref name="host"/>'s shadow root. Ordinary
     /// <see cref="Children"/> continues to return only light children.
     /// </summary>
@@ -946,10 +966,15 @@ public sealed partial class DomTree
 
     public List<NodeId> Descendants(NodeId nodeId)
     {
-        var result = new List<NodeId>();
+        // A walk of the whole document visits nearly every slot; sizing it up front saves the
+        // doubling copies, which are large-object-heap garbage on a big document.
+        var result = nodeId == Document ? new List<NodeId>(_nodes.Count) : new List<NodeId>();
         var stack = new Stack<NodeId>();
 
-        PushChildrenReversed(nodeId, stack);
+        // One scratch list for the whole walk: a fresh one per visited node was most of what
+        // a walk over a large document allocated.
+        var childrenToPush = new List<NodeId>();
+        PushChildrenReversed(nodeId, stack, childrenToPush);
 
         while (stack.Count > 0)
         {
@@ -968,15 +993,15 @@ public sealed partial class DomTree
                 break;
             }
 
-            PushChildrenReversed(current, stack);
+            PushChildrenReversed(current, stack, childrenToPush);
         }
 
         return result;
     }
 
-    private void PushChildrenReversed(NodeId nodeId, Stack<NodeId> stack)
+    private void PushChildrenReversed(NodeId nodeId, Stack<NodeId> stack, List<NodeId> childrenToPush)
     {
-        var childrenToPush = new List<NodeId>();
+        childrenToPush.Clear();
         var child = Slot(nodeId)?.FirstChild;
         while (child is { } childId)
         {

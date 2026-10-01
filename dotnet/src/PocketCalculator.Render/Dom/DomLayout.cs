@@ -12,6 +12,22 @@ internal enum GeneratedBoxKind : byte
 
 internal readonly record struct GeneratedBox(NodeId Host, GeneratedBoxKind Kind, Rect Rect);
 
+/// <summary>
+/// A grid's used track sizes in CSS px, implicit tracks included, with how many of them come
+/// before the explicit grid and how many are explicit.
+/// </summary>
+internal sealed record GridTrackSizes(
+    float[] Columns, int NegativeColumns, int ExplicitColumns, float[] Rows, int NegativeRows, int ExplicitRows)
+{
+    internal static GridTrackSizes From(Layout.DetailedGridInfo info) => new(
+        [.. info.Columns.Sizes],
+        info.Columns.NegativeImplicitTracks,
+        info.Columns.ExplicitTracks,
+        [.. info.Rows.Sizes],
+        info.Rows.NegativeImplicitTracks,
+        info.Rows.ExplicitTracks);
+}
+
 internal readonly record struct GeneratedBoxBuild(
     NodeId Host,
     GeneratedBoxKind Kind,
@@ -108,6 +124,12 @@ public sealed class DomLayout
     /// </summary>
     internal List<GeneratedBox> GeneratedBoxes { get; set; } = [];
 
+    /// <summary>
+    /// The used track sizes of every box laid out as a grid, keyed by DOM node: the resolved
+    /// value of <c>grid-template-columns</c>/<c>-rows</c> on a grid container.
+    /// </summary>
+    internal Dictionary<NodeId, GridTrackSizes> GridTracks { get; set; } = [];
+
     /// <summary>Move the retained style maps out of this layout.</summary>
     internal RetainedStyleMaps TakeRetainedStyleMaps()
     {
@@ -179,6 +201,7 @@ public sealed class DomLayout
             bool visibilityHidden = style.VisibilityHidden ?? parentState.VisibilityHidden;
             bool opacityZero = parentState.OpacityZero || style.Opacity is { } opacity && opacity <= 0f;
             style.EffectivelyInvisible = visibilityHidden || opacityZero;
+            style.ComputedVisibilityHidden = visibilityHidden;
             if (style.BeforePseudo is { } before)
             {
                 before.EffectivelyInvisible = style.EffectivelyInvisible;

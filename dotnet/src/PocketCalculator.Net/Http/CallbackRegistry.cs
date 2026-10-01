@@ -9,6 +9,11 @@ public delegate void RequestCallback(RequestInfo request);
 /// <param name="response">The response.</param>
 public delegate void ResponseCallback(RequestInfo request, Response response);
 
+/// <summary>A message for the page's console, raised by the network layer.</summary>
+/// <param name="level">The console level: <c>"warning"</c> or <c>"error"</c>.</param>
+/// <param name="text">The message text.</param>
+public delegate void ConsoleCallback(string level, string text);
+
 /// <summary>
 /// Page-scoped store for the passive on_request/on_response callbacks (issue
 /// #408). Each Page owns one, so a callback never fires for another page's
@@ -22,6 +27,21 @@ public sealed class CallbackRegistry
     private readonly List<(ulong Id, ResponseCallback Callback)> _onResponse = [];
     private readonly System.Threading.Lock _lock = new();
     private ulong _idCounter = 1;
+    private ConsoleCallback? _console;
+
+    /// <summary>
+    /// Where network-layer console messages go (mixed content, for one): the page's
+    /// current runtime sets it when it attaches, so a later document replaces the
+    /// earlier one's sink. Null drops the messages.
+    /// </summary>
+    public ConsoleCallback? ConsoleSink
+    {
+        get => Volatile.Read(ref _console);
+        set => Volatile.Write(ref _console, value);
+    }
+
+    /// <summary>Send one message to <see cref="ConsoleSink"/>, from any thread.</summary>
+    public void FireConsole(string level, string text) => ConsoleSink?.Invoke(level, text);
 
     private ulong NextId()
     {

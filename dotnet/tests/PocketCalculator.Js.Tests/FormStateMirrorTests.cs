@@ -72,9 +72,11 @@ public class FormStateMirrorTests
 
         // bootstrap.js reads the map back with `!== undefined`, so a read of an untouched node
         // has to stay undefined and a written one has to read back as itself.
+        // (The map itself is closure state of bootstrap.js now, SECURITY.md I10, so the
+        // untouched read is observed through the field it backs.)
         Assert.Equal(
-            "undefined",
-            runtime.Evaluate("typeof _formValues[9999]")!.GetValue<string>());
+            "",
+            runtime.Evaluate("document.getElementById('f').value")!.GetValue<string>());
         runtime.Evaluate("document.getElementById('t').value = 'body text'");
         Assert.Equal(
             "body text",

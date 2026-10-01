@@ -376,6 +376,29 @@ public sealed class AnimationTimelineState
         return true;
     }
 
+    /// <summary>Whether any Web Animation targets <paramref name="node"/>.</summary>
+    /// <remarks>
+    /// The cascade asks this for every element; an iterator over an empty map still allocated
+    /// its state machine each time (7.6 MB on 50k elements).
+    /// </remarks>
+    internal bool HasWaapiForNode(NodeId node)
+    {
+        if (_waapi.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (WaapiAnimation animation in _waapi.Values)
+        {
+            if (animation.Node == node)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     internal IEnumerable<(WaapiAnimation Animation, AnimationSampleTime Local)> WaapiForNode(
         NodeId node,
         AnimationSampleTime documentTime)

@@ -147,6 +147,7 @@ internal sealed class CoreCdpServer : IDisposable
     private readonly Func<string, Reply> _route;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentQueue<string> _requests = new();
+    private readonly ConcurrentQueue<string> _heads = new();
     private int _active;
     private int _peak;
     private bool _disposed;
@@ -166,6 +167,9 @@ internal sealed class CoreCdpServer : IDisposable
 
     /// <summary>Every request line path this fixture served, in arrival order.</summary>
     internal IReadOnlyList<string> Requests => [.. _requests];
+
+    /// <summary>The first read of every request (request line and headers), in arrival order.</summary>
+    internal IReadOnlyList<string> Heads => [.. _heads];
 
     /// <summary>The largest number of requests this fixture served at the same time.</summary>
     internal int PeakConcurrency => Volatile.Read(ref _peak);
@@ -219,6 +223,7 @@ internal sealed class CoreCdpServer : IDisposable
                 string[] parts = firstLine.Split(' ');
                 string path = parts.Length > 1 ? parts[1] : "/";
                 _requests.Enqueue(firstLine);
+                _heads.Enqueue(headerText);
 
                 int active = Interlocked.Increment(ref _active);
                 int observed = Volatile.Read(ref _peak);

@@ -278,7 +278,9 @@ public sealed partial class RuntimeTests
             Assert.False(HasHeader(sent, "Cookie"), sent);
             Assert.False(HasHeader(sent, "Sec-Fetch-Site"), sent);
             Assert.False(HasHeader(sent, "Proxy-Foo"), sent);
-            Assert.False(HasHeader(sent, "Referer"), sent);
+            // The page's own Referer goes out (strict-origin-when-cross-origin), never the
+            // one script set.
+            Assert.Contains("\r\nReferer: http://example.com/\r\n", sent, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("evil.test", sent, StringComparison.Ordinal);
         }
 

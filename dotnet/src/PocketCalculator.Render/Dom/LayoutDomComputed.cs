@@ -605,7 +605,10 @@ public static partial class RenderDom
         }
 
         inh.ContainerType = style.ContainerType;
-        inh.ContainerNames = [.. style.ContainerNames];
+        if (style.ContainerNames.Count != 0 || inh.ContainerNames.Count != 0)
+        {
+            inh.ContainerNames = [.. style.ContainerNames];
+        }
         if (style.OverflowInheritX)
         {
             style.OverflowSpecifiedX = inh.OverflowX;
@@ -1057,6 +1060,7 @@ public static partial class RenderDom
         inh.VisibilityHidden = style.VisibilityHidden ?? inh.VisibilityHidden;
         inh.HasZeroOpacity |= style.Opacity is { } opacity && opacity <= 0f;
         style.EffectivelyInvisible = inh.VisibilityHidden || inh.HasZeroOpacity;
+        style.ComputedVisibilityHidden = inh.VisibilityHidden;
         if (style.ListStyle is { } listStyle)
         {
             inh.ListStyle = listStyle;
@@ -1385,6 +1389,7 @@ public static partial class RenderDom
         TaffyAlignItems? hostTextAlign = style.TextAlign;
         Dimension? hostTextIndent = style.TextIndent;
         bool hostInvisible = style.EffectivelyInvisible;
+        bool hostVisibilityHidden = style.ComputedVisibilityHidden;
         Display hostDisplay = style.Display;
         TaffyDirection hostDirection = style.Direction ?? TaffyDirection.Ltr;
         bool hostDisplayContents = style.DisplayContents;
@@ -1626,6 +1631,7 @@ public static partial class RenderDom
             }
 
             pseudo.EffectivelyInvisible = hostInvisible;
+            pseudo.ComputedVisibilityHidden = pseudo.VisibilityHidden ?? hostVisibilityHidden;
         }
 
         if (style.BeforePseudo is { } before)

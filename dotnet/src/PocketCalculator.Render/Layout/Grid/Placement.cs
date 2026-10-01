@@ -2,56 +2,21 @@
 //
 // Implements placing items in the grid and resolving the implicit grid.
 // https://www.w3.org/TR/css-grid-1/#placement
+//
+// Deviation from the vendored taffy, which placed right-to-left grids in mirrored column
+// coordinates and searched each row from its right end (so an item took the first free cell
+// counted from the right edge of the explicit grid, and an implicit column went to the
+// physical left whatever side it was created on). Chromium places in logical coordinates
+// whatever the direction and mirrors the finished grid, which GridLayout does; placement here
+// is direction-free.
 namespace PocketCalculator.Render.Layout;
 
 /// <summary>8.5. Grid Item Placement Algorithm.</summary>
 internal static class GridPlacementAlgorithm
 {
-    /// <summary>Returns whether placement/search should run in reverse for this axis.</summary>
-    private static bool AxisIsReversed(Direction direction, AbsoluteAxis axis) =>
-        direction.IsRtl() && axis == AbsoluteAxis.Horizontal;
-
-    /// <summary>Advances the cursor by one track in the active search direction.</summary>
-    private static OriginZeroLine AdvancePosition(OriginZeroLine position, bool axisIsReversed) =>
-        axisIsReversed
-            ? new OriginZeroLine((short)(position.Value - 1))
-            : new OriginZeroLine((short)(position.Value + 1));
-
-    /// <summary>Returns the initial search line for sparse/dense placement in the given direction.</summary>
-    private static OriginZeroLine SearchStartLine(
-        OriginZeroLine gridStartLine,
-        OriginZeroLine gridEndLine,
-        bool axisIsReversed) => axisIsReversed ? gridEndLine - (ushort)1 : gridStartLine;
-
-    /// <summary>Resolves an indefinite span at <paramref name="position"/>, respecting the direction.</summary>
-    private static Line<OriginZeroLine> ResolveIndefiniteGridSpan(
-        OriginZeroLine position,
-        ushort span,
-        bool axisIsReversed) =>
-        axisIsReversed
-            ? new Line<OriginZeroLine>((position - span) + (ushort)1, position + (ushort)1)
-            : new Line<OriginZeroLine>(position, position + span);
-
-    /// <summary>Mirrors a horizontal span around the explicit grid width.</summary>
-    private static Line<OriginZeroLine> MirrorHorizontalSpan(
-        Line<OriginZeroLine> span,
-        ushort explicitColCount)
-    {
-        short explicitColEndLine = (short)explicitColCount;
-        return new Line<OriginZeroLine>(
-            new OriginZeroLine((short)(explicitColEndLine - span.End.Value)),
-            new OriginZeroLine((short)(explicitColEndLine - span.Start.Value)));
-    }
-
-    /// <summary>Mirrors horizontal spans for RTL while leaving all other spans unchanged.</summary>
-    private static Line<OriginZeroLine> MaybeMirrorSpan(
-        Line<OriginZeroLine> span,
-        AbsoluteAxis axis,
-        Direction direction,
-        ushort explicitColCount) =>
-        axis == AbsoluteAxis.Horizontal && direction.IsRtl()
-            ? MirrorHorizontalSpan(span, explicitColCount)
-            : span;
+    /// <summary>Resolves an indefinite span starting at <paramref name="position"/>.</summary>
+    private static Line<OriginZeroLine> ResolveIndefiniteGridSpan(OriginZeroLine position, ushort span) =>
+        new(position, position + span);
 
     /// <summary>
     /// Place items into the grid, generating new rows/columns into the implicit grid as required.
@@ -61,7 +26,6 @@ internal static class GridPlacementAlgorithm
         CellOccupancyMatrix cellOccupancyMatrix,
         List<GridItem> items,
         IReadOnlyList<(int Index, NodeId Node, IGridItemStyle Style)> children,
-        Direction direction,
         GridAutoFlow gridAutoFlow,
         AlignItems alignItems,
         AlignItems justifyItems,
@@ -88,11 +52,11 @@ internal static class GridPlacementAlgorithm
 
         // Deviation from taffy, which places items at any line its 16-bit coordinates reach and
         // grows the occupancy matrix (rows x columns) to match: every span is pulled into a
-        // window of GridLimits.MaxTracks tracks per axis, as Chromium pulls items placed past
+        // window of GridLimits.MaxAxisTracks tracks per axis, as Chromium pulls items placed past
         // kGridMaxTracks back into the last track.
         var windows = new InBothAbsAxis<GridWindow>(
-            PlacementWindow(cellOccupancyMatrix, placements, AbsoluteAxis.Horizontal, direction, explicitColCount),
-            PlacementWindow(cellOccupancyMatrix, placements, AbsoluteAxis.Vertical, direction, explicitColCount));
+            PlacementWindow(cellOccupancyMatrix, placements, AbsoluteAxis.Horizontal),
+            PlacementWindow(cellOccupancyMatrix, placements, AbsoluteAxis.Vertical));
 
         // 1. Place children with definite positions
         for (int i = 0; i < childCount; i++)
@@ -103,8 +67,7 @@ internal static class GridPlacementAlgorithm
                 continue;
             }
 
-            var (rowSpan, colSpan) =
-                PlaceDefiniteGridItem(placement, primaryAxis, direction, explicitColCount, windows);
+            var (primarySpan, secondarySpan) = PlaceDefiniteGridItem(placement, primaryAxis, windows);
             RecordGridPlacement(
                 cellOccupancyMatrix,
                 items,
@@ -114,12 +77,19 @@ internal static class GridPlacementAlgorithm
                 alignItems,
                 justifyItems,
                 primaryAxis,
-                rowSpan,
-                colSpan,
+                primarySpan,
+                secondarySpan,
                 CellOccupancyState.DefinitelyPlaced);
         }
 
         // 2. Place remaining children with definite secondary axis positions
+        //
+        // Deviation from taffy, which starts the sparse search at the last auto-placed cell of
+        // the item's first row (so after any step 2 item that merely spans into that row) and
+        // reads that cell back with the other axis's track counts. Chromium keeps one cursor per
+        // start line, the end of the last item this step placed with that start line, which is
+        // the spec's "past any grid items previously placed in this row by this step".
+        Dictionary<int, OriginZeroLine>? cursors = gridAutoFlow.IsDense() ? null : [];
         for (int i = 0; i < childCount; i++)
         {
             var placement = placements[i];
@@ -129,7 +99,11 @@ internal static class GridPlacementAlgorithm
             }
 
             var (primarySpan, secondarySpan) = PlaceDefiniteSecondaryAxisItem(
-                cellOccupancyMatrix, placement, gridAutoFlow, direction, explicitColCount, windows);
+                cellOccupancyMatrix, placement, gridAutoFlow, windows, cursors);
+            if (cursors is not null)
+            {
+                cursors[secondarySpan.Start.Value] = primarySpan.End;
+            }
 
             RecordGridPlacement(
                 cellOccupancyMatrix,
@@ -149,17 +123,9 @@ internal static class GridPlacementAlgorithm
         //    grid size estimate and by expand_to_fit_range.
 
         // 4. Position the remaining grid items
-        var primaryAxisGridStartLine = cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitStartLine();
-        var primaryAxisGridEndLine = cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitEndLine();
-        var secondaryAxisGridStartLine = cellOccupancyMatrix.TrackCountsFor(secondaryAxis).ImplicitStartLine();
-        var secondaryAxisGridEndLine = cellOccupancyMatrix.TrackCountsFor(secondaryAxis).ImplicitEndLine();
-        bool primaryAxisIsReversed = AxisIsReversed(direction, primaryAxis);
         var gridStartPosition = (
-            Primary: SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed),
-            Secondary: SearchStartLine(
-                secondaryAxisGridStartLine,
-                secondaryAxisGridEndLine,
-                AxisIsReversed(direction, secondaryAxis)));
+            Primary: cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitStartLine(),
+            Secondary: cellOccupancyMatrix.TrackCountsFor(secondaryAxis).ImplicitStartLine());
         var gridPosition = gridStartPosition;
 
         for (int i = 0; i < childCount; i++)
@@ -171,7 +137,7 @@ internal static class GridPlacementAlgorithm
             }
 
             var (primarySpan, secondarySpan) = PlaceIndefinitelyPositionedItem(
-                cellOccupancyMatrix, placement, gridAutoFlow, gridPosition, direction, explicitColCount, windows);
+                cellOccupancyMatrix, placement, gridAutoFlow, gridPosition, windows);
 
             RecordGridPlacement(
                 cellOccupancyMatrix,
@@ -189,11 +155,7 @@ internal static class GridPlacementAlgorithm
             // If using the "dense" placement algorithm then reset the grid position back to the start
             // ready for the next item. Otherwise set it to the position of the current item so that
             // the next item is placed after it.
-            gridPosition = gridAutoFlow.IsDense()
-                ? gridStartPosition
-                : primaryAxisIsReversed
-                    ? (primarySpan.Start, secondarySpan.Start)
-                    : (primarySpan.End, secondarySpan.Start);
+            gridPosition = gridAutoFlow.IsDense() ? gridStartPosition : (primarySpan.End, secondarySpan.Start);
         }
     }
 
@@ -201,21 +163,10 @@ internal static class GridPlacementAlgorithm
     private static (Line<OriginZeroLine> Primary, Line<OriginZeroLine> Secondary) PlaceDefiniteGridItem(
         InBothAbsAxis<Line<OriginZeroGridPlacement>> placement,
         AbsoluteAxis primaryAxis,
-        Direction direction,
-        ushort explicitColCount,
-        InBothAbsAxis<GridWindow> windows)
-    {
-        var primarySpan = MaybeMirrorSpan(
-            placement.Get(primaryAxis).ResolveDefiniteGridLines(), primaryAxis, direction, explicitColCount);
-        var secondarySpan = MaybeMirrorSpan(
-            placement.Get(primaryAxis.OtherAxis()).ResolveDefiniteGridLines(),
-            primaryAxis.OtherAxis(),
-            direction,
-            explicitColCount);
-
-        return (windows.Get(primaryAxis).Clamp(primarySpan),
-            windows.Get(primaryAxis.OtherAxis()).Clamp(secondarySpan));
-    }
+        InBothAbsAxis<GridWindow> windows) =>
+        (windows.Get(primaryAxis).Clamp(placement.Get(primaryAxis).ResolveDefiniteGridLines()),
+            windows.Get(primaryAxis.OtherAxis()).Clamp(
+                placement.Get(primaryAxis.OtherAxis()).ResolveDefiniteGridLines()));
 
     /// <summary>Step 2. Place remaining children with definite secondary axis positions.</summary>
     private static (Line<OriginZeroLine> Primary, Line<OriginZeroLine> Secondary)
@@ -223,63 +174,42 @@ internal static class GridPlacementAlgorithm
             CellOccupancyMatrix cellOccupancyMatrix,
             InBothAbsAxis<Line<OriginZeroGridPlacement>> placement,
             GridAutoFlow autoFlow,
-            Direction direction,
-            ushort explicitColCount,
-            InBothAbsAxis<GridWindow> windows)
+            InBothAbsAxis<GridWindow> windows,
+            Dictionary<int, OriginZeroLine>? cursors)
     {
         var primaryAxis = autoFlow.PrimaryAxis();
         var secondaryAxis = primaryAxis.OtherAxis();
         var primaryWindow = windows.Get(primaryAxis);
-        bool primaryAxisIsReversed = AxisIsReversed(direction, primaryAxis);
-        var primaryAxisGridStartLine = cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitStartLine();
-        var primaryAxisGridEndLine = cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitEndLine();
 
-        var secondaryAxisPlacement = windows.Get(secondaryAxis).Clamp(MaybeMirrorSpan(
-            placement.Get(secondaryAxis).ResolveDefiniteGridLines(),
-            secondaryAxis,
-            direction,
-            explicitColCount));
+        var secondaryAxisPlacement =
+            windows.Get(secondaryAxis).Clamp(placement.Get(secondaryAxis).ResolveDefiniteGridLines());
 
-        OriginZeroLine startingPosition;
-        if (autoFlow.IsDense())
-        {
-            startingPosition =
-                SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed);
-        }
-        else
-        {
-            var lookupResult = primaryAxisIsReversed
-                ? cellOccupancyMatrix.FirstOfType(
-                    primaryAxis, secondaryAxisPlacement.Start, CellOccupancyState.AutoPlaced)
-                : cellOccupancyMatrix.LastOfType(
-                    primaryAxis, secondaryAxisPlacement.Start, CellOccupancyState.AutoPlaced);
-            startingPosition = lookupResult
-                ?? SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed);
-        }
+        var position =
+            cursors is not null && cursors.TryGetValue(secondaryAxisPlacement.Start.Value, out var cursor)
+                ? cursor
+                : cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitStartLine();
 
         ushort primaryAxisSpan = placement.Get(primaryAxis).IndefiniteSpan();
 
-        var position = startingPosition;
         while (true)
         {
-            var primaryAxisPlacement =
-                ResolveIndefiniteGridSpan(position, primaryAxisSpan, primaryAxisIsReversed);
+            var primaryAxisPlacement = ResolveIndefiniteGridSpan(position, primaryAxisSpan);
 
-            // The search has left the window: stop in the last track it allows.
-            if (!primaryWindow.Contains(primaryAxisPlacement))
+            // Cells past the window are never occupied, so the search ends there at the latest;
+            // a position found past it is pulled into the last track, as Chromium pulls one
+            // found past kGridMaxTracks.
+            //
+            // taffy steps one track and re-tests. As in step 4, every candidate that still
+            // contains the furthest occupied track fails, and so does one whose own track is
+            // occupied, so jump past both: the same position is found in fewer probes.
+            if (cellOccupancyMatrix.OccupiedPrimaryTrackBounds(
+                    primaryAxis, primaryAxisPlacement, secondaryAxisPlacement) is not { } occupied)
             {
                 return (primaryWindow.Clamp(primaryAxisPlacement), secondaryAxisPlacement);
             }
 
-            bool doesFit = cellOccupancyMatrix.LineAreaIsUnoccupied(
-                primaryAxis, primaryAxisPlacement, secondaryAxisPlacement);
-
-            if (doesFit)
-            {
-                return (primaryAxisPlacement, secondaryAxisPlacement);
-            }
-
-            position = AdvancePosition(position, primaryAxisIsReversed);
+            position = cellOccupancyMatrix.NextFreePrimaryTrack(
+                primaryAxis, occupied.Last + 1, secondaryAxisPlacement, false);
         }
     }
 
@@ -290,78 +220,58 @@ internal static class GridPlacementAlgorithm
             InBothAbsAxis<Line<OriginZeroGridPlacement>> placement,
             GridAutoFlow autoFlow,
             (OriginZeroLine Primary, OriginZeroLine Secondary) gridPosition,
-            Direction direction,
-            ushort explicitColCount,
             InBothAbsAxis<GridWindow> windows)
     {
         var primaryAxis = autoFlow.PrimaryAxis();
         var secondaryAxis = primaryAxis.OtherAxis();
         var primaryWindow = windows.Get(primaryAxis);
         var secondaryWindow = windows.Get(secondaryAxis);
-        bool primaryAxisIsReversed = AxisIsReversed(direction, primaryAxis);
-        bool secondaryAxisIsReversed = AxisIsReversed(direction, secondaryAxis);
 
         var primaryPlacementStyle = placement.Get(primaryAxis);
         var secondaryPlacementStyle = placement.Get(secondaryAxis);
 
         ushort secondarySpanCount = secondaryPlacementStyle.IndefiniteSpan();
-        bool hasDefinitePrimaryAxisPosition = primaryPlacementStyle.IsDefinite();
         var primaryAxisGridStartLine = cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitStartLine();
         var primaryAxisGridEndLine = cellOccupancyMatrix.TrackCountsFor(primaryAxis).ImplicitEndLine();
         var secondaryAxisGridStartLine = cellOccupancyMatrix.TrackCountsFor(secondaryAxis).ImplicitStartLine();
-        var secondaryAxisGridEndLine = cellOccupancyMatrix.TrackCountsFor(secondaryAxis).ImplicitEndLine();
-        var primaryStartPosition =
-            SearchStartLine(primaryAxisGridStartLine, primaryAxisGridEndLine, primaryAxisIsReversed);
-        var secondaryStartPosition =
-            SearchStartLine(secondaryAxisGridStartLine, secondaryAxisGridEndLine, secondaryAxisIsReversed);
-
-        bool LineAreaIsOccupied(Line<OriginZeroLine> primary, Line<OriginZeroLine> secondary) =>
-            !cellOccupancyMatrix.LineAreaIsUnoccupied(primaryAxis, primary, secondary);
 
         var primaryIdx = gridPosition.Primary;
         var secondaryIdx = gridPosition.Secondary;
 
-        if (hasDefinitePrimaryAxisPosition)
+        if (primaryPlacementStyle.IsDefinite())
         {
-            var primarySpan = primaryWindow.Clamp(MaybeMirrorSpan(
-                primaryPlacementStyle.ResolveDefiniteGridLines(), primaryAxis, direction, explicitColCount));
+            var primarySpan = primaryWindow.Clamp(primaryPlacementStyle.ResolveDefiniteGridLines());
 
             // Compute the secondary axis starting position for the search.
             if (autoFlow.IsDense())
             {
-                secondaryIdx = secondaryStartPosition;
+                secondaryIdx = secondaryAxisGridStartLine;
             }
-            else
+            else if (primarySpan.Start < primaryIdx)
             {
-                bool shouldAdvanceSecondary = primaryAxisIsReversed
-                    ? primarySpan.Start > primaryIdx
-                    : primarySpan.Start < primaryIdx;
-                if (shouldAdvanceSecondary)
-                {
-                    secondaryIdx = AdvancePosition(secondaryIdx, secondaryAxisIsReversed);
-                }
+                secondaryIdx += 1;
             }
 
             // Item has a fixed primary axis position: increment the secondary axis position until we
             // find a space that the item fits in.
+            //
+            // taffy steps one secondary track and re-tests. Every candidate that still contains
+            // an occupied secondary track fails the same way, so jump past the furthest one and
+            // then past every track occupied across the item's primary span, as the free search
+            // does along the primary axis: the same position, found in a handful of probes
+            // rather than one per occupied row.
             while (true)
             {
-                var secondarySpan =
-                    ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount, secondaryAxisIsReversed);
-
-                // The search has left the window: stop in the last track it allows.
-                if (!secondaryWindow.Contains(secondarySpan))
+                var secondarySpan = ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount);
+                if (cellOccupancyMatrix.OccupiedPrimaryTrackBounds(secondaryAxis, secondarySpan, primarySpan)
+                    is not { } occupied)
                 {
+                    // A position past the window is pulled into its last track.
                     return (primarySpan, secondaryWindow.Clamp(secondarySpan));
                 }
 
-                if (LineAreaIsOccupied(primarySpan, secondarySpan))
-                {
-                    secondaryIdx = AdvancePosition(secondaryIdx, secondaryAxisIsReversed);
-                    continue;
-                }
-
-                return (primarySpan, secondarySpan);
+                secondaryIdx = cellOccupancyMatrix.NextFreePrimaryTrack(
+                    secondaryAxis, occupied.Last + 1, primarySpan, false);
             }
         }
         else
@@ -372,24 +282,20 @@ internal static class GridPlacementAlgorithm
             // already existent tracks, then reset the primary axis and increment the secondary axis.
             while (true)
             {
-                var primarySpan =
-                    ResolveIndefiniteGridSpan(primaryIdx, primarySpanCount, primaryAxisIsReversed);
-                var secondarySpan =
-                    ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount, secondaryAxisIsReversed);
+                var primarySpan = ResolveIndefiniteGridSpan(primaryIdx, primarySpanCount);
+                var secondarySpan = ResolveIndefiniteGridSpan(secondaryIdx, secondarySpanCount);
 
-                // The search has left the window: stop in the last track it allows.
-                if (!secondaryWindow.Contains(secondarySpan))
+                if (primarySpan.End > primaryAxisGridEndLine)
                 {
-                    return (primaryWindow.Clamp(primarySpan), secondaryWindow.Clamp(secondarySpan));
-                }
+                    // Past the window every row is empty, so a span that still does not fit
+                    // the primary axis there never will: stop in the window's last track.
+                    if (secondarySpan.Start.Value >= secondaryWindow.End)
+                    {
+                        return (primaryWindow.Clamp(primarySpan), secondaryWindow.Clamp(secondarySpan));
+                    }
 
-                bool primaryOutOfBounds = primaryAxisIsReversed
-                    ? primarySpan.Start < primaryAxisGridStartLine
-                    : primarySpan.End > primaryAxisGridEndLine;
-                if (primaryOutOfBounds)
-                {
-                    secondaryIdx = AdvancePosition(secondaryIdx, secondaryAxisIsReversed);
-                    primaryIdx = primaryStartPosition;
+                    secondaryIdx += 1;
+                    primaryIdx = primaryAxisGridStartLine;
                     continue;
                 }
 
@@ -400,15 +306,13 @@ internal static class GridPlacementAlgorithm
                 if (cellOccupancyMatrix.OccupiedPrimaryTrackBounds(primaryAxis, primarySpan, secondarySpan)
                     is { } occupied)
                 {
-                    var from = primaryAxisIsReversed
-                        ? new OriginZeroLine((short)(occupied.First.Value - 1))
-                        : new OriginZeroLine((short)(occupied.Last.Value + 1));
                     primaryIdx = cellOccupancyMatrix.NextFreePrimaryTrack(
-                        primaryAxis, from, secondarySpan, primaryAxisIsReversed);
+                        primaryAxis, occupied.Last + 1, secondarySpan, false);
                     continue;
                 }
 
-                return (primarySpan, secondarySpan);
+                // A position past the window is pulled into its last track.
+                return (primaryWindow.Clamp(primarySpan), secondaryWindow.Clamp(secondarySpan));
             }
         }
     }
@@ -434,32 +338,20 @@ internal static class GridPlacementAlgorithm
     private static GridWindow PlacementWindow(
         CellOccupancyMatrix cellOccupancyMatrix,
         InBothAbsAxis<Line<OriginZeroGridPlacement>>[] placements,
-        AbsoluteAxis axis,
-        Direction direction,
-        ushort explicitColCount)
+        AbsoluteAxis axis)
     {
         var counts = cellOccupancyMatrix.TrackCountsFor(axis);
-        int explicitCount = counts.Explicit;
-
-        // A reversed axis (the columns of an RTL grid) auto-places towards its start, so there
-        // the window is anchored at the far end instead: work in unmirrored lines and mirror
-        // the window back.
-        bool reversed = AxisIsReversed(direction, axis);
-        int earliest = reversed ? -counts.PositiveImplicit : -counts.NegativeImplicit;
+        int earliest = -counts.NegativeImplicit;
         foreach (var placement in placements)
         {
             var line = placement.Get(axis);
-            if (!line.IsDefinite())
+            if (line.IsDefinite())
             {
-                continue;
+                earliest = Math.Min(earliest, line.ResolveDefiniteGridLines().Start.Value);
             }
-
-            var span = MaybeMirrorSpan(line.ResolveDefiniteGridLines(), axis, direction, explicitColCount);
-            earliest = Math.Min(earliest, reversed ? explicitCount - span.End.Value : span.Start.Value);
         }
 
-        var window = GridLimits.WindowFor(earliest, explicitCount);
-        return reversed ? new GridWindow(explicitCount - window.End, explicitCount - window.Start) : window;
+        return GridLimits.WindowFor(earliest, counts.Explicit);
     }
 
     /// <summary>
@@ -486,6 +378,6 @@ internal static class GridPlacementAlgorithm
         var rowSpan = primaryAxis == AbsoluteAxis.Horizontal ? secondarySpan : primarySpan;
 
         items.Add(GridItem.NewWithPlacementStyleAndOrder(
-            node, colSpan, rowSpan, style, parentAlignItems, parentJustifyItems, (ushort)index));
+            node, colSpan, rowSpan, style, parentAlignItems, parentJustifyItems, index));
     }
 }

@@ -242,6 +242,10 @@ internal sealed class LayoutStyleRare
 
     public Layout.Line<Layout.GridPlacement>? GridRow;
 
+    public string? GridTemplateColumnsText;
+
+    public string? GridTemplateRowsText;
+
     public (float Angle, (float X, float Y) Center, List<GradientStop> Stops)? BackgroundConicGradient;
 
     public ReplacedIntrinsic? ReplacedIntrinsic;
@@ -1454,6 +1458,36 @@ public sealed class LayoutStyle
     /// <summary>Reset <see cref="GridTemplateRows"/> to empty, releasing its list.</summary>
     public void ClearGridTemplateRows() => m_gridTemplateRows = null;
 
+    /// <summary>
+    /// The declared <c>grid-template-columns</c> track list, kept for its computed value on a
+    /// box that is not a grid container (which Chromium serializes as specified, with
+    /// <c>repeat()</c>; <see cref="GridTemplateColumns"/> has the repetitions expanded).
+    /// </summary>
+    internal string? GridTemplateColumnsText
+    {
+        get => m_rare?.GridTemplateColumnsText;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.GridTemplateColumnsText = value;
+            }
+        }
+    }
+
+    /// <summary>The declared <c>grid-template-rows</c> track list; see <see cref="GridTemplateColumnsText"/>.</summary>
+    internal string? GridTemplateRowsText
+    {
+        get => m_rare?.GridTemplateRowsText;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.GridTemplateRowsText = value;
+            }
+        }
+    }
+
     private List<Layout.GridTemplateComponent>? m_gridTemplateRows;
 
     /// <summary>
@@ -2112,6 +2146,14 @@ public sealed class LayoutStyle
     /// paintable and are isolated into composited groups by the paint pass.
     /// </summary>
     public bool EffectivelyInvisible;
+
+    /// <summary>
+    /// The computed <c>visibility</c>: <see cref="VisibilityHidden"/> where declared, the
+    /// parent's computed value where not. Resolved in the same pass as
+    /// <see cref="EffectivelyInvisible"/>, and what <c>getComputedStyle()</c> and
+    /// <c>innerText</c> read.
+    /// </summary>
+    public bool ComputedVisibilityHidden;
 
     /// <summary>A CSS image supplied by <c>content: url(...)</c> on a replaced element.</summary>
     /// <remarks>

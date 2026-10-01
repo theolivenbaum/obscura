@@ -50,6 +50,12 @@ public readonly record struct ModuleNetworkContext
     /// <summary>Why there is no usable network context, or null.</summary>
     public string? Error { get; private init; }
 
+    /// <summary>
+    /// The owning document's referrer policy for module fetches, or null for the default.
+    /// Port addition.
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicy { get; init; }
+
     /// <summary>A usable context.</summary>
     public static ModuleNetworkContext From(
         PocketCalculatorHttpClient client,
@@ -331,6 +337,7 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         var request = ResourceRequest.ModuleScript(
             new Uri(documentUrl.Href),
             new Uri(referrer.Href));
+        request.ReferrerPolicy = network.ReferrerPolicy;
 
         Response response;
         try

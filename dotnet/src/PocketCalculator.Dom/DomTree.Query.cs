@@ -61,8 +61,20 @@ public sealed partial class DomTree
         var selectorList = SelectorParser.Parse(selector);
         var context = new MatchingContext(SelectorQuirksMode);
 
-        foreach (var descId in Descendants(root))
+        // Walked lazily in tree order, so the first match ends the walk. Snapshotting every
+        // descendant first made each call cost the whole tree: document.body, which is this
+        // query, took 1 ms on a document of 20,000 elements, and document.write, which reads it
+        // on every call, turned quadratic (SECURITY.md M11). The visit count bounds the walk
+        // as Descendants does, should the tree ever hold a cycle.
+        var visited = 0;
+        for (var current = NextInSubtree(root, root); current is { } descId; current = NextInSubtree(root, descId))
         {
+            WorkCancellation.ThrowIfCancellationRequested();
+            if (++visited > _nodes.Count)
+            {
+                break;
+            }
+
             if (GetNode(descId)?.IsElement != true)
             {
                 continue;

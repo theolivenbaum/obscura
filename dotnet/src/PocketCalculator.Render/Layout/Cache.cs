@@ -39,7 +39,13 @@ public sealed class Cache
     private const ulong XAxisValueMask = (ulong)uint.MaxValue << 32;
 
     private CacheEntry<LayoutOutput>? _finalLayoutEntry;
-    private readonly CacheEntry<MeasureOutput>?[] _measureEntries = new CacheEntry<MeasureOutput>?[CacheSize];
+
+    /// <summary>
+    /// The nine measurement slots, allocated on the first measurement: many nodes (text leaves
+    /// under a block, most of a large document) are only ever laid out, never measured, and
+    /// the slots are the bulk of a node's cache.
+    /// </summary>
+    private CacheEntry<MeasureOutput>?[]? _measureEntries;
 
     /// <summary>
     /// Measurements evicted from <see cref="_measureEntries"/>, kept so an alternating pair of
@@ -220,10 +226,16 @@ public sealed class Cache
                 return null;
 
             case RunMode.ComputeSize:
-                byte marginKey = VerticalMarginContextKey(input);
-                for (int i = 0; i < _measureEntries.Length; i++)
+                if (_measureEntries is not { } entries)
                 {
-                    if (_measureEntries[i] is not { } measure)
+                    // The overflow ring only ever holds what a slot evicted.
+                    return null;
+                }
+
+                byte marginKey = VerticalMarginContextKey(input);
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    if (entries[i] is not { } measure)
                     {
                         continue;
                     }
@@ -266,6 +278,7 @@ public sealed class Cache
             case RunMode.ComputeSize:
                 _isEmpty = false;
                 int cacheSlot = ComputeCacheSlot(input.KnownDimensions, input.AvailableSpace);
+                _measureEntries ??= new CacheEntry<MeasureOutput>?[CacheSize];
                 if (_measureEntries[cacheSlot] is { } evicted)
                 {
                     KeepEvicted(evicted);
@@ -315,7 +328,11 @@ public sealed class Cache
 
         _isEmpty = true;
         _finalLayoutEntry = null;
-        Array.Clear(_measureEntries);
+        if (_measureEntries is { } slots)
+        {
+            Array.Clear(slots);
+        }
+
         _overflowCount = 0;
         _overflowNext = 0;
         return ClearState.Cleared;
@@ -329,11 +346,14 @@ public sealed class Cache
             return false;
         }
 
-        for (int i = 0; i < _measureEntries.Length; i++)
+        if (_measureEntries is { } entries)
         {
-            if (_measureEntries[i] is not null)
+            for (int i = 0; i < entries.Length; i++)
             {
-                return false;
+                if (entries[i] is not null)
+                {
+                    return false;
+                }
             }
         }
 

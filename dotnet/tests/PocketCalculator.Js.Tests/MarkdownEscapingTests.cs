@@ -13,7 +13,7 @@ public sealed class MarkdownEscapingTests
     private static string Markdown(string body)
     {
         using var fixture = RuntimeFixture.Setup("<html><body>" + body + "</body></html>");
-        return fixture.Runtime.Evaluate(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
+        return fixture.Runtime.EvaluateHost(MarkdownScript.HtmlToMarkdown)!.GetValue<string>();
     }
 
     [Fact]

@@ -602,7 +602,10 @@ public sealed partial class PreparedRender
         output["z-index"] = style.ZIndex is { } z
             ? z.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : "auto";
-        output["visibility"] = style.VisibilityHidden == true ? "hidden" : "visible";
+        // DEVIATION from crates/obscura-render: visibility is inherited, so a child of a
+        // `visibility: hidden` element reports `hidden` (Chromium 141), not its own
+        // undeclared value.
+        output["visibility"] = style.ComputedVisibilityHidden ? "hidden" : "visible";
         output["opacity"] = PaintCssValues.CssNumber(style.Opacity ?? 1f);
         RgbaColor background = style.BackgroundColor ?? new RgbaColor(0, 0, 0, 0);
         output["background-color"] = style.BackgroundColorIsSrgbFunction
@@ -958,9 +961,11 @@ public sealed partial class PreparedRender
         {
             TaffyGridAutoFlow.Row => "row",
             TaffyGridAutoFlow.Column => "column",
-            TaffyGridAutoFlow.RowDense => "row dense",
+            // Chromium serializes the computed value without the implied `row`.
+            TaffyGridAutoFlow.RowDense => "dense",
             _ => "column dense",
         };
+        AppendGridStyle(output, id, style, display, isPseudo);
 
         output["transform"] = PaintCssValues.TransformCss(style, rect, RootFontSize, ViewportSize);
         output["transform-origin"] = PaintCssValues.TransformOriginCss(style, rect);
@@ -981,6 +986,82 @@ public sealed partial class PreparedRender
             ? "normal"
             : PseudoContentCss(style, generatedContentPseudo);
         return output;
+    }
+
+    /// <summary>
+    /// The CSS Grid properties. On a grid container with a box, <c>grid-template-columns</c> and
+    /// <c>-rows</c> resolve to the used track sizes (CSSOM's resolved value); elsewhere they
+    /// are the computed, as-specified list. The placement longhands and shorthands are as
+    /// specified, the way Chromium 141 serializes them.
+    /// </summary>
+    private void AppendGridStyle(
+        Dictionary<string, string> output, NodeId id, LayoutStyle style, string display, bool isPseudo)
+    {
+        // Computed lengths are absolute: font-relative units against this element's face.
+        CalcUnits units = new(
+            FontUnits.ForStyle(style), RootFontSize, ViewportSize.Width / 100f, ViewportSize.Height / 100f);
+        GridTrackSizes? used = null;
+        bool usedTracks = !isPseudo
+            && display is "grid" or "inline-grid"
+            && Layout.GridTracks.TryGetValue(id, out used);
+        if (usedTracks)
+        {
+            output["grid-template-columns"] = GridCssValues.UsedTrackList(
+                used!.Columns, used.NegativeColumns, used.ExplicitColumns, style.GridTemplateColumnsText, style.GridColLineNames);
+            output["grid-template-rows"] = GridCssValues.UsedTrackList(
+                used.Rows, used.NegativeRows, used.ExplicitRows, style.GridTemplateRowsText, style.GridRowLineNames);
+        }
+        else
+        {
+            output["grid-template-columns"] = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateColumnsText, style.GridTemplateColumns, units);
+            output["grid-template-rows"] = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateRowsText, style.GridTemplateRows, units);
+        }
+
+        output["grid-template-areas"] = GridCssValues.Areas(style.GridAreas);
+        output["grid-auto-columns"] = GridCssValues.AutoTracks(style.GridAutoColumns, units);
+        output["grid-auto-rows"] = GridCssValues.AutoTracks(style.GridAutoRows, units);
+
+        (string columnStart, string columnEnd) = GridCssValues.Sides(style, column: true);
+        (string rowStart, string rowEnd) = GridCssValues.Sides(style, column: false);
+        output["grid-column-start"] = columnStart;
+        output["grid-column-end"] = columnEnd;
+        output["grid-row-start"] = rowStart;
+        output["grid-row-end"] = rowEnd;
+        output["grid-column"] = GridCssValues.LineShorthand(columnStart, columnEnd);
+        output["grid-row"] = GridCssValues.LineShorthand(rowStart, rowEnd);
+        output["grid-area"] = GridCssValues.AreaShorthand(rowStart, columnStart, rowEnd, columnEnd);
+
+        // Chromium 141 builds `grid-template` from the computed track lists, falling back to
+        // the used ones only for a list that is `none`, and serializes `grid` as all six
+        // longhands, the track lists resolved.
+        string templateRows = output["grid-template-rows"];
+        string templateColumns = output["grid-template-columns"];
+        if (usedTracks)
+        {
+            string specifiedRows = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateRowsText, style.GridTemplateRows, units);
+            string specifiedColumns = GridCssValues.SpecifiedTrackList(
+                style.GridTemplateColumnsText, style.GridTemplateColumns, units);
+            // A subgrid list on a box that lays out its own tracks also gives the used ones.
+            templateRows = specifiedRows == "none" || specifiedRows.StartsWith("subgrid", StringComparison.Ordinal)
+                ? templateRows
+                : specifiedRows;
+            templateColumns = specifiedColumns == "none" || specifiedColumns.StartsWith("subgrid", StringComparison.Ordinal)
+                ? templateColumns
+                : specifiedColumns;
+        }
+
+        output["grid-template"] = GridCssValues.TemplateShorthand(templateRows, templateColumns, style.GridAreas);
+        output["grid"] = string.Join(
+            " / ",
+            output["grid-template-rows"],
+            output["grid-template-columns"],
+            output["grid-template-areas"],
+            GridCssValues.AutoFlowInShorthand(style.GridAutoFlow ?? TaffyGridAutoFlow.Row),
+            output["grid-auto-rows"],
+            output["grid-auto-columns"]);
     }
 
     /// <summary>

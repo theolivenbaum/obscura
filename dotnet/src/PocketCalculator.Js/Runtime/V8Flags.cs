@@ -149,6 +149,56 @@ public static class V8Flags
         int.TryParse(value, System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out megabytes) && megabytes > 0;
 
+    private static bool _wasmCapApplied;
+
+    /// <summary>
+    /// The per-memory ceiling V8 enforces, in bytes, once
+    /// <see cref="ApplyWasmMemoryCap"/> has set it; null when it could not be set.
+    /// </summary>
+    internal static long? NativeWasmMemoryCapBytes { get; private set; }
+
+    /// <summary>
+    /// Sets <c>--wasm-max-mem-pages</c> from <paramref name="bytes"/>, once per process,
+    /// if V8 is not initialized yet; zero or less leaves V8's own limit.
+    /// </summary>
+    /// <remarks>
+    /// The flag is the only limit on memory a module declares for itself and on
+    /// <c>memory.grow</c> run inside WebAssembly, where no script wrapper can see it. V8
+    /// then fails the reservation with the <c>RangeError</c> Chromium gives when it runs
+    /// out ("could not allocate memory", "Unable to grow instance memory"). Where the flag
+    /// cannot be set (see <see cref="V8NativeFlags"/>) bootstrap.js's per-isolate budget
+    /// still covers memory created and grown through the JavaScript API.
+    /// </remarks>
+    internal static void ApplyWasmMemoryCap(long bytes)
+    {
+        lock (Gate)
+        {
+            if (_wasmCapApplied)
+            {
+                return;
+            }
+            _wasmCapApplied = true;
+            if (bytes <= 0)
+            {
+                return;
+            }
+
+            const long PageBytes = 64 * 1024;
+            long pages = Math.Clamp(bytes / PageBytes, 1, 65536);
+            string flag = "--wasm-max-mem-pages=" + pages.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (V8NativeFlags.TryApplyBeforeInitialization(flag))
+            {
+                NativeWasmMemoryCapBytes = pages * PageBytes;
+            }
+            else
+            {
+                Warned?.Invoke(
+                    $"V8 flag \"{flag}\" could not be set on this platform; WebAssembly memory is " +
+                    "capped only where script creates or grows it");
+            }
+        }
+    }
+
     /// <summary>Test seam: forget any applied flags and platform state.</summary>
     internal static void ResetForTests()
     {

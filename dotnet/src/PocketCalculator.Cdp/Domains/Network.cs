@@ -26,6 +26,71 @@ public static class Network
     private static CookieJar CookieJarFor(CdpContext ctx, string? sessionId) =>
         ctx.GetSessionPage(sessionId)?.Context.CookieJar ?? ctx.DefaultContext.CookieJar;
 
+    /// <summary>
+    /// The cookies <c>Network.getCookies</c> answers with, as Chromium 141 does: those for
+    /// each of <c>urls</c>, read in the page's own partition; without <c>urls</c>, those
+    /// for the page's URL and each of its frames' URLs, each read in the partition that
+    /// document is in (a cross-site frame's key has the cross-site ancestor bit).
+    /// Partitioned cookies of any other partition are left out, and a cookie two URLs
+    /// share is listed once.
+    /// </summary>
+    /// <remarks>
+    /// Deviation from crates/obscura-cdp/src/domains/network.rs, which answers every
+    /// cookie in the jar, as <c>Network.getAllCookies</c> does. Chromium's order is that
+    /// of a hash map; this lists them by URL, then in jar order. A sessionless call with
+    /// no <c>urls</c> has no page to read, and still answers every cookie.
+    /// </remarks>
+    private static List<CookieInfo> CookiesForGetCookies(JsonNode? parameters, CdpContext ctx, string? sessionId)
+    {
+        CookieJar jar = CookieJarFor(ctx, sessionId);
+        PocketCalculator.Browser.Page? page = ctx.GetSessionPage(sessionId);
+        Uri? top = page is not null && Uri.TryCreate(page.UrlString(), UriKind.Absolute, out Uri? pageUrl)
+            ? pageUrl
+            : null;
+        List<(Uri Url, CookiePartitionKey? Partition)> targets = [];
+        if (parameters.Get("urls").AsJsonArray() is { } urls)
+        {
+            CookiePartitionKey? partition = top is null ? null : CookiePartitionKey.ForTopLevel(top);
+            foreach (JsonNode? entry in urls)
+            {
+                if (entry.AsString() is { } text && Uri.TryCreate(text, UriKind.Absolute, out Uri? url))
+                {
+                    targets.Add((url, partition));
+                }
+            }
+        }
+        else if (page is null)
+        {
+            return jar.GetAllCookies();
+        }
+        else if (top is not null)
+        {
+            targets.Add((top, CookiePartitionKey.ForTopLevel(top)));
+            foreach (var frame in page.Frames)
+            {
+                if (Uri.TryCreate(frame.State.Url, UriKind.Absolute, out Uri? frameUrl))
+                {
+                    targets.Add((frameUrl, CookiePartitionKey.For(top, frame.State.CrossSiteAncestor, frameUrl)));
+                }
+            }
+        }
+
+        List<CookieInfo> result = [];
+        HashSet<(string, string, string, CookiePartitionKey?)> seen = [];
+        foreach (var (url, partition) in targets)
+        {
+            foreach (CookieInfo cookie in jar.GetCookiesForUrl(url, partition))
+            {
+                if (seen.Add((cookie.Name, cookie.Domain, cookie.Path, cookie.PartitionKey)))
+                {
+                    result.Add(cookie);
+                }
+            }
+        }
+
+        return result;
+    }
+
     public static async Task<DomainResult> HandleAsync(
         string method,
         JsonNode? parameters,
@@ -81,6 +146,16 @@ public static class Network
             }
 
             case "getCookies":
+            {
+                var cookies = new JsonArray();
+                foreach (CookieInfo cookie in CookiesForGetCookies(parameters, ctx, sessionId))
+                {
+                    cookies.Add(CookieInfoToCdpJson(cookie));
+                }
+
+                return DomainResult.Ok(new JsonObject { ["cookies"] = cookies });
+            }
+
             case "getAllCookies":
             {
                 var cookies = new JsonArray();
@@ -94,9 +169,27 @@ public static class Network
 
             case "setCookie":
             {
+                if (!CookieParams.TryParsePartitionKey(parameters, out _))
+                {
+                    return DomainResult.Err("Deserializing cookie partition key failed");
+                }
+
                 if (CookieParams.ParseCdpCookie(parameters) is not { } cookie)
                 {
                     return DomainResult.Err("setCookie: missing required name/domain (or url)");
+                }
+
+                if (CookieParams.FailsSanitizing(cookie.Cookie))
+                {
+                    return DomainResult.Err("Sanitizing cookie failed");
+                }
+
+                // A SameSite=None cookie that is not Secure is not stored; Chromium 141
+                // answers that with success: false rather than an error.
+                if (string.Equals(cookie.Cookie.SameSite, "None", StringComparison.OrdinalIgnoreCase)
+                    && !cookie.Cookie.Secure)
+                {
+                    return DomainResult.Ok(new JsonObject { ["success"] = false });
                 }
 
                 CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope([(cookie.Cookie, cookie.HostOnly)]);
@@ -107,7 +200,12 @@ public static class Network
             {
                 if (parameters.Get("cookies").AsJsonArray() is { } cookies)
                 {
-                    CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope(ParseCookies(cookies));
+                    if (ParseCookies(cookies) is not { } parsed)
+                    {
+                        return DomainResult.Err("Invalid cookie fields");
+                    }
+
+                    CookieJarFor(ctx, sessionId).SetCookiesFromCdpWithScope(parsed);
                 }
 
                 return DomainResult.Empty();
@@ -117,8 +215,10 @@ public static class Network
             {
                 if (CookieParams.ParseDeleteCookiesParams(parameters) is { } filter)
                 {
+                    // Chromium 141 deletes from the named partition only, and without a
+                    // partitionKey unpartitioned cookies only (port addition, CHIPS).
                     CookieJarFor(ctx, sessionId)
-                        .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path);
+                        .DeleteCookiesFiltered(filter.Name, filter.Domain, filter.Path, filter.PartitionKey);
                 }
 
                 return DomainResult.Empty();
@@ -201,13 +301,23 @@ public static class Network
     }
 
     /// <summary>Parse a <c>cookies</c> array, keeping each cookie's host-only scope.</summary>
-    internal static List<(CookieInfo Cookie, bool HostOnly)> ParseCookies(JsonArray cookies)
+    /// <summary>
+    /// The cookies of a <c>setCookies</c> payload, or null when one of them fails
+    /// Chromium's sanitizing (<see cref="CookieParams.FailsSanitizing"/>): Chromium 141
+    /// then refuses the whole call and sets none of them.
+    /// </summary>
+    internal static List<(CookieInfo Cookie, bool HostOnly)>? ParseCookies(JsonArray cookies)
     {
         var parsed = new List<(CookieInfo, bool)>();
         foreach (JsonNode? entry in cookies)
         {
             if (CookieParams.ParseCdpCookie(entry) is { } cookie)
             {
+                if (CookieParams.FailsSanitizing(cookie.Cookie))
+                {
+                    return null;
+                }
+
                 parsed.Add((cookie.Cookie, cookie.HostOnly));
             }
         }
@@ -221,7 +331,7 @@ public static class Network
         long expires = cookie.Expires ?? SessionCookieExpires;
         bool session = cookie.Expires is null;
         string sameSite = cookie.SameSite.Length == 0 ? DefaultSameSite : cookie.SameSite;
-        return new JsonObject
+        var json = new JsonObject
         {
             ["name"] = cookie.Name,
             ["value"] = cookie.Value,
@@ -240,5 +350,18 @@ public static class Network
             ["sourcePort"] = cookie.Secure ? DefaultSecurePort : DefaultInsecurePort,
             ["priority"] = "Medium",
         };
+
+        // Chromium 141's shape, present only on a partitioned (CHIPS) cookie, so every
+        // other cookie serializes as it does in Rust.
+        if (cookie.PartitionKey is { } key)
+        {
+            json["partitionKey"] = new JsonObject
+            {
+                ["topLevelSite"] = key.TopLevelSite,
+                ["hasCrossSiteAncestor"] = key.HasCrossSiteAncestor,
+            };
+        }
+
+        return json;
     }
 }

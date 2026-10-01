@@ -329,6 +329,7 @@ public sealed partial class TextEngine : IDisposable
         IReadOnlyList<NodeId> run,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
+        run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
@@ -363,6 +364,87 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return PushShapedItem(style, context, spans, collector);
+    }
+
+    /// <summary>
+    /// Put back the decoration-free inline wrappers a block's child list splices away.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which folds a mixed block's run from
+    /// the spliced list: the text inside <c>&lt;a&gt;</c>, <c>&lt;span&gt;</c> or
+    /// <c>&lt;b&gt;</c> reached the shaper as the block's own text, so the wrapper owned no
+    /// shaped range, <c>getBoundingClientRect()</c> reported 0,0,0,0 for it (a CDP click by
+    /// coordinates missed the link) and its own color and font were not applied. Chromium
+    /// 141: <c>&lt;div&gt;before &lt;a&gt;mixed link&lt;/a&gt;&lt;div&gt;block&lt;/div&gt;&lt;/div&gt;</c>
+    /// reports the link at 57.8,8,71.1,17. Each run node is replaced by its outermost
+    /// ancestor below <paramref name="parent"/>, and the lifted list is kept only when
+    /// splicing it again gives back exactly <paramref name="run"/>, so a wrapper whose content
+    /// is split across runs (it holds a block) keeps the spliced form.
+    /// </remarks>
+    private static IReadOnlyList<NodeId> LiftFlattenedWrappers(
+        DomTree tree,
+        NodeId parent,
+        IReadOnlyList<NodeId> run,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        List<NodeId>? lifted = null;
+        for (int index = 0; index < run.Count; index++)
+        {
+            NodeId top = run[index];
+            NodeId? up = tree.GetNode(top)?.Parent;
+            int guard = 0;
+            while (up is { } ancestor && ancestor != parent)
+            {
+                if (++guard > 4096)
+                {
+                    return run;
+                }
+
+                top = ancestor;
+                up = tree.GetNode(ancestor)?.Parent;
+            }
+
+            if (up is null)
+            {
+                return run;
+            }
+
+            if (top != run[index] && lifted is null)
+            {
+                lifted = new List<NodeId>(run.Count);
+                for (int before = 0; before < index; before++)
+                {
+                    lifted.Add(run[before]);
+                }
+            }
+
+            if (lifted is not null && (lifted.Count == 0 || lifted[^1] != top))
+            {
+                lifted.Add(top);
+            }
+        }
+
+        if (lifted is null)
+        {
+            return run;
+        }
+
+        List<NodeId> respliced = new(run.Count);
+        DomBuild.FlattenBoxlessInlineChildren(tree, lifted, styles, respliced);
+        if (respliced.Count != run.Count)
+        {
+            return run;
+        }
+
+        for (int index = 0; index < run.Count; index++)
+        {
+            if (respliced[index] != run[index])
+            {
+                return run;
+            }
+        }
+
+        return lifted;
     }
 
     /// <summary>
@@ -1120,6 +1202,16 @@ public sealed partial class TextEngine : IDisposable
                 float alignmentShift = InlineGeometry.LineEdgeAlignmentShift(item, lineStart, lineEnd);
                 float lineRight = run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
 
+                // DEVIATION from crates/obscura-render/src/inline.rs, whose continuing fragment
+                // runs to the line's full advance. The white space a soft wrap leaves at the
+                // end of a line hangs, and Chromium 141 ends the fragment before it: the
+                // first line of a span wrapped after "three " is 36.47 wide ("three"), where
+                // this gave 40.91.
+                if (item.OwnerBoxes.Count > 0)
+                {
+                    lineRight -= TrailingSpaceAdvance(run);
+                }
+
                 // RunCursorX scans the run's glyphs, and every owner open across the line asks
                 // for the same few offsets, so it is memoized per run.
                 cursorByOffset.Clear();
@@ -1134,6 +1226,7 @@ public sealed partial class TextEngine : IDisposable
                     return x;
                 }
 
+                bool lineHasRtl = item.OwnerBoxes.Count > 0 && LineHasRtlGlyph(run);
                 foreach (InlineOwnerBox owner in item.OwnerBoxes)
                 {
                     bool empty = owner.Start == owner.End;
@@ -1158,6 +1251,21 @@ public sealed partial class TextEngine : IDisposable
                             + InlineGeometry.LineAdvanceBeforeEvent(item, owner.EndEvent, lineStart, lineEnd)
                             + owner.EndEdge.BorderPadding
                         : lineRight;
+                    // DEVIATION from crates/obscura-render/src/inline.rs, which measures from
+                    // the logical start cursor to the logical end cursor. On a right-to-left
+                    // line the start cursor is the right edge, so the width came out negative
+                    // and clamped to 0: Chromium 141 reports a `direction: rtl` span of
+                    // Arabic at 1235,37 wide where this gave 1263.4,0. A line with any
+                    // right-to-left glyph takes the visual extent of the owner's glyphs.
+                    if (!empty
+                        && lineHasRtl
+                        && OwnerGlyphExtent(run, owner.Start - lineStart, owner.End - lineStart)
+                            is { } visual)
+                    {
+                        rawLeft = visual.Left;
+                        rawRight = visual.Right;
+                    }
+
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
                     float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
@@ -1189,6 +1297,82 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return output;
+    }
+
+    /// <summary>The advance of the spaces a left-to-right visual line ends with.</summary>
+    private static float TrailingSpaceAdvance(LayoutRun run)
+    {
+        if (run.Rtl)
+        {
+            return 0f;
+        }
+
+        float advance = 0f;
+        for (int index = run.Glyphs.Count - 1; index >= 0; index--)
+        {
+            LayoutGlyph glyph = run.Glyphs[index];
+            if ((glyph.Level & 1) != 0
+                || glyph.Start < 0
+                || glyph.End > run.Text.Length
+                || glyph.End <= glyph.Start)
+            {
+                break;
+            }
+
+            bool spaces = true;
+            for (int at = glyph.Start; at < glyph.End; at++)
+            {
+                if (run.Text[at] != ' ')
+                {
+                    spaces = false;
+                    break;
+                }
+            }
+
+            if (!spaces)
+            {
+                break;
+            }
+
+            advance += glyph.W;
+        }
+
+        return advance;
+    }
+
+    private static bool LineHasRtlGlyph(LayoutRun run)
+    {
+        if (run.Rtl)
+        {
+            return true;
+        }
+
+        foreach (LayoutGlyph glyph in run.Glyphs)
+        {
+            if ((glyph.Level & 1) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The visual x extent of the glyphs whose text lies in <c>start..end</c>.</summary>
+    private static (float Left, float Right)? OwnerGlyphExtent(LayoutRun run, int start, int end)
+    {
+        float left = float.PositiveInfinity;
+        float right = float.NegativeInfinity;
+        foreach (LayoutGlyph glyph in run.Glyphs)
+        {
+            if (glyph.Start < end && glyph.End > start)
+            {
+                left = F32.Min(left, glyph.X);
+                right = F32.Max(right, glyph.X + glyph.W);
+            }
+        }
+
+        return left <= right ? (left, right) : null;
     }
 
     /// <summary>Lines at most this long are always probed whole.</summary>
@@ -1403,6 +1587,21 @@ public sealed partial class TextEngine : IDisposable
                     float edges = InlineGeometry.LineEdgeAdvance(item, globalStart, candidateEnd);
                     float requiredAvailable = F32.Max(baseAvailable - edges, 0f);
                     split = candidateEndLocal;
+                    if (lineWidth + edges > baseAvailable + 0.01f
+                        && LastWordStartX(line.Text, layout) is { } lastWordCut
+                        && lastWordCut > requiredAvailable)
+                    {
+                        // DEVIATION from crates/obscura-render/src/inline.rs, which retries at
+                        // the width left once every edge on the candidate line is paid for.
+                        // The closing edges of the boxes that end with the text all sit on its
+                        // last word, so 300 nested `padding:0 3px;margin:0 2px` spans asked
+                        // for 1500px there and the retry fell to 0: each later line held one
+                        // or two words, 60 lines where Chromium 141 has 6. Never retry below
+                        // the width that drops just the last word; that word and its edges go
+                        // to the next line, and overflow there when they alone do not fit.
+                        requiredAvailable = lastWordCut;
+                    }
+
                     if (lineWidth + edges <= baseAvailable + 0.01f || requiredAvailable + 0.01f >= available)
                     {
                         break;
@@ -1468,6 +1667,39 @@ public sealed partial class TextEngine : IDisposable
 
         item.Buffer.SetSize(width is { } finalWidth ? F32.Max(finalWidth, 0f) : null, null);
         item.Buffer.ShapeUntilScroll(_shaper);
+    }
+
+    /// <summary>
+    /// The width at which <paramref name="layout"/> keeps everything but its last word: the x
+    /// of the last space that has a non-space glyph after it. <c>null</c> when the line is one
+    /// word, or is not a plain left-to-right line.
+    /// </summary>
+    private static float? LastWordStartX(string text, LayoutLine layout)
+    {
+        List<LayoutGlyph> glyphs = layout.Glyphs;
+        bool sawWord = false;
+        for (int index = glyphs.Count - 1; index >= 0; index--)
+        {
+            LayoutGlyph glyph = glyphs[index];
+            if ((glyph.Level & 1) != 0 || glyph.Start < 0 || glyph.Start >= text.Length)
+            {
+                return null;
+            }
+
+            if (text[glyph.Start] == ' ')
+            {
+                if (sawWord)
+                {
+                    return glyph.X - glyphs[0].X + 0.01f;
+                }
+            }
+            else
+            {
+                sawWord = true;
+            }
+        }
+
+        return null;
     }
 
     private static int SkipTrailingWhitespace(string text, int split)

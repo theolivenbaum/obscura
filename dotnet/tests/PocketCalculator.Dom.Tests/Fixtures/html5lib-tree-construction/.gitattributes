@@ -1,0 +1,2 @@
+# The cases carry literal CR and NUL characters; keep the bytes exactly.
+*.dat -text

@@ -92,6 +92,13 @@ internal sealed class IfcRegistry
     /// by the taffy leaf that stands in for the control.
     /// </summary>
     internal Dictionary<TaffyNodeId, Layout.Size<float>> NativeControlContent { get; } = [];
+
+    /// <summary>
+    /// Decoration-free inline wrappers a block's child list spliced away, outermost first. One
+    /// whose run folded back into a shaped item gets its box from shaping; the rest take the
+    /// union of their content after layout (<c>SynthesizeSplicedInlineRects</c>).
+    /// </summary>
+    internal List<NodeId> SplicedInlines { get; } = [];
 }
 
 internal sealed class BuildContext
@@ -1178,7 +1185,8 @@ internal static partial class DomBuild
         DomTree tree,
         IReadOnlyList<NodeId> children,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        List<NodeId> output)
+        List<NodeId> output,
+        List<NodeId>? spliced = null)
     {
         if (!StackGuard.CanDescend())
         {
@@ -1194,8 +1202,13 @@ internal static partial class DomBuild
                 || IsFlattenableInline(tree, cid, styles)
                 || InlineWrapsOnlyInFlowBlocks(tree, cid, styles))
             {
+                if (!displayContents)
+                {
+                    spliced?.Add(cid);
+                }
+
                 FlattenBoxlessInlineChildren(
-                    tree, DomTraversal.RenderedChildren(tree, cid), styles, output);
+                    tree, DomTraversal.RenderedChildren(tree, cid), styles, output, spliced);
             }
             else
             {

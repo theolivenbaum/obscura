@@ -587,6 +587,17 @@ internal static class DomCascade
                 style.Display = Display.None;
             }
 
+            // UA rule `dialog:not([open]) { display: none }`. DEVIATION from
+            // crates/obscura-render/src/style.rs, which has no dialog rule, so a closed dialog
+            // laid out and painted as a block and its text reached innerText (Chromium 141:
+            // display none, a 0,0,0,0 rect, no text).
+            if (!isSvgNamespace
+                && string.Equals(node.AsElement()?.Name.Local, "dialog", StringComparison.Ordinal)
+                && node.GetAttribute("open") is null)
+            {
+                style.Display = Display.None;
+            }
+
             ApplyPresentationalHints(node, style);
             if (isSvgNamespace)
             {
@@ -771,6 +782,7 @@ internal static class DomCascade
     {
         DomTree tree = context.Tree;
         List<Matcher> subtreeMatchers = [];
+        List<NodeId> childScratch = [];
 
         // A work item is either a visit, a pop-ancestor marker, or a pop-subtree-matcher marker.
         List<(Visit? Visit, int Marker)> work =
@@ -896,7 +908,8 @@ internal static class DomCascade
             }
 
             bool isShadowHost = tree.ShadowRootOf(visit.Id) is not null;
-            List<NodeId> children = tree.Children(visit.Id);
+            List<NodeId> children = childScratch;
+            tree.CopyChildrenTo(visit.Id, children);
             for (int index = children.Count - 1; index >= 0; index--)
             {
                 NodeId cid = children[index];

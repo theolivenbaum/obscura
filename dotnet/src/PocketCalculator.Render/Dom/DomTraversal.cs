@@ -53,17 +53,27 @@ internal static class DomTraversal
     internal static List<NodeId> RenderedDescendants(DomTree tree, NodeId root)
     {
         int limit = tree.Count;
-        List<NodeId> result = [];
-        HashSet<NodeId> visited = [];
-        List<NodeId> stack = RenderedChildren(tree, root);
-        stack.Reverse();
+        List<NodeId> result = root == tree.Document ? new(limit) : [];
+
+        // Indexed by arena slot: a live node owns its slot, so this is the same visited set as
+        // one keyed by id, without hashing every node of the document.
+        bool[] visited = new bool[tree.SlotCount];
+        List<NodeId> stack = [];
+        List<NodeId> scratch = [];
+        PushRenderedChildrenReversed(tree, root, stack, scratch);
         while (stack.Count > 0)
         {
             NodeId id = stack[^1];
             stack.RemoveAt(stack.Count - 1);
-            if (!visited.Add(id))
+            int slot = id.Index;
+            if ((uint)slot < (uint)visited.Length)
             {
-                continue;
+                if (visited[slot])
+                {
+                    continue;
+                }
+
+                visited[slot] = true;
             }
 
             result.Add(id);
@@ -72,14 +82,64 @@ internal static class DomTraversal
                 break;
             }
 
+            PushRenderedChildrenReversed(tree, id, stack, scratch);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Push <see cref="RenderedChildren"/> of <paramref name="id"/> onto
+    /// <paramref name="stack"/> in reverse order.
+    /// </summary>
+    /// <remarks>
+    /// An element that is not a shadow host, a slot or a <c>details</c> renders exactly its
+    /// DOM children, which are read off the sibling chain here instead of being copied into a
+    /// fresh list per node; every other node takes <see cref="RenderedChildren"/> itself.
+    /// </remarks>
+    private static void PushRenderedChildrenReversed(
+        DomTree tree,
+        NodeId id,
+        List<NodeId> stack,
+        List<NodeId> scratch)
+    {
+        if (tree.GetNode(id) is not { } node)
+        {
+            return;
+        }
+
+        bool plain = tree.ShadowRootOf(id) is null
+            && !(node.AsElement() is { } element
+                && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+                && element.Name.Local is "slot" or "details");
+        if (!plain)
+        {
             List<NodeId> children = RenderedChildren(tree, id);
             for (int index = children.Count - 1; index >= 0; index--)
             {
                 stack.Add(children[index]);
             }
+
+            return;
         }
 
-        return result;
+        scratch.Clear();
+        int cap = tree.SlotCount;
+        for (NodeId? child = node.FirstChild; child is { } cid; child = tree.GetNode(cid)?.NextSibling)
+        {
+            scratch.Add(cid);
+
+            // The sibling-chain bound of DomTree.Children.
+            if (scratch.Count > cap)
+            {
+                break;
+            }
+        }
+
+        for (int index = scratch.Count - 1; index >= 0; index--)
+        {
+            stack.Add(scratch[index]);
+        }
     }
 
     /// <summary>Children for computed-value inheritance traversal.</summary>

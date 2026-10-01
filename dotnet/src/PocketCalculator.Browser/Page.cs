@@ -219,6 +219,12 @@ public sealed partial class Page : IDisposable
     public string Referrer { get; set; } = string.Empty;
 
     /// <summary>
+    /// The policy of the current document's <c>Referrer-Policy</c> response header, or null.
+    /// Port addition (Rust has no referrer policy).
+    /// </summary>
+    public ReferrerPolicy? ReferrerPolicyHeader { get; set; }
+
+    /// <summary>
     /// CSS viewport used by responsive page JavaScript and CDP screenshots. The
     /// physical <c>screen</c> fingerprint stays independent.
     /// </summary>
@@ -447,6 +453,7 @@ public sealed partial class Page : IDisposable
         rt.SetEncoding(Encoding);
         rt.SetTitle(Title);
         rt.SetReferrer(Referrer);
+        rt.SetReferrerPolicyHeader(ReferrerPolicyHeader);
 
         rt.SetUserAgent(HttpClient.UserAgent);
         rt.SetPlatform(Context.Platform, Context.UaPlatform, Context.UaPlatformVersion);
@@ -509,6 +516,15 @@ public sealed partial class Page : IDisposable
 
     public string UrlString() => Url?.Href ?? "about:blank";
 
+    /// <summary>
+    /// The serialized origin of the loaded document as the host committed it, <c>"null"</c>
+    /// when opaque. Nothing the page does moves it (<c>history.pushState</c> cannot leave
+    /// the origin, and <c>location.origin</c> is page-replaceable).
+    /// </summary>
+    public string DocumentOrigin() => Js is { } js
+        ? StateHelpers.DocumentOrigin(js.State)
+        : Url?.AsciiOrigin ?? "null";
+
     public T? WithDom<T>(Func<DomTree, T> body)
     {
         ArgumentNullException.ThrowIfNull(body);
@@ -561,8 +577,8 @@ public sealed partial class Page : IDisposable
     /// </summary>
     /// <remarks>
     /// A single page app answers a click by calling <c>history.pushState</c> and
-    /// rendering the next view in place. <c>bootstrap.js</c> tracks that in
-    /// <c>__virtualUrl</c> so <c>location.href</c> reads correctly, but nothing on
+    /// rendering the next view in place. <c>bootstrap.js</c> tracks that (upstream in
+    /// <c>__virtualUrl</c>, here reported through <c>op_history_url</c>) so <c>location.href</c> reads correctly, but nothing on
     /// the host side looked at it, so the page had moved on while
     /// <c>page.url()</c> still reported the old document. Adopting the URL is
     /// unchanged; what the outcome adds is that the change is classified, because
@@ -584,21 +600,12 @@ public sealed partial class Page : IDisposable
         {
             return PageNavigationOutcome.None;
         }
-        JsonNode? value;
-        try
-        {
-            value = js.Evaluate("globalThis.__virtualUrl || ''");
-        }
-        catch (JsRuntimeException)
-        {
-            return PageNavigationOutcome.None;
-        }
-        if (value?.GetValueKind() != System.Text.Json.JsonValueKind.String)
-        {
-            return PageNavigationOutcome.None;
-        }
-        string virtualUrl = value.GetValue<string>();
-        if (virtualUrl.Length == 0 || PageUrl.TryParse(virtualUrl) is not { } parsed)
+        // DEVIATION from fork_virtual_url.rs, which evaluates the page-writable global
+        // __virtualUrl: a page could set it to any URL and move Page.Url and what CDP and
+        // MCP report (SECURITY.md L9). The host keeps the History API URL itself, checked
+        // against the committed document URL when the page moved it.
+        string? virtualUrl = js.HistoryUrl;
+        if (string.IsNullOrEmpty(virtualUrl) || PageUrl.TryParse(virtualUrl) is not { } parsed)
         {
             return PageNavigationOutcome.None;
         }

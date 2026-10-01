@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using PocketCalculator.Js.Modules;
 using PocketCalculator.Js.Ops;
+using PocketCalculator.Js.Runtime;
 
 namespace PocketCalculator.Cdp;
 
@@ -173,6 +174,7 @@ public static class Dispatcher
         var method = req.Method[(separator + 1)..];
 
         DomainResult result;
+        ParkedCommand? parkedCommand = null;
         try
         {
             result = domain switch
@@ -214,6 +216,12 @@ public static class Dispatcher
                 _ => DomainResult.Err($"Unknown domain: {domain}"),
             };
         }
+        catch (CommandParkedException parked)
+        {
+            parkedCommand = new ParkedCommand(req.Id, req.SessionId, req.Method, parked.Parked, parked.Finish);
+            ctx.ParkedCommands.Add(parkedCommand);
+            result = DomainResult.Empty();
+        }
         catch (OperationCanceledException) when (watchdog is { Fired: true })
         {
             // The command watchdog cancelled C# work the handler was doing outside
@@ -235,7 +243,7 @@ public static class Dispatcher
             throw;
         }
 
-        if (result.IsOk && Domains.Page.CommandCanChangeScreencastFrame(req.Method))
+        if (parkedCommand is null && result.IsOk && Domains.Page.CommandCanChangeScreencastFrame(req.Method))
         {
             if (Domains.Page.QueueScreencastFrame(ctx, req.SessionId, false) is { } screencastError)
             {
@@ -260,6 +268,11 @@ public static class Dispatcher
         DrainBindingCalls(ctx);
         DrainFrameEvents(ctx);
 
+        if (parkedCommand is not null)
+        {
+            return new CdpResponse { Id = req.Id, SessionId = req.SessionId, Parked = true };
+        }
+
         if (result.IsOk)
         {
             return CdpResponse.Success(req.Id, result.Value, req.SessionId);
@@ -267,6 +280,99 @@ public static class Dispatcher
 
         CdpLog.Warn($"CDP error for {req.Method}: {result.Error}");
         return CdpResponse.Failure(req.Id, -32601, result.Error!, req.SessionId);
+    }
+
+    /// <summary>
+    /// Answers <paramref name="parked"/> if its promise has settled or its time is up,
+    /// under the same lock and command watchdog as a dispatched command. Null while it
+    /// is still pending.
+    /// </summary>
+    internal static async Task<CdpResponse?> TryResumeParkedAsync(ParkedCommand parked, CdpContext ctx)
+    {
+        ArgumentNullException.ThrowIfNull(parked);
+        ArgumentNullException.ThrowIfNull(ctx);
+        await ctx.V8Lock.WaitAsync().ConfigureAwait(false);
+        ArmedWatchdog? watchdog = null;
+        try
+        {
+            RemoteObjectInfo? info;
+            try
+            {
+                info = parked.Await.TryComplete();
+            }
+            catch (CdpContextGoneException error)
+            {
+                // The realm went away under the promise (a navigation, a closed or
+                // suspended page): Chromium answers -32000 "Inspected target navigated
+                // or closed", or "Execution context was destroyed." for a lost frame.
+                return CdpResponse.Failure(parked.Id, -32000, error.Message, parked.SessionId);
+            }
+            catch (JsRuntimeException error)
+            {
+                return CdpResponse.Failure(parked.Id, -32601, error.Message, parked.SessionId);
+            }
+
+            if (info is null)
+            {
+                if (Environment.TickCount64 >= parked.Await.Deadline)
+                {
+                    CdpLog.Warn($"CDP error for {parked.Method}: {parked.Await.TimeoutMessage}");
+                    return CdpResponse.Failure(parked.Id, -32601, parked.Await.TimeoutMessage, parked.SessionId);
+                }
+
+                return null;
+            }
+
+            var budgetMs = CommandBudgetMs();
+            if (budgetMs != 0 && ctx.GetSessionPage(parked.SessionId)?.IsolateHandle is { } handle)
+            {
+                watchdog = CdpWatchdog.Arm(handle, TimeSpan.FromMilliseconds(budgetMs));
+            }
+
+            DomainResult result;
+            try
+            {
+                result = await parked.Finish(info).ConfigureAwait(false);
+            }
+            catch (Domains.DomainError error)
+            {
+                result = DomainResult.Err(error.Message);
+            }
+            catch (OperationCanceledException) when (watchdog is { Fired: true })
+            {
+                result = DomainResult.Err($"{parked.Method} exceeded its {budgetMs}ms time budget");
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                result = DomainResult.Err(error.Message);
+            }
+
+            if (watchdog is not null && CdpWatchdog.Disarm(watchdog))
+            {
+                ctx.GetSessionPageMut(parked.SessionId)?.CancelV8Termination();
+            }
+
+            watchdog = null;
+            DrainRuntimeEvents(ctx);
+            DrainBindingCalls(ctx);
+            DrainFrameEvents(ctx);
+            if (result.IsOk)
+            {
+                return CdpResponse.Success(parked.Id, result.Value, parked.SessionId);
+            }
+
+            CdpLog.Warn($"CDP error for {parked.Method}: {result.Error}");
+            return CdpResponse.Failure(parked.Id, -32601, result.Error!, parked.SessionId);
+        }
+        finally
+        {
+            if (watchdog is not null)
+            {
+                CdpWatchdog.Disarm(watchdog);
+            }
+
+            ctx.V8Lock.Release();
+        }
     }
 
     private static ulong CommandBudgetMs()
@@ -393,9 +499,13 @@ public static class Dispatcher
             // Port addition (SECURITY.md M6): calls from an isolated world's binding,
             // which report that world's execution context.
             var worldCalls = page.TakePendingWorldBindingCalls();
-            if (calls.Count != 0 || worldCalls.Count != 0)
+            // Port addition: calls from a child frame's own realm, which report that
+            // frame's default context, as in Chromium. A frame with no live context yet
+            // (not announced) has no client to hear it.
+            var frameCalls = page.TakePendingFrameBindingCalls();
+            if (calls.Count != 0 || worldCalls.Count != 0 || frameCalls.Count != 0)
             {
-                List<(string Name, string Payload, long WorldKey)> all = new(calls.Count + worldCalls.Count);
+                List<(string Name, string Payload, long WorldKey)> all = new(calls.Count + worldCalls.Count + frameCalls.Count);
                 foreach (var (name, payload) in calls)
                 {
                     all.Add((name, payload, 0));
@@ -404,6 +514,14 @@ public static class Dispatcher
                 foreach (var (worldKey, name, payload) in worldCalls)
                 {
                     all.Add((name, payload, worldKey));
+                }
+
+                foreach (var (frameId, name, payload) in frameCalls)
+                {
+                    if (ctx.FrameDefaultContextId(page.Id, Domains.Page.ChildFrameId(page.FrameId, frameId)) is { } contextId)
+                    {
+                        all.Add((name, payload, -contextId));
+                    }
                 }
 
                 drained.Add((page.Id, all));
@@ -426,13 +544,20 @@ public static class Dispatcher
         // fire Runtime.bindingCalled for a binding no client registered, or one
         // it removed. Only names with a live Runtime.addBinding shim in this
         // context are reported now; the rest are dropped.
-        HashSet<string> registeredNames = new(StringComparer.Ordinal);
-        foreach (var (identifier, _) in ctx.PreloadScripts)
+        // Port fix: per page, as Chromium scopes a binding to its target (CdpContext.PreloadScripts).
+        HashSet<string> RegisteredNames(string pageId)
         {
-            if (identifier.StartsWith(BindingPreloadPrefix, StringComparison.Ordinal))
+            HashSet<string> names = new(StringComparer.Ordinal);
+            foreach (var (identifier, _, owner) in ctx.PreloadScripts)
             {
-                registeredNames.Add(identifier[BindingPreloadPrefix.Length..]);
+                if (identifier.StartsWith(BindingPreloadPrefix, StringComparison.Ordinal)
+                    && CdpContext.PreloadAppliesTo(owner, pageId))
+                {
+                    names.Add(identifier[BindingPreloadPrefix.Length..]);
+                }
             }
+
+            return names;
         }
 
         List<CdpEvent> events = [];
@@ -446,16 +571,28 @@ public static class Dispatcher
             }
 
             var defaultContextId = ctx.DefaultContextId(pageId) ?? 1;
+            HashSet<string> registeredNames = RegisteredNames(pageId);
             foreach (var (name, payload, worldKey) in calls)
             {
                 long executionContextId = defaultContextId;
-                if (worldKey != 0)
+                if (worldKey < 0)
+                {
+                    // A child frame's own realm (negated context id, above): a page-level
+                    // binding, reported with the frame's default context.
+                    if (!registeredNames.Contains(name))
+                    {
+                        continue;
+                    }
+
+                    executionContextId = -worldKey;
+                }
+                else if (worldKey != 0)
                 {
                     // A world's call counts only for a binding registered for that
                     // world's name, and only while its context is live.
                     if (ctx.ContextById(worldKey) is not { IsDefault: false } world
                         || !string.Equals(world.PageId, pageId, StringComparison.Ordinal)
-                        || !WorldHasBinding(ctx, world.WorldName, name))
+                        || !WorldHasBinding(ctx, world.WorldName, name, pageId))
                     {
                         continue;
                     }
@@ -506,13 +643,14 @@ public static class Dispatcher
         ctx.PendingEvents.AddRange(events);
     }
 
-    private static bool WorldHasBinding(CdpContext ctx, string worldName, string name)
+    private static bool WorldHasBinding(CdpContext ctx, string worldName, string name, string pageId)
     {
         string key = BindingPreloadPrefix + name;
-        foreach (var (identifier, world, _) in ctx.WorldPreloadScripts)
+        foreach (var (identifier, world, _, owner) in ctx.WorldPreloadScripts)
         {
             if (string.Equals(identifier, key, StringComparison.Ordinal)
-                && string.Equals(world, worldName, StringComparison.Ordinal))
+                && string.Equals(world, worldName, StringComparison.Ordinal)
+                && CdpContext.PreloadAppliesTo(owner, pageId))
             {
                 return true;
             }
@@ -569,6 +707,15 @@ public static class Dispatcher
                     continue;
                 }
 
+                // Port addition (SECURITY.md M6): the frame's execution contexts, its own
+                // realm and a world per new-document world name, as Chromium creates them
+                // on the frame's document. The Rust engine announces a frame with none, so
+                // a client could not evaluate in it at all.
+                ctx.EnsureDefaultContext(page.Id);
+                List<ExecutionContextRecord> frameContexts = ctx.CreateFrameContexts(
+                    page.Id, id, frame.Get("url").AsStringOr(string.Empty));
+                List<string> runtimeSessions = frameContexts.Count == 0 ? [] : ctx.RuntimeSessionsForPage(page.Id);
+
                 foreach (var sessionId in sessionIds)
                 {
                     // Attach before navigate: a client builds its frame from the
@@ -594,6 +741,14 @@ public static class Dispatcher
                         },
                         SessionId = sessionId,
                     });
+
+                    if (runtimeSessions.Contains(sessionId, StringComparer.Ordinal))
+                    {
+                        foreach (ExecutionContextRecord context in frameContexts)
+                        {
+                            events.Add(Domains.Runtime.ExecutionContextCreatedEvent(context, sessionId));
+                        }
+                    }
 
                     // The frame's document scripts have already run by the time it
                     // is in this list, so it is not still loading.
@@ -706,6 +861,9 @@ public static class Dispatcher
         CdpRequest req,
         CdpContext ctx)
     {
+        // The wrapped reply is built from the inner one, so the inner command cannot be
+        // answered later: its await stays inline.
+        PocketCalculator.Js.Runtime.CdpAwaitParking.YieldWhen = null;
         var sessionId = req.Params.Get("sessionId").AsString();
         if (req.Params.Get("message").AsString() is not { } message)
         {

@@ -18,7 +18,19 @@ public static class McpCommand
             // this cast. Rust has no second runtime check and neither should
             // this: a duplicate guard would only ever print a message the
             // reference does not.
-            await Http.RunAsync(mcp.Host, checked((ushort)mcp.Port), proxy, mcp.UserAgent, args.Stealth)
+            // SECURITY.md I1: optional TLS, from --tls-cert/--tls-key or the
+            // POCKETCALCULATOR_TLS_CERT/_KEY fallbacks.
+            System.Security.Cryptography.X509Certificates.X509Certificate2? certificate;
+            try
+            {
+                certificate = PocketCalculator.Net.ServerTls.Resolve(mcp.TlsCert, mcp.TlsKey);
+            }
+            catch (InvalidOperationException error)
+            {
+                throw new CliException(error.Message);
+            }
+
+            await Http.RunAsync(mcp.Host, checked((ushort)mcp.Port), proxy, mcp.UserAgent, args.Stealth, certificate)
                 .ConfigureAwait(false);
             return;
         }

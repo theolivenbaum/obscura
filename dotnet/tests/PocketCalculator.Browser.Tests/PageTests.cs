@@ -1135,7 +1135,7 @@ public sealed class PageTests
         Assert.Equal(
             1.0,
             PageFixtures.AsDouble(
-                page.Js!.Evaluate("Object.keys(globalThis.__obscura_frameObjects).length")));
+                page.Js!.EvaluateHost("__obscura_host.frameRegistrySize()[2]")));
     }
 
     /// <summary>
@@ -1157,10 +1157,33 @@ public sealed class PageTests
         Assert.Empty(page.Frames);
         Assert.Equal(
             0.0,
-            PageFixtures.AsDouble(page.Js!.Evaluate(
-                "Object.keys(globalThis.__obscura_frameObjects).length"
-                + " + Object.keys(globalThis.__obscura_frameWindows).length"
-                + " + Object.keys(globalThis.__obscura_frameElements).length")));
+            PageFixtures.AsDouble(page.Js!.EvaluateHost(
+                "(function (s) { return s[0] + s[1] + s[2]; })(__obscura_host.frameRegistrySize())")));
+    }
+
+    /// <summary>
+    /// SECURITY.md L10: the sweep's list of live frames was built with the page's
+    /// <c>Array.prototype.push</c> and <c>isConnected</c>, so a page that replaced either
+    /// had every child frame torn down under the client (Playwright's page.frames() lost
+    /// them). Chromium's frame tree does not consult page script.
+    /// </summary>
+    [Fact]
+    public async Task APageReplacingPushOrIsConnectedKeepsItsFrames()
+    {
+        using TestHttpServer server = SpawnShadowFrameServer();
+        using Page page = PageFixtures.FramePage("tampered-frame-sweep");
+        await page.NavigateAsync($"{server.Origin}/plain.html");
+        await page.SettleAsync(1_000);
+        Assert.Single(page.Frames);
+
+        page.Js!.Evaluate("""
+            (Array.prototype.push = function () { return 0; },
+             Object.defineProperty(Node.prototype, 'isConnected', { get() { return false; }, configurable: true }),
+             1)
+            """);
+        page.ReleaseDetachedFrames();
+
+        Assert.Single(page.Frames);
     }
 
     [Fact]
@@ -1259,9 +1282,9 @@ public sealed class PageTests
         page.Dom = HtmlParsing.ParseHtml(
             "<html><head></head><body><script id=old></script></body></html>");
         page.InitJs();
-        page.Js!.Evaluate(
-            "var setup = true; const old = document.getElementById('old');"
-            + " globalThis.__markParserScripts([old._nid]); return old._nid;");
+        page.Js!.Evaluate("var setup = true; document.getElementById('old')._nid");
+        page.Js!.ExecuteHostScript(
+            "mark", "__obscura_host.vars.__markParserScripts([document.getElementById('old')._nid]);");
         page.SuspendJs();
 
         page.Url = UrlRecord.Parse("http://example.com/new.html")!;
@@ -1656,10 +1679,10 @@ public sealed class PageTests
             "load-delayer-deadline",
             "http://127.0.0.1:9",
             "<html><head></head><body></body></html>");
+        page.Js!.SetDocumentReadyState("loading");
         page.Js!.ExecuteScript(
             "install-load-delayer",
-            "globalThis.__documentReadyState__ = 'loading'; "
-            + "const script = document.createElement('script'); "
+            "const script = document.createElement('script'); "
             + $"script.src = '{server.Origin}/slow-dynamic.js'; "
             + "document.head.appendChild(script);");
         Assert.True(page.Js!.HasPendingLoadDelayingScripts());
@@ -1697,10 +1720,10 @@ public sealed class PageTests
         // The throw is deferred through a timer so it lands on a pump tick. Thrown
         // during the installing script's own microtask drain it would clear the
         // pending-script bookkeeping before the fetch even starts.
+        page.Js!.SetDocumentReadyState("loading");
         page.Js!.ExecuteScript(
             "install-load-delayer",
-            "globalThis.__documentReadyState__ = 'loading'; "
-            + "const script = document.createElement('script'); "
+            "const script = document.createElement('script'); "
             + $"script.src = '{server.Origin}/slow-dynamic.js'; "
             + "document.head.appendChild(script); "
             + "setTimeout(() => { "
@@ -1744,10 +1767,10 @@ public sealed class PageTests
             $"post-load enhancement must not extend navigation; elapsed={navigationElapsed}");
         PageFixtures.AssertJson(
             """["complete", false, true, false]""",
-            page.Js!.Evaluate(
+            page.Js!.EvaluateHost(
                 "[document.readyState, globalThis.__postLoadDynamicRan === true,"
-                + " globalThis.__obscura_hasPendingDynamicScripts(),"
-                + " globalThis.__obscura_hasPendingLoadDelayingScripts()]"));
+                + " __obscura_host.vars.__obscura_hasPendingDynamicScripts(),"
+                + " __obscura_host.vars.__obscura_hasPendingLoadDelayingScripts()]"));
 
         await page.SettleForDurationAsync(700);
 

@@ -80,12 +80,12 @@ internal sealed class NamedLineResolver
     {
         var startResolved = line.Start.Kind == GridPlacementKind.NamedLine
             ? GridPlacement.FromLineIndex(
-                FindLineIndex(line.Start.Name!, line.Start.LineIndex, axis, GridAreaEnd.Start, Identity).AsI16())
+                (short)FindLineIndex(line.Start.Name!, line.Start.LineIndex, axis, GridAreaEnd.Start, Identity).AsI16())
             : line.Start;
 
         var endResolved = line.End.Kind == GridPlacementKind.NamedLine
             ? GridPlacement.FromLineIndex(
-                FindLineIndex(line.End.Name!, line.End.LineIndex, axis, GridAreaEnd.End, Identity).AsI16())
+                (short)FindLineIndex(line.End.Name!, line.End.LineIndex, axis, GridAreaEnd.End, Identity).AsI16())
             : line.End;
 
         short explicitTrackCount = axis == GridAreaAxis.Row
