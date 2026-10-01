@@ -13775,6 +13775,20 @@ _htmlTagClasses = {
   INPUT: globalThis.HTMLInputElement,
   SELECT: globalThis.HTMLSelectElement,
 };
+// As in Chromium, HTMLInputElement.prototype, HTMLSelectElement.prototype and
+// HTMLTextAreaElement.prototype own `value` (and the input its `checked`): React's input
+// tracker reads Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value'). They
+// forward to Element.prototype's accessors, so behaviour is unchanged.
+for (const _ctor of [globalThis.HTMLInputElement, globalThis.HTMLSelectElement, globalThis.HTMLTextAreaElement]) {
+  for (const _name of _ctor === globalThis.HTMLInputElement ? ['value', 'checked'] : ['value']) {
+    const _desc = _getOwnPropertyDescriptor(Element.prototype, _name);
+    if (_desc && (_desc.get || _desc.set) && !_getOwnPropertyDescriptor(_ctor.prototype, _name)) {
+      _defineProperty(_ctor.prototype, _name, {
+        get: _desc.get, set: _desc.set, enumerable: _desc.enumerable, configurable: true,
+      });
+    }
+  }
+}
 // SVGAnimatedString backs the className and href reflections on SVG elements.
 // baseVal and animVal both read the live attribute (no SMIL animation), and
 // baseVal is writable. Used by the SVG-aware get className()/get href() above.
