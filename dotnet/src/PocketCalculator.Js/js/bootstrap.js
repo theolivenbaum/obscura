@@ -149,6 +149,8 @@ function _queryImpl(root, all) {
   if (_isPrototypeOf(_fragmentProtoAtBoot, root)) return all ? _queryImpls.fragmentAll : _queryImpls.fragment;
   return null;
 }
+// Set while select.value updates each option, so the selectedcontent is synced once.
+let _selectValueSetting = false;
 function _qs(root, selector) {
   const impl = _queryImpl(root, false);
   return impl ? _reflectApply(impl, root, [selector]) : root.querySelector(selector);
@@ -4257,11 +4259,17 @@ class Element extends Node {
       // handler back into that handler in an infinite loop.
       const wanted = String(v);
       const opts = _qsa(this, 'option');
-      for (let i = 0; i < opts.length; i++) {
-        const attrV = opts[i].getAttribute('value');
-        const optVal = attrV !== null ? attrV : opts[i].textContent;
-        opts[i].selected = optVal === wanted;
+      _selectValueSetting = true;
+      try {
+        for (let i = 0; i < opts.length; i++) {
+          const attrV = opts[i].getAttribute('value');
+          const optVal = attrV !== null ? attrV : opts[i].textContent;
+          opts[i].selected = optVal === wanted;
+        }
+      } finally {
+        _selectValueSetting = false;
       }
+      this._syncSelectedContent();
       return;
     }
     const before = this.value;
@@ -4366,6 +4374,9 @@ class Element extends Node {
     if (this.localName === 'option') {
       if (this._selected) this.setAttribute('selected', '');
       else this.removeAttribute('selected');
+      let select = this.parentNode;
+      if (select && select.localName === 'optgroup') select = select.parentNode;
+      if (select && select.localName === 'select' && !_selectValueSetting) select._syncSelectedContent();
     }
   }
   get text() {
@@ -4692,6 +4703,21 @@ class Element extends Node {
       this.insertBefore(item, before);
     }
   }
+  // <selectedcontent> (customizable select, Chromium 141): after a script changes the
+  // selection of a single select, its first selectedcontent holds clones of the
+  // selected option's children. The parser does the same at parse time (HtmlTreeBuilder).
+  // Chromium also copies when a selectedcontent or option is inserted into a connected select
+  // (innerHTML, appendChild); the shim does not.
+  // The shim's own selectedIndex decides which option that is.
+  _syncSelectedContent() {
+    if (this.localName !== 'select' || this.hasAttribute('multiple')) return;
+    const content = _qs(this, 'selectedcontent');
+    if (!content) return;
+    const option = this.options[this.selectedIndex];
+    const clones = [];
+    if (option) for (let c = option.firstChild; c; c = c.nextSibling) clones.push(c.cloneNode(true));
+    content.replaceChildren(...clones);
+  }
   get selectedIndex() {
     const opts = this.options;
     for (let i = 0; i < opts.length; i++) {
@@ -4706,6 +4732,7 @@ class Element extends Node {
     for (let i = 0; i < opts.length; i++) {
       opts[i]._selected = (i === v);
     }
+    this._syncSelectedContent();
   }
   // Per the HTML spec, the submit() METHOD submits the form WITHOUT firing a
   // cancelable `submit` event — a page's submit listener cannot veto it. Only

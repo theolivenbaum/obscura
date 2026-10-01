@@ -22,12 +22,6 @@ public class Html5libTreeConstructionTests
     /// </summary>
     private static readonly Dictionary<string, string> KnownFailures = new(StringComparer.Ordinal)
     {
-        // <selectedcontent> mirrors the selected option's content; that is DOM behaviour
-        // (option insertion steps), not tree construction.
-        ["webkit02.dat:44"] = "selectedcontent",
-        ["webkit02.dat:45"] = "selectedcontent",
-        ["webkit02.dat:46"] = "selectedcontent",
-        ["webkit02.dat:47"] = "selectedcontent",
     };
 
     private static string CorpusDirectory([CallerFilePath] string path = "") =>

@@ -314,6 +314,7 @@ internal sealed partial class HtmlTreeBuilder
     {
         var builder = new HtmlTreeBuilder(tree, html, context: null);
         builder.Run();
+        builder.PopOpenOptionsAtEnd();
         tree.SetQuirks(builder._quirks);
     }
 
@@ -749,6 +750,11 @@ internal sealed partial class HtmlTreeBuilder
 
         r.Index = -1;
         r.PrevName = r.PrevScope = r.PrevSpecial = r.PrevSpecialNotAdp = r.PrevHtml = null;
+        if (r.IsHtml(HtmlTag.Option))
+        {
+            OptionPopped(r);
+        }
+
         return r;
     }
 
@@ -1042,6 +1048,11 @@ internal sealed partial class HtmlTreeBuilder
         }
 
         Push(rec);
+        if (ns == Namespaces.Html && local == "selectedcontent")
+        {
+            SelectedContentInserted(rec);
+        }
+
         return rec;
     }
 
