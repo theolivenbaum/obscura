@@ -358,8 +358,8 @@ internal static class DomPasses
             reverse[domId] = taffyId;
         }
 
-        Dictionary<NodeId, TaffyNodeId> nearestAbsCbForChildren = [];
-        Dictionary<NodeId, TaffyNodeId> nearestFixedCbForChildren = [];
+        Dictionary<NodeId, TaffyNodeId> nearestAbsCbForChildren = new(styles.Count);
+        Dictionary<NodeId, TaffyNodeId> nearestFixedCbForChildren = new(styles.Count);
         List<StaticPositionCandidate> staticCandidates = [];
 
         foreach (NodeId domId in DomTraversal.RenderedDescendants(tree, tree.Document))

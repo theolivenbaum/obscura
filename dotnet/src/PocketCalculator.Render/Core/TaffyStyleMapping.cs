@@ -19,9 +19,10 @@ namespace PocketCalculator.Render;
 
 internal static class TaffyStyleMapping
 {
-    internal static Layout.TaffyTree<TNodeContext> NewTaffyTree<TNodeContext>()
+    internal static Layout.TaffyTree<TNodeContext> NewTaffyTree<TNodeContext>(int capacity = 16)
     {
-        Layout.TaffyTree<TNodeContext> tree = new();
+        // Capacity only reserves slots; node ids are assigned the same way whatever it is.
+        Layout.TaffyTree<TNodeContext> tree = new(capacity);
         // Every opaque handle is backed by an expression retained in the LayoutStyle
         // map/input tree, which outlives all computations on this tree. Without this
         // resolver taffy falls back to its default, which returns 0 for every calc()

@@ -605,7 +605,10 @@ public static partial class RenderDom
         }
 
         inh.ContainerType = style.ContainerType;
-        inh.ContainerNames = [.. style.ContainerNames];
+        if (style.ContainerNames.Count != 0 || inh.ContainerNames.Count != 0)
+        {
+            inh.ContainerNames = [.. style.ContainerNames];
+        }
         if (style.OverflowInheritX)
         {
             style.OverflowSpecifiedX = inh.OverflowX;
