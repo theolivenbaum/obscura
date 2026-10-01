@@ -50,8 +50,9 @@ Still open after the fixes:
   (M11). Grid axes hold up to 100,000 tracks with sparse occupancy. Still slow, but
   bounded by the deadline:
   - nested `display:table` relayouts per depth level (quadratic, capped by the box
-    depth limit at about 110 ms warm);
-  - the first layout of a 50k-wide tree (about 4 s, most of it garbage collection).
+    depth limit; the per-table ancestor walks and full intrinsic layouts are gone);
+  - the first layout of a 50k-wide tree (about 5 s cold, mostly JIT; warm layout
+    1.9-2.3 s, down from 2.6-3.1 s).
 
   `POCKETCALCULATOR_HANG_EXIT_MS` stays as the opt-in backstop for `serve` and
   `mcp`, for work outside any of these scopes.
@@ -59,18 +60,21 @@ Still open after the fixes:
   memory per isolate (1 GiB) and DOM data per document (512 MiB), detached DOM
   nothing holds is garbage-collected, and `op_fetch_url` writes its result once. The
   per-process limit (`POCKETCALCULATOR_MAX_PROCESS_BYTES`) is opt-in.
-- **Remaining page-replaceable built-ins** (L10): some shim internals that no host
-  decision reads still call page-replaceable built-ins. Host decisions, host
-  snippets, the by-value serializer, markdown escaping and the world bridge no longer
-  do, and by-value results no longer call a page's `toJSON`.
-- **Detectability** (I10): the shim's state and host-set values moved off the global
-  object into closure state, so no `__obscura_*`, `__*` or `_*` name is left on it.
-  ClearScript's `EngineInternal` is defined non-configurable before any host code
-  runs; it is hidden from the global's reflection APIs, but `in` and `typeof` still
-  see it. The global's API shape still differs from Chromium's in places (its
-  prototype chain, and a few own properties).
+- **Page-replaceable built-ins** (L10): with any one of 44 groups of built-ins
+  replaced by the page (String, RegExp and Array methods, the array iterator,
+  `call`/`apply`/`bind`, Map/Set/WeakMap, JSON, Object statics, `Promise.prototype.then`,
+  accessors on `Object.prototype`, ...), a Playwright session gives the same results
+  against the port as against Chromium. Shim paths whose results no host decision
+  reads (Object and Promise statics there, the Map/Set iterator prototypes) are left.
+- **Detectability** (I10): no `__obscura_*`, `__*` or `_*` name is left on the global,
+  and the global has Chromium's prototype chain (`Window` -> `WindowProperties` ->
+  `EventTarget`) and own names. ClearScript's `EngineInternal` is defined
+  non-configurable before any host code runs; it is hidden from the global's
+  reflection APIs, but `in` and `typeof` still see it. Remaining shape differences:
+  many window attributes are data properties where Chromium has accessors, the
+  global's prototype is mutable, and many interfaces Chromium has are missing.
 - **Not modelled:** the HSTS preload list; revocation checks (none, as in Chromium);
-  Chromium's per-partition cookie size limits; the `srcdoc` attribute.
+  Chromium's per-partition cookie size limits.
 
 ### Cancellation of work inside ops
 

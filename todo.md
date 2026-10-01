@@ -336,29 +336,41 @@ Found during the review, not from upstream:
     linear; 30 s to 12 ms)
   - [x] nested tables: the fixed-width floor and the intrinsic measurements are
     linear in the subtree walks (1,500 nested tables 4.0 s to 2.5 s)
+  - [x] nested tables: memoized depth and cyclic-item walks, size-only intrinsic
+    measurements (1,500 nested: the cyclic pass 91 to 8 ms, the table pass 168 to
+    136 ms per layout); 50k-wide tree allocations trimmed (736 to 655 MB, warm layout
+    2.6-3.1 s to 1.9-2.3 s)
   - [ ] still slow: `ApplyTableUsedWidths` still relays out from the root per table
-    depth level (quadratic, ~110 ms warm at the box depth cap); the first layout of a
-    50k-wide tree (~4 s, GC-bound: ~45 objects per element); RTL, CJK and short lines
-    still reshape the rest of the line per line
+    depth level (quadratic, bounded by the box depth cap); a 50k-wide tree retains
+    ~270 MB (`LayoutStyle` is 1,264 bytes per element; moving rare fields to
+    `LayoutStyleRare` is the next step); RTL, CJK and short lines still reshape the
+    rest of the line per line
   - [x] grid: sparse occupancy (a byte per cell up to 1,024 cells, a segment tree of
     interval sets beyond), 32-bit lines, 100,000 tracks per axis, Chromium's step-2
     auto-placement cursor, `getComputedStyle` serializes the grid properties
-  - [ ] grid, found on the way: RTL auto-placement mirrors and searches in reverse
-    (Chromium places logically and mirrors after; 92 of 102 remaining random-grid
-    mismatches); `em` in grid tracks resolves against 16px; undefined named lines do
-    not create implicit lines; `calc()` is serialized as written; `grid-template` and
-    `grid` shorthands are not serialized; step 4 with a definite primary position
-    steps one track at a time
-  - [ ] found on the way, not fixed: computed `visibility` does not inherit (innerText
-    shows text inside a hidden subtree's children); closed `<details>`/`<dialog>`
-    content is not `display:none`; a float after inline text starts a new line where
-    Chromium keeps it on the line (y/height differ); nested `padding:0 3px;margin:0
-    2px` spans land far from Chromium's y
+  - [x] grid: RTL auto-placement is logical and mirrored after (random grids matching
+    Chromium 2,898 to 2,986 of 3,000), font-relative and viewport track lengths,
+    undeclared named lines, canonical `calc()`, the `grid-template` and `grid`
+    shorthands (and three parsing bugs in them), step 4 jumps occupied tracks
+  - [ ] grid leftovers: 14 of 3,000 random grids still differ from Chromium (other
+    step-2/4 cases); `fit-content()` lays out with a 16px-based argument
+  - [x] inline `<a>`/`<span>` in a mixed block report their line fragments (CDP clicks
+    by coordinates hit inline links), RTL and wrapped fragments match Chromium, nested
+    padded spans wrap as Chromium does; `visibility` inherits; closed `<details>` and
+    `dialog:not([open])` are hidden; left/right/left floats place natively
+  - [ ] layout, found on the way: a float after inline text starts a new line where
+    Chromium keeps it on the line; `dir=rtl` text does not start at the right;
+    `<summary>` reports `block` (Chromium `list-item`); centred and justified lines
+    count the trailing space; a block with an explicit width beside a float is
+    narrowed
   - [x] HTML tree construction is the port's own (`HtmlTreeBuilder`) over AngleSharp's
     tokenizer (M11): 50k nested divs 20 s to 0.14 s, a 50k-sibling fragment 91 s to
     0.13 s; html5lib tree-construction 1756/1765
-  - [ ] parser leftovers: the tokenizer drops U+0000 in the data state (no U+FFFD in
-    foreign content); `<selectedcontent>` is not implemented; `outerHTML` has no setter
+  - [x] parser: U+0000 survives the tokenizer (html5lib tree-construction 1765/1765),
+    `<selectedcontent>`, the `outerHTML` setter
+  - [ ] parser leftovers: `<selectedcontent>` is not refreshed when a select or option is
+    inserted by script; `selectedIndex=` does not clear `selected` attributes;
+    mutation records carry no sibling links
   - [x] memory budgets (M7): `ArrayBuffer` cap per isolate, DOM byte budget per
     document, glyph lists sized up front, opt-in per-process backstop; op_fetch_url
     builds its result from the body bytes in one pass (M4)
@@ -375,12 +387,10 @@ Found during the review, not from upstream:
     `Object.keys`, `dispatchEvent`, `elementFromPoint` and the event constructors
   - [x] host reads of page-writable values (`window.scrollX/Y`, `location.assign`,
     `__obscura_click_target`, `__obscura_focused`), by-value `toJSON`, input helpers (L10)
-  - [ ] L10 leftovers: string/regex handling in the markdown script and shim,
-    `Array.prototype.push/forEach`, `Function.prototype.call` and `Set`/`Map` methods in
-    shim internals
-  - [ ] an inline `<a>` reports an empty rect, so CDP clicks by coordinates miss inline
-    links; Puppeteer `type` puts the caret at the end where Chromium puts it at the
-    start; Puppeteer `::-p-text` selectors do not work
+  - [x] shim internals on host-visible paths use captured built-ins: a Playwright session
+    matches Chromium with any one of 44 built-in groups replaced (L10)
+  - [x] Puppeteer `type` caret placement, `::-p-text` selectors (real
+    `HTMLInputElement`/`HTMLSelectElement`), click focus and caret
   - [x] CDP and MCP SSE idle timeouts (L3); optional TLS for `serve` and `mcp --http`,
     including the balancer's own 503 (I1)
   - [x] the History API URL is host-side; MCP storage state follows the committed
@@ -394,23 +404,36 @@ Found during the review, not from upstream:
   - [x] the shim's engine globals are closure state reached as `__obscura_host.vars`;
     bindings install without a bridge global; module completion uses a random
     top-level `const` (I10)
+  - [x] the global has Chromium's prototype chain and own names: `Window` ->
+    `WindowProperties` -> `EventTarget`, frame indices only for existing frames, named
+    access on WindowProperties, no `SharedArrayBuffer`/`ContentIndex`/`FontFaceSet`/
+    `webkitAudioContext` (I10)
   - [ ] ClearScript's non-configurable `EngineInternal` stays visible to `in`/`typeof`;
-    the global's shape differs from Chromium's (Object-based prototype chain, own index
-    getters `0`..`49`, own `addEventListener`/`dispatchEvent`/`constructor`,
-    `ContentIndex`, `FontFaceSet`, `SharedArrayBuffer`, `webkitAudioContext`)
+    ~110 window attributes are data properties where Chromium has accessors; the
+    global's prototype is mutable; frame indices are accessors; `Object.keys(window)`
+    order; ~760 Chromium interfaces missing; `addEventListener.call({})` does not throw;
+    a div's tag is `[object Element]`
   - [x] child frames: init scripts and bindings run in frames, a frame's binding call
     reports the frame's context, init scripts belong to the target that added them, a
     frame's own GET navigation is followed, a click that loads a new document emits
     the full navigation sequence
-  - [ ] found on the way: an awaited `Runtime.evaluate`/`callFunctionOn` that calls an
-    exposed binding deadlocks the connection (main frame too); a frame's POST
-    navigation is dropped
-  - [ ] network, found on the way: CDP `Network.getCookies` returns every cookie
-    (Chromium filters by URL and partition); `document.cookie` in about:srcdoc and
-    about:blank frames uses the about: URL; a partitioned `setCookie` for an http URL
-    is accepted with Secure forced where Chromium refuses it; images in an inline
-    `<style>` use the document policy where Chromium uses the default; the shim has no
-    `srcdoc` attribute
+  - [x] an awaited `Runtime.evaluate`/`callFunctionOn` is parked while the connection
+    has other work, so an exposed binding no longer deadlocks; a frame's POST
+    navigation and a form targeting an iframe are followed
+  - [ ] CDP and frames, found on the way: Secure cookies are never sent to http
+    localhost (Chromium sends them); stored cookies report `sameSite: "Lax"` where
+    Chromium omits it; `getAllCookies` order; CDP frames carry no `name`;
+    `Accessibility.queryAXTree` is missing (`::-p-aria`); `:scope>` in an element's
+    `querySelectorAll` matches nothing; `selectionDirection` after `focus()`; a click on
+    the text itself puts the caret at the end; a frame POST lacks `Cache-Control:
+    max-age=0` and a frame's own activation; multipart and text/plain form encodings;
+    a frame's `load` fires before its scripts run; `removeAttribute('src')` and
+    `setAttributeNS` on an iframe do not navigate; `DataTransfer` is missing
+    (Playwright `setInputFiles`); a document's events do not bubble to the window
+  - [x] `Network.getCookies` answers the page's URLs in their partitions; a non-Secure
+    partitioned `setCookie` is refused; about:srcdoc and about:blank frames take their
+    creator's origin and cookies; iframe `srcdoc`; inline-style images use the default
+    referrer policy
 
 - **A forced geometry read after a style write that *does* change layout still
   re-lays out the whole document.** The half that does not is fixed: a retained
@@ -1300,6 +1323,46 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 
 ### Security review fixes (September 2026)
 
+- **iframe srcdoc:** Rust ignores srcdoc and loads src. The port loads srcdoc as an `about:srcdoc` frame, as Chromium 141 does: srcdoc wins over src, a src change waits while srcdoc is present, and setting or removing srcdoc navigates. The markup is read host-side by node id (`op_frame_document_srcdoc`). The document takes its creator's origin, base URL and cookie URL, and is opaque when sandboxed without allow-same-origin or when its parent is sandboxed that way; an inherited opaque origin (a file: or data: page and its srcdoc frame) is shared.
+- **about: frame origin and cookies:** Rust derives no host-side origin and reads cookies for the frame's own URL, so about: frames see none. about:srcdoc and about:blank frames take their creator's origin, fallback base URL, cookie URL, site for cookies and partition (Chromium 141). The parent's stand-in for its initial about:blank reads and writes the parent's cookies. An opaque-origin document gets `SecurityError` from `document.cookie` (`op_get_cookies`/`op_set_cookie` return `"\u0000sandboxed"`; `op_set_cookie` otherwise returns null). A sandboxed iframe's initial about:blank has a null `contentDocument`.
+- **Frame script URLs** resolve against the frame document's base URL, not the frame URL.
+- **Document frame start:** navigation starts parsed frames through `__obscura_host.loadDocumentFrames`; Rust calls the page-visible `Element.prototype._loadIframeSrc` on each `iframe[src]`.
+- **Inline-style subresources:** images and fonts named by an inline `<style>`, a style attribute or CSSOM load under strict-origin-when-cross-origin whatever the document's header or meta says; an inline `@import` and an `<img>` keep the document policy (Chromium 141).
+- **CDP awaitPromise:** an awaited `Runtime.evaluate`/`callFunctionOn` whose promise is pending while the connection has other work is parked and answered when it settles, times out, or its realm goes away (-32000 "Inspected target navigated or closed" / "Execution context was destroyed."), as in Chromium 141; responses can come out of order. Rust awaits inline, which deadlocks an exposed binding (the client answers `Runtime.bindingCalled` with its own command).
+- **`Network.getCookies`:** answers the given urls in the page's partition, or without urls the page and frame URLs in their own partitions, each cookie once. Rust answers every cookie, as `getAllCookies` does.
+- **CDP setCookie/setCookies:** a partitioned cookie that is not Secure is refused ("Sanitizing cookie failed" / "Invalid cookie fields", whole batch); an https url makes the cookie Secure; `SameSite=None` without Secure gives `success:false`. Rust has no partitions and reads `secure` alone.
+- **Frame form navigation:** a frame's own POST navigation is followed with Chromium's body, Content-Type, Origin, Referer and fetch metadata judged from the frame; a form `target`/`formtarget` naming an iframe navigates that iframe (`op_navigate_frame`). Rust navigates only the page and ignores `target`.
+- **Text controls:** the no-selection caret is 0 (Rust: null); setting the value moves the caret to the end; mousedown focuses the focusable element under it; a click on a text field puts the caret at the end.
+- **Input interfaces:** `HTMLInputElement`/`HTMLSelectElement` are real subclasses (Rust aliases them to Element), and the input/select/textarea prototypes own `value` (and input `checked`).
+- **`Runtime.callFunctionOn`** honours `userGesture`.
+- **Grid RTL placement:** the vendored taffy placed RTL grids in mirrored column coordinates, searching each row from the right end of the explicit grid, and reversed only the explicit column tracks. The port places logically, as Chromium does, and mirrors the finished grid (the column list, the implicit counts and the item column lines); `getComputedStyle` lists RTL columns in logical order.
+- **Grid step 4 with a definite primary position:** taffy steps the secondary axis one track at a time; the port jumps past occupied tracks. The positions found are the same.
+- **Grid track units:** Rust's `px_value` resolves em/rem/ex/ch against 16px and reads `10vw` as 10px. Track lengths in those units are late-resolved calc handles given the element's font, the root font and the viewport, and `ch` is accepted. `fit-content()` lays out with its argument resolved against 16px (taffy has no calc form for it), though `getComputedStyle` reports the correct value.
+- **Named grid lines:** Rust resolves a name only when the container declares it and otherwise auto-places the item. The port follows css-grid-2 §8.3 as Chromium does (nth line from either end, named spans, area edges, implicit lines counted as having any name there are too few lines of), so `grid-area: a / b` lands past the explicit grid.
+- **`grid-template` areas form:** Rust kept only the strings; the port keeps the row sizes and line names between them, with `auto` for a row with no size.
+- **`grid: auto-flow <tracks> / ...`:** Rust read only the flow keywords; the port also sets `grid-auto-rows`/`-columns` and resets the other axis to `auto`.
+- **`grid-template-areas` sizes the explicit grid:** Rust never handed taffy the areas; the port gives taffy one unnamed area covering the template.
+- **`getComputedStyle` grid values:** math functions serialize as Chromium computes them, not as written; new keys `grid-template` and `grid`; `grid-auto-flow: row dense` reports `dense`.
+- **U+0000 in markup:** AngleSharp's tokenizer drops it in the data state. HtmlTreeBuilder hands the tokenizer U+DFFF in its place and restores it, as U+0000 in data character tokens and U+FFFD elsewhere. Script-built markup containing both U+0000 and U+DFFF is the one input misread.
+- **`<selectedcontent>`:** html5ever and the Rust shim have none. The parser copies the selected option into it when parsing a whole document (a fragment parse copies nothing, as in Chromium, which copies only when connected to its select); `select.value`, `selectedIndex` and `option.selected` re-sync it. Not done: the copy Chromium makes when a selectedcontent or option is inserted into a connected select, and exact results after mixed `selected`/`selectedIndex` assignments (`selectedIndex=` does not clear `selected` attributes).
+- **`outerHTML` setter:** the Rust shim has only the getter. The port parses the markup as a fragment in the parent's context and replaces the element in one childList record (previousSibling/nextSibling null, like every shim record), throwing NoModificationAllowedError with Chromium's messages for no parent and for any non-element parent.
+- **Spliced inline wrappers (`TextEngine.LiftFlattenedWrappers`, `LayoutDomOnce.SynthesizeSplicedInlineRects`):** Rust folds a mixed block's inline run from its spliced children, so a decoration-free `<a>`/`<span>`/`<b>` there owned no shaped range: `getBoundingClientRect()` was 0,0,0,0, a CDP click by coordinates missed it, and its own color and font were lost. C# lifts the wrapper back into the run when splicing again gives back the same run (Chromium 141 and C# both give 57.8,8,71.1,17 for `<div>before <a>mixed link</a><div>block</div></div>`). A wrapper whose run does not fold (an image or a control) gets the union of its content: 20x20 where Chromium's font box gives 20x17.
+- **RTL owner fragments (`InlineOwnerLineFragments`):** Rust measures from the logical start cursor to the logical end cursor, which gave 0 width on a right-to-left line; C# uses the owner's visual glyph extent on any line holding RTL glyphs.
+- **Hanging space at a soft wrap:** Rust runs a continuing fragment to the line's full advance; C# ends it before the trailing spaces, as Chromium does.
+- **Edge-aware line retry (`ShapeWithTextIndent`, `LastWordStartX`):** Rust retries at the width left after paying every edge on the candidate line, so 300 nested `padding:0 3px;margin:0 2px` spans made 60 lines. C# never retries below the width that drops just the last word: 6 lines, as in Chromium.
+- **Visibility inherits:** `getComputedStyle().visibility` and `innerText` read the inherited computed value (`ComputedVisibilityHidden`); Rust reported only an element's own declaration.
+- **Closed `<details>` in innerText:** only the summary is collected (Chromium); Rust's walk read every DOM child.
+- **`dialog:not([open]) { display: none }`:** a UA rule Rust lacks; without it a closed dialog laid out, painted and appeared in innerText.
+- **Floats on both sides:** a block whose in-flow content is only left and right floats takes the native float context; Rust's float-zone row put a third float below the first (Chromium: beside it).
+- **Table width pass:** size-only intrinsic measurements and memoized depth and cyclic-item walks, where Rust does full layouts and repeated ancestor walks. Output is identical.
+- **Allocation trims:** no shadow-scope builders outside shadow trees, no WAAPI iterator per element, lazy sort delegates, lists shared between `Inherited` clones, pre-sized per-element maps and taffy tree. Output is identical.
+- **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, picking the window, element, document or plain-target implementation by receiver. Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.
+- **Frame indices:** `window[i]` exists only for existing iframes, as an accessor (Chromium: a data property), re-synced on iframe insertion and removal, on `length`, on global reflection and on a stale read. Rust: 50 index getters always.
+- **Named access:** element ids and frame names resolve on WindowProperties, not as own properties of window; reflection on it lists no names, an assignment creates an own property, and an id never shadows an EventTarget.prototype or Object.prototype member. Rust: own, enumerable, getter-only properties on the global.
+- **Global enumerability and tags:** uppercase own globals are non-enumerable, `history` is enumerable, and shim interface prototypes have a Symbol.toStringTag. Rust: interface objects enumerable and untagged.
+- **Removed globals:** SharedArrayBuffer (no cross-origin isolation; the shim keeps a private copy), ContentIndex, FontFaceSet (`document.fonts.constructor` is EventTarget) and webkitAudioContext; onfocusin/onfocusout everywhere and onpaste on window. oncopy, oncut and onpaste added to Document and Element. Rust exposes all of these.
+- **Shim internals (L10):** frame liveness and the frame helpers; form submission, click activation and control value/checked/selected state; listener storage and dispatch for elements, the document, the window and EventTarget; the shim's Map/Set/WeakMap registries (their methods held as own properties); the isolated-world event description; postMessage's targetOrigin check and message source; Event, MouseEvent and KeyboardEvent state (class fields) use built-ins captured at bootstrap. The language globals are bound inside the shim, with Math and JSON as frozen copies.
+- **Form submission URLs:** form-urlencoded escaping of `'()~`, CRLF in textarea values, the submitter button's name=value, and a GET that replaces the action's query and keeps its fragment, as in Chromium. Rust leaves `'()~` bare, sends LF, omits the submitter, and appends to an existing query.
 - **I10 (engine globals):** Rust keeps the shim's state and host-set values as `globalThis.__obscura_*` / `__*` / `_*` globals and calls `__obscura_init`, `__markParserScripts`, `__documentReadyState__` and `__currentScriptNid` by name. The port keeps them in a closure object the host reaches as `__obscura_host.vars` (HostScript), and page init is `__obscura_host.init`. Only ClearScript's non-configurable `EngineInternal` remains, hidden from the global's reflection APIs; `in` and `typeof` still see it.
 - **I10 (bindings):** Rust's `Runtime.addBinding` shim calls the page-visible `__obscura_binding_called`. The port files the binding name (`BindingPreload`) and installs a native-looking function that closes over `op_binding_called`; no bridge global exists.
 - **I10 (modules):** module completion is recorded through a randomly named top-level `const`, not a `__obscura_moduleSettled_N` global.
