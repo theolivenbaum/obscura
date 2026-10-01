@@ -149,6 +149,8 @@ function _queryImpl(root, all) {
   if (_isPrototypeOf(_fragmentProtoAtBoot, root)) return all ? _queryImpls.fragmentAll : _queryImpls.fragment;
   return null;
 }
+// The childList record being gathered for one parent, or null; see __notifyMutation.
+let _childListBatch = null;
 // Set while select.value updates each option, so the selectedcontent is synced once.
 let _selectValueSetting = false;
 function _qs(root, selector) {
@@ -3555,6 +3557,34 @@ class Element extends Node {
     }
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
+  // Port addition; the Rust shim has no setter, so an assignment was silently dropped. As
+  // Chromium 141: the markup is parsed as a fragment in the parent's context and replaces this
+  // element in one childList record. Chromium throws NoModificationAllowedError for no parent
+  // and for any parent that is not an element (the spec allows a DocumentFragment parent).
+  set outerHTML(v) {
+    const parent = this.parentNode;
+    const prefix = "Failed to set the 'outerHTML' property on 'Element': ";
+    if (!parent) {
+      throw new DOMException(prefix + "This element has no parent node.", "NoModificationAllowedError");
+    }
+    if (parent.nodeType !== 1) {
+      throw new DOMException(
+        prefix + "This element's parent is of type '" + parent.nodeName + "', which is not an element node.",
+        "NoModificationAllowedError");
+    }
+    const fragment = document.createDocumentFragment();
+    for (const node of _parseHTMLFragment(v === null ? '' : String(v), parent)) fragment.appendChild(node);
+    const outer = _childListBatch;
+    const batch = _childListBatch = { target: parent._nid, added: [], removed: [] };
+    try {
+      parent.replaceChild(fragment, this);
+    } finally {
+      _childListBatch = outer;
+    }
+    if (batch.added.length || batch.removed.length) {
+      _hostVars.__notifyMutation('childList', parent._nid, batch.added, batch.removed);
+    }
+  }
   // innerText used to be an alias for textContent, so document.body.innerText
   // opened with the source of every <style> and <script> in the page and ran
   // all block-level content together on one line. It is a rendered-text
@@ -10434,6 +10464,13 @@ function _childListObserved(node) {
 }
 _hostVars.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
   if (!_hostVars.__mutationObservers.length) return;
+  // A batch (outerHTML) gathers its own parent's childList changes into one record.
+  const batch = _childListBatch;
+  if (batch && type === 'childList' && target_nid === batch.target) {
+    if (addedNodes) for (const id of addedNodes) batch.added.push(id);
+    if (removedNodes) for (const id of removedNodes) batch.removed.push(id);
+    return;
+  }
   // Use `_wrap` (the canonical node-id → wrapper resolver) instead of a
   // direct cache poke. The previous code referenced `globalThis._cache`,
   // but `_cache` is a module-local Map — the lookup always returned
