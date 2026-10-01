@@ -343,6 +343,57 @@ public sealed class PageTamperingTests
     }
 
     /// <summary>
+    /// L10: the page realm describes an event to an isolated world's listeners (its class
+    /// and init dictionary) with loops over the shim's arrays. They were for-of loops, so a
+    /// page that replaced the array iterator made every event reach a world as a plain
+    /// Event without coordinates, and Playwright's hit-target check reported that the root
+    /// element intercepted every click.
+    /// </summary>
+    [Fact]
+    public async Task WorldListenersSeeTheEventDespiteThePagesArrayIterator()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><button id=b>b</button></body></html>");
+        var runtime = fixture.Runtime;
+        var world = new IsolatedWorldTarget(100, "w", []);
+        var listen = await runtime.EvaluateForCdpWithTimeoutAsync(
+            "globalThis.__seen = []; window.addEventListener('click', (e) => { __seen.push((e instanceof MouseEvent ? 'MouseEvent' : 'Event') + ':' + e.clientX); }, true); 1",
+            true, true, 5_000, world);
+        Assert.False(listen.Thrown, listen.Description);
+        runtime.ExecuteScript("tamper", "Array.prototype[Symbol.iterator] = function* () {};");
+        runtime.ExecuteHostScript("click", """
+            const h = __obscura_host.dom;
+            h.dispatch(h.querySelector(h.document(), '#b'), h.event('MouseEvent', 'click', { bubbles: true, clientX: 7 }, true));
+            """);
+        var seen = await runtime.EvaluateForCdpWithTimeoutAsync("__seen.join(',')", true, true, 5_000, world);
+        Assert.False(seen.Thrown, seen.Description);
+        Assert.Equal("MouseEvent:7", seen.Value?.GetValue<string>());
+    }
+
+    /// <summary>
+    /// L10: an accessor a page defines on Object.prototype under an event field's name
+    /// (type, clientX, key) used to swallow the shim's own assignment, so a click the host
+    /// dispatched had no type and reached no listener. In Chromium event state is internal.
+    /// </summary>
+    [Fact]
+    public void EventFieldsSurviveAccessorsOnObjectPrototype()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><button id=b>b</button></body></html>");
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("tamper", """
+            globalThis.__seen = [];
+            for (const n of ['type', 'clientX', 'key', 'bubbles', 'target', 'defaultPrevented'])
+              Object.defineProperty(Object.prototype, n, { __proto__: null, get() { return undefined; }, set(v) {}, configurable: true });
+            document.getElementById('b').addEventListener('click', (e) => { __seen[__seen.length] = e.type + ':' + e.clientX; });
+            """);
+        runtime.ExecuteHostScript("click", """
+            const h = __obscura_host.dom;
+            h.dispatch(h.querySelector(h.document(), '#b'), h.event('MouseEvent', 'click', { bubbles: true, clientX: 7 }, true));
+            """);
+        Assert.Equal("\"click:7\"", Eval(runtime, "__seen.join(',')"));
+        Assert.Equal("\"keydown|a|true\"", Eval(runtime, "(() => { const e = new KeyboardEvent('keydown', { key: 'a', bubbles: true }); return [e.type, e.key, e.bubbles].join('|'); })()"));
+    }
+
+    /// <summary>
     /// L10: the node wrapper cache is the shim's node identity. It used the page's
     /// Map.prototype.get, so a page replacing it made every lookup build a new wrapper:
     /// <c>document.body !== document.body</c>, and each wrapper's form and listener state

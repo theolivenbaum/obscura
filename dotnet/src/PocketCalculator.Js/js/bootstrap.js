@@ -11562,7 +11562,15 @@ function _inputFilesOf(el) {
   _inputFileCacheSet(_inputFileCache, el, { version, list });
   return list;
 }
+// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the event's own state
+// is declared as class fields, which define own properties, before the constructor assigns
+// them. A plain `this.type = t` runs an accessor a page put on Object.prototype under that
+// name instead, so the shim's own events (CDP clicks and keys) lost their type and
+// coordinates and reached no listener. Chromium's event state is internal.
 Event = globalThis.Event = class Event {
+  type = ''; bubbles = false; cancelable = false; composed = false; defaultPrevented = false;
+  target = null; currentTarget = null; eventPhase = 0; timeStamp = 0;
+  _propagationStopped = false; _immediatePropagationStopped = false;
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
   get isTrusted() { return _trustedHas(_trustedEvents, this); }
   preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
@@ -11590,6 +11598,8 @@ CustomEvent = globalThis.CustomEvent = class extends Event {
   }
 };
 MouseEvent = globalThis.MouseEvent = class extends Event {
+  view = null; detail = 0; screenX = 0; screenY = 0; clientX = 0; clientY = 0; ctrlKey = false;
+  altKey = false; shiftKey = false; metaKey = false; button = 0; buttons = 0; relatedTarget = null;
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.screenX=o.screenX||0;this.screenY=o.screenY||0;this.clientX=o.clientX||0;this.clientY=o.clientY||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.button=o.button||0;this.buttons=o.buttons||0;this.relatedTarget=o.relatedTarget||null; }
   // Legacy DOM Level 2 initializer. Positional signature per UI Events spec.
   initMouseEvent(type,canBubble,cancelable,view,detail,screenX,screenY,clientX,clientY,ctrlKey,altKey,shiftKey,metaKey,button,relatedTarget) {
@@ -11610,6 +11620,8 @@ MouseEvent = globalThis.MouseEvent = class extends Event {
   }
 };
 KeyboardEvent = globalThis.KeyboardEvent = class extends Event {
+  view = null; detail = 0; key = ''; code = ''; location = 0; ctrlKey = false; altKey = false;
+  shiftKey = false; metaKey = false; repeat = false;
   constructor(t,o={}) { super(t,o);this.view=o.view||null;this.detail=o.detail||0;this.key=o.key||"";this.code=o.code||"";this.location=o.location||0;this.ctrlKey=!!o.ctrlKey;this.altKey=!!o.altKey;this.shiftKey=!!o.shiftKey;this.metaKey=!!o.metaKey;this.repeat=!!o.repeat; }
   // Legacy DOM Level 3 initializer. Positional signature per the WebKit/Gecko form.
   initKeyboardEvent(type,canBubble,cancelable,view,key,location,ctrlKey,altKey,shiftKey,metaKey) {
@@ -18707,7 +18719,9 @@ function _pageInit() {
   delete _hostVars.__obscura_isolated_world;
   _browserPostedTaskWakePending = false;
   for (const queue of _browserPostedTaskQueues) _browserPostedTaskDiscardQueue(queue);
-  _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
+  // The global's Math.random, not the shim's copy: page init runs before any page script,
+  // and the runtime tests steer the fingerprint seed through it.
+  _fpSeed = Date.now() ^ (globalThis.Math.random() * 0xFFFFFFFF >>> 0);
   _fpCache = null;
   // A real navigation just completed (this runs after set_url), so drop any
   // URL a location setter previewed synchronously and let document_url drive
@@ -19444,8 +19458,12 @@ const _worldClassCtors = (function () {
   }
   return out;
 })();
+// Indexed loops, not for-of: these run for every event a world listens for, after page
+// script, and a page that replaced the array iterator made every event reach a world as a
+// plain Event with no coordinates, so Playwright's hit-target check failed (SECURITY.md L10).
 function _worldEventClassOf(event) {
-  for (const name of _worldEventClasses) {
+  for (let i = 0; i < _worldEventClasses.length; i++) {
+    const name = _worldEventClasses[i];
     const C = _worldClassCtors[name];
     if (C && _isPrototypeOf(C.prototype, event)) return name;
   }
@@ -19454,7 +19472,8 @@ function _worldEventClassOf(event) {
 // An event's class, type and init dictionary, which another realm rebuilds it from.
 function _worldEventInit(event) {
   const init = { bubbles: !!event.bubbles, cancelable: !!event.cancelable, composed: !!event.composed };
-  for (const key of _worldInitKeys) {
+  for (let i = 0; i < _worldInitKeys.length; i++) {
+    const key = _worldInitKeys[i];
     let value;
     try { value = event[key]; } catch (_) { continue; }
     const t = typeof value;
