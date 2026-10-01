@@ -1161,6 +1161,31 @@ public sealed class PageTests
                 "(function (s) { return s[0] + s[1] + s[2]; })(__obscura_host.frameRegistrySize())")));
     }
 
+    /// <summary>
+    /// SECURITY.md L10: the sweep's list of live frames was built with the page's
+    /// <c>Array.prototype.push</c> and <c>isConnected</c>, so a page that replaced either
+    /// had every child frame torn down under the client (Playwright's page.frames() lost
+    /// them). Chromium's frame tree does not consult page script.
+    /// </summary>
+    [Fact]
+    public async Task APageReplacingPushOrIsConnectedKeepsItsFrames()
+    {
+        using TestHttpServer server = SpawnShadowFrameServer();
+        using Page page = PageFixtures.FramePage("tampered-frame-sweep");
+        await page.NavigateAsync($"{server.Origin}/plain.html");
+        await page.SettleAsync(1_000);
+        Assert.Single(page.Frames);
+
+        page.Js!.Evaluate("""
+            (Array.prototype.push = function () { return 0; },
+             Object.defineProperty(Node.prototype, 'isConnected', { get() { return false; }, configurable: true }),
+             1)
+            """);
+        page.ReleaseDetachedFrames();
+
+        Assert.Single(page.Frames);
+    }
+
     [Fact]
     public async Task SuspendResumePreservesDocumentScriptStartState()
     {

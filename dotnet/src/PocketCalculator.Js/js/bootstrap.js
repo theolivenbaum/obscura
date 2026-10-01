@@ -1,6 +1,31 @@
 "use strict";
 (function () {
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the shim's own
+// references to the language's globals are bindings of this closure, taken before any page
+// script runs, not lookups on the global object. A page that assigned `String = ...`,
+// `Number = ...` or `Map = ...` changed every call the shim made through that name
+// (typing, clicks, form values, frame bookkeeping), where Chromium's DOM is native. It does
+// not cover a page replacing a method on one of these (Map.prototype.get): see _private
+// and the captured members below for those.
+const {
+  String, Number, Boolean, Object, Array, Map, Set, WeakMap, WeakSet, Symbol, Promise,
+  Reflect, Error, TypeError, RangeError, SyntaxError, RegExp, Date, Proxy,
+  parseInt, parseFloat, isNaN, isFinite, encodeURIComponent, decodeURIComponent,
+  encodeURI, decodeURI, Uint8Array, ArrayBuffer,
+} = globalThis;
+// Math and JSON are namespaces whose members a page replaces (Math.max, JSON.stringify),
+// so the shim's names are frozen copies of them: caret clamping, geometry rounding and the
+// JSON the shim hands its ops keep V8's functions.
+const _namespaceCopy = (ns) => {
+  const copy = Object.create(null);
+  const keys = Reflect.ownKeys(ns);
+  for (let i = 0; i < keys.length; i++) copy[keys[i]] = ns[keys[i]];
+  return Object.freeze(copy);
+};
+const Math = _namespaceCopy(globalThis.Math);
+const JSON = _namespaceCopy(globalThis.JSON);
+
 // deno_core installs its privileged bridge in the page's V8 context. Capture
 // it in this private bootstrap closure. The host removes the public global
 // after deno_core finishes binding ops and before any page script runs. All
@@ -30,6 +55,47 @@ const _JSONparse = JSON.parse;
 // calling these names still gets its own replacement.
 const _JSONstringify = JSON.stringify;
 const _uncurry = (fn) => Function.prototype.call.bind(fn);
+// The shim's own collections answer with the methods bootstrap found, as own properties
+// of the instance, so a page that replaced Map.prototype.get, Set.prototype.has or
+// WeakMap.prototype.set (or their size, forEach or iterator) does not change what the
+// shim's registries hold: node identity (_cache), frame and iframe state, listener
+// stamps, the trusted-event marks. DEVIATION from crates/obscura-js/js/bootstrap.js,
+// whose collections call the page-replaceable prototype methods (SECURITY.md L10). A
+// direct call of an own property costs what the prototype call did.
+const _privateCollectionMembers = (() => {
+  const take = (proto, names) => {
+    const out = [];
+    for (let i = 0; i < names.length; i++) {
+      const d = Object.getOwnPropertyDescriptor(proto, names[i]);
+      if (d) out[out.length] = [names[i], d];
+    }
+    return out;
+  };
+  const iterable = ['forEach', 'keys', 'values', 'entries', 'size', Symbol.iterator];
+  return [
+    [Map.prototype, take(Map.prototype, ['get', 'set', 'has', 'delete', 'clear'].concat(iterable))],
+    [Set.prototype, take(Set.prototype, ['add', 'has', 'delete', 'clear'].concat(iterable))],
+    [WeakMap.prototype, take(WeakMap.prototype, ['get', 'set', 'has', 'delete'])],
+    [WeakSet.prototype, take(WeakSet.prototype, ['add', 'has', 'delete'])],
+  ];
+})();
+const _objectIsPrototypeOfAtBoot = Function.prototype.call.bind(Object.prototype.isPrototypeOf);
+const _definePropertyAtBoot = Object.defineProperty;
+function _private(collection) {
+  for (let i = 0; i < _privateCollectionMembers.length; i++) {
+    const entry = _privateCollectionMembers[i];
+    if (!_objectIsPrototypeOfAtBoot(entry[0], collection)) continue;
+    const members = entry[1];
+    for (let j = 0; j < members.length; j++) {
+      const d = members[j][1];
+      _definePropertyAtBoot(collection, members[j][0], d.get
+        ? { get: d.get, enumerable: false, configurable: false }
+        : { value: d.value, writable: false, enumerable: false, configurable: false });
+    }
+    break;
+  }
+  return collection;
+}
 const _arrayPush = _uncurry(Array.prototype.push);
 const _arraySlice = _uncurry(Array.prototype.slice);
 const _arrayJoin = _uncurry(Array.prototype.join);
@@ -67,6 +133,7 @@ const _promiseResolveAtBoot = (value) => _reflectApply(_promiseResolveFn, _Promi
 const _MathRound = Math.round;
 const _MathMin = Math.min;
 const _MathMax = Math.max;
+const _encodeURIComponentAtBoot = encodeURIComponent;
 // Chromium exposes SharedArrayBuffer only to a cross-origin isolated document, and this
 // engine has no cross-origin isolation, so the global goes (SECURITY.md I10). The shim
 // keeps V8's constructor for the checks it makes on buffers a page can still obtain
@@ -134,7 +201,7 @@ let _worldListenTypes = null;
 let _crossStamp = 0;
 // In an isolated world: runs one of its listeners for the document realm's dispatch.
 let _worldInvokeImpl = null;
-const _handlerStamps = new WeakMap();
+const _handlerStamps = _private(new WeakMap());
 const _handlerStampGet = _uncurry(WeakMap.prototype.get);
 const _handlerStampHas = _uncurry(WeakMap.prototype.has);
 const _handlerStampSet = _uncurry(WeakMap.prototype.set);
@@ -270,15 +337,20 @@ globalThis.onunhandledrejection = function(e) { if (e?.preventDefault) e.prevent
 globalThis.onerror = function(msg, src, line, col, error) {
   _hostVars.__obscura_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
 };
-_hostVars.__windowListeners = {};
+// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the window's listener
+// lists have no prototype and are kept without the page's Array methods, as Element's are.
+_hostVars.__windowListeners = _objectCreate(null);
 globalThis.addEventListener = function(type, fn) {
-  if (!_hostVars.__windowListeners[type]) _hostVars.__windowListeners[type] = [];
-  _hostVars.__windowListeners[type].push(fn);
+  let list = _hostVars.__windowListeners[type];
+  if (!list) list = _hostVars.__windowListeners[type] = [];
+  list[list.length] = fn;
 };
 globalThis.removeEventListener = function(type, fn) {
-  if (_hostVars.__windowListeners[type]) {
-    _hostVars.__windowListeners[type] = _hostVars.__windowListeners[type].filter(h => h !== fn);
-  }
+  const list = _hostVars.__windowListeners[type];
+  if (!list) return;
+  const kept = [];
+  for (let i = 0; i < list.length; i++) if (list[i] !== fn) kept[kept.length] = list[i];
+  _hostVars.__windowListeners[type] = kept;
 };
 globalThis.dispatchEvent = function(event) {
   if (!event) return true;
@@ -289,17 +361,17 @@ globalThis.dispatchEvent = function(event) {
 
 let _domMutationEpoch = 0;
 let _treeMutationEpoch = 0;
-const _DOM_MUTATION_COMMANDS = new Set([
+const _DOM_MUTATION_COMMANDS = _private(new Set([
   "append_child", "insert_before", "remove_child",
   "set_attribute", "remove_attribute",
   "set_text_content", "set_inner_html", "set_inner_html_context",
   "set_fragment_html_executable", "document_write",
-]);
-const _DOM_TREE_MUTATION_COMMANDS = new Set([
+]));
+const _DOM_TREE_MUTATION_COMMANDS = _private(new Set([
   "append_child", "insert_before", "remove_child",
   "set_inner_html", "set_inner_html_context", "set_fragment_html_executable",
   "document_write",
-]);
+]));
 // Which realm this bootstrap closure belongs to. Every wrapper's methods come
 // from its own realm's prototypes, so a DOM call names the document it belongs
 // to instead of letting the host guess from whoever is calling. That is what
@@ -354,11 +426,11 @@ let _documentQuerySelector = null;
 const _documentQuery = (doc, selector) =>
   _documentQuerySelector ? _reflectApply(_documentQuerySelector, doc, [selector]) : _qs(doc, selector);
 
-const _nativeFns = new Set();
+const _nativeFns = _private(new Set());
 // Exact toString override for members whose native form is not just
 // `function <name>()`, e.g. accessors (`function get x() { [native code] }`)
 // or functions whose `.name` does not match the real builtin.
-const _nativeStr = new Map();
+const _nativeStr = _private(new Map());
 const _origToString = Function.prototype.toString;
 // Method syntax matches the native function's non-constructible shape and
 // does not add an own `prototype` property.
@@ -456,7 +528,7 @@ let _frameIndicesReady = false;
   } catch(e) {}
 });
 
-const _stackCache = new WeakMap();
+const _stackCache = _private(new WeakMap());
 const _origStackDesc = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
 if (_origStackDesc && _origStackDesc.get) {
   Object.defineProperty(Error.prototype, 'stack', {
@@ -682,8 +754,8 @@ function _resolveResourceUrl(src) {
   } catch(e) { return src; }
 }
 
-const _linkedStylesheetNodes = new WeakMap();
-const _linkElementSheets = new WeakMap();
+const _linkedStylesheetNodes = _private(new WeakMap());
+const _linkElementSheets = _private(new WeakMap());
 
 // DEVIATION from crates/obscura-js/js/bootstrap.js, where a fetched <link> sheet is a real
 // <style> element inserted next to the link, so its bytes are node text. Chromium 141 creates
@@ -877,7 +949,7 @@ function _fp(key) { return _getFp()[key]; }
 // global: the listener registry and the dirty form state were page-readable and
 // page-writable there, and detectable by name (SECURITY.md I10). The form maps the
 // host installed ahead of this file (FormStateMirror) are adopted and taken off it.
-const _eventRegistry = {};
+const _eventRegistry = _objectCreate(null);
 const _formValues = globalThis._formValues || {};
 const _formChecked = globalThis._formChecked || {};
 const _formIndeterminate = globalThis._formIndeterminate || {};
@@ -1038,11 +1110,11 @@ globalThis.console = {
 };
 
 let _tid = 0;
-const _intervals = new Set();
-const _nativeTimerIds = new Map();
-const _timerStates = new Map();
-const _frameTimerStates = new Map();
-const __obscuraPendingTimeoutDeadlines = new Map();
+const _intervals = _private(new Set());
+const _nativeTimerIds = _private(new Map());
+const _timerStates = _private(new Map());
+const _frameTimerStates = _private(new Map());
+const __obscuraPendingTimeoutDeadlines = _private(new Map());
 Object.defineProperty(_hostVars, '__obscura_nextPendingTimeoutDelay', {
   value: function() {
     const now = performance.now();
@@ -1058,7 +1130,7 @@ Object.defineProperty(_hostVars, '__obscura_nextPendingTimeoutDelay', {
 });
 
 let _frameTimerSeq = 0;
-const _cancelledFrameTimers = new Set();
+const _cancelledFrameTimers = _private(new Set());
 
 const _scheduleAfter = (delay, fn) => {
   const d = Math.max(0, Number(delay) || 0);
@@ -1231,7 +1303,7 @@ globalThis.clearInterval = (id) => {
 // alias eventually used Promise.resolve(), so a normal animation loop formed
 // an unbounded microtask chain and pinned V8 until the watchdog terminated it.
 const _RAF_FRAME_DELAY_MS = 16;
-let _rafPending = new Map();
+let _rafPending = _private(new Map());
 let _rafCurrentBatch = null;
 let _rafFrameScheduled = false;
 let _rafRunningFrame = false;
@@ -1287,7 +1359,7 @@ function _runAnimationFrameBatch() {
   // running therefore belongs to the next frame. Every callback in this
   // batch receives the same rendering timestamp.
   const batch = _rafPending;
-  _rafPending = new Map();
+  _rafPending = _private(new Map());
   _rafCurrentBatch = batch;
   _rafRunningFrame = true;
   const timestamp = performance.now();
@@ -1410,7 +1482,7 @@ function _browserPostedTaskRunOne(currentGeneration = _invalidPostedTaskGenerati
 // This keeps background prefetch work behind visible hydration while still
 // giving every callback its own microtask checkpoint.
 const _schedulerConstructionKey = {};
-const _schedulerInstances = new WeakSet();
+const _schedulerInstances = _private(new WeakSet());
 const _schedulerPriorityRank = {
   "background": 0,
   "user-visible": 1,
@@ -1595,7 +1667,7 @@ Object.defineProperty(globalThis, "scheduler", {
 // Keep stopped-port messages queued, clone payloads synchronously, and deliver
 // one message per task so every delivery gets its own microtask checkpoint.
 const _messagePortConstructionKey = {};
-const _messagePortState = new WeakMap();
+const _messagePortState = _private(new WeakMap());
 function _messagePortStateFor(port) {
   const state = _messagePortState.get(port);
   if (!state) throw new TypeError("Illegal invocation");
@@ -1812,7 +1884,7 @@ const _CSS_PROPERTY_NAMES = [
   "transitionTimingFunction","translate","unicodeBidi","userSelect","verticalAlign","visibility",
   "whiteSpace","width","willChange","wordBreak","wordSpacing","wordWrap","writingMode","zIndex","zoom",
 ];
-const _CSS_PROP_SET = new Set(_CSS_PROPERTY_NAMES);
+const _CSS_PROP_SET = _private(new Set(_CSS_PROPERTY_NAMES));
 
 // Parse a `style` attribute string (`"color: red; margin: 5px"`) into the given
 // dashed-key store, replacing its contents in place.
@@ -2001,7 +2073,13 @@ function _shallowCloneNode(node) {
 // EventTarget listener state belongs to the JS wrapper rather than the backing
 // DOM node.  This is also what makes `new EventTarget()` and subclasses used by
 // framework schedulers work: those targets deliberately have no native node id.
-const _eventTargetListeners = new WeakMap();
+// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the lists are kept
+// with the WeakMap methods and String bootstrap captured, in objects with no prototype,
+// without the page's Map, Array.prototype.some / push / splice / slice / includes or the
+// array iterator, so a page that replaced any of them does not silence a target's
+// listeners, which Chromium keeps natively.
+const _eventTargetListeners = _private(new WeakMap());
+const _eventTargetListenersDelete = _uncurry(WeakMap.prototype.delete);
 function _eventCapture(options) {
   return typeof options === "boolean" ? options : !!(options && options.capture);
 }
@@ -2009,22 +2087,25 @@ function _eventTargetAdd(target, type, callback, options) {
   if (callback == null) return;
   const isFunction = typeof callback === "function";
   if (!isFunction && typeof callback.handleEvent !== "function") return;
-  type = String(type);
+  type = _String(type);
   const capture = _eventCapture(options);
   const signal = options && typeof options === "object" ? options.signal : null;
   if (signal && signal.aborted) return;
-  let byType = _eventTargetListeners.get(target);
+  let byType = _weakMapGet(_eventTargetListeners, target);
   if (!byType) {
-    byType = new Map();
-    _eventTargetListeners.set(target, byType);
+    byType = _objectCreate(null);
+    _weakMapSet(_eventTargetListeners, target, byType);
   }
-  let listeners = byType.get(type);
+  let listeners = byType[type];
   if (!listeners) {
     listeners = [];
-    byType.set(type, listeners);
+    byType[type] = listeners;
   }
-  if (listeners.some((entry) => entry.callback === callback && entry.capture === capture)) return;
+  for (let i = 0; i < listeners.length; i++) {
+    if (listeners[i].callback === callback && listeners[i].capture === capture) return;
+  }
   const entry = {
+    __proto__: null,
     callback,
     capture,
     once: !!(options && typeof options === "object" && options.once),
@@ -2032,46 +2113,54 @@ function _eventTargetAdd(target, type, callback, options) {
     signal,
     abortHandler: null,
   };
-  listeners.push(entry);
+  listeners[listeners.length] = entry;
   if (signal && typeof signal.addEventListener === "function") {
     entry.abortHandler = () => _eventTargetRemove(target, type, callback, capture);
     signal.addEventListener("abort", entry.abortHandler, { once: true });
   }
 }
 function _eventTargetRemove(target, type, callback, options) {
-  const byType = _eventTargetListeners.get(target);
+  const byType = _weakMapGet(_eventTargetListeners, target);
   if (!byType) return;
-  type = String(type);
-  const listeners = byType.get(type);
+  type = _String(type);
+  const listeners = byType[type];
   if (!listeners) return;
   const capture = _eventCapture(options);
   for (let i = 0; i < listeners.length; i++) {
     const entry = listeners[i];
     if (entry.callback !== callback || entry.capture !== capture) continue;
-    listeners.splice(i, 1);
+    // A new list, so a dispatch walking the old one is not disturbed.
+    const kept = [];
+    for (let j = 0; j < listeners.length; j++) if (j !== i) kept[kept.length] = listeners[j];
+    entry.removed = true;
+    if (kept.length === 0) delete byType[type]; else byType[type] = kept;
     if (entry.signal && entry.abortHandler && typeof entry.signal.removeEventListener === "function") {
       entry.signal.removeEventListener("abort", entry.abortHandler);
     }
     break;
   }
-  if (listeners.length === 0) byType.delete(type);
-  if (byType.size === 0) _eventTargetListeners.delete(target);
+  for (const _ in byType) return;
+  _eventTargetListenersDelete(_eventTargetListeners, target);
 }
 function _eventTargetDispatch(target, event) {
   if (!event || typeof event.type === "undefined") {
     throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not of type 'Event'.");
   }
-  if (String(event.type) === "") {
+  const type = _String(event.type);
+  if (type === "") {
     throw new DOMException("The event's type was not specified.", "InvalidStateError");
   }
   if (!event.target) event.target = target;
   event.currentTarget = target;
   event.eventPhase = 2;
-  const listeners = (_eventTargetListeners.get(target)?.get(String(event.type)) || []).slice();
-  for (const entry of listeners) {
-    const current = _eventTargetListeners.get(target)?.get(String(event.type));
-    if (!current || !current.includes(entry)) continue;
-    if (entry.once) _eventTargetRemove(target, event.type, entry.callback, entry.capture);
+  const byType = _weakMapGet(_eventTargetListeners, target);
+  const listeners = byType && byType[type];
+  const count = listeners ? listeners.length : 0;
+  for (let i = 0; i < count; i++) {
+    const entry = listeners[i];
+    // Removed during this dispatch (by an earlier listener): it does not run.
+    if (entry.removed) continue;
+    if (entry.once) _eventTargetRemove(target, type, entry.callback, entry.capture);
     const callback = entry.callback;
     try {
       if (typeof callback === "function") _reflectApply(callback, target, [event]);
@@ -2863,7 +2952,10 @@ function _documentBase() {
   if (virtual) {
     const raw = _domParse("document_base_href");
     if (!raw) return virtual;
-    try { return new URL(raw, virtual).href; } catch (e) { return virtual; }
+    // The URL op, not the page-replaceable URL global: form submission and link
+    // resolution for the host read this (SECURITY.md L10).
+    const parsed = _urlParseOp(raw, virtual);
+    return parsed ? parsed.href : virtual;
   }
   return _domParse("document_base_url") || _domParse("document_url") || "";
 }
@@ -2989,7 +3081,7 @@ function _labeledControl(label) {
 const _INTERACTIVE = 'a[href],audio[controls],button,details,embed,iframe,'
   + 'img[usemap],input:not([type=hidden]),select,textarea,video[controls]';
 
-const _forwardingLabels = new WeakSet();
+const _forwardingLabels = _private(new WeakSet());
 // Passed to click() only by label activation on behalf of a real input event,
 // so the forwarded control events keep the trustedness of the click that
 // caused them, as they do in a real browser. The symbol itself is
@@ -3074,11 +3166,15 @@ function _interactiveHost(el) {
 // trusted activation, which page script must never be able to ask for, so all four
 // reach the host through __obscura_host instead (see the end of this file).
 
+// With the members bootstrap captured: a CDP click decides from this whether a click
+// submits (SECURITY.md L10).
 function _isSubmitButton(el) {
-  if (!el || typeof el.localName !== "string") return false;
-  const type = ((el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
-  if (el.localName === "button") return type !== "reset" && type !== "button";
-  if (el.localName === "input") return type === "submit" || type === "image";
+  if (!el || typeof el !== "object") return false;
+  const localName = _elGet("localName", el);
+  if (typeof localName !== "string") return false;
+  const type = _stringToLowerCase(_String(_elCall("getAttribute", el, ["type"]) || ""));
+  if (localName === "button") return type !== "reset" && type !== "button";
+  if (localName === "input") return type === "submit" || type === "image";
   return false;
 }
 
@@ -3206,7 +3302,7 @@ class NamedNodeMap {
 globalThis.NamedNodeMap = NamedNodeMap;
 
 let _waapiNextId = 1;
-const _waapiAnimations = new Set();
+const _waapiAnimations = _private(new Set());
 
 function _normalizeWaapiKeyframes(input) {
   let frames;
@@ -3841,7 +3937,7 @@ class Element extends Node {
     this._nullNamespaceAttrs = null;
     if (ns === "" && n === "style") this._style._replaceFromAttribute("");
   }
-  hasAttribute(n) { return this.getAttribute(n) !== null; }
+  hasAttribute(n) { return _elCall('getAttribute', this, [n]) !== null; }
   hasAttributes() { return this.attributes.length > 0; }
   getAttributeNames() { return _domParse("attribute_names", this._nid) || []; }
   get attributes() {
@@ -3956,18 +4052,28 @@ class Element extends Node {
     }
     return null;
   }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): an element's
+  // listeners are stored and run without the page's Array.prototype.push, filter and
+  // iterator, in lists with no prototype, and the event bubbles by parentNode as bootstrap
+  // defined it. A page that replaced any of them (or put an accessor named after an event
+  // type on Object.prototype) silenced every listener added afterwards, and with it the
+  // clicks and keys a CDP client sends, where Chromium's dispatch is native.
   addEventListener(type, handler, opts) {
     const key = this._nid;
-    if (!_eventRegistry[key]) _eventRegistry[key] = {};
-    if (!_eventRegistry[key][type]) _eventRegistry[key][type] = [];
-    _eventRegistry[key][type].push(handler);
+    let byType = _eventRegistry[key];
+    if (!byType) byType = _eventRegistry[key] = _objectCreate(null);
+    let list = byType[type];
+    if (!list) list = byType[type] = [];
+    list[list.length] = handler;
     _stampHandler(handler);
   }
   removeEventListener(type, handler) {
-    const key = this._nid;
-    if (_eventRegistry[key] && _eventRegistry[key][type]) {
-      _eventRegistry[key][type] = _eventRegistry[key][type].filter(h => h !== handler);
-    }
+    const byType = _eventRegistry[this._nid];
+    const list = byType ? byType[type] : undefined;
+    if (!list) return;
+    const kept = [];
+    for (let i = 0; i < list.length; i++) if (list[i] !== handler) kept[kept.length] = list[i];
+    byType[type] = kept;
   }
   dispatchEvent(event) {
     if (!event) return true;
@@ -3987,18 +4093,20 @@ class Element extends Node {
         if (ret === false) event.preventDefault();
       } catch(e) { console.error(e); }
     }
-    const handlers = (_eventRegistry[this._nid] || {})[event.type] || [];
+    const byType = _eventRegistry[this._nid];
+    const handlers = (byType && byType[event.type]) || [];
     if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 4) !== 0) {
       // Port addition (SECURITY.md M6): isolated worlds listen on this node too.
       _worldRunListeners(this, event, handlers, false);
     } else {
-      for (const h of handlers) {
-        try { _reflectApply(h, this, [event]); } catch(e) { console.error(e); }
+      for (let i = 0; i < handlers.length; i++) {
+        try { _reflectApply(handlers[i], this, [event]); } catch(e) { console.error(e); }
         if (event._immediatePropagationStopped) break;
       }
     }
-    if (event.bubbles && !event._propagationStopped && this.parentNode) {
-      _bubble(this.parentNode, event);
+    const parent = event.bubbles && !event._propagationStopped ? _elGet('parentNode', this) : null;
+    if (parent) {
+      _bubble(parent, event);
     }
     return !event.defaultPrevented;
   }
@@ -4021,13 +4129,20 @@ class Element extends Node {
     // private token so the forwarded events stay trusted. Read from arguments
     // to keep click.length at 0, as in a real browser.
     const _trusted = arguments[0] === _TRUSTED_ACTIVATION;
+    // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the activation
+    // behaviour below (a checkbox's toggle, a link's navigation, a submit button's form)
+    // reads the element with the members and String methods bootstrap captured, and
+    // navigates and submits by the shim's own location and requestSubmit. It is what a
+    // CDP click runs, and a page that replaced getAttribute, closest, toLowerCase,
+    // location.assign or requestSubmit decided where a click on a link or a submit
+    // button went; Chromium's activation behaviour is native.
     // Pre-click activation steps (HTML spec): a checkbox/radio flips BEFORE the
     // click event dispatches, so listeners observe the new state, and the change
     // is reverted if the event is cancelled. This mirrors the CDP mouse path in
     // obscura-cdp/src/domains/input.rs, which already implements it; without it
     // el.click() dispatched an event but never toggled the control.
     const _tag = this.tagName;
-    const _type = ((this.getAttribute && this.getAttribute('type')) || '').toLowerCase();
+    const _type = _stringToLowerCase(_String(_elCall('getAttribute', this, ['type']) || ''));
     const _checkable = _tag === 'INPUT' && (_type === 'checkbox' || _type === 'radio')
       && !_isActuallyDisabled(this);
     // A disabled form control has no activation behaviour and dispatches no
@@ -4092,19 +4207,19 @@ class Element extends Node {
       }
     }
     if (!cancelled) {
-      const link = this.tagName === 'A' ? this : (this.closest ? this.closest('a[href]') : null);
+      const link = _tag === 'A' ? this : _elCall('closest', this, ['a[href]']);
       if (link) {
-        const href = link.getAttribute('href');
+        const href = _elCall('getAttribute', link, ['href']);
         // A fragment href used to be excluded here, back when every
         // location.assign tore the document down and rebooted the realm. It is
         // a same-document navigation now, so excluding it only meant that
         // clicking an in-page link -- how most single page apps route -- did
         // nothing at all: no URL change, no hashchange, no popstate.
-        if (href !== null && href !== '' && !href.startsWith('javascript:')) {
+        if (href !== null && href !== '' && _stringSlice(_String(href), 0, 11) !== 'javascript:') {
           // The link's own referrer policy (rel=noreferrer, referrerpolicy) rides with
           // the navigation op_navigate queues during assign (port addition).
           _dom("set_navigation_referrer_policy", _linkReferrerPolicy(link));
-          try { location.assign(href); } finally { _dom("set_navigation_referrer_policy", ""); }
+          try { _locationNavigate(_String(href), false); } finally { _dom("set_navigation_referrer_policy", ""); }
           return;
         }
       }
@@ -4113,10 +4228,12 @@ class Element extends Node {
       // click path in input.rs, which already treats <input type=image> as a
       // submit button.
       if (_isSubmitButton(this)) {
-        const form = this.closest ? this.closest('form') : null;
+        const form = _elCall('closest', this, ['form']);
         // A real submit-button click fires the cancelable submit event, so use
         // requestSubmit() (not the plain submit() method, which now bypasses it).
-        if (form && typeof form.requestSubmit === 'function') {
+        if (form && _isBootElement(form) && typeof _bootEl.requestSubmit === 'function') {
+          _reflectApply(_bootEl.requestSubmit, form, [this]);
+        } else if (form && typeof form.requestSubmit === 'function') {
           form.requestSubmit(this);
         } else if (form && typeof form.submit === 'function') {
           form.submit(this);
@@ -4276,39 +4393,45 @@ class Element extends Node {
     this._internalsAttached = true;
     return new ElementInternals(this);
   }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): a control's value
+  // and checkedness are read with the members and String methods bootstrap captured. Form
+  // submission, the MCP form tools and CDP typing read them, and a page that replaced
+  // getAttribute or toLowerCase changed what a submitted form carried; Chromium's control
+  // state is internal.
   get value() {
-    const tag = this.localName;
+    const tag = _elGet('localName', this);
+    const attr = (el, name) => _elCall('getAttribute', el, [name]);
     if (tag === 'select') {
       // Selected option wins; otherwise first option (HTML default).
       const opts = _qsa(this, 'option');
       for (let i = 0; i < opts.length; i++) {
-        if (opts[i].selected) {
-          return opts[i].getAttribute('value') !== null ? opts[i].getAttribute('value') : opts[i].textContent;
+        if (_elGet('selected', opts[i])) {
+          return attr(opts[i], 'value') !== null ? attr(opts[i], 'value') : _elGet('textContent', opts[i]);
         }
       }
-      if (opts.length) return opts[0].getAttribute('value') !== null ? opts[0].getAttribute('value') : opts[0].textContent;
+      if (opts.length) return attr(opts[0], 'value') !== null ? attr(opts[0], 'value') : _elGet('textContent', opts[0]);
       return '';
     }
     if (_formValues[this._nid] !== undefined) return _formValues[this._nid];
-    if (tag === 'textarea') return this.textContent;
+    if (tag === 'textarea') return _elGet('textContent', this);
     if (tag === 'option') {
-      const attr = this.getAttribute('value');
-      return attr !== null ? attr : this.textContent;
+      const value = attr(this, 'value');
+      return value !== null ? value : _elGet('textContent', this);
     }
     if (tag === 'input') {
-      const itype = (this.getAttribute('type') || '').toLowerCase();
+      const itype = _stringToLowerCase(_String(attr(this, 'type') || ''));
       if (itype === 'checkbox' || itype === 'radio') {
         // A checkbox/radio with no value attribute defaults to "on" in a real
         // browser, not the empty string.
-        const attr = this.getAttribute('value');
-        return attr !== null ? attr : 'on';
+        const value = attr(this, 'value');
+        return value !== null ? value : 'on';
       }
       if (itype === 'file') {
         // Chrome exposes a file input's value as C:\fakepath\<first filename>.
         { const files = _inputFilesOf(this); return (files && files.length) ? ('C:\\fakepath\\' + files[0].name) : ''; }
       }
     }
-    return this.getAttribute("value") || "";
+    return attr(this, "value") || "";
   }
   // FileList for <input type=file>, populated by DOM.setFileInputFiles (Puppeteer
   // uploadFile / Playwright setInputFiles). null for non-file inputs, matching
@@ -4428,7 +4551,7 @@ class Element extends Node {
   }
   get checked() {
     if (_formChecked[this._nid] !== undefined) return _formChecked[this._nid];
-    return this.hasAttribute("checked");
+    return _elCall('hasAttribute', this, ["checked"]);
   }
   set checked(v) { _formChecked[this._nid] = !!v; }
   // `indeterminate` is IDL-only: it has no content attribute to reflect, so
@@ -4440,7 +4563,7 @@ class Element extends Node {
   set indeterminate(v) { _formIndeterminate[this._nid] = !!v; }
   get selected() {
     if (this._selected !== undefined) return this._selected;
-    return this.hasAttribute("selected");
+    return _elCall('hasAttribute', this, ["selected"]);
   }
   set selected(v) {
     this._selected = !!v;
@@ -4839,17 +4962,27 @@ class Element extends Node {
     if (cancelled) return;
     this._navigateSubmit(submitter);
   }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the form data set
+  // is read with the members and built-ins bootstrap captured (getAttribute, localName,
+  // value, checked, String and Array methods, encodeURIComponent, the URL op), not the
+  // page's. The URL is the navigation the host performs after a CDP click on a submit
+  // button, and Chromium builds it natively. The encoding is the form-urlencoded one
+  // (_formEncode), as Chromium's: the Rust shim leaves ' ( ) ~ bare. A textarea's line
+  // breaks go out as CRLF, and a GET submission replaces the action's query, as in
+  // Chromium.
   _navigateSubmit(submitter) {
-    const pairs = [];
-    const fields = _qsa(this, 'input, select, textarea');
+    let encoded = '';
+    const attr = (el, name) => _elCall('getAttribute', el, [name]);
+    // Buttons too: the submitter's own name=value goes out, as in Chromium.
+    const fields = _qsa(this, 'input, select, textarea, button');
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i];
-      const name = f.getAttribute('name');
+      const name = attr(f, 'name');
       if (!name) continue;
-      if (f.getAttribute('disabled') !== null) continue;
-      const tag = f.localName;
-      const type = (f.getAttribute('type') || '').toLowerCase();
-      if ((type === 'checkbox' || type === 'radio') && !f.checked) continue;
+      if (attr(f, 'disabled') !== null) continue;
+      const tag = _elGet('localName', f);
+      const type = _stringToLowerCase(_String(attr(f, 'type') || ''));
+      if ((type === 'checkbox' || type === 'radio') && !_elGet('checked', f)) continue;
       if (type === 'file' || type === 'reset') continue;
       if (type === 'button') continue;
       if (type === 'submit' || tag === 'button') {
@@ -4860,42 +4993,45 @@ class Element extends Node {
       let val;
       if (tag === 'select') {
         const opt = _qs(f, 'option[selected]') || _qs(f, 'option');
-        val = opt ? (opt.getAttribute('value') !== null ? opt.getAttribute('value') : opt.textContent) : '';
+        val = opt ? (attr(opt, 'value') !== null ? attr(opt, 'value') : _elGet('textContent', opt)) : '';
       } else if (tag === 'textarea') {
-        val = f.value || f.textContent || '';
+        val = _normalizeNewlinesCrLf(_String(_elGet('value', f) || _elGet('textContent', f) || ''));
       } else {
-        val = f.value !== undefined ? f.value : (f.getAttribute('value') || '');
+        const v = _elGet('value', f);
+        val = v !== undefined ? v : (attr(f, 'value') || '');
       }
-      const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+').replace(/!/g, '%21');
-      pairs.push(enc(name) + '=' + enc(val));
+      encoded += (encoded ? '&' : '') + _formEncode(name) + '=' + _formEncode(val);
     }
 
-    const action = this.getAttribute('action') || '';
-    const method = (this.getAttribute('method') || 'GET').toUpperCase();
-    const baseUrl = globalThis.location?.href || 'about:blank';
-    let targetUrl;
-    try { targetUrl = new URL(action, baseUrl).href; } catch(e) { targetUrl = action; }
+    const action = attr(this, 'action') || '';
+    const post = _stringToLowerCase(_String(attr(this, 'method') || 'get')) === 'post';
+    const resolved = _urlParseOp(_String(action), _documentBase() || __currentUrl());
+    const targetUrl = resolved ? resolved.href : _String(action);
 
-    const encoded = pairs.join('&');
     // Port addition: a `target` (or the submitter's `formtarget`) naming one of this
     // document's iframes navigates that frame, as in Chromium 141; the Rust shim
     // navigated the document itself. Other names keep that behaviour.
-    const frameTarget = (submitter && _hostDom.getAttribute(submitter, 'formtarget'))
-      || _hostDom.getAttribute(this, 'target') || '';
-    if (frameTarget && frameTarget[0] !== '_' && _iframeNamed(document, _String(frameTarget))) {
-      if (method === 'POST') {
-        __obscuraCore.ops.op_navigate_frame(targetUrl, 'POST', encoded, _String(frameTarget));
+    const frameTarget = _String((submitter && attr(submitter, 'formtarget'))
+      || attr(this, 'target') || '');
+    const getUrl = () => {
+      const hash = _stringIndexOf(targetUrl, '#');
+      const noHash = hash < 0 ? targetUrl : _stringSlice(targetUrl, 0, hash);
+      const query = _stringIndexOf(noHash, '?');
+      const base = query < 0 ? noHash : _stringSlice(noHash, 0, query);
+      return base + '?' + encoded + (hash < 0 ? '' : _stringSlice(targetUrl, hash));
+    };
+    if (frameTarget && frameTarget[0] !== '_' && _iframeNamed(document, frameTarget)) {
+      if (post) {
+        __obscuraCore.ops.op_navigate_frame(targetUrl, 'POST', encoded, frameTarget);
       } else {
-        const sep = targetUrl.includes('?') ? '&' : '?';
-        __obscuraCore.ops.op_navigate_frame(targetUrl + (encoded ? sep + encoded : ''), 'GET', '', _String(frameTarget));
+        __obscuraCore.ops.op_navigate_frame(getUrl(), 'GET', '', frameTarget);
       }
       return;
     }
-    if (method === 'POST') {
+    if (post) {
       __obscuraCore.ops.op_navigate(targetUrl, 'POST', encoded);
     } else {
-      const sep = targetUrl.includes('?') ? '&' : '?';
-      __obscuraCore.ops.op_navigate(targetUrl + (encoded ? sep + encoded : ''), 'GET', '');
+      __obscuraCore.ops.op_navigate(getUrl(), 'GET', '');
     }
   }
   reset() {
@@ -5876,20 +6012,28 @@ class Document extends Node {
     return new Cls('');
   }
   createRange() { return new Range(); }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): as Element's, the
+  // document's listeners are kept and run without the page's Array methods.
   addEventListener(type, fn, opts) {
     if (typeof fn !== 'function') return;
-    if (!this._listeners) this._listeners = {};
-    if (!this._listeners[type]) this._listeners[type] = [];
-    if (!this._listeners[type].includes(fn)) { this._listeners[type].push(fn); _stampHandler(fn); }
+    if (!this._listeners) this._listeners = _objectCreate(null);
+    let list = this._listeners[type];
+    if (!list) list = this._listeners[type] = [];
+    for (let i = 0; i < list.length; i++) if (list[i] === fn) return;
+    list[list.length] = fn;
+    _stampHandler(fn);
   }
   removeEventListener(type, fn) {
-    if (this._listeners?.[type]) {
-      this._listeners[type] = this._listeners[type].filter(h => h !== fn);
-    }
+    const list = this._listeners ? this._listeners[type] : undefined;
+    if (!list) return;
+    const kept = [];
+    for (let i = 0; i < list.length; i++) if (list[i] !== fn) kept[kept.length] = list[i];
+    this._listeners[type] = kept;
   }
   dispatchEvent(event) {
     if (!event) return true;
-    const handlers = (this._listeners?.[event.type] || []).slice();
+    const list = this._listeners ? this._listeners[event.type] : undefined;
+    const handlers = list ? _arraySlice(list) : [];
     if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 4) !== 0 && typeof this._nid === 'number') {
       // Port addition (SECURITY.md M6): isolated worlds listen on the document too.
       _worldRunListeners(this, event, handlers, true);
@@ -6315,7 +6459,7 @@ class DocumentType extends Node {
   get ownerDocument() { return this._ownerDocument || globalThis.document; }
 }
 
-const _cache = new Map();
+const _cache = _private(new Map());
 
 class TextTrackCue {
   constructor(startTime, endTime, text) {
@@ -7094,7 +7238,7 @@ function _wrapEl(nid) {
 // wrapper), so a detached node that script still holds survives with its expandos.
 let _gcKeys = null;
 let _gcPending = null;
-const _gcKeepers = new WeakMap();
+const _gcKeepers = _private(new WeakMap());
 function _gcCachedNids() {
   _gcKeys = Array.from(_cache.keys());
   return _gcKeys.join(",");
@@ -8214,7 +8358,7 @@ function _requestMode(initMode, fallback, op) {
 // refused in any case, and only DELETE/GET/HEAD/OPTIONS/POST/PUT are uppercased
 // ('patch' stays 'patch'). Rust uppercased every method and sent any of them.
 // Returns the normalized method, or an error kind and message.
-const _NORMALIZED_METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT']);
+const _NORMALIZED_METHODS = _private(new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT']));
 function _checkMethod(method) {
   const m = String(method);
   if (!_HTTP_TOKEN_RE.test(m)) return { error: 'invalid', message: "'" + m + "' is not a valid HTTP method." };
@@ -8231,8 +8375,8 @@ function _normalizeMethod(method, where) {
 }
 // Referrer policy (port addition; Rust has none). The host applies it: these only
 // validate and carry what script asked for. See FetchReferrer.cs for the op argument.
-const _REFERRER_POLICIES = new Set(['', 'no-referrer', 'no-referrer-when-downgrade', 'origin',
-  'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url']);
+const _REFERRER_POLICIES = _private(new Set(['', 'no-referrer', 'no-referrer-when-downgrade', 'origin',
+  'origin-when-cross-origin', 'same-origin', 'strict-origin', 'strict-origin-when-cross-origin', 'unsafe-url']));
 // The token helpers below use the built-ins as bootstrap found them: the host's CDP click
 // on a link reaches them through __obscura_host.navigate (SECURITY.md L10).
 function _referrerPolicyToken(value) {
@@ -8368,8 +8512,8 @@ globalThis.fetch = async (input, init = {}) => {
 // Content-Language or Content-Type. Invalid names and values throw TypeError, as
 // in Chromium. op_fetch_url applies the same filter host-side. The guard lives
 // in a closure WeakMap so page script cannot reset it.
-const _headersGuards = new WeakMap();
-const _HEADERS_FORBIDDEN_NAMES = new Set([
+const _headersGuards = _private(new WeakMap());
+const _HEADERS_FORBIDDEN_NAMES = _private(new Set([
   'accept-charset', 'accept-encoding', 'access-control-request-headers',
   'access-control-request-method', 'access-control-request-private-network',
   'connection', 'content-length', 'cookie', 'cookie2', 'date', 'dnt', 'expect',
@@ -8379,7 +8523,7 @@ const _HEADERS_FORBIDDEN_NAMES = new Set([
   // headers and ignores it in XHR setRequestHeader (measured on Chromium 141):
   // the browser's User-Agent always goes out. Rust let script replace it.
   'user-agent',
-]);
+]));
 const _HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 function _isForbiddenRequestHeader(name, value) {
   const lower = String(name).toLowerCase();
@@ -9346,7 +9490,7 @@ function _roMeasurements(targets) {
 }
 
 const _roConstructionKey = {};
-const _roSizeValues = new WeakMap();
+const _roSizeValues = _private(new WeakMap());
 globalThis.ResizeObserverSize = class ResizeObserverSize {
   constructor(key, inlineSize, blockSize) {
     if (key !== _roConstructionKey) throw new TypeError("Illegal constructor");
@@ -9355,7 +9499,7 @@ globalThis.ResizeObserverSize = class ResizeObserverSize {
   get inlineSize() { return _roSizeValues.get(this)?.inlineSize; }
   get blockSize() { return _roSizeValues.get(this)?.blockSize; }
 };
-const _roEntryValues = new WeakMap();
+const _roEntryValues = _private(new WeakMap());
 globalThis.ResizeObserverEntry = class ResizeObserverEntry {
   constructor(key, target, measurement) {
     if (key !== _roConstructionKey) throw new TypeError("Illegal constructor");
@@ -9736,7 +9880,7 @@ globalThis.matchMedia = _markNative(function matchMedia(q) {
 // Share the immutable native snapshot behind them. Frameworks routinely call
 // getComputedStyle() repeatedly on the same few roots; rebuilding and parsing
 // several hundred properties for every wrapper dominated real-page startup.
-const _computedStyleSnapshotCache = new WeakMap();
+const _computedStyleSnapshotCache = _private(new WeakMap());
 globalThis.getComputedStyle = (el, pseudoElt) => {
   if (!el) el = document.body || {};
   const style = el?.style || el?._style || new CSSStyleDeclaration();
@@ -10087,7 +10231,7 @@ class CSSRuleList {
 // Upstream 04418a5: a sheet's origin-clean flag, its href and its last-seen source live in a
 // WeakMap, so page script cannot flip `sheet._originClean` before reading cssRules, and a
 // cross-origin sheet's text is never copied onto the object.
-const _cssStyleSheetPrivate = new WeakMap();
+const _cssStyleSheetPrivate = _private(new WeakMap());
 
 class CSSStyleSheet {
   constructor(_options) {
@@ -10235,7 +10379,7 @@ class CSSStyleSheet {
   }
 }
 
-const _styleElementSheets = new WeakMap();
+const _styleElementSheets = _private(new WeakMap());
 // Only adoptedStyleSheets still materializes a <style>. The three markers a fetched <link>
 // sheet, a dynamically inserted one and an @import used to carry are gone with the elements
 // they marked; those bytes are held beside their node now.
@@ -10420,7 +10564,7 @@ function _syncAdoptedStyles(root) {
 // its contents. Mutating the backing target directly avoids intermediate
 // materializations while assignment is in progress; ordinary array mutations
 // still pass through the proxy and synchronize immediately.
-const _adoptedSheetListTargets = new WeakMap();
+const _adoptedSheetListTargets = _private(new WeakMap());
 function _makeAdoptedSheetList(root, values) {
   const target = Array.from(values || []);
   const list = new Proxy(target, {
@@ -10473,7 +10617,7 @@ _hostVars.__mutationObservers = [];
 // and DOM 4.3.4 with the HTML event loop is the authority for all four: records
 // are queued synchronously as the DOM is mutated and the *notify set* is
 // drained once at the microtask checkpoint.
-const _mutationNotifySet = new Set();
+const _mutationNotifySet = _private(new Set());
 let _mutationObserverMicrotaskQueued = false;
 
 function _queueMutationObserverMicrotask() {
@@ -10724,7 +10868,7 @@ function _isConstructorCE(v) {
   if (typeof v !== 'function') return false;
   try { Reflect.construct(function () {}, [], v); return true; } catch (e) { return false; }
 }
-const _CE_RESERVED = new Set(['annotation-xml', 'color-profile', 'font-face', 'font-face-src', 'font-face-uri', 'font-face-format', 'font-face-name', 'missing-glyph']);
+const _CE_RESERVED = _private(new Set(['annotation-xml', 'color-profile', 'font-face', 'font-face-src', 'font-face-uri', 'font-face-format', 'font-face-name', 'missing-glyph']));
 function _isValidCustomElementName(name) {
   if (typeof name !== 'string' || _CE_RESERVED.has(name)) return false;
   // PotentialCustomElementName (approx): lowercase start, a hyphen, no uppercase.
@@ -10864,7 +11008,7 @@ globalThis.NodeFilter = {
 // element-root, and overflow-ancestor boxes from one prepared layout snapshot.
 _hostVars.__intersectionObservers = [];
 let _intersectionRenderCheckpointPending = false;
-const _intersectionDeliveryObservers = new Set();
+const _intersectionDeliveryObservers = _private(new Set());
 let _intersectionDeliveryTaskPending = false;
 
 function _scheduleIntersectionObserverDelivery(observer) {
@@ -11294,7 +11438,7 @@ globalThis.DOMException = (function () {
 // The set is also reached through WeakSet.prototype methods captured now, not looked
 // up on each call: a page that replaced WeakSet.prototype.has would otherwise be
 // handed this very set as `this` on its first isTrusted read, and could add to it.
-const _trustedEvents = new WeakSet();
+const _trustedEvents = _private(new WeakSet());
 const _trustedAdd = Function.prototype.call.bind(WeakSet.prototype.add);
 const _trustedHas = Function.prototype.call.bind(WeakSet.prototype.has);
 // DOM "dispatch": dispatchEvent() sets isTrusted to false. An event the user agent marks
@@ -11302,7 +11446,7 @@ const _trustedHas = Function.prototype.call.bind(WeakSet.prototype.has);
 // it and every later one clears it: page script re-dispatching a trusted event it was
 // handed gets an untrusted one, as in Chromium (SECURITY.md L10). DEVIATION from
 // crates/obscura-js/js/bootstrap.js, where the mark stays for any later dispatch.
-const _trustedPending = new WeakSet();
+const _trustedPending = _private(new WeakSet());
 const _trustedPendingAdd = Function.prototype.call.bind(WeakSet.prototype.add);
 const _trustedPendingTake = Function.prototype.call.bind(WeakSet.prototype.delete);
 const _trustedDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
@@ -11402,7 +11546,7 @@ function _filesFromSpecs(list) {
 // This realm's FileList for a file input's host-held selection, rebuilt only when the
 // selection changed (its version), so `input.files === input.files` holds. Null when the
 // host holds none for the node.
-const _inputFileCache = new WeakMap();
+const _inputFileCache = _private(new WeakMap());
 const _inputFileCacheGet = _uncurry(WeakMap.prototype.get);
 const _inputFileCacheSet = _uncurry(WeakMap.prototype.set);
 function _inputFilesOf(el) {
@@ -11814,8 +11958,35 @@ if (typeof FormData === "undefined") globalThis.FormData = class FormData {
 // application/x-www-form-urlencoded serializer: like encodeURIComponent but
 // space -> '+' and also percent-encoding the chars encodeURIComponent leaves
 // bare ( ! ~ ' ( ) ), keeping the form-urlencoded safe set ( * - . _ ).
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which uses the page's
+// encodeURIComponent, String.prototype.replace and RegExp: a form's submission URL is the
+// navigation the host performs, so a page that replaced them chose what it sent
+// (SECURITY.md L10).
+// LF and lone CR become CRLF, as HTML's form data set construction does for a textarea.
+function _normalizeNewlinesCrLf(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = _stringCharAt(s, i);
+    if (c === '\r') { out += '\r\n'; if (_stringCharAt(s, i + 1) === '\n') i++; }
+    else if (c === '\n') out += '\r\n';
+    else out += c;
+  }
+  return out;
+}
 function _formEncode(s){
-  return encodeURIComponent(String(s)).replace(/%20/g,'+').replace(/[!'()~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  const e = _encodeURIComponentAtBoot(_String(s));
+  let out = '';
+  for (let i = 0; i < e.length; i++) {
+    const c = _stringCharAt(e, i);
+    if (c === '%' && _stringSlice(e, i, i + 3) === '%20') { out += '+'; i += 2; }
+    else if (c === '!') out += '%21';
+    else if (c === "'") out += '%27';
+    else if (c === '(') out += '%28';
+    else if (c === ')') out += '%29';
+    else if (c === '~') out += '%7E';
+    else out += c;
+  }
+  return out;
 }
 function _hexv(c){ if(c>=48&&c<=57)return c-48; if(c>=65&&c<=70)return c-55; if(c>=97&&c<=102)return c-87; return -1; }
 if (typeof URLSearchParams === "undefined") globalThis.URLSearchParams = class URLSearchParams {
@@ -13129,7 +13300,7 @@ globalThis.scrollX = 0; globalThis.scrollY = 0;
 // renderer actually implements. Reporting an unknown declaration as supported
 // is not harmless: Tailwind and other framework sheets use negative probes to
 // select legacy-browser fallbacks, which can replace their modern cascade.
-const _CSS_SUPPORTED_DECLARATIONS = new Set((
+const _CSS_SUPPORTED_DECLARATIONS = _private(new Set((
   "display width height min-width min-height max-width max-height box-sizing aspect-ratio content " +
   "margin margin-top margin-right margin-bottom margin-left margin-inline margin-inline-start " +
   "margin-inline-end margin-block margin-block-start margin-block-end padding padding-top " +
@@ -13151,9 +13322,9 @@ const _CSS_SUPPORTED_DECLARATIONS = new Set((
   "grid-column-end grid-row-start grid-row-end transform filter backdrop-filter " +
   "-webkit-backdrop-filter perspective contain will-change content-visibility box-shadow " +
   "-webkit-box-shadow"
-).split(/\s+/));
+).split(/\s+/)));
 
-const _CSS_SUPPORTED_COLOR_NAMES = new Set((
+const _CSS_SUPPORTED_COLOR_NAMES = _private(new Set((
   "transparent white black gray grey silver lightgray lightgrey darkgray darkgrey whitesmoke " +
   "gainsboro red green lime blue navy yellow orange purple maroon teal aqua cyan fuchsia magenta " +
   "olive darkblue mediumblue royalblue dodgerblue cornflowerblue steelblue deepskyblue skyblue " +
@@ -13169,7 +13340,7 @@ const _CSS_SUPPORTED_COLOR_NAMES = new Set((
   "oldlace floralwhite ghostwhite aliceblue lavenderblush mistyrose cornsilk antiquewhite bisque " +
   "blanchedalmond navajowhite dimgray dimgrey slategray slategrey lightslategray lightslategrey " +
   "darkslategray darkslategrey"
-).split(/\s+/));
+).split(/\s+/)));
 
 function _cssSupportsColor(value) {
   const raw = value.trim();
@@ -13567,14 +13738,14 @@ function _cssHasTopLevelComma(text) {
   return false;
 }
 
-const _CSS_SUPPORTED_SIMPLE_PSEUDOS = new Set((
+const _CSS_SUPPORTED_SIMPLE_PSEUDOS = _private(new Set((
   "hover active focus focus-visible focus-within enabled disabled checked link any-link visited " +
   "first-child last-child only-child root empty scope first-of-type last-of-type only-of-type " +
   "before after"
-).split(/\s+/));
-const _CSS_SUPPORTED_FUNCTIONAL_PSEUDOS = new Set((
+).split(/\s+/)));
+const _CSS_SUPPORTED_FUNCTIONAL_PSEUDOS = _private(new Set((
   "nth-child nth-of-type nth-last-child nth-last-of-type is where has host not"
-).split(/\s+/));
+).split(/\s+/)));
 
 function _cssSupportsSelector(selector) {
   selector = selector.trim();
@@ -14114,8 +14285,8 @@ function _nodeList(els) {
 // The accessor resolves against the live tree: one match returns that element
 // (or an iframe's Window), while duplicates return a live-shaped
 // HTMLCollection in tree order.
-const _windowNamedPropertyNames = new Set();
-const _windowNamedNameTags = new Set(["embed", "form", "iframe", "img", "object"]);
+const _windowNamedPropertyNames = _private(new Set());
+const _windowNamedNameTags = _private(new Set(["embed", "form", "iframe", "img", "object"]));
 
 function _windowNameEligibleElement(element) {
   return !!element
@@ -14175,7 +14346,7 @@ function _ensureWindowNamedProperty(name) {
   if (!name || _windowNamedPropertyNames.has(name)) return;
   if (name in EventTarget.prototype) return;
   try {
-    Object.defineProperty(_windowProperties, name, {
+    _defineProperty(_windowProperties, name, {
       get() { return _windowNamedValue(name); },
       set(value) {
         _defineProperty(this, name, { value, writable: true, enumerable: true, configurable: true });
@@ -14700,9 +14871,9 @@ class _IframeDocument {
   close() {}
 }
 
-const _iframeRealmGlobalCache = new WeakMap();
+const _iframeRealmGlobalCache = _private(new WeakMap());
 let _iframeRealmGlobalNames = [];
-let _iframeRealmGlobalNameSet = new Set();
+let _iframeRealmGlobalNameSet = _private(new Set());
 
 function _iframeSourceIsConstructor(value) {
   try {
@@ -14809,12 +14980,12 @@ const _iframeWindowProxyHandler = {
 // element (_frameId, _iframeDoc, _iframeWin, _iframeLoadedUrl, _iframeLoadingUrl). Page script
 // could read a cross-origin frame's document straight out of _iframeDoc, or rewrite
 // _iframeLoadedUrl to pass the same-origin check (SECURITY.md C2).
-const _iframeStates = new WeakMap();
+const _iframeStates = _private(new WeakMap());
 // A parent-side _IframeWindow -> the iframe element it stands for.
-const _iframeWindowOwners = new WeakMap();
+const _iframeWindowOwners = _private(new WeakMap());
 // An iframe element -> its cross-origin window, one per element so that
 // `event.source === iframe.contentWindow` holds across navigations of the frame.
-const _crossOriginWindows = new WeakMap();
+const _crossOriginWindows = _private(new WeakMap());
 const _BLANK_FRAME_HTML = '<!DOCTYPE html><html><head></head><body></body></html>';
 
 function _makeIframeWindow(el, doc, url) {
@@ -14970,7 +15141,7 @@ class _CrossOriginFrameWindow {
   close() {}
 }
 _markNative(_CrossOriginFrameWindow.prototype.postMessage);
-const _crossOriginWindowElements = new WeakMap();
+const _crossOriginWindowElements = _private(new WeakMap());
 const _crossOriginLocation = Object.freeze({
   assign() {}, replace() {}, reload() {},
   set href(_v) {},
@@ -15002,11 +15173,15 @@ _hostVars.__obscura_parentFrameId = 0;
 // shape a challenge widget uses — while `isConnected` reports it correctly.
 // Treating it as gone would tear down a frame that is still in the page.
 // Host-only (__obscura_host.liveFrameIds); upstream's global __obscura_liveFrameIds.
+// DEVIATION from crates/obscura-js/js/bootstrap.js: the list is built without the page's
+// Array.prototype.push and asks isConnected as bootstrap defined it. The host discards every
+// frame this answer leaves out, so a page that replaced either tore down its child frames
+// under the client (SECURITY.md L10).
 function _liveFrameIds() {
   const live = [];
   for (const id in _frameElements) {
     const element = _frameElements[id];
-    if (element && element.isConnected) live.push(id >>> 0);
+    if (element && _elGet('isConnected', element)) live[live.length] = id >>> 0;
   }
   return live;
 }
@@ -15037,13 +15212,18 @@ function _realmOrigin() {
 // Mirrors the browser check done at delivery time: '*' (or an unspecified '')
 // allows any origin; '/' requires the receiver to be same-origin as the sender;
 // anything else must equal the receiver's own origin.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which parses targetOrigin with the
+// receiving realm's URL global: a receiver that replaced URL chose the origin it was
+// checked against and received messages restricted to another origin. The URL op
+// parses it here (SECURITY.md L10).
 function _targetOriginAllows(targetOrigin, receiverOrigin, senderOrigin) {
   if (!targetOrigin || targetOrigin === '*') return true;
   let expected;
   if (targetOrigin === '/') {
     expected = senderOrigin;
   } else {
-    try { expected = new URL(targetOrigin).origin; } catch (_) { expected = targetOrigin; }
+    const parsed = _urlParseOp(targetOrigin);
+    expected = parsed ? _String(parsed.origin) : targetOrigin;
   }
   return receiverOrigin === expected;
 }
@@ -15131,8 +15311,10 @@ function _deliverMessage(dataJson, origin, sourceFrameId, targetOrigin) {
   let data = null;
   try { data = _JSONparse(dataJson).v; } catch (_) {}
   // Who to reply to: the frame above, or one of the frames below.
+  // The parent's window as _installFramingRelationships made it, not the page-writable
+  // `parent` (SECURITY.md L10).
   const source = (_realmFrameId !== 0 && sourceFrameId === _realmParentFrameId)
-    ? globalThis.parent
+    ? _remoteWindow(_realmParentFrameId)
     : _frameWindowFor(sourceFrameId);
   try {
     // Trusted, because the user agent delivers this event: the sender called
@@ -15171,12 +15353,12 @@ class _RemoteWindow {
 }
 _markNative(_RemoteWindow.prototype.postMessage);
 
-const _remoteWindows = new Map();
+const _remoteWindows = _private(new Map());
 function _remoteWindow(frameId) {
-  let win = _remoteWindows.get(frameId);
+  let win = _mapGet(_remoteWindows, frameId);
   if (!win) {
     win = new _RemoteWindow(frameId);
-    _remoteWindows.set(frameId, win);
+    _mapSet(_remoteWindows, frameId, win);
   }
   return win;
 }
@@ -18914,8 +19096,8 @@ if (typeof ValidityState === 'undefined') {
 }
 
 // Validity and validation message storage on elements
-const _ns_validityCache = new WeakMap();
-const _ns_customValidityMsg = new WeakMap();
+const _ns_validityCache = _private(new WeakMap());
+const _ns_customValidityMsg = _private(new WeakMap());
 
 // Element.prototype.validity - returns cached ValidityState for the element
 if (!Element.prototype.validity) {
@@ -18987,9 +19169,9 @@ if (!Element.prototype.setCustomValidity) {
 }
 
 // Text selection on Element.prototype
-const _ns_selectionStart = new WeakMap();
-const _ns_selectionEnd = new WeakMap();
-const _ns_selectionDir = new WeakMap();
+const _ns_selectionStart = _private(new WeakMap());
+const _ns_selectionEnd = _private(new WeakMap());
+const _ns_selectionDir = _private(new WeakMap());
 
 // Port addition: a text control that has no selection yet has its caret at 0, as in
 // Chromium 141, where the Rust shim answers null; Input.insertText then appended at the
@@ -19173,7 +19355,7 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
   });
   _iframeRealmGlobalNames = Array.from(new Set(constructors.concat(standardGlobals)))
     .filter(name => name in globalThis);
-  _iframeRealmGlobalNameSet = new Set(_iframeRealmGlobalNames);
+  _iframeRealmGlobalNameSet = _private(new Set(_iframeRealmGlobalNames));
 })();
 
 (function _markBuiltinsNative() {
@@ -19298,7 +19480,7 @@ function _worldEventInit(event) {
 // listeners in bubble order with no capture phase and the window is not reached. A
 // world's window listeners (Playwright's hit-target check listens there, capturing) are
 // run around the node dispatch instead: capturing ones before it, the others after it.
-const _worldEventKeys = new WeakMap();
+const _worldEventKeys = _private(new WeakMap());
 const _worldEventKeyGet = _uncurry(WeakMap.prototype.get);
 const _worldEventKeySet = _uncurry(WeakMap.prototype.set);
 const _worldEventKeyDelete = _uncurry(WeakMap.prototype.delete);
@@ -19769,7 +19951,7 @@ function _installIsolatedWorldBridges() {
 const _dispatchingAdd = Function.prototype.call.bind(WeakSet.prototype.add);
 const _dispatchingHas = Function.prototype.call.bind(WeakSet.prototype.has);
 const _dispatchingDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
-const _dispatching = new WeakSet();
+const _dispatching = _private(new WeakSet());
 function _dispatchEntry(original) {
   return _markNative({
     dispatchEvent(event) {
@@ -19840,6 +20022,14 @@ function _captureDispatchImpls() {
     nextElementSibling: findMember(Element.prototype, 'nextElementSibling', 'get'),
     ownerDocument: findMember(Element.prototype, 'ownerDocument', 'get'),
     getElementById: findMember(Document.prototype, 'getElementById'),
+    localName: findMember(Element.prototype, 'localName', 'get'),
+    value: findMember(Element.prototype, 'value', 'get'),
+    checked: findMember(Element.prototype, 'checked', 'get'),
+    isConnected: findMember(Element.prototype, 'isConnected', 'get'),
+    parentNode: findMember(Element.prototype, 'parentNode', 'get'),
+    textContent: findMember(Element.prototype, 'textContent', 'get'),
+    requestSubmit: findMember(Element.prototype, 'requestSubmit'),
+    selected: findMember(Element.prototype, 'selected', 'get'),
   });
   _elementProtoAtBoot = Element.prototype;
   _documentProtoAtBoot = Document.prototype;
@@ -20481,7 +20671,7 @@ function _iframeNamed(doc, name) {
   const frames = _qsa(doc, 'iframe');
   for (let i = 0; i < frames.length; i++) {
     const el = frames[i];
-    if (el.isConnected && _hostDom.getAttribute(el, 'name') === name) return el;
+    if (_elGet('isConnected', el) && _hostDom.getAttribute(el, 'name') === name) return el;
   }
   return null;
 }
@@ -20556,7 +20746,7 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // when the frame has no connected element here).
   frameOwner: (frameId) => {
     const el = _frameElements[frameId >>> 0];
-    return el && el.isConnected ? el._nid : -1;
+    return el && _elGet('isConnected', el) ? el._nid : -1;
   },
   // Port addition: start the parsed document's frames (srcdoc and src), for the host once
   // the document is in place. See _loadDocumentFrames.
@@ -20571,7 +20761,7 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // names the initiator of that load (port addition: frames navigated by GET only).
   navigateFrame: (frameId, url, method, body) => {
     const el = _frameElements[frameId >>> 0];
-    if (!el || !el.isConnected) return false;
+    if (!el || !_elGet('isConnected', el)) return false;
     _reflectApply(_iframeLoadAtBoot, el, [_String(url), _frameNavigationRequest(method, body)]);
     return true;
   },
@@ -20585,7 +20775,7 @@ globalThis.__obscura_host_handoff = Object.freeze({
   },
   frameContentOrigin: (frameId) => {
     const el = _frameElements[frameId >>> 0];
-    if (!el || !el.isConnected) return null;
+    if (!el || !_elGet('isConnected', el)) return null;
     const r = _hostDom.rect(el);
     if (!r) return null;
     let cs = null;

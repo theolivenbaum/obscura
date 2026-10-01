@@ -252,4 +252,140 @@ public sealed class PageTamperingTests
         Assert.Equal("typed", focus.Value?.GetValue<string>());
         Assert.Equal("\"f|typed\"", Eval(runtime, "document.activeElement.id + '|' + document.getElementById('f').value"));
     }
+
+    private const string SubmitForm = """
+        <html><body>
+        <form id=f action="/submitted.html?old=1#frag" method=get>
+        <input name="q" value="a b!'()~*&#233;">
+        <textarea name=t></textarea>
+        <input type=checkbox name=c checked><input type=checkbox name=d>
+        <select name=s><option value=x>X</option><option value=y selected>Y</option></select>
+        <button id=sub type=submit name=btn value=go>Go</button>
+        </form></body></html>
+        """;
+
+    /// <summary>
+    /// The URL Chromium 141 navigates to when this form's submit button is clicked,
+    /// measured with Playwright on the same markup (the textarea's value set to
+    /// "l1\nl2\rl3" by script).
+    /// </summary>
+    private const string SubmitUrl =
+        "http://example.com/submitted.html?q=a+b%21%27%28%29%7E*%C3%A9&t=l1%0D%0Al2%0D%0Al3&c=on&s=y&btn=go#frag";
+
+    /// <summary>
+    /// L10: a submit button's click builds the navigation the host performs. It used the
+    /// page's encodeURIComponent, String and Array methods, URL and getAttribute, so a page
+    /// replacing them chose where a CDP click on a submit button went, or stopped it.
+    /// </summary>
+    [Fact]
+    public void FormSubmissionIgnoresThePagesBuiltIns()
+    {
+        using var plain = RuntimeFixture.Setup(SubmitForm);
+        plain.Runtime.ExecuteScript("value", "document.querySelector('textarea').value = 'l1\\nl2\\rl3';");
+        plain.Runtime.ExecuteHostScript("click", "__obscura_host.dom.call(__obscura_host.dom.querySelector(__obscura_host.dom.document(), '#sub'), 'click', []);");
+        Assert.Equal(SubmitUrl, plain.Runtime.TakePendingNavigation()?.Url);
+
+        using var fixture = RuntimeFixture.Setup(SubmitForm);
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("value", "document.querySelector('textarea').value = 'l1\\nl2\\rl3';");
+        runtime.ExecuteScript("tamper", """
+            encodeURIComponent = () => 'x';
+            String.prototype.replace = function () { return 'r'; };
+            String.prototype.toLowerCase = function () { return 'post'; };
+            String.prototype.toUpperCase = function () { return 'POST'; };
+            String.prototype.includes = function () { return true; };
+            Array.prototype.join = function () { return 'j'; };
+            Array.prototype.push = function () { return 0; };
+            URL = function () { this.href = 'http://evil.example/'; };
+            Element.prototype.getAttribute = function () { return null; };
+            Element.prototype.closest = function () { return null; };
+            HTMLFormElement.prototype.requestSubmit = function () {};
+            """);
+        runtime.ExecuteHostScript("click", "__obscura_host.dom.call(__obscura_host.dom.querySelector(__obscura_host.dom.document(), '#sub'), 'click', []);");
+        Assert.Equal(SubmitUrl, runtime.TakePendingNavigation()?.Url);
+    }
+
+    /// <summary>
+    /// L10: listeners on elements, the document, the window and plain targets are stored
+    /// and run without the page's Array methods, array iterator, Map or WeakMap, and an
+    /// accessor a page puts on Object.prototype under an event's name does not swallow
+    /// them. Chromium's listener lists are native.
+    /// </summary>
+    [Fact]
+    public void ListenersSurviveThePagesCollectionsAndIterators()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><body><button id=b>b</button></body></html>");
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("tamper", """
+            globalThis.__hits = '';
+            Array.prototype.push = function () { return 0; };
+            Array.prototype.filter = function () { return []; };
+            Array.prototype.slice = function () { return []; };
+            Array.prototype.some = function () { return true; };
+            Array.prototype.includes = function () { return true; };
+            Array.prototype[Symbol.iterator] = function* () {};
+            Map.prototype.get = function () { return undefined; };
+            Map.prototype.set = function () { return this; };
+            WeakMap.prototype.get = function () { return undefined; };
+            WeakMap.prototype.set = function () { return this; };
+            Object.defineProperty(Object.prototype, 'click', { get() { return undefined; }, set(v) {}, configurable: true });
+            Object.defineProperty(Object.prototype, 'ping', { get() { return undefined; }, set(v) {}, configurable: true });
+            const b = document.getElementById('b');
+            b.addEventListener('click', () => { __hits += 'button,'; });
+            document.addEventListener('click', () => { __hits += 'document,'; });
+            window.addEventListener('ping', () => { __hits += 'window,'; });
+            globalThis.__target = new EventTarget();
+            __target.addEventListener('ping', () => { __hits += 'target,'; });
+            """);
+        runtime.ExecuteHostScript("click", "__obscura_host.dom.call(__obscura_host.dom.querySelector(__obscura_host.dom.document(), '#b'), 'click', []);");
+        runtime.ExecuteScript("dispatch", "window.dispatchEvent(new Event('ping')); __target.dispatchEvent(new Event('ping'));");
+        Assert.Equal("\"button,document,window,target,\"", Eval(runtime, "__hits"));
+    }
+
+    /// <summary>
+    /// L10: the node wrapper cache is the shim's node identity. It used the page's
+    /// Map.prototype.get, so a page replacing it made every lookup build a new wrapper:
+    /// <c>document.body !== document.body</c>, and each wrapper's form and listener state
+    /// was a stranger's.
+    /// </summary>
+    [Fact]
+    public void NodeIdentitySurvivesThePagesMap()
+    {
+        using var fixture = RuntimeFixture.Setup(Page);
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("tamper", """
+            Map.prototype.get = function () { return undefined; };
+            Map.prototype.has = function () { return false; };
+            Map.prototype.set = function () { return this; };
+            Set.prototype.has = function () { return false; };
+            """);
+        Assert.Equal(
+            "\"true,true,true\"",
+            Eval(runtime, """
+                [document.body === document.body,
+                 document.getElementById('a') === document.querySelector('#a'),
+                 document.getElementById('list').firstElementChild === document.querySelector('li')].join(',')
+                """));
+    }
+
+    /// <summary>
+    /// L10: postMessage's targetOrigin was parsed with the receiving realm's URL global, so
+    /// a receiver that replaced URL passed the check for a message restricted to another
+    /// origin. The host checks the same thing before delivery (SECURITY.md H4); this is the
+    /// receiving shim's own check, which must not be the page's either.
+    /// </summary>
+    [Fact]
+    public void MessageTargetOriginIgnoresThePagesUrl()
+    {
+        using var fixture = RuntimeFixture.Page("https://receiver.example/", "<html><body></body></html>");
+        var runtime = fixture.Runtime;
+        runtime.ExecuteScript("tamper", """
+            globalThis.__got = 0;
+            window.addEventListener('message', () => { __got++; });
+            URL = function () { this.origin = 'https://receiver.example'; this.href = 'https://receiver.example/'; };
+            """);
+        runtime.ExecuteHostScript("deliver", "__obscura_host.deliverMessage('{\"v\":1}', 'https://sender.example', 0, 'https://other.example');");
+        runtime.ExecuteHostScript("deliver", "__obscura_host.deliverMessage('{\"v\":2}', 'https://sender.example', 0, 'https://receiver.example');");
+        Assert.Equal("1", Eval(runtime, "__got"));
+    }
 }
