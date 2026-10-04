@@ -4628,3 +4628,42 @@ Pinned by `DomLayoutTests.PercentageWidthTableIsFlooredByItsMinContentWidth`,
 `PercentageWidthTableThatFitsKeepsItsContainingBlockWidth`,
 `DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren` and
 `TableInAScrollableBoxTakesItsContentWidth`.
+
+### HTML element interfaces are distinct, and HTMLElement is not Element
+
+`crates/obscura-js/js/bootstrap.js` aliases HTMLElement and about thirty HTML*Element
+interfaces to `Element` (`globalThis.HTMLScriptElement = Element;`), so every element was an
+instance of every one of them. On live sites: `document.createElement('div') instanceof
+HTMLScriptElement` was true, Ensighten's patch of `HTMLScriptElement.prototype.setAttribute` ran
+for every element and threw, and webpack style-loader treated `<head>` as an iframe and never
+injected CSS. DEVIATION: `HTMLElement` is its own class between `Element` and every HTML
+interface, each of the 34 aliased interfaces (and ten Chromium has that were missing:
+HTMLDataElement, HTMLModElement, HTMLMenuElement, HTMLParamElement, HTMLFontElement,
+HTMLFrameElement, HTMLFrameSetElement, HTMLMarqueeElement, HTMLDirectoryElement,
+HTMLSelectedContentElement) is its own subclass, and `_htmlTagClasses` maps every tag to its
+interface with Chromium 141's table (an unlisted name is HTMLUnknownElement, a hyphenated one
+HTMLElement). SVG and null-namespace elements are not HTMLElements. The constructors throw
+"Illegal constructor" as in Chromium, except `new` of a defined autonomous custom element, which
+now creates the element (the shim used to build a wrapper with no node). Wrappers the shim
+builds go through `_constructElement`, which is how the constructor tells them apart.
+
+Members moved off `Element.prototype` to where Chromium keeps them: innerText, hidden, title,
+lang, dir, accessKey, offset*, click, popover and its methods, attachInternals to
+`HTMLElement.prototype`; style, dataset, tabIndex, autofocus, focus, blur and the
+GlobalEventHandlers `on*` to both `HTMLElement.prototype` and `SVGElement.prototype`; the
+window's handlers (`onhashchange`, `onpopstate`, ...) to HTMLBodyElement/HTMLFrameSetElement.
+Added: outerText, contentEditable, isContentEditable, draggable, spellcheck, translate, inert,
+offsetParent, and offsetTop/offsetLeft are now measured from the offsetParent (document-relative
+for `<body>`) rather than being the viewport rect; the anchor/area stringifier returns href.
+Other members Chromium has on the specific interfaces (an anchor's `href`, an iframe's
+`contentWindow`, ...) stay on `Element.prototype`. The host's click (`__obscura_host.dom.call(el,
+'click')`) still reaches SVG elements, which have no click() of their own. The Rust-derived
+`GlobalEventHandlersPresentOnDocumentAndElement` now asserts Chromium's placement. Pinned by
+`HtmlElementInterfacesTests` and `OffsetParentTests`.
+
+### An about:blank iframe's document.open() returns the document
+
+The reference's `_IframeDocument.open()` returns undefined; Chromium's returns the document,
+and Akamai mPulse's `iframe.contentWindow.document.open()._l = ...` threw. Still open: the
+stand-in's `write()` appends through `innerHTML`, so a `<script>` or `<body onload>` written
+into the frame does not run, where Chromium runs it in the frame's realm.
