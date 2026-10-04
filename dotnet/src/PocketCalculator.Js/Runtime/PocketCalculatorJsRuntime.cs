@@ -797,11 +797,9 @@ public sealed partial class PocketCalculatorJsRuntime
             "<set-viewport>",
             $"__obscura_host.vars.__obscura_viewport_w={Number(width)};"
             + $"__obscura_host.vars.__obscura_viewport_h={Number(height)};"
+            // visualViewport's width and height follow innerWidth/innerHeight (read-only
+            // VisualViewport attributes in bootstrap.js, as in Chromium).
             + $"globalThis.innerWidth={Number(width)};globalThis.innerHeight={Number(height)};"
-            + "if(globalThis.visualViewport){"
-            + $"globalThis.visualViewport.width={Number(width)};"
-            + $"globalThis.visualViewport.height={Number(height)};"
-            + "}"
             + "if(typeof __obscura_host.vars.__obscura_recompute_intersections==='function'){"
             + "__obscura_host.vars.__obscura_recompute_intersections();"
             + "}"

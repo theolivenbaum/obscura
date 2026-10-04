@@ -1719,6 +1719,60 @@ This relaxes "the engine never uses host fonts" only on request: with nothing co
 no file is read and output is byte-identical to before. Faces still load with
 `SKTypeface.FromData`, never `FromFamilyName`, and no fontconfig is involved.
 
+### Global interface objects for the objects the shim already hands out
+
+`crates/obscura-js/js/bootstrap.js` leaves some 460 of Chromium 141's 713 global constructors
+undefined, including the interfaces of objects it does hand out, and pages test for them:
+icloud.com sends a Chrome UA without `window.MathMLElement` to `/unsupported_browser/`, TikTok's
+SDK throws `Navigator is not defined`, grammarly.com and mozilla.org `DOMImplementation is not
+defined`.
+
+DEVIATION from crates/obscura-js/js/bootstrap.js. The block "Global interface objects" near the
+end of the port's `bootstrap.js` defines them as the real prototypes of those objects, measured
+against Chromium 141 (typeof, name, length, parent interface, `new`/call errors, toStringTag,
+`instanceof` of the existing instance): Navigator, Location, Performance (+PerformanceTiming,
+PerformanceNavigation), DOMImplementation (now one object per document), HTMLDocument and
+XMLDocument (the realm's document), MutationRecord, NodeIterator, TreeWalker, PluginArray, Plugin,
+MimeTypeArray, MimeType, Permissions, PermissionStatus, Geolocation*, NavigatorUAData,
+MediaCapabilities, Screen, ScreenOrientation, VisualViewport, XMLHttpRequestUpload, External and
+`window.external`, BarProp and the six bar properties, AbstractRange, XPathResult, XPathEvaluator,
+XPathExpression, TextMetrics, FileList, DOMStringList (`location.ancestorOrigins`), the IndexedDB
+interfaces and IDBKeyRange, MediaQueryList, StyleSheet, MediaList, the CSS rule interfaces,
+DOMRectReadOnly/DOMRect, DOMPointReadOnly/DOMPoint, DOMMatrixReadOnly/DOMMatrix (+WebKitCSSMatrix),
+DOMQuad, MathMLElement, Option, WebKitMutationObserver, CloseEvent, PageTransitionEvent,
+BeforeUnloadEvent, DragEvent, FormDataEvent, MediaQueryListEvent, IDBVersionChangeEvent,
+TextEvent, Touch, TouchList, TouchEvent, DataTransfer (+Item, ItemList), the two queuing
+strategies, the stream reader/writer/controller interfaces, IdleDeadline and CustomStateSet.
+Interfaces Chromium does not let script construct throw its "Illegal constructor"; members sit
+on the prototypes as brand-checked accessors ("Illegal invocation" off an instance), so
+navigator, performance, screen and the rest have no own properties. All are non-enumerable on
+the window. Behaviour changes that come with them:
+
+- Element rects (`getBoundingClientRect`, `getClientRects`) are DOMRects, not plain objects with
+  an own `toJSON` and an `__obscuraViewportFixed` property (now a private WeakSet).
+- DOMRect normalises a negative size in top/right/bottom/left; DOMMatrix does real matrix
+  arithmetic and parses CSS transform lists (upstream's answered the identity for every
+  operation). Angles that are multiples of 90 degrees are exact, as in Chromium; other angles
+  can differ from Chromium in the last bit (V8's fdlibm sin against the C library's).
+- A stylesheet's at-rules are CSSMediaRule, CSSSupportsRule, CSSContainerRule, CSSLayerBlockRule,
+  CSSLayerStatementRule, CSSStartingStyleRule, CSSScopeRule, CSSPageRule, CSSFontFaceRule,
+  CSSKeyframesRule/CSSKeyframeRule, CSSImportRule, CSSNamespaceRule and CSSPropertyRule with
+  Chromium's cssText, instead of opaque CSSRules of type 0. @counter-style,
+  @font-feature-values, @view-transition and unknown at-rules stay opaque CSSRules (Chromium drops
+  the unknown ones). `sheet.title` is null without a title attribute, as in Chromium.
+- navigator gains appName, appCodeName and vendorSub; the PDF plugins list their two MIME types,
+  whose enabledPlugin is the plugin.
+- `performance.timeOrigin` and `performance.memory` are written through `_ifaceSet` at page init,
+  since they are read-only accessors now.
+
+Left out on purpose: interfaces that would only be feature-detection stubs (Web Audio nodes,
+WebRTC, Gamepad, MediaSource, Web Speech, WebGL object types, Push, Background Fetch, typed CSS
+OM, TrustedTypes, Navigation API, ...), CompressionStream/DecompressionStream (no deflate in the
+shim), TaskController/TaskSignal (postTask has no priority change), the HTML collections, and the
+members Chromium has only in secure contexts. The IndexedDB objects keep their members as own
+properties (the shim's request records assign to themselves). DOMParser and createHTMLDocument
+documents are still plain objects, not HTMLDocuments. Pinned by `GlobalInterfaceObjects`.
+
 ### A linked stylesheet leaves no element in the DOM
 
 `crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic
