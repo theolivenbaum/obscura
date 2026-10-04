@@ -456,6 +456,25 @@ Found during the review, not from upstream:
   rather than the document. Raising the watchdog budget only moves the
   threshold.
 
+  Measured again on nvidia.com (live, 4.7k elements, October 2026): reads with
+  no write in between already reuse the retained layout (1000 `offsetHeight`
+  reads 10ms on a 2000-item page), so the cost is entirely write-then-read
+  cycles - 75 `offsetParent`/`offsetWidth` reads after AEM image components
+  swap a placeholder `src` and insert an `<img>`, each a whole-document
+  relayout. Three of those relayouts' costs were spurious and are fixed (see
+  "An `<img>` source swap restyles the image", "Line layouts are kept with the
+  shaped paragraph" and the font-set note under "Shaped paragraphs are carried
+  across render passes"); `op_layout_offset` is now a geometry consumer like
+  `op_layout_geometry`. Interleaved through CDP, three runs each: goto 34.6s ->
+  27.4s (Chromium 2.5s), 75 `offsetParent` reads 16.5s -> 9.3s (Chromium 32ms),
+  peak RSS 4.1GB -> 3.0GB; on a 2000-item local page a class write + `offsetWidth`
+  read 255ms -> 200ms, a style write + `getBoundingClientRect` 187ms -> 139ms
+  (Chromium 2.3ms and 1.3ms). What is left is the relayout itself (120-250ms a
+  pass on nvidia.com: taffy with text measurement a third, the top-down style
+  pass a fifth, the box-tree build a seventh, `@font-face` collection and the
+  per-pass `TextEngine` font database 6% each), which needs the retained box
+  tree above.
+
 - **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
   attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
   route runs ~33 prepares totalling 13.4s, of which #7-#31 are twenty-five
@@ -2608,6 +2627,44 @@ work below; the live set is untouched.
 
 Correctness: 40 fixture pages dumped every element's `getBoundingClientRect` with the cache on
 and off, all 40 byte-identical. `OBSCURA_DISABLE_SHAPE_CACHE=1` is the switch that A/B ran on.
+
+**The font-set match was by reference, which no page with a web font ever passed.**
+`MatchesFontSet` compared `WebFont` objects with `ReferenceEquals` on the belief that one is
+produced per decoded resource, but `PaintFonts.CollectWebFonts` builds new ones on every pass. So
+on any page with an `@font-face` the cache was discarded on every relayout (nvidia.com: 16 faces,
+~1250 paragraphs reshaped per forced read). Faces now match by the identity of their decoded bytes
+(the memoized decode in `RenderResourceCache`, the same array for an unchanged resource) and their
+descriptors, in order. Adoption also requires the same emoji-face choice: the emoji face loads
+between the directory faces and the web fonts, so loading it renumbers every web font's `FontId`,
+which keys a shaped paragraph. Pinned by `ShapeCacheAdoptionTests` (Render).
+
+### Line layouts are kept with the shaped paragraph
+
+DEVIATION from `crates/obscura-render`, which lays every paragraph out again on every pass, as the
+port did. A forced relayout re-measures each text leaf at the widths it had in the previous pass,
+and `TextLayout.LayoutToBuffer` was a third of what such a pass allocated (its `LayoutGlyph` arrays
+alone a fifth). `ShapeCache.Layout` keeps up to four layouts per shaped paragraph, keyed on the
+exact arguments (floats by bit pattern), under a global budget of 2^18 glyphs (~25MB); past it,
+lines are laid out per call as before. Sound for the same reason the shape cache is: the paragraph
+is never mutated after shaping, and nothing mutates a returned `LayoutLine` or its glyph list.
+Measured on a 2000-item page, interleaved: class write + `offsetWidth` read 255ms -> 200ms, style
+write + `getBoundingClientRect` 187ms -> 139ms; peak RSS unchanged. Pinned by
+`LineLayoutMemoTests` (Render). `POCKETCALCULATOR_DISABLE_SHAPE_CACHE=1` turns this off with the
+shape cache.
+
+### An `<img>` source swap restyles the image, not the document
+
+DEVIATION from `crates/obscura-render/src/dom.rs` (`retained_attribute_mutation_kind`), which
+classifies `src`, `srcset` and `sizes` on an `<img>` as Full, discarding every retained style.
+`RetainedStylePlanner.RetainedAttributeMutationKindOf` classifies them Subtree: every prepare,
+retained or not, rebuilds image intrinsics from the tree (`PaintImages.CollectImageIntrinsics`),
+so the only thing a retained pass lacks is a fresh style for the `<img>`, whose `LayoutStyle` the
+previous pass wrote the old image's natural size and ratio into. `<source>`, `<picture>` and the
+other resource attributes stay Full. Lazy loaders swap a placeholder and read the geometry right
+away (nvidia.com: 49-75 swaps, each a whole-document cascade). The Rust selector-matrix case
+"image resource mutation" now expects Incremental in `DomLayoutTests`; pinned by
+`RetainedImageSourceSwapMatchesForcedFull` (Render, against a forced full layout, including a
+source that has no intrinsic size yet) and `LayoutReadCacheTests` (Js, against Chromium 141).
 
 ### The CDP watchdog scans its slots in a separate frame
 
