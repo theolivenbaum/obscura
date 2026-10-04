@@ -18690,6 +18690,7 @@ const _workerUnscopables = _objectFreeze({
   __obscura_source: true, __obscura_capture: true,
 });
 const _workerKey = {};
+const _workerResolved = Promise.resolve();
 const _workerJsMime = new Set(['application/ecmascript', 'application/javascript', 'application/x-ecmascript',
   'application/x-javascript', 'text/ecmascript', 'text/javascript', 'text/javascript1.0', 'text/javascript1.1',
   'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
@@ -18997,8 +18998,32 @@ globalThis.Worker = class Worker {
     } finally {
       if (!this._terminated) {
         this._scope = scope;
-        for (const data of this._pendingMessages.splice(0)) this.postMessage(data);
+        // Messages posted before the worker was ready are its first tasks after its
+        // script. They are delivered in order in this same task, after the script's own
+        // microtasks, instead of each waiting for another timer turn: the extra turn
+        // made delivery depend on how fast the host got back to the loop, and a loaded
+        // host could run out a caller's budget between the script and its messages.
+        const queued = this._pendingMessages.splice(0);
+        if (queued.length !== 0) {
+          const worker = this;
+          _reflectApply(_promiseThenAtBoot, _workerResolved, [() => {
+            for (let i = 0; i < queued.length; i++) worker._deliver(queued[i]);
+          }]);
+        }
       }
+    }
+  }
+  _deliver(data) {
+    if (this._terminated || !this._scope) return;
+    const scope = this._scope;
+    try {
+      const event = { data };
+      if (typeof scope.onmessage === 'function') scope.onmessage.call(scope, event);
+      const evs = (scope._ev && scope._ev['message']) || [];
+      for (const handler of evs.slice()) handler.call(scope, event);
+    } catch(e) {
+      console.error('Worker error:', e.message);
+      if (this.onerror) this.onerror(e);
     }
   }
   postMessage(data) {
@@ -19008,19 +19033,7 @@ globalThis.Worker = class Worker {
       return;
     }
     const worker = this;
-    setTimeout(() => {
-      if (worker._terminated || !worker._scope) return;
-      const scope = worker._scope;
-      try {
-        const event = { data };
-        if (typeof scope.onmessage === 'function') scope.onmessage.call(scope, event);
-        const evs = (scope._ev && scope._ev['message']) || [];
-        for (const handler of evs.slice()) handler.call(scope, event);
-      } catch(e) {
-        console.error('Worker error:', e.message);
-        if (worker.onerror) worker.onerror(e);
-      }
-    }, 0);
+    setTimeout(() => worker._deliver(data), 0);
   }
   terminate() {
     this._terminated = true;

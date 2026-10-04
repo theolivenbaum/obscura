@@ -275,6 +275,39 @@ public sealed partial class RuntimeTests
         AssertJson("""["var:x"]""", rt.Evaluate("__replies"));
     }
 
+    [Fact]
+    public async Task WorkerDeliversQueuedMessagesInTheTurnThatStartsIt()
+    {
+        // Forces the slow path deterministically: the worker's script runs longer than the
+        // whole pump budget, so any message that waits for a later turn after the script
+        // is never delivered. Messages posted before the worker was ready are delivered in
+        // order in the task that runs its script, after the script's microtasks (Chromium
+        // runs the worker's microtask checkpoint before its first message task: the
+        // handler sees ready === true).
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        rt.ExecuteScript(
+            "worker-slow-start",
+            """
+            globalThis.__slowReplies = [];
+            const source = `
+                let ready = false;
+                Promise.resolve().then(() => { ready = true; });
+                const end = Date.now() + 150;
+                while (Date.now() < end) {}
+                let count = 0;
+                onmessage = event => postMessage([++count, event.data, ready]);
+            `;
+            const slowUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+            const slow = new Worker(slowUrl);
+            slow.onmessage = event => __slowReplies.push(event.data);
+            slow.postMessage('first');
+            slow.postMessage('second');
+            """);
+        await rt.RunEventLoopBoundedAsync(100);
+        AssertJson("""[[1,"first",true],[2,"second",true]]""", rt.Evaluate("__slowReplies"));
+    }
+
     // ---- data: and blob: ES modules ----
 
     private static async Task<string> ImportResultAsync(PocketCalculatorJsRuntime rt, string body)
