@@ -69,6 +69,12 @@ public sealed class PocketCalculatorState
     public InternalLoadStore InternalLoadStore { get; } = new();
 
     /// <summary>
+    /// Sources of <c>blob:</c> URLs minted for JavaScript Blobs, for the module loader. The
+    /// page's instance holds every realm's (see <see cref="BlobScriptStore"/>). Port addition.
+    /// </summary>
+    public BlobScriptStore BlobScripts { get; } = new();
+
+    /// <summary>
     /// WHATWG canonical name of the document's character encoding (e.g. "UTF-8",
     /// "EUC-JP"). Backs <c>document.characterSet</c> and the URL query encoding
     /// override for <c>&lt;a&gt;</c>/<c>&lt;area&gt;</c> hrefs in legacy-charset documents.

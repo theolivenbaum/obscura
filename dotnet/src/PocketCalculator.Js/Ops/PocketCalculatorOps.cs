@@ -468,6 +468,18 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
                 Page, document, U32(nid), U64(width), U64(height), B(sandboxed))));
         Bind(ops, "op_load_stylesheet", (Func<object?, object?, Task<string>>)(
             (nid, url) => LinkedStylesheetLoader.OpLoadStylesheetAsync(RealmState(), document, U32(nid), S(url))));
+        // Port additions: importScripts and worker script globals (see WorkerOps), and the
+        // blob: module sources the loader reads (BlobScriptStore).
+        Bind(ops, "op_worker_import_script", (Func<object?, object?, object?, object?, string>)(
+            (url, workerUrl, scope, runner) => WorkerOps.ImportScript(
+                RealmState(), document, S(url), S(workerUrl), scope, runner)));
+        Bind(ops, "op_script_declarations", (Func<object?, string>)(
+            source => OpGuard.Run(
+                "op_script_declarations", () => ScriptDeclarations.ScanJson(S(source)), "{\"s\":false,\"v\":[],\"f\":[],\"l\":[]}")));
+        Bind(ops, "op_blob_script_register", (Action<object?, object?>)(
+            (url, source) => OpGuard.Run("op_blob_script_register", () => Page.BlobScripts.Register(S(url), S(source)))));
+        Bind(ops, "op_blob_script_revoke", (Action<object?>)(
+            url => OpGuard.Run("op_blob_script_revoke", () => Page.BlobScripts.Revoke(S(url)))));
         Bind(ops, "op_frame_same_origin", (Func<object?, double>)(
             frameId => OpGuard.Run("op_frame_same_origin", () => FrameSameOrigin(document, U32(frameId)), -1d)));
         if (!ReferenceEquals(document, Page))

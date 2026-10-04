@@ -17327,44 +17327,162 @@ navigator.wakeLock = { request() { return Promise.reject(new DOMException('Not a
 
 globalThis.opener = null;
 
+// Workers run in this realm. A worker's scripts are evaluated under a scope object that
+// stands in for its global, a DedicatedWorkerGlobalScope; nothing here is a separate
+// isolate. DEVIATION from crates/obscura-js/js/bootstrap.js, whose worker had no
+// importScripts (pinterest.com and netflix.com logged "importScripts is not defined"),
+// no WorkerLocation or WorkerNavigator (self.location was the page's), no
+// WorkerGlobalScope prototype chain, accepted only a string URL (not new URL(...)), and
+// leaked window-only globals (typeof document was "object"). Each script's top-level
+// var/function/let/const/class also stayed private to that script, which made a library
+// loaded with importScripts invisible to the script that loaded it.
+const _workerEvalIntrinsic = globalThis.eval;
+const _WorkerFunction = Function;
+const _WorkerURL = URL;
+const _WorkerSyntaxError = SyntaxError;
+const _WorkerTypeError = TypeError;
+const _WorkerDOMException = DOMException;
+// Every worker script is a direct eval in this function. Its `eval` parameter is the
+// intrinsic, so the call is a direct eval however the worker's own `eval` is bound; the
+// two object environments are the worker's global lexical scope (its scripts' let, const
+// and class) and its global object. The first statement hands back a resolver for this
+// function's own environment, where a sloppy script's var and function declarations land
+// (they are hoisted, so it works while the script is still running); the trailer the
+// shim appends to the source hands back one for the script's own scope.
+const _workerEvaluator = _WorkerFunction(
+  'eval', '__obscura_scope', '__obscura_lexical', '__obscura_source', '__obscura_capture',
+  '__obscura_capture(0, function (__obscura_name) { return eval(__obscura_name); });\n' +
+  'with (__obscura_scope) { with (__obscura_lexical) { return eval(__obscura_source); } }');
+const _workerTrailer = '\n;__obscura_capture(1, function (__obscura_name) { return eval(__obscura_name); });';
+// The evaluator's own names never resolve to a property a worker script set on its global.
+const _workerUnscopables = _objectFreeze({
+  __proto__: null, eval: true, __obscura_scope: true, __obscura_lexical: true,
+  __obscura_source: true, __obscura_capture: true,
+});
+const _workerKey = {};
+const _workerJsMime = new Set(['application/ecmascript', 'application/javascript', 'application/x-ecmascript',
+  'application/x-javascript', 'text/ecmascript', 'text/javascript', 'text/javascript1.0', 'text/javascript1.1',
+  'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
+  'text/livescript', 'text/x-ecmascript', 'text/x-javascript']);
+function _isJavaScriptMime(type) {
+  const raw = _String(type || '');
+  const semi = _stringIndexOf(raw, ';');
+  return _setHas(_workerJsMime, _stringToLowerCase(_stringTrim(semi < 0 ? raw : _stringSlice(raw, 0, semi))));
+}
+
+function WorkerGlobalScope() { throw new _WorkerTypeError('Illegal constructor'); }
+function DedicatedWorkerGlobalScope() { throw new _WorkerTypeError('Illegal constructor'); }
+Object.setPrototypeOf(DedicatedWorkerGlobalScope, WorkerGlobalScope);
+Object.setPrototypeOf(DedicatedWorkerGlobalScope.prototype, WorkerGlobalScope.prototype);
+_defineProperty(WorkerGlobalScope.prototype, Symbol.toStringTag, { value: 'WorkerGlobalScope', configurable: true });
+_defineProperty(DedicatedWorkerGlobalScope.prototype, Symbol.toStringTag, { value: 'DedicatedWorkerGlobalScope', configurable: true });
+_markNative(WorkerGlobalScope); _markNative(DedicatedWorkerGlobalScope);
+
+class WorkerLocation {
+  #url;
+  constructor(key, href) {
+    if (key !== _workerKey) throw new _WorkerTypeError('Illegal constructor');
+    this.#url = new _WorkerURL(href);
+  }
+  get href() { return this.#url.href; }
+  get origin() { return this.#url.origin; }
+  get protocol() { return this.#url.protocol; }
+  get host() { return this.#url.host; }
+  get hostname() { return this.#url.hostname; }
+  get port() { return this.#url.port; }
+  get pathname() { return this.#url.pathname; }
+  get search() { return this.#url.search; }
+  get hash() { return this.#url.hash; }
+  toString() { return this.#url.href; }
+}
+_defineProperty(WorkerLocation.prototype, Symbol.toStringTag, { value: 'WorkerLocation', configurable: true });
+_markNative(WorkerLocation);
+
+// The page's navigator, seen through the members WorkerNavigator has, so a worker reports
+// the same identity as its document.
+class WorkerNavigator {
+  constructor(key) { if (key !== _workerKey) throw new _WorkerTypeError('Illegal constructor'); }
+}
+for (const name of ['appCodeName', 'appName', 'appVersion', 'platform', 'product', 'userAgent',
+  'language', 'languages', 'onLine', 'hardwareConcurrency', 'deviceMemory', 'userAgentData',
+  'connection', 'storage', 'locks', 'gpu', 'permissions', 'mediaCapabilities']) {
+  _defineProperty(WorkerNavigator.prototype, name, {
+    get() { const nav = globalThis.navigator; return nav ? nav[name] : undefined; },
+    enumerable: true, configurable: true,
+  });
+}
+_defineProperty(WorkerNavigator.prototype, Symbol.toStringTag, { value: 'WorkerNavigator', configurable: true });
+_markNative(WorkerNavigator);
+
 globalThis.Worker = class Worker {
-  constructor(url) {
+  constructor(url, options) {
+    if (arguments.length === 0) {
+      throw new _WorkerTypeError("Failed to construct 'Worker': 1 argument required, but only 0 present.");
+    }
     this.onmessage = null;
     this.onerror = null;
     this._terminated = false;
     this._listeners = {};
     this._scope = null;
+    this._scopeObject = null;
+    this._lexical = _objectCreate(null);
+    this._declared = _objectCreate(null);
+    this._running = [];
     this._pendingMessages = [];
+    this._type = options && options.type === 'module' ? 'module' : 'classic';
+    this._name = options && options.name !== undefined ? _String(options.name) : '';
     const worker = this;
 
-    let resolvedUrl = url;
-    if (typeof url === 'string') {
-      const blob = _hostVars.__blobStore?.[url];
-      if (blob) {
-        worker._code = blob;
-        // Auto-start on next tick so caller can set onmessage first.
-        setTimeout(() => worker._autoRun(), 0);
-        return;
-      }
-      // Resolve relative URLs against the current page.
-      if (!url.startsWith('http') && !url.startsWith('blob:') && !url.startsWith('data:')) {
-        try { resolvedUrl = new URL(url, globalThis.location?.href || '').href; } catch(e) {}
-      }
-      (async () => {
-        try {
-          const resp = await fetch(resolvedUrl);
-          worker._code = await resp.text();
-          if (!worker._terminated) worker._autoRun();
-        } catch(e) { if (worker.onerror) worker.onerror(e); }
-      })();
+    // A URL object (new Worker(new URL('w.js', import.meta.url)), the bundler idiom) is
+    // stringified, as WebIDL does for a USVString argument.
+    url = _String(url);
+    const blob = _hostVars.__blobStore?.[url];
+    if (blob !== undefined) {
+      worker._url = url;
+      worker._code = blob;
+      // Auto-start on next tick so caller can set onmessage first.
+      setTimeout(() => worker._autoRun(), 0);
+      return;
     }
+    let resolvedUrl;
+    try {
+      resolvedUrl = new _WorkerURL(url, globalThis.location?.href || undefined).href;
+    } catch (e) {
+      throw new _WorkerDOMException("Failed to construct 'Worker': The URL '" + url + "' is invalid.", 'SyntaxError');
+    }
+    worker._url = resolvedUrl;
+    if (resolvedUrl.startsWith('data:')) {
+      try { worker._code = _decodeDataScriptUrl(resolvedUrl); } catch (e) { worker._code = ''; }
+      setTimeout(() => worker._autoRun(), 0);
+      return;
+    }
+    (async () => {
+      try {
+        const resp = await fetch(resolvedUrl);
+        // A failed load is an error event, not the error page's body run as script.
+        if (resp.ok === false) throw new Error("Failed to load worker script '" + resolvedUrl + "'");
+        worker._code = await resp.text();
+        if (!worker._terminated) worker._autoRun();
+      } catch(e) { if (worker.onerror) worker.onerror(e); }
+    })();
   }
   _makeScope() {
     const worker = this;
-    const scope = {
+    const scope = _objectCreate(DedicatedWorkerGlobalScope.prototype);
+    const members = {
       onmessage: null,
-      WorkerGlobalScope: function WorkerGlobalScope() {},
-      DedicatedWorkerGlobalScope: function DedicatedWorkerGlobalScope() {},
+      onmessageerror: null,
+      onerror: null,
+      name: worker._name,
+      WorkerGlobalScope,
+      DedicatedWorkerGlobalScope,
+      WorkerLocation,
+      WorkerNavigator,
+      location: new WorkerLocation(_workerKey, worker._url),
+      navigator: new WorkerNavigator(_workerKey),
+      origin: (() => { try { return new _WorkerURL(worker._url).origin; } catch (e) { return 'null'; } })(),
+      isSecureContext: globalThis.isSecureContext,
+      importScripts: function importScripts() { worker._importScripts(arguments); },
       postMessage: (msg) => {
         if (worker._terminated) return;
         const evt = { data: msg };
@@ -17376,6 +17494,9 @@ globalThis.Worker = class Worker {
         if (!scope._ev) scope._ev = {};
         if (!scope._ev[type]) scope._ev[type] = [];
         scope._ev[type].push(fn);
+      },
+      removeEventListener: (type, fn) => {
+        if (scope._ev && scope._ev[type]) scope._ev[type] = scope._ev[type].filter(h => h !== fn);
       },
       close: () => { worker.terminate(); },
       crypto: globalThis.crypto,
@@ -17393,19 +17514,153 @@ globalThis.Worker = class Worker {
       fetch: globalThis.fetch,
       console: globalThis.console,
       performance: globalThis.performance,
-      location: globalThis.location,
     };
-    scope.self = scope;
+    for (const key of _objectKeys(members)) {
+      _defineProperty(scope, key, { value: members[key], writable: true, enumerable: true, configurable: true });
+    }
+    // Window-only globals a worker does not have. Without these the lookup fell through to
+    // the page's window, so environment checks (typeof window, typeof document) took the
+    // browser-page path inside a worker.
+    for (const key of ['window', 'document', 'parent', 'top', 'frames', 'opener', 'frameElement',
+      'localStorage', 'sessionStorage', 'history', 'customElements', 'alert', 'confirm', 'prompt',
+      'print', 'open']) {
+      _defineProperty(scope, key, { value: undefined, writable: true, enumerable: false, configurable: true });
+    }
+    _defineProperty(scope, Symbol.unscopables, { value: _workerUnscopables, writable: false, enumerable: false, configurable: false });
+    _defineProperty(scope, 'self', { value: scope, writable: true, enumerable: true, configurable: true });
+    _defineProperty(scope, 'globalThis', { value: scope, writable: true, enumerable: false, configurable: true });
     return scope;
+  }
+  // Runs one classic script in the worker's global scope, as a global script: its var and
+  // function declarations become properties of the scope, its let/const/class are seen by
+  // the worker's later scripts. Throws what the script throws.
+  _evaluate(source, url) {
+    const scope = this._scopeObject;
+    const declared = this._declared;
+    let decls;
+    try { decls = _JSONparse(__obscuraCore.ops.op_script_declarations(source)); } catch (e) { decls = null; }
+    if (!decls || !_isArray(decls.v) || !_isArray(decls.f) || !_isArray(decls.l)) decls = { s: false, v: [], f: [], l: [] };
+    if (!decls.s) {
+      // A sloppy script's var assignments resolve through the scope object first, so a
+      // var the global does not have yet is made a property of it before the script runs.
+      for (let i = 0; i < decls.v.length; i++) {
+        const name = decls.v[i];
+        if (name in scope || _workerUnscopables[name]) continue;
+        _defineProperty(scope, name, { value: undefined, writable: true, enumerable: true, configurable: false });
+        declared[name] = true;
+      }
+    }
+    const frame = { decls, outer: null, inner: null };
+    const capture = (kind, resolver) => { if (kind === 0) frame.outer = resolver; else frame.inner = resolver; };
+    let text = source + _workerTrailer;
+    if (/^(?:https?|blob):/.test(url) && !/[\r\n]/.test(url)) text += '\n//# sourceURL=' + url;
+    _arrayPush(this._running, frame);
+    try {
+      return _reflectApply(_workerEvaluator, scope, [_workerEvalIntrinsic, scope, this._lexical, text, capture]);
+    } finally {
+      this._running.length--;
+      this._publish(frame, true);
+    }
+  }
+  // Gives the scope the declarations of a script that is running or has run.
+  _publish(frame, done) {
+    const scope = this._scopeObject;
+    const declared = this._declared;
+    const decls = frame.decls;
+    const read = decls.s ? frame.inner : frame.outer;
+    if (read) {
+      for (let i = 0; i < decls.f.length; i++) {
+        const name = decls.f[i];
+        if (_workerUnscopables[name] || (_objectHasOwn(scope, name) && !declared[name])) continue;
+        let value;
+        try { value = read(name); } catch (e) { continue; }
+        if (typeof value !== 'function') continue;
+        _defineProperty(scope, name, { value, writable: true, enumerable: true, configurable: false });
+        declared[name] = true;
+      }
+    }
+    if (!done || !frame.inner) return;
+    const inner = frame.inner;
+    if (decls.s) {
+      for (let i = 0; i < decls.v.length; i++) {
+        const name = decls.v[i];
+        if (_workerUnscopables[name] || (_objectHasOwn(scope, name) && !declared[name])) continue;
+        let value;
+        try { value = inner(name); } catch (e) { continue; }
+        _defineProperty(scope, name, { value, writable: true, enumerable: true, configurable: false });
+        declared[name] = true;
+      }
+    }
+    for (let i = 0; i < decls.l.length; i++) {
+      const name = decls.l[i];
+      if (_workerUnscopables[name]) continue;
+      try { this._lexical[name] = inner(name); } catch (e) {}
+    }
+  }
+  _importScripts(args) {
+    const prefix = "Failed to execute 'importScripts' on 'WorkerGlobalScope': ";
+    if (this._type === 'module') {
+      throw new _WorkerTypeError(prefix + "Module scripts don't support importScripts().");
+    }
+    // Every URL is parsed before anything is fetched; one bad URL loads nothing.
+    const urls = [];
+    for (let i = 0; i < args.length; i++) {
+      const raw = _String(args[i]);
+      let href;
+      try { href = new _WorkerURL(raw, this._url).href; }
+      catch (e) { throw new _WorkerDOMException(prefix + "The URL '" + raw + "' is invalid.", 'SyntaxError'); }
+      _arrayPush(urls, href);
+    }
+    // A script that calls importScripts has its function declarations hoisted already;
+    // the imported scripts may call them.
+    for (let i = 0; i < this._running.length; i++) this._publish(this._running[i], false);
+    for (let i = 0; i < urls.length; i++) this._importScript(urls[i], prefix);
+  }
+  // Fetches and runs one imported script synchronously, in order. A failed load is a
+  // NetworkError; an exception the script throws is rethrown, except from another
+  // origin's script, whose errors are muted to a NetworkError; a script that does not
+  // parse is a SyntaxError naming importScripts.
+  _importScript(href, prefix) {
+    const worker = this;
+    const failed = () => new _WorkerDOMException(prefix + "The script at '" + href + "' failed to load.", 'NetworkError');
+    const outcome = { ran: false, threw: false, error: undefined, parse: false, muted: false };
+    const run = (scope, source, url, muted) => {
+      outcome.ran = true;
+      outcome.muted = !!muted;
+      try {
+        worker._evaluate(source, url);
+      } catch (e) {
+        outcome.threw = true;
+        outcome.error = e;
+        if (e instanceof _WorkerSyntaxError) {
+          try { _WorkerFunction(source); } catch (p) { outcome.parse = true; }
+        }
+      }
+    };
+    if (href.startsWith('data:')) {
+      let source;
+      try { source = _decodeDataScriptUrl(href); } catch (e) { throw failed(); }
+      run(this._scopeObject, source, href, false);
+    } else if (href.startsWith('blob:')) {
+      const source = _hostVars.__blobStore[href];
+      if (typeof source !== 'string') throw failed();
+      run(this._scopeObject, source, href, false);
+    } else {
+      // The host fetches over the page's transport and passes the source to `run`
+      // without it becoming a value page script can reach (SECURITY.md C3).
+      const status = __obscuraCore.ops.op_worker_import_script(href, this._url, this._scopeObject, run);
+      if (status !== '' || !outcome.ran) throw failed();
+    }
+    if (!outcome.threw) return;
+    if (outcome.muted) throw failed();
+    if (outcome.parse) throw new _WorkerSyntaxError(prefix + (outcome.error && outcome.error.message));
+    throw outcome.error;
   }
   _autoRun() {
     if (this._terminated || this._scope || this._code === undefined) return;
-    const scope = this._makeScope();
+    const scope = this._scopeObject = this._makeScope();
     try {
-      // Direct eval preserves script directives and resolves bare handler names
-      // against the worker scope. Run once so message closures retain their state.
-      const fn = new Function('scope', 'source', 'with (scope) { eval(source); }');
-      fn.call(scope, scope, this._code);
+      this._evaluate(this._code, this._url);
     } catch(e) {
       console.error('Worker error:', e.message);
       if (this.onerror) this.onerror(e);
@@ -17490,12 +17745,20 @@ URL.createObjectURL = function(blob) {
     // failed (net::ERR_FAILED), which broke AWS WAF's proof-of-work worker.
     // The obscura Blob materializes _bytes in its constructor; fall back to
     // the async text() store only for foreign Blob shims without _bytes.
+    //
+    // A JavaScript Blob's text is also registered with the host, whose module loader
+    // imports blob: URLs (port addition; any other type is refused as a module by
+    // Chromium's strict MIME check, so its text is not copied).
+    const registerScript = _isJavaScriptMime(blob.type)
+      ? (text) => { try { __obscuraCore.ops.op_blob_script_register(id, text); } catch (e) {} }
+      : null;
     if (blob._bytes) {
       let text = '';
       try { text = new TextDecoder().decode(blob._bytes); } catch (e) {}
       _hostVars.__blobStore[id] = text;
+      if (registerScript) registerScript(text);
     } else if (typeof blob.text === 'function') {
-      blob.text().then(text => { _hostVars.__blobStore[id] = text; });
+      blob.text().then(text => { _hostVars.__blobStore[id] = text; if (registerScript) registerScript(text); });
     } else {
       _hostVars.__blobStore[id] = '';
     }
@@ -17504,6 +17767,7 @@ URL.createObjectURL = function(blob) {
 };
 URL.revokeObjectURL = function(url) {
   delete _hostVars.__blobStore[url];
+  try { __obscuraCore.ops.op_blob_script_revoke(_String(url)); } catch (e) {}
 };
 
 // Window-level scrolling (issue #468). #431 gave elements functional

@@ -316,6 +316,10 @@ so these are called unguarded:
 | `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
 | `op_history_url` | fast | `url: String, frame_id: u32` | `bool`: false, and nothing kept, when the document may not be rewritten to `url`; `""` clears it |
 | `op_wasm_memory_admit` | fast | `held_bytes: f64, delta_bytes: f64` | `bool`: whether the isolate's WebAssembly memory budget allows `delta_bytes` more |
+| `op_worker_import_script` | sync | `url: String, worker_url: String, scope: Object, runner: Function` | `String`: `""` once `runner(scope, source, final_url, muted)` has run, `"network"` on a network error (blocks on the fetch) |
+| `op_script_declarations` | fast | `source: String` | `String`: `{"s":strict,"v":[vars],"f":[functions],"l":[lexicals]}`, the script's top-level names |
+| `op_blob_script_register` | fast | `blob_url: String, source: String` | `(void)`; a JavaScript Blob's text, for `blob:` module imports |
+| `op_blob_script_revoke` | fast | `blob_url: String` | `(void)` |
 
 `op_get_cookies` and `op_set_cookie` answer a document with an opaque origin (a frame
 sandboxed without `allow-same-origin`) with the string `"\u0000sandboxed"`, on which
