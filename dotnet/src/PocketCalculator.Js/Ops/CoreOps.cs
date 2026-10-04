@@ -169,7 +169,16 @@ public static class CoreOps
         false);
 
     /// <summary><c>op_console_msg</c>. Records one console call for the CDP Runtime domain.</summary>
-    public static void OpConsoleMsg(PocketCalculatorState page, string level, string msg, string argsJson) =>
+    /// <param name="page">The page state whose runtime events carry the call.</param>
+    /// <param name="level">The console method's CDP type.</param>
+    /// <param name="msg">The call's text.</param>
+    /// <param name="argsJson">The arguments as remote objects.</param>
+    /// <param name="worldKey">
+    /// The CDP context id of the isolated world that made the call, or 0 for the page realm.
+    /// A world's arguments lose their object ids: those name the world's own object store,
+    /// which a later <c>Runtime</c> call addressed by a console id would not reach.
+    /// </param>
+    public static void OpConsoleMsg(PocketCalculatorState page, string level, string msg, string argsJson, long worldKey = 0) =>
         OpGuard.Run("op_console_msg", () =>
         {
             ArgumentNullException.ThrowIfNull(page);
@@ -191,7 +200,13 @@ public static class CoreOps
                 args = [];
                 for (var i = 0; i < array.Count; i++)
                 {
-                    args.Add(array[i]?.DeepClone());
+                    var arg = array[i]?.DeepClone();
+                    if (worldKey != 0 && arg is JsonObject remote)
+                    {
+                        remote.Remove("objectId");
+                    }
+
+                    args.Add(arg);
                 }
             }
             catch (JsonException)
@@ -206,7 +221,7 @@ public static class CoreOps
 
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             page.PendingRuntimeEvents.Enqueue(
-                new RuntimeEvent.Console(new RuntimeConsoleEvent(level, args, timestamp)));
+                new RuntimeEvent.Console(new RuntimeConsoleEvent(level, args, timestamp, worldKey)));
         });
 
     /// <summary>

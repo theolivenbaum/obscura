@@ -315,6 +315,12 @@ public static partial class CdpServer
         ctx.Pages.Add(page);
 
         var navigationSucceeded = navigateError is null;
+        if (navigationSucceeded && page.LoadAbandoned)
+        {
+            CdpLog.Warn(
+                $"navigation deadline passed after the document committed; reporting it as far as it got ({page.Readiness})");
+        }
+
         var response = navigationSucceeded
             ? CdpResponse.Success(
                 req.Id,
@@ -341,7 +347,9 @@ public static partial class CdpServer
             pageIdForEvents,
             networkEvents,
             waitUntil,
-            reachedNetworkIdle);
+            reachedNetworkIdle,
+            // A failed navigation keeps announcing the whole sequence, as it always has.
+            navigationSucceeded ? page.Readiness : DocumentReadiness.Loaded);
 
         if (navigationSucceeded &&
             Domains.Page.QueueScreencastFrame(ctx, sessionForEvents, false) is { } screencastError)

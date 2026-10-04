@@ -38,6 +38,30 @@ public sealed partial class Page
     }
 
     /// <summary>
+    /// Record the page's own document response: <paramref name="url"/> is the URL it came
+    /// from after <paramref name="redirects"/>, and the event is marked as the navigation's.
+    /// </summary>
+    internal void RecordDocumentNetworkEvent(
+        string url,
+        int status,
+        IReadOnlyDictionary<string, string> responseHeaders,
+        byte[] body,
+        bool base64Encoded,
+        IReadOnlyList<NetworkRedirect> redirects)
+    {
+        string requestId = RecordNetworkEventInner(
+            url,
+            "GET",
+            "Document",
+            status,
+            responseHeaders,
+            body.Length,
+            isNavigation: true,
+            redirects);
+        StoreResponseBody(requestId, body, base64Encoded);
+    }
+
+    /// <summary>
     /// Record a subresource this page's own transport fetched, for
     /// <c>performance.getEntriesByType('resource')</c>.
     /// </summary>
@@ -77,7 +101,9 @@ public sealed partial class Page
         string resourceType,
         int status,
         IReadOnlyDictionary<string, string> responseHeaders,
-        int bodySize)
+        int bodySize,
+        bool isNavigation = false,
+        IReadOnlyList<NetworkRedirect>? redirects = null)
     {
         _networkEventCounter += 1;
         string requestId =
@@ -94,6 +120,8 @@ public sealed partial class Page
             ResponseHeaders = new Dictionary<string, string>(responseHeaders, StringComparer.OrdinalIgnoreCase),
             BodySize = bodySize,
             Timestamp = timestamp,
+            IsNavigation = isNavigation,
+            Redirects = redirects ?? [],
         });
         return requestId;
     }

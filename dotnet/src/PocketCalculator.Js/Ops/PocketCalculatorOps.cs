@@ -676,12 +676,15 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     /// bootstrap.js keeps in JavaScript (form values, focus, selection).</item>
     /// <item><c>op_binding_called</c> queues the call as the world's, so it is reported
     /// with the world's execution context.</item>
-    /// <item>Console calls are not reported: they would carry the page's context.</item>
+    /// <item>Console calls are reported with the world's execution context, as Chromium
+    /// reports them. Playwright's <c>setContent</c> waits for a <c>console.debug</c> its
+    /// utility world makes, and hung when worlds were silent.</item>
     /// </list>
     /// </remarks>
     internal void BindIsolatedWorldOverrides(
         ScriptObject ops,
         object world,
+        long worldKey,
         PocketCalculatorState document,
         Func<string, double, string, string> worldCall,
         Action<string, string> bindingCalled)
@@ -696,8 +699,11 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             (kind, nid, arg) => OpGuard.Run("op_world_call", () => worldCall(S(kind), D(nid), S(arg)), string.Empty)));
         Bind(ops, "op_binding_called", (Action<object?, object?>)(
             (name, payload) => OpGuard.Run("op_binding_called", () => bindingCalled(S(name), S(payload)))));
-        Bind(ops, "op_runtime_events_enabled", (Func<bool>)(() => false));
-        Bind(ops, "op_console_msg", (Action<object?, object?, object?>)((_, _, _) => { }));
+        // The page's state carries the event whatever document the world is over: that is
+        // the queue the CDP layer drains.
+        Bind(ops, "op_runtime_events_enabled", (Func<bool>)(() => CoreOps.OpRuntimeEventsEnabled(Page)));
+        Bind(ops, "op_console_msg", (Action<object?, object?, object?>)(
+            (level, msg, args) => CoreOps.OpConsoleMsg(Page, S(level), S(msg), S(args), worldKey)));
     }
 
     /// <summary>

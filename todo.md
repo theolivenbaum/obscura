@@ -4752,3 +4752,74 @@ line's top instead of on the baseline; a percentage width inside the float-zone 
 resolves against the column, not the containing block, and a run of `clear`ing same-side floats
 is laid out side by side. The last two, not rounding, are why wikipedia.org's footer drops
 `.other-projects` below its sidebar. Pinned by `SubpixelGeometryScriptTests`.
+
+### A redirected navigation is reported hop by hop under the loader id
+
+`crates/obscura-browser` records the document under the URL it asked for, and
+`crates/obscura-cdp` finds the navigation's request by matching that URL against the page
+URL. After a redirect the page URL is the final one, so nothing matched, no request carried
+the loader id, and Playwright's and Puppeteer's `page.goto()` resolved to null for every site
+that redirects (50 of 77 in the live survey, `reddit.com` to `www.reddit.com` among them).
+
+DEVIATION from both. The transport keeps each hop's status and headers
+(`Response.RedirectChain`, a synthesized 307 with `Non-Authoritative-Reason: HSTS` for an
+HSTS upgrade), the page marks its document event (`NetworkEvent.IsNavigation`, with the
+final URL and the hops), and `EmitNavigationEvents` reports what Chromium does: one
+`Network.requestWillBeSent` per hop, all with `requestId` = loader id, each after the first
+carrying the previous hop's `redirectResponse` and `redirectHasExtraInfo: false`, then
+`responseReceived`/`loadingFinished` for the final response. Measured on a local 301 -> 302 ->
+200 chain with Playwright 1.56: Chromium and the port now both give `status() 200`, the final
+`url()`, and `redirectedFrom()` walking `/r2` (302) then `/r1`. An unredirected navigation
+keeps its single request, byte for byte. `Fetch.requestPaused` for the document still names
+the URL first requested. Pinned by `NavigationLifecycle.RedirectedNavigationReportsEachHopUnderTheLoaderId`.
+
+### A navigation deadline after the document committed leaves the page as it stood
+
+`crates/obscura-browser` fails a navigation whenever its end-to-end deadline
+(`POCKETCALCULATOR_NAV_TIMEOUT_MS`, 30s) passes, marking the page `Failed`; over CDP that is a
+protocol error from `Page.navigate` on slow, script-heavy sites whose DOM was already built.
+
+DEVIATION. Chromium's `Page.navigate` answers once the navigation commits and leaves the
+load to the client's own `waitUntil` and timeout. The port now separates the two: a deadline
+before the commit (no response, or the body never finished) still fails the navigation; one
+after it (`Page.Readiness >= Committed`: the response is in and the document built) leaves the
+page as it stood, sets `Page.LoadAbandoned`, and abandons the pending work (remaining
+scripts, resource warmup, frames) rather than resuming it, so the deadline still bounds how
+long the navigation holds the page. `document.readyState` is `loading` from the commit until
+the script phase completes it, as in Chromium. `EmitNavigationEvents` reports the document
+only as far as it got: `commit` always, `DOMContentLoaded` and `load` (and `networkIdle`,
+`frameStoppedLoading`) only if the document dispatched them. The port does not resume the
+document later, so a `load` that was cut off never arrives; a client waiting for it times out
+on its own clock, as it would in Chromium for a load that has not happened, while one waiting
+for `commit` gets the page. The CLI `fetch` reads such a page as it stood and prints
+`Warning: <url> did not finish loading within <n>s`; the library's `GotoAsync`, which promises
+a loaded page, still throws unless the document reached its load. Measured with a page whose
+parser-blocking script stalls 12s and a 5s deadline: `goto(waitUntil: 'commit')` now returns
+200 (was a protocol error), `waitUntil: 'load'` times out on the client as in Chromium, and a
+server that never answers is still a navigation error. Pinned by
+`NavigationLifecycle.DeadlineAfterCommitLeavesThePageAsItStood` and
+`DeadlineBeforeCommitStillFails`.
+
+### A reopened document reports its load, and isolated-world console calls are reported
+
+`crates/obscura-js/js/bootstrap.js`'s `document.close()` does nothing, and an isolated world's
+console calls were dropped. Playwright's `page.setContent()` runs `document.open()`, a tagged
+`console.debug`, `write()` and `close()` in its utility world, then waits for the tag and for
+the frame's `load`, so against the port it hung until its timeout.
+
+DEVIATION. A world's console call is now reported with the world's execution context, as
+Chromium reports it (its arguments carry no `objectId`: those name the world's own store,
+which a console id would not reach). `document.open()` on a document that has finished
+loading marks it reopened, and `close()` then calls the new `op_dom` command `document_close`
+(port addition to the op protocol), which counts a load; `Dispatcher.DrainDocumentLoads`
+reports each as Chromium does after `document.close()`: `Page.lifecycleEvent` `init`,
+`Page.domContentEventFired`, `DOMContentLoaded`, `Page.loadEventFired`, `load` (then
+`networkIdle`), under the current loader id, with no `frameNavigated` and no new context.
+While the document is still loading, open/close add nothing, matching Chromium's no-op
+`open()` during parsing. `setContent` now resolves (Chromium 9ms, the port 174ms cold).
+Still different from Chromium, and not fixed here: `document.open()` only empties the body
+and `write()` parses into it, where Chromium replaces the whole document (a written `<title>`
+lands in the body, `document.title` keeps the old one, old listeners stay), and the reopened
+document fires no page-visible `DOMContentLoaded`/`load`. Pinned by
+`NavigationLifecycle.ReopenedDocumentReportsWorldConsoleAndLoadLifecycle` and
+`DocumentCloseDuringLoadAddsNoLifecycle`.

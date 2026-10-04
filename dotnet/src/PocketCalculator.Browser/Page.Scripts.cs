@@ -507,6 +507,7 @@ public sealed partial class Page
             // load-event delay set, including scripts inserted by a DOMContentLoaded
             // listener.
             lifecycle.RunLifecycle("DOMContentLoaded");
+            ReachReadiness(DocumentReadiness.DomContentLoaded);
 
             await DriveLoadDelayingScriptsAsync(lifecycle, scriptDeadline).ConfigureAwait(false);
 
@@ -514,6 +515,7 @@ public sealed partial class Page
             // an onload handler is therefore post-load work and remains pending until
             // an explicit caller settle/wait.
             lifecycle.RunLifecycle("load");
+            ReachReadiness(DocumentReadiness.Loaded);
         }
 
         execDisarm.Dispose();

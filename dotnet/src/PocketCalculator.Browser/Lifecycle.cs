@@ -11,6 +11,30 @@ public enum LifecycleState
     Failed,
 }
 
+/// <summary>
+/// How far the current document got: committed (the response arrived and the document
+/// was created), its <c>DOMContentLoaded</c> dispatched, its <c>load</c> dispatched.
+/// </summary>
+/// <remarks>
+/// Port addition. <see cref="LifecycleState"/> says what a navigation waited for;
+/// this says what the document reached, which differs when the navigation deadline
+/// stops a document that has already committed (<see cref="Page.LoadAbandoned"/>).
+/// </remarks>
+public enum DocumentReadiness
+{
+    /// <summary>No document yet: the navigation has not had its response.</summary>
+    None,
+
+    /// <summary>The response arrived and the document was built from it.</summary>
+    Committed,
+
+    /// <summary>The document's <c>DOMContentLoaded</c> was dispatched.</summary>
+    DomContentLoaded,
+
+    /// <summary>The document's <c>load</c> was dispatched.</summary>
+    Loaded,
+}
+
 /// <summary>The predicates Rust declares as inherent methods on the enum.</summary>
 public static class LifecycleStateExtensions
 {
