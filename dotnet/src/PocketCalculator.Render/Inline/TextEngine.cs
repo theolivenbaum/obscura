@@ -29,6 +29,7 @@ public sealed partial class TextEngine : IDisposable
     private readonly TextShaper _shaper;
     private readonly WebFont[] _fonts;
     private readonly FontDirectorySet _directoryFonts;
+    private readonly bool _emojiLoaded;
     private readonly GlyphRasterizer _rasterizer;
     private readonly VariableGlyphCache _variableCache;
 
@@ -127,6 +128,7 @@ public sealed partial class TextEngine : IDisposable
         _rasterizer = new GlyphRasterizer(_database);
         _variableCache = new VariableGlyphCache(_database);
         _fonts = [.. fonts];
+        _emojiLoaded = loadEmoji;
     }
 
     /// <summary>
@@ -141,12 +143,18 @@ public sealed partial class TextEngine : IDisposable
             return;
         }
 
+        // The emoji face loads between the directory faces and the web fonts, so whether it is
+        // present shifts every web font's FontId, and a shaped paragraph is keyed on those ids.
         _shaper.Cache = previous?._shaper.Cache is { } inherited
             && ReferenceEquals(previous._directoryFonts, _directoryFonts)
+            && previous._emojiLoaded == _emojiLoaded
             && inherited.MatchesFontSet(_fonts)
             ? inherited
             : new ShapeCache(_fonts);
     }
+
+    /// <summary>The shaped-paragraph cache this engine shapes through, for tests.</summary>
+    internal ShapeCache? CurrentShapeCache => _shaper.Cache;
 
     /// <summary>Shaped-paragraph cache statistics, for tests and profiling.</summary>
     internal (int Entries, int Hits, int Misses) ShapeCacheStats =>

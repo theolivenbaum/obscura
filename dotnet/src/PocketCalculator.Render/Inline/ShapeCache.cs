@@ -113,10 +113,18 @@ internal sealed class ShapeCache
 
     /// <summary>
     /// Whether a cache filled against one web-font set may be used by a pass built from another.
-    /// Reference equality per face is deliberate: a <see cref="WebFont"/> is produced once per
-    /// decoded resource, so two passes over an unchanged document hand over the same instances,
-    /// and anything else is treated as a different font set.
     /// </summary>
+    /// <remarks>
+    /// The faces are compared by their decoded bytes' identity and their descriptors, in order.
+    /// This used to be reference equality on the <see cref="WebFont"/> itself, on the belief that
+    /// one is produced once per decoded resource; but <c>PaintFonts.CollectWebFonts</c> builds new
+    /// ones on every pass, so on any page with an <c>@font-face</c> no cache was ever adopted and
+    /// every forced relayout reshaped the whole document (nvidia.com: 16 faces, ~1250 paragraphs
+    /// reshaped per pass). The bytes are the memoized decode from
+    /// <see cref="RenderResourceCache"/>, so an unchanged resource hands over the same array; a
+    /// face that arrives, changes or is evicted is a different array and still discards the cache.
+    /// The order matters as well as the set: it decides each face's <see cref="FontId"/>.
+    /// </remarks>
     internal bool MatchesFontSet(IReadOnlyList<WebFont> fonts)
     {
         if (_fonts.Length != fonts.Count)
@@ -126,7 +134,13 @@ internal sealed class ShapeCache
 
         for (int index = 0; index < _fonts.Length; index++)
         {
-            if (!ReferenceEquals(_fonts[index], fonts[index]))
+            WebFont mine = _fonts[index];
+            WebFont theirs = fonts[index];
+            if (!ReferenceEquals(mine, theirs)
+                && !(ReferenceEquals(mine.Data, theirs.Data)
+                    && string.Equals(mine.Family, theirs.Family, StringComparison.Ordinal)
+                    && mine.Weight == theirs.Weight
+                    && mine.Italic == theirs.Italic))
             {
                 return false;
             }
