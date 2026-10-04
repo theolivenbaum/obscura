@@ -4628,3 +4628,52 @@ Pinned by `DomLayoutTests.PercentageWidthTableIsFlooredByItsMinContentWidth`,
 `PercentageWidthTableThatFitsKeepsItsContainingBlockWidth`,
 `DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren` and
 `TableInAScrollableBoxTakesItsContentWidth`.
+
+### Workers have `importScripts` and a worker global scope; `data:` and `blob:` modules load
+
+Port addition; Rust has none of it. Measured against Chromium 141 (Playwright 1.56).
+
+- **`importScripts`** (bootstrap.js `Worker`, `Ops/WorkerOps.cs`). Classic workers parse
+  every URL against the worker's URL first (`SyntaxError` DOMException), then fetch and run
+  each in order, synchronously. HTTP(S) loads go through the new sync op
+  `op_worker_import_script`, which blocks the engine thread on the page's client as a
+  static module graph does: page cookies (same-origin credentials), SSRF and mixed-content
+  gates, `Network.setBlockedURLs`, callbacks. Like a module graph it is not offered to CDP
+  `Fetch` interception, because the CDP loop that would resolve the pause is waiting on
+  this thread. A non-2xx response or a type that is not a JavaScript MIME type (no type
+  included) is a `NetworkError`; `data:` and `blob:` imports are decoded in the shim and
+  not type-checked, as in Chromium. An exception from another origin's script is muted to
+  a `NetworkError`; a parse error is a `SyntaxError` naming `importScripts`; a module
+  worker throws `TypeError`. The host hands the source straight to the shim's evaluator
+  (SECURITY.md C3).
+- **Global declarations.** A worker still runs in the page realm under a scope object.
+  Each of its scripts was a direct eval whose top-level `var`/`function`/`let`/`const`/`class`
+  stayed private to that eval, so an `importScripts` library was invisible to its caller.
+  The host scans each script's top-level names (`Ops/ScriptDeclarations.cs`, a tolerant
+  scanner, `op_script_declarations`); a sloppy script's `var`s become scope properties
+  before it runs and its functions after hoisting (also before a nested `importScripts`),
+  and `let`/`const`/`class` go to a per-worker lexical object that later scripts see but
+  `self` does not. Known gaps: a strict script's declarations are copied after it finishes
+  (a snapshot), a block-level function declaration is not hoisted to the scope, and an
+  implicit global assignment still lands on the page's window.
+- **Worker scope.** `self` is a `DedicatedWorkerGlobalScope` (`instanceof WorkerGlobalScope`,
+  `[object DedicatedWorkerGlobalScope]`), `location` is a `WorkerLocation` for the worker's
+  URL, `navigator` a `WorkerNavigator` reading the page's navigator, `name` comes from the
+  options, and `window`, `document` and the other window-only names are `undefined` instead
+  of falling through to the page. `new Worker(new URL(...))` is accepted; a non-2xx worker
+  script is an error instead of running the error page.
+- **`data:` modules** (`PocketCalculatorModuleLoader.LoadLocalDocument`, `Url/DataUrl.cs`):
+  decoded locally with the Fetch data: URL processor, one module per URL, UTF-8, refused
+  unless the type is JavaScript (`data:text/plain,...` fails as in Chromium).
+- **`blob:` modules**: `URL.createObjectURL` registers a Blob whose type is JavaScript with
+  the host (`op_blob_script_register`, `BlobScriptStore`, revoked with the URL); the loader
+  imports from there. An untyped Blob is refused, as by Chromium's strict MIME check.
+- **`import.meta.url`** is now set for every module the loader returns (a document context
+  callback); before, only a graph's root had it.
+
+Still open: module workers (`type: 'module'`) evaluate their source as a classic script;
+`SharedWorker` is a stub that never runs; a failed `import()` rejects with `Error`, where
+Chromium rejects with `TypeError` (ClearScript converts the loader's exception); HTTP
+modules are not MIME-checked. Pinned by `RuntimeTests.WorkerImportScripts*`,
+`DataUrlModules*`, `BlobUrlModulesLoadWhenTheBlobIsJavaScript`,
+`ImportedModulesSeeTheirOwnImportMetaUrl` and `ScriptDeclarationsFindsTopLevelNamesOnly`.

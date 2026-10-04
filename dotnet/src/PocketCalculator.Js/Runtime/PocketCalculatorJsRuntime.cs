@@ -102,7 +102,11 @@ public sealed partial class PocketCalculatorJsRuntime
         // the state's map while the loader kept reading an empty one, so every
         // page-authored import map was silently ignored. Rust shares a single
         // Rc<RefCell<ImportMap>> for exactly this reason.
-        _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
+        _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork)
+        {
+            // Port addition: blob: modules, from the sources URL.createObjectURL registered.
+            BlobScriptSource = _ops.Page.BlobScripts.Get,
+        };
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
         _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
