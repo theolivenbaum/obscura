@@ -307,6 +307,18 @@ public sealed partial class PocketCalculatorJsRuntime
             constraints.MaxArrayBufferAllocation = shared.MaxArrayBufferAllocation;
         }
 
+        if (V8OldSpaceLimitMbForTests.Value is { } oldSpaceMb)
+        {
+            constraints.MaxOldSpaceSize = oldSpaceMb;
+        }
+
+        // V8 must grow rather than abort when it reaches its own heap limit before the
+        // heap cap's sampler has run (see HeapCapExpansionMultiplier).
+        if (constraints.HeapExpansionMultiplier <= 1)
+        {
+            constraints.HeapExpansionMultiplier = HeapCapExpansionMultiplier;
+        }
+
         long limit = ArrayBufferLimitBytes();
         if (limit > 0)
         {
@@ -315,6 +327,44 @@ public sealed partial class PocketCalculatorJsRuntime
 
         return constraints;
     }
+
+    /// <summary>
+    /// The factor by which V8 raises its own heap limit, instead of aborting the process,
+    /// when a heap reaches it before the heap cap has stopped the script.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The cap (<see cref="SetHeapLimit"/>) is a sample, not a hook. ClearScript checks the
+    /// heap from a <see cref="System.Threading.Timer"/> (50 ms at the shortest), whose
+    /// callback runs on the .NET thread pool and then asks the isolate's thread for the
+    /// check; the heap cannot be read from any other thread while script runs, because
+    /// ClearScript reads it under the isolate lock. V8 posts its own
+    /// background work (concurrent marking, sweeping, compilation) to that same pool, and a
+    /// heap growing fast is exactly what makes it post more, so on a busy or memory-starved
+    /// host the check can come seconds late. Until this multiplier, V8 reached its own limit
+    /// first and failed with <c>Fatal JavaScript out of memory: Reached heap limit</c>,
+    /// aborting the whole process (SIGABRT, exit 134) and every page in it: with no
+    /// <c>--max-old-space-size</c> that limit is V8's built-in 1400 MB, under the 4 GiB
+    /// default cap, so the cap never fired at all; with the CLI's 4096 MB the two were
+    /// equal and the sampler lost the race. That is what crashed the Js test host, in
+    /// <c>HeapLimitTerminatesScriptAndRuntimeRecovers</c>, when the pool was saturated.
+    /// </para>
+    /// <para>
+    /// With a multiplier ClearScript's near-heap-limit callback raises V8's limit instead,
+    /// so the heap keeps growing only until the late check runs, which terminates the
+    /// script as before and <see cref="RecoverHeapLimit"/> collects. The cost is memory for
+    /// as long as the check is late, which is the trade Rust makes too: its callback raises
+    /// the limit by a fixed headroom and terminates in the same breath (it can, being a V8
+    /// hook; ClearScript exposes none). Deviation from Rust, which needs no multiplier.
+    /// </para>
+    /// </remarks>
+    internal const double HeapCapExpansionMultiplier = 2.0;
+
+    /// <summary>
+    /// Test seam: V8's own old-space limit, in MB, for runtimes created on this async flow,
+    /// in place of <c>--max-old-space-size</c>. It also becomes their heap cap.
+    /// </summary>
+    internal static readonly AsyncLocal<int?> V8OldSpaceLimitMbForTests = new();
 
     // ------------------------------------------------------- wasm memory
 
@@ -384,7 +434,8 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <see cref="DefaultHeapLimitBytes"/>, the same ceiling the CLI's default flags
     /// set. Without it a library or CDP embedder that configured nothing had no cap
     /// at all, and V8's internal OOM aborted the process. <see cref="SetHeapLimit"/>
-    /// with zero removes it.
+    /// with zero removes it. Because the ceiling is sampled, V8's own limit must not abort
+    /// the process before a sample lands: see <see cref="HeapCapExpansionMultiplier"/>.
     /// </para>
     /// </remarks>
     private void ApplyHeapLimit(V8RuntimeConstraints constraints)
