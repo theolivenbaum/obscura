@@ -154,8 +154,120 @@ internal sealed class ShapeCache
         if (_entries.Count >= MaxEntries)
         {
             _entries.Clear();
+            _memoGlyphs = 0;
+            _memoGeneration++;
         }
 
         _entries[key] = shape;
     }
+
+    /// <summary>
+    /// Glyphs, summed over every memoized line layout, above which no further layout is kept.
+    /// A laid-out glyph is about a hundred bytes, so this bounds the memo near 25 MB however
+    /// much text a document carries; past it, lines are laid out per call as before.
+    /// </summary>
+    internal const long MaxMemoGlyphs = 1 << 18;
+
+    /// <summary>Line layouts kept per shaped paragraph: min-content, max-content and used.</summary>
+    internal const int MemoSlots = 4;
+
+    private long _memoGlyphs;
+    private int _memoGeneration;
+
+    internal int LayoutHits { get; private set; }
+
+    internal int LayoutMisses { get; private set; }
+
+    /// <summary>
+    /// <see cref="TextLayout.LayoutToBuffer"/> for a paragraph this cache handed out, reusing a
+    /// result computed for the same arguments in this or an earlier pass.
+    /// </summary>
+    /// <remarks>
+    /// PORT NOTE, alongside the shaping cache above. Line breaking is a pure function of the
+    /// shaped paragraph and its five arguments, and the paragraph is never mutated after it is
+    /// shaped, so a layout computed once stays exact for as long as the paragraph is reused.
+    /// Nothing mutates a returned <see cref="LayoutLine"/> or its glyph list either: they are
+    /// built in <c>LayoutToBuffer</c> and only read afterwards. A forced relayout re-measures
+    /// every text leaf at the same widths it had before, and laying those lines out again was
+    /// a third of everything such a pass allocated (the <see cref="LayoutGlyph"/> arrays alone
+    /// were a fifth), so it is kept with the shaping. Floats compare by bit pattern: a width
+    /// that differs in the last place may wrap differently and must not share a result.
+    /// </remarks>
+    internal List<LayoutLine> Layout(
+        ShapeLine shape,
+        float fontSize,
+        float? width,
+        Wrap wrap,
+        Align? align,
+        float? matchMonoWidth)
+    {
+        LayoutMemoKey key = new(
+            BitConverter.SingleToInt32Bits(fontSize),
+            width is { } w ? BitConverter.SingleToUInt32Bits(w) : long.MinValue,
+            wrap,
+            align,
+            matchMonoWidth is { } m ? BitConverter.SingleToUInt32Bits(m) : long.MinValue);
+        LayoutMemo? memo = shape.LayoutMemo is { } existing && existing.Generation == _memoGeneration
+            ? existing
+            : null;
+        if (memo is not null)
+        {
+            for (int index = 0; index < memo.Count; index++)
+            {
+                if (memo.Keys[index] == key)
+                {
+                    LayoutHits++;
+                    return memo.Layouts[index];
+                }
+            }
+        }
+
+        LayoutMisses++;
+        List<LayoutLine> layout = TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, align, matchMonoWidth);
+        int glyphs = 0;
+        foreach (LayoutLine line in layout)
+        {
+            glyphs += line.Glyphs.Count;
+        }
+
+        memo ??= shape.LayoutMemo = new LayoutMemo(_memoGeneration);
+        int slot = memo.Count < MemoSlots ? memo.Count : memo.Next;
+        long released = slot < memo.Count ? memo.Glyphs[slot] : 0;
+        if (_memoGlyphs - released + glyphs > MaxMemoGlyphs)
+        {
+            return layout;
+        }
+
+        _memoGlyphs += glyphs - released;
+        memo.Keys[slot] = key;
+        memo.Layouts[slot] = layout;
+        memo.Glyphs[slot] = glyphs;
+        if (slot == memo.Count)
+        {
+            memo.Count++;
+        }
+        else
+        {
+            memo.Next = (memo.Next + 1) % MemoSlots;
+        }
+
+        return layout;
+    }
+}
+
+/// <summary>The arguments of one <see cref="TextLayout.LayoutToBuffer"/> call, floats as bits.</summary>
+internal readonly record struct LayoutMemoKey(int FontSize, long Width, Wrap Wrap, Align? Align, long Mono);
+
+/// <summary>
+/// The line layouts <see cref="ShapeCache.Layout"/> keeps for one shaped paragraph. A memo from
+/// before the cache last cleared itself is ignored, which keeps the glyph budget exact.
+/// </summary>
+internal sealed class LayoutMemo(int generation)
+{
+    internal readonly int Generation = generation;
+    internal readonly LayoutMemoKey[] Keys = new LayoutMemoKey[ShapeCache.MemoSlots];
+    internal readonly List<LayoutLine>[] Layouts = new List<LayoutLine>[ShapeCache.MemoSlots];
+    internal readonly int[] Glyphs = new int[ShapeCache.MemoSlots];
+    internal int Count;
+    internal int Next;
 }
