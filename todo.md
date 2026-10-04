@@ -4754,7 +4754,11 @@ Port addition; Rust has none of it. Measured against Chromium 141 (Playwright 1.
   URL, `navigator` a `WorkerNavigator` reading the page's navigator, `name` comes from the
   options, and `window`, `document` and the other window-only names are `undefined` instead
   of falling through to the page. `new Worker(new URL(...))` is accepted; a non-2xx worker
-  script is an error instead of running the error page.
+  script is an error instead of running the error page. Messages posted before the worker
+  was ready are delivered in order in the task that runs its script (after the script's
+  microtasks, as Chromium's worker checkpoint does), not one timer turn later each: that
+  extra turn made delivery depend on host load
+  (`WorkerDeliversQueuedMessagesInTheTurnThatStartsIt`).
 - **`data:` modules** (`PocketCalculatorModuleLoader.LoadLocalDocument`, `Url/DataUrl.cs`):
   decoded locally with the Fetch data: URL processor, one module per URL, UTF-8, refused
   unless the type is JavaScript (`data:text/plain,...` fails as in Chromium).
