@@ -193,7 +193,16 @@ public static partial class ComputedStyle
             // with an inherited `line-height: 1.4` (Tesserae sets one) every button came out
             // 38px tall against Chromium's 21px, and its label box two line-heights tall
             // instead of one. See "Known deviations" in todo.md.
+            //
+            // The same shorthand resets font-weight and font-style to normal, so a control
+            // inside a bold or italic parent stays 400 / normal (Chromium 141) - every
+            // control arm here sets both. DEVIATION from crates/obscura-render, which lets
+            // them inherit.
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "arial";
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -213,6 +222,10 @@ public static partial class ComputedStyle
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "arial";
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -233,6 +246,10 @@ public static partial class ComputedStyle
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "arial";
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -275,6 +292,10 @@ public static partial class ComputedStyle
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
             style.FontSize = 13.333_333f;
+            style.FontWeight = "400";
+            style.FontStyleItalic = false;
+            style.FontVariantCaps = "normal";
+            style.FontStretch = 1f;
             style.FontFamily = "monospace";
             style.FontFamilySpecified = "monospace";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
@@ -1046,6 +1067,13 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>apply_font_shorthand</c>.</summary>
     internal static void ApplyFontShorthand(LayoutStyle style, string value)
     {
+        string keyword = CssText.AsciiLower(value.Trim());
+        if (keyword is "inherit" or "initial" or "unset" or "revert" or "revert-layer")
+        {
+            ApplyFontShorthandKeyword(style, keyword);
+            return;
+        }
+
         List<string> tokens = SplitWsParen(value);
         int sizeIndex = -1;
         string size = string.Empty;
@@ -1102,6 +1130,8 @@ public static partial class ComputedStyle
 
         // The shorthand resets every constituent before applying supplied values.
         style.FontStyleItalic = false;
+        style.FontVariantCaps = "normal";
+        style.FontStretch = 1f;
         style.FontWeight = "400";
         style.FontOpticalSizing = PocketCalculator.Render.FontOpticalSizing.Auto;
         style.FontVariationSettings = [];
@@ -1113,6 +1143,15 @@ public static partial class ComputedStyle
             if (lower == "italic" || lower.StartsWith("oblique", StringComparison.Ordinal))
             {
                 style.FontStyleItalic = true;
+            }
+            else if (lower == "small-caps")
+            {
+                // CSS 2.1 font-variant: the only non-normal value the shorthand accepts.
+                style.FontVariantCaps = lower;
+            }
+            else if (FontStretchKeyword(lower) is { } stretch)
+            {
+                style.FontStretch = stretch;
             }
             else if (SpecifiedFontWeight(lower) is { } weight)
             {
@@ -1130,6 +1169,77 @@ public static partial class ComputedStyle
         style.FontFamily = CssText.AsciiLower(families);
         style.FontFamilySpecified = SerializeFontFamilyList(families);
     }
+
+    /// <summary>
+    /// A CSS-wide keyword given to the <c>font</c> shorthand applies to every longhand it
+    /// sets.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/style.rs, whose shorthand parser looks for a
+    /// font-size token, finds none in `inherit`, and drops the declaration. So the ubiquitous
+    /// reset `button, input, optgroup, select, textarea { font: inherit }` left every control
+    /// on the user-agent `13.333px Arial` while Chromium gives it the page's font. All of the
+    /// font longhands are inherited, so `unset` is `inherit`; `initial` is Chromium's
+    /// `normal 400 16px/normal "Times New Roman"`; `revert` keeps the cascaded value, which
+    /// is how every longhand here treats it. Of the font-variant longhands only
+    /// `font-variant-caps` is recorded. See "Known deviations" in todo.md.
+    /// </remarks>
+    private static void ApplyFontShorthandKeyword(LayoutStyle style, string keyword)
+    {
+        switch (keyword)
+        {
+            case "inherit":
+            case "unset":
+                style.FontStyleItalic = null;
+                style.FontWeight = "inherit";
+                ApplyFontSize(style, "inherit");
+                style.LineHeight = null;
+                style.LineHeightExpression = null;
+                style.FontFamily = null;
+                style.FontFamilySpecified = null;
+                style.FontOpticalSizing = null;
+                style.FontVariationSettings = null;
+                style.FontVariantCaps = null;
+                style.FontStretch = null;
+                break;
+            case "initial":
+                style.FontStyleItalic = false;
+                style.FontVariantCaps = "normal";
+                style.FontStretch = 1f;
+                style.FontWeight = "400";
+                ApplyFontSize(style, "initial");
+                style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
+                style.LineHeightExpression = null;
+                style.FontFamily = InitialFontFamily;
+                style.FontFamilySpecified = InitialFontFamilySpecified;
+                style.FontOpticalSizing = PocketCalculator.Render.FontOpticalSizing.Auto;
+                style.FontVariationSettings = [];
+                break;
+        }
+    }
+
+    /// <summary>The fraction of normal width a <c>font-stretch</c> keyword names.</summary>
+    internal static float? FontStretchKeyword(string lower) => lower switch
+    {
+        "ultra-condensed" => 0.5f,
+        "extra-condensed" => 0.625f,
+        "condensed" => 0.75f,
+        "semi-condensed" => 0.875f,
+        "normal" => 1f,
+        "semi-expanded" => 1.125f,
+        "expanded" => 1.25f,
+        "extra-expanded" => 1.5f,
+        "ultra-expanded" => 2f,
+        _ => null,
+    };
+
+    /// <summary>
+    /// Chromium's initial <c>font-family</c>, which the face matcher resolves to the embedded
+    /// serif face.
+    /// </summary>
+    private const string InitialFontFamily = "times new roman";
+
+    private const string InitialFontFamilySpecified = "\"Times New Roman\"";
 
     /// <summary>
     /// Re-serialize a <c>font-family</c> list the way a computed-style query reports it: the
@@ -1825,6 +1935,12 @@ public static partial class ComputedStyle
                     // Roll back to the UA value, which is the value already in `style`.
                     case "revert":
                     case "revert-layer":
+                        break;
+
+                    // Not inherited: Chromium's initial family, reported as such.
+                    case "initial":
+                        style.FontFamily = InitialFontFamily;
+                        style.FontFamilySpecified = InitialFontFamilySpecified;
                         break;
 
                     default:
@@ -2550,7 +2666,14 @@ public static partial class ComputedStyle
                 }
 
                 style.LineHeightExpression = null;
-                if (CssText.EqualsAscii(trimmed, "normal"))
+                if (CssText.EqualsAscii(trimmed, "revert") || CssText.EqualsAscii(trimmed, "revert-layer"))
+                {
+                    return true;
+                }
+
+                // `initial` is `normal`; `inherit` and `unset` fall through to the unitless
+                // branch below, whose failed parse leaves null, which is inherit.
+                if (CssText.EqualsAscii(trimmed, "normal") || CssText.EqualsAscii(trimmed, "initial"))
                 {
                     style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
                 }
@@ -2670,11 +2793,95 @@ public static partial class ComputedStyle
                 };
                 return true;
 
-            case "font-style":
+            // Not modeled by crates/obscura-render, so getComputedStyle answered the empty
+            // string for both. Recorded and reported, not rendered: the port synthesises no
+            // small capitals and the embedded faces have no width axis.
+            case "font-variant":
+            case "font-variant-caps":
             {
                 string lower = CssText.AsciiLower(value.Trim());
-                style.FontStyleItalic = lower.StartsWith("italic", StringComparison.Ordinal)
-                    || lower.StartsWith("oblique", StringComparison.Ordinal);
+                switch (lower)
+                {
+                    case "inherit":
+                    case "unset":
+                        style.FontVariantCaps = null;
+                        return true;
+                    case "revert":
+                    case "revert-layer":
+                        return true;
+                    case "initial":
+                    case "normal":
+                    case "none" when name == "font-variant":
+                        style.FontVariantCaps = "normal";
+                        return true;
+                }
+
+                string? caps = null;
+                foreach (string token in SplitWhitespace(lower))
+                {
+                    if (token is "small-caps" or "all-small-caps" or "petite-caps"
+                        or "all-petite-caps" or "unicase" or "titling-caps")
+                    {
+                        caps = token;
+                    }
+                    else if (name == "font-variant-caps")
+                    {
+                        return false;
+                    }
+                }
+
+                if (caps is null && name == "font-variant-caps")
+                {
+                    return false;
+                }
+
+                style.FontVariantCaps = caps ?? "normal";
+                return true;
+            }
+
+            case "font-stretch":
+            {
+                string lower = CssText.AsciiLower(value.Trim());
+                if (lower is "inherit" or "unset")
+                {
+                    style.FontStretch = null;
+                }
+                else if (lower == "initial")
+                {
+                    style.FontStretch = 1f;
+                }
+                else if (FontStretchKeyword(lower) is { } keywordStretch)
+                {
+                    style.FontStretch = keywordStretch;
+                }
+                else if (lower.EndsWith('%') && ParseF32(lower[..^1].Trim()) is { } percent && percent >= 0f)
+                {
+                    style.FontStretch = percent / 100f;
+                }
+                else if (lower is not ("revert" or "revert-layer"))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+
+            case "font-style":
+            {
+                // `font-style` is inherited, so `inherit` and `unset` clear the cascaded value
+                // (null reads as "take the parent's"); they used to compute to `normal`.
+                // `revert` keeps the cascaded value, as the other font longhands do.
+                string lower = CssText.AsciiLower(value.Trim());
+                if (lower is "inherit" or "unset")
+                {
+                    style.FontStyleItalic = null;
+                }
+                else if (lower is not ("revert" or "revert-layer"))
+                {
+                    style.FontStyleItalic = lower.StartsWith("italic", StringComparison.Ordinal)
+                        || lower.StartsWith("oblique", StringComparison.Ordinal);
+                }
+
                 return true;
             }
 

@@ -2340,6 +2340,19 @@ public sealed class LayoutStyle
     /// </remarks>
     public bool? FontStyleItalic;
 
+    /// <summary>
+    /// The cascaded <c>font-variant-caps</c> keyword (<c>normal</c>, <c>small-caps</c>, ...),
+    /// <c>null</c> to inherit. Recorded and reported only: the port does not synthesise caps.
+    /// </summary>
+    public string? FontVariantCaps;
+
+    /// <summary>
+    /// The cascaded <c>font-stretch</c> as a fraction of normal width (0.75 for
+    /// <c>condensed</c>), <c>null</c> to inherit. Recorded and reported only: the embedded faces
+    /// have no width axis to select.
+    /// </summary>
+    public float? FontStretch;
+
     /// <summary><c>object-fit</c> for a replaced element (<c>&lt;img&gt;</c>).</summary>
     /// <remarks>
     /// Controls how the decoded image is scaled into the element's box when their aspect ratios

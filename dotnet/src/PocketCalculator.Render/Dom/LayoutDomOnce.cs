@@ -73,6 +73,8 @@ public static partial class RenderDom
         internal TextWrapStyle TextWrapStyle = TextWrapStyle.Auto;
         internal TextTransform TextTransform = TextTransform.None;
         internal bool Italic;
+        internal string FontVariantCaps = "normal";
+        internal float FontStretch = 1f;
         internal BoxSizing BoxSizing = BoxSizing.ContentBox;
         internal bool BorderCollapse;
         internal VerticalAlign? TableVerticalAlign;
@@ -162,6 +164,8 @@ public static partial class RenderDom
             TextWrapStyle = TextWrapStyle,
             TextTransform = TextTransform,
             Italic = Italic,
+            FontVariantCaps = FontVariantCaps,
+            FontStretch = FontStretch,
             BoxSizing = BoxSizing,
             BorderCollapse = BorderCollapse,
             TableVerticalAlign = TableVerticalAlign,

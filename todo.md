@@ -4684,3 +4684,22 @@ wikipedia.org's `.lang-list-button { display: inline; margin: 0 auto }` exposed 
   marker for an atomic child, so the space is measured (`NormalizeControlLabel`).
 
 Covered by `FormControlDisplayTests`.
+
+### The `font` shorthand takes CSS-wide keywords, and controls reset their whole font
+
+`style.rs` parses `font` by looking for a font-size token, finds none in `inherit`, and drops
+the declaration, so the reset every page ships - `button, input, optgroup, select, textarea {
+font: inherit }` - left all of them on the UA 13.333px Arial (the `font-family: inherit`
+half was fixed earlier as F3). C# expands `inherit`/`unset` to every longhand,
+`initial` to `normal 400 16px/normal "Times New Roman"`, and keeps the cascaded value for
+`revert`, as the longhands do. `font-style: inherit` computed to `normal` and
+`line-height: initial` inherited; both are fixed. The UA control font
+(`-webkit-small-control`) now also resets weight, style, variant and stretch, which the
+reference let inherit from a bold or italic parent.
+
+`font-variant-caps` and `font-stretch` were not modeled at all, so getComputedStyle answered
+the empty string for `font-variant` and `font-stretch`. They are now cascaded, inherited and
+reported, not rendered: the port synthesises no small capitals and the embedded faces have
+no width axis.
+
+Covered by `FontShorthandKeywordTests`.

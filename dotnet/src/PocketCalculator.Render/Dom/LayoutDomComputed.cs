@@ -148,6 +148,16 @@ public static partial class RenderDom
                         inh.Italic = italic;
                     }
 
+                    if (retainedStyle.FontVariantCaps is { } retainedCaps)
+                    {
+                        inh.FontVariantCaps = retainedCaps;
+                    }
+
+                    if (retainedStyle.FontStretch is { } retainedStretch)
+                    {
+                        inh.FontStretch = retainedStretch;
+                    }
+
                     inh.BoxSizing = retainedStyle.BoxSizing;
                     if (retainedStyle.BorderCollapse is { } collapse)
                     {
@@ -1118,6 +1128,24 @@ public static partial class RenderDom
             style.FontStyleItalic = inh.Italic;
         }
 
+        if (style.FontVariantCaps is { } variantCaps)
+        {
+            inh.FontVariantCaps = variantCaps;
+        }
+        else
+        {
+            style.FontVariantCaps = inh.FontVariantCaps;
+        }
+
+        if (style.FontStretch is { } stretch)
+        {
+            inh.FontStretch = stretch;
+        }
+        else
+        {
+            style.FontStretch = inh.FontStretch;
+        }
+
         if (style.BoxSizing == BoxSizing.Inherit)
         {
             style.BoxSizing = inh.BoxSizing;
@@ -1414,6 +1442,8 @@ public static partial class RenderDom
         TextWrapStyle? hostTextWrapStyle = style.TextWrapStyle;
         TextTransform? hostTransform = style.TextTransform;
         bool? hostItalic = style.FontStyleItalic;
+        string? hostVariantCaps = style.FontVariantCaps;
+        float? hostStretch = style.FontStretch;
         TaffyAlignItems? hostTextAlign = style.TextAlign;
         Dimension? hostTextIndent = style.TextIndent;
         bool hostInvisible = style.EffectivelyInvisible;
@@ -1648,6 +1678,8 @@ public static partial class RenderDom
             pseudo.Color ??= hostColor;
             pseudo.TextTransform ??= hostTransform;
             pseudo.FontStyleItalic ??= hostItalic;
+            pseudo.FontVariantCaps ??= hostVariantCaps;
+            pseudo.FontStretch ??= hostStretch;
             pseudo.TextAlign ??= hostTextAlign;
             if (pseudo.TextIndent is { } indent)
             {

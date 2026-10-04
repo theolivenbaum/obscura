@@ -880,6 +880,9 @@ public sealed partial class PreparedRender
         output["outline"] = output["outline-color"] + " " + output["outline-style"] + " " + output["outline-width"];
 
         output["font-style"] = style.FontStyleItalic == true ? "italic" : "normal";
+        output["font-variant-caps"] = style.FontVariantCaps ?? "normal";
+        output["font-variant"] = style.FontVariantCaps ?? "normal";
+        output["font-stretch"] = PaintCssValues.CssNumber((style.FontStretch ?? 1f) * 100f) + "%";
 
         // The cascade models only the underline line, so `line-through` / `overline` cannot be
         // reported; everything else is initial, and Chromium then omits style and color.
