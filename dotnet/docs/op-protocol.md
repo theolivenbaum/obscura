@@ -191,11 +191,13 @@ Port additions for shadow roots and slots (bootstrap.js `_shadowRootFromNid`, `H
   is a slot.
 - `slot_changes` (no arguments): JSON array of the slots whose assigned nodes changed since the
   last call (the host marks the shadow trees a mutation can affect before it runs).
-- `event_path` (arg1 node; port addition for event dispatch): DOM's "get the parent" chain from
-  arg1 to its root, comma-separated node ids with arg1 left out. A node assigned to a slot steps
-  to the slot (that id is prefixed `s`), a shadow root to its host, anything else to its parent;
-  `""` when arg1 is no node. bootstrap.js decides where a non-composed event stops at a shadow
-  root and adds the window after the document.
+- `event_path` (arg1 node; port addition for event dispatch): `1` when the tree has any shadow
+  root, else `0`, then DOM's "get the parent" chain from arg1 to its root, comma-separated node
+  ids with arg1 left out. A node assigned to a slot steps to the slot (that id is prefixed `s`),
+  a shadow root to its host, anything else to its parent; only the flag when arg1 is no node.
+  bootstrap.js decides where a non-composed event stops at a shadow root and adds the window
+  after the document; while the tree has no shadow root it walks the parents its wrappers
+  cache and asks again only after a tree mutation.
 
 The three `op_external_stylesheet_*` ops (upstream 04418a5) hold a linked sheet's
 fetched CSS beside its `<link>` (or an `@import`'s beside its `<style>`) in the

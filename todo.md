@@ -5114,7 +5114,18 @@ walked parentNode, listener exceptions went to the console only.
   relatedTarget; Rust fired nothing); click() is composed.
 - **Isolated worlds**: world listeners on nodes keep their capture flag (the host index records
   it for nodes too) and the document realm runs them at the matching step of the path, the
-  window's included, instead of around a node-only dispatch.
+  window's included, instead of around a node-only dispatch. A world's focus()/blur() leaves
+  the focus events to the page realm, which fires them trusted.
+- **Cost**: in a tree with no shadow root (`event_path` answers the flag with the chain, cached
+  per tree epoch) the path is the parentNode chain the wrappers cache, so a dispatch over an
+  unchanged tree makes no host call. Measured with the CLI on a 22-deep chain, 20k bubbling
+  mousemove dispatches with three listeners: 112-135 ms against 144-232 ms before; with a tree
+  mutation between dispatches 526-770 ms against 652-927 ms; a non-bubbling event on a body
+  child with no listeners 21-47 ms against 13-20 ms (it now walks five targets twice, as the
+  capture phase needs). `ChildFrameNewDocumentScripts.ARoutedClickOnALinkNavigatesTheFrame`
+  polled the frame tree with an indexer that threw on the moment between the old frame's
+  detach and the new one's attach, which the frame navigation now reaches one autonomous turn
+  later; the poll treats an empty list as "not yet".
 
 Not done: the event's state is still own data properties (Chromium: `Object.keys(event)` is
 `['isTrusted']`, an own accessor, and the rest are prototype accessors); click() dispatches a
@@ -5124,5 +5135,7 @@ Chromium says "Unexpected end of input"; an attribute changed outside setAttribu
 (Attr nodes, setAttributeNS, the host) does not update its handler; focus() still focuses any
 element (Chromium skips non-focusable ones, so no events there); an unhandled rejection is
 reported before a message posted earlier in the same task (Chromium: after).
-`EventTarget.prototype.addEventListener.call({})` still does not throw. Pinned by
+`EventTarget.prototype.addEventListener.call({})` still does not throw; a CDP mouse click on
+content inside a shadow root is dispatched at the host, since the hit test does not enter
+shadow trees (Playwright's `#host >> #inner` click never reaches the inner button). Pinned by
 `EventDispatchConformanceTests` (Js), which runs the Chromium probe's sections.

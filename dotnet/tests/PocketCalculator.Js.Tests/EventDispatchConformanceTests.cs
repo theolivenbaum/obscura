@@ -635,6 +635,59 @@ section('window', function (L) {
     }
 
     /// <summary>
+    /// The path of a light child slotted into a declarative shadow root runs through its slot
+    /// and the shadow root before script has touched either (the host reports the tree's
+    /// shadow roots), and a parent cached for an earlier dispatch is not reused after the
+    /// tree changed.
+    /// </summary>
+    [Fact]
+    public void PathFollowsDeclarativeSlotsAndTreeChanges()
+    {
+        using var fixture = RuntimeFixture.Setup(
+            "<!doctype html><html><body><div id=h><template shadowrootmode=open><div id=wrap><slot></slot></div></template><b id=l>x</b></div><p id=p></p></body></html>");
+        var rt = fixture.Runtime;
+        rt.ExecuteScript("setup", """
+            globalThis.L = [];
+            const id = (n) => n === window ? 'W' : n === document ? 'D' : n.nodeType === 11 ? 'SR' : (n.id || n.nodeName);
+            const l = document.getElementById('l');
+            l.addEventListener('e', (e) => L.push(e.composedPath().map(id).join(',')));
+            l.dispatchEvent(new Event('e', { bubbles: true }));
+            l.dispatchEvent(new Event('e', { bubbles: true }));
+            document.getElementById('p').appendChild(l);
+            l.dispatchEvent(new Event('e', { bubbles: true }));
+            l.dispatchEvent(new Event('e', { bubbles: true }));
+            """);
+        Assert.Equal(
+            "l,SLOT,wrap,SR,h,BODY,HTML,D,W|l,SLOT,wrap,SR,h,BODY,HTML,D,W|l,p,BODY,HTML,D,W|l,p,BODY,HTML,D,W",
+            rt.Evaluate("L.join('|')")!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// In a tree with no shadow root a dispatch walks the cached parents; moving a node or
+    /// replacing an ancestor's markup is seen by the next dispatch.
+    /// </summary>
+    [Fact]
+    public void PlainPathSeesReparenting()
+    {
+        using var fixture = RuntimeFixture.Setup("<!doctype html><html><body><div id=a><span id=s></span></div><div id=b></div></body></html>");
+        var rt = fixture.Runtime;
+        rt.ExecuteScript("setup", """
+            globalThis.L = [];
+            const id = (n) => n === window ? 'W' : n === document ? 'D' : (n.id || n.nodeName);
+            const s = document.getElementById('s');
+            s.addEventListener('e', (e) => L.push(e.composedPath().map(id).join(',')));
+            s.dispatchEvent(new Event('e'));
+            document.getElementById('b').appendChild(s);
+            s.dispatchEvent(new Event('e'));
+            s.remove();
+            s.dispatchEvent(new Event('e'));
+            document.body.appendChild(s);
+            s.dispatchEvent(new Event('e'));
+            """);
+        Assert.Equal("s,a,BODY,HTML,D,W|s,b,BODY,HTML,D,W|s|s,BODY,HTML,D,W", rt.Evaluate("L.join('|')")!.GetValue<string>());
+    }
+
+    /// <summary>
     /// focus() and blur() fire blur/focusout then focus/focusin, trusted FocusEvents, composed,
     /// each naming the other element as relatedTarget; focus and blur do not bubble but pass the
     /// window and document in the capture phase. click() is composed, so a click in a shadow

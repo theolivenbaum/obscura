@@ -996,11 +996,13 @@ public static class DomOps
                     ? Expose(dom, assignedSlot)
                     : "-1";
 
-            // Port addition (event dispatch): DOM's "get the parent" from node arg1 up to its
-            // root, comma-separated, the start node left out. A node assigned to a slot steps to
-            // the slot (the entry is prefixed "s"), a shadow root to its host; anything else to
-            // its parent. bootstrap.js builds an event path from this in one call and decides
-            // itself where a non-composed event stops at a shadow root.
+            // Port addition (event dispatch): "1" when the tree has a shadow root, else "0",
+            // then DOM's "get the parent" from node arg1 up to its root, comma-separated, the
+            // start node left out. A node assigned to a slot steps to the slot (the entry is
+            // prefixed "s"), a shadow root to its host; anything else to its parent.
+            // bootstrap.js builds an event path from this in one call and decides itself where a
+            // non-composed event stops at a shadow root; with no shadow root it walks the
+            // parents it caches and asks again only after the tree changed.
             case "event_path":
                 return EventParentChain(dom, ParseNodeOrZero(arg1));
 
@@ -1411,15 +1413,16 @@ public static class DomOps
     /// </summary>
     private static string EventParentChain(DomTree dom, NodeId start)
     {
-        var node = dom.GetNode(start);
-        if (node is null)
+        var shadow = dom.HasShadowRoots;
+        var sb = new StringBuilder();
+        sb.Append(shadow ? '1' : '0');
+        if (dom.GetNode(start) is null)
         {
-            return string.Empty;
+            return sb.ToString();
         }
 
-        var sb = new StringBuilder();
         var current = start;
-        var shadow = dom.HasShadowRoots;
+        var first = true;
         for (var steps = 0; steps < 100_000; steps++)
         {
             NodeId next;
@@ -1442,11 +1445,12 @@ public static class DomOps
                 break;
             }
 
-            if (sb.Length > 0)
+            if (!first)
             {
                 sb.Append(',');
             }
 
+            first = false;
             if (viaSlot)
             {
                 sb.Append('s');

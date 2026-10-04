@@ -2580,15 +2580,24 @@ function _eventPath(target, event) {
   _pathClearsTargets = false;
   const hasRelated = _objectHasOwn(event, 'relatedTarget');
   const original = hasRelated ? event.relatedTarget : null;
+  // Whether the tree has a shadow root is known per tree epoch; while it has none, the path
+  // is the parentNode chain the wrappers cache, and a dispatch over an unchanged tree makes
+  // no host call.
+  let raw = null;
+  if (_slotWatch || _shadowCheckEpoch !== _treeMutationEpoch || _treeHasShadowRoots) {
+    raw = _dom('event_path', target._nid);
+    _treeHasShadowRoots = _stringCharCodeAt(raw, 0) === 49;
+    _shadowCheckEpoch = _treeMutationEpoch;
+  }
+  if (!_slotWatch && !_treeHasShadowRoots) return _plainEventPath(target, event, original, raw);
   const relatedInShadow = original !== null && _isNodeTarget(original) && _inShadowTree(original);
   let related = relatedInShadow ? _retarget(original, target) : original;
   if (related === target && target !== original) return null;
   let shadowSeen = _isShadowRootNode(target);
   const path = [target, target, related, 1];
-  const raw = _dom('event_path', target._nid);
   const composed = !!event.composed;
   let depth = 0, targetDepth = 0, current = target, last = target, previousShadow = shadowSeen, reachesWindow = true;
-  for (let at = 0, len = raw.length; at < len;) {
+  for (let at = 1, len = raw.length; at < len;) {
     let comma = _stringIndexOf(raw, ',', at);
     if (comma < 0) comma = len;
     const viaSlot = _stringCharCodeAt(raw, at) === 115;
@@ -2639,6 +2648,43 @@ function _eventPath(target, event) {
     const r = path[i + 2];
     _pathClearsTargets = (shadowSeen && _inShadowTree(path[i + 1]))
       || (relatedInShadow && r !== null && _isNodeTarget(r) && _inShadowTree(r));
+  }
+  return path;
+}
+let _shadowCheckEpoch = -1;
+let _treeHasShadowRoots = true;
+// The path in a tree with no shadow root: the target, its ancestors, the window. `raw` is
+// event_path's answer when the host was asked (its parents are cached on the wrappers as
+// parentNode's getter would), else the cached parents are walked, asking parentNode for any
+// the tree changed under.
+function _plainEventPath(target, event, related, raw) {
+  const path = [target, target, related, 1];
+  let last = target;
+  if (raw !== null) {
+    let child = target;
+    for (let at = 1, len = raw.length; at < len;) {
+      let comma = _stringIndexOf(raw, ',', at);
+      if (comma < 0) comma = len;
+      const parent = _wrap(_Number(_stringSlice(raw, at, comma)));
+      at = comma + 1;
+      if (parent === null) break;
+      if (!child._shadowParent) { child._treeParent = parent; child._treeParentEpoch = _treeMutationEpoch; }
+      path[path.length] = parent; path[path.length] = target; path[path.length] = related; path[path.length] = 0;
+      child = last = parent;
+    }
+  } else {
+    let node = target;
+    for (let guard = 0; guard < 100000; guard++) {
+      const parent = !node._shadowParent && !node._treeDetachedExact && node._treeParentEpoch === _treeMutationEpoch
+        ? node._treeParent
+        : _callAtBoot(_parentNodeGetter, node);
+      if (parent === null || parent === undefined) break;
+      path[path.length] = parent; path[path.length] = target; path[path.length] = related; path[path.length] = 0;
+      node = last = parent;
+    }
+  }
+  if (last === _realmDocument && event.type !== 'load') {
+    path[path.length] = globalThis; path[path.length] = target; path[path.length] = related; path[path.length] = 0;
   }
   return path;
 }
@@ -3883,6 +3929,7 @@ class Node {
   isSameNode(other) { return other && this._nid === other._nid; }
 }
 _NodeProtoAtBoot = Node.prototype;
+const _parentNodeGetter = _getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
 // DOM "replace data" over the whole of a CharacterData node: data, nodeValue and textContent
 // all end here, so each queues the one characterData record Chromium does. `value` is the
 // setter's argument; textContent and nodeValue pass null (and undefined) as "".
@@ -5438,12 +5485,17 @@ class Element extends Node {
   // focus/focusin at the one gaining it, trusted, composed, each naming the other as its
   // relatedTarget. DEVIATION from crates/obscura-js/js/bootstrap.js, whose focus() and
   // blur() moved the focused element and fired nothing.
+  // In an isolated world the page realm moves the focus (_focusBridge) and fires them.
   focus() {
     const previous = _getFocused();
     _setFocused(this); _clickTarget = this;
-    if (previous !== this) _fireFocusChange(previous, this);
+    if (previous !== this && _focusBridge === null) _fireFocusChange(previous, this);
   }
-  blur() { if (_getFocused() === this) { _setFocused(null); _fireFocusChange(this, null); } }
+  blur() {
+    if (_getFocused() !== this) return;
+    _setFocused(null);
+    if (_focusBridge === null) _fireFocusChange(this, null);
+  }
 
   // --- Popover API (HTML "popover") ---------------------------------------
   // Read the popover content attribute case-insensitively. The HTML parser
@@ -22365,9 +22417,13 @@ const _worldCall = (function () {
         const focused = _getFocused();
         return focused && typeof focused._nid === 'number' ? _String(focused._nid) : '';
       }
-      case 'unfocus':
+      case 'unfocus': {
+        // A world's blur(): the page realm fires blur and focusout.
+        const focused = _getFocused();
         _setFocused(null);
+        if (focused) _fireFocusChange(focused, null);
         return '';
+      }
       case 'dispatch': {
         if (!node) return '1';
         const spec = parse(_String(arg));
