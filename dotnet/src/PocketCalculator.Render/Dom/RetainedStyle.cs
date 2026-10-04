@@ -151,10 +151,26 @@ public static class RetainedStylePlanner
             return RetainedAttributeMutationKind.Full;
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which classifies `src`, `srcset` and
+        // `sizes` on an <img> as Full along with the attributes below. Every prepare - retained
+        // or not - already rebuilds the decoded-resource/intrinsic-size inputs from the tree
+        // (PaintImages.CollectImageIntrinsics in PrepareInternalCore), so what the retained path
+        // has to add is a fresh style for the <img>: the previous pass wrote the old image's
+        // natural size and ratio into that element's LayoutStyle, and a retained style object
+        // would carry them into an image that has none yet. Restyling the element's subtree
+        // gives it exactly the state a full cascade would. Full instead discarded the whole
+        // style graph on every image swap, and lazy loaders swap one image and then read its
+        // geometry (nvidia.com's nv-image: 49 placeholder swaps, each a whole-document cascade
+        // before a forced read). `<source>` and <picture> selection stay Full below.
+        if (local is "img" && name is "sizes" or "src" or "srcset")
+        {
+            return RetainedAttributeMutationKind.Subtree;
+        }
+
         // Resource selection changes require the embedding runtime to rebuild its
         // decoded-resource/intrinsic-size inputs, not merely recompute CSS.
         if ((local is "img" && name is "crossorigin" or "decoding" or "fetchpriority"
-                or "referrerpolicy" or "sizes" or "src" or "srcset")
+                or "referrerpolicy")
             || (local is "source" && name is "height" or "media" or "sizes" or "src" or "srcset"
                 or "type" or "width")
             || (local is "audio" or "video" or "track" && name is "crossorigin" or "kind" or "label"

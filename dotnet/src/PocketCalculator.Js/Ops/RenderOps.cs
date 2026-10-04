@@ -282,8 +282,12 @@ public static class RenderOps
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
             RenderState.SampleLiveDocumentAnimations(state);
+            // A geometry consumer, like op_layout_geometry and op_layout_metrics: offset* read
+            // only box rects, so a newer animation sample whose effects are paint-only (opacity,
+            // color) leaves them exact. Through EnsurePreparedRender every offsetWidth read in a
+            // new task on a page with a running opacity animation rebuilt the whole layout.
             if (state.Dom is not { } dom
-                || RenderState.EnsurePreparedRender(state) is not { } prepared
+                || RenderState.EnsurePreparedGeometry(state) is not { } prepared
                 || prepared.OffsetMetrics(dom, nid) is not { } offset)
             {
                 return string.Empty;

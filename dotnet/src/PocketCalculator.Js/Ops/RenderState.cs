@@ -122,8 +122,11 @@ public static class RenderState
             state.AnimationTimeline.ClearStartCandidates();
         }
 
-        var connected = StateHelpers.ShadowIncludingConnectedNodes(dom);
-        state.AnimationTimeline.RetainNodes(connected.Contains);
+        // Built on the first question only: a document with no animation state asks none, and
+        // every forced layout read used to pay a whole-tree walk and set for it.
+        HashSet<NodeId>? connected = null;
+        state.AnimationTimeline.RetainNodes(
+            node => (connected ??= StateHelpers.ShadowIncludingConnectedNodes(dom)).Contains(node));
 
         state.PreparedRender = built;
         state.ResolvedScroll = null;
