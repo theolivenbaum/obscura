@@ -112,6 +112,29 @@ public static class HtmlParsing
             return false;
         }
 
+        // The template's boolean attributes become the root's options, as in Chromium
+        // (Rust drops them with the template). Declarative roots always assign by name.
+        bool Has(string name)
+        {
+            foreach (var attr in attrs)
+            {
+                if (string.Equals(attr.Name.Local, name, StringComparison.Ordinal)
+                    && string.IsNullOrEmpty(attr.Name.Ns))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        tree.SetShadowRootOptions(
+            root,
+            manualSlotAssignment: false,
+            delegatesFocus: Has("shadowrootdelegatesfocus"),
+            clonable: Has("shadowrootclonable"),
+            serializable: Has("shadowrootserializable"));
+
         // The temporary template was never inserted on the successful path, but node creation
         // registered any `id` before attachment. Use the DOM removal path so that stale template
         // ids cannot escape through document.getElementById; template contents are a separate
