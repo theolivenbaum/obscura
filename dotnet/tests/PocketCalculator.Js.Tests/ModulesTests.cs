@@ -927,8 +927,11 @@ public sealed class CdpWatchdogTests
         var handle = new RecordingHandle();
         var armed = CdpWatchdog.Arm(handle, TimeSpan.FromMilliseconds(50));
 
-        Assert.True(SpinUntil(() => armed.Fired, TimeSpan.FromSeconds(10)));
+        // The worker marks the slot fired before it terminates the handle, so wait for the
+        // termination itself: reading the count as soon as Fired shows raced the worker.
+        Assert.True(SpinUntil(() => handle.Terminations > 0, TimeSpan.FromSeconds(10)));
         Assert.Equal(1, handle.Terminations);
+        Assert.True(armed.Fired);
         // The dispatcher must learn that it fired, so it can clear the isolate's
         // termination state before the next command runs.
         Assert.True(CdpWatchdog.Disarm(armed));
@@ -957,8 +960,10 @@ public sealed class CdpWatchdogTests
         var slow = CdpWatchdog.Arm(longLived, TimeSpan.FromMinutes(10));
         var fast = CdpWatchdog.Arm(shortLived, TimeSpan.FromMilliseconds(50));
 
-        Assert.True(SpinUntil(() => fast.Fired, TimeSpan.FromSeconds(10)));
+        // Wait for the termination, not for Fired, which the worker sets first.
+        Assert.True(SpinUntil(() => shortLived.Terminations > 0, TimeSpan.FromSeconds(10)));
         Assert.Equal(1, shortLived.Terminations);
+        Assert.True(fast.Fired);
         Assert.Equal(0, longLived.Terminations);
 
         Assert.True(CdpWatchdog.Disarm(fast));
