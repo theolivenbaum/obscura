@@ -198,6 +198,9 @@ public readonly struct DomElement(DomTree tree, NodeId nodeId) : IEquatable<DomE
         };
     }
 
+    /// <summary>HTML <c>:defined</c> (see <see cref="ElementData.IsDefined"/>).</summary>
+    public bool IsDefined() => Node?.Data is not ElementData element || element.IsDefined();
+
     public bool IsHtmlSlotElement() => Tree.IsHtmlSlotElement(NodeId);
 
     public DomElement? AssignedSlot() =>

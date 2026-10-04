@@ -1906,10 +1906,12 @@ public sealed partial class RuntimeTests
             customElements.define("throws-during-upgrade", ThrowsDuringUpgrade);
             const element = document.getElementById("target");
             customElements.upgrade(document);
+            // A failed upgrade leaves the element in the "failed" state, which :defined
+            // does not match (Chromium 141).
             return [
                 constructorCalls,
                 connectedCalls,
-                element.__customUpgradeFailed === true
+                element.matches(":defined") === false
             ];
             """);
         AssertJson("[1,0,true]", result);
