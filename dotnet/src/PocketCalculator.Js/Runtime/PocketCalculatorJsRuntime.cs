@@ -919,10 +919,11 @@ public sealed partial class PocketCalculatorJsRuntime
     /// <summary>
     /// Runs document lifecycle steps in order, through the shim's own event class and
     /// dispatch: <c>interactive</c> and <c>complete</c> set <c>readyState</c>;
-    /// <c>DOMContentLoaded</c> fires it at the document and the window;
+    /// <c>DOMContentLoaded</c> fires it at the document, bubbling to the window;
     /// <c>readystatechange</c> fires that at the document; <c>load</c> sets
-    /// <c>readyState</c> to <c>complete</c>, calls <c>window.onload</c> and fires
-    /// <c>load</c> at the window.
+    /// <c>readyState</c> to <c>complete</c> and fires <c>load</c> at the window with the
+    /// document as its target (<c>window.onload</c> runs among the window's listeners).
+    /// All are trusted.
     /// </summary>
     /// <remarks>
     /// DEVIATION from the Rust engine, whose host snippets call the page's current

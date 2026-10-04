@@ -265,7 +265,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     internal const int MaxWorldListenersPerDocument = 4096;
 
-    /// <summary>One world listener: its stamp on the document realm's counter, its world, and whether it captures (window only).</summary>
+    /// <summary>One world listener: its stamp on the document realm's counter, its world, and whether it captures.</summary>
     private readonly record struct WorldListener(double Stamp, long WorldKey, bool Capture);
 
     /// <summary>Per document (frame id): (node id, type) to its world listeners in stamp order; node -1 is the window.</summary>
@@ -285,7 +285,7 @@ public sealed partial class PocketCalculatorJsRuntime
             return string.Empty;
         }
         var type = arg[..split];
-        var capture = nid < 0 && arg.AsSpan(split + 1).SequenceEqual("1");
+        var capture = arg.AsSpan(split + 1).SequenceEqual("1");
         if (!_worldListeners.TryGetValue(world.FrameId, out var index))
         {
             index = [];

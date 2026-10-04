@@ -208,7 +208,10 @@ public sealed class ChildFrameNewDocumentScripts
             // What the connection's autonomous pump does between commands.
             await ctx.GetSessionPageMut(session)!.RunAutonomousEventLoopTurnAsync();
             JsonNode tree = await CoreCdp.CdpAsync(ctx, 74, "Page.getFrameTree", new JsonObject(), session);
-            url = tree["frameTree"]?["childFrames"]?[0]?["frame"]?["url"]?.GetValue<string>();
+            // The frame is detached before its new document attaches, so a poll can see none.
+            url = tree["frameTree"]?["childFrames"] is JsonArray { Count: > 0 } frames
+                ? frames[0]?["frame"]?["url"]?.GetValue<string>()
+                : null;
             if (url?.EndsWith("/next.html", StringComparison.Ordinal) != true)
             {
                 await Task.Delay(50);
