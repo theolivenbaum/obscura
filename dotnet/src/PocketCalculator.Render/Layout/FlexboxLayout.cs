@@ -2106,25 +2106,14 @@ public static class FlexboxLayout
                 SizingMode.InherentSize,
                 GeometryExtensions.LineFalse);
 
-            var nonAutoMargin = margin.Map(static m => m ?? 0.0f);
-
-            var freeSpace = new Size<float>(
-                constants.ContainerSize.Width - finalSize.Width - nonAutoMargin.HorizontalAxisSum(),
-                constants.ContainerSize.Height - finalSize.Height - nonAutoMargin.VerticalAxisSum())
-                .F32Max(GeometryExtensions.SizeZero);
-
-            // Expand auto margins to fill available space
-            int autoMarginCountWidth = (margin.Left.HasValue ? 0 : 1) + (margin.Right.HasValue ? 0 : 1);
-            float autoMarginWidth = autoMarginCountWidth > 0 ? freeSpace.Width / autoMarginCountWidth : 0.0f;
-            int autoMarginCountHeight = (margin.Top.HasValue ? 0 : 1) + (margin.Bottom.HasValue ? 0 : 1);
-            float autoMarginHeight =
-                autoMarginCountHeight > 0 ? freeSpace.Height / autoMarginCountHeight : 0.0f;
-
-            var resolvedMargin = new Rect<float>(
-                margin.Left ?? autoMarginWidth,
-                margin.Right ?? autoMarginWidth,
-                margin.Top ?? autoMarginHeight,
-                margin.Bottom ?? autoMarginHeight);
+            // DEVIATION from vendor/taffy/src/compute/flexbox.rs, which spreads auto margins
+            // over the container's border box whatever the insets. An abspos box's auto
+            // margins resolve only against two non-auto insets (in the padding box the insets
+            // are measured from) and are 0 otherwise, which is also what a flex container's
+            // static-position alignment takes them as. See BlockLayout.ResolveAbsoluteMargins.
+            var resolvedMargin = BlockLayout.ResolveAbsoluteMargins(
+                margin, left, right, top, bottom, insetRelativeSize, finalSize,
+                constants.LayoutDirection.IsRtl());
 
             // Determine flex-relative insets
             float? startMain = constants.IsRow ? left : top;

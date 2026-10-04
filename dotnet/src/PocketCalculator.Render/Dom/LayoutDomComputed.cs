@@ -160,6 +160,7 @@ public static partial class RenderDom
                         inh.TableVerticalAlign = verticalAlign;
                     }
 
+                    inh.InsideFixedCb |= retainedStyle.EstablishesPositioningContainingBlock();
                     inh.OverflowX = retainedStyle.OverflowComputedX;
                     inh.OverflowY = retainedStyle.OverflowComputedY;
                     childCbHeightDefinite = retainedStyle.Height.Kind
@@ -265,6 +266,11 @@ public static partial class RenderDom
             }
 
             inh.CbWidth = childCbWidth;
+            if (style is not null)
+            {
+                inh.InsideFixedCb |= style.EstablishesPositioningContainingBlock();
+            }
+
             inh.CbHeightDefinite = childCbHeightDefinite;
             inh.CbHeight = childCbHeight;
             inh.CbHeightKnown = childCbHeightKnown;
@@ -657,7 +663,9 @@ public static partial class RenderDom
             style.LineHeight = LineHeight.Px(pixels);
         }
 
-        float cbW = inh.CbWidth;
+        // A viewport-anchored fixed box resolves its percentages against the initial
+        // containing block, not against its DOM parent's content box.
+        float cbW = style.PositionFixed && !inh.InsideFixedCb ? initialCbWidth : inh.CbWidth;
 
         // DEVIATION from crates/obscura-render/src/style.rs, which drops the CSS-wide keyword
         // `inherit` on the box-size properties. They are not inherited properties, so the
@@ -952,29 +960,6 @@ public static partial class RenderDom
             }
         }
 
-        // A fixed box is positioned against the initial containing block.
-        if (style.PositionFixed)
-        {
-            if (style.Width.IsAuto
-                && style.Inset[1] is { Kind: DimensionKind.Px } right
-                && style.Inset[3] is { Kind: DimensionKind.Px } left)
-            {
-                style.Width = Dimension.Px(F32.Max(initialCbWidth - left.Value - right.Value, 0f));
-            }
-
-            if (style.Height.IsAuto
-                && style.Inset[0] is { Kind: DimensionKind.Px } top
-                && style.Inset[2] is { Kind: DimensionKind.Px } bottom)
-            {
-                style.Height = Dimension.Px(F32.Max(viewport.Height - top.Value - bottom.Value, 0f));
-            }
-
-            childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
-            childCbHeight = ContentBoxBlockSize(style, inh.CbHeight);
-            childCbHeightKnown = childCbHeightDefinite
-                && (style.Height.Kind == DimensionKind.Px || inh.CbHeightKnown);
-        }
-
         ushort computedWeight = ComputedStyle.ComputedFontWeight(style.FontWeight, inh.FontWeight);
         style.FontWeight = computedWeight.ToString(CultureInfo.InvariantCulture);
         inh.FontWeight = computedWeight;
@@ -1199,6 +1184,49 @@ public static partial class RenderDom
 
         style.Padding = padding;
         style.Margin = margin;
+
+        // A fixed box is positioned against the initial containing block. Make the CSS 2.1
+        // stretch equation explicit for `position:fixed` with both insets of an axis set, so
+        // the box's children see a definite containing block.
+        //
+        // DEVIATION from crates/obscura-render/src/dom.rs, which sets the width to
+        // `viewport - left - right` here, before margins are resolved, ignoring margins,
+        // padding and border (a content-box `left:0;right:0;margin:0 20px` box came out
+        // 1280px wide and overflowed instead of 1240px), and does so even inside a
+        // transformed ancestor, which is the containing block there. C# runs it after the
+        // box edges settle, subtracts them, and skips it when an ancestor establishes the
+        // fixed containing block. See "Known deviations" in todo.md.
+        if (style.PositionFixed && !inh.InsideFixedCb)
+        {
+            bool contentBox = style.BoxSizing == BoxSizing.ContentBox;
+            if (style.Width.IsAuto
+                && style.Inset[1] is { Kind: DimensionKind.Px } right
+                && style.Inset[3] is { Kind: DimensionKind.Px } left)
+            {
+                float outer = initialCbWidth - left.Value - right.Value
+                    - style.Margin.Left - style.Margin.Right;
+                float edges = contentBox
+                    ? style.Padding.Left + style.Padding.Right + style.Border.Left + style.Border.Right
+                    : 0f;
+                style.Width = Dimension.Px(F32.Max(outer - edges, 0f));
+            }
+
+            if (style.Height.IsAuto
+                && style.Inset[0] is { Kind: DimensionKind.Px } top
+                && style.Inset[2] is { Kind: DimensionKind.Px } bottom)
+            {
+                float outer = viewport.Height - top.Value - bottom.Value
+                    - style.Margin.Top - style.Margin.Bottom;
+                float edges = contentBox
+                    ? style.Padding.Top + style.Padding.Bottom + style.Border.Top + style.Border.Bottom
+                    : 0f;
+                style.Height = Dimension.Px(F32.Max(outer - edges, 0f));
+            }
+
+            childCbHeightDefinite = style.Height.Kind is DimensionKind.Px or DimensionKind.Percent;
+            childCbHeight = ContentBoxBlockSize(style, viewport.Height);
+            childCbHeightKnown = childCbHeightDefinite;
+        }
 
         SettlePseudos(style, inh, fontUnits, emPx, parentFs, rootFs, vw, vh, viewport, cbW);
 

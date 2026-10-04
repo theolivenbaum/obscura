@@ -4628,3 +4628,35 @@ Pinned by `DomLayoutTests.PercentageWidthTableIsFlooredByItsMinContentWidth`,
 `PercentageWidthTableThatFitsKeepsItsContainingBlockWidth`,
 `DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren` and
 `TableInAScrollableBoxTakesItsContentWidth`.
+
+### An absolutely positioned box's auto margins follow the constraint equation
+
+taffy (`vendor/taffy/src/compute/block.rs`) zeroes a pair of auto margins whenever the
+declared size is `>=` the free space, which compares the box with the space *excluding* the
+box: a `position: fixed; left: 0; right: 0; width: 760px; margin: 0 auto` box in a 1280px
+viewport (bing.com's search box, every centred modal) sat at x=0 where Chromium centres it at
+260, and a `max-width`-clamped auto width never centred at all. It also resolves auto margins
+against whatever space a single inset leaves (`right: 10px; margin: auto` landed mid-way
+instead of at the right edge), and `flexbox.rs` and `grid/alignment.rs` spread them over the
+container whatever the insets. C# follows CSS 2.1 10.3.7 / 10.6.4 as Chromium does, in
+`BlockLayout.ResolveAbsoluteMargins` for all three: auto margins resolve only between two
+non-auto insets and are 0 otherwise, against the used (clamped) size; a negative inline-axis
+pair pins the start margin per the containing block's direction, and a negative block-axis
+pair splits equally.
+
+Three neighbours of the same bug:
+
+- `dom.rs` pre-sizes a stretched fixed box to `viewport - left - right` before its margins
+  are resolved, ignoring margins, padding and border, and does so inside a transformed
+  ancestor too, which is the containing block there. C# runs it after the box edges settle,
+  subtracts them, skips it under a fixed containing block (`Inherited.InsideFixedCb`), and
+  resolves a viewport-fixed box's percentages against the initial containing block.
+- `dom.rs` turns a flex container's `justify-content` off when any child has a main-axis auto
+  margin, absolutely positioned children included, so an abspos `margin: auto` child of a
+  `justify-content: center` container sat at the start. C# skips out-of-flow children.
+- The CSSOM snapshot measured a fixed box's insets against its nearest positioned ancestor
+  (`left: -128px`), and reported `auto` for auto margins. It now uses the fixed containing
+  block, reports a specified inset pair as specified and the used value of an auto margin
+  (Chromium: `left: 0px`, `margin-left: 260px`).
+
+Covered by `PositionedAutoMarginTests`.
