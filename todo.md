@@ -4660,3 +4660,27 @@ Three neighbours of the same bug:
   (Chromium: `left: 0px`, `margin-left: 260px`).
 
 Covered by `PositionedAutoMarginTests`.
+
+### Form controls take Chromium's display adjustments, and an inline-level box has no auto margins
+
+`style.rs` keeps an author `display` on a control as written. Chromium (LayoutTheme::
+AdjustStyle) turns `inline`, `inline-table` and every internal table display into
+`inline-block`, and `table` into `block`, on a control that keeps its native appearance
+(every `input` but hidden/file/image, `button`, `select`, `textarea`, `meter`, `progress`);
+`appearance: none` turns that off, but the control is still laid out as an atomic box.
+`display: contents` on a replaced element or a form control computes to `none` (a button
+keeps it), and a drop-down `select` with native appearance ignores the author `line-height`.
+`ComputedStyle.AdjustFormControlStyle` applies all of it at the end of the cascade, and
+`appearance` / `-webkit-appearance` are now parsed and reported. The UA sheet's `meter` and
+`progress` are `inline-block`, where the reference left them `block`.
+
+wikipedia.org's `.lang-list-button { display: inline; margin: 0 auto }` exposed two more:
+
+- `TaffyStyleMapping` handed an inline-level box's auto margins to taffy as auto, so the
+  centred button sat at the right edge of its line. CSS 2.1 10.3.1 / 10.3.9 make them 0.
+- `native_button_intrinsic_content` collapses the collected label as one string, which trims
+  the space between the label and a trailing icon as if it ended the line, so the button came
+  out one space narrower than its content and the icon wrapped onto a second line. C# leaves a
+  marker for an atomic child, so the space is measured (`NormalizeControlLabel`).
+
+Covered by `FormControlDisplayTests`.

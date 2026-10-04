@@ -198,6 +198,15 @@ public static partial class ComputedStyle
             style.FontFamilySpecified = "Arial";
             style.LineHeight = PocketCalculator.Render.LineHeight.Normal;
         }
+        else if (tag is "meter" or "progress")
+        {
+            // DEVIATION from crates/obscura-render/src/style.rs, which leaves both at the
+            // default `block`. Chromium's UA sheet makes them `inline-block` (measured on
+            // Chromium 141: an unstyled meter is an 80x16 box on the text line, not a
+            // viewport-wide block). See "Known deviations" in todo.md.
+            style.Display = Display.Inline;
+            style.IsInlineBlock = true;
+        }
         else if (tag == "select")
         {
             style.Cursor = "default";
@@ -1281,6 +1290,22 @@ public static partial class ComputedStyle
             case "display":
                 ApplyDisplay(style, value);
                 return true;
+
+            // Not modeled by crates/obscura-render. Recorded so the end of the cascade can
+            // apply Chromium's form-control display adjustment, which only a control that
+            // keeps its native appearance takes (see AdjustFormControlStyle).
+            case "appearance":
+            case "-webkit-appearance":
+            {
+                string appearance = CssText.AsciiLower(value.Trim());
+                if (appearance.Length == 0 || appearance.Contains(' '))
+                {
+                    return false;
+                }
+
+                style.AppearanceSpecified = appearance is "revert" or "revert-layer" ? null : appearance;
+                return true;
+            }
 
             case "container-type":
                 if (CssText.EqualsAscii(value, "inherit"))

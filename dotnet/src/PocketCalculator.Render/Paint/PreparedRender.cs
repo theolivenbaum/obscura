@@ -556,6 +556,8 @@ public sealed partial class PreparedRender
         string display = ComputedDisplay(id, style, isPseudo);
 
         output["display"] = display;
+        output["appearance"] = style.ComputedAppearance;
+        output["-webkit-appearance"] = style.ComputedAppearance;
 
         // `border-collapse` and `border-spacing` are inherited, so every element answers them
         // and not only a table: Chromium 141 reports `2px` / `separate` on a `<table>` and on
@@ -1132,7 +1134,7 @@ public sealed partial class PreparedRender
                 (Display.Block, true) => "inline-block",
                 (Display.Flex, false) => "flex",
                 (Display.Grid, false) => "grid",
-                (Display.Inline, true) => "inline-block",
+                (Display.Inline, true) => style.ReportsInlineDisplay ? "inline" : "inline-block",
                 (Display.Inline, false) => "inline",
 
                 // `display: flow-root` reported as `block`, which is what this switch did for

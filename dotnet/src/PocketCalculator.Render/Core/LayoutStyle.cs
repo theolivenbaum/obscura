@@ -474,6 +474,26 @@ public sealed class LayoutStyle
     internal bool NativeControlAppearance;
 
     /// <summary>
+    /// The cascaded <c>appearance</c> / <c>-webkit-appearance</c> keyword, lower-cased, or
+    /// <c>null</c> when no author rule set one.
+    /// </summary>
+    internal string? AppearanceSpecified;
+
+    /// <summary>
+    /// The computed <c>appearance</c>: <c>auto</c> on a form control the user-agent sheet
+    /// gives native appearance, <c>none</c> elsewhere, or the author's keyword. Settled at
+    /// the end of the cascade by <see cref="ComputedStyle.AdjustFormControlStyle"/>.
+    /// </summary>
+    internal string ComputedAppearance = "none";
+
+    /// <summary>
+    /// A form control whose computed <c>display</c> stays <c>inline</c> (its appearance is
+    /// <c>none</c>) but which is laid out as an atomic inline-block, as Chromium does for
+    /// every button and form control. Only the <c>getComputedStyle</c> projection reads it.
+    /// </summary>
+    internal bool ReportsInlineDisplay;
+
+    /// <summary>
     /// The computed <c>table-layout: fixed</c> value. The fixed algorithm is only activated
     /// when the table also has a definite inline size; otherwise CSS requires the automatic
     /// table layout algorithm.

@@ -78,8 +78,30 @@ internal static class DomStyleFixups
     /// Normalize a control's collected text the way the sizing pass measures it: one line,
     /// runs of white space collapsed to a single space.
     /// </summary>
-    internal static string NormalizeControlLabel(string text) =>
-        string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    /// <remarks>
+    /// An atomic inline child (an icon, an inline-block) leaves
+    /// <see cref="AtomicPlaceholder"/> in the collected text, so the white space between it
+    /// and the label survives the collapse, then the marker becomes a zero-width word joiner
+    /// (U+2060), so the measured run does not end in white space the shaper would trim.
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which trims the space next to an
+    /// icon as if it sat at the end of the line: `<span>Read Wikipedia</span> <i
+    /// style="display:inline-block;width:10px"></i>` came out one space short of its
+    /// content (120px against Chromium's 123px), and the icon wrapped onto a second line.
+    /// See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static string NormalizeControlLabel(string text)
+    {
+        string collapsed = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return collapsed.Contains(AtomicPlaceholder, StringComparison.Ordinal)
+            ? collapsed.Replace(AtomicPlaceholder.ToString(), "\u2060", StringComparison.Ordinal)
+            : collapsed;
+    }
+
+    /// <summary>
+    /// Stands in for an atomic inline child in a button's collected label text. U+FFFC is not
+    /// white space, so collapsing keeps the spaces on either side of it.
+    /// </summary>
+    internal const char AtomicPlaceholder = '\uFFFC';
 
     /// <remarks>
     /// The relative arms are an unreached net, not a resolution path: this pass runs after the
@@ -280,6 +302,7 @@ internal static class DomStyleFixups
             is "svg" or "img" or "video" or "canvas" or "iframe" or "embed" or "object";
         if (isAtomic)
         {
+            content.Text.Append(AtomicPlaceholder);
             if (style is not null && DefiniteInlineSize(style.Width, fontSize) is { } width)
             {
                 float horizontalEdges = style.Padding.Left
@@ -321,6 +344,7 @@ internal static class DomStyleFixups
                     ? childWidth + horizontal
                     : F32.Max(childWidth, horizontal);
                 content.AtomicWidth += childBorderBox + margins;
+                content.Text.Append(AtomicPlaceholder);
 
                 // A definite inline size is the whole contribution; its own text is laid out
                 // inside it and cannot widen the button further.
@@ -328,6 +352,12 @@ internal static class DomStyleFixups
             }
 
             childEdges = horizontal + margins;
+        }
+
+        bool atomicInline = style is { IsInlineBlock: true };
+        if (atomicInline)
+        {
+            content.Text.Append(AtomicPlaceholder);
         }
 
         content.AtomicWidth += childEdges;
@@ -351,6 +381,10 @@ internal static class DomStyleFixups
         }
 
         NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, content);
+        if (atomicInline)
+        {
+            content.Text.Append(AtomicPlaceholder);
+        }
     }
 
     /// <summary>
