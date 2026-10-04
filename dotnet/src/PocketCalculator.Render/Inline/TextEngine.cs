@@ -173,6 +173,9 @@ public sealed partial class TextEngine : IDisposable
             : new ShapeCache(_fonts);
     }
 
+    /// <summary>The shaped-paragraph cache this engine shapes through, for tests.</summary>
+    internal ShapeCache? CurrentShapeCache => _shaper.Cache;
+
     /// <summary>Shaped-paragraph cache statistics, for tests and profiling.</summary>
     internal (int Entries, int Hits, int Misses) ShapeCacheStats =>
         _shaper.Cache is { } cache ? (cache.Count, cache.Hits, cache.Misses) : (0, 0, 0);

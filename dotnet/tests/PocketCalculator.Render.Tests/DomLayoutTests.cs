@@ -2032,6 +2032,89 @@ public class DomLayoutTests
             telemetry);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData(2f)]
+    [InlineData(1f)]
+    public void RetainedImageSourceSwapMatchesForcedFull(float? newRatio)
+    {
+        // An <img> source swap restyles the element instead of discarding every retained
+        // style (crates/obscura-render classifies `src` as Full). The first source was square;
+        // the second is not loaded yet (null), twice as wide, or square again.
+        const string initialHtml = """
+            <html><head><style>
+            html,body{margin:0}
+            #pic{display:block;width:40%}
+            img[src$=".png"]{border:1px solid}
+            .after{height:7px}
+            </style></head><body>
+            <div id=before style="height:5px"></div><img id=pic src="a.gif" alt=""><div id=after class=after></div>
+            </body></html>
+            """;
+        string finalHtml = initialHtml.Replace("a.gif", "b.png", StringComparison.Ordinal);
+        DomTree tree = Parse(initialHtml);
+        StylesheetCache cache = new();
+        NodeId pic = Id(tree, "pic");
+        DomLayout initial = RenderDom.LayoutDomWithWebFontsAndStylesheetCache(
+            tree,
+            (300f, 200f),
+            new Dictionary<NodeId, ReplacedIntrinsic> { [pic] = ReplacedIntrinsic.FromDimensions(1f, 1f) },
+            [],
+            cache);
+        Assert.Equal(120f, initial.Rects[pic].Height);
+
+        Assert.Equal(
+            RetainedAttributeMutationKind.Subtree,
+            RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, pic, "src"));
+        tree.GetNode(pic)!.SetAttribute("src", "b.png");
+        Dictionary<NodeId, ReplacedIntrinsic> after = newRatio is { } ratio
+            ? new() { [pic] = ReplacedIntrinsic.FromDimensions(ratio, 1f) }
+            : [];
+        (DomLayout incremental, ContainerLayoutTelemetry telemetry) =
+            RenderDom.LayoutDomWithWebFontsPassLimit(
+                tree,
+                (300f, 200f),
+                after,
+                [],
+                null,
+                cache,
+                initial.TakeRetainedStyleMaps(),
+                [RetainedStyleMutation.From(new AttributeStyleMutation(pic, "src", "a.gif", "b.png"))]);
+
+        DomTree finalTree = Parse(finalHtml);
+        NodeId finalPic = Id(finalTree, "pic");
+        DomLayout full = RenderDom.LayoutDomWithWebFontsAndStylesheetCache(
+            finalTree,
+            (300f, 200f),
+            newRatio is { } finalRatio
+                ? new Dictionary<NodeId, ReplacedIntrinsic> { [finalPic] = ReplacedIntrinsic.FromDimensions(finalRatio, 1f) }
+                : NoIntrinsic,
+            [],
+            new StylesheetCache());
+
+        Assert.Equal(0, telemetry.RetainedFallback);
+        Assert.True(telemetry.RetainedReused > 0, "clean elements must keep their styles");
+        foreach (string id in new[] { "before", "pic", "after" })
+        {
+            Assert.Equal(full.Rects[Id(finalTree, id)], incremental.Rects[Id(tree, id)]);
+        }
+
+        Assert.Equal(full.Styles[finalPic].IntrinsicSize, incremental.Styles[pic].IntrinsicSize);
+    }
+
+    [Fact]
+    public void ImageResourceSelectionAttributesKeepTheirClassification()
+    {
+        DomTree tree = Parse("<picture id=p><source id=s srcset=a.png><img id=i src=a.png></picture>");
+        NodeId img = Id(tree, "i");
+        NodeId source = Id(tree, "s");
+        Assert.Equal(RetainedAttributeMutationKind.Subtree, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, img, "srcset"));
+        Assert.Equal(RetainedAttributeMutationKind.Subtree, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, img, "sizes"));
+        Assert.Equal(RetainedAttributeMutationKind.Full, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, img, "crossorigin"));
+        Assert.Equal(RetainedAttributeMutationKind.Full, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, source, "srcset"));
+        Assert.Equal(RetainedAttributeMutationKind.Full, RetainedStylePlanner.RetainedAttributeMutationKindOf(tree, source, "src"));
+    }
+
     [Fact]
     public void RetainedAttributeStylesMatchForcedFullWithDormantContainerRules()
     {
@@ -2459,7 +2542,9 @@ public class DomLayoutTests
             new(
                 "image resource mutation",
                 "#image{width:17px;height:19px}",
-                "image", "src", "replacement.png", ConservativeFallback),
+                // DEVIATION from the Rust case, which expects ConservativeFallback: the port
+                // restyles the <img> subtree for `src` (RetainedStylePlanner, see todo.md).
+                "image", "src", "replacement.png", Incremental),
             new(
                 "inherited language semantic mutation",
                 ".scope{width:113px}",

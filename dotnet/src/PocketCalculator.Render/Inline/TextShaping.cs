@@ -192,6 +192,9 @@ public sealed class ShapeLine
     public bool Rtl;
     public List<ShapeSpan> Spans = [];
     public TextMetrics? Metrics;
+
+    /// <summary>Line layouts of this paragraph kept by <see cref="ShapeCache.Layout"/>.</summary>
+    internal LayoutMemo? LayoutMemo;
 }
 
 /// <summary>

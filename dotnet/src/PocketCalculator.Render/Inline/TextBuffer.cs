@@ -376,7 +376,9 @@ public sealed class BufferLine
         if (_layout is null)
         {
             ShapeLine shape = Shape(shaper, tabWidth);
-            _layout = TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, Align, matchMonoWidth);
+            _layout = shaper.Cache is { } cache
+                ? cache.Layout(shape, fontSize, width, wrap, Align, matchMonoWidth)
+                : TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, Align, matchMonoWidth);
         }
 
         return _layout;
