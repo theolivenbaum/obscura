@@ -25,6 +25,12 @@ copies of the ones Obscura bundles, and keep their own licenses: Liberation
 Color Emoji (SIL Open Font License 1.1, see LICENSE-NOTO-COLOR-EMOJI.txt and
 FONT-PROVENANCE.md in that folder).
 
+The same folder also embeds Noto Sans CJK SC Regular 2.004
+(https://github.com/notofonts/noto-cjk), Copyright 2014-2021 Adobe
+(http://www.adobe.com/), unmodified and licensed under the SIL Open Font
+License 1.1 (LICENSE-NOTO-SANS-CJK.txt and FONT-PROVENANCE.md in that folder).
+Noto is a trademark of Google Inc.
+
 The Public Suffix List (dotnet/src/PocketCalculator.Net/Resources/public_suffix_list.dat,
 https://publicsuffix.org/) is subject to the terms of the Mozilla Public License,
 v. 2.0. A copy of the MPL is available at https://mozilla.org/MPL/2.0/. The file
