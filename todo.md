@@ -1356,7 +1356,7 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **Floats on both sides:** a block whose in-flow content is only left and right floats takes the native float context; Rust's float-zone row put a third float below the first (Chromium: beside it).
 - **Table width pass:** size-only intrinsic measurements and memoized depth and cyclic-item walks, where Rust does full layouts and repeated ancestor walks. Output is identical.
 - **Allocation trims:** no shadow-scope builders outside shadow trees, no WAAPI iterator per element, lazy sort delegates, lists shared between `Inherited` clones, pre-sized per-element maps and taffy tree. Output is identical.
-- **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, picking the window, element, document or plain-target implementation by receiver. Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.
+- **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, one implementation for every target (see "DOM event dispatch"). Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.
 - **Frame indices:** `window[i]` exists only for existing iframes, as an accessor (Chromium: a data property), re-synced on iframe insertion and removal, on `length`, on global reflection and on a stale read. Rust: 50 index getters always.
 - **Named access:** element ids and frame names resolve on WindowProperties, not as own properties of window; reflection on it lists no names, an assignment creates an own property, and an id never shadows an EventTarget.prototype or Object.prototype member. Rust: own, enumerable, getter-only properties on the global.
 - **Global enumerability and tags:** uppercase own globals are non-enumerable, `history` is enumerable, and shim interface prototypes have a Symbol.toStringTag. Rust: interface objects enumerable and untagged.
@@ -1394,7 +1394,7 @@ Recorded as they are decided. Each entry needs a reason and a tracking note.
 - **Child-frame execution contexts (M6):** each child frame gets a default context (its own realm) and a realm per isolated-world name over its document, announced with `executionContextCreated` and routed by object id; also `DOM.getFrameOwner`, `Node.frameId` on iframes, frame node boxes in page coordinates, input routed into the frame under the point, and key input to the last-focused realm. Rust announces frames with no contexts and runs everything in the page realm.
 - **Frame render ops:** they read the frame's own document and viewport (the iframe's content box; Rust passes the border box). Rust reads the page's state, so a frame's geometry described the page node that shared its node id.
 - **`Promise.prototype.then` captured at boot:** frame timers and async-op accounting use it; Rust calls the page's `then`.
-- **Cross-world event dispatch:** a document realm's dispatch runs isolated-world listeners interleaved by registration stamp, with world-side wrappers and `isTrusted`/`preventDefault`/stop flags carried both ways. World window listeners run around the node dispatch (capturing before, others after), because the engine's event model has no node capture phase and does not reach the window.
+- **Cross-world event dispatch:** a document realm's dispatch runs isolated-world listeners interleaved by registration stamp, with world-side wrappers and `isTrusted`/`preventDefault`/stop flags carried both ways. World listeners (nodes and the window) run at the matching capture, at-target or bubble step of the path (see "DOM event dispatch").
 - **File input selection:** held by the host per document (`op_dom` `set_input_files`/`input_files_version`/`get_input_files`, plus `note_focus`). Rust keeps it on the calling realm's wrapper.
 - **Grid occupancy:** taffy stores one state per cell in a dense `rows x columns` matrix. The port keeps the placed areas: a byte per cell up to 1,024 cells, a segment tree of interval sets beyond that. Only occupied/free is kept; answers are cell for cell the same (`CellOccupancyMatrixTests`).
 - **Grid coordinates are 32-bit:** taffy's lines are i16 and counts u16. `DetailedGridTracksInfo`/`DetailedGridItemsInfo` fields are `int`.
@@ -5047,10 +5047,82 @@ Found while booting youtube.com (Polymer) and msn.com (FAST). All DEVIATIONS fro
   always false (the shim does not see COOP/COEP; Chromium reads true when both are sent).
 
 Not done: Attr is still not a Node in the shim (`attr.textContent` makes an own property);
-interface members defined in classes stay non-enumerable and the on* handlers are data
-properties (both pre-existing, Chromium has enumerable accessors); `input.files = fileList` is
-accepted and ignored; `HTMLFencedFrameElement` does not exist; an element's listeners still
-ignore `capture` and `once`, and a bubbling event reaches the document's listeners with
-`currentTarget` left at `<html>`. Pinned by
+interface members defined in classes stay non-enumerable (pre-existing, Chromium has
+enumerable accessors); `input.files = fileList` is accepted and ignored;
+`HTMLFencedFrameElement` does not exist. (The on* handlers, `capture`/`once` and the
+document's `currentTarget` are done under "DOM event dispatch" below.) Pinned by
 `InterfaceMemberPlacementTests`, `ShadowSlotTests`, `NodeTextAndWindowOriginTests` (Js) and
 `ManualSlotAssignmentTests` (Dom).
+
+### DOM event dispatch
+
+A conformance pass of DOM's dispatch and HTML's event handlers against Chromium 141, all
+DEVIATIONS from `crates/obscura-js/js/bootstrap.js`. There, elements, the document, the window
+and plain EventTargets each kept listeners their own way, and an element's dispatch ran its
+on* handler, then its listeners, then called its parent's dispatchEvent: no capture phase,
+`capture`/`once`/`passive`/`signal` ignored on elements, the document's listeners saw
+`currentTarget` left at `<html>` and a bubbling event never reached the window, composedPath()
+walked parentNode, listener exceptions went to the console only.
+
+- **One listener store and one dispatch** (`_eventDispatch` in bootstrap.js): the event path
+  through assigned slots and shadow roots (new op_dom `event_path`, one host call per
+  dispatch), target and relatedTarget retargeting, the relatedTarget truncation and
+  clear-targets steps, capture then at-target (capturing listeners first) then bubble, through
+  the document to the window (not for `load`, nor for a document with no browsing context).
+  `eventPhase`/`currentTarget` per step and reset after; stop/stopImmediate/cancelBubble;
+  `returnValue`; `srcElement`; Event.NONE..BUBBLING_PHASE; `timeStamp` on performance.now()'s
+  clock (Rust: Date.now()); composedPath() with closed trees hidden; listeners added during
+  dispatch do not run there, removed ones do not run; `once` removes before the call;
+  re-dispatching resets the flags; initEvent is ignored while dispatching; a createEvent
+  event throws InvalidStateError until initEvent.
+- **addEventListener options**: boolean or {capture, once, passive, signal}, read in Chromium's
+  order (removeEventListener reads only capture); duplicates by (type, callback, capture);
+  `signal` must be an AbortSignal (TypeError otherwise), an aborted one adds nothing, abort
+  removes the listener before the abort event (DOM abort algorithms); a passive listener's
+  preventDefault does nothing; touchstart/touchmove/wheel/mousewheel are passive by default on
+  the window, document, `<html>` and `<body>` (Chromium's intervention); missing arguments and
+  non-object callbacks throw TypeError; an object without a callable handleEvent is skipped
+  silently, as Chromium does.
+- **Chromium behaviours kept over the spec**: a window or plain EventTarget that is itself the
+  target runs every listener in registration order (capturing ones are not first), and
+  composedPath() is `[window]` / `[]` there; the window's load event targets the document.
+- **Exceptions** in listeners, handlers and timer callbacks are reported (HTML "report the
+  exception"): a trusted, cancelable ErrorEvent at the window ("Uncaught Error: msg"),
+  window.onerror with (message, filename, lineno, colno, error) where `return true` cancels,
+  then the console unless cancelled. Other listeners still run. ErrorEvent gained filename,
+  lineno and colno (filename is "" and lineno/colno 0: the shim does not know the script
+  position).
+- **Event handlers**: the on* IDL attributes are enumerable accessors on the interfaces Chromium
+  141 has them on (HTMLElement/SVGElement/MathMLElement, Element's own few, Document, ShadowRoot
+  `onslotchange`, HTMLMediaElement, own accessors on the window; `<body>`/`<frameset>` forward the
+  window's), replacing Rust's null data properties on Element.prototype (with window-only names
+  such as `onhashchange` on every element). A handler is a listener registered at its first
+  non-null value and keeps its place while set; `return false` cancels; non-objects set null;
+  content attributes compile on first use with document, form owner and element in scope
+  (`with`), named `onclick`, length 1; a syntax error is reported and the handler is null. A
+  parser-set attribute is found the first time an event of its type reaches the element (one
+  getAttribute per element and type) and goes first in the list. `window.event` exists
+  (undefined outside a listener and for listeners in shadow trees). Rust's window.onerror
+  (recording `__obscura_errors`) and window.onunhandledrejection defaults are gone: Chromium's
+  are null, and they would now run among the page's listeners.
+- **Lifecycle and UA events**: DOMContentLoaded is one trusted bubbling dispatch at the document
+  (Rust: an untrusted one at the document and another at the window); the window's load is
+  trusted, targets the document and runs window.onload among the listeners (Rust called it
+  first); the viewport scroll is one bubbling dispatch at the document; hashchange, popstate,
+  unhandledrejection and rejectionhandled are trusted and their window handlers run as
+  listeners; focus()/blur() fire blur, focusout, focus, focusin (trusted, composed, with
+  relatedTarget; Rust fired nothing); click() is composed.
+- **Isolated worlds**: world listeners on nodes keep their capture flag (the host index records
+  it for nodes too) and the document realm runs them at the matching step of the path, the
+  window's included, instead of around a node-only dispatch.
+
+Not done: the event's state is still own data properties (Chromium: `Object.keys(event)` is
+`['isTrusted']`, an own accessor, and the rest are prototype accessors); click() dispatches a
+MouseEvent where Chromium's is a PointerEvent; a content attribute's SyntaxError message lacks
+Chromium's "Failed to execute 'dispatchEvent' ..." prefix and says "Unexpected token '}'" where
+Chromium says "Unexpected end of input"; an attribute changed outside setAttribute/removeAttribute
+(Attr nodes, setAttributeNS, the host) does not update its handler; focus() still focuses any
+element (Chromium skips non-focusable ones, so no events there); an unhandled rejection is
+reported before a message posted earlier in the same task (Chromium: after).
+`EventTarget.prototype.addEventListener.call({})` still does not throw. Pinned by
+`EventDispatchConformanceTests` (Js), which runs the Chromium probe's sections.

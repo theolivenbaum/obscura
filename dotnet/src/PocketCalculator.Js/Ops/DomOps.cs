@@ -996,6 +996,14 @@ public static class DomOps
                     ? Expose(dom, assignedSlot)
                     : "-1";
 
+            // Port addition (event dispatch): DOM's "get the parent" from node arg1 up to its
+            // root, comma-separated, the start node left out. A node assigned to a slot steps to
+            // the slot (the entry is prefixed "s"), a shadow root to its host; anything else to
+            // its parent. bootstrap.js builds an event path from this in one call and decides
+            // itself where a non-composed event stops at a shadow root.
+            case "event_path":
+                return EventParentChain(dom, ParseNodeOrZero(arg1));
+
             // Port addition (slotchange): the slots whose assigned nodes changed since the
             // last call, as a JSON array of node ids. bootstrap.js asks at the microtask where
             // Chromium fires slotchange.
@@ -1395,6 +1403,61 @@ public static class DomOps
     }
 
     private static string Bool(bool value) => value ? "true" : "false";
+
+    /// <summary>
+    /// The ancestors an event at <paramref name="start"/> propagates through (op_dom
+    /// <c>event_path</c>). The walk is capped like <c>Descendants()</c>, so a corrupt parent
+    /// chain cannot hang a dispatch.
+    /// </summary>
+    private static string EventParentChain(DomTree dom, NodeId start)
+    {
+        var node = dom.GetNode(start);
+        if (node is null)
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder();
+        var current = start;
+        var shadow = dom.HasShadowRoots;
+        for (var steps = 0; steps < 100_000; steps++)
+        {
+            NodeId next;
+            var viaSlot = false;
+            if (shadow && dom.ShadowRootInfo(current) is { } root)
+            {
+                next = root.Host;
+            }
+            else if (dom.GetNode(current)?.Parent is { } parent)
+            {
+                next = parent;
+                if (shadow && dom.ShadowRootOf(parent) is not null && dom.AssignedSlot(current) is { } slot)
+                {
+                    next = slot;
+                    viaSlot = true;
+                }
+            }
+            else
+            {
+                break;
+            }
+
+            if (sb.Length > 0)
+            {
+                sb.Append(',');
+            }
+
+            if (viaSlot)
+            {
+                sb.Append('s');
+            }
+
+            sb.Append(Expose(dom, next));
+            current = next;
+        }
+
+        return sb.ToString();
+    }
 
     private static List<int> ExposeAll(DomTree dom, List<NodeId> ids)
     {

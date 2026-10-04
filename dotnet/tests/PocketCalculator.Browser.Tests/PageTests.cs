@@ -1585,13 +1585,15 @@ public sealed class PageTests
                     document.body.setAttribute('onload', 'globalThis.__bodyOnloadFromAttribute = true');
                     const attributeReplacesWindow = document.body.onload !== fromWindow
                         && document.body.onload === window.onload;
-                    const reflected = window.onload;
+                    // Any <body> of an active document forwards the window's handlers, a
+                    // detached one included (HTML "determining the target of an event
+                    // handler"; measured in Chromium 141).
                     const detachedBody = document.createElement('body');
                     detachedBody.onload = function detachedBodyOnload() {};
-                    const detachedBodyStaysLocal = window.onload === reflected
-                        && detachedBody.onload !== window.onload;
+                    const detachedBodyReflects = window.onload === detachedBody.onload
+                        && window.onload.name === 'detachedBodyOnload';
                     return bodySetsWindow && windowSetsBody && attributeReplacesWindow
-                        && detachedBodyStaysLocal;
+                        && detachedBodyReflects;
                 })()
                 """));
     }

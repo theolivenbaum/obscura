@@ -55,20 +55,6 @@ const _JSONparse = JSON.parse;
 // calling these names still gets its own replacement.
 const _JSONstringify = JSON.stringify;
 const _uncurry = (fn) => Function.prototype.call.bind(fn);
-// DOM "inner invoke" for one listener: a function is called with the target as `this`, an
-// object through its handleEvent, looked up at dispatch. DEVIATION from
-// crates/obscura-js/js/bootstrap.js, whose node, document and window dispatch called every
-// listener as a function, so an EventListener object (FAST registers its elements with
-// `addEventListener(type, this)`) threw "Function.prototype.apply was called on #<...>".
-function _invokeListener(listener, target, event) {
-  if (typeof listener === 'function') return _reflectApply(listener, target, [event]);
-  if (listener !== null && typeof listener === 'object') {
-    const handleEvent = listener.handleEvent;
-    if (typeof handleEvent === 'function') return _reflectApply(handleEvent, listener, [event]);
-    throw new TypeError("The 'handleEvent' property of the event listener is not callable.");
-  }
-  return undefined;
-}
 // The shim's own collections answer with the methods bootstrap found, as own properties
 // of the instance, so a page that replaced Map.prototype.get, Set.prototype.has or
 // WeakMap.prototype.set (or their size, forEach or iterator) does not change what the
@@ -183,13 +169,6 @@ function _dispatch(target, event) {
   const impl = _dispatchImplFor(target);
   return impl ? _reflectApply(impl, target, [event]) : target.dispatchEvent(event);
 }
-// An Element's dispatch bubbling to its parent: the one call that may pass an event that
-// is already being dispatched (see _dispatchEntry).
-let _bubbleToken = false;
-function _bubble(parent, event) {
-  _bubbleToken = true;
-  try { return _dispatch(parent, event); } finally { _bubbleToken = false; }
-}
 // querySelector / querySelectorAll by the shim's own methods for the root's kind, for the
 // same reason as _dispatch: the shim's own queries (select.options, form.elements,
 // getElementsByTagName, hit testing, label lookup) must not call a page's replacement.
@@ -209,22 +188,12 @@ function _getFocused() { return _focusBridge ? _focusBridge.get() : _focusedElem
 // document's nodes. Null while no world of this document listens for anything; else the
 // event types some world listens for, pushed by the host (worldListenTypes). While it is
 // set, this realm's own listeners are stamped from the counter the worlds' are
-// (_handlerStamps, worldStamp), so one dispatch runs both in registration order. See the
+// (_ListenerEntry.stamp, worldStamp), so one dispatch runs both in registration order. See the
 // isolated-world section at the end of this file.
 let _worldListenTypes = null;
 let _crossStamp = 0;
 // In an isolated world: runs one of its listeners for the document realm's dispatch.
 let _worldInvokeImpl = null;
-const _handlerStamps = _private(new WeakMap());
-const _handlerStampGet = _uncurry(WeakMap.prototype.get);
-const _handlerStampHas = _uncurry(WeakMap.prototype.has);
-const _handlerStampSet = _uncurry(WeakMap.prototype.set);
-function _stampHandler(handler) {
-  if (_worldListenTypes !== null && handler !== null && (typeof handler === 'object' || typeof handler === 'function')
-      && !_handlerStampHas(_handlerStamps, handler)) {
-    _handlerStampSet(_handlerStamps, handler, ++_crossStamp);
-  }
-}
 // Port addition (child-frame CDP contexts): a realm taking focus tells the host, which
 // sends key events to the realm that took it last (Page.FocusedFrameId). The Rust
 // engine has one realm that ever receives CDP input.
@@ -345,33 +314,14 @@ function _installBinding(name) {
 
 _hostVars.__obscura_errors = [];
 
-globalThis.addEventListener = globalThis.addEventListener || function(){};
-globalThis.onunhandledrejection = function(e) { if (e?.preventDefault) e.preventDefault(); };
-
-globalThis.onerror = function(msg, src, line, col, error) {
-  _hostVars.__obscura_errors.push({msg: String(msg), src: String(src||""), line, error: String(error||"")});
-};
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which sets window.onerror (recording into
+// __obscura_errors) and window.onunhandledrejection (preventDefault) here: page script read
+// non-null handlers where Chromium's are null, and with the handlers now listeners in the
+// window's list, they would also run among the page's own. Errors still reach the console.
 // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the window's listener
 // lists have no prototype and are kept without the page's Array methods, as Element's are.
+// The window's add/remove/dispatch are the shared EventTarget members (see _eventDispatch).
 _hostVars.__windowListeners = _objectCreate(null);
-globalThis.addEventListener = function(type, fn) {
-  let list = _hostVars.__windowListeners[type];
-  if (!list) list = _hostVars.__windowListeners[type] = [];
-  list[list.length] = fn;
-};
-globalThis.removeEventListener = function(type, fn) {
-  const list = _hostVars.__windowListeners[type];
-  if (!list) return;
-  const kept = [];
-  for (let i = 0; i < list.length; i++) if (list[i] !== fn) kept[kept.length] = list[i];
-  _hostVars.__windowListeners[type] = kept;
-};
-globalThis.dispatchEvent = function(event) {
-  if (!event) return true;
-  const handlers = _hostVars.__windowListeners[event.type] || [];
-  for (let i = 0; i < handlers.length; i++) { try { _invokeListener(handlers[i], globalThis, event); } catch(e) { console.error(e); } }
-  return !event.defaultPrevented;
-};
 
 let _domMutationEpoch = 0;
 let _treeMutationEpoch = 0;
@@ -1261,7 +1211,9 @@ globalThis.setTimeout = (fn, delay = 0, ...args) => {
       __obscuraPendingTimeoutDeadlines.delete(id);
       if (state.cancelled) return;
       _runTimerTask(taskNestingLevel, () => {
-        try { f(...args); } catch(e) { console.error("Timer error:", e); }
+        // HTML reports a timer callback's exception to the window (error event,
+        // window.onerror) before the console. Rust logged it only.
+        try { f(...args); } catch(e) { _reportException(e); }
       });
     },
   );
@@ -1296,7 +1248,7 @@ globalThis.setInterval = (fn, delay = 0, ...args) => {
   const tick = () => {
     if (!_intervals.has(id)) return;
     _runTimerTask(taskNestingLevel, () => {
-      try { f(...args); } catch(e) { console.error("Interval error:", e); }
+      try { f(...args); } catch(e) { _reportException(e); }
     });
     if (!_intervals.has(id)) return;
     const nextDelay = _timerDelayForNesting(normalizedDelay, taskNestingLevel);
@@ -2090,110 +2042,861 @@ function _shallowCloneNode(node) {
   return el;
 }
 
-// EventTarget listener state belongs to the JS wrapper rather than the backing
-// DOM node.  This is also what makes `new EventTarget()` and subclasses used by
-// framework schedulers work: those targets deliberately have no native node id.
-// DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): the lists are kept
-// with the WeakMap methods and String bootstrap captured, in objects with no prototype,
-// without the page's Map, Array.prototype.some / push / splice / slice / includes or the
-// array iterator, so a page that replaced any of them does not silence a target's
-// listeners, which Chromium keeps natively.
+// ---- DOM events: listener lists, event handlers and dispatch ----------------------------------
+// DEVIATION from crates/obscura-js/js/bootstrap.js, measured against Chromium 141. There each
+// kind of target kept its listeners its own way and an event went from target to target by
+// calling the parent's dispatchEvent: an element ran its on* handler first and then its
+// listeners in order, ignoring capture, once, passive and signal; the document ran its own
+// list and stopped, so a bubbling event never reached the window and the document's listeners
+// saw currentTarget left at <html>; there was no capture phase, composedPath() walked
+// parentNode, and an exception in a listener went to the console only. Here the nodes, the
+// document, the window and plain EventTargets share one listener store and DOM's "dispatch":
+// the event path (through assigned slots and shadow roots, retargeting target and
+// relatedTarget), capture, at-target and bubble phases, stop/cancel flags, passive listeners,
+// on* handlers as listeners in registration order, and exceptions reported to the window as
+// a trusted ErrorEvent. Two Chromium behaviours the spec does not have are kept: a window or
+// plain EventTarget that is itself the target runs its listeners in registration order
+// (capturing ones included) with composedPath() of [window] and [], and
+// touchstart/touchmove/wheel/mousewheel listeners on the window, document, <html> and <body>
+// are passive by default.
+//
+// Listener lists: an element's by node id in _eventRegistry (DOM collection moves them with
+// the component), the window's in _hostVars.__windowListeners, any other target's in a WeakMap
+// keyed by the object. A map is `type -> [entry]`. A removal marks the entry and replaces the
+// array, and an addition appends past the length a dispatch took, so a dispatch runs the
+// listeners that were there when it reached the target (DOM's clone of the list). The
+// lists are kept with the built-ins bootstrap captured, in objects with no prototype, so a
+// page that replaced Array, Map or WeakMap methods does not silence a target's listeners,
+// which Chromium keeps natively (SECURITY.md L10).
 const _eventTargetListeners = _private(new WeakMap());
-const _eventTargetListenersDelete = _uncurry(WeakMap.prototype.delete);
-function _eventCapture(options) {
-  return typeof options === "boolean" ? options : !!(options && options.capture);
+const _HANDLERS = Symbol('eventHandlers');
+const _callAtBoot = _uncurry(Function.prototype.call);
+const _weakMapDelete = _uncurry(WeakMap.prototype.delete);
+// DOM's dispatch flag.
+const _dispatchingAdd = Function.prototype.call.bind(WeakSet.prototype.add);
+const _dispatchingHas = Function.prototype.call.bind(WeakSet.prototype.has);
+const _dispatchingDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
+const _dispatching = _private(new WeakSet());
+// Events document.createEvent made that initEvent has not initialized yet.
+const _uninitializedEvents = _private(new WeakSet());
+// The dispatches in progress, for composedPath(): event, path, event, path, ...
+const _activeDispatches = [];
+// The event a passive listener is running for: its preventDefault() does nothing.
+let _passiveEvent = null;
+// window.event: the event the running listener was called for, left undefined while the
+// listener's target is in a shadow tree (the current step of the path, _invocationInShadow).
+let _currentEvent = undefined;
+let _invocationInShadow = false;
+// Set by _eventPath: whether the dispatch ends with target and relatedTarget cleared.
+let _pathClearsTargets = false;
+// AbortSignal.prototype as bootstrap defined it, and each signal's abort algorithms, which
+// run before its abort event as DOM's "signal abort" orders them.
+let _AbortSignalProto = null;
+const _abortAlgorithms = _private(new WeakMap());
+let _NodeProtoAtBoot = null;
+let _EventProtoAtBoot = null;
+// performance.now as bootstrap left it, for Event.timeStamp (set by _captureDispatchImpls).
+let _perfNowFn = null, _perfObj = null;
+function _eventTimeStamp() {
+  if (_perfNowFn !== null) { try { return _callAtBoot(_perfNowFn, _perfObj); } catch (_) {} }
+  return 0;
 }
+
+class _ListenerEntry {
+  callback = null; capture = false; once = false; passive = false; removed = false;
+  handler = null; stamp = 0;
+  constructor(callback, capture, once, passive) {
+    this.callback = callback; this.capture = capture; this.once = once; this.passive = passive;
+    // Isolated-world listeners interleave with this realm's by the stamp (SECURITY.md M6).
+    this.stamp = _worldListenTypes !== null ? ++_crossStamp : 0;
+  }
+}
+// An event handler (HTML's on* IDL attribute and content attribute): its value, a content
+// attribute's source not yet compiled, and the listener it registered at its first non-null
+// value, which keeps its place while the handler stays set.
+class _HandlerRecord {
+  name = ''; value = null; source = null; element = null; entry = null;
+  constructor(name) { this.name = name; }
+}
+
+function _isElementTarget(target) {
+  return _elementProtoAtBoot !== null && _isPrototypeOf(_elementProtoAtBoot, target);
+}
+function _isNodeTarget(target) {
+  return _NodeProtoAtBoot !== null && target !== null && typeof target === 'object'
+    && _isPrototypeOf(_NodeProtoAtBoot, target) && typeof target._nid === 'number';
+}
+function _listenerMap(target, create) {
+  if (target === globalThis) return _hostVars.__windowListeners;
+  let map;
+  if (_isElementTarget(target)) {
+    const nid = target._nid;
+    map = _eventRegistry[nid];
+    if (map === undefined && create) map = _eventRegistry[nid] = _objectCreate(null);
+    return map;
+  }
+  map = _weakMapGet(_eventTargetListeners, target);
+  if (map === undefined && create) {
+    map = _objectCreate(null);
+    _weakMapSet(_eventTargetListeners, target, map);
+  }
+  return map;
+}
+
+// "flatten more": capture (1), once (2), passive given (4) and its value (8); a signal is
+// left in _optSignal. Chromium reads capture, once, passive and signal, in that order, and
+// removeEventListener reads capture only.
+let _optSignal = null;
+function _listenerOptionFlags(options, add, method) {
+  _optSignal = null;
+  if (options === undefined || options === null) return 0;
+  if (typeof options !== 'object' && typeof options !== 'function') return options ? 1 : 0;
+  let flags = options.capture ? 1 : 0;
+  if (!add) return flags;
+  if (options.once) flags |= 2;
+  const passive = options.passive;
+  if (passive !== undefined) flags |= passive ? 12 : 4;
+  const signal = options.signal;
+  if (signal !== undefined) {
+    if (_AbortSignalProto === null || signal === null || typeof signal !== 'object'
+        || !_isPrototypeOf(_AbortSignalProto, signal)) {
+      throw new TypeError("Failed to execute '" + method + "' on 'EventTarget': Failed to read the 'signal' property from 'AddEventListenerOptions': Failed to convert value to 'AbortSignal'.");
+    }
+    _optSignal = signal;
+  }
+  return flags;
+}
+function _checkListenerArgs(argc, callback, method) {
+  if (argc < 2) {
+    throw new TypeError("Failed to execute '" + method + "' on 'EventTarget': 2 arguments required, but only " + argc + " present.");
+  }
+  if (callback !== null && callback !== undefined && typeof callback !== 'object' && typeof callback !== 'function') {
+    throw new TypeError("Failed to execute '" + method + "' on 'EventTarget': The callback provided as parameter 2 is not an object.");
+  }
+}
+// Chromium makes these listeners passive unless they say otherwise (the "default passive"
+// intervention), on the window, the document, its <html> and its <body>.
+function _defaultPassive(target, type) {
+  if (type !== 'touchstart' && type !== 'touchmove' && type !== 'wheel' && type !== 'mousewheel') return false;
+  if (target === globalThis) return true;
+  const doc = _realmDocument;
+  if (doc === null) return false;
+  if (target === doc) return true;
+  if (!_isElementTarget(target)) return false;
+  const name = _elGet('localName', target);
+  if (name === 'html') return _elGet('parentNode', target) === doc;
+  return name === 'body' && target === doc.body;
+}
+function _abortAlgorithmAdd(signal, algorithm) {
+  let list = _weakMapGet(_abortAlgorithms, signal);
+  if (list === undefined) {
+    list = [];
+    _weakMapSet(_abortAlgorithms, signal, list);
+  }
+  list[list.length] = algorithm;
+}
+function _runAbortAlgorithms(signal) {
+  const list = _weakMapGet(_abortAlgorithms, signal);
+  if (list === undefined) return;
+  _weakMapDelete(_abortAlgorithms, signal);
+  for (let i = 0; i < list.length; i++) { try { list[i](); } catch (_) {} }
+}
+// DOM "add an event listener". Returns the entry, or null when nothing was added.
+function _addListenerEntry(target, type, callback, capture, once, passive, signal) {
+  const map = _listenerMap(target, true);
+  let list = map[type];
+  if (list === undefined) list = map[type] = [];
+  else {
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (e.callback === callback && e.capture === capture) return null;
+    }
+  }
+  const entry = new _ListenerEntry(callback, capture, once,
+    passive === null ? _defaultPassive(target, type) : passive);
+  list[list.length] = entry;
+  if (signal !== null) _abortAlgorithmAdd(signal, () => _removeEntry(target, type, entry));
+  return entry;
+}
+// DOM "remove an event listener".
+function _removeEntry(target, type, entry) {
+  if (entry.removed) return;
+  entry.removed = true;
+  const map = _listenerMap(target, false);
+  const list = map === undefined ? undefined : map[type];
+  if (list === undefined) return;
+  const kept = [];
+  for (let i = 0; i < list.length; i++) if (list[i] !== entry) kept[kept.length] = list[i];
+  if (kept.length === 0) delete map[type]; else map[type] = kept;
+}
+// addEventListener after its arguments are checked (the shim's own callers skip the check).
 function _eventTargetAdd(target, type, callback, options) {
-  if (callback == null) return;
-  const isFunction = typeof callback === "function";
-  if (!isFunction && typeof callback.handleEvent !== "function") return;
   type = _String(type);
-  const capture = _eventCapture(options);
-  const signal = options && typeof options === "object" ? options.signal : null;
-  if (signal && signal.aborted) return;
-  let byType = _weakMapGet(_eventTargetListeners, target);
-  if (!byType) {
-    byType = _objectCreate(null);
-    _weakMapSet(_eventTargetListeners, target, byType);
-  }
-  let listeners = byType[type];
-  if (!listeners) {
-    listeners = [];
-    byType[type] = listeners;
-  }
-  for (let i = 0; i < listeners.length; i++) {
-    if (listeners[i].callback === callback && listeners[i].capture === capture) return;
-  }
-  const entry = {
-    __proto__: null,
-    callback,
-    capture,
-    once: !!(options && typeof options === "object" && options.once),
-    passive: !!(options && typeof options === "object" && options.passive),
-    signal,
-    abortHandler: null,
-  };
-  listeners[listeners.length] = entry;
-  if (signal && typeof signal.addEventListener === "function") {
-    entry.abortHandler = () => _eventTargetRemove(target, type, callback, capture);
-    signal.addEventListener("abort", entry.abortHandler, { once: true });
-  }
+  const flags = _listenerOptionFlags(options, true, 'addEventListener');
+  const signal = _optSignal;
+  _optSignal = null;
+  if (callback === null || callback === undefined) return;
+  if (signal !== null && signal._aborted) return;
+  _addListenerEntry(target, type, callback, (flags & 1) !== 0, (flags & 2) !== 0,
+    (flags & 4) !== 0 ? (flags & 8) !== 0 : null, signal);
 }
 function _eventTargetRemove(target, type, callback, options) {
-  const byType = _weakMapGet(_eventTargetListeners, target);
-  if (!byType) return;
   type = _String(type);
-  const listeners = byType[type];
-  if (!listeners) return;
-  const capture = _eventCapture(options);
-  for (let i = 0; i < listeners.length; i++) {
-    const entry = listeners[i];
-    if (entry.callback !== callback || entry.capture !== capture) continue;
-    // A new list, so a dispatch walking the old one is not disturbed.
-    const kept = [];
-    for (let j = 0; j < listeners.length; j++) if (j !== i) kept[kept.length] = listeners[j];
-    entry.removed = true;
-    if (kept.length === 0) delete byType[type]; else byType[type] = kept;
-    if (entry.signal && entry.abortHandler && typeof entry.signal.removeEventListener === "function") {
-      entry.signal.removeEventListener("abort", entry.abortHandler);
+  const capture = (_listenerOptionFlags(options, false, 'removeEventListener') & 1) !== 0;
+  if (callback === null || callback === undefined) return;
+  const map = _listenerMap(target, false);
+  const list = map === undefined ? undefined : map[type];
+  if (list === undefined) return;
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
+    if (e.callback === callback && e.capture === capture && e.handler === null) {
+      _removeEntry(target, type, e);
+      return;
     }
-    break;
   }
-  for (const _ in byType) return;
-  _eventTargetListenersDelete(_eventTargetListeners, target);
 }
-function _eventTargetDispatch(target, event) {
-  if (!event || typeof event.type === "undefined") {
+// The page-facing EventTarget members, shared by every node, the document, the window and
+// plain targets (_shapeGlobalObject puts them on EventTarget.prototype alone).
+const _eventTargetMembers = {
+  addEventListener(type, callback) {
+    _checkListenerArgs(arguments.length, callback, 'addEventListener');
+    _eventTargetAdd(this === undefined || this === null ? globalThis : this, type, callback, arguments[2]);
+  },
+  removeEventListener(type, callback) {
+    _checkListenerArgs(arguments.length, callback, 'removeEventListener');
+    _eventTargetRemove(this === undefined || this === null ? globalThis : this, type, callback, arguments[2]);
+  },
+  dispatchEvent(event) {
+    const target = this === undefined || this === null ? globalThis : this;
+    if (arguments.length < 1) {
+      throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': 1 argument required, but only 0 present.");
+    }
+    return _dispatchChecked(target, event);
+  },
+};
+// DOM "dispatchEvent": the checks, then dispatch. An event is trusted only through the one
+// dispatch the user agent marked it for (_markTrusted): measured in Chromium, a listener's
+// re-dispatch of the trusted click it is handling throws InvalidStateError, and a later
+// re-dispatch reaches listeners with isTrusted false.
+function _dispatchChecked(target, event) {
+  if (_EventProtoAtBoot === null || event === null || typeof event !== 'object' || !_isPrototypeOf(_EventProtoAtBoot, event)) {
     throw new TypeError("Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not of type 'Event'.");
   }
-  const type = _String(event.type);
-  if (type === "") {
-    throw new DOMException("The event's type was not specified.", "InvalidStateError");
+  if (_dispatchingHas(_dispatching, event)) {
+    throw new DOMException("Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.", 'InvalidStateError');
   }
-  if (!event.target) event.target = target;
-  event.currentTarget = target;
-  event.eventPhase = 2;
-  const byType = _weakMapGet(_eventTargetListeners, target);
-  const listeners = byType && byType[type];
-  const count = listeners ? listeners.length : 0;
-  for (let i = 0; i < count; i++) {
-    const entry = listeners[i];
-    // Removed during this dispatch (by an earlier listener): it does not run.
-    if (entry.removed) continue;
-    if (entry.once) _eventTargetRemove(target, type, entry.callback, entry.capture);
-    const callback = entry.callback;
+  if (_dispatchingHas(_uninitializedEvents, event)) {
+    throw new DOMException("Failed to execute 'dispatchEvent' on 'EventTarget': The event provided is uninitialized.", 'InvalidStateError');
+  }
+  if (!_trustedPendingTake(_trustedPending, event)) _trustedDelete(_trustedEvents, event);
+  return _eventDispatch(target, event);
+}
+
+// HTML "report the exception": a trusted, cancelable ErrorEvent at the window, then the
+// console unless a listener or window.onerror (returning true) cancelled it.
+let _reportingDepth = 0;
+function _reportException(error) {
+  if (_reportingDepth > 1 || typeof ErrorEvent !== 'function') { try { console.error(error); } catch (_) {} return; }
+  _reportingDepth++;
+  try {
+    let message;
     try {
-      if (typeof callback === "function") _reflectApply(callback, target, [event]);
-      else _reflectApply(callback.handleEvent, callback, [event]);
-    } catch (error) {
-      console.error(error);
-    }
-    if (event._immediatePropagationStopped) break;
+      if (error !== null && typeof error === 'object') {
+        const name = _String(error.name), text = _String(error.message);
+        message = 'Uncaught ' + (text === '' ? name : name + ': ' + text);
+      } else {
+        message = 'Uncaught ' + _String(error);
+      }
+    } catch (_) { message = 'Uncaught exception'; }
+    const event = _markTrusted(new ErrorEvent('error', { message, error, cancelable: true }));
+    let prevented = false;
+    try { _dispatchChecked(globalThis, event); prevented = event.defaultPrevented; } catch (_) {}
+    if (!prevented) { try { console.error(error); } catch (_) {} }
+  } finally {
+    _reportingDepth--;
   }
-  event.currentTarget = null;
-  event.eventPhase = 0;
+}
+
+// HTML's event handler names: GlobalEventHandlers and DocumentAndElementEventHandlers on
+// elements, documents and windows; WindowEventHandlers on windows (and, reflecting the window,
+// on <body> and <frameset>). Assigned where the accessors are installed.
+let _handlerTypeNames = _objectCreate(null);   // event type -> 'on' + type, for any target
+let _windowHandlerTypeNames = _objectCreate(null);
+// Handler names a <body> or <frameset> forwards to its window.
+let _bodyReflectedHandlers = _objectCreate(null);
+function _handlerRecord(target, name, create) {
+  const map = _listenerMap(target, create);
+  if (map === undefined) return undefined;
+  let records = map[_HANDLERS];
+  if (records === undefined) {
+    if (!create) return undefined;
+    records = map[_HANDLERS] = _objectCreate(null);
+  }
+  let record = records[name];
+  if (record === undefined && create) record = records[name] = new _HandlerRecord(name);
+  return record;
+}
+// The element's content attribute `name`, without a page-visible lookup.
+function _contentAttribute(el, name) {
+  const local = el._nullNamespaceAttrs;
+  if (local instanceof Map) return local.has(name) ? local.get(name) : null;
+  return _domParse('get_attribute', el._nid, name);
+}
+// An HTML <body> or <frameset>, whose window-reflecting handlers are its window's.
+function _isBodyLike(el) {
+  const name = _elGet('localName', el);
+  return name === 'body' || name === 'frameset';
+}
+// Where content attribute `name` of element `el` is an event handler: the element, its
+// window, or null when the attribute is no handler on it.
+function _handlerAttributeTarget(el, name) {
+  if (name.length < 3 || _stringCharCodeAt(name, 0) !== 111 || _stringCharCodeAt(name, 1) !== 110) return null;
+  if (_bodyReflectedHandlers[name] === true && _isBodyLike(el)) return globalThis;
+  return _handlerTypeNames[_stringSlice(name, 2)] === name ? el : null;
+}
+// A handler the parser set as a content attribute is registered when the element is made,
+// before any listener script adds, so the first look at a name on an element (or, for the
+// window, its <body>) takes the attribute and puts its listener first.
+function _discoverHandler(target, name) {
+  let record = _handlerRecord(target, name, false);
+  if (record !== undefined) return record;
+  record = _handlerRecord(target, name, true);
+  let element = null;
+  if (target === globalThis) {
+    if (_bodyReflectedHandlers[name] === true) element = _windowReflectingBodyElement() || null;
+  } else if (_isElementTarget(target) && !(_bodyReflectedHandlers[name] === true && _isBodyLike(target))) {
+    element = target;
+  }
+  const source = element === null ? null : _contentAttribute(element, name);
+  if (source !== null) {
+    record.source = _String(source);
+    record.element = element;
+    _activateHandler(target, record, true);
+  }
+  return record;
+}
+function _activateHandler(target, record, first) {
+  if (record.entry !== null && !record.entry.removed) return;
+  const type = _stringSlice(record.name, 2);
+  const entry = new _ListenerEntry(record, false, false, _defaultPassive(target, type));
+  entry.handler = record;
+  record.entry = entry;
+  const map = _listenerMap(target, true);
+  const list = map[type];
+  if (list === undefined) { map[type] = [entry]; return; }
+  if (!first) { list[list.length] = entry; return; }
+  const next = [entry];
+  for (let i = 0; i < list.length; i++) next[next.length] = list[i];
+  map[type] = next;
+}
+function _deactivateHandler(target, record) {
+  record.value = null;
+  record.source = null;
+  record.element = null;
+  const entry = record.entry;
+  record.entry = null;
+  if (entry !== null) _removeEntry(target, _stringSlice(record.name, 2), entry);
+}
+// The on* IDL attribute getter: the handler's value, its content attribute compiled on the
+// first read.
+function _handlerGet(target, name) {
+  const record = _discoverHandler(target, name);
+  if (record.source !== null) _compileHandler(target, record);
+  return record.value;
+}
+// The setter. [LegacyTreatNonObjectAsNull]: anything but an object is null.
+function _handlerSet(target, name, value) {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) value = null;
+  const record = value === null ? _handlerRecord(target, name, false) : _discoverHandler(target, name);
+  if (record === undefined) return;
+  if (value === null) { _deactivateHandler(target, record); return; }
+  record.value = value;
+  record.source = null;
+  record.element = null;
+  _activateHandler(target, record, false);
+}
+// Before a content attribute named like a handler changes: a parser-set value not looked
+// at yet keeps its place, so take it first.
+function _handlerAttributeWillChange(el, name) {
+  const target = _handlerAttributeTarget(el, name);
+  if (target !== null) _discoverHandler(target, name);
+  return target;
+}
+// After it changed (setAttribute, removeAttribute): HTML's attribute change steps.
+function _handlerAttributeChanged(target, el, name, value) {
+  const record = _discoverHandler(target, name);
+  if (value === null) { _deactivateHandler(target, record); return; }
+  record.value = null;
+  record.source = _String(value);
+  record.element = el;
+  _activateHandler(target, record, false);
+}
+// HTML "get the current value of the event handler" for a content attribute: the body
+// compiled as a function of `event` (onerror on a window: event, source, lineno, colno,
+// error) with the document, the form owner and the element in its scope chain.
+function _compileHandler(target, record) {
+  const source = record.source;
+  record.source = null;
+  const name = record.name;
+  const isWindow = target === globalThis;
+  const el = record.element;
+  record.element = null;
+  const doc = _realmDocument;
+  let form = null;
+  if (!isWindow && el && _isElementTarget(el)) {
+    try {
+      const ln = _elGet('localName', el);
+      if (ln === 'input' || ln === 'button' || ln === 'select' || ln === 'textarea' || ln === 'fieldset'
+          || ln === 'output' || ln === 'object' || ln === 'img' || ln === 'label' || ln === 'legend' || ln === 'option') {
+        form = el.form || null;
+      }
+    } catch (_) {}
+  }
+  const params = isWindow && name === 'onerror' ? 'event, source, lineno, colno, error' : 'event';
+  let fn = null;
+  try {
+    const scopes = (doc ? 'with (arguments[0]) ' : '') + (form ? 'with (arguments[1]) ' : '') + (el ? 'with (arguments[2]) ' : '');
+    const make = new Function(scopes + 'return function ' + name + '(' + params + ') {\n' + source + '\n};');
+    fn = make(doc, form, el);
+  } catch (error) {
+    _reportException(error);
+    fn = null;
+  }
+  record.value = fn;
+  if (fn === null) {
+    const entry = record.entry;
+    record.entry = null;
+    if (entry !== null) _removeEntry(target, _stringSlice(name, 2), entry);
+  }
+}
+// HTML "the event handler processing algorithm".
+function _runHandler(record, item, event) {
+  if (record.source !== null) _compileHandler(item, record);
+  const fn = record.value;
+  if (typeof fn !== 'function') return;
+  if (item === globalThis && record.name === 'onerror' && event.type === 'error'
+      && typeof ErrorEvent === 'function' && _isPrototypeOf(ErrorEvent.prototype, event)) {
+    const ret = _reflectApply(fn, item, [event.message, event.filename, event.lineno, event.colno, event.error]);
+    if (ret === true) event.preventDefault();
+    return;
+  }
+  const ret = _callAtBoot(fn, item, event);
+  if (ret === false) event.preventDefault();
+}
+// DOM "inner invoke" for one listener.
+function _callListener(entry, item, event) {
+  const previous = _passiveEvent;
+  const previousEvent = _currentEvent;
+  if (entry.passive) _passiveEvent = event;
+  _currentEvent = _invocationInShadow ? undefined : event;
+  try {
+    if (entry.handler !== null) _runHandler(entry.handler, item, event);
+    else {
+      const callback = entry.callback;
+      if (typeof callback === 'function') _callAtBoot(callback, item, event);
+      else {
+        // An EventListener object: its handleEvent, looked up now. Chromium skips a
+        // listener whose handleEvent is not callable without reporting anything.
+        const handleEvent = callback.handleEvent;
+        if (typeof handleEvent === 'function') _callAtBoot(handleEvent, callback, event);
+      }
+    }
+  } catch (error) {
+    _passiveEvent = previous;
+    _currentEvent = previousEvent;
+    _reportException(error);
+  }
+  _passiveEvent = previous;
+  _currentEvent = previousEvent;
+}
+// The listeners of `item` for one phase: 1 capturing ones, 2 the others, 3 all in
+// registration order (a window or plain target that is the target, as Chromium runs them).
+function _invokeListeners(item, event, type, mode) {
+  let map = _listenerMap(item, false);
+  if (mode !== 1) {
+    const name = item === globalThis ? _windowHandlerTypeNames[type] : _handlerTypeNames[type];
+    if (name !== undefined && (item === globalThis || _isElementTarget(item))) {
+      const records = map === undefined ? undefined : map[_HANDLERS];
+      if (records === undefined || records[name] === undefined) {
+        _discoverHandler(item, name);
+        map = _listenerMap(item, false);
+      }
+    }
+  }
+  const world = _worldListenTypes === null ? null : _worldEntriesAt(item, type, mode);
+  const list = map === undefined ? undefined : map[type];
+  if (list === undefined && world === null) return;
+  const count = list === undefined ? 0 : list.length;
+  const worldCount = world === null ? 0 : world.length;
+  let w = 0;
+  for (let k = 0; k < count; k++) {
+    const entry = list[k];
+    if (entry.removed || (mode === 1 ? !entry.capture : mode === 2 && entry.capture)) continue;
+    while (w < worldCount && world[w][0] < entry.stamp) {
+      _worldInvoke(event, item, world[w]);
+      w++;
+      if (event._immediatePropagationStopped) return;
+    }
+    if (entry.once) _removeEntry(item, type, entry);
+    _callListener(entry, item, event);
+    if (event._immediatePropagationStopped) return;
+  }
+  for (; w < worldCount; w++) {
+    _worldInvoke(event, item, world[w]);
+    if (event._immediatePropagationStopped) return;
+  }
+}
+
+function _isShadowRootNode(node) {
+  return _ShadowRootClass !== null && node !== null && typeof node === 'object'
+    && _isPrototypeOf(_ShadowRootClass.prototype, node);
+}
+function _rootNodeOf(node) {
+  return _isNodeTarget(node) ? _wrap(+_dom('node_root', node._nid)) : null;
+}
+function _inShadowTree(node) { return _isShadowRootNode(_rootNodeOf(node)); }
+// DOM "retarget A against B".
+function _retarget(a, b) {
+  for (let guard = 0; guard < 1000; guard++) {
+    const root = _rootNodeOf(a);
+    if (!_isShadowRootNode(root)) return a;
+    if (b !== globalThis && _isNodeTarget(b)) {
+      let r = _rootNodeOf(b);
+      for (let g = 0; g < 1000; g++) {
+        if (r === root) return a;
+        if (!_isShadowRootNode(r)) break;
+        r = _rootNodeOf(r._host);
+      }
+    }
+    a = root._host;
+  }
+  return a;
+}
+// DOM "dispatch" steps 5.4 to 5.13 for a node target: the event path, four slots per entry
+// (invocation target, the target listeners there see, the relatedTarget they see, flags: 1
+// the entry is at the target, 2 it was reached as an assigned slot). Null when the event
+// goes nowhere (its relatedTarget retargets to the target). Sets _pathClearsTargets.
+function _eventPath(target, event) {
+  _pathClearsTargets = false;
+  const hasRelated = _objectHasOwn(event, 'relatedTarget');
+  const original = hasRelated ? event.relatedTarget : null;
+  const relatedInShadow = original !== null && _isNodeTarget(original) && _inShadowTree(original);
+  let related = relatedInShadow ? _retarget(original, target) : original;
+  if (related === target && target !== original) return null;
+  let shadowSeen = _isShadowRootNode(target);
+  const path = [target, target, related, 1];
+  const raw = _dom('event_path', target._nid);
+  const composed = !!event.composed;
+  let depth = 0, targetDepth = 0, current = target, last = target, previousShadow = shadowSeen, reachesWindow = true;
+  for (let at = 0, len = raw.length; at < len;) {
+    let comma = _stringIndexOf(raw, ',', at);
+    if (comma < 0) comma = len;
+    const viaSlot = _stringCharCodeAt(raw, at) === 115;
+    const parent = _wrap(_Number(_stringSlice(raw, viaSlot ? at + 1 : at, comma)));
+    at = comma + 1;
+    let parentDepth = depth;
+    if (viaSlot) {
+      parentDepth = depth + 1;
+      shadowSeen = true;
+    } else if (previousShadow) {
+      // A shadow root's parent is its host, unless the event is not composed and the root
+      // is the root of the event's target.
+      if (!composed && depth === 0) { reachesWindow = false; break; }
+      parentDepth = depth - 1;
+    }
+    if (parent === null) { reachesWindow = false; break; }
+    if (relatedInShadow) related = _retarget(original, parent);
+    const flags = viaSlot ? 2 : 0;
+    if (parentDepth >= targetDepth) {
+      path[path.length] = parent; path[path.length] = current; path[path.length] = related; path[path.length] = flags;
+    } else if (parent === related) {
+      reachesWindow = false;
+      break;
+    } else {
+      current = parent;
+      targetDepth = parentDepth;
+      path[path.length] = parent; path[path.length] = parent; path[path.length] = related; path[path.length] = flags | 1;
+    }
+    depth = parentDepth;
+    previousShadow = _isShadowRootNode(parent);
+    if (previousShadow) shadowSeen = true;
+    last = parent;
+  }
+  // A document's parent is its window, except for a load event and for a document with no
+  // browsing context (DOMParser's, createHTMLDocument's).
+  if (reachesWindow && last === _realmDocument && event.type !== 'load') {
+    if (relatedInShadow) related = _retarget(original, globalThis);
+    path[path.length] = globalThis; path[path.length] = current; path[path.length] = related; path[path.length] = 0;
+  }
+  if (shadowSeen) {
+    for (let i = 0; i < path.length; i += 4) {
+      if (path[i] !== globalThis && _inShadowTree(path[i])) path[i + 3] |= 4;
+    }
+  }
+  if (shadowSeen || relatedInShadow) {
+    let i = path.length - 4;
+    while (i > 0 && (path[i + 3] & 1) === 0) i -= 4;
+    const r = path[i + 2];
+    _pathClearsTargets = (shadowSeen && _inShadowTree(path[i + 1]))
+      || (relatedInShadow && r !== null && _isNodeTarget(r) && _inShadowTree(r));
+  }
+  return path;
+}
+// The window's path when it is the target itself.
+let _windowOnlyPath = null;
+// DOM "dispatch" (without activation behaviour, which click() runs itself).
+function _eventDispatch(target, event) {
+  _dispatchingAdd(_dispatching, event);
+  const type = event.type;
+  const base = _activeDispatches.length;
+  const hasRelated = _objectHasOwn(event, 'relatedTarget');
+  const outerInShadow = _invocationInShadow;
+  let clear = false;
+  try {
+    _invocationInShadow = false;
+    if (_isNodeTarget(target)) {
+      const path = _eventPath(target, event);
+      if (path !== null) {
+        clear = _pathClearsTargets;
+        _activeDispatches[base] = event;
+        _activeDispatches[base + 1] = path;
+        const n = path.length;
+        for (let i = n - 4; i >= 0; i -= 4) {
+          event.eventPhase = (path[i + 3] & 1) !== 0 ? 2 : 1;
+          event.target = path[i + 1];
+          if (hasRelated) event.relatedTarget = path[i + 2];
+          if (event._propagationStopped) continue;
+          event.currentTarget = path[i];
+          _invocationInShadow = (path[i + 3] & 4) !== 0;
+          _invokeListeners(path[i], event, type, 1);
+        }
+        const bubbles = !!event.bubbles;
+        for (let i = 0; i < n; i += 4) {
+          if ((path[i + 3] & 1) !== 0) event.eventPhase = 2;
+          else if (!bubbles) continue;
+          else event.eventPhase = 3;
+          event.target = path[i + 1];
+          if (hasRelated) event.relatedTarget = path[i + 2];
+          if (event._propagationStopped) continue;
+          event.currentTarget = path[i];
+          _invocationInShadow = (path[i + 3] & 4) !== 0;
+          _invokeListeners(path[i], event, type, 2);
+        }
+      }
+    } else {
+      if (target === globalThis) {
+        if (_windowOnlyPath === null) _windowOnlyPath = [globalThis, globalThis, null, 1];
+        _activeDispatches[base] = event;
+        _activeDispatches[base + 1] = _windowOnlyPath;
+      }
+      event.target = target;
+      event.eventPhase = 2;
+      if (!event._propagationStopped) {
+        event.currentTarget = target;
+        _invokeListeners(target, event, type, 3);
+      }
+    }
+  } finally {
+    _invocationInShadow = outerInShadow;
+    _activeDispatches.length = base;
+    event.eventPhase = 0;
+    event.currentTarget = null;
+    if (clear) {
+      event.target = null;
+      if (hasRelated) event.relatedTarget = null;
+    }
+    event._propagationStopped = false;
+    event._immediatePropagationStopped = false;
+    _dispatchingDelete(_dispatching, event);
+    if (_worldListenTypes !== null) _worldEventForget(event);
+  }
   return !event.defaultPrevented;
 }
+// The window's load event: Chromium dispatches it at the window with the document as its
+// target, running the window's listeners in registration order at the target.
+function _dispatchWindowLoad(event, doc) {
+  if (_dispatchingHas(_dispatching, event)) return;
+  if (!_trustedPendingTake(_trustedPending, event)) _trustedDelete(_trustedEvents, event);
+  _dispatchingAdd(_dispatching, event);
+  const base = _activeDispatches.length;
+  const outerInShadow = _invocationInShadow;
+  try {
+    _invocationInShadow = false;
+    if (_windowOnlyPath === null) _windowOnlyPath = [globalThis, globalThis, null, 1];
+    _activeDispatches[base] = event;
+    _activeDispatches[base + 1] = _windowOnlyPath;
+    event.target = doc || globalThis;
+    event.eventPhase = 2;
+    event.currentTarget = globalThis;
+    _invokeListeners(globalThis, event, 'load', 3);
+  } finally {
+    _invocationInShadow = outerInShadow;
+    _activeDispatches.length = base;
+    event.eventPhase = 0;
+    event.currentTarget = null;
+    event._propagationStopped = false;
+    event._immediatePropagationStopped = false;
+    _dispatchingDelete(_dispatching, event);
+  }
+}
+// HTML's focus update steps, for focus() and blur(): blur and focusout at the element
+// losing focus, then focus and focusin at the one gaining it.
+function _fireFocusChange(from, to) {
+  const fire = (target, type, bubbles, related) => {
+    try {
+      _dispatch(target, _markTrusted(new FocusEvent(type, { bubbles, composed: true, relatedTarget: related, view: globalThis })));
+    } catch (_) {}
+  };
+  if (from !== null && from !== undefined && _isNodeTarget(from)) {
+    fire(from, 'blur', false, to);
+    fire(from, 'focusout', true, to);
+  }
+  if (to !== null && to !== undefined && _isNodeTarget(to)) {
+    fire(to, 'focus', false, from || null);
+    fire(to, 'focusin', true, from || null);
+  }
+}
+// Event.composedPath() during a dispatch, with DOM's hiding of closed shadow trees.
+function _composedPath(event) {
+  let path = null;
+  for (let i = _activeDispatches.length - 2; i >= 0; i -= 2) {
+    if (_activeDispatches[i] === event) { path = _activeDispatches[i + 1]; break; }
+  }
+  const currentTarget = event.currentTarget;
+  if (path === null || currentTarget === null) return [];
+  const n = path.length / 4;
+  const closedRoot = (k) => {
+    const node = path[k * 4];
+    return _isShadowRootNode(node) && node._mode === 'closed';
+  };
+  const closedSlot = (k) => {
+    if ((path[k * 4 + 3] & 2) === 0) return false;
+    const root = _rootNodeOf(path[k * 4]);
+    return _isShadowRootNode(root) && root._mode === 'closed';
+  };
+  let currentIndex = 0, hidden = 0;
+  for (let k = n - 1; k >= 0; k--) {
+    if (closedRoot(k)) hidden++;
+    if (path[k * 4] === currentTarget) { currentIndex = k; break; }
+    if (closedSlot(k)) hidden--;
+  }
+  const before = [];
+  let level = hidden, max = hidden;
+  for (let k = currentIndex - 1; k >= 0; k--) {
+    if (closedRoot(k)) level++;
+    if (level <= max) before[before.length] = path[k * 4];
+    if (closedSlot(k)) { level--; if (level < max) max = level; }
+  }
+  const out = [];
+  for (let k = before.length - 1; k >= 0; k--) out[out.length] = before[k];
+  out[out.length] = currentTarget;
+  level = hidden; max = hidden;
+  for (let k = currentIndex + 1; k < n; k++) {
+    if (closedSlot(k)) level++;
+    if (level <= max) out[out.length] = path[k * 4];
+    if (closedRoot(k)) { level--; if (level < max) max = level; }
+  }
+  return out;
+}
+
+// HTML's event handler IDL attributes, as the accessors Chromium 141 has, on the interfaces
+// it puts them on (enumerable, configurable; the window's are its own). DEVIATION from
+// crates/obscura-js/js/bootstrap.js, whose on* members were null data properties on
+// Element.prototype, Document.prototype and the window (with WindowEventHandlers names on
+// elements and window.onload the one accessor) that only the element dispatch read, running
+// `this['on' + type]` before every listener. Here they are HTML's event handlers: a set
+// registers a listener at the first non-null value, which keeps its place among the target's
+// listeners while it stays set; `return false` cancels (window.onerror: `return true`, with
+// its five arguments); a content attribute (`onclick="..."`) is compiled on first use with
+// the document, the form owner and the element in scope; <body>/<frameset> forward the
+// window's handlers.
+function _installEventHandlerAttributes() {
+  const split = (text) => {
+    const out = [];
+    let start = 0;
+    for (let i = 0; i <= text.length; i++) {
+      if (i === text.length || text[i] === ' ') { if (i > start) out[out.length] = 'on' + _stringSlice(text, start, i); start = i + 1; }
+    }
+    return out;
+  };
+  const shared = 'abort animationend animationiteration animationstart auxclick beforeinput beforematch '
+    + 'beforetoggle beforexrselect blur cancel canplay canplaythrough change click close command '
+    + 'contentvisibilityautostatechange contextlost contextmenu contextrestored cuechange dblclick drag '
+    + 'dragend dragenter dragleave dragover dragstart drop durationchange emptied ended error focus formdata '
+    + 'gotpointercapture input invalid keydown keypress keyup load loadeddata loadedmetadata loadstart '
+    + 'lostpointercapture mousedown mouseenter mouseleave mousemove mouseout mouseover mouseup mousewheel '
+    + 'pause play playing pointercancel pointerdown pointerenter pointerleave pointermove pointerout '
+    + 'pointerover pointerrawupdate pointerup progress ratechange reset resize scroll scrollend '
+    + 'scrollsnapchange scrollsnapchanging securitypolicyviolation seeked seeking select selectionchange '
+    + 'selectstart slotchange stalled submit suspend timeupdate toggle transitioncancel transitionend '
+    + 'transitionrun transitionstart volumechange waiting webkitanimationend webkitanimationiteration '
+    + 'webkitanimationstart webkittransitionend wheel';
+  const htmlElement = split(shared + ' copy cut paste');
+  const element = split('beforecopy beforecut beforepaste fullscreenchange fullscreenerror search webkitfullscreenchange webkitfullscreenerror');
+  const document = split(shared + ' beforecopy beforecut beforepaste copy cut paste freeze fullscreenchange '
+    + 'fullscreenerror pointerlockchange pointerlockerror prerenderingchange readystatechange resume search '
+    + 'visibilitychange webkitfullscreenchange webkitfullscreenerror');
+  const body = split('afterprint beforeprint beforeunload blur error focus hashchange languagechange load '
+    + 'message messageerror offline online pagehide pageshow popstate rejectionhandled resize scroll storage '
+    + 'unhandledrejection unload');
+  const window = split(shared + ' afterprint appinstalled beforeinstallprompt beforeprint beforeunload '
+    + 'devicemotion deviceorientation deviceorientationabsolute hashchange languagechange message messageerror '
+    + 'offline online pagehide pagereveal pageshow pageswap popstate rejectionhandled search storage '
+    + 'unhandledrejection unload');
+  const media = split('encrypted waitingforkey');
+  const types = _objectCreate(null);
+  for (const list of [htmlElement, element, media]) for (const name of list) types[_stringSlice(name, 2)] = name;
+  const windowTypes = _objectCreate(null);
+  for (const name of window) windowTypes[_stringSlice(name, 2)] = name;
+  const reflected = _objectCreate(null);
+  for (const name of body) reflected[name] = true;
+  _handlerTypeNames = types;
+  _windowHandlerTypeNames = windowTypes;
+  _bodyReflectedHandlers = reflected;
+
+  const illegal = () => { throw new TypeError('Illegal invocation'); };
+  const install = (proto, names, receiver) => {
+    if (!proto) return;
+    for (const name of names) {
+      const d = _getOwnPropertyDescriptor({
+        get [name]() { return _handlerGet(receiver(this), name); },
+        set [name](value) { _handlerSet(receiver(this), name, value); },
+      }, name);
+      _markNativeAs(d.get, 'function get ' + name + '() { [native code] }');
+      _markNativeAs(d.set, 'function set ' + name + '() { [native code] }');
+      _defineProperty(proto, name, { get: d.get, set: d.set, enumerable: true, configurable: true });
+    }
+  };
+  const anElement = (self) => (_isElementTarget(self) && typeof self._nid === 'number' ? self : illegal());
+  const aDocument = (self) => (self !== null && typeof self === 'object' && _isPrototypeOf(Document.prototype, self) ? self : illegal());
+  const aShadowRoot = (self) => (_isShadowRootNode(self) ? self : illegal());
+  const theWindow = () => globalThis;
+  const bodyWindow = (self) => { anElement(self); return globalThis; };
+  install(HTMLElement.prototype, htmlElement, anElement);
+  if (typeof globalThis.SVGElement === 'function') install(globalThis.SVGElement.prototype, htmlElement, anElement);
+  if (typeof globalThis.MathMLElement === 'function') install(globalThis.MathMLElement.prototype, htmlElement, anElement);
+  install(Element.prototype, element, anElement);
+  install(Document.prototype, document, aDocument);
+  if (_ShadowRootClass !== null) install(_ShadowRootClass.prototype, ['onslotchange'], aShadowRoot);
+  if (typeof globalThis.HTMLMediaElement === 'function') install(globalThis.HTMLMediaElement.prototype, media, anElement);
+  for (const name of ['HTMLBodyElement', 'HTMLFrameSetElement']) {
+    if (typeof globalThis[name] === 'function') install(globalThis[name].prototype, body, bodyWindow);
+  }
+  install(globalThis, window, theWindow);
+  // window.event: the event a listener is running for, undefined outside one ([Replaceable]).
+  const eventDesc = _getOwnPropertyDescriptor({
+    get event() { return _currentEvent; },
+    set event(value) { _defineProperty(globalThis, 'event', { value, writable: true, enumerable: true, configurable: true }); },
+  }, 'event');
+  _markNativeAs(eventDesc.get, 'function get event() { [native code] }');
+  _markNativeAs(eventDesc.set, 'function set event() { [native code] }');
+  _defineProperty(globalThis, 'event', { get: eventDesc.get, set: eventDesc.set, enumerable: true, configurable: true });
+}
+// The window's own members until _shapeGlobalObject leaves them on EventTarget.prototype.
+globalThis.addEventListener = _eventTargetMembers.addEventListener;
+globalThis.removeEventListener = _eventTargetMembers.removeEventListener;
+globalThis.dispatchEvent = _eventTargetMembers.dispatchEvent;
+function _eventTargetDispatch(target, event) { return _dispatchChecked(target, event); }
 
 // ---- Custom element reactions ---------------------------------------------------------------
 // DEVIATION from crates/obscura-js/js/bootstrap.js, whose registry upgraded what define()
@@ -2245,21 +2948,7 @@ function _ceLookup(localName, isValue) {
   return null;
 }
 // HTML "report the exception": the window's error event, then the console.
-function _ceReport(error) {
-  let text = "";
-  try {
-    text = error !== null && typeof error === "object"
-      ? String(error.name) + ": " + String(error.message)
-      : String(error);
-  } catch (_) {}
-  let prevented = false;
-  try {
-    const event = new ErrorEvent("error", { message: "Uncaught " + text, error, cancelable: true });
-    _dispatch(globalThis, event);
-    prevented = event.defaultPrevented;
-  } catch (_) {}
-  if (!prevented) { try { console.error(error); } catch (_) {} }
-}
+function _ceReport(error) { _reportException(error); }
 function _ceReactionsOf(el) {
   let reactions = el._ceReactions;
   if (reactions === undefined) {
@@ -2777,10 +3466,9 @@ function _seedUnchangedConnection(node, connected) {
 // surface and `window instanceof EventTarget` was false (SECURITY.md I10). The
 // methods here serve plain targets until _shapeGlobalObject makes them the one
 // entry for every node, the document and the window, as Chromium's are.
-class EventTarget {
-  addEventListener(type, callback) { _eventTargetAdd(this, type, callback, arguments[2]); }
-  removeEventListener(type, callback) { _eventTargetRemove(this, type, callback, arguments[2]); }
-  dispatchEvent(event) { return _eventTargetDispatch(this, event); }
+class EventTarget {}
+for (const _name of ['addEventListener', 'removeEventListener', 'dispatchEvent']) {
+  _defineProperty(EventTarget.prototype, _name, { value: _eventTargetMembers[_name], writable: true, enumerable: true, configurable: true });
 }
 _defineProperty(EventTarget.prototype, Symbol.toStringTag, { value: 'EventTarget', configurable: true });
 
@@ -3193,16 +3881,8 @@ class Node {
     return true;
   }
   isSameNode(other) { return other && this._nid === other._nid; }
-  addEventListener(type, callback, options) {
-    _eventTargetAdd(this, type, callback, options);
-  }
-  removeEventListener(type, callback, options) {
-    _eventTargetRemove(this, type, callback, options);
-  }
-  dispatchEvent(event) {
-    return _eventTargetDispatch(this, event);
-  }
 }
+_NodeProtoAtBoot = Node.prototype;
 // DOM "replace data" over the whole of a CharacterData node: data, nodeValue and textContent
 // all end here, so each queues the one characterData record Chromium does. `value` is the
 // setter's argument; textContent and nodeValue pass null (and undefined) as "".
@@ -4412,6 +5092,7 @@ class Element extends Node {
       : null;
     const value = String(v);
     const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, null) : undefined;
+    const handlerTarget = _handlerAttributeWillChange(this, n);
     _dom("set_attribute", this._nid, n + "\0" + value);
     if (n === "srcdoc" && this.localName === "iframe") {
       _loadIframeSrcdoc(this);
@@ -4433,11 +5114,7 @@ class Element extends Node {
       }
     }
     if (n === "style") this._style._replaceFromAttribute(value);
-    if (n === "onload" && _isWindowReflectingBodyElement(this)) {
-      _windowOnloadOverrideSet = false;
-      _windowOnloadOverride = null;
-      if (this.__inlineHandlerCache) delete this.__inlineHandlerCache.onload;
-    }
+    if (handlerTarget !== null) _handlerAttributeChanged(handlerTarget, this, n, value);
     if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev);
     if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('attributes', this._nid, [], [], n);
     if (this.localName === "source"
@@ -4477,6 +5154,7 @@ class Element extends Node {
     const removedSrcdoc = n === "srcdoc" && this.localName === "iframe"
       && _hostDom.getAttribute(this, "srcdoc") !== null;
     const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, null) : undefined;
+    const handlerTarget = _handlerAttributeWillChange(this, n);
     _dom("remove_attribute", this._nid, n);
     if (removedSrcdoc) _iframeAttributeChanged(this, n);
     if (this._nullNamespaceAttrs instanceof Map) {
@@ -4487,11 +5165,7 @@ class Element extends Node {
       _reconcileWindowNamedProperty(previousWindowName);
     }
     if (n === "style") this._style._replaceFromAttribute("");
-    if (n === "onload" && _isWindowReflectingBodyElement(this)) {
-      _windowOnloadOverrideSet = false;
-      _windowOnloadOverride = null;
-      if (this.__inlineHandlerCache) delete this.__inlineHandlerCache.onload;
-    }
+    if (handlerTarget !== null) _handlerAttributeChanged(handlerTarget, this, n, null);
     if (popoverPrev !== undefined) this._popoverTypeMaybeChanged(popoverPrev);
     if (this.localName === "source"
         && (n === "srcset" || n === "sizes" || n === "media" || n === "type")) {
@@ -4640,80 +5314,6 @@ class Element extends Node {
     }
     return null;
   }
-  // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): an element's
-  // listeners are stored and run without the page's Array.prototype.push, filter and
-  // iterator, in lists with no prototype, and the event bubbles by parentNode as bootstrap
-  // defined it. A page that replaced any of them (or put an accessor named after an event
-  // type on Object.prototype) silenced every listener added afterwards, and with it the
-  // clicks and keys a CDP client sends, where Chromium's dispatch is native.
-  addEventListener(type, handler, opts) {
-    // A null listener is ignored, as in DOM's "add an event listener".
-    if (handler === null || (typeof handler !== 'function' && typeof handler !== 'object')) return;
-    const key = this._nid;
-    let byType = _eventRegistry[key];
-    if (!byType) byType = _eventRegistry[key] = _objectCreate(null);
-    let list = byType[type];
-    if (!list) list = byType[type] = [];
-    list[list.length] = handler;
-    _stampHandler(handler);
-  }
-  removeEventListener(type, handler) {
-    const byType = _eventRegistry[this._nid];
-    const list = byType ? byType[type] : undefined;
-    if (!list) return;
-    const kept = [];
-    for (let i = 0; i < list.length; i++) if (list[i] !== handler) kept[kept.length] = list[i];
-    byType[type] = kept;
-  }
-  dispatchEvent(event) {
-    if (!event) return true;
-    if (!event.target) event.target = this;
-    event.currentTarget = this;
-    // Spec: inline `onclick="..."` content attributes are event handlers
-    // for the matching event type. Fire them alongside any
-    // addEventListener handlers. Also honor the IDL property
-    // `el.onclick = fn` if set. Without this, b.click() never invokes
-    // the inline handler and forms with onsubmit / buttons with onclick
-    // are silently dead.
-    const handlerName = 'on' + event.type;
-    const inlineFn = this[handlerName] || this._resolveInlineHandler(handlerName);
-    if (typeof inlineFn === 'function') {
-      try {
-        const ret = _reflectApply(inlineFn, this, [event]);
-        if (ret === false) event.preventDefault();
-      } catch(e) { console.error(e); }
-    }
-    const byType = _eventRegistry[this._nid];
-    const handlers = (byType && byType[event.type]) || [];
-    if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 4) !== 0) {
-      // Port addition (SECURITY.md M6): isolated worlds listen on this node too.
-      _worldRunListeners(this, event, handlers, false);
-    } else {
-      for (let i = 0; i < handlers.length; i++) {
-        try { _invokeListener(handlers[i], this, event); } catch(e) { console.error(e); }
-        if (event._immediatePropagationStopped) break;
-      }
-    }
-    const parent = event.bubbles && !event._propagationStopped ? _elGet('parentNode', this) : null;
-    if (parent) {
-      _bubble(parent, event);
-    }
-    return !event.defaultPrevented;
-  }
-  _resolveInlineHandler(name) {
-    // name = 'onclick' / 'onsubmit' / etc. Compile the content attribute
-    // as a function body on first read and cache it on the instance.
-    const cache = this.__inlineHandlerCache || (this.__inlineHandlerCache = {});
-    if (_objectHasOwn(cache, name)) return cache[name];
-    const src = this.getAttribute && this.getAttribute(name);
-    if (!src) { cache[name] = null; return null; }
-    try {
-      cache[name] = new Function('event', src);
-    } catch (e) {
-      cache[name] = null;
-    }
-    return cache[name];
-  }
   click() {
     // A label activating this control on behalf of a real input event passes a
     // private token so the forwarded events stay trusted. Read from arguments
@@ -4767,7 +5367,10 @@ class Element extends Node {
         this.indeterminate = false;
       }
     }
-    const _clickEvent = new MouseEvent("click", {bubbles: true, cancelable: true});
+    // Composed, as Chromium's (a click inside a shadow tree reaches the document).
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, whose click stopped at the root.
+    // Chromium's is a PointerEvent; this one stays a MouseEvent.
+    const _clickEvent = new MouseEvent("click", {bubbles: true, cancelable: true, composed: true, view: globalThis});
     if (_trusted) _markTrusted(_clickEvent);
     const cancelled = !_dispatch(this, _clickEvent);
     if (cancelled) {
@@ -4831,8 +5434,16 @@ class Element extends Node {
       }
     }
   }
-  focus() { _setFocused(this); _clickTarget = this; }
-  blur() { if (_getFocused() === this) _setFocused(null); }
+  // HTML's focus update steps fire blur/focusout at the element losing focus and
+  // focus/focusin at the one gaining it, trusted, composed, each naming the other as its
+  // relatedTarget. DEVIATION from crates/obscura-js/js/bootstrap.js, whose focus() and
+  // blur() moved the focused element and fired nothing.
+  focus() {
+    const previous = _getFocused();
+    _setFocused(this); _clickTarget = this;
+    if (previous !== this) _fireFocusChange(previous, this);
+  }
+  blur() { if (_getFocused() === this) { _setFocused(null); _fireFocusChange(this, null); } }
 
   // --- Popover API (HTML "popover") ---------------------------------------
   // Read the popover content attribute case-insensitively. The HTML parser
@@ -4932,10 +5543,6 @@ class Element extends Node {
   set open(v) { if (v) { if (!this.hasAttribute('open')) this.setAttribute('open', ''); } else if (this.hasAttribute('open')) { this.removeAttribute('open'); this._dialogModal = false; } }
   get returnValue() { return this._returnValue != null ? this._returnValue : ''; }
   set returnValue(v) { this._returnValue = String(v); }
-  get oncancel() { return this._oncancel || null; }
-  set oncancel(f) { this._oncancel = typeof f === 'function' ? f : null; }
-  get onclose() { return this._onclose || null; }
-  set onclose(f) { this._onclose = typeof f === 'function' ? f : null; }
   get closedBy() { const v = (this.getAttribute('closedby') || '').toLowerCase(); return (v === 'any' || v === 'closerequest' || v === 'none') ? v : 'auto'; }
   set closedBy(v) { this.setAttribute('closedby', String(v)); }
   show() {
@@ -6133,6 +6740,7 @@ class Element extends Node {
 // HTMLElement is its own interface between Element and the HTML element interfaces, as
 // in Chromium, so SVG and null-namespace elements are not instances of it. The per-tag
 // interfaces are defined with the others further down (_htmlTagClasses).
+_elementProtoAtBoot = Element.prototype;
 class HTMLElement extends Element {
   // Port additions: HTMLElement members the shim had no form of (Chromium 141).
   get outerText() { return this.innerText; }
@@ -6799,48 +7407,23 @@ class Document extends Node {
     };
     // The interfaces defined with the global interfaces near the end of this file.
     const extra = _createEventExtra ? _createEventExtra[normalized] : undefined;
-    if (extra) return extra();
-    const Cls = map[normalized];
-    if (!Cls) {
-      throw new DOMException(
-        `The provided event type ('${eventType}') is invalid`,
-        'NotSupportedError'
-      );
+    let created;
+    if (extra) created = extra();
+    else {
+      const Cls = map[normalized];
+      if (!Cls) {
+        throw new DOMException(
+          `The provided event type ('${eventType}') is invalid`,
+          'NotSupportedError'
+        );
+      }
+      created = new Cls('');
     }
-    return new Cls('');
+    // Not initialized until initEvent: dispatching it first throws InvalidStateError.
+    if (created !== null && typeof created === 'object') _dispatchingAdd(_uninitializedEvents, created);
+    return created;
   }
   createRange() { return new Range(); }
-  // DEVIATION from crates/obscura-js/js/bootstrap.js (SECURITY.md L10): as Element's, the
-  // document's listeners are kept and run without the page's Array methods.
-  addEventListener(type, fn, opts) {
-    // A function or an EventListener object (handleEvent); null is ignored.
-    if (fn === null || (typeof fn !== 'function' && typeof fn !== 'object')) return;
-    if (!this._listeners) this._listeners = _objectCreate(null);
-    let list = this._listeners[type];
-    if (!list) list = this._listeners[type] = [];
-    for (let i = 0; i < list.length; i++) if (list[i] === fn) return;
-    list[list.length] = fn;
-    _stampHandler(fn);
-  }
-  removeEventListener(type, fn) {
-    const list = this._listeners ? this._listeners[type] : undefined;
-    if (!list) return;
-    const kept = [];
-    for (let i = 0; i < list.length; i++) if (list[i] !== fn) kept[kept.length] = list[i];
-    this._listeners[type] = kept;
-  }
-  dispatchEvent(event) {
-    if (!event) return true;
-    const list = this._listeners ? this._listeners[event.type] : undefined;
-    const handlers = list ? _arraySlice(list) : [];
-    if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 4) !== 0 && typeof this._nid === 'number') {
-      // Port addition (SECURITY.md M6): isolated worlds listen on the document too.
-      _worldRunListeners(this, event, handlers, true);
-      return !event.defaultPrevented;
-    }
-    for (let i = 0; i < handlers.length; i++) { try { _invokeListener(handlers[i], this, event); } catch(e) { console.error('document event error:', e); } }
-    return !event.defaultPrevented;
-  }
   createTreeWalker(root, whatToShow, filter) {
     // whatToShow is unsigned long; default SHOW_ALL only when the arg is omitted.
     // An explicit 0 (show nothing) must stay 0, not become SHOW_ALL.
@@ -7444,18 +8027,19 @@ class HTMLImageElement extends HTMLElement {
     this._queueImageRequest();
     return this._imageNaturalHeight;
   }
-  get onload() { return this._imageOnload || null; }
+  // The element's event handlers, plus the image request a handler starts.
+  get onload() { return _handlerGet(this, "onload"); }
   set onload(value) {
-    this._imageOnload = typeof value === "function" ? value : null;
-    if (this._imageOnload) {
+    _handlerSet(this, "onload", value);
+    if (typeof value === "function") {
       this._refreshImageFromCache();
       this._queueImageRequest();
     }
   }
-  get onerror() { return this._imageOnerror || null; }
+  get onerror() { return _handlerGet(this, "onerror"); }
   set onerror(value) {
-    this._imageOnerror = typeof value === "function" ? value : null;
-    if (this._imageOnerror) {
+    _handlerSet(this, "onerror", value);
+    if (typeof value === "function") {
       this._refreshImageFromCache();
       this._queueImageRequest();
     }
@@ -8267,15 +8851,10 @@ function _isFragmentOnlyChange(current, target) {
       && a.pathname === b.pathname && a.search === b.search
       && _rawFragment(current) !== _rawFragment(target);
 }
-// window.dispatchEvent only runs addEventListener registrations, so the
-// `window.onhashchange = fn` / `window.onpopstate = fn` form (still common in
-// hash routers) would never be called.
+// The window's onhashchange / onpopstate handlers are listeners in the window's list, run
+// by the dispatch in registration order; the event is the user agent's, so trusted.
 function _dispatchWindowEventWithHandler(ev, handlerName) {
-  try { _dispatch(globalThis, ev); } catch (e) { console.error(e); }
-  try {
-    const handler = globalThis[handlerName];
-    if (typeof handler === 'function') _reflectApply(handler, globalThis, [ev]);
-  } catch (e) { console.error(e); }
+  try { _dispatch(globalThis, _markTrusted(ev)); } catch (e) { console.error(e); }
 }
 // The History object and its methods as bootstrap defined them, set where History is.
 let _bootHistory = null;
@@ -8384,51 +8963,10 @@ globalThis.frames = globalThis;
 globalThis.frameElement = null;
 globalThis.length = 0;
 
-// HTML spec exposes on* event handler IDL attributes via the GlobalEventHandlers
-// mixin on Window, Document, and HTMLElement. Libraries feature-detect the modern
-// event path through these: jQuery checks `("on" + ev) in window`, and React
-// decides whether the `input` event is supported via `("oninput" in document)`.
-// When that check fails React falls back to a legacy change-detection path that
-// never fires onChange for controlled inputs (issue #324). Initialising these to
-// null on all three targets makes the checks match real browsers. On Document and
-// Element they are non-enumerable so they don't surface in `for..in` over nodes.
-for (const _ev of [
-  "abort","beforeprint","beforeunload","blur","cancel","canplay","canplaythrough",
-  "change","click","close","contextmenu","cuechange","dblclick","drag","dragend",
-  "dragenter","dragleave","dragover","dragstart","drop","durationchange","emptied",
-  "ended","error","focus","formdata","gotpointercapture",
-  "hashchange","input","invalid","keydown","keypress","keyup","languagechange",
-  "load","loadeddata","loadedmetadata","loadstart","lostpointercapture","message",
-  "mousedown","mouseenter","mouseleave","mousemove","mouseout","mouseover","mouseup",
-  "offline","online","pagehide","pageshow","pause","play","playing",
-  "pointercancel","pointerdown","pointerenter","pointerleave","pointermove",
-  "pointerout","pointerover","pointerup","popstate","progress","ratechange",
-  "rejectionhandled","reset","resize","scroll","seeked","seeking","select",
-  "stalled","storage","submit","suspend","timeupdate","toggle","unhandledrejection",
-  "unload","volumechange","waiting","wheel",
-]) {
-  const _on = "on" + _ev;
-  if (!(_on in globalThis)) globalThis[_on] = null;
-  for (const _proto of [Document.prototype, Element.prototype]) {
-    if (!(_on in _proto)) {
-      Object.defineProperty(_proto, _on, { value: null, writable: true, configurable: true, enumerable: false });
-    }
-  }
-}
-// DEVIATION from crates/obscura-js/js/bootstrap.js, whose list above also has focusin,
-// focusout and paste, for all three targets. Chromium 141 has no onfocusin or onfocusout
-// anywhere, and oncopy, oncut and onpaste only on documents and elements (the
-// DocumentAndElementEventHandlers mixin), never on the window (SECURITY.md I10).
-for (const _ev of ["copy", "cut", "paste"]) {
-  for (const _proto of [Document.prototype, Element.prototype]) {
-    if (!(("on" + _ev) in _proto)) {
-      Object.defineProperty(_proto, "on" + _ev, { value: null, writable: true, configurable: true, enumerable: false });
-    }
-  }
-}
-
-let _windowOnloadOverrideSet = false;
-let _windowOnloadOverride = null;
+// The on* event handler IDL attributes are installed by _installEventHandlerAttributes,
+// once every interface they live on exists. Libraries feature-detect through them: jQuery
+// checks `("on" + ev) in window`, and React decides whether the `input` event is supported
+// via `("oninput" in document)` (issue #324).
 function _windowReflectingBodyElement() {
   const document = globalThis.document;
   return document && (document.body || _qs(document, 'frameset'));
@@ -8436,38 +8974,6 @@ function _windowReflectingBodyElement() {
 function _isWindowReflectingBodyElement(element) {
   return element === _windowReflectingBodyElement();
 }
-Object.defineProperty(globalThis, 'onload', {
-  get() {
-    if (_windowOnloadOverrideSet) return _windowOnloadOverride;
-    const body = _windowReflectingBodyElement();
-    return body && body._resolveInlineHandler
-      ? body._resolveInlineHandler('onload')
-      : null;
-  },
-  set(value) {
-    _windowOnloadOverrideSet = true;
-    _windowOnloadOverride = typeof value === 'function' ? value : null;
-  },
-  configurable: true,
-  enumerable: true,
-});
-Object.defineProperty(Element.prototype, 'onload', {
-  get() {
-    if (_isWindowReflectingBodyElement(this)) {
-      return globalThis.onload;
-    }
-    return this.__onload || null;
-  },
-  set(value) {
-    if (_isWindowReflectingBodyElement(this)) {
-      globalThis.onload = value;
-      return;
-    }
-    this.__onload = typeof value === 'function' ? value : null;
-  },
-  configurable: true,
-  enumerable: false,
-});
 
 // The global's prototype chain, as Chromium's: window -> Window.prototype ->
 // WindowProperties -> EventTarget.prototype -> Object.prototype. DEVIATION from
@@ -13024,30 +13530,40 @@ Event = globalThis.Event = class Event {
   type = ''; bubbles = false; cancelable = false; composed = false; defaultPrevented = false;
   target = null; currentTarget = null; eventPhase = 0; timeStamp = 0;
   _propagationStopped = false; _immediatePropagationStopped = false;
-  constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=Date.now();this._propagationStopped=false;this._immediatePropagationStopped=false; }
+  // timeStamp is a DOMHighResTimeStamp on performance.now()'s clock, as in Chromium.
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, whose Date.now() put event times
+  // decades away from performance.now() and requestAnimationFrame's timestamps.
+  constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'Event': 1 argument required, but only 0 present."); if (o === null || o === undefined) o = {}; this.type=String(t);this.bubbles=!!o.bubbles;this.cancelable=!!o.cancelable;this.composed=!!o.composed;this.defaultPrevented=false;this.target=null;this.currentTarget=null;this.eventPhase=0;this.timeStamp=_eventTimeStamp();this._propagationStopped=false;this._immediatePropagationStopped=false; }
   get isTrusted() { return _trustedHas(_trustedEvents, this); }
-  preventDefault() { if (this.cancelable) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
-  initEvent(type,bubbles,cancelable) { if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present."); this.type=String(type);this.bubbles=!!bubbles;this.cancelable=!!cancelable;this.defaultPrevented=false;this._propagationStopped=false;this._immediatePropagationStopped=false; }
-  composedPath() {
-    if (!this.target) return [];
-    const path = [];
-    let n = this.target;
-    while (n) { path.push(n); n = n.parentNode || null; }
-    if (typeof window !== "undefined" && window && path[path.length - 1] !== window) path.push(window);
-    return path;
-  }
+  // A passive listener's preventDefault() does nothing (DOM "set the canceled flag").
+  preventDefault() { if (this.cancelable && _passiveEvent !== this) this.defaultPrevented=true; } stopPropagation(){ this._propagationStopped=true; } stopImmediatePropagation(){ this._propagationStopped=true; this._immediatePropagationStopped=true; }
+  // The legacy members, as DOM defines them: srcElement is target, cancelBubble the stop
+  // propagation flag (setting false does nothing), returnValue the inverse of the canceled
+  // flag (setting false cancels).
+  get srcElement() { return this.target; }
+  get cancelBubble() { return this._propagationStopped; }
+  set cancelBubble(value) { if (value) this._propagationStopped = true; }
+  get returnValue() { return !this.defaultPrevented; }
+  set returnValue(value) { if (!value) this.preventDefault(); }
+  // DOM "initialize": nothing while the event is being dispatched.
+  initEvent(type,bubbles,cancelable) { if (arguments.length < 1) throw new TypeError("Failed to execute 'initEvent' on 'Event': 1 argument required, but only 0 present."); if (_dispatchingHas(_dispatching, this)) return; _dispatchingDelete(_uninitializedEvents, this); _trustedDelete(_trustedEvents, this); this.type=String(type);this.bubbles=!!bubbles;this.cancelable=!!cancelable;this.defaultPrevented=false;this.target=null;this._propagationStopped=false;this._immediatePropagationStopped=false; }
+  composedPath() { return _composedPath(this); }
 };
 _markNative(Event);
+_EventProtoAtBoot = Event.prototype;
+for (const [_name, _value] of [['NONE', 0], ['CAPTURING_PHASE', 1], ['AT_TARGET', 2], ['BUBBLING_PHASE', 3]]) {
+  _defineProperty(Event, _name, { value: _value, writable: false, enumerable: true, configurable: false });
+  _defineProperty(Event.prototype, _name, { value: _value, writable: false, enumerable: true, configurable: false });
+}
 CustomEvent = globalThis.CustomEvent = class extends Event {
   constructor(t,o={}) { if (arguments.length < 1) throw new TypeError("Failed to construct 'CustomEvent': 1 argument required, but only 0 present."); super(t,o);this.detail=o.detail!==undefined?o.detail:null; }
   // Legacy DOM Level 2 init; some libraries (Starbucks China bundle, older
   // analytics shims) still call createEvent('CustomEvent') + initCustomEvent
   // instead of new CustomEvent(...). See issue #41.
   initCustomEvent(type,bubbles,cancelable,detail) {
-    this.type = type;
-    this.bubbles = !!bubbles;
-    this.cancelable = !!cancelable;
-    this.detail = detail;
+    if (_dispatchingHas(_dispatching, this)) return;
+    this.initEvent(type, bubbles, cancelable);
+    this.detail = detail === undefined ? null : detail;
   }
 };
 MouseEvent = globalThis.MouseEvent = class extends Event {
@@ -13091,7 +13607,12 @@ KeyboardEvent = globalThis.KeyboardEvent = class extends Event {
 };
 FocusEvent = globalThis.FocusEvent = class extends Event { constructor(t,o={}) { super(t,o);this.relatedTarget=o.relatedTarget||null; } };
 InputEvent = globalThis.InputEvent = class extends Event { constructor(t,o={}) { super(t,o);this.data=o.data||null;this.inputType=o.inputType||""; } };
-ErrorEvent = globalThis.ErrorEvent = class extends Event { constructor(t,o={}) { super(t,o);this.message=o.message||"";this.error=o.error||null; } };
+// filename, lineno and colno as ErrorEventInit has them, which window.onerror receives; an
+// absent error is undefined, as in Chromium (Rust: no position, error null).
+ErrorEvent = globalThis.ErrorEvent = class extends Event {
+  message = ""; filename = ""; lineno = 0; colno = 0; error = undefined;
+  constructor(t,o={}) { super(t,o); if (o === null || o === undefined) o = {}; this.message=o.message===undefined?"":String(o.message);this.filename=o.filename===undefined?"":String(o.filename);this.lineno=o.lineno>>>0;this.colno=o.colno>>>0;this.error=o.error; }
+};
 PointerEvent = globalThis.PointerEvent = class extends Event { constructor(t,o={}) { super(t,o); } };
 AnimationEvent = globalThis.AnimationEvent = class extends Event {};
 TransitionEvent = globalThis.TransitionEvent = class extends Event {};
@@ -13196,11 +13717,9 @@ __obscuraCore.setUnhandledPromiseRejectionHandler((promise, reason) => {
     reason,
     cancelable: true,
   });
-  _dispatch(globalThis, event);
-  if (typeof globalThis.onunhandledrejection === "function") {
-    try { globalThis.onunhandledrejection.call(globalThis, event); }
-    catch (error) { console.error(error); }
-  }
+  // Trusted, with window.onunhandledrejection run by the dispatch in its place among the
+  // window's listeners (Rust called the handler after the listeners).
+  _dispatch(globalThis, _markTrusted(event));
   // Browsers report an unhandled rejection without terminating the page's
   // event loop. Returning true tells deno_core that the host delivered it.
   return true;
@@ -13208,11 +13727,7 @@ __obscuraCore.setUnhandledPromiseRejectionHandler((promise, reason) => {
 
 __obscuraCore.setHandledPromiseRejectionHandler((promise, reason) => {
   const event = new PromiseRejectionEvent("rejectionhandled", { promise, reason });
-  _dispatch(globalThis, event);
-  if (typeof globalThis.onrejectionhandled === "function") {
-    try { globalThis.onrejectionhandled.call(globalThis, event); }
-    catch (error) { console.error(error); }
-  }
+  _dispatch(globalThis, _markTrusted(event));
 });
 
 StorageEvent = globalThis.StorageEvent = class StorageEvent extends Event {
@@ -13256,6 +13771,9 @@ _markNative(globalThis.StorageEvent);
     signal._reason = reason !== undefined
       ? reason
       : new DOMException("signal is aborted without reason", "AbortError");
+    // DOM "signal abort": the abort algorithms (listeners added with this signal) run
+    // before the abort event.
+    _runAbortAlgorithms(signal);
     const evt = typeof Event === "function" ? new Event("abort") : { type: "abort" };
     try { evt.target = signal; evt.currentTarget = signal; } catch (_) {}
     emit(signal, evt);
@@ -13318,6 +13836,7 @@ _markNative(globalThis.StorageEvent);
   };
   _markNative(globalThis.AbortSignal);
   _markNative(globalThis.AbortController);
+  _AbortSignalProto = globalThis.AbortSignal.prototype;
 })();
 // Normalize one Blob part to bytes. `native` newline normalization applies to
 // string parts when the Blob/File `endings` option is "native".
@@ -19132,15 +19651,14 @@ function _windowScroll(x, y, relative) {
   if ((root.scrollLeft || 0) === beforeLeft && (root.scrollTop || 0) === beforeTop) {
     return;
   }
-  // Async, matching the element path #431 added. Dispatched at the document
-  // AND the window: a page scroll event reaches both in Chrome, but
-  // Document.dispatchEvent here runs only its own listeners and does not
-  // propagate, so firing once would strand half the listeners.
+  // Async, matching the element path #431 added. HTML fires a viewport scroll at the
+  // document with bubbles set, so it reaches the window too (one dispatch; Rust fired a
+  // non-bubbling event at each, since its document dispatch did not reach the window).
   setTimeout(() => {
     try {
       const doc = globalThis.document;
-      if (doc) _dispatch(doc, new Event('scroll', { bubbles: false }));
-      _dispatch(globalThis, new Event('scroll', { bubbles: false }));
+      if (doc) _dispatch(doc, _markTrusted(new Event('scroll', { bubbles: true })));
+      else _dispatch(globalThis, _markTrusted(new Event('scroll', { bubbles: false })));
     } catch (e) {}
   }, 0);
 }
@@ -21491,10 +22009,10 @@ function _worldEventInit(event) {
 // (worldInvoke), and propagation flags travel both ways. Only types some world listens
 // for pay anything: every other dispatch sees _worldListenTypes miss.
 //
-// This follows the engine's own event model, where a node event runs each node's
-// listeners in bubble order with no capture phase and the window is not reached. A
-// world's window listeners (Playwright's hit-target check listens there, capturing) are
-// run around the node dispatch instead: capturing ones before it, the others after it.
+// The document realm's dispatch (_invokeListeners) asks for the worlds' listeners at each
+// step of the event path, for the phase it is running: capturing ones in the capture phase,
+// the others at the target and in the bubble phase, the window's included, so a world's
+// listeners run where a single DOM dispatch over every world's listeners would run them.
 const _worldEventKeys = _private(new WeakMap());
 const _worldEventKeyGet = _uncurry(WeakMap.prototype.get);
 const _worldEventKeySet = _uncurry(WeakMap.prototype.set);
@@ -21511,36 +22029,71 @@ function _worldEventKey(event) {
 function _worldEventForget(event) {
   if (event !== null && typeof event === 'object') _worldEventKeyDelete(_worldEventKeys, event);
 }
-// [[stamp, worldKey], ...] in stamp order: the worlds' listeners for `type` on node `nid`.
-function _worldListenersAt(nid, type) {
+// [[stamp, worldKey, capture], ...] in stamp order: the worlds' listeners for `type` on node
+// `nid`, the capturing (1) or the other (0) ones.
+function _worldListenersAt(nid, type, capture) {
   let raw;
   try {
-    raw = String(__obscuraCore.ops.op_dom('world_listeners', String(nid), String(type), _realmFrameId));
+    raw = String(__obscuraCore.ops.op_dom('world_listeners', String(nid), String(type) + '\0' + capture, _realmFrameId));
   } catch (_) { return []; }
-  return _worldParseEntries(raw);
+  return _worldParseEntries(raw, capture);
 }
 // The window's are pushed with the types (worldListenTypes): [capturing, other].
 let _worldWindowLists = null;
-function _worldParseEntries(raw) {
+function _worldParseEntries(raw, capture) {
   const out = [];
   for (let at = 0; at < raw.length;) {
     let comma = _stringIndexOf(raw, ',', at);
     if (comma < 0) comma = raw.length;
     const colon = _stringIndexOf(raw, ':', at);
     if (colon > at && colon < comma) {
-      out[out.length] = [_Number(_stringSlice(raw, at, colon)), _stringSlice(raw, colon + 1, comma)];
+      out[out.length] = [_Number(_stringSlice(raw, at, colon)), _stringSlice(raw, colon + 1, comma), capture];
     }
     at = comma + 1;
   }
   return out;
 }
-// Runs one world's listener (stamp `entry[0]`, world `entry[1]`) on node `nid` for
-// `event`, and takes back what it did to propagation.
-function _worldInvoke(event, target, nid, entry, phase) {
+// The worlds' listeners at one step of a dispatch (`mode` as in _invokeListeners), or null.
+function _worldEntriesAt(item, type, mode) {
+  const mask = _worldListenTypes[type] | 0;
+  if (item === globalThis) {
+    if ((mask & 3) === 0 || _worldWindowLists === null) return null;
+    const lists = _worldWindowLists[type];
+    if (lists === undefined) return null;
+    const capturing = lists[0], other = lists[1];
+    if (mode === 1) return capturing.length !== 0 ? capturing : null;
+    if (mode === 2) return other.length !== 0 ? other : null;
+    if (capturing.length === 0) return other.length !== 0 ? other : null;
+    if (other.length === 0) return capturing;
+    const merged = [];
+    let i = 0, j = 0;
+    while (i < capturing.length || j < other.length) {
+      if (j >= other.length || (i < capturing.length && capturing[i][0] < other[j][0])) merged[merged.length] = capturing[i++];
+      else merged[merged.length] = other[j++];
+    }
+    return merged;
+  }
+  if ((mask & 4) === 0 || !_isNodeTarget(item)) return null;
+  let list;
+  if (mode === 3) {
+    const capturing = _worldListenersAt(item._nid, type, 1), other = _worldListenersAt(item._nid, type, 0);
+    list = capturing;
+    for (let i = 0; i < other.length; i++) list[list.length] = other[i];
+    list.sort((x, y) => x[0] - y[0]);
+  } else {
+    list = _worldListenersAt(item._nid, type, mode === 1 ? 1 : 0);
+  }
+  return list.length !== 0 ? list : null;
+}
+// Runs one world's listener (stamp `entry[0]`, world `entry[1]`, capturing `entry[2]`) at
+// `item` for `event`, and takes back what it did to propagation.
+function _worldInvoke(event, item, entry) {
+  const target = event.target;
   const spec = {
-    k: _worldEventKey(event), n: nid, s: entry[0], t: String(event.type), c: _worldEventClassOf(event),
-    i: _worldEventInit(event), tr: _trustedHas(_trustedEvents, event),
-    g: typeof target._nid === 'number' ? target._nid : -1, p: phase,
+    k: _worldEventKey(event), n: item === globalThis ? -1 : item._nid, s: entry[0], t: String(event.type),
+    c: _worldEventClassOf(event), i: _worldEventInit(event), tr: _trustedHas(_trustedEvents, event),
+    g: target !== null && typeof target === 'object' && typeof target._nid === 'number' ? target._nid : -1,
+    p: event.eventPhase, q: entry[2],
     f: [!!event.defaultPrevented, !!event._propagationStopped, !!event._immediatePropagationStopped],
   };
   let flags = '';
@@ -21550,49 +22103,6 @@ function _worldInvoke(event, target, nid, entry, phase) {
   if (flags[0] === '1' && event.cancelable) event.defaultPrevented = true;
   if (flags[1] === '1') event._propagationStopped = true;
   if (flags[2] === '1') { event._propagationStopped = true; event._immediatePropagationStopped = true; }
-}
-// A node's listeners, this realm's (`handlers`) and the worlds', in stamp order.
-function _worldRunListeners(node, event, handlers, isDocument) {
-  const world = _worldListenersAt(node._nid, event.type);
-  const target = event.target || node;
-  const phase = target === node ? 2 : 3;
-  let j = 0;
-  for (let i = 0; i <= handlers.length; i++) {
-    const h = i < handlers.length ? handlers[i] : null;
-    const stamp = h === null ? Infinity : (_handlerStampGet(_handlerStamps, h) || 0);
-    while (j < world.length && world[j][0] < stamp) {
-      _worldInvoke(event, target, node._nid, world[j], phase);
-      j++;
-      if (event._immediatePropagationStopped && !isDocument) return;
-    }
-    if (h === null) break;
-    try { _invokeListener(h, node, event); } catch (e) {
-      if (isDocument) console.error('document event error:', e); else console.error(e);
-    }
-    if (event._immediatePropagationStopped && !isDocument) return;
-  }
-}
-function _worldRunWindow(target, event, phase) {
-  const lists = _worldWindowLists === null ? undefined : _worldWindowLists[event.type];
-  if (lists === undefined) return;
-  const world = lists[phase === 1 ? 0 : 1];
-  for (let j = 0; j < world.length; j++) {
-    _worldInvoke(event, target, -1, world[j], phase);
-    if (event._immediatePropagationStopped) return;
-  }
-}
-function _worldDispatchAround(target, event, original) {
-  const mask = _worldListenTypes === null ? 0 : _worldListenTypes[event.type] | 0;
-  if (mask & 1) {
-    _worldRunWindow(target, event, 1);
-    if (event._propagationStopped) {
-      if (!event.target) event.target = target;
-      return !event.defaultPrevented;
-    }
-  }
-  _reflectApply(original, target, [event]);
-  if ((mask & 2) && event.bubbles && !event._propagationStopped) _worldRunWindow(target, event, 3);
-  return !event.defaultPrevented;
 }
 
 // Interface members off Element.prototype. DEVIATION from crates/obscura-js/js/bootstrap.js,
@@ -21984,7 +22494,7 @@ function _installIsolatedWorldBridges() {
   // untrusted copy, and this world's listeners get the event object it dispatched.
   const worldTag = call('tag', -1);
   const entries = new Map();
-  const keyOf = (nid, type, capture) => (nid < 0 ? '-1|' + type + '|' + (capture ? '1' : '0') : nid + '|' + type);
+  const keyOf = (nid, type, capture) => nid + '|' + type + '|' + (capture ? '1' : '0');
   const captureOf = (options) => (typeof options === 'boolean' ? options : !!(options && options.capture));
   const addListener = (nid, type, fn, options) => {
     if (fn === null || (typeof fn !== 'function' && (typeof fn !== 'object' || typeof fn.handleEvent !== 'function'))) return;
@@ -22032,7 +22542,7 @@ function _installIsolatedWorldBridges() {
         removeEventListener(type, fn, options) {
           const nid = nidOf(this);
           if (nid < 0) return apply(remove, this, [type, fn, options]);
-          removeListener(nid, type, fn, false);
+          removeListener(nid, type, fn, captureOf(options));
         },
       }.removeEventListener,
     });
@@ -22127,14 +22637,14 @@ function _installIsolatedWorldBridges() {
         wrappers.set(k, ev);
         if (wrappers.size > 64) wrappers.delete(wrappers.keys().next().value);
       }
-    } else if (!ev.target) {
-      ev.target = m.g >= 0 ? _wrap(m.g) : globalThis;
     }
+    // The target listeners at this step see, retargeted by the document realm's path.
+    ev.target = m.g >= 0 ? _wrap(m.g) : globalThis;
     const f = m.f || [];
     if (f[0] && ev.cancelable) ev.defaultPrevented = true;
     if (f[1]) ev._propagationStopped = true;
     if (f[2]) ev._immediatePropagationStopped = true;
-    const capture = m.n < 0 && m.p === 1;
+    const capture = m.q === 1;
     const list = entries.get(keyOf(m.n, type, capture));
     let entry = null;
     if (list) for (const candidate of list) if (candidate.stamp === m.s) { entry = candidate; break; }
@@ -22176,67 +22686,15 @@ function _installIsolatedWorldBridges() {
   });
 }
 
-// The page-facing dispatchEvent of Node, Element, Document and the window: DOM's
-// "dispatch" steps the shim's own methods leave out. Re-dispatching an event that is
-// still being dispatched throws InvalidStateError, and an event is trusted only through
-// the dispatch the user agent marked it for (_markTrusted). Measured in Chromium: a
-// listener's re-dispatch of the trusted click it is handling throws InvalidStateError; a
-// later re-dispatch reaches listeners with isTrusted false, and the event reads false
-// from then on.
-const _dispatchingAdd = Function.prototype.call.bind(WeakSet.prototype.add);
-const _dispatchingHas = Function.prototype.call.bind(WeakSet.prototype.has);
-const _dispatchingDelete = Function.prototype.call.bind(WeakSet.prototype.delete);
-const _dispatching = _private(new WeakSet());
-function _dispatchEntry(original) {
-  return _markNative({
-    dispatchEvent(event) {
-      const bubbling = _bubbleToken;
-      _bubbleToken = false;
-      if (event === null || typeof event !== 'object') return _reflectApply(original, this, [event]);
-      if (_dispatchingHas(_dispatching, event)) {
-        if (bubbling) return _reflectApply(original, this, [event]);
-        throw new DOMException(
-          "Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.",
-          'InvalidStateError');
-      }
-      if (!_trustedPendingTake(_trustedPending, event)) _trustedDelete(_trustedEvents, event);
-      _dispatchingAdd(_dispatching, event);
-      try {
-        // Port addition (SECURITY.md M6): isolated worlds' window listeners for this
-        // event, around the node dispatch below.
-        if (_worldListenTypes !== null && (_worldListenTypes[event.type] & 3) !== 0
-            && this !== globalThis && this !== null && typeof this._nid === 'number') {
-          return _worldDispatchAround(this, event, original);
-        }
-        return _reflectApply(original, this, [event]);
-      } finally {
-        _dispatchingDelete(_dispatching, event);
-        if (_worldListenTypes !== null) _worldEventForget(event);
-      }
-    },
-  }.dispatchEvent);
-}
-function _installDispatchEntries() {
-  for (const proto of [Node.prototype, Element.prototype, Document.prototype]) {
-    const original = proto.dispatchEvent;
-    _defineProperty(proto, 'dispatchEvent', {
-      value: _dispatchEntry(original), writable: true, enumerable: false, configurable: true,
-    });
-  }
-  const current = _getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
-  if (current && typeof current.value === 'function') {
-    _defineProperty(globalThis, 'dispatchEvent', {
-      value: _dispatchEntry(current.value), writable: current.writable,
-      enumerable: current.enumerable, configurable: current.configurable,
-    });
-  }
-}
-_installDispatchEntries();
 
 // The dispatchEvent _dispatch uses. Called once bootstrap has defined them, and again
 // by an isolated world once its bridges have replaced them.
 function _captureDispatchImpls() {
   _atobAtBoot = globalThis.atob;
+  if (globalThis.performance && typeof globalThis.performance.now === 'function') {
+    _perfObj = globalThis.performance;
+    _perfNowFn = _perfObj.now;
+  }
   const findMember = (proto, name, kind) => {
     for (let p = proto; p; p = _getPrototypeOf(p)) {
       const d = _getOwnPropertyDescriptor(p, name);
@@ -22282,6 +22740,7 @@ function _captureDispatchImpls() {
     fragment: DocumentFragment.prototype.querySelector, fragmentAll: DocumentFragment.prototype.querySelectorAll,
   };
 }
+_installEventHandlerAttributes();
 _captureDispatchImpls();
 
 // By-value serialization for the host (port addition, SECURITY.md L10): what CDP's
@@ -24595,9 +25054,9 @@ const _cdpHost = _objectFreeze({
 // - addEventListener, removeEventListener and dispatchEvent were own members of the
 //   window, Node.prototype, Element.prototype and Document.prototype. In Chromium they
 //   are EventTarget.prototype's alone, so `window.addEventListener ===
-//   EventTarget.prototype.addEventListener`. Each target kind keeps the implementation it
-//   had; the one member on EventTarget.prototype picks it by the receiver (an undefined
-//   receiver is the window, as for any operation on the global in WebIDL).
+//   EventTarget.prototype.addEventListener`. Every target kind shares the one
+//   implementation (an undefined receiver is the window, as for any operation on the
+//   global in WebIDL).
 // - interface objects were enumerable own globals, so Object.keys(window) listed some
 //   hundreds of names that Chromium's does not;
 // - the shim's interfaces had no Symbol.toStringTag, so Object.prototype.toString of a
@@ -24613,41 +25072,13 @@ const _cdpHost = _objectFreeze({
     delete obj[name];
     return d.value;
   };
-  const table = (name) => {
-    const node = take(Node.prototype, name) || ETP[name];
-    return _objectFreeze({
-      __proto__: null,
-      win: take(globalThis, name) || node,
-      el: take(EP, name) || node,
-      doc: take(DP, name) || node,
-      node,
-    });
-  };
-  const addImpls = table('addEventListener');
-  const removeImpls = table('removeEventListener');
-  const dispatchImpls = table('dispatchEvent');
-  const pick = (impls, target) => target === globalThis ? impls.win
-    : _isPrototypeOf(EP, target) ? impls.el
-    : _isPrototypeOf(DP, target) ? impls.doc
-    : impls.node;
-  const members = {
-    addEventListener(type, callback) {
-      const target = this === undefined || this === null ? globalThis : this;
-      return _reflectApply(pick(addImpls, target), target, arguments);
-    },
-    removeEventListener(type, callback) {
-      const target = this === undefined || this === null ? globalThis : this;
-      return _reflectApply(pick(removeImpls, target), target, arguments);
-    },
-    dispatchEvent(event) {
-      const target = this === undefined || this === null ? globalThis : this;
-      return _reflectApply(pick(dispatchImpls, target), target, arguments);
-    },
-  };
+  // Every target shares one implementation (_eventTargetMembers), which takes an
+  // undefined receiver as the window, as for any operation on the global in WebIDL.
   const names = ['addEventListener', 'removeEventListener', 'dispatchEvent'];
   for (let i = 0; i < names.length; i++) {
+    take(globalThis, names[i]); take(Node.prototype, names[i]); take(EP, names[i]); take(DP, names[i]);
     _defineProperty(ETP, names[i], {
-      value: _markNative(members[names[i]]), writable: true, enumerable: true, configurable: true,
+      value: _markNative(_eventTargetMembers[names[i]]), writable: true, enumerable: true, configurable: true,
     });
   }
 
@@ -24719,24 +25150,24 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // Document lifecycle steps (PocketCalculatorJsRuntime.RunLifecycle), through the shim's
   // own Event and dispatch rather than the page-writable globals (SECURITY.md L10).
   lifecycle: (phase) => {
-    const fire = (target, event) => { try { _dispatch(target, event); } catch (e) {} };
-    const plain = (type) => new Event(type, { bubbles: false, cancelable: false });
+    // Trusted, as the user agent's own events are. DOMContentLoaded bubbles from the
+    // document to the window (one dispatch, as in Chromium; Rust fired it at each, not
+    // bubbling); the window's load event targets the document and runs window.onload in
+    // its place among the window's listeners (Rust called onload first).
+    const fire = (target, event) => { try { _dispatch(target, _markTrusted(event)); } catch (e) {} };
+    const plain = (type, bubbles) => new Event(type, { bubbles: !!bubbles, cancelable: false });
     switch (_String(phase)) {
       case 'interactive': _hostVars.__documentReadyState__ = 'interactive'; return;
       case 'complete': _hostVars.__documentReadyState__ = 'complete'; return;
       case 'DOMContentLoaded':
-        if (_realmDocument) fire(_realmDocument, plain('DOMContentLoaded'));
-        fire(globalThis, plain('DOMContentLoaded'));
+        fire(_realmDocument || globalThis, plain('DOMContentLoaded', true));
         return;
       case 'readystatechange':
         if (_realmDocument) fire(_realmDocument, plain('readystatechange'));
         return;
       case 'load': {
         _hostVars.__documentReadyState__ = 'complete';
-        const loadEvent = plain('load');
-        const onload = globalThis.onload;
-        if (typeof onload === 'function') { try { _reflectApply(onload, globalThis, [loadEvent]); } catch (e) {} }
-        fire(globalThis, loadEvent);
+        try { _dispatchWindowLoad(_markTrusted(plain('load')), _realmDocument); } catch (e) {}
         return;
       }
     }
@@ -24859,7 +25290,7 @@ globalThis.__obscura_host_handoff = Object.freeze({
     for (let i = 0; i < keys.length; i++) {
       const value = parsed[keys[i]];
       types[keys[i]] = value[0] | 0;
-      windows[keys[i]] = [_worldParseEntries(_String(value[1] || '')), _worldParseEntries(_String(value[2] || ''))];
+      windows[keys[i]] = [_worldParseEntries(_String(value[1] || ''), 1), _worldParseEntries(_String(value[2] || ''), 0)];
     }
     _worldWindowLists = windows;
     _worldListenTypes = types;
