@@ -31,6 +31,8 @@ public sealed partial class TextEngine : IDisposable
     private readonly FontDirectorySet _directoryFonts;
     private readonly GlyphRasterizer _rasterizer;
     private readonly VariableGlyphCache _variableCache;
+    private readonly bool _loadsEmoji;
+    private readonly bool _loadsCjk;
 
     public TextEngine()
         : this([], loadEmoji: false)
@@ -42,12 +44,16 @@ public sealed partial class TextEngine : IDisposable
     {
     }
 
-    public TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji)
-        : this(fonts, loadEmoji, FontDirectories.Current)
+    public TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji, bool loadCjk = false)
+        : this(fonts, loadEmoji, FontDirectories.Current, loadCjk)
     {
     }
 
-    internal TextEngine(IReadOnlyList<WebFont> fonts, bool loadEmoji, FontDirectorySet directoryFonts)
+    internal TextEngine(
+        IReadOnlyList<WebFont> fonts,
+        bool loadEmoji,
+        FontDirectorySet directoryFonts,
+        bool loadCjk = false)
     {
         // Build a database from embedded and page-provided faces. The host's font set is never
         // consulted implicitly: it would make layout differ machine to machine and add a
@@ -75,9 +81,24 @@ public sealed partial class TextEngine : IDisposable
 
         _directoryFonts = directoryFonts;
 
+        // The two large faces are read in place and shared across passes (FontAssets.Embedded),
+        // and each joins only a pass whose text needs it.
+        _loadsEmoji = loadEmoji;
         if (loadEmoji)
         {
-            foreach (FontId id in _database.LoadFontSource(FontAssets.Load(FontAssets.EmojiFaceFile)))
+            foreach (FontId id in _database.LoadEmbeddedSource(FontAssets.Embedded(FontAssets.EmojiFaceFile)))
+            {
+                declarations.Add((id, null, null, null));
+            }
+        }
+
+        // DEVIATION from crates/obscura-render/src/inline.rs, which embeds no CJK face and draws
+        // every Han, kana and Hangul character as a missing glyph. See "Known deviations" in
+        // todo.md.
+        _loadsCjk = loadCjk;
+        if (loadCjk)
+        {
+            foreach (FontId id in _database.LoadEmbeddedSource(FontAssets.Embedded(FontAssets.CjkFaceFile)))
             {
                 declarations.Add((id, null, null, null));
             }
@@ -141,8 +162,12 @@ public sealed partial class TextEngine : IDisposable
             return;
         }
 
+        // The optional embedded faces decide which FontId each later face gets, and shaped
+        // glyphs carry FontIds, so a pass that loaded a different set cannot reuse them.
         _shaper.Cache = previous?._shaper.Cache is { } inherited
             && ReferenceEquals(previous._directoryFonts, _directoryFonts)
+            && previous._loadsEmoji == _loadsEmoji
+            && previous._loadsCjk == _loadsCjk
             && inherited.MatchesFontSet(_fonts)
             ? inherited
             : new ShapeCache(_fonts);
@@ -1868,6 +1893,7 @@ public sealed partial class TextEngine : IDisposable
         {
             FontSize = baseSize,
             LineHeight = lineHeight,
+            LineHeightNormal = Inline.IsNormalLineHeight(baseStyle),
             Above = strutAbove,
             Below = strutBelow,
             LetterSpacing = baseStyle.LetterSpacing ?? 0f,
@@ -2022,6 +2048,7 @@ public sealed partial class TextEngine : IDisposable
         {
             FontSize = childFontSize,
             LineHeight = childLineHeight,
+            LineHeightNormal = style is not null ? Inline.IsNormalLineHeight(style) : context.LineHeightNormal,
             Above = extent.Above,
             Below = extent.Below,
             Align = extent.Align,

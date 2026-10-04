@@ -6,6 +6,8 @@
     <Description>PocketCalculator rendering: CSS cascade, computed style, layout, and painting onto Skia.</Description>
     <!-- Ships inside the PocketCalculator package, not as a package of its own. -->
     <IsPackable>false</IsPackable>
+    <!-- FontAssets.Embedded reads large faces in place from the resource section. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,9 +29,11 @@
 
   <!-- Font assets, copied from crates/obscura-render/assets/ rather than linked.
        They are byte-identical to the Rust engine's today; re-copy if that tree's
-       faces are ever updated, or the two engines will rasterize differently. -->
+       faces are ever updated, or the two engines will rasterize differently. The
+       exception is noto-sans-cjk-sc-regular.otf, the port's own CJK fallback (see
+       Assets/FONT-PROVENANCE.md). -->
   <ItemGroup>
-    <EmbeddedResource Include="Assets/*.ttf">
+    <EmbeddedResource Include="Assets/*.ttf;Assets/*.otf">
       <LogicalName>PocketCalculator.Render.Assets.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>

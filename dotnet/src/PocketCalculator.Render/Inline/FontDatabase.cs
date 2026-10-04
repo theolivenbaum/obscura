@@ -54,11 +54,24 @@ public sealed class FaceRecord : IDisposable
     private SKFont? _coverageFont;
     private HbFont? _hbFont;
     private bool _disposed;
+    private byte[]? _data;
+    private readonly EmbeddedFontSource? _embedded;
 
     internal FaceRecord(FontId id, byte[] data, int index, SKTypeface typeface)
+        : this(id, data, null, index, typeface)
+    {
+    }
+
+    internal FaceRecord(FontId id, EmbeddedFontSource embedded, int index, SKTypeface typeface)
+        : this(id, null, embedded, index, typeface)
+    {
+    }
+
+    private FaceRecord(FontId id, byte[]? data, EmbeddedFontSource? embedded, int index, SKTypeface typeface)
     {
         Id = id;
-        Data = data;
+        _data = data;
+        _embedded = embedded;
         Index = index;
         Typeface = typeface;
         FamilyName = typeface.FamilyName ?? FontAssets.SansFamily;
@@ -76,7 +89,19 @@ public sealed class FaceRecord : IDisposable
 
     public FontId Id { get; }
 
-    public byte[] Data { get; }
+    /// <summary>
+    /// The font file's bytes. A face read in place from an embedded resource (see
+    /// <see cref="FontAssets.Embedded"/>) materializes them only when asked.
+    /// </summary>
+    public byte[] Data => _data ??= _embedded!.ToArray();
+
+    /// <summary>
+    /// Whether a bold request this face cannot meet is drawn emboldened, as Chromium does for
+    /// a family with a single weight. Only the embedded CJK face opts in: Liberation and
+    /// DejaVu ship real bold faces, the emoji face is color bitmaps, and a page or directory
+    /// face's own weight descriptors are not modelled here.
+    /// </summary>
+    public bool SynthesizesBold => _embedded?.SynthesizesBold == true && !IsVariable;
 
     public int Index { get; }
 
@@ -99,7 +124,9 @@ public sealed class FaceRecord : IDisposable
     {
         get
         {
-            _hbFace ??= FontTables.CreateHarfBuzzFace(Data, Index);
+            _hbFace ??= _embedded is { } embedded
+                ? new HbFace(embedded.Blob, Index)
+                : FontTables.CreateHarfBuzzFace(Data, Index);
 
             return _hbFace;
         }
@@ -297,6 +324,26 @@ public sealed class FontDatabase : IDisposable
         return ids;
     }
 
+    /// <summary>
+    /// Load an embedded face that is read in place and shared across passes, rather than
+    /// copied per pass like <see cref="LoadFontSource"/> does.
+    /// </summary>
+    internal List<FontId> LoadEmbeddedSource(EmbeddedFontSource source)
+    {
+        List<FontId> ids = [];
+        SKTypeface? typeface = SKTypeface.FromData(source.Data, 0);
+        if (typeface is null)
+        {
+            return ids;
+        }
+
+        var record = new FaceRecord(new FontId(_nextId++), source, 0, typeface);
+        _faces.Add(record);
+        Version++;
+        ids.Add(record.Id);
+        return ids;
+    }
+
     public FaceRecord? Face(FontId id)
     {
         foreach (FaceRecord face in _faces)
@@ -454,12 +501,22 @@ public sealed class FontDatabase : IDisposable
 
     /// <summary>
     /// The families from cosmic-text's Unix <c>common_fallback</c> list that this engine
-    /// actually bundles, in that list's order.
+    /// actually bundles, in that list's order, then the embedded CJK face.
     /// </summary>
+    /// <remarks>
+    /// The CJK face is the port's own addition (the Rust engine embeds none, so its CJK text is
+    /// tofu). cosmic-text reaches "Noto Sans CJK" through its per-script list rather than the
+    /// common one; listing it here keeps a Han, kana or Hangul run from first being shaped,
+    /// and missed, by every Liberation style in load order. DejaVu covers none of those blocks,
+    /// so trying it first changes nothing for them; for a character both faces have, DejaVu
+    /// winning matches fontconfig's <c>sans-serif</c> order, which Chromium's fallback follows
+    /// when the text carries no CJK <c>lang</c>.
+    /// </remarks>
     private static readonly string[] CommonFallbackFamilies =
     [
         FontAssets.SystemFamily,
         FontAssets.EmojiFamily,
+        FontAssets.CjkFamily,
     ];
 
     public void Dispose()

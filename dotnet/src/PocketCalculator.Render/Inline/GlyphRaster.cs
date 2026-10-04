@@ -97,6 +97,13 @@ public sealed class GlyphRasterizer(FontDatabase database) : IDisposable
             font.SkewX = -MathF.Tan(14f * MathF.PI / 180f);
         }
 
+        if (key.FakeBold)
+        {
+            // Skia's own synthetic bold, which is also what Chromium applies to a
+            // single-weight face: the outline grows, the advance does not.
+            font.Embolden = true;
+        }
+
         ushort[] glyphs = [key.GlyphId];
         var bounds = new SKRect[1];
         font.GetGlyphWidths(glyphs, null, bounds);

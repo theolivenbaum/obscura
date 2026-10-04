@@ -258,24 +258,49 @@ public static partial class RenderDom
 
         List<NodeId> descendants = tree.Descendants(tree.Document);
         bool needsEmojiFont = false;
+        bool needsCjkFont = false;
         foreach (NodeId id in descendants)
         {
-            if (tree.GetNode(id)?.TextContentOfTextNode is { } contents
-                && FontAssets.TextMayNeedEmojiFont(contents))
+            if (tree.GetNode(id)?.TextContentOfTextNode is { } contents)
             {
-                needsEmojiFont = true;
-                break;
+                needsEmojiFont = needsEmojiFont || FontAssets.TextMayNeedEmojiFont(contents);
+                needsCjkFont = needsCjkFont || FontAssets.TextMayNeedCjkFont(contents);
+                if (needsEmojiFont && needsCjkFont)
+                {
+                    break;
+                }
             }
         }
 
-        if (!needsEmojiFont)
+        if (!needsEmojiFont || !needsCjkFont)
         {
+            string? lastFamily = null;
             foreach (LayoutStyle style in styles.Values)
             {
-                if ((style.BeforeContent is { } before && FontAssets.TextMayNeedEmojiFont(before))
-                    || (style.AfterContent is { } after && FontAssets.TextMayNeedEmojiFont(after)))
+                if (style.BeforeContent is { } before)
                 {
-                    needsEmojiFont = true;
+                    needsEmojiFont = needsEmojiFont || FontAssets.TextMayNeedEmojiFont(before);
+                    needsCjkFont = needsCjkFont || FontAssets.TextMayNeedCjkFont(before);
+                }
+
+                if (style.AfterContent is { } after)
+                {
+                    needsEmojiFont = needsEmojiFont || FontAssets.TextMayNeedEmojiFont(after);
+                    needsCjkFont = needsCjkFont || FontAssets.TextMayNeedCjkFont(after);
+                }
+
+                // A family list naming the CJK face selects it for Latin text too. Styles share
+                // their inherited family string, so only a new one is looked at.
+                if (!needsCjkFont
+                    && style.FontFamily is { } family
+                    && !ReferenceEquals(family, lastFamily))
+                {
+                    lastFamily = family;
+                    needsCjkFont = FontAssets.FamilyNamesCjkFace(family);
+                }
+
+                if (needsEmojiFont && needsCjkFont)
+                {
                     break;
                 }
             }
@@ -284,7 +309,7 @@ public static partial class RenderDom
         TaffyTree taffyTree = TaffyStyleMapping.NewTaffyTree<int?>(tree.SlotCount + 16);
         Dictionary<TaffyNodeId, NodeId> idMap = new(styles.Count);
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
-        TextEngine engine = new(fonts, needsEmojiFont);
+        TextEngine engine = new(fonts, needsEmojiFont, needsCjkFont);
 
         // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
         // layout: it is a pure function of the text, its attributes and the tab width. Carry the

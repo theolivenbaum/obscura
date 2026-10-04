@@ -63,6 +63,11 @@ public enum LineBoxAlign : byte
 /// <c>max(line_height)</c> gives 18; a 48px span is 27px. <see cref="Above"/> and
 /// <see cref="Below"/> are those two contributions, already carrying the box's
 /// <c>vertical-align</c> shift. See "Known deviations" in todo.md.
+/// <para>
+/// <see cref="LineHeightNormal"/> marks a box whose <c>line-height</c> is <c>normal</c>: Blink
+/// then unites the metrics of every fallback face its text was shaped with into the box's
+/// contribution, which <see cref="TextShaper"/> applies per glyph.
+/// </para>
 /// </remarks>
 public readonly record struct TextMetrics(
     float FontSize,
@@ -70,7 +75,8 @@ public readonly record struct TextMetrics(
     float Above = 0f,
     float Below = 0f,
     LineBoxAlign Align = LineBoxAlign.Baseline,
-    float Shift = 0f)
+    float Shift = 0f,
+    bool LineHeightNormal = false)
 {
     /// <summary>
     /// Aligned to the line box rather than to a baseline, so the box is out of the
@@ -163,7 +169,8 @@ public readonly record struct GlyphCacheKey(
     uint FontSizeBits,
     SubpixelBin XBin,
     SubpixelBin YBin,
-    bool FakeItalic)
+    bool FakeItalic,
+    bool FakeBold = false)
 {
     public float FontSize => BitConverter.UInt32BitsToSingle(FontSizeBits);
 
@@ -172,12 +179,13 @@ public readonly record struct GlyphCacheKey(
         ushort glyphId,
         float fontSize,
         (float X, float Y) position,
-        bool fakeItalic)
+        bool fakeItalic,
+        bool fakeBold = false)
     {
         (int x, SubpixelBin xBin) = SubpixelBinExtensions.New(position.X);
         (int y, SubpixelBin yBin) = SubpixelBinExtensions.New(position.Y);
         return (
-            new GlyphCacheKey(fontId, glyphId, BitConverter.SingleToUInt32Bits(fontSize), xBin, yBin, fakeItalic),
+            new GlyphCacheKey(fontId, glyphId, BitConverter.SingleToUInt32Bits(fontSize), xBin, yBin, fakeItalic, fakeBold),
             x,
             y);
     }
@@ -210,6 +218,7 @@ public struct LayoutGlyph
     public RgbaColor? Color;
     public ulong Metadata;
     public bool FakeItalic;
+    public bool FakeBold;
 
     public readonly PhysicalGlyph Physical((float X, float Y) offset, float scale)
     {
@@ -222,7 +231,8 @@ public struct LayoutGlyph
             (
                 ((X + xOffset) * scale) + offset.X,
                 MathF.Truncate(((Y - yOffset) * scale) + offset.Y)),
-            FakeItalic);
+            FakeItalic,
+            FakeBold);
         return new PhysicalGlyph(key, x, y);
     }
 }
