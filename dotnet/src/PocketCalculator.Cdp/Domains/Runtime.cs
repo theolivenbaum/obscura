@@ -133,7 +133,8 @@ public static class Runtime
             pageId,
             networkEvents,
             WaitUntil.Load,
-            reachedIdle);
+            reachedIdle,
+            current.Readiness);
     }
 
     public static async Task<DomainResult> HandleAsync(

@@ -171,6 +171,11 @@ set_text_content                tag_name                        template_content
 text_content
 ```
 
+Port addition: `document_close` (no arguments, answers `"true"`). The C# shim's
+`document.close()` sends it when it ends a parser `document.open()` started on a loaded
+document; the host counts it so the CDP layer reports the reload's lifecycle events
+(`Dispatcher.DrainDocumentLoads`). The Rust shim's `close()` does nothing and never sends it.
+
 The three `op_external_stylesheet_*` ops (upstream 04418a5) hold a linked sheet's
 fetched CSS beside its `<link>` (or an `@import`'s beside its `<style>`) in the
 `DomTree`, with an origin-clean bit. `set` accepts only a `link` or `style` owner

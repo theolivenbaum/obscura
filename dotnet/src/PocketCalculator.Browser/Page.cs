@@ -31,7 +31,28 @@ public sealed class NetworkEvent
     public required int BodySize { get; init; }
 
     public required double Timestamp { get; init; }
+
+    /// <summary>
+    /// The page's own document request, as opposed to a subresource. <see cref="Url"/> is
+    /// then the URL the document came from, after any redirects.
+    /// </summary>
+    /// <remarks>
+    /// Port addition. The CDP layer used to find the document by matching
+    /// <see cref="Url"/> against the page URL, which found nothing once a redirect had
+    /// moved the page, so no request carried the loader id and a client's
+    /// <c>page.goto()</c> resolved to null.
+    /// </remarks>
+    public bool IsNavigation { get; init; }
+
+    /// <summary>The redirects the document request followed, in order.</summary>
+    public IReadOnlyList<NetworkRedirect> Redirects { get; init; } = [];
 }
+
+/// <summary>One redirect a request followed: the URL it asked for and the response that sent it on.</summary>
+/// <param name="Url">The URL this hop requested, in the page's URL spelling.</param>
+/// <param name="Status">The redirect status.</param>
+/// <param name="Headers">The redirect response's headers.</param>
+public sealed record NetworkRedirect(string Url, int Status, IReadOnlyDictionary<string, string> Headers);
 
 /// <summary>A response body retained for <c>Network.getResponseBody</c>.</summary>
 public sealed record StoredResponseBody(string Body, bool Base64Encoded);
@@ -177,6 +198,26 @@ public sealed partial class Page : IDisposable
     public UrlRecord? Url { get; set; }
 
     public DomTree? Dom { get; set; }
+
+    /// <summary>How far the current document got (see <see cref="DocumentReadiness"/>).</summary>
+    public DocumentReadiness Readiness { get; private set; } = DocumentReadiness.Loaded;
+
+    /// <summary>
+    /// The last navigation hit its deadline after the document committed, and the page
+    /// was left as it stood rather than failed: its DOM is built, and whatever parsing,
+    /// scripts or frames were still pending did not run. <see cref="Readiness"/> says how
+    /// far the document got.
+    /// </summary>
+    public bool LoadAbandoned { get; private set; }
+
+    /// <summary>Record that the current document reached <paramref name="readiness"/>.</summary>
+    internal void ReachReadiness(DocumentReadiness readiness)
+    {
+        if (readiness > Readiness)
+        {
+            Readiness = readiness;
+        }
+    }
 
     /// <summary>Live child frame realms, in creation order.</summary>
     public List<FrameRealm> Frames { get; } = [];

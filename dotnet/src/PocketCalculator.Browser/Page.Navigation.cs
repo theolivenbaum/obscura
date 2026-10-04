@@ -136,30 +136,66 @@ public sealed partial class Page
             throw PageException.Network(NavigationPolicy.LocalResourceRefusal(url));
         }
 
-        TimeSpan navTimeout = NavigationTimeout;
-        ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
-
-        using var deadline = new CancellationTokenSource(navTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            deadline.Token, cancellationToken);
         ResourceRequest profile = NavigationProfile(initiator);
         if (initiator is null && clientReferrer is not null)
         {
             profile = profile with { Referrer = clientReferrer.Url, ReferrerPolicy = clientReferrer.Policy };
         }
         string referrer = DocumentReferrer(profile, url);
+        await RunWithNavigationDeadlineAsync(
+            token => NavigateWithWaitPostInnerAsync(url, waitUntil, method, body, referrer, profile, token),
+            cancellationToken).ConfigureAwait(false);
+        PushHistory(UrlString());
+    }
+
+    /// <summary>
+    /// Run a navigation under the page's end-to-end deadline
+    /// (<see cref="NavigationTimeout"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A deadline that expires before the document commits fails the navigation, as it
+    /// always did: nothing answered, or the answer never finished arriving. One that
+    /// expires after the commit no longer does. Chromium's <c>Page.navigate</c> answers
+    /// once the navigation commits, and a document whose <c>load</c> is late is still the
+    /// page: the client's own <c>waitUntil</c> and timeout decide what to make of it.
+    /// Failing it here turned every slow, script-heavy site into a protocol error with its
+    /// DOM already built. The page is kept as it stood, <see cref="LoadAbandoned"/> is
+    /// set, and <see cref="Readiness"/> says how far the document got. The work still
+    /// pending (scripts, resource warmup, frames) is abandoned rather than resumed, so the
+    /// deadline still bounds how long the navigation holds the page.
+    /// </para>
+    /// <para>
+    /// Deviation from crates/obscura-browser/src/page.rs, which fails the navigation
+    /// whenever its deadline expires. A caller's own cancellation still propagates.
+    /// </para>
+    /// </remarks>
+    private async Task RunWithNavigationDeadlineAsync(
+        Func<CancellationToken, Task> navigate,
+        CancellationToken cancellationToken)
+    {
+        TimeSpan navTimeout = NavigationTimeout;
+        ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
+
+        using var deadline = new CancellationTokenSource(navTimeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            deadline.Token, cancellationToken);
+        LoadAbandoned = false;
         try
         {
-            await NavigateWithWaitPostInnerAsync(url, waitUntil, method, body, referrer, profile, linked.Token)
-                .ConfigureAwait(false);
+            await navigate(linked.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
-            Lifecycle = LifecycleState.Failed;
-            throw PageException.Network(
-                $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
+            if (cancellationToken.IsCancellationRequested || Readiness < DocumentReadiness.Committed)
+            {
+                Lifecycle = LifecycleState.Failed;
+                throw PageException.Network(
+                    $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
+            }
+
+            LoadAbandoned = true;
         }
-        PushHistory(UrlString());
     }
 
     private async Task NavigateWithWaitPostInnerAsync(
@@ -187,6 +223,9 @@ public sealed partial class Page
                 documentReferrer,
                 profile,
                 cancellationToken).ConfigureAwait(false);
+            // Whatever the navigation waited for, the document has dispatched its load: the
+            // script phase dispatches it even when the caller only waits for DOMContentLoaded.
+            ReachReadiness(DocumentReadiness.Loaded);
 
             if (TakePendingNavigation() is not { } next)
             {
@@ -240,6 +279,7 @@ public sealed partial class Page
         // The previous document's background render-resource loads end with it.
         RetireRenderResources();
         Lifecycle = LifecycleState.Loading;
+        Readiness = DocumentReadiness.None;
         Referrer = referrer;
         ReferrerPolicyHeader = null;
         Url = url;
@@ -361,19 +401,31 @@ public sealed partial class Page
         // Network.getResponseBody returns intact bytes. A UTF-8-lossy text store
         // corrupts them. Text-like types stay as text.
         bool mainIsBinary = !PageHelpers.IsTextLikeContentType(response.ContentType());
-        RecordNetworkEventWithBody(
-            url.Href,
-            "GET",
-            "Document",
+        string documentUrl = url.Href;
+        if (response.RedirectedFrom.Count != 0)
+        {
+            UrlRecord finalUrl = NetUrl.To(response.Url);
+            Url = finalUrl;
+            documentUrl = finalUrl.Href;
+        }
+
+        // Deviation from crates/obscura-browser/src/page.rs, which records the document
+        // under the URL it asked for with no trace of the redirects. The event carries the
+        // URL the response came from and each hop, so the CDP layer can report the chain
+        // the way Chromium does (one request id, a redirectResponse per hop) and a
+        // client's page.goto() resolves to the final response.
+        List<NetworkRedirect> redirects = new(response.RedirectChain.Count);
+        foreach (RedirectHop hop in response.RedirectChain)
+        {
+            redirects.Add(new NetworkRedirect(NetUrl.To(hop.Url).Href, hop.Status, hop.Headers));
+        }
+        RecordDocumentNetworkEvent(
+            documentUrl,
             response.Status,
             response.Headers,
             response.Body,
-            mainIsBinary);
-
-        if (response.RedirectedFrom.Count != 0)
-        {
-            Url = NetUrl.To(response.Url);
-        }
+            mainIsBinary,
+            redirects);
 
         ReferrerPolicyHeader = ReferrerPolicies.ParseHeader(response.Header("referrer-policy"));
 
@@ -391,6 +443,12 @@ public sealed partial class Page
 
         Dom = dom;
         InitJs();
+        // Committed: the response is in and the document exists. A deadline from here on
+        // leaves the page as it stands instead of failing it (RunWithNavigationDeadlineAsync).
+        ReachReadiness(DocumentReadiness.Committed);
+        // The document is loading from here until the script phase completes it, so a
+        // page the deadline stops before then reads as Chromium's does, not as complete.
+        Js?.SetDocumentReadyState("loading");
         var authorStylesheets = await FetchStylesheetsAsync(cancellationToken).ConfigureAwait(false);
 
         // Upstream 04418a5: fetched CSS goes into the DomTree store with its origin-clean bit,
@@ -906,22 +964,9 @@ public sealed partial class Page
 
         ResourceRequest profile = NavigationProfile(pending);
         string sourceUrl = DocumentReferrer(profile, url);
-        TimeSpan navTimeout = NavigationTimeout;
-        ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
-        using var deadline = new CancellationTokenSource(navTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            deadline.Token, cancellationToken);
-        try
-        {
-            await NavigateWithWaitPostInnerAsync(url, WaitUntil.Load, method, body, sourceUrl, profile, linked.Token)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
-        {
-            Lifecycle = LifecycleState.Failed;
-            throw PageException.Network(
-                $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
-        }
+        await RunWithNavigationDeadlineAsync(
+            token => NavigateWithWaitPostInnerAsync(url, WaitUntil.Load, method, body, sourceUrl, profile, token),
+            cancellationToken).ConfigureAwait(false);
         PushHistory(UrlString());
         return PageNavigationOutcome.CrossDocument;
     }

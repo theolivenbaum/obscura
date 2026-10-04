@@ -753,6 +753,13 @@ public static class DomOps
                 gs.WriteStream = null;
                 return "true";
 
+            // Port addition: document.close() ended the parser document.open() started on
+            // a loaded document, so the document has loaded again. The CDP layer reports
+            // the lifecycle events Chromium sends for that (Dispatcher.DrainDocumentLoads).
+            case "document_close":
+                gs.ScriptDocumentLoads++;
+                return "true";
+
             case "set_text_content":
             {
                 var nodeId = ParseNodeOrZero(arg1);

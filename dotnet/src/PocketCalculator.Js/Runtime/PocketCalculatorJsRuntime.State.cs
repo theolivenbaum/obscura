@@ -520,6 +520,17 @@ public sealed partial class PocketCalculatorJsRuntime
     /// Page moves these into its own network events so the CDP layer emits
     /// Network events for them (#406).
     /// </summary>
+    /// <summary>
+    /// Drain the count of document loads <c>document.open()</c>/<c>close()</c> caused on
+    /// the page's document (see <see cref="PocketCalculatorState.ScriptDocumentLoads"/>).
+    /// </summary>
+    public int TakeScriptDocumentLoads()
+    {
+        var loads = State.ScriptDocumentLoads;
+        State.ScriptDocumentLoads = 0;
+        return loads;
+    }
+
     public IReadOnlyList<JsNetworkEvent> TakeJsNetworkEvents()
     {
         var events = State.JsNetworkEvents.ToArray();

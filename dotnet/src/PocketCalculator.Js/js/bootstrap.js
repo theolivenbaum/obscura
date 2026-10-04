@@ -6374,9 +6374,21 @@ class Document extends Node {
     _dom("document_write_reset");
     this._writeAnchorScript = 0;
     this._writeAnchorNid = 0;
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, whose close() does nothing. A
+    // document reopened after it finished loading gets a script-created parser, and
+    // closing that parser runs the document's load again: Chromium reports init,
+    // DOMContentLoaded and load lifecycle events for it, and Playwright's setContent
+    // (open/write/close in its utility world) waits for that load, so it hung. While the
+    // document is still loading, open() leaves Chromium's parser alone and close() does
+    // nothing either.
+    this._reopened = this.readyState !== 'loading';
     return this;
   }
   close() {
+    if (this._reopened) {
+      this._reopened = false;
+      _dom("document_close");
+    }
     return;
   }
   hasFocus() { return true; }
