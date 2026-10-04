@@ -177,7 +177,8 @@ public sealed class GlobalObjectShape
                  Object.getOwnPropertyDescriptor(window, 'history').enumerable].join('|')
                 """));
         Assert.Equal(
-            "[object Text]|[object Document]|[object EventTarget]|[object DOMRect]|[object HTMLCollection]",
+            // The document is an HTMLDocument, as in Chromium (GlobalInterfaceObjects).
+            "[object Text]|[object HTMLDocument]|[object EventTarget]|[object DOMRect]|[object HTMLCollection]",
             Eval(runtime, """
                 [document.createTextNode('x'), document, new EventTarget(),
                  new DOMRect(1, 2, 3, 4), document.getElementsByTagName('p')]
