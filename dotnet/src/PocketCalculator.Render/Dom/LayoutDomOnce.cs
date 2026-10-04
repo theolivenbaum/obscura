@@ -73,6 +73,8 @@ public static partial class RenderDom
         internal TextWrapStyle TextWrapStyle = TextWrapStyle.Auto;
         internal TextTransform TextTransform = TextTransform.None;
         internal bool Italic;
+        internal string FontVariantCaps = "normal";
+        internal float FontStretch = 1f;
         internal BoxSizing BoxSizing = BoxSizing.ContentBox;
         internal bool BorderCollapse;
         internal VerticalAlign? TableVerticalAlign;
@@ -117,6 +119,13 @@ public static partial class RenderDom
         /// </remarks>
         internal bool CbHeightKnown;
 
+        /// <summary>
+        /// Whether an ancestor establishes the containing block for fixed-position
+        /// descendants (a transform, filter, contain and the like), so a fixed box here is
+        /// not anchored to the initial containing block.
+        /// </summary>
+        internal bool InsideFixedCb;
+
         internal Inherited Clone() => new()
         {
             Display = Display,
@@ -155,6 +164,8 @@ public static partial class RenderDom
             TextWrapStyle = TextWrapStyle,
             TextTransform = TextTransform,
             Italic = Italic,
+            FontVariantCaps = FontVariantCaps,
+            FontStretch = FontStretch,
             BoxSizing = BoxSizing,
             BorderCollapse = BorderCollapse,
             TableVerticalAlign = TableVerticalAlign,
@@ -164,6 +175,7 @@ public static partial class RenderDom
             CbHeightDefinite = CbHeightDefinite,
             CbHeight = CbHeight,
             CbHeightKnown = CbHeightKnown,
+            InsideFixedCb = InsideFixedCb,
         };
     }
 

@@ -313,7 +313,8 @@ internal static class GridAlignment
             insetVertical,
             margin.VerticalComponents(),
             baselineShim,
-            Direction.Ltr);
+            Direction.Ltr,
+            blockAxis: true);
 
         var scrollbarSize = new Size<float>(
             overflow.Y == Overflow.Scroll ? scrollbarWidth : 0.0f,
@@ -352,7 +353,8 @@ internal static class GridAlignment
         Line<float?> inset,
         Line<float?> margin,
         float baselineShim,
-        Direction direction)
+        Direction direction,
+        bool blockAxis = false)
     {
         // Calculate the grid area dimension in the axis
         var nonAutoMargin = new Line<float>(
@@ -366,6 +368,20 @@ internal static class GridAlignment
         var resolvedMargin = new Line<float>(
             (margin.Start ?? autoMarginSize) + baselineShim,
             margin.End ?? autoMarginSize);
+
+        // DEVIATION from vendor/taffy/src/compute/grid/alignment.rs, which spreads an
+        // absolutely positioned item's auto margins over the grid area whatever its insets,
+        // and then ignores them when both insets are set. An abspos box's auto margins
+        // resolve only against two non-auto insets and are 0 otherwise, as in Chromium; see
+        // BlockLayout.ResolveAbsoluteMargins.
+        if (position == Position.Absolute)
+        {
+            (float absStart, float absEnd) = BlockLayout.ResolveAbsoluteAxisMargins(
+                margin.Start, margin.End, inset.Start, inset.End,
+                gridAreaSize, resolvedSize, direction.IsRtl(), blockAxis);
+            resolvedMargin = new Line<float>(absStart + baselineShim, absEnd);
+            nonAutoMargin = new Line<float>(absStart + baselineShim, absEnd);
+        }
 
         bool overflows = resolvedSize + nonAutoMargin.Sum() > gridAreaSize;
 

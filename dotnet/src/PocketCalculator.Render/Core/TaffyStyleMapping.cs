@@ -252,7 +252,17 @@ internal static class TaffyStyleMapping
             }
         }
 
-        s.Margin = RectAuto(style.Margin, style.MarginAuto);
+        // DEVIATION from crates/obscura-render, which hands an inline-level box's auto
+        // margins to taffy as auto. CSS 2.1 10.3.1 / 10.3.9 / 10.6.1: on an inline or
+        // inline-block box (blockification has already run, so floats, abspos boxes and
+        // flex/grid items are block-level here) a horizontal or vertical `auto` margin is 0.
+        // wikipedia.org's `.lang-list-button { display: inline; margin: 0 auto }` inside a
+        // `text-align: center` wrapper sat at the right edge instead of centred (Chromium
+        // 141). See "Known deviations" in todo.md.
+        bool inlineLevel = LayoutStyleExtensions.IsInlineLevelBox(style)
+            && style.Position != Layout.Position.Absolute
+            && style.Float is null;
+        s.Margin = RectAuto(style.Margin, inlineLevel ? NoAutoMargins : style.MarginAuto);
         s.Padding = RectLpPercent(style.Padding, style.PaddingPercent);
 
         // DEVIATION from crates/obscura-render, which reserves a scrollbar gutter only out of
@@ -391,6 +401,8 @@ internal static class TaffyStyleMapping
             Side(e.Top, percent[0]),
             Side(e.Bottom, percent[2]));
     }
+
+    private static readonly bool[] NoAutoMargins = new bool[4];
 
     private static Layout.Rect<TaffyLengthPercentageAuto> RectAuto(Edges e, ReadOnlySpan<bool> auto)
     {

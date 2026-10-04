@@ -646,6 +646,8 @@ public sealed partial class PreparedRender
         string display = ComputedDisplay(id, style, isPseudo);
 
         output["display"] = display;
+        output["appearance"] = style.ComputedAppearance;
+        output["-webkit-appearance"] = style.ComputedAppearance;
 
         // `border-collapse` and `border-spacing` are inherited, so every element answers them
         // and not only a table: Chromium 141 reports `2px` / `separate` on a `<table>` and on
@@ -841,7 +843,8 @@ public sealed partial class PreparedRender
         // `top: 50%` box in a 34px containing block is `top: 17px` / `bottom: 7px` and a
         // `position: relative` box that specified nothing is `0px` on all four sides.
         string[] insetNames = ["top", "right", "bottom", "left"];
-        float[]? usedInsets = isPseudo ? null : UsedInsets(id, style, rect);
+        float?[] usedAutoMargins = new float?[4];
+        float[]? usedInsets = isPseudo ? null : UsedInsets(id, style, rect, usedAutoMargins);
         for (int side = 0; side < insetNames.Length; side++)
         {
             output[insetNames[side]] = usedInsets is { } used
@@ -851,16 +854,18 @@ public sealed partial class PreparedRender
                     : "auto";
         }
 
-        (string Name, float Value, bool Auto)[] margins =
+        (string Name, float Value, bool Auto, float? Used)[] margins =
         [
-            ("margin-top", style.Margin.Top, style.MarginAuto[0]),
-            ("margin-right", style.Margin.Right, style.MarginAuto[1]),
-            ("margin-bottom", style.Margin.Bottom, style.MarginAuto[2]),
-            ("margin-left", style.Margin.Left, style.MarginAuto[3]),
+            ("margin-top", style.Margin.Top, style.MarginAuto[0], usedAutoMargins[0]),
+            ("margin-right", style.Margin.Right, style.MarginAuto[1], usedAutoMargins[1]),
+            ("margin-bottom", style.Margin.Bottom, style.MarginAuto[2], usedAutoMargins[2]),
+            ("margin-left", style.Margin.Left, style.MarginAuto[3], usedAutoMargins[3]),
         ];
-        foreach ((string name, float value, bool auto) in margins)
+        foreach ((string name, float value, bool auto, float? used) in margins)
         {
-            output[name] = auto ? "auto" : PaintCssValues.CssPx(value);
+            output[name] = used is { } usedMargin
+                ? PaintCssValues.CssPx(usedMargin)
+                : auto ? "auto" : PaintCssValues.CssPx(value);
         }
 
         output["margin"] = CollapseSides(
@@ -969,6 +974,9 @@ public sealed partial class PreparedRender
         output["outline"] = output["outline-color"] + " " + output["outline-style"] + " " + output["outline-width"];
 
         output["font-style"] = style.FontStyleItalic == true ? "italic" : "normal";
+        output["font-variant-caps"] = style.FontVariantCaps ?? "normal";
+        output["font-variant"] = style.FontVariantCaps ?? "normal";
+        output["font-stretch"] = PaintCssValues.CssNumber((style.FontStretch ?? 1f) * 100f) + "%";
 
         // The cascade models only the underline line, so `line-through` / `overline` cannot be
         // reported; everything else is initial, and Chromium then omits style and color.
@@ -1223,7 +1231,7 @@ public sealed partial class PreparedRender
                 (Display.Block, true) => "inline-block",
                 (Display.Flex, false) => "flex",
                 (Display.Grid, false) => "grid",
-                (Display.Inline, true) => "inline-block",
+                (Display.Inline, true) => style.ReportsInlineDisplay ? "inline" : "inline-block",
                 (Display.Inline, false) => "inline",
 
                 // `display: flow-root` reported as `block`, which is what this switch did for
@@ -1514,7 +1522,16 @@ public sealed partial class PreparedRender
     /// place the resolved offsets exist; a relatively positioned one is its resolved offset and
     /// the negation of it on the opposite side, which is what its box was shifted by.
     /// </remarks>
-    private float[]? UsedInsets(NodeId id, LayoutStyle style, Rect? rect)
+    /// <remarks>
+    /// For an absolutely positioned or fixed box, an axis whose two insets are both set
+    /// reports them as specified (resolved against the containing block) and the used value
+    /// of any <c>auto</c> margin in that axis, which is what Chromium 141 answers for the
+    /// centred `left:0; right:0; margin:0 auto` pattern (`0px` insets, `260px` margins). An
+    /// axis with an <c>auto</c> inset has its auto margins at 0 (CSS 2.1 10.3.7/10.6.4), so
+    /// its offsets follow from the box. <paramref name="usedAutoMargins"/> receives the used
+    /// value of each auto margin resolved here (top, right, bottom, left), null otherwise.
+    /// </remarks>
+    private float[]? UsedInsets(NodeId id, LayoutStyle style, Rect? rect, float?[] usedAutoMargins)
     {
         if (TreeValue is not { } tree)
         {
@@ -1523,7 +1540,8 @@ public sealed partial class PreparedRender
 
         bool absolute = style.Position == TaffyPosition.Absolute || style.PositionFixed;
         bool relative = !absolute && !style.PositionSticky && style.Position == TaffyPosition.Relative;
-        if ((!absolute && !relative) || ContainingBlockBox(tree, id, absolute) is not { } cb)
+        if ((!absolute && !relative)
+            || ContainingBlockBox(tree, id, absolute, style.PositionFixed) is not { } cb)
         {
             return null;
         }
@@ -1549,14 +1567,72 @@ public sealed partial class PreparedRender
         float marginRight = style.MarginAuto[1] ? 0f : style.Margin.Right;
         float top = box.Y - marginTop - cb.Y;
         float left = box.X - marginLeft - cb.X;
-
-        return
+        float[] used =
         [
             top,
             cb.Width - left - (marginLeft + box.Width + marginRight),
             cb.Height - top - (marginTop + box.Height + marginBottom),
             left,
         ];
+
+        if (SpecifiedInsetPair(style, 3, 1, cb.Width) is ({ } specLeft, { } specRight))
+        {
+            used[3] = specLeft;
+            used[1] = specRight;
+            if (style.MarginAuto[3])
+            {
+                usedAutoMargins[3] = box.X - cb.X - specLeft;
+            }
+
+            if (style.MarginAuto[1])
+            {
+                usedAutoMargins[1] = cb.X + cb.Width - specRight - box.X - box.Width;
+            }
+        }
+        else
+        {
+            usedAutoMargins[3] = style.MarginAuto[3] ? 0f : null;
+            usedAutoMargins[1] = style.MarginAuto[1] ? 0f : null;
+        }
+
+        if (SpecifiedInsetPair(style, 0, 2, cb.Height) is ({ } specTop, { } specBottom))
+        {
+            used[0] = specTop;
+            used[2] = specBottom;
+            if (style.MarginAuto[0])
+            {
+                usedAutoMargins[0] = box.Y - cb.Y - specTop;
+            }
+
+            if (style.MarginAuto[2])
+            {
+                usedAutoMargins[2] = cb.Y + cb.Height - specBottom - box.Y - box.Height;
+            }
+        }
+        else
+        {
+            usedAutoMargins[0] = style.MarginAuto[0] ? 0f : null;
+            usedAutoMargins[2] = style.MarginAuto[2] ? 0f : null;
+        }
+
+        return used;
+    }
+
+    /// <summary>
+    /// Both insets of one axis resolved against the containing block, or nulls when either is
+    /// <c>auto</c> or is a late-resolved calc() whose flattened value is only approximate.
+    /// </summary>
+    private (float? Start, float? End) SpecifiedInsetPair(LayoutStyle style, int start, int end, float basis)
+    {
+        if (style.InsetCalc is { } calc && (calc[start] is not null || calc[end] is not null))
+        {
+            return (null, null);
+        }
+
+        return ResolveInset(style, start, basis) is { } startValue
+            && ResolveInset(style, end, basis) is { } endValue
+            ? (startValue, endValue)
+            : (null, null);
     }
 
     /// <summary>One inset resolved against its axis of the containing block.</summary>
@@ -1586,7 +1662,14 @@ public sealed partial class PreparedRender
     /// an absolutely positioned box, the parent's content box otherwise, and the initial
     /// containing block when neither exists.
     /// </summary>
-    private Rect? ContainingBlockBox(DomTree tree, NodeId id, bool absolute)
+    /// <remarks>
+    /// A fixed box skips positioned ancestors: only one that establishes a containing block
+    /// for fixed descendants (a transform, filter, contain and the like) captures it, and the
+    /// initial containing block takes it otherwise. Treating it like an absolute box measured
+    /// a `position: fixed; left: 0` box inside a 128px-offset relative wrapper as
+    /// `left: -128px`.
+    /// </remarks>
+    private Rect? ContainingBlockBox(DomTree tree, NodeId id, bool absolute, bool fixedPosition = false)
     {
         NodeId? ancestor = DomTraversal.RenderedParent(tree, id);
         while (ancestor is { } candidate)
@@ -1594,10 +1677,12 @@ public sealed partial class PreparedRender
             if (Layout.Styles.TryGetValue(candidate, out LayoutStyle? ancestorStyle)
                 && Layout.Rects.TryGetValue(candidate, out Rect ancestorRect))
             {
-                bool positioned = ancestorStyle.Position is not null
-                    || ancestorStyle.PositionFixed
-                    || ancestorStyle.PositionSticky
-                    || ancestorStyle.EstablishesPositioningContainingBlock();
+                bool positioned = fixedPosition
+                    ? ancestorStyle.EstablishesPositioningContainingBlock()
+                    : ancestorStyle.Position is not null
+                        || ancestorStyle.PositionFixed
+                        || ancestorStyle.PositionSticky
+                        || ancestorStyle.EstablishesPositioningContainingBlock();
                 if (!absolute || positioned)
                 {
                     Edges padding = absolute ? Edges.Zero : ancestorStyle.Padding;

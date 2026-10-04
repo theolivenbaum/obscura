@@ -4823,3 +4823,78 @@ lands in the body, `document.title` keeps the old one, old listeners stay), and 
 document fires no page-visible `DOMContentLoaded`/`load`. Pinned by
 `NavigationLifecycle.ReopenedDocumentReportsWorldConsoleAndLoadLifecycle` and
 `DocumentCloseDuringLoadAddsNoLifecycle`.
+
+### An absolutely positioned box's auto margins follow the constraint equation
+
+taffy (`vendor/taffy/src/compute/block.rs`) zeroes a pair of auto margins whenever the
+declared size is `>=` the free space, which compares the box with the space *excluding* the
+box: a `position: fixed; left: 0; right: 0; width: 760px; margin: 0 auto` box in a 1280px
+viewport (bing.com's search box, every centred modal) sat at x=0 where Chromium centres it at
+260, and a `max-width`-clamped auto width never centred at all. It also resolves auto margins
+against whatever space a single inset leaves (`right: 10px; margin: auto` landed mid-way
+instead of at the right edge), and `flexbox.rs` and `grid/alignment.rs` spread them over the
+container whatever the insets. C# follows CSS 2.1 10.3.7 / 10.6.4 as Chromium does, in
+`BlockLayout.ResolveAbsoluteMargins` for all three: auto margins resolve only between two
+non-auto insets and are 0 otherwise, against the used (clamped) size; a negative inline-axis
+pair pins the start margin per the containing block's direction, and a negative block-axis
+pair splits equally.
+
+Three neighbours of the same bug:
+
+- `dom.rs` pre-sizes a stretched fixed box to `viewport - left - right` before its margins
+  are resolved, ignoring margins, padding and border, and does so inside a transformed
+  ancestor too, which is the containing block there. C# runs it after the box edges settle,
+  subtracts them, skips it under a fixed containing block (`Inherited.InsideFixedCb`), and
+  resolves a viewport-fixed box's percentages against the initial containing block.
+- `dom.rs` turns a flex container's `justify-content` off when any child has a main-axis auto
+  margin, absolutely positioned children included, so an abspos `margin: auto` child of a
+  `justify-content: center` container sat at the start. C# skips out-of-flow children.
+- The CSSOM snapshot measured a fixed box's insets against its nearest positioned ancestor
+  (`left: -128px`), and reported `auto` for auto margins. It now uses the fixed containing
+  block, reports a specified inset pair as specified and the used value of an auto margin
+  (Chromium: `left: 0px`, `margin-left: 260px`).
+
+Covered by `PositionedAutoMarginTests`.
+
+### Form controls take Chromium's display adjustments, and an inline-level box has no auto margins
+
+`style.rs` keeps an author `display` on a control as written. Chromium (LayoutTheme::
+AdjustStyle) turns `inline`, `inline-table` and every internal table display into
+`inline-block`, and `table` into `block`, on a control that keeps its native appearance
+(every `input` but hidden/file/image, `button`, `select`, `textarea`, `meter`, `progress`);
+`appearance: none` turns that off, but the control is still laid out as an atomic box.
+`display: contents` on a replaced element or a form control computes to `none` (a button
+keeps it), and a drop-down `select` with native appearance ignores the author `line-height`.
+`ComputedStyle.AdjustFormControlStyle` applies all of it at the end of the cascade, and
+`appearance` / `-webkit-appearance` are now parsed and reported. The UA sheet's `meter` and
+`progress` are `inline-block`, where the reference left them `block`.
+
+wikipedia.org's `.lang-list-button { display: inline; margin: 0 auto }` exposed two more:
+
+- `TaffyStyleMapping` handed an inline-level box's auto margins to taffy as auto, so the
+  centred button sat at the right edge of its line. CSS 2.1 10.3.1 / 10.3.9 make them 0.
+- `native_button_intrinsic_content` collapses the collected label as one string, which trims
+  the space between the label and a trailing icon as if it ended the line, so the button came
+  out one space narrower than its content and the icon wrapped onto a second line. C# leaves a
+  marker for an atomic child, so the space is measured (`NormalizeControlLabel`).
+
+Covered by `FormControlDisplayTests`.
+
+### The `font` shorthand takes CSS-wide keywords, and controls reset their whole font
+
+`style.rs` parses `font` by looking for a font-size token, finds none in `inherit`, and drops
+the declaration, so the reset every page ships - `button, input, optgroup, select, textarea {
+font: inherit }` - left all of them on the UA 13.333px Arial (the `font-family: inherit`
+half was fixed earlier as F3). C# expands `inherit`/`unset` to every longhand,
+`initial` to `normal 400 16px/normal "Times New Roman"`, and keeps the cascaded value for
+`revert`, as the longhands do. `font-style: inherit` computed to `normal` and
+`line-height: initial` inherited; both are fixed. The UA control font
+(`-webkit-small-control`) now also resets weight, style, variant and stretch, which the
+reference let inherit from a bold or italic parent.
+
+`font-variant-caps` and `font-stretch` were not modeled at all, so getComputedStyle answered
+the empty string for `font-variant` and `font-stretch`. They are now cascaded, inherited and
+reported, not rendered: the port synthesises no small capitals and the embedded faces have
+no width axis.
+
+Covered by `FontShorthandKeywordTests`.

@@ -1092,6 +1092,74 @@ public static class BlockLayout
     }
 
     /// <summary>Perform absolute layout on all absolutely positioned children.</summary>
+    /// <summary>
+    /// The used margins of an absolutely positioned box (CSS 2.1 10.3.7 / 10.6.4, css-position-3
+    /// 4.1), given its insets resolved against the containing block area.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from vendor/taffy (block.rs, flexbox.rs and grid/alignment.rs), which resolve
+    /// auto margins against whatever space the set insets leave, even with an inset auto, and
+    /// in block.rs zero a pair of auto margins whenever the declared size is >= the free space
+    /// (a comparison of the box against the space excluding the box, so a 760px box in a
+    /// 1280px containing block never centred, and a max-width-clamped auto width never did
+    /// either). C# follows the spec, as Chromium does: auto margins resolve only when both
+    /// insets of an axis are non-auto and are 0 otherwise, against the used (clamped) size. A
+    /// pair of inline-axis auto margins that would go negative puts the start margin (per
+    /// the containing block's direction) at 0 and the overflow on the end margin; a
+    /// block-axis pair splits equally even when negative. See "Known deviations" in todo.md.
+    /// </remarks>
+    internal static Rect<float> ResolveAbsoluteMargins(
+        Rect<float?> margin,
+        float? left,
+        float? right,
+        float? top,
+        float? bottom,
+        Size<float> areaSize,
+        Size<float> finalSize,
+        bool rtl)
+    {
+        (float leftMargin, float rightMargin) = ResolveAbsoluteAxisMargins(
+            margin.Left, margin.Right, left, right, areaSize.Width, finalSize.Width, rtl, false);
+        (float topMargin, float bottomMargin) = ResolveAbsoluteAxisMargins(
+            margin.Top, margin.Bottom, top, bottom, areaSize.Height, finalSize.Height, false, true);
+        return new Rect<float>(leftMargin, rightMargin, topMargin, bottomMargin);
+    }
+
+    /// <summary>
+    /// One axis of <see cref="ResolveAbsoluteMargins"/>. <paramref name="reversed"/> is a
+    /// right-to-left containing block in the inline axis; <paramref name="blockAxis"/> lets a
+    /// negative pair of auto margins split equally rather than pinning the start margin.
+    /// </summary>
+    internal static (float Start, float End) ResolveAbsoluteAxisMargins(
+        float? marginStart,
+        float? marginEnd,
+        float? insetStart,
+        float? insetEnd,
+        float area,
+        float size,
+        bool reversed,
+        bool blockAxis)
+    {
+        if (!insetStart.HasValue || !insetEnd.HasValue)
+        {
+            return (marginStart ?? 0.0f, marginEnd ?? 0.0f);
+        }
+
+        float free = area - insetStart.Value - insetEnd.Value - size
+            - (marginStart ?? 0.0f) - (marginEnd ?? 0.0f);
+        if (marginStart.HasValue || marginEnd.HasValue)
+        {
+            return (marginStart ?? free, marginEnd ?? free);
+        }
+
+        if (free >= 0.0f || blockAxis)
+        {
+            return (free / 2.0f, free / 2.0f);
+        }
+
+        return reversed ? (free, 0.0f) : (0.0f, free);
+    }
+
     private static Size<float> PerformAbsoluteLayoutOnAbsoluteChildren(
         ILayoutBlockContainer tree,
         List<BlockItem> items,
@@ -1193,69 +1261,9 @@ public static class BlockLayout
                 SizingMode.ContentSize,
                 GeometryExtensions.LineFalse);
 
-            var nonAutoMargin = new Rect<float>(
-                left.HasValue ? margin.Left ?? 0.0f : 0.0f,
-                right.HasValue ? margin.Right ?? 0.0f : 0.0f,
-                top.HasValue ? margin.Top ?? 0.0f : 0.0f,
-                bottom.HasValue ? margin.Bottom ?? 0.0f : 0.0f);
-
-            // Expand auto margins to fill available space.
-            // Auto margins for absolutely positioned elements in block containers only resolve if
-            // inset is set. Otherwise they resolve to 0.
-            var absoluteAutoMarginSpace = new Point<float>(
-                right.HasValue ? areaSize.Width - right.Value - (left ?? 0.0f) : finalSize.Width,
-                bottom.HasValue ? areaSize.Height - bottom.Value - (top ?? 0.0f) : finalSize.Height);
-            var freeSpace = new Size<float>(
-                absoluteAutoMarginSpace.X - finalSize.Width - nonAutoMargin.HorizontalAxisSum(),
-                absoluteAutoMarginSpace.Y - finalSize.Height - nonAutoMargin.VerticalAxisSum());
-
-            float autoMarginWidth;
-            {
-                int autoMarginCount = (margin.Left.HasValue ? 0 : 1) + (margin.Right.HasValue ? 0 : 1);
-                if (autoMarginCount == 2
-                    && (!styleSize.Width.HasValue || styleSize.Width.Value >= freeSpace.Width))
-                {
-                    autoMarginWidth = 0.0f;
-                }
-                else if (autoMarginCount > 0)
-                {
-                    autoMarginWidth = freeSpace.Width / autoMarginCount;
-                }
-                else
-                {
-                    autoMarginWidth = 0.0f;
-                }
-            }
-
-            float autoMarginHeight;
-            {
-                int autoMarginCount = (margin.Top.HasValue ? 0 : 1) + (margin.Bottom.HasValue ? 0 : 1);
-                if (autoMarginCount == 2
-                    && (!styleSize.Height.HasValue || styleSize.Height.Value >= freeSpace.Height))
-                {
-                    autoMarginHeight = 0.0f;
-                }
-                else if (autoMarginCount > 0)
-                {
-                    autoMarginHeight = freeSpace.Height / autoMarginCount;
-                }
-                else
-                {
-                    autoMarginHeight = 0.0f;
-                }
-            }
-
-            var autoMargin = new Rect<float>(
-                margin.Left.HasValue ? 0.0f : autoMarginWidth,
-                margin.Right.HasValue ? 0.0f : autoMarginWidth,
-                margin.Top.HasValue ? 0.0f : autoMarginHeight,
-                margin.Bottom.HasValue ? 0.0f : autoMarginHeight);
-
-            var resolvedMargin = new Rect<float>(
-                margin.Left ?? autoMargin.Left,
-                margin.Right ?? autoMargin.Right,
-                margin.Top ?? autoMargin.Top,
-                margin.Bottom ?? autoMargin.Bottom);
+            // DEVIATION from vendor/taffy/src/compute/block.rs; see ResolveAbsoluteMargins.
+            var resolvedMargin = ResolveAbsoluteMargins(
+                margin, left, right, top, bottom, areaSize, finalSize, direction.IsRtl());
 
             float xOffset;
             if (left.HasValue && right.HasValue)
