@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json.Nodes;
 using PocketCalculator.Dom;
 using PocketCalculator.Js.Modules;
 using PocketCalculator.Net;
@@ -955,6 +956,70 @@ public static class DomOps
                 return "true";
             }
 
+            // Port addition (shadow DOM): arg1 is a shadow root's node. Answers
+            // "host\0mode\0flags" (flags: delegatesFocus, clonable, serializable, manual slot
+            // assignment, each "1" or "0"), or "" when arg1 is no shadow root. The shim wraps a
+            // declarative root it meets through parentNode with this, since node_type reports
+            // the root's backing node as a document.
+            case "shadow_root_host":
+            {
+                if (dom.ShadowRootInfo(ParseNodeOrZero(arg1)) is not { } info)
+                {
+                    return string.Empty;
+                }
+
+                return Expose(dom, info.Host) + "\0"
+                    + (info.Mode == ShadowRootMode.Open ? "open" : "closed") + "\0"
+                    + (info.DelegatesFocus ? "1" : "0") + (info.Clonable ? "1" : "0")
+                    + (info.Serializable ? "1" : "0") + (info.ManualSlotAssignment ? "1" : "0");
+            }
+
+            // Port addition: attachShadow's options for the root arg1, as the four flags above.
+            case "shadow_root_options":
+                return Bool(arg2.Length >= 4 && dom.SetShadowRootOptions(
+                    ParseNodeOrZero(arg1),
+                    manualSlotAssignment: arg2[3] == '1',
+                    delegatesFocus: arg2[0] == '1',
+                    clonable: arg2[1] == '1',
+                    serializable: arg2[2] == '1'));
+
+            // Port addition (HTMLSlotElement.assignedNodes): the slot's assigned nodes, the
+            // assignment the render layer uses, or "null" when arg1 is not a slot in a shadow tree.
+            case "slot_assigned_nodes":
+                return dom.AssignedNodes(ParseNodeOrZero(arg1)) is { } assignedNodes
+                    ? SerdeJson.IntArray(ExposeAll(dom, assignedNodes))
+                    : "null";
+
+            // Port addition (assignedSlot): the slot arg1 is assigned to, or -1.
+            case "assigned_slot":
+                return dom.AssignedSlot(ParseNodeOrZero(arg1)) is { } assignedSlot
+                    ? Expose(dom, assignedSlot)
+                    : "-1";
+
+            // Port addition (slotchange): the slots whose assigned nodes changed since the
+            // last call, as a JSON array of node ids. bootstrap.js asks at the microtask where
+            // Chromium fires slotchange.
+            case "slot_changes":
+                return SerdeJson.IntArray(ExposeAll(dom, dom.TakeSlotChanges()));
+
+            // Port addition (HTMLSlotElement.assign): arg2 is a JSON array of node ids.
+            case "slot_assign":
+            {
+                var nodes = new List<NodeId>();
+                if (JsonNode.Parse(arg2) is JsonArray array)
+                {
+                    foreach (var item in array)
+                    {
+                        if (item is JsonValue value && value.TryGetValue<long>(out var raw) && raw >= 0 && raw <= uint.MaxValue)
+                        {
+                            nodes.Add(NodeId.New((uint)raw));
+                        }
+                    }
+                }
+
+                return Bool(dom.AssignSlottablesManually(ParseNodeOrZero(arg1), nodes));
+            }
+
             // Connectivity is maintained incrementally by DomTree. Exposing the cached
             // bit avoids an ancestor op crossing for every level when JS builds a deep
             // detached subtree.
@@ -1017,6 +1082,11 @@ public static class DomOps
         // box/style loss keeps that latent state, but DOM removal, reparenting, and
         // subtree replacement reset the affected identities, matching Chromium's
         // lifecycle behavior.
+        if (state.Dom is { HasShadowRoots: true } slotTree)
+        {
+            NoteSlotMutation(slotTree, cmd, arg1, arg2);
+        }
+
         HashSet<NodeId> resetNodes = [];
         if (state.Dom is { } tree)
         {
@@ -1160,6 +1230,95 @@ public static class DomOps
         }
 
         state.ResolvedScroll = null;
+    }
+
+    /// <summary>
+    /// Port addition (slotchange): before a mutation runs, mark the shadow trees whose slot
+    /// assignment it can change, so <c>slot_changes</c> can compare against the state before it.
+    /// A host's child list or a child's <c>slot</c> attribute is a dictionary lookup; a slot moving
+    /// in or out of a shadow tree, or renamed, costs an ancestor walk.
+    /// </summary>
+    private static void NoteSlotMutation(DomTree dom, string cmd, string arg1, string arg2)
+    {
+        static NodeId? Node(string value) => uint.TryParse(value, out var raw) ? NodeId.New(raw) : null;
+
+        void Moving(NodeId moved, NodeId? newParent)
+        {
+            var oldParent = dom.GetNode(moved)?.Parent;
+            dom.MarkHostSlotsDirty(oldParent);
+            dom.MarkHostSlotsDirty(newParent);
+            if (dom.MayCarrySlot(moved))
+            {
+                dom.MarkContainingSlotsDirty(oldParent);
+                dom.MarkContainingSlotsDirty(newParent);
+            }
+        }
+
+        switch (cmd)
+        {
+            case "append_child":
+                if (Node(arg1) is { } parent && Node(arg2) is { } child)
+                {
+                    Moving(child, parent);
+                }
+
+                break;
+            case "insert_before":
+                if (Node(arg1) is { } inserted && Node(arg2) is { } reference)
+                {
+                    Moving(inserted, dom.GetNode(reference)?.Parent);
+                }
+
+                break;
+            case "remove_child":
+                if (Node(arg1) is { } removed)
+                {
+                    Moving(removed, null);
+                }
+
+                break;
+            case "set_attribute":
+            case "remove_attribute":
+            case "set_attribute_ns":
+            case "remove_attribute_ns":
+            {
+                if (Node(arg1) is not { } target)
+                {
+                    break;
+                }
+
+                var name = cmd switch
+                {
+                    "set_attribute" => arg2.Split('\0', 2)[0],
+                    "remove_attribute" => arg2,
+                    "set_attribute_ns" => arg2.Split('\0', 3) is { Length: > 1 } parts ? parts[1] : string.Empty,
+                    _ => SplitOnceNul(arg2).Local,
+                };
+                if (string.Equals(name, "slot", StringComparison.Ordinal))
+                {
+                    dom.MarkHostSlotsDirty(dom.GetNode(target)?.Parent);
+                }
+                else if (string.Equals(name, "name", StringComparison.Ordinal) && dom.IsHtmlSlotElement(target))
+                {
+                    dom.MarkContainingSlotsDirty(target);
+                }
+
+                break;
+            }
+
+            case "set_inner_html":
+            case "set_inner_html_context":
+            case "set_text_content":
+            case "set_fragment_html_executable":
+                // A text node's data never moves a slottable.
+                if (Node(arg1) is { } replaced && dom.GetNode(replaced) is { Data: ElementData or DocumentData })
+                {
+                    dom.MarkHostSlotsDirty(replaced);
+                    dom.MarkContainingSlotsDirty(replaced);
+                }
+
+                break;
+        }
     }
 
     private static string CustomElementCandidates(DomTree dom, NodeId root)

@@ -176,6 +176,22 @@ Port addition: `document_close` (no arguments, answers `"true"`). The C# shim's
 document; the host counts it so the CDP layer reports the reload's lifecycle events
 (`Dispatcher.DrainDocumentLoads`). The Rust shim's `close()` does nothing and never sends it.
 
+Port additions for shadow roots and slots (bootstrap.js `_shadowRootFromNid`, `HTMLSlotElement`,
+`assignedSlot`, `slotchange`; the Rust shim has none of them):
+
+- `shadow_root_host` (arg1 a shadow root's node): `"host\0mode\0flags"`, flags being four
+  `0`/`1` characters for delegatesFocus, clonable, serializable and manual slot assignment, or
+  `""` when arg1 is no shadow root. `node_type` reports a root's backing node as 9.
+- `shadow_root_options` (arg1 root, arg2 the four flags): records attachShadow's options;
+  `"true"` when arg1 is a shadow root.
+- `slot_assigned_nodes` (arg1 slot): JSON array of the slot's assigned nodes, or `"null"` when
+  arg1 is not a slot in a shadow tree.
+- `assigned_slot` (arg1 node): the slot it is assigned to, or `-1`.
+- `slot_assign` (arg1 slot, arg2 JSON array of node ids): `assign(...nodes)`; `"true"` when arg1
+  is a slot.
+- `slot_changes` (no arguments): JSON array of the slots whose assigned nodes changed since the
+  last call (the host marks the shadow trees a mutation can affect before it runs).
+
 The three `op_external_stylesheet_*` ops (upstream 04418a5) hold a linked sheet's
 fetched CSS beside its `<link>` (or an `@import`'s beside its `<style>`) in the
 `DomTree`, with an origin-clean bit. `set` accepts only a `link` or `style` owner

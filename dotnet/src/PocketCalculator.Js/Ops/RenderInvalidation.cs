@@ -253,6 +253,19 @@ internal static class RenderInvalidation
                 return new RenderMutationImpact(StateHelpers.NodeIsConnected(dom, target), changed);
             }
 
+            // Port addition: manual slot assignment (and switching a root to it) changes which
+            // light children the composed tree shows.
+            case "slot_assign":
+            case "shadow_root_options":
+            {
+                if (ParseNode(arg1) is not { } target || dom.GetNode(target) is null)
+                {
+                    return RenderMutationImpact.None;
+                }
+
+                return new RenderMutationImpact(StateHelpers.NodeIsConnected(dom, target), true);
+            }
+
             default:
                 return RenderMutationImpact.None;
         }

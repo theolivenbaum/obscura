@@ -4709,8 +4709,8 @@ window's handlers (`onhashchange`, `onpopstate`, ...) to HTMLBodyElement/HTMLFra
 Added: outerText, contentEditable, isContentEditable, draggable, spellcheck, translate, inert,
 offsetParent, and offsetTop/offsetLeft are now measured from the offsetParent (document-relative
 for `<body>`) rather than being the viewport rect; the anchor/area stringifier returns href.
-Other members Chromium has on the specific interfaces (an anchor's `href`, an iframe's
-`contentWindow`, ...) stay on `Element.prototype`. The host's click (`__obscura_host.dom.call(el,
+The members Chromium has on the specific interfaces (an anchor's `href`, an iframe's
+`contentWindow`, ...) moved later, see "Interface members off Element.prototype". The host's click (`__obscura_host.dom.call(el,
 'click')`) still reaches SVG elements, which have no click() of their own. The Rust-derived
 `GlobalEventHandlersPresentOnDocumentAndElement` now asserts Chromium's placement. Pinned by
 `HtmlElementInterfacesTests` and `OffsetParentTests`.
@@ -4992,3 +4992,65 @@ elements are upgraded on insertion; `adoptedCallback` never fires, because
 `createHTMLDocument()`/`DOMParser` documents are stand-ins over the page's own tree
 (`ownerDocument` never changes); `connectedMoveCallback` is read but `moveBefore` does not exist;
 reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.
+
+### Interface members off Element.prototype, CharacterData textContent, slots, window.origin
+
+Found while booting youtube.com (Polymer) and msn.com (FAST). All DEVIATIONS from
+`crates/obscura-js/js/bootstrap.js`, measured against Chromium 141.
+
+- **Element.prototype carried every HTML interface's members** (the shim's one class served
+  every element): `iframe.sandbox = '...'` threw "which has only a getter", FAST's
+  `this.options = [...]` on its own element threw, and a custom element's `this.disabled = true`
+  or `this.value = x` wrote attributes instead of making own properties. The ~80 members
+  (`_elementMemberOwners` in bootstrap.js, generated from Chromium's prototypes) now sit on the
+  interfaces Chromium defines them on, enumerable and configurable as there; Element.prototype
+  keeps only Chromium's own members (plus `nodeName`/`nodeType` overrides and the shim's `_`
+  helpers). [PutForwards] attributes take assignment (`classList`, `relList` on a/area/link/form,
+  `sandbox`, a link's `sizes`, an output's `htmlFor`, `style`); an img's/source's `sizes`, a
+  script's `htmlFor` and a body's `text` reflect strings; select/textarea/fieldset/output `type`
+  is read-only, a button's defaults to "submit"; a form has `relList`. SVG elements get Chromium's
+  SVG interfaces (SVGAElement, SVGRectElement, SVGTextElement, ... under SVGGraphicsElement /
+  SVGGeometryElement / SVGTextContentElement) with `href` (getter-only SVGAnimatedString),
+  `getBBox` and the text-content methods only where Chromium has them, and no HTML members. The
+  shim reaches moved members through `_elementMemberImpls` and `_bootEl`; isolated-world bridges
+  replace them on every owning prototype.
+- **textContent on CharacterData** appended a text node the tree refused, so `text.textContent =
+  ''` did nothing, and on the document it removed the doctype and `<html>`. Now: CharacterData sets
+  its data (null is "") with one characterData record, Document and DocumentType ignore it and
+  read null; `nodeValue` on a Text/Comment/PI is "replace data" too (it wrote without a record),
+  and `data = undefined` is "undefined".
+- **Slots**: `HTMLSlotElement.assignedNodes/assignedElements({flatten})`, `assign()`
+  (`slotAssignment: 'manual'`), `name`, `Element/Text.assignedSlot` (null for a closed root) and
+  `slotchange` (trusted, bubbles, not composed, after the mutation observers' callbacks at the same
+  microtask). The assignment is the native one (`DomTree.AssignedNodes`), which the render layer
+  and `::slotted` use; manual assignment is native too (`DomTree.Slots.cs`), so an unassigned light
+  child of a manual root does not render. New op_dom commands (port additions):
+  `shadow_root_host`, `shadow_root_options`, `slot_assigned_nodes`, `assigned_slot`,
+  `slot_assign`, `slot_changes` (dotnet/docs/op-protocol.md). Known differences: the host
+  compares assignment states, so a change undone within one task fires no slotchange where
+  Chromium fires one, and slots are reported per shadow root in tree order (Chromium: the order
+  they were signalled, which differs after successive `assign()` calls).
+- **Declarative shadow roots**: a DSD root's backing node is a document in the native tree, and
+  `_wrap` made it a Document, so a child read through `parentNode` before script touched
+  `host.shadowRoot` (a custom element upgraded inside the root, as Polymer's are) saw `#document`.
+  `_wrap` now asks the host (`shadow_root_host`) and builds the ShadowRoot; the template's
+  `shadowrootdelegatesfocus` / `shadowrootclonable` / `shadowrootserializable` become the root's
+  options (Rust dropped them).
+- **EventListener objects**: node, document and window dispatch called every listener as a
+  function, so FAST's `addEventListener('slotchange', this)` (and its image load listeners) threw
+  "Function.prototype.apply was called on #<...>", and the document dropped object listeners at
+  add time. Listeners now run through `_invokeListener` (a function, or `handleEvent` looked up at
+  dispatch); a null listener is ignored.
+- **window.origin, isSecureContext, crossOriginIsolated**: missing. Own enumerable configurable
+  accessors of the window with Chromium's brand check; `origin` is [Replaceable], the other two
+  getter-only. isSecureContext is true for https/wss/file and loopback http; crossOriginIsolated is
+  always false (the shim does not see COOP/COEP; Chromium reads true when both are sent).
+
+Not done: Attr is still not a Node in the shim (`attr.textContent` makes an own property);
+interface members defined in classes stay non-enumerable and the on* handlers are data
+properties (both pre-existing, Chromium has enumerable accessors); `input.files = fileList` is
+accepted and ignored; `HTMLFencedFrameElement` does not exist; an element's listeners still
+ignore `capture` and `once`, and a bubbling event reaches the document's listeners with
+`currentTarget` left at `<html>`. Pinned by
+`InterfaceMemberPlacementTests`, `ShadowSlotTests`, `NodeTextAndWindowOriginTests` (Js) and
+`ManualSlotAssignmentTests` (Dom).

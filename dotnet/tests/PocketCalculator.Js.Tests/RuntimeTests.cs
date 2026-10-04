@@ -19242,13 +19242,16 @@ public sealed partial class RuntimeTests
                     age.labels.length,
                     age.labels[0] === l2,
                     hid.labels.length,
-                    plain.labels.length,
-                    plain.control === null,
+                    plain.labels === undefined,
+                    plain.control === undefined,
                 ].join(',');
             })()
             """);
+        // DEVIATION from the Rust test, which reads `labels` and `control` off a <div>: the Rust
+        // shim keeps them on Element.prototype. In Chromium 141 they are HTMLLabelElement's and
+        // the labelable elements' only, so a div has neither (InterfaceMemberPlacementTests).
         Assert.Equal(
-            "true,true,1,true,1,true,0,0,true",
+            "true,true,1,true,1,true,0,true,true",
             result!.GetValue<string>());
     }
 

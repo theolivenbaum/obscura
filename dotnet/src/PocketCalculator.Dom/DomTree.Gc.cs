@@ -451,6 +451,7 @@ public sealed partial class DomTree
         {
             // Every link of a freed node points inside its own component, which goes as a
             // whole, so no live node is left pointing at a freed slot.
+            ForgetManualSlotAssignment(id);
             if (_shadowRoots.Remove(id, out var root) && _shadowRootsByHost.TryGetValue(root.Host, out var hosted) && hosted == id)
             {
                 _shadowRootsByHost.Remove(root.Host);

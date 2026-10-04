@@ -808,6 +808,7 @@ public sealed partial class DomTree
         // inherit an old host/root relationship.
         foreach (var id in nodesToRemove)
         {
+            ForgetManualSlotAssignment(id);
             if (_shadowRoots.Remove(id, out var root))
             {
                 if (_shadowRootsByHost.TryGetValue(root.Host, out var hosted) && hosted == id)
@@ -1072,6 +1073,11 @@ public sealed partial class DomTree
             return null;
         }
 
+        if (_shadowRoots.TryGetValue(root, out var rootInfo) && rootInfo.ManualSlotAssignment)
+        {
+            return ManualAssignedSlot(node, root);
+        }
+
         foreach (var candidate in Descendants(root))
         {
             if (IsHtmlSlotElement(candidate)
@@ -1102,6 +1108,11 @@ public sealed partial class DomTree
         }
 
         var host = info.Host;
+        if (info.ManualSlotAssignment)
+        {
+            return ManualAssignedNodes(slot, host);
+        }
+
         var name = Slot(slot)?.GetAttribute("name") ?? "";
 
         bool IsSameNameSlot(NodeId candidate) =>
