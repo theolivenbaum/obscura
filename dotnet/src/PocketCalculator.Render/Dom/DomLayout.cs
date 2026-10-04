@@ -28,6 +28,82 @@ internal sealed record GridTrackSizes(
         info.Rows.ExplicitTracks);
 }
 
+/// <summary>
+/// A border box as taffy computed it before its rounding pass, beside the pixel-snapped rect
+/// <see cref="DomLayout.Rects"/> holds for it at the same moment.
+/// </summary>
+/// <remarks>
+/// Not in crates/obscura-render/src/dom.rs, which reports the rounded layout. Chromium lays
+/// out in LayoutUnits and snaps only at paint, so a 200.4px float reports
+/// <c>width: 200.390625</c> from <c>getBoundingClientRect()</c>. <see cref="Snapped"/> lets a
+/// reader tell whether a later pass replaced the box: a rect that only moved keeps its size
+/// and so keeps its fraction, one that was resized no longer matches and reports as snapped.
+/// </remarks>
+internal readonly record struct SubpixelRect(Rect Snapped, Rect Precise)
+{
+    /// <summary>
+    /// Whether <paramref name="snapped"/> plausibly is the rounding of <paramref name="precise"/>.
+    /// The rounding pass rounds locations relative to their parent, so the absolute drift can
+    /// exceed half a pixel; anything beyond two pixels means the two layouts are not the same
+    /// pass and the snapped one is kept.
+    /// </summary>
+    internal static bool IsSnapOf(Rect snapped, Rect precise) =>
+        float.IsFinite(precise.X) && float.IsFinite(precise.Y)
+        && float.IsFinite(precise.Width) && float.IsFinite(precise.Height)
+        && MathF.Abs(precise.X - snapped.X) < 2f
+        && MathF.Abs(precise.Y - snapped.Y) < 2f
+        && MathF.Abs(precise.Width - snapped.Width) < 2f
+        && MathF.Abs(precise.Height - snapped.Height) < 2f;
+
+    /// <summary>
+    /// The precise box for <paramref name="current"/>, the node's final snapped rect, or null
+    /// when a later pass resized the box.
+    /// </summary>
+    internal Rect? Resolve(Rect current)
+    {
+        if (current.Width != Snapped.Width || current.Height != Snapped.Height)
+        {
+            return null;
+        }
+
+        return new Rect(
+            LayoutUnit.Snap(Precise.X + (current.X - Snapped.X)),
+            LayoutUnit.Snap(Precise.Y + (current.Y - Snapped.Y)),
+            LayoutUnit.Snap(Precise.Width),
+            LayoutUnit.Snap(Precise.Height));
+    }
+}
+
+/// <summary>
+/// CSSOM View's offset metrics for one element: <c>offsetParent</c> (null when it has none) and
+/// the integer <c>offsetLeft</c>, <c>offsetTop</c>, <c>offsetWidth</c> and <c>offsetHeight</c>.
+/// </summary>
+public readonly record struct OffsetMetrics(NodeId? Parent, float Left, float Top, float Width, float Height);
+
+/// <summary>Chromium's layout precision: a <c>LayoutUnit</c> is 1/64 CSS px.</summary>
+internal static class LayoutUnit
+{
+    private const float Scale = 64f;
+
+    /// <summary>
+    /// Quantizes a CSS px value to a whole number of LayoutUnits the way
+    /// <c>LayoutUnit(float)</c> does, truncating towards zero, so 200.4px reports as
+    /// 200.390625. A float sum that lands a hair under a unit boundary (99.99999 for 100)
+    /// is nudged back onto it first, or truncation would lose a whole unit.
+    /// </summary>
+    internal static float Snap(float value)
+    {
+        if (!float.IsFinite(value))
+        {
+            return value;
+        }
+
+        float scaled = value * Scale;
+        float nudged = scaled >= 0f ? scaled + 0.01f : scaled - 0.01f;
+        return MathF.Truncate(nudged) / Scale;
+    }
+}
+
 internal readonly record struct GeneratedBoxBuild(
     NodeId Host,
     GeneratedBoxKind Kind,
@@ -49,6 +125,29 @@ public sealed class DomLayout
 {
     /// <summary>Border boxes keyed by DOM node.</summary>
     public Dictionary<NodeId, Rect> Rects { get; internal set; } = [];
+
+    /// <summary>
+    /// The unrounded border box of every node whose taffy layout was fractional, for
+    /// geometry reporting. Paint keeps using <see cref="Rects"/>. See <see cref="PreciseRect"/>.
+    /// </summary>
+    internal Dictionary<NodeId, SubpixelRect> SubpixelRects { get; set; } = [];
+
+    /// <summary>
+    /// The border box CSSOM View reports for a node: the unrounded layout at LayoutUnit
+    /// precision when it is still the box <see cref="Rects"/> holds, else the snapped rect.
+    /// </summary>
+    internal Rect? PreciseRect(NodeId id)
+    {
+        if (!Rects.TryGetValue(id, out Rect rect))
+        {
+            return null;
+        }
+
+        return SubpixelRects.TryGetValue(id, out SubpixelRect subpixel)
+            && subpixel.Resolve(rect) is { } precise
+                ? precise
+                : rect;
+    }
 
     /// <summary>
     /// Object bounding boxes for the descendants of an inline <c>&lt;svg&gt;</c>, in document

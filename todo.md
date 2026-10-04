@@ -4716,3 +4716,39 @@ Chromium rejects with `TypeError` (ClearScript converts the loader's exception);
 modules are not MIME-checked. Pinned by `RuntimeTests.WorkerImportScripts*`,
 `DataUrlModules*`, `BlobUrlModulesLoadWhenTheBlobIsJavaScript`,
 `ImportedModulesSeeTheirOwnImportMetaUrl` and `ScriptDeclarationsFindsTopLevelNamesOnly`.
+
+### Geometry is reported at LayoutUnit precision; offsets come from the layout
+
+Rust reports every box from taffy's rounded layout, so `getBoundingClientRect()` was whole
+pixels (a `200.4px` float read 200 and the inline-block after it started at 200), and the shim
+answered `offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight` from that same rect, so they
+moved with scrolling and transforms, ignored the offset parent (there was no `offsetParent`),
+and `html`/`body` reported the viewport. Chromium lays out in LayoutUnits (1/64px) and snaps
+only at paint: the bounding rect is fractional, the `offset*` and `client*` values are integers.
+
+- `DomPasses.ComputeAbsoluteRects` keeps taffy's unrounded box beside the snapped one
+  (`DomLayout.SubpixelRects`); `DomLayout.PreciseRect` answers with it, truncated to 1/64px as
+  `LayoutUnit(float)` does, while the box keeps the size it had when recorded. Paint still uses
+  the snapped `Rects`, which is Chromium's pixel snapping, so screenshots do not change.
+  `PreparedRender.DocumentRect` and the client-rect fallback read the precise box, so
+  `getBoundingClientRect()`, `getClientRects()`, IntersectionObserver and the CDP box model see
+  it. `clientWidth`/`scrollWidth` still come from the snapped rect, as before. Quantizing the
+  absolute value rather than each layout step can differ from Chromium by 1/64px.
+- `op_layout_offset` (additive) returns `offsetParent` and the four `offset*` integers from
+  `PreparedRender.OffsetMetrics`: the nearest positioned or containing-block ancestor, `body`, or
+  `td`/`th`/`table` for a static element; the border box relative to the parent's padding edge in
+  untransformed layout space; a static `body` parent measures from the document origin; sizes
+  round on their own (Chromium 141 does not snap them against the offset's fraction).
+- An atomic inline's strut descent splits the leading as text lines do (ascent half floored),
+  so a 20px inline-block in a 16px serif line is 24px, not 23.5 (`DomBuild.StrutDescent`).
+- A unitless `line-height` truncates to LayoutUnits (17px * 1.2 = 20.390625); lengths still
+  round (`FontResolution.UsedLineHeightWithMetrics`). `getComputedStyle` keeps the product.
+- Grid track offsets use compensated summation (`GridAlignment`); plain f32 accumulation over
+  2000 implicit tracks put a 1000px item at 999.94px once the unrounded box was visible.
+
+Not done: border widths are not snapped to whole pixels (Chromium draws `4.1px` as 4px, so the
+box is 0.1px narrower there); an atomic inline shorter than the strut's ascent still sits at the
+line's top instead of on the baseline; a percentage width inside the float-zone flow column
+resolves against the column, not the containing block, and a run of `clear`ing same-side floats
+is laid out side by side. The last two, not rounding, are why wikipedia.org's footer drops
+`.other-projects` below its sidebar. Pinned by `SubpixelGeometryScriptTests`.

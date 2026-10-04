@@ -536,12 +536,21 @@ internal static partial class DomBuild
     /// block container, clamped at zero because a <c>line-height</c> shorter than the font box
     /// puts the strut's bottom above the baseline, where it adds nothing.
     /// </summary>
+    /// <remarks>
+    /// The leading is split the way the text lines split it (<see cref="FontAssets.LineBoxHalves"/>):
+    /// Blink floors the ascent half to whole pixels and gives the descent the rest. An even
+    /// split put half a pixel on each side, which the taffy rounding pass hid until
+    /// <c>getBoundingClientRect()</c> reported the unrounded box: a 20px inline-block in a
+    /// <c>16px</c> serif line measured 23.5px where Chromium has 24.
+    /// </remarks>
     internal static float StrutDescent(LayoutStyle block)
     {
         FaceMetrics metrics = FontAssets.BundledFaceMetrics(FontAssets.ResolveFontFamily(block.FontFamily));
-        (float ascent, float descent) = FontAssets.FittedFontBoxMetrics(block.FontSize ?? 16f, metrics);
-        float halfLeading = (FontResolution.UsedLineHeightWithMetrics(block, metrics) - (ascent + descent)) / 2f;
-        return F32.Max(descent + halfLeading, 0f);
+        (float _, float below) = FontAssets.LineBoxHalves(
+            block.FontSize ?? 16f,
+            FontResolution.UsedLineHeightWithMetrics(block, metrics),
+            metrics);
+        return F32.Max(below, 0f);
     }
 
     /// <summary>Build the direct children of a genuine flex/grid container.</summary>

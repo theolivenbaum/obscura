@@ -477,7 +477,8 @@ public sealed partial class PreparedRender
     /// </summary>
     public Rect? DocumentRect(NodeId id)
     {
-        if (!Layout.Rects.TryGetValue(id, out Rect rect))
+        // The unrounded box, as Chromium reports it: paint snaps, CSSOM View does not.
+        if (Layout.PreciseRect(id) is not { } rect)
         {
             // An SVG shape has no CSS box, so CSSOM View answers from the SVG object bounding
             // boxes instead.
@@ -486,6 +487,95 @@ public sealed partial class PreparedRender
 
         return Layout.Transforms.TryGetValue(id, out Affine2 transform) ? transform.MapRect(rect) : rect;
     }
+
+    /// <summary>
+    /// CSSOM View's <c>offsetParent</c> and the four <c>offset*</c> integers, or null when the
+    /// node has no CSS box.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, whose shim answers <c>offsetLeft</c>/<c>offsetTop</c> with
+    /// the viewport-relative bounding rect and <c>offsetWidth</c> with its width, so they moved
+    /// with scrolling and transforms and were relative to the wrong box. This follows Blink's
+    /// <c>LayoutBoxModelObject::AdjustedPositionRelativeTo</c>: the border box relative to the
+    /// offset parent's padding edge in untransformed layout space, rounded half away from zero,
+    /// with a static <c>&lt;body&gt;</c> parent measuring from the document origin.
+    /// </remarks>
+    public OffsetMetrics? OffsetMetrics(DomTree tree, NodeId id)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        if (Layout.PreciseRect(id) is not { } rect
+            || !Layout.Styles.TryGetValue(id, out LayoutStyle? style))
+        {
+            return null;
+        }
+
+        bool isBody = IsHtmlElement(tree, id, "body");
+        NodeId? offsetParent = null;
+        if (!isBody && !IsHtmlElement(tree, id, "html") && !style.PositionFixed)
+        {
+            bool selfStatic = style.Position is null;
+            for (NodeId? ancestor = DomTraversal.RenderedParent(tree, id);
+                ancestor is { } candidate;
+                ancestor = DomTraversal.RenderedParent(tree, candidate))
+            {
+                if (!Layout.Styles.TryGetValue(candidate, out LayoutStyle? candidateStyle)
+                    || candidateStyle.DisplayContents)
+                {
+                    continue;
+                }
+
+                if (candidateStyle.Position is not null
+                    || candidateStyle.EstablishesPositioningContainingBlock()
+                    || IsHtmlElement(tree, candidate, "body")
+                    || (selfStatic
+                        && (IsHtmlElement(tree, candidate, "table")
+                            || IsHtmlElement(tree, candidate, "td")
+                            || IsHtmlElement(tree, candidate, "th"))))
+                {
+                    offsetParent = candidate;
+                    break;
+                }
+            }
+        }
+
+        float left = rect.X;
+        float top = rect.Y;
+        if (isBody)
+        {
+            left = 0f;
+            top = 0f;
+        }
+        else if (offsetParent is { } parent
+            && Layout.PreciseRect(parent) is { } parentRect
+            && Layout.Styles.TryGetValue(parent, out LayoutStyle? parentStyle))
+        {
+            bool staticBody = IsHtmlElement(tree, parent, "body") && parentStyle.Position is null;
+            if (!staticBody)
+            {
+                left -= parentRect.X;
+                top -= parentRect.Y;
+                if (!IsHtmlElement(tree, parent, "body"))
+                {
+                    left -= parentStyle.UsedBorder.Left;
+                    top -= parentStyle.UsedBorder.Top;
+                }
+            }
+        }
+
+        // Chromium 141 rounds the size on its own, not snapped against the offset's fraction:
+        // a 50.59375px box 10.59375px into its offset parent has offsetWidth 51.
+        return new OffsetMetrics(
+            offsetParent,
+            F32.Round(left),
+            F32.Round(top),
+            F32.Round(rect.Width),
+            F32.Round(rect.Height));
+    }
+
+    private static bool IsHtmlElement(DomTree tree, NodeId id, string localName) =>
+        tree.GetNode(id)?.AsElement() is { } element
+        && string.Equals(element.Name.Local, localName, StringComparison.Ordinal)
+        && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal);
 
     /// <summary>Unscaled padding-box size used by CSSOM View's client metrics.</summary>
     public (float Width, float Height)? ClientSize(NodeId id)
@@ -650,7 +740,11 @@ public sealed partial class PreparedRender
 
         output["line-height"] = (style.LineHeight ?? PocketCalculator.Render.LineHeight.Normal) == PocketCalculator.Render.LineHeight.Normal
             ? "normal"
-            : PaintCssValues.CssPx(Layout.TextEngine.SelectedLineHeight(style));
+            : style.LineHeight is { Kind: LineHeightKind.Ratio } ratio
+                // The resolved value is the plain product; layout's copy is truncated to
+                // LayoutUnits (FontResolution.UsedLineHeightWithMetrics), CSSOM's is not.
+                ? PaintCssValues.CssPx((style.FontSize ?? 16f) * ratio.Number)
+                : PaintCssValues.CssPx(Layout.TextEngine.SelectedLineHeight(style));
         output["letter-spacing"] = (style.LetterSpacing ?? 0f) == 0f
             ? "normal"
             : PaintCssValues.CssPx(style.LetterSpacing ?? 0f);
@@ -1765,7 +1859,7 @@ public sealed partial class PreparedRender
             return [.. fragments];
         }
 
-        if (Layout.Rects.TryGetValue(id, out Rect rect))
+        if (Layout.PreciseRect(id) is { } rect)
         {
             return [rect];
         }
