@@ -5073,16 +5073,49 @@ class Element extends Node {
     });
     return this._dataset;
   }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which answers every offset*
+  // value from getBoundingClientRect(): offsetLeft/offsetTop moved with scrolling and
+  // transforms and were not relative to an offsetParent (which did not exist), html and
+  // body reported the viewport, and once that rect carries Chromium's subpixel
+  // LayoutUnits none of them were integers any more. With the render op present they
+  // come from the layout (op_layout_offset); the old answers remain the fallback for a
+  // build without it.
+  _renderOffsetMetrics() {
+    const op = __obscuraCore.ops.op_layout_offset;
+    if (typeof op !== 'function') return undefined;
+    try {
+      const raw = op(String(this._nid | 0));
+      return raw ? _JSONparse(raw) : null;
+    } catch (_error) {}
+    return null;
+  }
+  get offsetParent() {
+    const metrics = this._renderOffsetMetrics();
+    if (!metrics || metrics.parent === null || metrics.parent === undefined) return null;
+    return _wrapEl(metrics.parent);
+  }
   get offsetWidth() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.width : 0;
     if (this._isViewportRoot()) return globalThis.innerWidth || 1280;
-    return this.getBoundingClientRect().width;
+    return Math.round(this.getBoundingClientRect().width);
   }
   get offsetHeight() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.height : 0;
     if (this._isViewportRoot()) return globalThis.innerHeight || 720;
-    return this.getBoundingClientRect().height;
+    return Math.round(this.getBoundingClientRect().height);
   }
-  get offsetTop() { return this.getBoundingClientRect().top; }
-  get offsetLeft() { return this.getBoundingClientRect().left; }
+  get offsetTop() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.top : 0;
+    return Math.round(this.getBoundingClientRect().top);
+  }
+  get offsetLeft() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.left : 0;
+    return Math.round(this.getBoundingClientRect().left);
+  }
   // In standards mode documentElement exposes viewport client geometry.
   // Puppeteer's #clickableBox clips boxes to those dimensions; returning the
   // non-render fallback 100x20 there makes every element appear off-screen.

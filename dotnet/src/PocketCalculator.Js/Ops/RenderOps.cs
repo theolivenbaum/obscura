@@ -266,6 +266,50 @@ public static class RenderOps
         string.Empty);
 
     /// <summary>
+    /// <c>op_layout_offset</c>. CSSOM View's <c>offsetParent</c> and <c>offset*</c> integers for
+    /// an element, or the empty string when it has no box.
+    /// </summary>
+    /// <remarks>
+    /// Additive, like <c>op_inner_text</c>: crates/obscura-js has no such op and derives every
+    /// <c>offset*</c> value from <c>getBoundingClientRect()</c>. Those moved with scrolling and
+    /// transforms, ignored the offset parent and, once that rect became fractional, stopped
+    /// being integers. See <see cref="PreparedRender.OffsetMetrics"/>.
+    /// </remarks>
+    public static string OpLayoutOffset(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_layout_offset",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom
+                || RenderState.EnsurePreparedRender(state) is not { } prepared
+                || prepared.OffsetMetrics(dom, nid) is not { } offset)
+            {
+                return string.Empty;
+            }
+
+            var sb = new StringBuilder(96);
+            sb.Append("{\"parent\":");
+            if (offset.Parent is { } parent)
+            {
+                sb.Append(parent.Value);
+            }
+            else
+            {
+                sb.Append("null");
+            }
+
+            sb.Append(",\"left\":").Append(SerdeJson.NumberF32(offset.Left));
+            sb.Append(",\"top\":").Append(SerdeJson.NumberF32(offset.Top));
+            sb.Append(",\"width\":").Append(SerdeJson.NumberF32(offset.Width));
+            sb.Append(",\"height\":").Append(SerdeJson.NumberF32(offset.Height));
+            sb.Append('}');
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
     /// <c>op_resize_observer_measurements</c>. Measures every target in one
     /// ResizeObserver rendering opportunity.
     /// </summary>

@@ -51,8 +51,15 @@ internal static class GridAlignment
             trackAlignment = trackAlignment.Reversed();
         }
 
-        // Compute offsets
+        // Compute offsets.
+        //
+        // DEVIATION from vendor/taffy, which adds each track to a plain running f32. Over
+        // thousands of implicit tracks the drift reaches a sizeable fraction of a pixel (a
+        // 1000px item spanning 2000 columns came out 999.94px wide). The rounding pass hid it;
+        // getBoundingClientRect() reports the unrounded box, as Chromium's LayoutUnit sums are
+        // exact. Compensated (Kahan) summation keeps the total within an ulp, still in f32.
         float totalOffset = origin;
+        float compensation = 0.0f;
         bool seenNonCollapsedTrack = false;
         for (int i = 0; i < tracks.Count; i++)
         {
@@ -71,7 +78,10 @@ internal static class GridAlignment
                 : 0.0f;
 
             track.Offset = totalOffset + offset;
-            totalOffset = totalOffset + offset + track.BaseSize;
+            float step = (offset + track.BaseSize) - compensation;
+            float next = totalOffset + step;
+            compensation = (next - totalOffset) - step;
+            totalOffset = next;
             if (isNonCollapsedTrack)
             {
                 seenNonCollapsedTrack = true;

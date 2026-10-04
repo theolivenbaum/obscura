@@ -293,6 +293,7 @@ public static partial class RenderDom
         }
 
         Dictionary<NodeId, Rect> rects = new(styles.Count);
+        Dictionary<NodeId, SubpixelRect> subpixelRects = [];
         Dictionary<NodeId, List<Rect>> inlineFragments = [];
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns = [];
         Dictionary<int, Rect> anonRects = [];
@@ -836,7 +837,10 @@ public static partial class RenderDom
                     textRuns,
                     anonRects,
                     generatedNodes,
-                    generatedRects);
+                    generatedRects,
+                    initialCbX,
+                    0f,
+                    subpixelRects);
 
                 // The used track sizes getComputedStyle() reports for a grid container.
                 foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
@@ -971,6 +975,7 @@ public static partial class RenderDom
         DomLayout layout = new()
         {
             Rects = rects,
+            SubpixelRects = subpixelRects,
             SvgRects = svgRects,
             InlineFragments = inlineFragments,
             Styles = styles,

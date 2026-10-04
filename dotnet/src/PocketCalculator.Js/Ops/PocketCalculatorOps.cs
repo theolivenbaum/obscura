@@ -361,6 +361,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLoadImageMetadataAsync(Page, U32(nid))));
         Bind(ops, "op_layout_geometry", (Func<object?, string>)(
             nid => RenderOps.OpLayoutGeometry(Page, S(nid))));
+        Bind(ops, "op_layout_offset", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffset(Page, S(nid))));
         Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
             nids => RenderOps.OpResizeObserverMeasurements(Page, S(nids))));
         Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(
@@ -502,6 +504,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLoadImageMetadataAsync(document, U32(nid))));
         Bind(ops, "op_layout_geometry", (Func<object?, string>)(
             nid => RenderOps.OpLayoutGeometry(document, S(nid))));
+        Bind(ops, "op_layout_offset", (Func<object?, string>)(
+            nid => RenderOps.OpLayoutOffset(document, S(nid))));
         Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
             nids => RenderOps.OpResizeObserverMeasurements(document, S(nids))));
         Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(
