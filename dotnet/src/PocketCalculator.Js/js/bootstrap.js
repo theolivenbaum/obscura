@@ -366,6 +366,8 @@ const _DOM_MUTATION_COMMANDS = _private(new Set([
   "set_attribute", "remove_attribute",
   "set_text_content", "set_inner_html", "set_inner_html_context",
   "set_fragment_html_executable", "document_write",
+  // A custom element upgrade changes what :defined matches.
+  "ce_state",
 ]));
 const _DOM_TREE_MUTATION_COMMANDS = _private(new Set([
   "append_child", "insert_before", "remove_child",
@@ -2175,15 +2177,407 @@ function _eventTargetDispatch(target, event) {
   return !event.defaultPrevented;
 }
 
-// During custom-element upgrade, HTMLElement's constructor must return the
-// already-existing element being upgraded. A class constructor cannot be
-// invoked with `.call(existingElement)`, so the registry and Element
-// constructor coordinate through the same construction-stack shape used by
-// browser custom-element implementations.
-const _customElementConstructionStack = [];
-// The window's CustomElementRegistry, set where it is created. The Element constructor
-// asks it whether a page-side `new X()` names a defined custom element.
-let _ceRegistry = null;
+// ---- Custom element reactions ---------------------------------------------------------------
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose registry upgraded what define()
+// found with querySelectorAll and called connectedCallback from there, and did nothing else:
+// an element that innerHTML, cloneNode, document.write or the parser made after define()
+// stayed a plain HTMLElement, and connectedCallback, disconnectedCallback and
+// attributeChangedCallback never ran on insertion, removal or an attribute change. YouTube's
+// Polymer, MSN's FAST and Reddit's faceplate components never finished booting. This is
+// HTML's model, measured against Chromium 141: a definition keeps the callbacks define()
+// read; each element has a reaction queue; a DOM method that can enqueue reactions runs them
+// before it returns ([CEReactions]), in element-queue order. As in Blink, whose fragment parser
+// creates a defined element with its upgrade already queued, innerHTML upgrades the new
+// children of a disconnected element too (the spec's inert fragment document would not).
+//
+// Every hook is behind `_ceDefCount !== 0`, so a page that defines nothing pays one compare.
+// Element state lives on the wrapper: `_ceState` (undefined for "undefined"/"uncustomized",
+// or "precustomized", "custom", "failed"), `_ceDef` and `_ceReactions`. A custom element
+// always has a wrapper, so an element with no wrapper is never custom.
+let _ceDefCount = 0;
+// Definitions with a disconnectedCallback or form association: only then does a removal scan.
+let _ceRemovalDefCount = 0;
+let _ceFormAssociatedCount = 0;
+const _ceDefs = _private(new Map());
+const _ceDefsByCtor = _private(new Map());
+const _ceWhenDefined = _private(new Map());
+let _ceDefining = false;
+// Open [CEReactions] scopes. A hook at depth 0 runs its reactions before it returns.
+let _ceDepth = 0;
+// The current element queue.
+let _ceQueue = [];
+// > 0 while the shim parses markup for a document with no browsing context (DOMParser,
+// createHTMLDocument): what that creates is not upgraded, as in Chromium.
+let _ceInert = 0;
+// > 0 while the shim creates an element for its own use (a fragment parsing context), which
+// must not run a custom element constructor.
+let _ceNoSync = 0;
+const _CE_ALREADY_CONSTRUCTED = {};
+const _arrayShift = _uncurry(Array.prototype.shift);
+const _reflectConstruct = Reflect.construct;
+
+// HTML "look up a custom element definition", for an HTML-namespace element.
+function _ceLookup(localName, isValue) {
+  let def = _ceDefs.get(localName);
+  if (def !== undefined && def.localName === localName) return def;
+  if (isValue) {
+    def = _ceDefs.get(isValue);
+    if (def !== undefined && def.localName === localName && def.name !== localName) return def;
+  }
+  return null;
+}
+// HTML "report the exception": the window's error event, then the console.
+function _ceReport(error) {
+  let text = "";
+  try {
+    text = error !== null && typeof error === "object"
+      ? String(error.name) + ": " + String(error.message)
+      : String(error);
+  } catch (_) {}
+  let prevented = false;
+  try {
+    const event = new ErrorEvent("error", { message: "Uncaught " + text, error, cancelable: true });
+    _dispatch(globalThis, event);
+    prevented = event.defaultPrevented;
+  } catch (_) {}
+  if (!prevented) { try { console.error(error); } catch (_) {} }
+}
+function _ceReactionsOf(el) {
+  let reactions = el._ceReactions;
+  if (reactions === undefined) {
+    reactions = [];
+    el._ceReactions = reactions;
+  }
+  return reactions;
+}
+// Enqueue a reaction on the element and the element on the current element queue.
+function _ceEnqueue(el, reaction) {
+  const reactions = _ceReactionsOf(el);
+  reactions[reactions.length] = reaction;
+  _ceQueue[_ceQueue.length] = el;
+}
+// HTML "enqueue a custom element callback reaction".
+function _ceCallback(el, name, args) {
+  const def = el._ceDef;
+  if (def === undefined) return;
+  const callback = def.callbacks[name];
+  if (callback === undefined) return;
+  if (name === "attributeChangedCallback" && !def.observed.has(args[0])) return;
+  _ceEnqueue(el, [1, callback, args]);
+}
+function _ceEnqueueUpgrade(el, def) { _ceEnqueue(el, [0, def]); }
+function _ceInvoke(queue) {
+  for (let i = 0; i < queue.length; i++) {
+    const el = queue[i];
+    const reactions = el._ceReactions;
+    if (reactions === undefined) continue;
+    while (reactions.length !== 0) {
+      const reaction = _arrayShift(reactions);
+      try {
+        if (reaction[0] === 0) _ceUpgrade(el, reaction[1]);
+        else _reflectApply(reaction[1], el, reaction[2]);
+      } catch (error) {
+        _ceReport(error);
+      }
+    }
+  }
+}
+function _ceFlush() {
+  while (_ceQueue.length !== 0) {
+    const queue = _ceQueue;
+    _ceQueue = [];
+    _ceInvoke(queue);
+  }
+}
+// The end of a [CEReactions] scope.
+function _ceLeave() {
+  if (--_ceDepth === 0 && _ceQueue.length !== 0) _ceFlush();
+}
+// The end of a hook: outside any scope, the reactions run now.
+function _ceDone() {
+  if (_ceDepth === 0 && _ceQueue.length !== 0) _ceFlush();
+}
+// Run page script the shim starts inside a scope (an inserted <script>) with a fresh one, as
+// its DOM calls are [CEReactions] methods of their own.
+function _ceIsolated(fn, arg) {
+  const depth = _ceDepth;
+  const queue = _ceQueue;
+  _ceDepth = 0;
+  _ceQueue = [];
+  try {
+    return fn(arg);
+  } finally {
+    if (_ceQueue.length !== 0) _ceFlush();
+    _ceDepth = depth;
+    _ceQueue = queue;
+  }
+}
+// The flat [nid, localName, isValue, ...] list of possible custom elements among the
+// shadow-including inclusive descendants of `node`, in shadow-including tree order.
+function _ceCandidates(node) {
+  return _domParse("ce_candidates", node._nid) || [];
+}
+function _ceIsUndefinedState(el) {
+  const state = el._ceState;
+  return state === undefined || state === "undefined";
+}
+// HTML "try to upgrade" for every candidate in `list` (skipping `skipNid`).
+function _ceTryUpgradeList(list, skipNid) {
+  for (let i = 0; i < list.length; i += 3) {
+    const nid = list[i];
+    if (nid === skipNid) continue;
+    const def = _ceLookup(list[i + 1], list[i + 2]);
+    if (def === null) continue;
+    let el = _cache.get(nid);
+    if (el !== undefined && !_ceIsUndefinedState(el)) continue;
+    if (el === undefined) el = _wrapEl(nid);
+    if (el) _ceEnqueueUpgrade(el, def);
+  }
+}
+// HTML removal steps for the custom elements in `list`: disconnectedCallback, and the form
+// owner reset of a form-associated one.
+function _ceDisconnectList(list, skipNid) {
+  for (let i = 0; i < list.length; i += 3) {
+    if (list[i] === skipNid) continue;
+    const el = _cache.get(list[i]);
+    if (el === undefined || el._ceState !== "custom") continue;
+    _ceCallback(el, "disconnectedCallback", []);
+    if (el._ceDef.formAssociated) _ceFormStateChanged(el);
+  }
+}
+// HTML insertion steps for custom elements, after `node` was inserted. `wasConnected` says the
+// node was connected before (a move), so its custom elements are disconnected first, as the
+// remove-then-insert does in Chromium. `connected` is the new parent's connectedness, which
+// the node now shares. Callers check `_ceDefCount !== 0`.
+function _ceInserted(node, wasConnected, connected) {
+  if (!connected && !wasConnected) return;
+  if (!(node instanceof Element) && !(node instanceof DocumentFragment)) return;
+  const list = _ceCandidates(node);
+  if (list.length === 0) return;
+  if (wasConnected && _ceRemovalDefCount !== 0) _ceDisconnectList(list, -1);
+  if (!connected) return;
+  for (let i = 0; i < list.length; i += 3) {
+    const nid = list[i];
+    const el = _cache.get(nid);
+    if (el !== undefined && el._ceState === "custom") {
+      _ceCallback(el, "connectedCallback", []);
+      if (el._ceDef.formAssociated) _ceFormStateChanged(el);
+      continue;
+    }
+    if (el !== undefined && !_ceIsUndefinedState(el)) continue;
+    const def = _ceLookup(list[i + 1], list[i + 2]);
+    if (def !== null) _ceEnqueueUpgrade(el !== undefined ? el : _wrapEl(nid), def);
+  }
+}
+// After `node` (connected before) was removed. Callers check `_ceDefCount !== 0`.
+function _ceRemoved(node) {
+  if (_ceRemovalDefCount === 0) return;
+  if (!(node instanceof Element) && !(node instanceof DocumentFragment)) return;
+  const list = _ceCandidates(node);
+  if (list.length !== 0) _ceDisconnectList(list, -1);
+}
+// New nodes under `root` that markup parsing (innerHTML, insertAdjacentHTML,
+// createContextualFragment) or cloning created: each defined one gets its upgrade queued, as
+// Blink's fragment parser and clone do.
+function _ceCreatedUnder(root, skipRoot) {
+  if (_ceInert !== 0) return;
+  const list = _ceCandidates(root);
+  if (list.length !== 0) _ceTryUpgradeList(list, skipRoot ? root._nid : -1);
+}
+// Before an attribute change: the attribute's old value when `el` is a custom element that
+// observes it (null when absent), or undefined when no attributeChangedCallback can follow.
+// `ns` null is setAttribute's qualified-name lookup, otherwise the attribute's namespace.
+function _ceObservedOld(el, localName, ns) {
+  const def = el._ceDef;
+  if (def === undefined || el._ceState !== "custom" || !def.observed.has(localName)) return undefined;
+  return ns === null
+    ? _domParse("get_attribute", el._nid, localName)
+    : _domParse("get_attribute_ns", el._nid, ns + "\0" + localName);
+}
+// After an attribute change: attributeChangedCallback when `old` is not undefined, and
+// formDisabledCallback when a disabled attribute changed.
+function _ceAttributeChanged(el, localName, old, value, ns) {
+  if (old !== undefined) _ceCallback(el, "attributeChangedCallback", [localName, old, value, ns]);
+  if (localName === "disabled" && _ceFormAssociatedCount !== 0) _ceDisabledChanged(el);
+  _ceDone();
+}
+// HTML "upgrade an element". Its attributeChangedCallback and connectedCallback reactions go
+// on the element's own queue, which the caller is draining.
+function _ceUpgrade(el, def) {
+  if (!_ceIsUndefinedState(el)) return;
+  const nid = el._nid;
+  el._ceDef = def;
+  el._ceState = "failed";
+  const reactions = _ceReactionsOf(el);
+  const changed = def.callbacks.attributeChangedCallback;
+  if (changed !== undefined && def.observed.size !== 0) {
+    const names = _domParse("attribute_names", nid) || [];
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      if (!def.observed.has(name)) continue;
+      reactions[reactions.length] = [1, changed, [name, null, _domParse("get_attribute", nid, name), null]];
+    }
+  }
+  const connected = def.callbacks.connectedCallback;
+  if (connected !== undefined && _dom("is_connected", nid) === "true") {
+    reactions[reactions.length] = [1, connected, []];
+  }
+  const stack = def.stack;
+  stack[stack.length] = el;
+  try {
+    el._ceState = "precustomized";
+    const result = _reflectConstruct(def.ctor, []);
+    if (result !== el) {
+      throw new TypeError("custom element constructors must call super() first and must not return a different object");
+    }
+  } catch (error) {
+    el._ceDef = undefined;
+    el._ceState = "failed";
+    reactions.length = 0;
+    _dom("ce_state", nid, "failed");
+    throw error;
+  } finally {
+    stack.length = stack.length - 1;
+  }
+  el._ceState = "custom";
+  _dom("ce_state", nid, "custom");
+  if (def.formAssociated) {
+    _ceResetFormOwner(el);
+    if (_ceFormDisabled(el)) {
+      el._ceDisabled = true;
+      _ceCallback(el, "formDisabledCallback", [true]);
+    }
+  }
+}
+// HTML "create an element" for an autonomous custom element with the synchronous custom
+// elements flag (createElement): construct, check the result, and on any failure report it
+// and return an HTMLUnknownElement in the "failed" state, as Chromium does.
+function _ceCreateSync(def) {
+  const prefix = "Failed to execute 'createElement' on 'Document': ";
+  try {
+    const result = _reflectConstruct(def.ctor, []);
+    if (!(result instanceof HTMLElement) || typeof result._nid !== "number") {
+      throw new TypeError(prefix + "The result must implement HTMLElement interface");
+    }
+    const nid = result._nid;
+    if ((_domParse("attribute_names", nid) || []).length !== 0) {
+      throw new DOMException(prefix + "The result must not have attributes", "NotSupportedError");
+    }
+    if (_dom("has_child_nodes", nid) === "true") {
+      throw new DOMException(prefix + "The result must not have children", "NotSupportedError");
+    }
+    if (+_dom("parent_node", nid) >= 0) {
+      throw new DOMException(prefix + "The result must not have a parent", "NotSupportedError");
+    }
+    if (_domParse("local_name", nid) !== def.localName) {
+      throw new DOMException(prefix + "The result must have the same localName", "NotSupportedError");
+    }
+    return result;
+  } catch (error) {
+    _ceReport(error);
+    const nid = +_dom("create_element", def.localName);
+    const el = _constructElement(_htmlUnknownElementClass || HTMLElement, nid);
+    el._tagName = def.localName.toUpperCase();
+    el._lname = def.localName;
+    el._ns = "http://www.w3.org/1999/xhtml";
+    el._nullNamespaceAttrs = new Map();
+    el._ceState = "failed";
+    _seedDetachedTreeState(el);
+    _cache.set(nid, el);
+    _dom("ce_state", nid, "failed");
+    return el;
+  }
+}
+// The shim interface a page class derives from: the nearest of HTMLElement, the HTML*Element
+// interfaces or Element in its prototype chain (HTML's "active function object"). Its name is
+// the one Chromium's "Failed to construct '<name>'" gives, so an undefined `class X extends
+// HTMLElement` reports HTMLElement.
+function _elementInterfaceOf(C) {
+  for (let c = C; typeof c === "function"; c = Object.getPrototypeOf(c)) {
+    if (c === Element || _nativeFns.has(c)) return c;
+  }
+  return HTMLElement;
+}
+// Form-associated custom elements: the form owner (the nearest ancestor <form>, or the one a
+// form attribute names) and the disabled state (its own disabled attribute or a disabled
+// <fieldset> ancestor), which decide formAssociatedCallback and formDisabledCallback.
+function _ceFormOwnerOf(el) {
+  const formId = _domParse("get_attribute", el._nid, "form");
+  if (formId !== null) {
+    if (_dom("is_connected", el._nid) !== "true") return null;
+    const byId = globalThis.document && globalThis.document.getElementById(formId);
+    return byId && byId.localName === "form" ? byId : null;
+  }
+  let node = el.parentNode;
+  while (node && node.nodeType === 1) {
+    if (node.localName === "form" && node.namespaceURI === "http://www.w3.org/1999/xhtml") return node;
+    node = node.parentNode;
+  }
+  return null;
+}
+function _ceResetFormOwner(el) {
+  const owner = _ceFormOwnerOf(el);
+  const previous = el._ceFormOwner === undefined ? null : el._ceFormOwner;
+  if (owner === previous) return;
+  el._ceFormOwner = owner;
+  _ceCallback(el, "formAssociatedCallback", [owner]);
+}
+// A form-associated custom element was inserted or removed: its form owner and its disabled
+// state (a <fieldset> ancestor) may have changed.
+function _ceFormStateChanged(el) {
+  _ceResetFormOwner(el);
+  const disabled = _ceFormDisabled(el);
+  if ((el._ceDisabled === true) !== disabled) {
+    el._ceDisabled = disabled;
+    _ceCallback(el, "formDisabledCallback", [disabled]);
+  }
+}
+function _ceFormDisabled(el) {
+  if (_domParse("get_attribute", el._nid, "disabled") !== null) return true;
+  let child = el;
+  let node = el.parentNode;
+  while (node && node.nodeType === 1) {
+    if (node.localName === "fieldset" && _domParse("get_attribute", node._nid, "disabled") !== null) {
+      // A descendant of the fieldset's first <legend> is not disabled by it.
+      let legend = null;
+      for (let c = node.firstElementChild; c; c = c.nextElementSibling) {
+        if (c.localName === "legend") { legend = c; break; }
+      }
+      if (!(legend && (legend === child || legend.contains(child)))) return true;
+    }
+    child = node;
+    node = node.parentNode;
+  }
+  return false;
+}
+// A disabled attribute changed on `el`: the form-associated custom elements whose disabled
+// state that changes get formDisabledCallback. Callers check `_ceFormAssociatedCount !== 0`.
+function _ceDisabledChanged(el) {
+  const ln = el.localName;
+  let list;
+  if (ln === "fieldset") list = _ceCandidates(el);
+  else if (el._ceState === "custom" && el._ceDef.formAssociated) list = [el._nid, ln, ""];
+  else return;
+  for (let i = 0; i < list.length; i += 3) {
+    const target = _cache.get(list[i]);
+    if (target === undefined || target._ceState !== "custom" || !target._ceDef.formAssociated) continue;
+    const disabled = _ceFormDisabled(target);
+    if ((target._ceDisabled === true) === disabled) continue;
+    target._ceDisabled = disabled;
+    _ceCallback(target, "formDisabledCallback", [disabled]);
+  }
+}
+// form.reset(): formResetCallback for each form-associated custom element the form owns.
+function _ceFormReset(form) {
+  if (_ceFormAssociatedCount === 0) return;
+  const list = _ceCandidates(globalThis.document);
+  for (let i = 0; i < list.length; i += 3) {
+    const el = _cache.get(list[i]);
+    if (el === undefined || el._ceState !== "custom" || !el._ceDef.formAssociated) continue;
+    if (_ceFormOwnerOf(el) === form) _ceCallback(el, "formResetCallback", []);
+  }
+  _ceDone();
+}
 // Set by _constructElement just before it runs `new C(nid)`, and consumed by the Element
 // constructor. Every wrapper the shim builds for a node goes through it, so a page-side
 // `new HTMLDivElement()` (which never sets it) can be told apart and refused, as Chromium
@@ -2193,15 +2587,6 @@ let _elementConstructKey = false;
 function _constructElement(C, nid) {
   _elementConstructKey = true;
   try { return new C(nid); } finally { _elementConstructKey = false; }
-}
-// The name Chromium's "Failed to construct '<name>'" message gives: the nearest
-// interface the shim defines, so an undefined `class X extends HTMLElement` reports
-// HTMLElement.
-function _elementInterfaceName(C) {
-  for (let c = C; typeof c === "function"; c = Object.getPrototypeOf(c)) {
-    if (c === Element || _nativeFns.has(c)) return c.name || "Element";
-  }
-  return "HTMLElement";
 }
 
 function __prepareInsertedScript(script) {
@@ -2337,6 +2722,12 @@ function __prepareInsertedSubtree(root) {
       seen.add(script._nid);
     }
   }
+  if (scripts.length === 0) return;
+  // A script that runs inside a DOM method runs its own [CEReactions] scopes.
+  if (_ceDepth !== 0) _ceIsolated(__runInsertedScripts, scripts);
+  else __runInsertedScripts(scripts);
+}
+function __runInsertedScripts(scripts) {
   for (const script of scripts) __prepareInsertedScript(script);
 }
 
@@ -2405,6 +2796,9 @@ class Node {
   }
   get textContent() { return _domParse("text_content", this._nid) ?? ""; }
   set textContent(v) {
+    // The custom elements among the children about to go, while they are still connected.
+    const ceRemoved = _ceDefCount !== 0 && _ceRemovalDefCount !== 0 && this.isConnected
+      ? _ceCandidates(this) : null;
     const oldChildren = _domParse("child_nodes", this._nid) || [];
     for (const c of oldChildren) {
       const child = _wrap(c);
@@ -2422,6 +2816,10 @@ class Node {
     // libs (intersection-driven lazy load, content sync) silently stall.
     if (_hostVars.__mutationObservers?.length) {
       _hostVars.__notifyMutation('childList', this._nid, added, oldChildren);
+    }
+    if (ceRemoved !== null && ceRemoved.length !== 0) {
+      _ceDisconnectList(ceRemoved, this._nid);
+      _ceDone();
     }
   }
   get nodeValue() {
@@ -2469,12 +2867,20 @@ class Node {
     if (!c) return c;
     if (c instanceof DocumentFragment) {
       const children = Array.from(c.childNodes);
-      for (const child of children) this.appendChild(child);
+      // One [CEReactions] scope for the whole fragment, so each inserted custom element's
+      // connectedCallback sees its later siblings already in place, as in Chromium.
+      _ceDepth++;
+      try {
+        for (const child of children) this.appendChild(child);
+      } finally {
+        _ceLeave();
+      }
       return c;
     }
     if (c._shadowParent) c._shadowParent.removeChild(c);
     else if (c.parentNode) _detachStyleSheetsInSubtree(c);
     const parentConnected = this.isConnected;
+    const ceWasConnected = _ceDefCount !== 0 && c.isConnected;
     const inserted = _dom("append_child", this._nid, c._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -2489,6 +2895,10 @@ class Node {
     __prepareInsertedSubtree(c);
     if (c instanceof Element && c.tagName === 'LINK') {
       _loadLinkedStylesheet(c);
+    }
+    if (_ceDefCount !== 0) {
+      _ceInserted(c, ceWasConnected, parentConnected);
+      _ceDone();
     }
     return c;
   }
@@ -2516,6 +2926,10 @@ class Node {
     _detachStyleSheetsInSubtree(c);
     _reconcileWindowNamedProperties(removedWindowNames);
     if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('childList', this._nid, [], [c._nid]);
+    if (_ceDefCount !== 0 && parentConnected) {
+      _ceRemoved(c);
+      _ceDone();
+    }
     return c;
   }
   replaceChild(newChild, oldChild) {
@@ -2529,13 +2943,19 @@ class Node {
     if (newChild === oldChild) return oldChild;
     if (newChild instanceof DocumentFragment) {
       const children = Array.from(newChild.childNodes);
-      for (const child of children) this.insertBefore(child, oldChild);
-      this.removeChild(oldChild);
+      _ceDepth++;
+      try {
+        for (const child of children) this.insertBefore(child, oldChild);
+        this.removeChild(oldChild);
+      } finally {
+        _ceLeave();
+      }
       return oldChild;
     }
     if (newChild._shadowParent) newChild._shadowParent.removeChild(newChild);
     else if (newChild.parentNode) _detachStyleSheetsInSubtree(newChild);
     const parentConnected = this.isConnected;
+    const ceWasConnected = _ceDefCount !== 0 && newChild.isConnected;
     const removedWindowNames = _windowNamedNamesInTree(oldChild);
     const inserted = _dom("insert_before", newChild._nid, oldChild._nid) === "true";
     if (!inserted) {
@@ -2561,6 +2981,12 @@ class Node {
     if (newChild instanceof Element && newChild.tagName === 'LINK') {
       _loadLinkedStylesheet(newChild);
     }
+    if (_ceDefCount !== 0) {
+      // HTML replaces by removing the old child first, so its reactions come first.
+      if (parentConnected) _ceRemoved(oldChild);
+      _ceInserted(newChild, ceWasConnected, parentConnected);
+      _ceDone();
+    }
     return oldChild;
   }
   insertBefore(n, ref) {
@@ -2575,12 +3001,18 @@ class Node {
     if (n === ref) return n;
     if (n instanceof DocumentFragment) {
       const children = Array.from(n.childNodes);
-      for (const child of children) this.insertBefore(child, ref);
+      _ceDepth++;
+      try {
+        for (const child of children) this.insertBefore(child, ref);
+      } finally {
+        _ceLeave();
+      }
       return n;
     }
     if (n._shadowParent) n._shadowParent.removeChild(n);
     else if (n.parentNode) _detachStyleSheetsInSubtree(n);
     const parentConnected = this.isConnected;
+    const ceWasConnected = _ceDefCount !== 0 && n.isConnected;
     const inserted = _dom("insert_before", n._nid, ref._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -2598,6 +3030,10 @@ class Node {
     if (n instanceof Element && n.tagName === 'LINK') {
       _loadLinkedStylesheet(n);
     }
+    if (_ceDefCount !== 0) {
+      _ceInserted(n, ceWasConnected, parentConnected);
+      _ceDone();
+    }
     return n;
   }
   // DEVIATION from crates/obscura-js, which answers only for strict descendants: DOM's
@@ -2612,7 +3048,14 @@ class Node {
   cloneNode(deep) {
     const t = this.nodeType;
     if (t === 1) {
-      return _wrap(+_dom("clone_node", this._nid, deep ? "true" : "false"));
+      const clone = _wrap(+_dom("clone_node", this._nid, deep ? "true" : "false"));
+      // HTML clones create each element with its upgrade queued, so the constructors run
+      // when cloneNode returns, over the finished copy.
+      if (_ceDefCount !== 0 && clone) {
+        _ceCreatedUnder(clone, false);
+        _ceDone();
+      }
+      return clone;
     }
     // Clone structurally via real DOM nodes rather than round-tripping through a
     // throwaway <div>.innerHTML: the fragment parser discards elements that are
@@ -3240,9 +3683,16 @@ function _parseHTMLFragment(html, context) {
   html = String(html == null ? '' : html);
   const ns = context && context.nodeType === 1 ? context.namespaceURI : null;
   const tag = context && context.nodeType === 1 ? context.localName : 'body';
-  const tmp = ns && ns !== 'http://www.w3.org/1999/xhtml'
-    ? document.createElementNS(ns, tag)
-    : document.createElement(tag);
+  // The context element is the shim's own: a custom element name must not construct one.
+  _ceNoSync++;
+  let tmp;
+  try {
+    tmp = ns && ns !== 'http://www.w3.org/1999/xhtml'
+      ? document.createElementNS(ns, tag)
+      : document.createElement(tag);
+  } finally {
+    _ceNoSync--;
+  }
   tmp.innerHTML = html;
   const out = [];
   let child;
@@ -3612,48 +4062,57 @@ class Element extends Node {
   // No declared parameter, so Element.length is 0 as in Chromium. The node id is the
   // first argument of the shim's own `new C(nid)` (_constructElement).
   constructor() {
-    const entry = _customElementConstructionStack[_customElementConstructionStack.length - 1];
-    const matchesUpgrade = entry && new.target === entry.constructor;
-    const upgrading = matchesUpgrade && !entry.constructed ? entry.element : null;
-    let nid = arguments[0];
-    let createdName = null;
-    if (upgrading) {
-      // The registry's own upgrade; the element already exists.
-    } else if (_elementConstructKey) {
+    if (_elementConstructKey) {
+      // The shim's own wrapper for an existing node (_constructElement).
       _elementConstructKey = false;
-    } else {
-      // Port addition: page script reached the constructor itself. Chromium allows that
-      // only for a defined autonomous custom element, which creates a fresh element of
-      // that name; every other interface (`new HTMLDivElement()`, an undefined subclass
-      // of HTMLElement) throws. The shim used to build a wrapper with no node behind it.
-      createdName = _ceRegistry && _ceRegistry._byCtor ? _ceRegistry._byCtor.get(new.target) : undefined;
-      if (typeof createdName !== "string") {
-        throw new TypeError("Failed to construct '" + _elementInterfaceName(new.target) + "': Illegal constructor");
+      super(arguments[0]);
+      this._style = _styleProxy(new CSSStyleDeclaration(this));
+      return;
+    }
+    // Port addition: page script reached the constructor itself. HTML's element constructors
+    // allow that only for a defined custom element; every other interface (`new
+    // HTMLDivElement()`, an undefined subclass of HTMLElement) throws. The shim used to build
+    // a wrapper with no node behind it.
+    const def = _ceDefsByCtor.get(new.target);
+    const iface = _elementInterfaceOf(new.target);
+    if (def === undefined) {
+      throw new TypeError("Failed to construct '" + (iface.name || "HTMLElement") + "': Illegal constructor");
+    }
+    if (def.name === def.localName) {
+      if (iface !== HTMLElement) {
+        throw new TypeError("Failed to construct '" + (iface.name || "HTMLElement") + "': Illegal constructor");
       }
-      nid = +_dom("create_element", createdName);
+    } else if (iface !== _htmlElementClassForTag(def.localName.toUpperCase())) {
+      throw new TypeError("Failed to construct '" + (iface.name || "HTMLElement")
+        + "': Illegal constructor: localName does not match the HTML element interface");
     }
-    super(upgrading ? upgrading._nid : nid);
-    if (matchesUpgrade && entry.constructed) {
-      throw new TypeError("Custom element is already being constructed");
+    const stack = def.stack;
+    if (stack.length !== 0) {
+      // An upgrade (_ceUpgrade): super() returns the element being upgraded, with the
+      // definition's prototype, and leaves the already-constructed marker in its place.
+      const element = stack[stack.length - 1];
+      if (element === _CE_ALREADY_CONSTRUCTED) {
+        throw new TypeError("Failed to construct 'HTMLElement': This instance is already constructed");
+      }
+      Object.setPrototypeOf(element, new.target.prototype);
+      stack[stack.length - 1] = _CE_ALREADY_CONSTRUCTED;
+      return element;
     }
-    if (createdName !== null) {
-      this._tagName = createdName.toUpperCase();
-      this._lname = createdName;
-      this._ns = "http://www.w3.org/1999/xhtml";
-      this._nullNamespaceAttrs = new Map();
-      this.__customUpgraded = true;
-      _seedDetachedTreeState(this);
-      _cache.set(nid, this);
-    }
-    if (upgrading) {
-      // Keep an already-constructed marker on the stack until the outer class
-      // constructor returns. Recursive `new`/`super` calls for the same
-      // definition must not steal the element currently being upgraded.
-      entry.constructed = true;
-      Object.setPrototypeOf(upgrading, new.target.prototype);
-      return upgrading;
-    }
+    // `new X()` or createElement: a new element of the definition's local name, already custom.
+    const localName = def.localName;
+    const nid = +_dom("create_element", localName);
+    super(nid);
     this._style = _styleProxy(new CSSStyleDeclaration(this));
+    this._tagName = localName.toUpperCase();
+    this._lname = localName;
+    this._ns = "http://www.w3.org/1999/xhtml";
+    this._nullNamespaceAttrs = new Map();
+    this._ceDef = def;
+    this._ceState = "custom";
+    _seedDetachedTreeState(this);
+    _cache.set(nid, this);
+    _dom("ce_state", nid, "custom");
+    if (def.name !== localName) _dom("ce_is", nid, def.name);
   }
   // Element wrappers always back a nodeType-1 node (_wrap/_wrapEl only build an
   // Element for element nodes, and node ids are never freed-and-reused), so this
@@ -3736,7 +4195,21 @@ class Element extends Node {
     if (observed) {
       oldChildren = _domParse("child_nodes", this._nid) || [];
     }
+    // The custom elements about to be removed, while they are still connected.
+    const ceRemoved = _ceDefCount !== 0 && _ceRemovalDefCount !== 0 && this.isConnected
+      ? _ceCandidates(this) : null;
     _dom("set_inner_html", this._nid, String(v ?? ""));
+    if (_ceDefCount !== 0) {
+      // As in Chromium: the new elements' upgrades (queued as the fragment parser created them)
+      // run before the old elements' disconnectedCallbacks.
+      _ceDepth++;
+      try {
+        _ceCreatedUnder(this, true);
+        if (ceRemoved !== null && ceRemoved.length !== 0) _ceDisconnectList(ceRemoved, this._nid);
+      } finally {
+        _ceDepth--;
+      }
+    }
     // HTML fragment parsing can introduce IDs without calling the JS
     // setAttribute path. Register those elements for Window named access
     // before script can synchronously read `window.someId`.
@@ -3746,6 +4219,7 @@ class Element extends Node {
       newChildren = _domParse("child_nodes", this._nid) || [];
       _hostVars.__notifyMutation('childList', this._nid, newChildren, oldChildren);
     }
+    if (_ceDefCount !== 0) _ceDone();
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
   // Port addition; the Rust shim has no setter, so an assignment was silently dropped. As
@@ -3763,17 +4237,23 @@ class Element extends Node {
         prefix + "This element's parent is of type '" + parent.nodeName + "', which is not an element node.",
         "NoModificationAllowedError");
     }
-    const fragment = document.createDocumentFragment();
-    for (const node of _parseHTMLFragment(v === null ? '' : String(v), parent)) fragment.appendChild(node);
-    const outer = _childListBatch;
-    const batch = _childListBatch = { target: parent._nid, added: [], removed: [] };
+    // One [CEReactions] scope: the parsed elements' upgrades, then this element's removal.
+    _ceDepth++;
     try {
-      parent.replaceChild(fragment, this);
+      const fragment = document.createDocumentFragment();
+      for (const node of _parseHTMLFragment(v === null ? '' : String(v), parent)) fragment.appendChild(node);
+      const outer = _childListBatch;
+      const batch = _childListBatch = { target: parent._nid, added: [], removed: [] };
+      try {
+        parent.replaceChild(fragment, this);
+      } finally {
+        _childListBatch = outer;
+      }
+      if (batch.added.length || batch.removed.length) {
+        _hostVars.__notifyMutation('childList', parent._nid, batch.added, batch.removed);
+      }
     } finally {
-      _childListBatch = outer;
-    }
-    if (batch.added.length || batch.removed.length) {
-      _hostVars.__notifyMutation('childList', parent._nid, batch.added, batch.removed);
+      _ceLeave();
     }
   }
   // innerText used to be an alias for textContent, so document.body.innerText
@@ -3893,6 +4373,7 @@ class Element extends Node {
       ? this.getAttribute(n)
       : null;
     const value = String(v);
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, null) : undefined;
     _dom("set_attribute", this._nid, n + "\0" + value);
     if (n === "srcdoc" && this.localName === "iframe") {
       _loadIframeSrcdoc(this);
@@ -3931,18 +4412,22 @@ class Element extends Node {
         image._imageSourceChanged();
       }
     }
+    if (_ceDefCount !== 0) _ceAttributeChanged(this, n, ceOld, value, null);
   }
   setAttributeNS(ns, n, v) {
     ns = ns == null || ns === '' ? '' : String(ns);
     n = String(n);
     const value = String(v);
     _ns_validateQualifiedName(ns, n);
+    const ceLocal = _ceDefCount !== 0 ? n.slice(n.indexOf(":") + 1) : "";
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, ceLocal, ns) : undefined;
     _dom("set_attribute_ns", this._nid, ns + "\0" + n + "\0" + value);
     // Namespace-aware writes can replace an attribute by namespace/local name
     // while changing its qualified name. Fall back to native reads afterwards
     // instead of maintaining a second, subtly different key space here.
     this._nullNamespaceAttrs = null;
     if (ns === "" && n === "style") this._style._replaceFromAttribute(value);
+    if (_ceDefCount !== 0) _ceAttributeChanged(this, ceLocal, ceOld, value, ns === "" ? null : ns);
   }
   removeAttribute(n) {
     n = _htmlAttrName(this, n);
@@ -3953,6 +4438,7 @@ class Element extends Node {
     // Removing srcdoc navigates the frame to src (port addition, Chromium 141).
     const removedSrcdoc = n === "srcdoc" && this.localName === "iframe"
       && _hostDom.getAttribute(this, "srcdoc") !== null;
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, null) : undefined;
     _dom("remove_attribute", this._nid, n);
     if (removedSrcdoc) _iframeAttributeChanged(this, n);
     if (this._nullNamespaceAttrs instanceof Map) {
@@ -3979,13 +4465,21 @@ class Element extends Node {
         image._imageSourceChanged();
       }
     }
+    // Removing an absent attribute changes nothing and has no callback.
+    if (_ceDefCount !== 0) {
+      _ceAttributeChanged(this, n, ceOld === null ? undefined : ceOld, null, null);
+    }
   }
   removeAttributeNS(ns, n) {
     ns = String(ns == null ? "" : ns);
     n = String(n);
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, ns) : undefined;
     _dom("remove_attribute_ns", this._nid, ns + "\0" + n);
     this._nullNamespaceAttrs = null;
     if (ns === "" && n === "style") this._style._replaceFromAttribute("");
+    if (_ceDefCount !== 0) {
+      _ceAttributeChanged(this, n, ceOld === null ? undefined : ceOld, null, ns === "" ? null : ns);
+    }
   }
   hasAttribute(n) { return _elCall('getAttribute', this, [n]) !== null; }
   hasAttributes() { return this.attributes.length > 0; }
@@ -4038,26 +4532,32 @@ class Element extends Node {
     const pos = String(position).toLowerCase();
     const parent = this.parentNode;
     const context = (pos === 'beforebegin' || pos === 'afterend') ? parent : this;
-    switch (pos) {
-      case 'beforebegin':
-        if (parent) for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, this);
-        break;
-      case 'afterbegin': {
-        const first = this.firstChild;
-        for (const n of _parseHTMLFragment(html, context)) this.insertBefore(n, first);
-        break;
+    // One [CEReactions] scope over the parse and the insertions.
+    _ceDepth++;
+    try {
+      switch (pos) {
+        case 'beforebegin':
+          if (parent) for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, this);
+          break;
+        case 'afterbegin': {
+          const first = this.firstChild;
+          for (const n of _parseHTMLFragment(html, context)) this.insertBefore(n, first);
+          break;
+        }
+        case 'beforeend':
+          for (const n of _parseHTMLFragment(html, context)) this.appendChild(n);
+          break;
+        case 'afterend':
+          if (parent) { const next = this.nextSibling; for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, next); }
+          break;
+        default:
+          throw new DOMException(
+            "Failed to execute 'insertAdjacentHTML' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
+            "SyntaxError"
+          );
       }
-      case 'beforeend':
-        for (const n of _parseHTMLFragment(html, context)) this.appendChild(n);
-        break;
-      case 'afterend':
-        if (parent) { const next = this.nextSibling; for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, next); }
-        break;
-      default:
-        throw new DOMException(
-          "Failed to execute 'insertAdjacentHTML' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
-          "SyntaxError"
-        );
+    } finally {
+      _ceLeave();
     }
   }
   // Like insertAdjacentHTML but inserts a Text node instead of parsing markup,
@@ -4436,9 +4936,10 @@ class Element extends Node {
     this._dialogClose(result, true);
   }
   attachInternals() {
-    const reg = (typeof customElements !== 'undefined' && customElements._registry) ? customElements._registry : null;
-    if (!reg || !reg.get(this.localName)) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to non-custom elements.", "NotSupportedError");
+    const def = _ceLookup(this.localName, null);
     if (this.getAttribute('is')) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to a customized built-in element.", "NotSupportedError");
+    if (def === null) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to non-custom elements.", "NotSupportedError");
+    if (def.disableInternals) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': ElementInternals is disabled by disabledFeature static field.", "NotSupportedError");
     if (this._internalsAttached) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': ElementInternals for the specified element was already attached.", "NotSupportedError");
     this._internalsAttached = true;
     return new ElementInternals(this);
@@ -5549,18 +6050,37 @@ class Element extends Node {
   }
   getAnimations() { return _animationsForTarget(this); }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
-  append(...nodes) { for (const n of _convertNodes(nodes)) this.appendChild(n); }
+  // Each of these is one [CEReactions] scope, so the custom element reactions of all the
+  // nodes run once every node is in place, as in Chromium.
+  append(...nodes) {
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) this.appendChild(n);
+    } finally {
+      _ceLeave();
+    }
+  }
   prepend(...nodes) {
-    const ref = this.firstChild;
-    for (const n of _convertNodes(nodes)) {
-      if (ref) this.insertBefore(n, ref); else this.appendChild(n);
+    _ceDepth++;
+    try {
+      const ref = this.firstChild;
+      for (const n of _convertNodes(nodes)) {
+        if (ref) this.insertBefore(n, ref); else this.appendChild(n);
+      }
+    } finally {
+      _ceLeave();
     }
   }
   replaceChildren(...nodes) {
-    const converted = _convertNodes(nodes);
-    let c;
-    while ((c = this.firstChild)) this.removeChild(c);
-    for (const n of converted) this.appendChild(n);
+    _ceDepth++;
+    try {
+      const converted = _convertNodes(nodes);
+      let c;
+      while ((c = this.firstChild)) this.removeChild(c);
+      for (const n of converted) this.appendChild(n);
+    } finally {
+      _ceLeave();
+    }
   }
 }
 
@@ -6063,8 +6583,23 @@ class Document extends Node {
   evaluate(expression, contextNode, namespaceResolver, type, result) {
     return _makeXPathResult(type, _xpathFindNodes(expression, contextNode || this));
   }
-  createElement(t) {
+  createElement(t, options) {
     const localName = String(t).toLowerCase();
+    // ElementCreationOptions' is (or the legacy string form): a customized built-in, or an is
+    // value the element keeps and serializes.
+    let is = null;
+    if (options !== undefined && options !== null) {
+      if (typeof options === "string") is = options;
+      else if (typeof options === "object" && options.is !== undefined) is = String(options.is);
+    }
+    let customized = null;
+    if (_ceDefCount !== 0 && _ceNoSync === 0) {
+      const def = _ceLookup(localName, is);
+      if (def !== null) {
+        if (def.name === def.localName) return _ceCreateSync(def);
+        customized = def;
+      }
+    }
     const nid = +_dom("create_element", localName);
     const C = _elementClassForKnownName(
       "http://www.w3.org/1999/xhtml",
@@ -6084,8 +6619,16 @@ class Document extends Node {
       el._templateContent = this.createDocumentFragment();
       el._templateContent._fragmentContext = 'template';
     }
-    const definition = globalThis.customElements?._registry?.get(localName);
-    if (el && definition) globalThis.customElements._upgradeElement(el, definition);
+    if (is !== null) _dom("ce_is", nid, is);
+    if (customized !== null) {
+      // A customized built-in is created and then upgraded synchronously (HTML "create an
+      // element"); a throwing constructor is reported and leaves the element "failed".
+      try { _ceUpgrade(el, customized); } catch (error) { _ceReport(error); }
+      if (el._ceReactions !== undefined && el._ceReactions.length !== 0) {
+        _ceQueue[_ceQueue.length] = el;
+        _ceDone();
+      }
+    }
     return el;
   }
   createElementNS(ns, t) {
@@ -6599,10 +7142,18 @@ class DocumentFragment extends Node {
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
   set innerHTML(v) {
     const html = String(v ?? "");
+    // A template's contents are inert (no upgrades); a shadow root's are not.
+    const ce = _ceDefCount !== 0 && this._fragmentContext !== 'template';
+    const ceRemoved = ce && _ceRemovalDefCount !== 0 && this.isConnected ? _ceCandidates(this) : null;
     if (this._fragmentContext) {
       _dom("set_inner_html_context", this._nid, _fragmentContextPayload(this._fragmentContext, html));
     } else {
       _dom("set_inner_html", this._nid, html);
+    }
+    if (ce) {
+      _ceCreatedUnder(this, true);
+      if (ceRemoved !== null && ceRemoved.length !== 0) _ceDisconnectList(ceRemoved, this._nid);
+      _ceDone();
     }
   }
   querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
@@ -6632,6 +7183,12 @@ class DocumentFragment extends Node {
     const nid = +_dom("clone_node", this._nid, deep ? "true" : "false");
     const frag = new DocumentFragment(nid);
     _cache.set(nid, frag);
+    // As Node.cloneNode: the copies' upgrades run before cloneNode returns. A template's
+    // contents are inert, and so is their clone; importNode() upgrades that one.
+    if (_ceDefCount !== 0 && this._fragmentContext !== 'template') {
+      _ceCreatedUnder(frag, true);
+      _ceDone();
+    }
     return frag;
   }
 }
@@ -9427,11 +9984,17 @@ if (!Element.prototype.replaceWith) {
   // _convertNodes turns any non-node argument (numbers, booleans, null, …) into
   // a Text node via String(n), matching the spec and append()/prepend(); the
   // old `typeof n === 'string'` check corrupted insert_before for other types.
+  // One [CEReactions] scope each, as append() (custom element reactions).
   Element.prototype.replaceWith = function(...nodes) {
     const parent = this.parentNode;
     if (!parent) return;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
-    parent.removeChild(this);
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
+      parent.removeChild(this);
+    } finally {
+      _ceLeave();
+    }
   };
   _markNative(Element.prototype.replaceWith);
 }
@@ -9439,7 +10002,12 @@ if (!Element.prototype.before) {
   Element.prototype.before = function(...nodes) {
     const parent = this.parentNode;
     if (!parent) return;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
+    } finally {
+      _ceLeave();
+    }
   };
   _markNative(Element.prototype.before);
 }
@@ -9448,7 +10016,12 @@ if (!Element.prototype.after) {
     const parent = this.parentNode;
     if (!parent) return;
     const ref = this.nextSibling;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, ref);
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) parent.insertBefore(n, ref);
+    } finally {
+      _ceLeave();
+    }
   };
   _markNative(Element.prototype.after);
 }
@@ -11075,87 +11648,173 @@ function _isValidCustomElementName(name) {
   // PotentialCustomElementName (approx): lowercase start, a hyphen, no uppercase.
   return /^[a-z][a-z0-9._·À-￿-]*-[a-z0-9._·À-￿-]*$/.test(name);
 }
+// HTML's CustomElementRegistry over the definitions and reactions declared with _ceDefs (see
+// "Custom element reactions" above). The messages are Chromium 141's. The registry keeps no
+// own properties, as in Chromium.
 class CustomElementRegistry {
-  constructor() { this._registry = new Map(); this._byCtor = new Map(); this._whenDefinedResolvers = new Map(); this._defining = false; }
-  define(name, cls, opts) {
-    if (!_isConstructorCE(cls)) throw new TypeError("Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.");
-    if (!_isValidCustomElementName(name)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError");
-    if (this._defining) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': operation is not supported while a definition is in progress", "NotSupportedError");
-    if (this._registry.has(name)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': the name \"" + name + "\" has already been used with this registry", "NotSupportedError");
-    if (this._byCtor.has(cls)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': the constructor has already been used with this registry", "NotSupportedError");
-    this._defining = true;
-    try { this._byCtor.set(cls, name); this._defineInner(name, cls, opts); } finally { this._defining = false; }
-  }
-  _defineInner(name, cls, opts) {
-    this._registry.set(name, cls);
-    // Upgrade existing matching elements: instantiate the class on each,
-    // fire connectedCallback if the element is in the document. Without
-    // this, lit / MusicKit / Polymer components never wire up their
-    // shadow DOM or render, leaving heavy chunks of YouTube,
-    // music.apple.com, and any web-component site as empty shells.
+  define(name, constructor, options) {
+    const prefix = "Failed to execute 'define' on 'CustomElementRegistry': ";
+    name = String(name);
+    if (typeof constructor !== "function") throw new TypeError(prefix + "parameter 2 is not of type 'Function'.");
+    let extendsName = null;
+    if (options !== undefined && options !== null) {
+      if (typeof options !== "object" && typeof options !== "function") {
+        throw new TypeError(prefix + "The provided value is not of type 'ElementDefinitionOptions'.");
+      }
+      const ext = options.extends;
+      if (ext !== undefined) extendsName = String(ext);
+    }
+    if (!_isConstructorCE(constructor)) throw new TypeError(prefix + "constructor argument is not a constructor");
+    if (!_isValidCustomElementName(name)) {
+      throw new DOMException(prefix + "\"" + name + "\" is not a valid custom element name", "SyntaxError");
+    }
+    if (_ceDefs.has(name)) {
+      throw new DOMException(prefix + "the name \"" + name + "\" has already been used with this registry", "NotSupportedError");
+    }
+    if (_ceDefsByCtor.has(constructor)) {
+      throw new DOMException(prefix + "this constructor has already been used with this registry", "NotSupportedError");
+    }
+    let localName = name;
+    if (extendsName !== null) {
+      if (_isValidCustomElementName(extendsName)) {
+        throw new DOMException(prefix + "\"" + extendsName + "\" is a valid custom element name", "NotSupportedError");
+      }
+      if (_htmlElementClassForTag(extendsName.toUpperCase()) === _htmlUnknownElementClass) {
+        throw new DOMException(prefix + "\"" + extendsName + "\" is an HTMLUnknownElement", "NotSupportedError");
+      }
+      localName = extendsName;
+    }
+    if (_ceDefining) {
+      throw new DOMException(prefix + "this registry is already defining an element", "NotSupportedError");
+    }
+    // The prototype's callbacks and the constructor's static fields are read once, here, as
+    // HTML does: replacing a callback after define() changes nothing.
+    const callbacks = _objectCreate(null);
+    const observed = _private(new Set());
+    let formAssociated = false;
+    let disableInternals = false;
+    let disableShadow = false;
+    _ceDefining = true;
     try {
-      const matches = globalThis.document?.querySelectorAll(name) || [];
-      for (const el of matches) this._upgradeElement(el, cls);
-    } catch (e) {}
-    const resolvers = this._whenDefinedResolvers.get(name);
-    if (resolvers) {
-      for (const r of resolvers) r(cls);
-      this._whenDefinedResolvers.delete(name);
+      const prototype = constructor.prototype;
+      if (prototype === null || (typeof prototype !== "object" && typeof prototype !== "function")) {
+        throw new TypeError(prefix + "constructor prototype is not an object");
+      }
+      const readCallback = (callbackName) => {
+        const value = prototype[callbackName];
+        if (value === undefined) return;
+        if (typeof value !== "function") {
+          throw new TypeError(prefix + "The '" + callbackName + "' property on the prototype is not a function.");
+        }
+        callbacks[callbackName] = value;
+      };
+      readCallback("connectedCallback");
+      readCallback("disconnectedCallback");
+      readCallback("connectedMoveCallback");
+      readCallback("adoptedCallback");
+      readCallback("attributeChangedCallback");
+      if (callbacks.attributeChangedCallback !== undefined) {
+        const list = constructor.observedAttributes;
+        if (list !== undefined && list !== null) {
+          for (const attribute of list) observed.add(String(attribute));
+        }
+      }
+      const disabled = constructor.disabledFeatures;
+      if (disabled !== undefined && disabled !== null) {
+        for (const feature of disabled) {
+          const f = String(feature);
+          if (f === "internals") disableInternals = true;
+          else if (f === "shadow") disableShadow = true;
+        }
+      }
+      formAssociated = !!constructor.formAssociated;
+      if (formAssociated) {
+        readCallback("formAssociatedCallback");
+        readCallback("formResetCallback");
+        readCallback("formDisabledCallback");
+        readCallback("formStateRestoreCallback");
+      }
+    } finally {
+      _ceDefining = false;
+    }
+    const def = {
+      name, localName, ctor: constructor, callbacks, observed,
+      formAssociated, disableInternals, disableShadow, stack: [],
+    };
+    _ceDefs.set(name, def);
+    _ceDefsByCtor.set(constructor, def);
+    _ceDefCount++;
+    if (callbacks.disconnectedCallback !== undefined || formAssociated) _ceRemovalDefCount++;
+    if (formAssociated) _ceFormAssociatedCount++;
+    _ceDepth++;
+    try {
+      // The upgrade candidates: the document's shadow-including descendants with that local
+      // name (and, for a customized built-in, that is value), in shadow-including tree order.
+      const doc = globalThis.document;
+      if (doc && _ceInert === 0) {
+        const list = _ceCandidates(doc);
+        for (let i = 0; i < list.length; i += 3) {
+          if (list[i + 1] !== localName) continue;
+          if (extendsName !== null && list[i + 2] !== name) continue;
+          let el = _cache.get(list[i]);
+          if (el !== undefined && !_ceIsUndefinedState(el)) continue;
+          if (el === undefined) el = _wrapEl(list[i]);
+          if (el) _ceEnqueueUpgrade(el, def);
+        }
+      }
+      const pending = _ceWhenDefined.get(name);
+      if (pending !== undefined) {
+        _ceWhenDefined.delete(name);
+        pending.resolve(constructor);
+      }
+    } finally {
+      _ceLeave();
     }
   }
-  _upgradeElement(el, cls) {
-    if (el.__customUpgraded) return;
-    el.__customUpgraded = true;
-    try {
-      // Upgrade preserves object identity but installs the definition's
-      // prototype before running its class constructor. HTMLElement's
-      // constructor consumes this entry and returns `el`, so derived class
-      // fields and constructor-side state initialize on the real DOM wrapper.
-      const constructionEntry = { element: el, constructor: cls, constructed: false };
-      _customElementConstructionStack.push(constructionEntry);
-      let constructed;
-      try {
-        constructed = Reflect.construct(cls, []);
-      } finally {
-        const pending = _customElementConstructionStack.lastIndexOf(constructionEntry);
-        if (pending !== -1) _customElementConstructionStack.splice(pending, 1);
-      }
-      if (constructed !== el) {
-        throw new TypeError("Custom element constructor did not produce the element being upgraded");
-      }
-      if (typeof el.connectedCallback === 'function' && globalThis.document?.contains?.(el)) {
-        try { el.connectedCallback(); } catch (e) {}
-      }
-    } catch (e) {
-      el.__customUpgradeFailed = true;
-    }
+  get(name) {
+    const def = _ceDefs.get(String(name));
+    return def === undefined ? undefined : def.ctor;
   }
-  get(name) { return this._registry.get(name); }
-  getName(cls) {
-    if (!_isConstructorCE(cls)) throw new TypeError("Failed to execute 'getName' on 'CustomElementRegistry': parameter 1 is not a constructor.");
-    return this._byCtor.has(cls) ? this._byCtor.get(cls) : null;
+  getName(constructor) {
+    if (typeof constructor !== "function") {
+      throw new TypeError("Failed to execute 'getName' on 'CustomElementRegistry': parameter 1 is not of type 'Function'.");
+    }
+    const def = _ceDefsByCtor.get(constructor);
+    return def === undefined ? null : def.name;
   }
   whenDefined(name) {
-    if (!_isValidCustomElementName(name)) return Promise.reject(new DOMException("Failed to execute 'whenDefined' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError"));
-    const cls = this._registry.get(name);
-    if (cls) return Promise.resolve(cls);
-    return new Promise((resolve) => {
-      const list = this._whenDefinedResolvers.get(name) || [];
-      list.push(resolve);
-      this._whenDefinedResolvers.set(name, list);
-    });
+    name = String(name);
+    if (!_isValidCustomElementName(name)) {
+      return Promise.reject(new DOMException("Failed to execute 'whenDefined' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError"));
+    }
+    const def = _ceDefs.get(name);
+    if (def !== undefined) return Promise.resolve(def.ctor);
+    // Repeated calls before define() share one promise, as in Chromium.
+    let pending = _ceWhenDefined.get(name);
+    if (pending === undefined) {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      pending = { promise, resolve };
+      _ceWhenDefined.set(name, pending);
+    }
+    return pending.promise;
   }
   upgrade(root) {
-    if (!root || !root.querySelectorAll) return;
-    for (const [name, cls] of this._registry.entries()) {
-      const matches = _qsa(root, name);
-      for (const el of matches) this._upgradeElement(el, cls);
+    if (!(root instanceof Node)) {
+      throw new TypeError("Failed to execute 'upgrade' on 'CustomElementRegistry': parameter 1 is not of type 'Node'.");
+    }
+    if (_ceDefCount === 0) return;
+    _ceDepth++;
+    try {
+      const list = _ceCandidates(root);
+      if (list.length !== 0) _ceTryUpgradeList(list, -1);
+    } finally {
+      _ceLeave();
     }
   }
 }
 globalThis.CustomElementRegistry = CustomElementRegistry;
 globalThis.customElements = new CustomElementRegistry();
-_ceRegistry = globalThis.customElements;
 // ElementInternals: form-associated custom element internals. Validity/state
 // are JS-observable; ARIA reflection that needs the accessibility tree is not.
 globalThis.ElementInternals = class ElementInternals {
@@ -12397,7 +13056,11 @@ globalThis.DOMParser = class DOMParser {
       // HTML inputs start with `<!DOCTYPE>` / `<html>` / `<head>` etc.; the
       // fragment parser strips the outer `<html>` and emits its head+body
       // children, which is what callers want.
+      // A parsed document has no browsing context, so nothing in it is upgraded, as in
+      // Chromium (custom elements).
+      _ceInert++;
       try { root.innerHTML = html; } catch (e) { /* leave empty on parse error */ }
+      finally { _ceInert--; }
     }
 
     // For XML mime types, surface a <parsererror> on clearly-malformed input so
@@ -14154,7 +14817,11 @@ globalThis.HTMLFormElement = class HTMLFormElement extends HTMLElement {
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
   // 'submit' event and (if not prevented) builds form data and navigates.
-  reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
+  reset() {
+    for (const f of this.elements) { if ('value' in f) f.value = ''; }
+    // A form-associated custom element's reset algorithm is its formResetCallback.
+    _ceFormReset(this);
+  }
 };
 globalThis.HTMLSelectElement = class HTMLSelectElement extends HTMLElement {};
 globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends HTMLElement {
@@ -14906,6 +15573,11 @@ globalThis.Range = class Range {
       frag._nid,
       _fragmentContextPayload(context || 'body', html),
     );
+    // Chromium upgrades the fragment's defined elements before this returns.
+    if (_ceDefCount !== 0) {
+      _ceCreatedUnder(frag, true);
+      _ceDone();
+    }
     return frag;
   }
   toString() {
@@ -18925,7 +19597,16 @@ if (typeof URLPattern === 'undefined') {
 }
 
 if (typeof Document !== 'undefined' && !Document.prototype.importNode) {
-  Document.prototype.importNode = function(node, deep) { return node?.cloneNode(!!deep) || null; };
+  Document.prototype.importNode = function(node, deep) {
+    const clone = node?.cloneNode(!!deep) || null;
+    // The copy belongs to this document, so its defined elements are upgraded even when the
+    // source was inert template contents (custom elements; cloneNode skipped those).
+    if (clone && _ceDefCount !== 0) {
+      _ceCreatedUnder(clone, false);
+      _ceDone();
+    }
+    return clone;
+  };
 }
 
 // Document.adoptNode: standard DOM (HTML living spec). Frameworks that move
@@ -19276,11 +19957,31 @@ if (!globalThis.Attr) {
     constructor(name, value = '', namespaceURI = null, prefix = null) {
       this.name = name;
       this.localName = name;
-      this.value = value;
+      this._value = String(value);
       this.namespaceURI = namespaceURI;
       this.prefix = prefix;
       this.ownerElement = null;
       this.specified = true;
+    }
+    // Port addition: an owned Attr is a view of its element's attribute, so setting its value
+    // changes the element (and reaches attributeChangedCallback), as in Chromium. The shim's
+    // Attr used to be a detached copy.
+    get value() {
+      const owner = this.ownerElement;
+      if (owner) {
+        const current = this.namespaceURI
+          ? owner.getAttributeNS(this.namespaceURI, this.localName)
+          : owner.getAttribute(this.name);
+        if (current !== null) return current;
+      }
+      return this._value;
+    }
+    set value(v) {
+      this._value = String(v);
+      const owner = this.ownerElement;
+      if (!owner) return;
+      if (this.namespaceURI) owner.setAttributeNS(this.namespaceURI, this.name, this._value);
+      else owner.setAttribute(this.name, this._value);
     }
     get nodeName() { return this.name; }
     get nodeValue() { return this.value; }

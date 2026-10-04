@@ -91,6 +91,19 @@ public sealed class ElementData(
     public NodeId? TemplateContents = templateContents;
     public bool MathmlAnnotationXmlIntegrationPoint = mathmlAnnotationXmlIntegrationPoint;
 
+    /// <summary>
+    /// HTML's "is value" when it was given without an <c>is</c> attribute
+    /// (<c>createElement(name, { is })</c>, <c>new</c> of a customized built-in). The parser's
+    /// is value is the <c>is</c> attribute itself, so it is not copied here. Port addition.
+    /// </summary>
+    public string? IsValue;
+
+    /// <summary>
+    /// The custom element state bootstrap.js reports (<c>ce_state</c>), for <c>:defined</c>.
+    /// Port addition. A clone starts over, as a cloned element does in HTML.
+    /// </summary>
+    public CustomElementState CustomElementState;
+
     public override NodeData Clone()
     {
         var attrs = new List<Attribute>(Attrs.Count);
@@ -99,8 +112,88 @@ public sealed class ElementData(
             attrs.Add(attr.Clone());
         }
 
-        return new ElementData(Name, attrs, TemplateContents, MathmlAnnotationXmlIntegrationPoint);
+        return new ElementData(Name, attrs, TemplateContents, MathmlAnnotationXmlIntegrationPoint)
+        {
+            IsValue = IsValue,
+        };
     }
+
+    /// <summary>
+    /// HTML <c>:defined</c>: an element is defined unless it is an HTML element that could be a
+    /// custom element (a valid custom element name, or an is value) and has not been upgraded,
+    /// or its upgrade failed.
+    /// </summary>
+    public bool IsDefined()
+    {
+        switch (CustomElementState)
+        {
+            case CustomElementState.Custom:
+                return true;
+            case CustomElementState.Failed:
+                return false;
+        }
+
+        if (!string.Equals(Name.Ns, Namespaces.Html, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (IsValue is not null)
+        {
+            return false;
+        }
+
+        foreach (var attr in Attrs)
+        {
+            if (attr.Name.Prefix is null && string.Equals(attr.Name.Local, "is", StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return !IsValidCustomElementName(Name.Local);
+    }
+
+    /// <summary>
+    /// HTML's valid custom element name, as bootstrap.js's <c>_isValidCustomElementName</c>
+    /// approximates it: an ASCII lower-case letter first, a hyphen, no ASCII upper case, and
+    /// not one of the reserved SVG/MathML names.
+    /// </summary>
+    public static bool IsValidCustomElementName(string name)
+    {
+        if (name.Length < 2 || name[0] is < 'a' or > 'z' || !name.Contains('-', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var c in name)
+        {
+            if (c is >= 'A' and <= 'Z')
+            {
+                return false;
+            }
+        }
+
+        return name switch
+        {
+            "annotation-xml" or "color-profile" or "font-face" or "font-face-src" or "font-face-uri"
+                or "font-face-format" or "font-face-name" or "missing-glyph" => false,
+            _ => true,
+        };
+    }
+}
+
+/// <summary>HTML's custom element state, as far as <c>:defined</c> needs it. Port addition.</summary>
+public enum CustomElementState : byte
+{
+    /// <summary>"undefined" or "uncustomized", decided by the element's name and is value.</summary>
+    Unknown,
+
+    /// <summary>"custom": upgraded or constructed.</summary>
+    Custom,
+
+    /// <summary>"failed": the constructor threw.</summary>
+    Failed,
 }
 
 public sealed class TextData(string contents) : NodeData

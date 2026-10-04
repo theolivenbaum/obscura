@@ -111,6 +111,25 @@ internal static class RenderInvalidation
                     !string.Equals(old, value, StringComparison.Ordinal));
             }
 
+            // Port addition: an upgrade changes what :defined matches.
+            case "ce_state":
+            {
+                if (ParseNode(arg1) is not { } target || dom.GetNode(target)?.Data is not ElementData element)
+                {
+                    return RenderMutationImpact.None;
+                }
+
+                var wanted = arg2 switch
+                {
+                    "custom" => CustomElementState.Custom,
+                    "failed" => CustomElementState.Failed,
+                    _ => CustomElementState.Unknown,
+                };
+                return new RenderMutationImpact(
+                    StateHelpers.NodeIsConnected(dom, target),
+                    element.CustomElementState != wanted);
+            }
+
             case "remove_attribute":
             {
                 if (ParseNode(arg1) is not { } target)

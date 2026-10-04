@@ -913,6 +913,41 @@ public static class DomOps
                     dom, ParseNodeOrZero(parts[0]), so, ParseNodeOrZero(parts[2]), eo));
             }
 
+            // Port addition (custom elements, bootstrap.js _ceCandidates): the shadow-including
+            // inclusive descendants of arg1 that can be custom elements, in shadow-including
+            // tree order, as a flat JSON array [nid, "localName", "isValue", ...] ("" for no is
+            // value). One crossing per insertion, removal or parse, and only once a page has
+            // defined an element.
+            case "ce_candidates":
+                return CustomElementCandidates(dom, ParseNodeOrZero(arg1));
+
+            // Port addition: the custom element state ("custom", "failed") for :defined.
+            case "ce_state":
+            {
+                if (dom.GetNode(ParseNodeOrZero(arg1))?.Data is ElementData element)
+                {
+                    element.CustomElementState = arg2 switch
+                    {
+                        "custom" => CustomElementState.Custom,
+                        "failed" => CustomElementState.Failed,
+                        _ => CustomElementState.Unknown,
+                    };
+                }
+
+                return "true";
+            }
+
+            // Port addition: an is value given without an is attribute (createElement options).
+            case "ce_is":
+            {
+                if (dom.GetNode(ParseNodeOrZero(arg1))?.Data is ElementData element)
+                {
+                    element.IsValue = arg2;
+                }
+
+                return "true";
+            }
+
             // Connectivity is maintained incrementally by DomTree. Exposing the cached
             // bit avoids an ancestor op crossing for every level when JS builds a deep
             // detached subtree.
@@ -1118,6 +1153,65 @@ public static class DomOps
         }
 
         state.ResolvedScroll = null;
+    }
+
+    private static string CustomElementCandidates(DomTree dom, NodeId root)
+    {
+        if (dom.GetNode(root) is null)
+        {
+            return "[]";
+        }
+
+        var sb = new StringBuilder("[");
+        var first = true;
+        var stack = new Stack<NodeId>();
+        stack.Push(root);
+        var visited = 0;
+        while (stack.TryPop(out var id))
+        {
+            if ((++visited & 1023) == 0)
+            {
+                WorkCancellation.ThrowIfCancellationRequested();
+            }
+
+            var node = dom.GetNode(id);
+            if (node is null)
+            {
+                continue;
+            }
+
+            if (node.Data is ElementData element
+                && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal))
+            {
+                var isValue = element.IsValue ?? node.GetAttribute("is");
+                if (isValue is not null || element.Name.Local.Contains('-', StringComparison.Ordinal))
+                {
+                    if (!first)
+                    {
+                        sb.Append(',');
+                    }
+
+                    first = false;
+                    sb.Append(Expose(dom, id)).Append(',')
+                        .Append(SerdeJson.String(element.Name.Local)).Append(',')
+                        .Append(SerdeJson.String(isValue ?? string.Empty));
+                }
+            }
+
+            // Shadow-including preorder: the light children go on the stack first, so the
+            // shadow tree, pushed last, is walked right after its host.
+            for (var child = node.LastChild; child is { } c; child = dom.GetNode(c)?.PrevSibling)
+            {
+                stack.Push(c);
+            }
+
+            if (node.IsElement && dom.ShadowRootOf(id) is { } shadow)
+            {
+                stack.Push(shadow);
+            }
+        }
+
+        return sb.Append(']').ToString();
     }
 
     private static NodeId ParseNodeOrZero(string value) =>

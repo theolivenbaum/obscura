@@ -108,6 +108,15 @@ public sealed partial class DomTree
                             buf.Append('"');
                         }
 
+                        // HTML serialization writes an is value that has no is attribute
+                        // (createElement('button', { is }) gives none). Port addition.
+                        if (element.IsValue is { } isValue && !HasPlainAttribute(element, "is"))
+                        {
+                            buf.Append(" is=\"");
+                            EscapeAttr(isValue, buf);
+                            buf.Append('"');
+                        }
+
                         buf.Append('>');
                     }
 
@@ -187,6 +196,19 @@ public sealed partial class DomTree
                 default: buf.Append(c); break;
             }
         }
+    }
+
+    private static bool HasPlainAttribute(ElementData element, string name)
+    {
+        foreach (var attr in element.Attrs)
+        {
+            if (attr.Name.Prefix is null && string.Equals(attr.Name.Local, name, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void EscapeAttr(string s, StringBuilder buf)

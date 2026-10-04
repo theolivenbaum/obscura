@@ -502,6 +502,7 @@ public static class SelectorMatching
         {
             PseudoClass.Link => element.IsLink(),
             PseudoClass.Visited => false,
+            PseudoClass.Defined => element.IsDefined(),
             // :enabled/:disabled/:checked reflect real, static DOM state (the disabled/checked
             // attributes), not live user interaction, so they resolve the same way against a static
             // snapshot as they would in a browser that never received an input event.

@@ -4667,3 +4667,43 @@ The reference's `_IframeDocument.open()` returns undefined; Chromium's returns t
 and Akamai mPulse's `iframe.contentWindow.document.open()._l = ...` threw. Still open: the
 stand-in's `write()` appends through `innerHTML`, so a `<script>` or `<body onload>` written
 into the frame does not run, where Chromium runs it in the frame's realm.
+
+### Custom elements follow HTML's reactions model
+
+`crates/obscura-js/js/bootstrap.js`'s registry upgraded what `define()` found with
+`querySelectorAll` and called `connectedCallback` from there, and nothing else: an element that
+innerHTML, cloneNode, document.write or a later insertion produced stayed a plain HTMLElement,
+and insertion, removal and attribute changes never reached a callback. YouTube (Polymer), MSN
+(FAST) and Reddit (faceplate) never finished booting. DEVIATION: the registry keeps HTML's
+definitions (callbacks and `observedAttributes` read once at `define()`), each element has a
+reaction queue, and the DOM methods that can enqueue reactions run them before returning
+([CEReactions]) in element-queue order: upgrade (constructor, then `attributeChangedCallback` for
+each observed attribute present, then `connectedCallback`), `connectedCallback` /
+`disconnectedCallback` for every custom element in an inserted or removed subtree in
+shadow-including tree order (a move is a disconnect then a connect), `attributeChangedCallback`
+from setAttribute(NS), removeAttribute(NS), toggleAttribute, reflected properties, classList,
+dataset and Attr nodes (whose `value` setter now writes through to the owner element), and the
+form-associated callbacks (form owner, fieldset/own `disabled`, `form.reset()`).
+`createElement` constructs synchronously and, as Chromium does, reports a constructor that adds
+attributes or children, throws or returns another element, and returns an HTMLUnknownElement in
+the "failed" state. Customized built-ins (`extends` + `is`, parser `is=`, `createElement(tag,
+{is})`) work, and an is value given without an attribute is serialized. `:defined` is supported
+by the selector engine (`ElementData.CustomElementState`, set by the `ce_state` op), so
+`x-foo:not(:defined) { display: none }` hides an element until its upgrade, as in Chromium.
+
+As in Blink (and unlike the spec's inert fragment document), innerHTML, insertAdjacentHTML,
+outerHTML and createContextualFragment queue an upgrade for each defined element they create,
+also under a disconnected element, and the new elements' upgrades run before the old children's
+`disconnectedCallback`s; template contents and DOMParser documents stay inert. Hooks cost one
+compare while nothing is defined; once something is, a connected insertion and a removal (when a
+definition has `disconnectedCallback`) make one `ce_candidates` crossing that walks the subtree
+natively. Pinned by `CustomElementReactionsTests` (Js) and `CustomElementStateTests` (Dom), whose
+expectations are Chromium 141's.
+
+Known differences: the port parses the whole document before running scripts, so an element
+that follows a defining `<script>` in the markup is upgraded by `define()` (its constructor sees
+its children and attributes) rather than constructed by the parser, and `document.write`'s
+elements are upgraded on insertion; `adoptedCallback` never fires, because
+`createHTMLDocument()`/`DOMParser` documents are stand-ins over the page's own tree
+(`ownerDocument` never changes); `connectedMoveCallback` is read but `moveBefore` does not exist;
+reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.
