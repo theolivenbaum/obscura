@@ -1322,6 +1322,26 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### V8 grows its heap limit instead of aborting when the heap cap's sample is late
+
+Rust caps the heap with a near-heap-limit callback at V8's own limit, which terminates
+the script and raises the limit by a fixed headroom. ClearScript exposes no such hook, so
+the port's cap (`SetHeapLimit`) is ClearScript's sampled `MaxRuntimeHeapSize`: a
+`System.Threading.Timer` (50 ms at the shortest) whose callback needs a .NET thread-pool
+thread, the same pool ClearScript gives V8's background GC and compile work. On a busy or
+memory-starved host the sample came late, V8 reached its own limit first (1400 MB with no
+`--max-old-space-size`, below the 4 GiB default cap; equal to the cap with the CLI's 4096
+MB), and V8 aborted the process: `Fatal JavaScript out of memory: Reached heap limit`,
+exit 134. That was the intermittent "Test process crashed with exit code 134" of the Js
+test host (in `HeapLimitTerminatesScriptAndRuntimeRecovers`), and it is a process-wide
+denial of service for a CDP or MCP server under load. Every runtime is now created with
+`V8RuntimeConstraints.HeapExpansionMultiplier` = 2
+(`PocketCalculatorJsRuntime.HeapCapExpansionMultiplier`), so ClearScript's near-heap-limit
+callback raises V8's limit and the late sample still terminates the script as before. The
+cost is memory for as long as the sample is late, bounded by the allocation rate times the
+delay rather than by a fixed headroom. Pinned by `HeapCapStarvationTests`, which starves the
+pool for a second under a 64 MB V8 limit; without the multiplier the test host aborts.
+
 ### Security review fixes (September 2026)
 
 - **iframe srcdoc:** Rust ignores srcdoc and loads src. The port loads srcdoc as an `about:srcdoc` frame, as Chromium 141 does: srcdoc wins over src, a src change waits while srcdoc is present, and setting or removing srcdoc navigates. The markup is read host-side by node id (`op_frame_document_srcdoc`). The document takes its creator's origin, base URL and cookie URL, and is opaque when sandboxed without allow-same-origin or when its parent is sandboxed that way; an inherited opaque origin (a file: or data: page and its srcdoc frame) is shared.
@@ -3986,7 +4006,10 @@ fonts, which is a deliberate policy, so paint work cannot close it.
   OOM still aborts the process. The violation policy is also load-bearing:
   `Exception` raises an ordinary script error that page JS can simply catch,
   defeating the cap, so the port uses the uncatchable `Interrupt` plus a
-  raise-collect-restore recovery.
+  raise-collect-restore recovery. (Since superseded: every runtime gets a default
+  cap (M7), and V8 grows its own limit rather than aborting before the cap's late
+  sample lands; see "V8 grows its heap limit instead of aborting" under Known
+  deviations.)
 - **The CLI exited on a signal after succeeding, and now does not.** About one
   run in ten exited 139 (SIGSEGV) having produced complete, byte-identical
   output: the crash lands in native shutdown after `main` returns and after
