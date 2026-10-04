@@ -1,6 +1,9 @@
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
+using SkiaSharp;
+using HbBlob = HarfBuzzSharp.Blob;
 
 namespace PocketCalculator.Render;
 
@@ -18,6 +21,11 @@ namespace PocketCalculator.Render;
 /// Serif, and <c>monospace</c> as Liberation Mono. Matching those keeps text metrics aligned
 /// with Chromium instead of drifting between unrelated host faces.
 /// </para>
+/// <para>
+/// Noto Sans CJK SC is the one face the Rust engine does not embed (its CJK text is missing
+/// glyphs). It is the fallback for Han, kana and Hangul, and is loaded only into a render pass
+/// whose text needs it, as the emoji face is. See <c>Assets/FONT-PROVENANCE.md</c>.
+/// </para>
 /// </remarks>
 public static class FontAssets
 {
@@ -26,6 +34,9 @@ public static class FontAssets
     public const string MonoFamily = "Liberation Mono";
     public const string SystemFamily = "DejaVu Sans";
     public const string EmojiFamily = "Noto Color Emoji";
+
+    /// <summary>The internal family name of the embedded CJK face.</summary>
+    public const string CjkFamily = "Noto Sans CJK SC";
 
     private static readonly Dictionary<string, byte[]> Cache = new(StringComparer.Ordinal);
     private static readonly Lock Gate = new();
@@ -51,7 +62,17 @@ public static class FontAssets
 
     internal const string EmojiFaceFile = "noto-color-emoji";
 
-    /// <summary>Read one embedded face by its asset stem (no extension).</summary>
+    /// <summary>
+    /// Noto Sans CJK SC Regular, the fallback for Chinese, Japanese and Korean text. Its file
+    /// name carries the extension because it is the one CFF (<c>.otf</c>) asset.
+    /// </summary>
+    internal const string CjkFaceFile = "noto-sans-cjk-sc-regular.otf";
+
+    private static readonly Dictionary<string, EmbeddedFontSource> Mapped = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Read one embedded face by its asset stem. A name without an extension is a <c>.ttf</c>.
+    /// </summary>
     public static byte[] Load(string stem)
     {
         lock (Gate)
@@ -61,7 +82,7 @@ public static class FontAssets
                 return cached;
             }
 
-            string name = "PocketCalculator.Render.Assets." + stem + ".ttf";
+            string name = ResourceName(stem);
             Assembly assembly = typeof(FontAssets).Assembly;
             using Stream? stream = assembly.GetManifestResourceStream(name)
                 ?? throw new InvalidOperationException($"embedded font resource '{name}' is missing");
@@ -70,6 +91,66 @@ public static class FontAssets
             byte[] data = buffer.ToArray();
             Cache[stem] = data;
             return data;
+        }
+    }
+
+    private static string ResourceName(string stem) =>
+        "PocketCalculator.Render.Assets." + stem + (Path.HasExtension(stem) ? string.Empty : ".ttf");
+
+    /// <summary>
+    /// One large embedded face shared by every render pass of the process, without copying it
+    /// into the managed heap.
+    /// </summary>
+    /// <remarks>
+    /// The emoji (10 MB) and CJK (16 MB) faces used to be read into a managed array, copied
+    /// into an <see cref="SKData"/> and copied twice more into a HarfBuzz blob for every
+    /// <see cref="TextEngine"/> that needed them, which is every layout pass of a page that
+    /// shows such text. Here Skia reads the face straight out of the assembly's resource
+    /// section, which the runtime already holds for the life of the process, and the
+    /// HarfBuzz blob is built once with <see cref="HarfBuzzSharp.MemoryMode.Duplicate"/> and
+    /// shared: HarfBuzz still never sees managed memory, and a blob is immutable and
+    /// reference-counted, so faces on any thread can share it.
+    /// </remarks>
+    internal static EmbeddedFontSource Embedded(string file)
+    {
+        lock (Gate)
+        {
+            if (Mapped.TryGetValue(file, out EmbeddedFontSource? cached))
+            {
+                return cached;
+            }
+
+            string name = ResourceName(file);
+            Stream stream = typeof(FontAssets).Assembly.GetManifestResourceStream(name)
+                ?? throw new InvalidOperationException($"embedded font resource '{name}' is missing");
+            IntPtr pointer;
+            int length;
+            unsafe
+            {
+                if (stream is UnmanagedMemoryStream mapped && mapped.Length <= int.MaxValue)
+                {
+                    // The resource section of a loaded assembly: never moved, never unloaded
+                    // (the engine lives in the default load context), so the stream is kept
+                    // open for the life of the process.
+                    pointer = (IntPtr)mapped.PositionPointer;
+                    length = (int)mapped.Length;
+                }
+                else
+                {
+                    // An assembly loaded from bytes: copy once into native memory that is
+                    // likewise never freed.
+                    using (stream)
+                    {
+                        length = checked((int)stream.Length);
+                        pointer = Marshal.AllocHGlobal(length);
+                        stream.ReadExactly(new Span<byte>((void*)pointer, length));
+                    }
+                }
+            }
+
+            var source = new EmbeddedFontSource(file, pointer, length);
+            Mapped[file] = source;
+            return source;
         }
     }
 
@@ -86,6 +167,68 @@ public static class FontAssets
         foreach (Rune rune in text.EnumerateRunes())
         {
             if (MayRequestEmoji(rune.Value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether text contains a code point only the embedded CJK face can draw: Han ideographs,
+    /// kana, Hangul, bopomofo, CJK punctuation and the fullwidth forms.
+    /// </summary>
+    /// <remarks>
+    /// Keeps the 16 MB face out of every render pass of a page that has no such text, the same
+    /// way <see cref="TextMayNeedEmojiFont"/> does for the color face. None of these ranges is
+    /// covered by Liberation or DejaVu, so loading on them changes no Latin layout.
+    /// </remarks>
+    public static bool TextMayNeedCjkFont(string text)
+    {
+        foreach (char ch in text)
+        {
+            // Supplementary ideographs (Extension B and on) arrive as a surrogate pair; the
+            // high surrogates D840-D8BF cover planes 2 and 3 entirely.
+            if (ch >= 0x1100 && (IsCjkCodepoint(ch) || ch is >= '\uD840' and <= '\uD8BF'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>A BMP code point in a block the embedded CJK face exists for.</summary>
+    internal static bool IsCjkCodepoint(int ch) => ch switch
+    {
+        >= 0x1100 and <= 0x11FF => true,   // Hangul Jamo
+        >= 0x2E80 and <= 0x2FDF => true,   // CJK radicals, Kangxi radicals
+        >= 0x2FF0 and <= 0x4DBF => true,   // ideographic description .. Extension A
+        >= 0x4E00 and <= 0x9FFF => true,   // CJK Unified Ideographs
+        >= 0xA960 and <= 0xA97F => true,   // Hangul Jamo Extended-A
+        >= 0xAC00 and <= 0xD7FF => true,   // Hangul Syllables, Jamo Extended-B
+        >= 0xF900 and <= 0xFAFF => true,   // CJK Compatibility Ideographs
+        >= 0xFE10 and <= 0xFE1F => true,   // vertical forms
+        >= 0xFE30 and <= 0xFE4F => true,   // CJK compatibility forms
+        >= 0xFF00 and <= 0xFFEF => true,   // halfwidth and fullwidth forms
+        _ => false,
+    };
+
+    /// <summary>
+    /// Whether a CSS <c>font-family</c> list names the embedded CJK face, which then has to be
+    /// loaded even for text with no CJK code point (its Latin glyphs and metrics apply).
+    /// </summary>
+    public static bool FamilyNamesCjkFace(string? family)
+    {
+        if (family is null || !family.Contains("cjk", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        foreach (string token in family.Split(','))
+        {
+            if (BundledFamilyForCssToken(token) == CjkFamily)
             {
                 return true;
             }
@@ -195,6 +338,20 @@ public static class FontAssets
             return SystemFamily;
         }
 
+        // The regional Noto Sans CJK families are one design with one set of metrics; they
+        // differ only in which regional glyph forms are the default. A host that has one of
+        // them has all five (the distribution packages ship the collection), so each resolves
+        // to the embedded SC face rather than to Liberation Sans through the "sans" rule below.
+        // Chromium with only the SC face installed resolves the SC name alone, and falls
+        // through on PingFang SC, Microsoft YaHei, SimSun, Meiryo, Malgun Gothic and the
+        // Google Fonts "Noto Sans SC/JP/KR" names, which is what this table does too: those
+        // pages get the CJK face per glyph, through fallback.
+        if (trimmed is "noto sans cjk sc" or "noto sans cjk tc" or "noto sans cjk jp"
+            or "noto sans cjk kr" or "noto sans cjk hk")
+        {
+            return CjkFamily;
+        }
+
         if (trimmed == "monospace"
             || trimmed.Contains("mono", StringComparison.Ordinal)
             || trimmed.Contains("courier", StringComparison.Ordinal)
@@ -247,15 +404,18 @@ public static class FontAssets
         // x-height is 6px at 10px, 9px at 16px and 14px at 24px - not one em fraction at all.
         // Measured here at the em, which costs `vertical-align: middle` up to half a pixel on
         // that face and nothing on the Liberation ones.
-        (float ascent, float descent, float lineGap, float xHeight) = family switch
+        (float ascent, float descent, float lineGap, float unitsPerEm, float xHeight) = family switch
         {
-            SerifFamily => (1825f, 443f, 87f, 940f),
-            MonoFamily => (1705f, 615f, 0f, 1082f),
-            SystemFamily => (1901f, 483f, 0f, 1120f),
-            _ => (1854f, 434f, 67f, 1082f),
+            SerifFamily => (1825f, 443f, 87f, 2048f, 940f),
+            MonoFamily => (1705f, 615f, 0f, 2048f, 1082f),
+            SystemFamily => (1901f, 483f, 0f, 2048f, 1120f),
+
+            // hhea 1160/-288/0 (no USE_TYPO_METRICS), OS/2 v3 sxHeight 543, 1000 units.
+            CjkFamily => (1160f, 288f, 0f, 1000f, 543f),
+            _ => (1854f, 434f, 67f, 2048f, 1082f),
         };
 
-        return new FaceMetrics(ascent, descent, lineGap, 2048f, XHeight: xHeight);
+        return new FaceMetrics(ascent, descent, lineGap, unitsPerEm, XHeight: xHeight);
     }
 
     public static float NormalLineHeight(float fontSize, FaceMetrics metrics)
@@ -411,4 +571,65 @@ public static class FontAssets
     }
 
     internal static string Invariant(FormattableString value) => value.ToString(CultureInfo.InvariantCulture);
+}
+
+/// <summary>
+/// A large embedded face kept outside the managed heap for the life of the process. See
+/// <see cref="FontAssets.Embedded"/>.
+/// </summary>
+internal sealed class EmbeddedFontSource(string file, IntPtr pointer, int length)
+{
+    private readonly Lock _gate = new();
+    private SKData? _data;
+    private HbBlob? _blob;
+
+    public string File { get; } = file;
+
+    public int Length { get; } = length;
+
+    /// <summary>
+    /// Whether Chromium would embolden this face for a bold request it cannot meet. True for
+    /// the single-weight CJK outline face; false for the color emoji face, whose bitmaps Skia
+    /// does not embolden.
+    /// </summary>
+    public bool SynthesizesBold => string.Equals(File, FontAssets.CjkFaceFile, StringComparison.Ordinal);
+
+    /// <summary>Skia's view of the bytes, referencing them in place.</summary>
+    public SKData Data
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _data ??= SKData.Create(pointer, Length);
+            }
+        }
+    }
+
+    /// <summary>One HarfBuzz blob over a native duplicate of the bytes, shared by every face.</summary>
+    public HbBlob Blob
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_blob is null)
+                {
+                    var blob = new HbBlob(pointer, Length, HarfBuzzSharp.MemoryMode.Duplicate);
+                    blob.MakeImmutable();
+                    _blob = blob;
+                }
+
+                return _blob;
+            }
+        }
+    }
+
+    /// <summary>A managed copy, for the few callers that want the raw bytes.</summary>
+    public byte[] ToArray()
+    {
+        byte[] copy = new byte[Length];
+        Marshal.Copy(pointer, copy, 0, Length);
+        return copy;
+    }
 }

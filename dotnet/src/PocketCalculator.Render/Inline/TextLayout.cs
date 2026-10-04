@@ -390,6 +390,7 @@ internal static class TextLayout
                                 Color = glyph.Color,
                                 Metadata = glyph.Metadata,
                                 FakeItalic = glyph.FakeItalic,
+                                FakeBold = glyph.FakeBold,
                             });
                             if (!shape.Rtl)
                             {

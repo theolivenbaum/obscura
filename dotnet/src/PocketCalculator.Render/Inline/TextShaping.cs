@@ -29,6 +29,9 @@ public struct ShapeGlyph
     public RgbaColor? Color;
     public ulong Metadata;
     public bool FakeItalic;
+
+    /// <summary>Embolden at raster time: a bold request the glyph's single-weight face cannot meet.</summary>
+    public bool FakeBold;
     public TextMetrics? Metrics;
 
     /// <summary>Width at the given font size, honoring a per-span metrics override.</summary>
@@ -649,7 +652,7 @@ public sealed class TextShaper(FontDatabase database)
 
         FaceRecord first = selected ?? order![0];
         int glyphStart = glyphs.Count;
-        List<int> missing = ShapeFallback(glyphs, first, line, attrsList, startRun, endRun, spanRtl);
+        List<int> missing = ShapeFallback(glyphs, first, line, attrsList, startRun, endRun, spanRtl, fallback: false);
 
         int next = 0;
         while (missing.Count > 0)
@@ -672,7 +675,8 @@ public sealed class TextShaper(FontDatabase database)
             }
 
             List<ShapeGlyph> fallbackGlyphs = [];
-            List<int> fallbackMissing = ShapeFallback(fallbackGlyphs, font, line, attrsList, startRun, endRun, spanRtl);
+            List<int> fallbackMissing = ShapeFallback(
+                fallbackGlyphs, font, line, attrsList, startRun, endRun, spanRtl, fallback: true);
 
             int fb = 0;
             while (fb < fallbackGlyphs.Count)
@@ -741,7 +745,8 @@ public sealed class TextShaper(FontDatabase database)
         AttrsList attrsList,
         int startRun,
         int endRun,
-        bool spanRtl)
+        bool spanRtl,
+        bool fallback)
     {
         string run = line[startRun..endRun];
         TextAttrs attrs = attrsList.GetSpan(startRun);
@@ -777,6 +782,7 @@ public sealed class TextShaper(FontDatabase database)
                 startRun,
                 endRun,
                 spanRtl,
+                fallback,
                 buffer.GetGlyphInfoSpan(),
                 buffer.GetGlyphPositionSpan());
         }
@@ -800,10 +806,12 @@ public sealed class TextShaper(FontDatabase database)
         int startRun,
         int endRun,
         bool spanRtl,
+        bool fallback,
         ReadOnlySpan<GlyphInfo> infos,
         ReadOnlySpan<GlyphPosition> positions)
     {
         float fontScale = font.UnitsPerEm;
+        float defaultSize = attrsList.Defaults.Metrics?.FontSize ?? 0f;
 
         List<int> missing = [];
         int glyphStart = glyphs.Count;
@@ -831,11 +839,39 @@ public sealed class TextShaper(FontDatabase database)
                 }
             }
 
+            // DEVIATION from crates/obscura-render/src/inline.rs (cosmic-text), which treats a
+            // fallback face like the primary one. Chromium on Linux does not, in two ways that
+            // CJK text makes visible on every line (measured on Chromium 141 with Liberation
+            // Sans primary and Noto Sans CJK SC as the only CJK face):
+            // - a glyph from a fallback face advances by whole pixels: ten Hangul syllables
+            //   (920 units) are 150px at 16px and 120px at 13px, where the same text with Noto
+            //   Sans CJK SC as the primary face is 147.2px; a DejaVu check mark is 13px as
+            //   fallback and 13.41px as primary;
+            // - with `line-height: normal`, the fallback face's own leaded ascent and descent
+            //   join the box's line-box contribution (Blink's AccumulateUsedFonts), so a
+            //   Liberation Sans line holding Chinese is 24px at 16px, not 18px.
+            // A fixed line-height is not affected. See "Known deviations" in todo.md.
+            TextMetrics? metrics = glyphAttrs.Metrics;
+            float advance = position.XAdvance / fontScale;
+            if (fallback)
+            {
+                float size = metrics?.FontSize ?? defaultSize;
+                if (size > 0f)
+                {
+                    advance = F32.Round(advance * size) / size;
+                }
+
+                if (metrics is { LineHeightNormal: true } boxMetrics)
+                {
+                    metrics = WithFallbackFaceMetrics(boxMetrics, font.Metrics);
+                }
+            }
+
             glyphs.Add(new ShapeGlyph
             {
                 Start = startGlyph,
                 End = endRun,
-                XAdvance = (position.XAdvance / fontScale) + letterSpacing,
+                XAdvance = advance + letterSpacing,
                 YAdvance = position.YAdvance / fontScale,
                 XOffset = position.XOffset / fontScale,
                 YOffset = position.YOffset / fontScale,
@@ -848,7 +884,8 @@ public sealed class TextShaper(FontDatabase database)
                 Color = glyphAttrs.Color,
                 Metadata = glyphAttrs.Metadata,
                 FakeItalic = glyphAttrs.FakeItalic,
-                Metrics = glyphAttrs.Metrics,
+                FakeBold = SynthesizesBold(font, glyphAttrs.Weight, fallback),
+                Metrics = metrics,
             });
         }
 
@@ -878,6 +915,33 @@ public sealed class TextShaper(FontDatabase database)
 
         return missing;
     }
+
+    /// <summary>
+    /// A box's line-box contribution united with a fallback face's own leaded ascent and
+    /// descent, as Blink's <c>InlineBoxState::AccumulateUsedFonts</c> does for
+    /// <c>line-height: normal</c>.
+    /// </summary>
+    internal static TextMetrics WithFallbackFaceMetrics(TextMetrics box, FaceMetrics face)
+    {
+        float lineHeight = FontAssets.NormalLineHeight(box.FontSize, face);
+        (float above, float below) = FontAssets.LineBoxHalves(box.FontSize, lineHeight, face);
+        float shift = box.LineRelative ? 0f : box.Shift;
+        return box with
+        {
+            Above = F32.Max(box.Above, above + shift),
+            Below = F32.Max(box.Below, below - shift),
+        };
+    }
+
+    /// <summary>
+    /// Whether Chromium would embolden this glyph. A face reached through fallback is
+    /// emboldened for any request of 600 or more; the primary face only when the request is
+    /// more than 200 above its own weight (measured on Chromium 141 with Noto Sans CJK SC
+    /// Regular: as fallback 600 is bold, as the named family 600 is regular and 700 bold).
+    /// The advance does not change in either case.
+    /// </summary>
+    private static bool SynthesizesBold(FaceRecord font, ushort weight, bool fallback) =>
+        font.SynthesizesBold && (fallback ? weight >= 600 : weight > font.Weight + 200);
 
     /// <summary>
     /// The canonical axis tuple one span shapes with.

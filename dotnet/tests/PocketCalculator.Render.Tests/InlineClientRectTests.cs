@@ -70,11 +70,17 @@ public class InlineClientRectTests
     [Fact]
     public void RightToLeftSpanHasItsGlyphWidth()
     {
-        // Chromium 141: 1235,8,37,17. The logical start of a right-to-left line is its right
-        // edge, so the fragment used to come out 0 wide.
+        // Chromium 141: 1234,9,38,17. The logical start of a right-to-left line is its right
+        // edge, so the fragment used to come out 0 wide. Liberation Sans has no Arabic, so the
+        // glyphs come from DejaVu Sans as a fallback, and Chromium treats a fallback face in two
+        // ways the port did not until the CJK face made them visible: its glyphs advance by
+        // whole pixels (38px here, 36.99px with DejaVu Sans named), and its taller ascent joins
+        // the `line-height: normal` line box, which puts the 19px line's baseline 1px lower and
+        // the span's font box at y 9. This used to assert 1235.01,8,36.99,17; re-measured on
+        // Chromium 141 with the engine's own font set and the page's charset declared.
         (DomTree tree, DomLayout laid) = Lay(
             "<div style=\"direction:rtl\"><span id=s>مرحبا</span></div>");
-        AssertRect(laid.Rects[Id(tree, "s")], 1235.01f, 8f, 36.99f, 17f);
+        AssertRect(laid.Rects[Id(tree, "s")], 1234f, 9f, 38f, 17f);
     }
 
     [Fact]

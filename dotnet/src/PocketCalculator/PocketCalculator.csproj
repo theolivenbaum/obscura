@@ -46,6 +46,13 @@
     <EngineAssembly Include="PocketCalculator.Browser;PocketCalculator.Js;PocketCalculator.Render;PocketCalculator.Net;PocketCalculator.Dom" />
   </ItemGroup>
 
+  <!-- PocketCalculator.Render.dll embeds the two Noto faces, whose SIL Open Font License
+       travels with them (NOTICE names them, FONT-PROVENANCE.md says where they came from). -->
+  <ItemGroup>
+    <None Include="../PocketCalculator.Render/Assets/LICENSE-NOTO-COLOR-EMOJI.txt" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="../PocketCalculator.Render/Assets/LICENSE-NOTO-SANS-CJK.txt" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
   <Target Name="IncludeEngineAssemblies">
     <ItemGroup>
       <BuildOutputInPackage Include="@(EngineAssembly->'$(OutDir)%(Identity).dll')" />

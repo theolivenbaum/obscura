@@ -1074,9 +1074,10 @@ DEVIATION comment at the C# code that differs.
   so a bare `<sup>` still sits on the baseline. The machinery it needs now exists, but
   `font-size: smaller` has to be measured first.
 
-  A third, unchased: Blink accumulates fallback-font metrics into a `line-height: normal` line
-  where the port uses the span's primary font only. Nothing in the corpus moved on it, so it is
-  recorded rather than fixed.
+  A third, since fixed: Blink accumulates fallback-font metrics into a `line-height: normal`
+  line where the port used the span's primary font only. Nothing in the corpus moved on it
+  until the embedded CJK face made every Chinese line 24px instead of 18px; see "The embedded
+  CJK face, and how Chromium treats a fallback face" below.
 
   Covered by `LineBoxFontMetricsTests` (11 facts, 10 of which fail at the parent commit -
   verified here by reverting the sources; the eleventh is the control that must not move).
@@ -4628,3 +4629,78 @@ Pinned by `DomLayoutTests.PercentageWidthTableIsFlooredByItsMinContentWidth`,
 `PercentageWidthTableThatFitsKeepsItsContainingBlockWidth`,
 `DefiniteWidthInlineBlockDoesNotShrinkItsBlockChildren` and
 `TableInAScrollableBoxTakesItsContentWidth`.
+
+### The embedded CJK face, and how Chromium treats a fallback face
+
+**Decision.** The engine embeds one CJK face, Noto Sans CJK SC Regular 2.004 (SIL OFL 1.1,
+`notofonts/noto-cjk`, 16,437,364 bytes; URL, commit and SHA-256 in
+`dotnet/src/PocketCalculator.Render/Assets/FONT-PROVENANCE.md`). Before it, every Chinese,
+Japanese and Korean character was a missing glyph (live survey: the wikipedia.org language
+list, example.com's multilingual notice, whole pages on baidu.com, qq.com, taobao.com,
+naver.com). The Rust engine embeds no CJK face, so this is a deviation from it by design. Why
+this file: every regional face under `OTF/` carries the full pan-CJK set (Unified Ideographs
+and Extension A, kana, all 11,172 Hangul syllables, CJK punctuation, fullwidth forms), and
+nothing smaller does: the `SubsetOTF/SC` face (8.3 MB) and the subset variable face (15.1 MB)
+have no Hangul, the full variable face is 30.7 MB, and a static Bold would add 17 MB. Bold is
+synthesized instead (below). No new native dependency: the face goes through Skia and HarfBuzz.
+
+**How it is loaded.** Like the emoji face, it joins only a render pass whose text (text nodes,
+`::before`/`::after` content) has a CJK code point, or whose styles name the face
+(`LayoutDomOnce`, `FontAssets.TextMayNeedCjkFont` / `FamilyNamesCjkFace`). Both large faces are
+now read in place: Skia gets an `SKData` over the assembly's resource section
+(`FontAssets.Embedded`), and the HarfBuzz blob is built once per process with
+`MemoryMode.Duplicate` and shared, where the emoji face used to be copied three times per
+layout pass. Fallback order is DejaVu Sans, Noto Color Emoji, Noto Sans CJK SC, then the rest.
+"Noto Sans CJK SC/TC/JP/KR/HK" resolve to it as a family; Chromium with the same font set falls
+through on PingFang SC, Microsoft YaHei, SimSun, Meiryo, Malgun Gothic and the Google Fonts
+"Noto Sans SC/JP/KR" names, and so does the port (their CJK text gets the face by fallback).
+A shape cache is no longer carried between passes that loaded a different optional-face set,
+since FontIds shift with it.
+
+Cost, measured interleaved (10 runs each, same build, `fetch --screenshot` of a local page):
+a Latin-only page is unchanged (median 1234 vs 1173 ms, noise; max RSS 183.0 vs 182.9 MB); a
+page with one CJK paragraph costs ~15 ms and 31 MB RSS (186.1 to 217.4 MB), about half of it
+the shared HarfBuzz duplicate. `PocketCalculator.Render.dll` grows from 16.7 to 33.2 MB and
+the `PocketCalculator` package from about 13.8 to 27.6 MB; the package now also carries both
+Noto OFL texts (`LICENSE-NOTO-COLOR-EMOJI.txt`, `LICENSE-NOTO-SANS-CJK.txt`).
+
+**Chromium's treatment of a fallback face**, which CJK text exposes on every line and which
+the port now follows for every fallback face (`TextShaper.ReadShapedGlyphs`), measured on
+Chromium 141 with fontconfig limited to the engine's own faces:
+
+- A glyph from a fallback face advances by whole pixels: ten Hangul syllables (920 units) are
+  150px at 16px as fallback and 147.2px with the face named; a DejaVu check mark is 13px as
+  fallback and 13.41px named; Arabic `مرحبا` is 38px, not 36.99.
+- With `line-height: normal`, the fallback face's leaded ascent and descent join the box's
+  line-box contribution (Blink's `AccumulateUsedFonts`): a Liberation Sans line with Chinese is
+  24px at 16px, 17px at 12px, 35px at 24px; a fixed line-height is unaffected; an emoji or
+  DejaVu fallback glyph makes an 18px line 19px. The inline box's own font box stays the
+  primary face's (a span is still 17px tall).
+- Synthetic bold: a fallback face is emboldened for a request of 600 or more, a named
+  single-weight face only above its weight + 200 (600 regular, 700 bold); the advance never
+  changes. Only the embedded CJK face opts in (`FaceRecord.SynthesizesBold`): Liberation and
+  DejaVu have real bold faces, and a page face's descriptors are not modelled, so web fonts
+  with one weight are still drawn unemboldened.
+
+**Line breaking.** Chromium's `line-break: auto` resolves CJ (small kana, the prolonged sound
+mark) as ID, where UAX#14's default and the Rust engine resolve it as NS; the CJK punctuation
+block, radicals, bopomofo, compatibility jamo, enclosed CJK and the fullwidth forms are ID
+(fullwidth digits used to be numeric and fullwidth letters alphabetic, with no break between
+them); `：；・〜゛゜゠･` are NS; `〝` opens, `〞〟` close; U+3000 breaks after.
+
+Pinned by `CjkFontTests` (Render) and `InlineClientRectTests.RightToLeftSpanHasItsGlyphWidth`,
+re-measured for the fallback rules.
+
+Still short of Chromium:
+
+- `text-spacing-trim` (Chromium's default `normal`) is not implemented: adjacent fullwidth
+  punctuation is not collapsed (`あ。「括弧」の` is 104px in Chromium, 112px here) and a closing
+  punctuation mark at the end of a line is not allowed to hang into half its width, so a
+  Japanese paragraph that fits exactly in Chromium can wrap one character earlier.
+- Han glyph forms are always the SC face's defaults: no `locl` from `lang` (a JP or KR page
+  gets Simplified Chinese forms of the shared ideographs), and one SC face stands in for the
+  TC/JP/KR/HK families.
+- SVG `<text>` and the static `PaintText`/`DomTextMeasure` paths have no per-glyph fallback
+  and still draw CJK as missing glyphs.
+- Emoji are 23px wide at 16px in Chromium and 20px here (unchanged by this work; the port
+  used 19.92).

@@ -189,11 +189,15 @@ dotnet/
 ## Fonts
 
 The engine never uses system fonts. It embeds its own faces (Liberation, DejaVu,
-Noto Color Emoji) so rasterization is identical on every host and works on
+Noto Color Emoji, Noto Sans CJK SC) so rasterization is identical on every host and works on
 distroless images with no fontconfig. They live in
-`dotnet/src/PocketCalculator.Render/Assets/` and are byte-identical copies of
+`dotnet/src/PocketCalculator.Render/Assets/`. All but Noto Sans CJK SC are byte-identical copies of
 `.reference/obscura/crates/obscura-render/assets/`; if an upstream sync updates
-those faces, re-copy them or the two engines will rasterize differently. Resolve typefaces with
+those faces, re-copy them or the two engines will rasterize differently. Noto Sans CJK SC
+(16 MB, the port's own addition; the Rust engine draws CJK as tofu) is the fallback for Han,
+kana and Hangul. It and the emoji face load only into a render pass whose text needs them,
+and are read in place from the resource section (`FontAssets.Embedded`) rather than copied
+per pass; `FONT-PROVENANCE.md` records where each came from. Resolve typefaces with
 `SKTypeface.FromData` over the embedded resources; never
 `SKTypeface.FromFamilyName`.
 

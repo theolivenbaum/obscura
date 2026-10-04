@@ -14,6 +14,9 @@ public sealed record SpanAttrs
 
     public required float LineHeight { get; init; }
 
+    /// <summary>Whether <see cref="LineHeight"/> came from <c>line-height: normal</c>.</summary>
+    public bool LineHeightNormal { get; init; }
+
     public required float LetterSpacing { get; init; }
 
     public required bool LetterSpacingNonNormal { get; init; }
@@ -107,7 +110,8 @@ public sealed record SpanAttrs
                 Above,
                 Below,
                 Align,
-                Shift),
+                Shift,
+                LineHeightNormal),
             Weight = Weight,
             FontWeightAxis = Weight,
             FontOpticalSize = OpticalSizing == FontOpticalSizing.Auto ? FontSize : null,
@@ -135,6 +139,8 @@ internal sealed record SpanCtx
     public required float FontSize { get; init; }
 
     public required float LineHeight { get; init; }
+
+    public bool LineHeightNormal { get; init; }
 
     public required float LetterSpacing { get; init; }
 
@@ -188,6 +194,7 @@ internal sealed record SpanCtx
     {
         FontSize = FontSize,
         LineHeight = LineHeight,
+        LineHeightNormal = LineHeightNormal,
         LetterSpacing = LetterSpacing,
         LetterSpacingNonNormal = LetterSpacingNonNormal,
         Weight = Weight,
@@ -317,6 +324,10 @@ public static class Inline
     public static (float X, float Y) ContentOrigin(Rect rect, LayoutStyle style) => (
         rect.X + style.UsedBorder.Left + style.Padding.Left,
         rect.Y + style.UsedBorder.Top + style.Padding.Top);
+
+    /// <summary>Whether a box's used <c>line-height</c> is the font-relative <c>normal</c>.</summary>
+    internal static bool IsNormalLineHeight(LayoutStyle style) =>
+        style.LineHeight is not { } lineHeight || lineHeight.Kind == LineHeightKind.Normal;
 
     public static float ContentWidth(Rect rect, LayoutStyle style) => F32.Max(
         rect.Width - style.UsedBorder.Left - style.UsedBorder.Right - style.Padding.Left - style.Padding.Right,
