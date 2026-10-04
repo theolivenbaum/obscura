@@ -136,7 +136,12 @@ public static class FontResolution
             case LineHeightKind.Px:
                 return lineHeight.Number;
             case LineHeightKind.Ratio:
-                return fontSize * lineHeight.Number;
+                // Blink multiplies a unitless line-height at layout time and stores the product
+                // as LayoutUnit(float), which truncates to 1/64px: 16px * 1.2 is 19.1875, not
+                // the 19.203125 that rounding gives. A length (px, em, %) is resolved at style
+                // time and rounds instead; see FontAssets.QuantizedLineHeight. Measured on
+                // Chromium 141 across 7 fonts and 4 ratios.
+                return FontAssets.TruncatedToLayoutUnit(fontSize * lineHeight.Number);
             case LineHeightKind.Relative:
                 Dimension relative = lineHeight.Length;
                 if (relative.Kind == DimensionKind.Percent)

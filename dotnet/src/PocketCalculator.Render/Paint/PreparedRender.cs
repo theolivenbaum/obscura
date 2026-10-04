@@ -650,7 +650,11 @@ public sealed partial class PreparedRender
 
         output["line-height"] = (style.LineHeight ?? PocketCalculator.Render.LineHeight.Normal) == PocketCalculator.Render.LineHeight.Normal
             ? "normal"
-            : PaintCssValues.CssPx(Layout.TextEngine.SelectedLineHeight(style));
+            : style.LineHeight is { Kind: LineHeightKind.Ratio } ratio
+                // The resolved value is the plain product; layout's copy is truncated to
+                // LayoutUnits (FontResolution.UsedLineHeightWithMetrics), CSSOM's is not.
+                ? PaintCssValues.CssPx((style.FontSize ?? 16f) * ratio.Number)
+                : PaintCssValues.CssPx(Layout.TextEngine.SelectedLineHeight(style));
         output["letter-spacing"] = (style.LetterSpacing ?? 0f) == 0f
             ? "normal"
             : PaintCssValues.CssPx(style.LetterSpacing ?? 0f);
