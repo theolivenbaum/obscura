@@ -12800,6 +12800,10 @@ public sealed partial class RuntimeTests
                 assert_eq!(p["winInput"], true);
             }
         */
+        // DEVIATION from the Rust test: Chromium 141 puts the GlobalEventHandlers on
+        // HTMLElement.prototype and SVGElement.prototype, not on Element.prototype (whose
+        // `'oninput' in` is false there), and the port now does the same (see
+        // _distributeElementMembers in bootstrap.js). An element still has them.
         using var fixture = RuntimeFixture.Setup("<div></div>");
         var result = fixture.Runtime.Evaluate("""
             JSON.stringify({
@@ -12807,6 +12811,9 @@ public sealed partial class RuntimeTests
                 docChange: ('onchange' in document),
                 docClick: ('onclick' in document),
                 elProtoInput: ('oninput' in Element.prototype),
+                htmlProtoInput: ('oninput' in HTMLElement.prototype),
+                svgProtoInput: ('oninput' in SVGElement.prototype),
+                divInput: ('oninput' in document.querySelector('div')),
                 winInput: ('oninput' in window)
             })
             """);
@@ -12814,7 +12821,10 @@ public sealed partial class RuntimeTests
         Assert.True(p["docInput"]!.GetValue<bool>());
         Assert.True(p["docChange"]!.GetValue<bool>());
         Assert.True(p["docClick"]!.GetValue<bool>());
-        Assert.True(p["elProtoInput"]!.GetValue<bool>());
+        Assert.False(p["elProtoInput"]!.GetValue<bool>());
+        Assert.True(p["htmlProtoInput"]!.GetValue<bool>());
+        Assert.True(p["svgProtoInput"]!.GetValue<bool>());
+        Assert.True(p["divInput"]!.GetValue<bool>());
         Assert.True(p["winInput"]!.GetValue<bool>());
     }
 

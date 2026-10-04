@@ -2181,6 +2181,28 @@ function _eventTargetDispatch(target, event) {
 // constructor coordinate through the same construction-stack shape used by
 // browser custom-element implementations.
 const _customElementConstructionStack = [];
+// The window's CustomElementRegistry, set where it is created. The Element constructor
+// asks it whether a page-side `new X()` names a defined custom element.
+let _ceRegistry = null;
+// Set by _constructElement just before it runs `new C(nid)`, and consumed by the Element
+// constructor. Every wrapper the shim builds for a node goes through it, so a page-side
+// `new HTMLDivElement()` (which never sets it) can be told apart and refused, as Chromium
+// refuses it. Nothing runs between the set and the read: a derived constructor's own code
+// only runs after super() has returned.
+let _elementConstructKey = false;
+function _constructElement(C, nid) {
+  _elementConstructKey = true;
+  try { return new C(nid); } finally { _elementConstructKey = false; }
+}
+// The name Chromium's "Failed to construct '<name>'" message gives: the nearest
+// interface the shim defines, so an undefined `class X extends HTMLElement` reports
+// HTMLElement.
+function _elementInterfaceName(C) {
+  for (let c = C; typeof c === "function"; c = Object.getPrototypeOf(c)) {
+    if (c === Element || _nativeFns.has(c)) return c.name || "Element";
+  }
+  return "HTMLElement";
+}
 
 function __prepareInsertedScript(script) {
   if (!__obscuraCore.ops.op_script_try_start(script._nid)) return;
@@ -3587,13 +3609,41 @@ function _animationsForTarget(target) {
 }
 
 class Element extends Node {
-  constructor(nid) {
+  // No declared parameter, so Element.length is 0 as in Chromium. The node id is the
+  // first argument of the shim's own `new C(nid)` (_constructElement).
+  constructor() {
     const entry = _customElementConstructionStack[_customElementConstructionStack.length - 1];
     const matchesUpgrade = entry && new.target === entry.constructor;
     const upgrading = matchesUpgrade && !entry.constructed ? entry.element : null;
+    let nid = arguments[0];
+    let createdName = null;
+    if (upgrading) {
+      // The registry's own upgrade; the element already exists.
+    } else if (_elementConstructKey) {
+      _elementConstructKey = false;
+    } else {
+      // Port addition: page script reached the constructor itself. Chromium allows that
+      // only for a defined autonomous custom element, which creates a fresh element of
+      // that name; every other interface (`new HTMLDivElement()`, an undefined subclass
+      // of HTMLElement) throws. The shim used to build a wrapper with no node behind it.
+      createdName = _ceRegistry && _ceRegistry._byCtor ? _ceRegistry._byCtor.get(new.target) : undefined;
+      if (typeof createdName !== "string") {
+        throw new TypeError("Failed to construct '" + _elementInterfaceName(new.target) + "': Illegal constructor");
+      }
+      nid = +_dom("create_element", createdName);
+    }
     super(upgrading ? upgrading._nid : nid);
     if (matchesUpgrade && entry.constructed) {
       throw new TypeError("Custom element is already being constructed");
+    }
+    if (createdName !== null) {
+      this._tagName = createdName.toUpperCase();
+      this._lname = createdName;
+      this._ns = "http://www.w3.org/1999/xhtml";
+      this._nullNamespaceAttrs = new Map();
+      this.__customUpgraded = true;
+      _seedDetachedTreeState(this);
+      _cache.set(nid, this);
     }
     if (upgrading) {
       // Keep an already-constructed marker on the stack until the outer class
@@ -5514,6 +5564,150 @@ class Element extends Node {
   }
 }
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where HTMLElement and most HTML*Element
+// interfaces are `= Element` aliases. That made every element an instance of every one of
+// them (a <div> was an HTMLScriptElement, <head> an HTMLIFrameElement), and a page that
+// patched HTMLScriptElement.prototype.setAttribute patched it for all elements. Here
+// HTMLElement is its own interface between Element and the HTML element interfaces, as
+// in Chromium, so SVG and null-namespace elements are not instances of it. The per-tag
+// interfaces are defined with the others further down (_htmlTagClasses).
+class HTMLElement extends Element {
+  // Port additions: HTMLElement members the shim had no form of (Chromium 141).
+  get outerText() { return this.innerText; }
+  set outerText(v) {
+    const parent = this.parentNode;
+    if (!parent || parent.nodeType === 9) {
+      throw new DOMException("Failed to set the 'outerText' property on 'HTMLElement': The element has no parent.", "NoModificationAllowedError");
+    }
+    this.replaceWith(document.createTextNode(v == null ? "" : String(v)));
+  }
+  get contentEditable() {
+    const v = this.getAttribute("contenteditable");
+    if (v === null) return "inherit";
+    const lc = v.toLowerCase();
+    if (lc === "" || lc === "true") return "true";
+    if (lc === "false" || lc === "plaintext-only") return lc;
+    return "inherit";
+  }
+  set contentEditable(v) {
+    const lc = String(v).toLowerCase();
+    if (lc === "inherit") this.removeAttribute("contenteditable");
+    else if (lc === "true" || lc === "false" || lc === "plaintext-only") this.setAttribute("contenteditable", lc);
+    else throw new DOMException("Failed to set the 'contentEditable' property on 'HTMLElement': The value provided ('" + String(v) + "') is not one of 'true', 'false', 'plaintext-only', or 'inherit'.", "SyntaxError");
+  }
+  // The nearest contenteditable attribute with a valid value decides, and designMode
+  // makes the whole document editable.
+  get isContentEditable() {
+    for (let el = this; el && el.nodeType === 1; el = el.parentNode) {
+      const v = el.getAttribute("contenteditable");
+      if (v === null) continue;
+      const lc = v.toLowerCase();
+      if (lc === "" || lc === "true" || lc === "plaintext-only") return true;
+      if (lc === "false") return false;
+    }
+    return String(document.designMode).toLowerCase() === "on";
+  }
+  get inert() { return this.hasAttribute("inert"); }
+  set inert(v) { if (v) this.setAttribute("inert", ""); else this.removeAttribute("inert"); }
+  // true/false attribute, else true for an image and a link with an href.
+  get draggable() {
+    const v = this.getAttribute("draggable");
+    const lc = v === null ? "" : v.toLowerCase();
+    if (lc === "true") return true;
+    if (lc === "false") return false;
+    const ln = this.localName;
+    return ln === "img" || (ln === "a" && this.hasAttribute("href"));
+  }
+  set draggable(v) { this.setAttribute("draggable", v ? "true" : "false"); }
+  // Inherited from the nearest ancestor that says, true by default.
+  get spellcheck() {
+    for (let el = this; el && el.nodeType === 1; el = el.parentNode) {
+      const v = el.getAttribute("spellcheck");
+      if (v === null) continue;
+      const lc = v.toLowerCase();
+      if (lc === "" || lc === "true") return true;
+      if (lc === "false") return false;
+    }
+    return true;
+  }
+  set spellcheck(v) { this.setAttribute("spellcheck", v ? "true" : "false"); }
+  get translate() {
+    for (let el = this; el && el.nodeType === 1; el = el.parentNode) {
+      const v = el.getAttribute("translate");
+      if (v === null) continue;
+      const lc = v.toLowerCase();
+      if (lc === "" || lc === "yes") return true;
+      if (lc === "no") return false;
+    }
+    return true;
+  }
+  set translate(v) { this.setAttribute("translate", v ? "yes" : "no"); }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which has no offsetParent and gives
+  // offsetTop/offsetLeft as getBoundingClientRect()'s viewport position. Chromium measures
+  // them from the offsetParent's padding edge, or from the document when that is <body>,
+  // and code that sums offsetTop up the offsetParent chain needs both halves to agree.
+  get offsetParent() {
+    const p = _offsetParentOf(this);
+    return p === undefined ? null : p;
+  }
+  get offsetTop() { return _offsetCoordinate(this, true); }
+  get offsetLeft() { return _offsetCoordinate(this, false); }
+}
+
+// CSSOM View's offsetParent: undefined when the element has no box (detached, or
+// display:none on it or an ancestor), null for <body>, <html> and a fixed-position
+// element, else the nearest positioned ancestor, the nearest td/th/table when the element
+// itself is not positioned, or <body>.
+function _offsetParentOf(el) {
+  if (!el.isConnected) return undefined;
+  const ln = el.localName;
+  const own = _innerTextStyle(el);
+  if (own && own.display === "none") return undefined;
+  const position = own ? String(own.position || "") : "";
+  const selfStatic = position === "" || position === "static";
+  let found = (ln === "body" || ln === "html" || position === "fixed") ? null : undefined;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    const s = _innerTextStyle(a);
+    if (s && s.display === "none") return undefined;
+    if (found !== undefined) continue;
+    const aln = a.localName;
+    const pos = s ? String(s.position || "") : "";
+    const transform = s ? String(s.transform || "") : "";
+    if (aln === "body" || (pos !== "" && pos !== "static") || (transform !== "" && transform !== "none")
+        || (selfStatic && (aln === "td" || aln === "th" || aln === "table"))) {
+      found = a;
+    }
+  }
+  return found === undefined ? null : found;
+}
+function _offsetCoordinate(el, vertical) {
+  if (el.localName === "body") return 0;
+  const parent = _offsetParentOf(el);
+  if (parent === undefined) return 0;
+  const rect = el.getBoundingClientRect();
+  const edge = vertical ? rect.top : rect.left;
+  const own = _innerTextStyle(el);
+  if (parent === null) {
+    // A fixed element is placed against the viewport; anything else against the document.
+    if (own && own.position === "fixed") return Math.round(edge);
+    return Math.round(edge + (vertical ? (globalThis.scrollY || 0) : (globalThis.scrollX || 0)));
+  }
+  if (parent.localName === "body") {
+    return Math.round(edge + (vertical ? (globalThis.scrollY || 0) : (globalThis.scrollX || 0)));
+  }
+  const prect = parent.getBoundingClientRect();
+  const ps = _innerTextStyle(parent);
+  const border = ps ? parseFloat(vertical ? ps.borderTopWidth : ps.borderLeftWidth) || 0 : 0;
+  // A scrolled container between the element and its offsetParent moves the element's box
+  // but not its offset.
+  let scrolled = 0;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    scrolled += (vertical ? a.scrollTop : a.scrollLeft) || 0;
+    if (a === parent) break;
+  }
+  return Math.round(edge - (vertical ? prect.top : prect.left) - border + scrolled);
+}
+
 // WHATWG "convert nodes into a node": a Node argument passes through, anything
 // else is stringified into a Text node, so e.g. append(null) inserts the text
 // "null" and append(undefined) inserts "undefined" per the (Node or DOMString)
@@ -5876,7 +6070,7 @@ class Document extends Node {
       "http://www.w3.org/1999/xhtml",
       localName,
     );
-    const el = new C(nid);
+    const el = _constructElement(C, nid);
     // This node was just created from values already known to JS. Seed its
     // immutable metadata instead of rediscovering it through native calls in
     // hydration's tag/local-name checks.
@@ -5909,7 +6103,7 @@ class Document extends Node {
     );
     const effectiveNamespace = namespace == null ? "" : namespace;
     const C = _elementClassForKnownName(effectiveNamespace, qualified);
-    const el = new C(nid);
+    const el = _constructElement(C, nid);
     const localName = qualified.includes(":")
       ? qualified.slice(qualified.indexOf(":") + 1)
       : qualified;
@@ -6566,9 +6760,9 @@ function _imageEncodingError() {
 // layout/paint. The render-only native op owns responsive candidate selection,
 // fetching, and metadata sniffing; bootstrap owns only the observable request
 // state and event timing.
-class HTMLImageElement extends Element {
-  constructor(nid) {
-    super(nid);
+class HTMLImageElement extends HTMLElement {
+  constructor() {
+    super(arguments[0]);
     this._imageRequest = 0;
     this._imageQueued = false;
     this._imageInitialized = false;
@@ -6888,7 +7082,7 @@ _markNative(HTMLImageElement.prototype.decode);
 
 // Report only capabilities backed by a real decoder. Poster rendering is an
 // image operation and does not make any audio/video container playable.
-class HTMLMediaElement extends Element {
+class HTMLMediaElement extends HTMLElement {
   static NETWORK_EMPTY = 0;
   static NETWORK_IDLE = 1;
   static NETWORK_LOADING = 2;
@@ -6962,7 +7156,7 @@ class HTMLVideoElement extends HTMLMediaElement {
   get videoHeight() { return 0; }
 }
 class HTMLAudioElement extends HTMLMediaElement {}
-class HTMLTrackElement extends Element {
+class HTMLTrackElement extends HTMLElement {
   static NONE = 0;
   static LOADING = 1;
   static LOADED = 2;
@@ -7156,57 +7350,64 @@ function _innerTextOf(el) {
   return _innerTextJoin(segments);
 }
 var _htmlTagClasses = null;
-function _elementClassFor(nid) {
-  const tag = _domParse("tag_name", nid);
-  // HTML tagName values are ASCII-uppercase. Foreign SVG names retain their
-  // case, so keep the common HTML path fast and only inspect the native
-  // namespace for possible SVG wrappers.
-  if (tag && tag !== tag.toUpperCase()
-      && _domParse("namespace_uri", nid) === "http://www.w3.org/2000/svg") {
-    if (tag === "path" && globalThis.SVGPathElement) return globalThis.SVGPathElement;
-    if (tag === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
+// MathMLElement, when this realm defines one (captured at the end of bootstrap).
+var _mathMLElementClass = null;
+// HTMLUnknownElement, set with _htmlTagClasses.
+var _htmlUnknownElementClass = null;
+const _XHTML_NS = "http://www.w3.org/1999/xhtml";
+const _SVG_NS = "http://www.w3.org/2000/svg";
+const _MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+// The interface of an HTML-namespace element, by its upper-case local name.
+function _htmlElementClassForTag(tag) {
+  const map = _htmlTagClasses;
+  if (map === null) return Element; // only while bootstrap itself is still running
+  const C = map[tag];
+  if (C !== undefined) return C;
+  // A valid custom element name (it has a hyphen) is an HTMLElement until it is
+  // defined; customElements upgrades it in place. Anything else is unknown.
+  return tag.indexOf("-") > 0 ? HTMLElement : _htmlUnknownElementClass;
+}
+function _foreignElementClass(namespace, localName) {
+  if (namespace === _SVG_NS) {
+    if (localName === "path" && globalThis.SVGPathElement) return globalThis.SVGPathElement;
+    if (localName === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
     if (globalThis.SVGElement) return globalThis.SVGElement;
   }
-  if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-  if (tag === "TEXTAREA" && globalThis.HTMLTextAreaElement) return globalThis.HTMLTextAreaElement;
-  if (tag === "IMG") return HTMLImageElement;
-  if (tag === "CANVAS" && globalThis.HTMLCanvasElement) return globalThis.HTMLCanvasElement;
-  if (tag === "AUDIO") return HTMLAudioElement;
-  if (tag === "VIDEO") return HTMLVideoElement;
-  if (tag === "TRACK") return HTMLTrackElement;
-  const mapped = tag && _htmlTagClasses ? _htmlTagClasses[tag] : undefined;
-  if (typeof mapped === "function") return mapped;
+  if (namespace === _MATHML_NS && _mathMLElementClass !== null) return _mathMLElementClass;
   return Element;
+}
+function _elementClassFor(nid) {
+  const tag = _domParse("tag_name", nid);
+  if (!tag) return Element;
+  // An HTML element in an HTML document has an ASCII-upper-case tagName, so the common
+  // case is one map lookup and no further native call. Foreign (SVG, MathML) names and
+  // the elements of an XML document keep their case: those ask the native tree for the
+  // namespace. An upper-case name the map does not know asks too, so an XML document's
+  // <ROOT> stays a plain Element rather than becoming an HTMLUnknownElement.
+  if (tag === tag.toUpperCase()) {
+    const known = _htmlTagClasses !== null ? _htmlTagClasses[tag] : undefined;
+    if (known !== undefined) return known;
+    if (tag.indexOf("-") > 0 && tag.indexOf(":") < 0) return _htmlElementClassForTag(tag);
+  }
+  const namespace = _domParse("namespace_uri", nid);
+  const colon = tag.indexOf(":");
+  const localName = colon >= 0 ? tag.slice(colon + 1) : tag;
+  if (namespace === _XHTML_NS) return _htmlElementClassForTag(localName.toUpperCase());
+  return _foreignElementClass(namespace, localName);
 }
 function _elementClassForKnownName(namespace, qualifiedName) {
   const localName = qualifiedName.includes(":")
     ? qualifiedName.slice(qualifiedName.indexOf(":") + 1)
     : qualifiedName;
-  if (namespace === "http://www.w3.org/2000/svg") {
-    if (localName === "path" && globalThis.SVGPathElement) return globalThis.SVGPathElement;
-    if (localName === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
-    if (globalThis.SVGElement) return globalThis.SVGElement;
-  }
-  if (namespace === "http://www.w3.org/1999/xhtml") {
-    const tag = localName.toUpperCase();
-    if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-    if (tag === "TEXTAREA" && globalThis.HTMLTextAreaElement) return globalThis.HTMLTextAreaElement;
-    if (tag === "IMG") return HTMLImageElement;
-    if (tag === "CANVAS" && globalThis.HTMLCanvasElement) return globalThis.HTMLCanvasElement;
-    if (tag === "AUDIO") return HTMLAudioElement;
-    if (tag === "VIDEO") return HTMLVideoElement;
-    if (tag === "TRACK") return HTMLTrackElement;
-    const mapped = _htmlTagClasses ? _htmlTagClasses[tag] : undefined;
-    if (typeof mapped === "function") return mapped;
-  }
-  return Element;
+  if (namespace === _XHTML_NS) return _htmlElementClassForTag(localName.toUpperCase());
+  return _foreignElementClass(namespace, localName);
 }
 function _wrap(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
   if (_cache.has(nid)) return _cache.get(nid);
   const t = +_dom("node_type", nid);
   let n;
-  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); }
+  if (t === 1) n = _constructElement(_elementClassFor(nid), nid);
   else if (t === 3) n = new Text(nid);
   else if (t === 8) n = new Comment(nid);
   else if (t === 9) n = new Document(nid);
@@ -7218,7 +7419,7 @@ function _wrapEl(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
   if (_cache.has(nid)) return _cache.get(nid);
   const C = _elementClassFor(nid);
-  const n = new C(nid);
+  const n = _constructElement(C, nid);
   _cache.set(nid, n);
   return n;
 }
@@ -10954,7 +11155,7 @@ class CustomElementRegistry {
 }
 globalThis.CustomElementRegistry = CustomElementRegistry;
 globalThis.customElements = new CustomElementRegistry();
-globalThis.HTMLUnknownElement = Element;
+_ceRegistry = globalThis.customElements;
 // ElementInternals: form-associated custom element internals. Validity/state
 // are JS-observable; ARIA reflection that needs the accessibility tree is not.
 globalThis.ElementInternals = class ElementInternals {
@@ -13872,28 +14073,91 @@ globalThis.CSS = {
   escape(s){ return s; }
 };
 
-globalThis.HTMLElement = Element;
-globalThis.HTMLDivElement = Element;
-globalThis.HTMLSpanElement = Element;
-globalThis.HTMLParagraphElement = Element;
-globalThis.HTMLAnchorElement = Element;
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where the interfaces below are
+// `= Element` aliases (see HTMLElement). Each one is its own subclass of HTMLElement,
+// as in Chromium, so `instanceof`, Object.prototype.toString and a patch to one
+// interface's prototype apply to its own elements only. _htmlTagClasses below hands the
+// matching prototype to parsed, created, cloned and imported elements alike.
+globalThis.HTMLElement = HTMLElement;
+class HTMLUnknownElement extends HTMLElement {}
+class HTMLDivElement extends HTMLElement {}
+class HTMLSpanElement extends HTMLElement {}
+class HTMLParagraphElement extends HTMLElement {}
+class HTMLAnchorElement extends HTMLElement {
+  // HTMLHyperlinkElementUtils' stringifier: String(a) is the link's href.
+  toString() { return this.href; }
+}
+class HTMLButtonElement extends HTMLElement {}
+class HTMLLabelElement extends HTMLElement {}
+class HTMLTableElement extends HTMLElement {}
+class HTMLIFrameElement extends HTMLElement {}
+class HTMLScriptElement extends HTMLElement {}
+class HTMLStyleElement extends HTMLElement {}
+class HTMLLinkElement extends HTMLElement {}
+class HTMLMetaElement extends HTMLElement {}
+class HTMLHeadElement extends HTMLElement {}
+class HTMLBodyElement extends HTMLElement {}
+class HTMLHtmlElement extends HTMLElement {}
+class HTMLBRElement extends HTMLElement {}
+class HTMLHRElement extends HTMLElement {}
+class HTMLUListElement extends HTMLElement {}
+class HTMLOListElement extends HTMLElement {}
+class HTMLLIElement extends HTMLElement {}
+class HTMLPreElement extends HTMLElement {}
+class HTMLHeadingElement extends HTMLElement {}
+class HTMLTemplateElement extends HTMLElement {}
+class HTMLSlotElement extends HTMLElement {}
+class HTMLOptionElement extends HTMLElement {}
+class HTMLDataListElement extends HTMLElement {}
+class HTMLFieldSetElement extends HTMLElement {}
+class HTMLLegendElement extends HTMLElement {}
+class HTMLProgressElement extends HTMLElement {}
+class HTMLDetailsElement extends HTMLElement {}
+class HTMLDialogElement extends HTMLElement {}
+// Interfaces Chromium 141 has that the shim had no name for at all.
+class HTMLDataElement extends HTMLElement {}
+class HTMLModElement extends HTMLElement {}
+class HTMLMenuElement extends HTMLElement {}
+class HTMLParamElement extends HTMLElement {}
+class HTMLFontElement extends HTMLElement {}
+class HTMLFrameElement extends HTMLElement {}
+class HTMLFrameSetElement extends HTMLElement {}
+class HTMLMarqueeElement extends HTMLElement {}
+class HTMLDirectoryElement extends HTMLElement {}
+class HTMLSelectedContentElement extends HTMLElement {}
+for (const _ctor of [
+  HTMLElement, HTMLUnknownElement, HTMLDivElement, HTMLSpanElement, HTMLParagraphElement,
+  HTMLAnchorElement, HTMLButtonElement, HTMLLabelElement, HTMLTableElement,
+  HTMLIFrameElement, HTMLScriptElement, HTMLStyleElement, HTMLLinkElement,
+  HTMLMetaElement, HTMLHeadElement, HTMLBodyElement, HTMLHtmlElement, HTMLBRElement,
+  HTMLHRElement, HTMLUListElement, HTMLOListElement, HTMLLIElement, HTMLPreElement,
+  HTMLHeadingElement, HTMLTemplateElement, HTMLSlotElement, HTMLOptionElement,
+  HTMLDataListElement, HTMLFieldSetElement, HTMLLegendElement, HTMLProgressElement,
+  HTMLDetailsElement, HTMLDialogElement, HTMLDataElement, HTMLModElement,
+  HTMLMenuElement, HTMLParamElement, HTMLFontElement, HTMLFrameElement,
+  HTMLFrameSetElement, HTMLMarqueeElement, HTMLDirectoryElement,
+  HTMLSelectedContentElement,
+]) {
+  globalThis[_ctor.name] = _ctor;
+  _markNative(_ctor);
+}
+_markNative(HTMLAnchorElement.prototype.toString);
 globalThis.HTMLImageElement = HTMLImageElement;
 // Port addition: real subclasses, so `instanceof HTMLInputElement` and
 // `instanceof HTMLSelectElement` discriminate as in Chromium (the Rust shim aliases both to
 // Element, so every element was an input and a select). Puppeteer's ::-p-text() reads a
 // form control's value instead of its text, so with the alias it matched nothing. Mapped
 // in _htmlTagClasses below.
-globalThis.HTMLInputElement = class HTMLInputElement extends Element {};
-globalThis.HTMLButtonElement = Element;
-globalThis.HTMLFormElement = class HTMLFormElement extends Element {
+globalThis.HTMLInputElement = class HTMLInputElement extends HTMLElement {};
+globalThis.HTMLFormElement = class HTMLFormElement extends HTMLElement {
   get elements() { return HTMLCollection._from(_qsa(this, "input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
   // 'submit' event and (if not prevented) builds form data and navigates.
   reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
 };
-globalThis.HTMLSelectElement = class HTMLSelectElement extends Element {};
-globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
+globalThis.HTMLSelectElement = class HTMLSelectElement extends HTMLElement {};
+globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends HTMLElement {
   // `rows`/`cols` reflect the content attributes and drive the control's
   // intrinsic box (the renderer sizes a textarea from them). The attributes
   // are limited to positive non-zero numbers; anything else falls back to the
@@ -13910,34 +14174,6 @@ globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
   }
   set cols(v) { this.setAttribute('cols', String(v)); }
 };
-globalThis.HTMLLabelElement = Element;
-globalThis.HTMLTableElement = Element;
-globalThis.HTMLIFrameElement = Element;
-globalThis.HTMLCanvasElement = Element;
-// HTMLVideoElement and HTMLAudioElement are defined above with canPlayType support.
-globalThis.HTMLScriptElement = Element;
-globalThis.HTMLStyleElement = Element;
-globalThis.HTMLLinkElement = Element;
-globalThis.HTMLMetaElement = Element;
-globalThis.HTMLHeadElement = Element;
-globalThis.HTMLBodyElement = Element;
-globalThis.HTMLHtmlElement = Element;
-globalThis.HTMLBRElement = Element;
-globalThis.HTMLHRElement = Element;
-globalThis.HTMLUListElement = Element;
-globalThis.HTMLOListElement = Element;
-globalThis.HTMLLIElement = Element;
-globalThis.HTMLPreElement = Element;
-globalThis.HTMLHeadingElement = Element;
-globalThis.HTMLTemplateElement = Element;
-globalThis.HTMLSlotElement = Element;
-globalThis.HTMLOptionElement = Element;
-globalThis.HTMLDataListElement = Element;
-globalThis.HTMLFieldSetElement = Element;
-globalThis.HTMLLegendElement = Element;
-globalThis.HTMLProgressElement = Element;
-globalThis.HTMLDetailsElement = Element;
-globalThis.HTMLDialogElement = Element;
 
 // Interface objects that were missing entirely. Referencing one is enough to
 // throw ReferenceError, and `HTMLTableRowElement` in particular is a common
@@ -13947,7 +14183,7 @@ globalThis.HTMLDialogElement = Element;
 // discriminates: with an alias, every element is an instance of every one of
 // them. `_htmlTagClasses` below is what makes the parser/createElement path
 // hand out the matching prototype.
-class HTMLTableRowElement extends Element {
+class HTMLTableRowElement extends HTMLElement {
   get cells() {
     const out = [];
     for (const child of this.children) {
@@ -13991,7 +14227,7 @@ class HTMLTableRowElement extends Element {
     cells[at].remove();
   }
 }
-class HTMLTableCellElement extends Element {
+class HTMLTableCellElement extends HTMLElement {
   get cellIndex() {
     const row = this.parentNode;
     if (!row || row.nodeType !== 1 || row.tagName !== "TR") return -1;
@@ -14007,7 +14243,7 @@ class HTMLTableCellElement extends Element {
   get rowSpan() { const v = parseInt(this.getAttribute("rowspan"), 10); return Number.isFinite(v) && v >= 0 ? v : 1; }
   set rowSpan(v) { this.setAttribute("rowspan", String(v)); }
 }
-class HTMLTableSectionElement extends Element {
+class HTMLTableSectionElement extends HTMLElement {
   get rows() {
     const out = [];
     for (const child of this.children) {
@@ -14031,33 +14267,35 @@ class HTMLTableSectionElement extends Element {
     rows[at].remove();
   }
 }
-class HTMLTableCaptionElement extends Element {}
-class HTMLTableColElement extends Element {
+class HTMLTableCaptionElement extends HTMLElement {}
+class HTMLTableColElement extends HTMLElement {
   get span() { const v = parseInt(this.getAttribute("span"), 10); return Number.isFinite(v) && v > 0 ? v : 1; }
   set span(v) { this.setAttribute("span", String(v)); }
 }
-class HTMLPictureElement extends Element {}
-class HTMLSourceElement extends Element {}
-class HTMLOptGroupElement extends Element {}
-class HTMLOutputElement extends Element {}
-class HTMLMeterElement extends Element {}
-class HTMLTimeElement extends Element {
+class HTMLPictureElement extends HTMLElement {}
+class HTMLSourceElement extends HTMLElement {}
+class HTMLOptGroupElement extends HTMLElement {}
+class HTMLOutputElement extends HTMLElement {}
+class HTMLMeterElement extends HTMLElement {}
+class HTMLTimeElement extends HTMLElement {
   get dateTime() { return this.getAttribute("datetime") || ""; }
   set dateTime(v) { this.setAttribute("datetime", v == null ? "" : String(v)); }
 }
-class HTMLQuoteElement extends Element {}
-class HTMLDListElement extends Element {}
-class HTMLBaseElement extends Element {}
-class HTMLTitleElement extends Element {
+class HTMLQuoteElement extends HTMLElement {}
+class HTMLDListElement extends HTMLElement {}
+class HTMLBaseElement extends HTMLElement {}
+class HTMLTitleElement extends HTMLElement {
   get text() { return this.textContent; }
   set text(v) { this.textContent = v == null ? "" : String(v); }
 }
-class HTMLMapElement extends Element {
+class HTMLMapElement extends HTMLElement {
   get areas() { return HTMLCollection._from(_qsa(this, "area")); }
 }
-class HTMLAreaElement extends Element {}
-class HTMLObjectElement extends Element {}
-class HTMLEmbedElement extends Element {}
+class HTMLAreaElement extends HTMLElement {
+  toString() { return this.href; }
+}
+class HTMLObjectElement extends HTMLElement {}
+class HTMLEmbedElement extends HTMLElement {}
 
 globalThis.HTMLTableRowElement = HTMLTableRowElement;
 globalThis.HTMLTableCellElement = HTMLTableCellElement;
@@ -14087,39 +14325,60 @@ for (const _ctor of [
   HTMLEmbedElement, globalThis.HTMLInputElement, globalThis.HTMLSelectElement,
 ]) _markNative(_ctor);
 
-// Tag -> wrapper class for the interfaces above. `_elementClassFor` and
-// `_elementClassForKnownName` consult this after their own special cases, so
-// a <tr> parsed from markup and one from createElement('tr') get the same
-// prototype. Declared with `var` so the hoisted binding is visible to those
-// functions, which are defined earlier in the file but only ever run later.
-_htmlTagClasses = {
-  TR: HTMLTableRowElement,
-  TD: HTMLTableCellElement,
-  TH: HTMLTableCellElement,
-  THEAD: HTMLTableSectionElement,
-  TBODY: HTMLTableSectionElement,
-  TFOOT: HTMLTableSectionElement,
-  CAPTION: HTMLTableCaptionElement,
-  COL: HTMLTableColElement,
-  COLGROUP: HTMLTableColElement,
-  PICTURE: HTMLPictureElement,
-  SOURCE: HTMLSourceElement,
-  OPTGROUP: HTMLOptGroupElement,
-  OUTPUT: HTMLOutputElement,
-  METER: HTMLMeterElement,
-  TIME: HTMLTimeElement,
-  BLOCKQUOTE: HTMLQuoteElement,
-  Q: HTMLQuoteElement,
-  DL: HTMLDListElement,
-  BASE: HTMLBaseElement,
-  TITLE: HTMLTitleElement,
-  MAP: HTMLMapElement,
-  AREA: HTMLAreaElement,
-  OBJECT: HTMLObjectElement,
-  EMBED: HTMLEmbedElement,
-  INPUT: globalThis.HTMLInputElement,
-  SELECT: globalThis.HTMLSelectElement,
-};
+// Tag -> wrapper class for every HTML element interface, keyed by the upper-case tagName
+// an HTML element has in an HTML document. `_elementClassFor` and
+// `_elementClassForKnownName` look the name up here, so a <tr> parsed from markup and one
+// from createElement('tr') get the same prototype. A name that is not here is an
+// HTMLElement when it is a valid custom element name and an HTMLUnknownElement otherwise
+// (Chromium 141's mapping, measured over every tag below). Declared with `var` so the
+// hoisted binding is visible to those functions, which are defined earlier in the file but
+// only ever run later. A null-prototype object, so "constructor" or "__proto__" as a tag
+// name finds nothing.
+_htmlTagClasses = Object.create(null);
+_htmlUnknownElementClass = HTMLUnknownElement;
+(function _fillHtmlTagClasses() {
+  const map = {
+    A: HTMLAnchorElement, AREA: HTMLAreaElement, AUDIO: HTMLAudioElement,
+    BASE: HTMLBaseElement, BLOCKQUOTE: HTMLQuoteElement, Q: HTMLQuoteElement,
+    BODY: HTMLBodyElement, BR: HTMLBRElement, BUTTON: HTMLButtonElement,
+    CAPTION: HTMLTableCaptionElement, COL: HTMLTableColElement, COLGROUP: HTMLTableColElement,
+    DATA: HTMLDataElement, DATALIST: HTMLDataListElement, DEL: HTMLModElement, INS: HTMLModElement,
+    DETAILS: HTMLDetailsElement, DIALOG: HTMLDialogElement, DIR: HTMLDirectoryElement,
+    DIV: HTMLDivElement, DL: HTMLDListElement, EMBED: HTMLEmbedElement,
+    FIELDSET: HTMLFieldSetElement, FONT: HTMLFontElement, FORM: globalThis.HTMLFormElement,
+    FRAME: HTMLFrameElement, FRAMESET: HTMLFrameSetElement,
+    H1: HTMLHeadingElement, H2: HTMLHeadingElement, H3: HTMLHeadingElement,
+    H4: HTMLHeadingElement, H5: HTMLHeadingElement, H6: HTMLHeadingElement,
+    HEAD: HTMLHeadElement, HR: HTMLHRElement, HTML: HTMLHtmlElement,
+    IFRAME: HTMLIFrameElement, IMG: HTMLImageElement, INPUT: globalThis.HTMLInputElement,
+    LABEL: HTMLLabelElement, LEGEND: HTMLLegendElement, LI: HTMLLIElement,
+    LINK: HTMLLinkElement, MAP: HTMLMapElement, MARQUEE: HTMLMarqueeElement,
+    MENU: HTMLMenuElement, META: HTMLMetaElement, METER: HTMLMeterElement,
+    OBJECT: HTMLObjectElement, OL: HTMLOListElement, OPTGROUP: HTMLOptGroupElement,
+    OPTION: HTMLOptionElement, OUTPUT: HTMLOutputElement, P: HTMLParagraphElement,
+    PARAM: HTMLParamElement, PICTURE: HTMLPictureElement,
+    PRE: HTMLPreElement, LISTING: HTMLPreElement, XMP: HTMLPreElement,
+    PROGRESS: HTMLProgressElement, SCRIPT: HTMLScriptElement,
+    SELECT: globalThis.HTMLSelectElement, SELECTEDCONTENT: HTMLSelectedContentElement,
+    SLOT: HTMLSlotElement, SOURCE: HTMLSourceElement, SPAN: HTMLSpanElement,
+    STYLE: HTMLStyleElement, TABLE: HTMLTableElement,
+    TBODY: HTMLTableSectionElement, THEAD: HTMLTableSectionElement, TFOOT: HTMLTableSectionElement,
+    TD: HTMLTableCellElement, TH: HTMLTableCellElement, TR: HTMLTableRowElement,
+    TEMPLATE: HTMLTemplateElement, TEXTAREA: globalThis.HTMLTextAreaElement,
+    TIME: HTMLTimeElement, TITLE: HTMLTitleElement, TRACK: HTMLTrackElement,
+    UL: HTMLUListElement, VIDEO: HTMLVideoElement,
+  };
+  for (const tag in map) _htmlTagClasses[tag] = map[tag];
+  // Elements the HTML standard (or Chromium's legacy list) knows that have no interface
+  // of their own. Anything else without a hyphen is an HTMLUnknownElement.
+  const plain = 'ABBR ACRONYM ADDRESS ARTICLE ASIDE B BASEFONT BDI BDO BIG CENTER CITE CODE DD '
+    + 'DFN DT EM FIGCAPTION FIGURE FOOTER HEADER HGROUP I KBD LAYER MAIN MARK NAV NOBR '
+    + 'NOEMBED NOFRAMES NOLAYER NOSCRIPT PLAINTEXT RB RP RT RTC RUBY S SAMP SEARCH SECTION '
+    + 'SMALL STRIKE STRONG SUB SUMMARY SUP TT U VAR WBR';
+  const names = plain.split(' ');
+  for (let i = 0; i < names.length; i++) _htmlTagClasses[names[i]] = HTMLElement;
+})();
+// HTMLCanvasElement is defined with the canvas implementation, further down.
 // As in Chromium, HTMLInputElement.prototype, HTMLSelectElement.prototype and
 // HTMLTextAreaElement.prototype own `value` (and the input its `checked`): React's input
 // tracker reads Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value'). They
@@ -14169,6 +14428,70 @@ globalThis.SVGGraphicsElement = SVGGraphicsElement;
 globalThis.SVGGeometryElement = SVGGeometryElement;
 globalThis.SVGPathElement = SVGPathElement;
 globalThis.SVGSVGElement = SVGSVGElement;
+
+// Where Chromium 141 keeps the members every element used to inherit from Element.prototype.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which defines them all on Element (its
+// HTMLElement is Element). Libraries read them off HTMLElement.prototype by descriptor
+// (`Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText')`), and an SVG
+// element in Chromium has no innerText, click(), hidden or offsetWidth. Each descriptor
+// moves unchanged, so behaviour on HTML elements is what it was:
+// - HTMLElement only: the members below;
+// - HTMLElement and SVGElement (the HTMLOrSVGElement, ElementCSSInlineStyle and
+//   GlobalEventHandlers mixins, which Chromium installs on each interface): style,
+//   dataset, tabIndex, autofocus, focus, blur and the on* handlers other than Element's own;
+// - HTMLBodyElement and HTMLFrameSetElement (WindowEventHandlers): the window's handlers.
+// Members Chromium has on HTMLElement that are not listed here stay on Element.prototype.
+const _htmlOnlyElementMembers = [
+  'accessKey', 'attachInternals', 'click', 'dir', 'hidden', 'hidePopover', 'innerText',
+  'lang', 'offsetHeight', 'offsetLeft', 'offsetTop', 'offsetWidth', 'popover',
+  'showPopover', 'title', 'togglePopover',
+];
+const _windowEventHandlerMembers = [
+  'onbeforeprint', 'onbeforeunload', 'onhashchange', 'onlanguagechange', 'onmessage',
+  'onoffline', 'ononline', 'onpagehide', 'onpageshow', 'onpopstate', 'onrejectionhandled',
+  'onstorage', 'onunhandledrejection', 'onunload',
+];
+// The on* names Chromium keeps on Element.prototype itself.
+const _elementOwnHandlers = _private(new Set([
+  'onbeforecopy', 'onbeforecut', 'onbeforepaste', 'onfullscreenchange', 'onfullscreenerror',
+  'onsearch', 'onwebkitfullscreenchange', 'onwebkitfullscreenerror',
+]));
+// name -> descriptor, for the mixin members, so a later interface (MathMLElement) gets them too.
+const _elementMixinDescriptors = [];
+function _installElementMixins(proto) {
+  for (let i = 0; i < _elementMixinDescriptors.length; i++) {
+    const entry = _elementMixinDescriptors[i];
+    if (!_objectHasOwn(proto, entry[0])) _defineProperty(proto, entry[0], entry[1]);
+  }
+}
+(function _distributeElementMembers() {
+  const EP = Element.prototype;
+  const move = (name, targets) => {
+    const d = _getOwnPropertyDescriptor(EP, name);
+    if (!d) return null;
+    for (let i = 0; i < targets.length; i++) {
+      if (!_objectHasOwn(targets[i], name)) _defineProperty(targets[i], name, d);
+    }
+    delete EP[name];
+    return d;
+  };
+  for (let i = 0; i < _htmlOnlyElementMembers.length; i++) {
+    move(_htmlOnlyElementMembers[i], [HTMLElement.prototype]);
+  }
+  for (let i = 0; i < _windowEventHandlerMembers.length; i++) {
+    move(_windowEventHandlerMembers[i], [HTMLBodyElement.prototype, HTMLFrameSetElement.prototype]);
+  }
+  const mixin = ['style', 'dataset', 'tabIndex', 'autofocus', 'nonce', 'focus', 'blur'];
+  const names = Object.getOwnPropertyNames(EP);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    if (name.length > 2 && name[0] === 'o' && name[1] === 'n' && !_elementOwnHandlers.has(name)) mixin.push(name);
+  }
+  for (let i = 0; i < mixin.length; i++) {
+    const d = move(mixin[i], [HTMLElement.prototype, SVGElement.prototype]);
+    if (d) _elementMixinDescriptors.push([mixin[i], d]);
+  }
+})();
 globalThis.CharacterData = CharacterData;
 globalThis.Text = Text;
 globalThis.Comment = Comment;
@@ -14715,9 +15038,9 @@ _markNative(globalThis.Selection);
   Element.prototype.getBoundingClientRect, Element.prototype.getClientRects,
   Element.prototype.checkVisibility,
   Element.prototype.addEventListener, Element.prototype.removeEventListener,
-  Element.prototype.dispatchEvent, Element.prototype.click,
-  Element.prototype.focus, Element.prototype.blur,
-  Element.prototype.showPopover, Element.prototype.hidePopover, Element.prototype.togglePopover,
+  Element.prototype.dispatchEvent, HTMLElement.prototype.click,
+  HTMLElement.prototype.focus, HTMLElement.prototype.blur,
+  HTMLElement.prototype.showPopover, HTMLElement.prototype.hidePopover, HTMLElement.prototype.togglePopover,
   Element.prototype.cloneNode, Element.prototype.attachShadow,
   Element.prototype.insertAdjacentHTML, Element.prototype.insertAdjacentText,
   Element.prototype.insertAdjacentElement, Element.prototype.scrollIntoView,
@@ -14879,7 +15202,14 @@ class _IframeDocument {
     if (this._body) this._body.innerHTML += html;
   }
   writeln(html) { this.write(html + '\n'); }
-  open() { if (this._body) this._body.innerHTML = ''; }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, whose open() returns undefined.
+  // document.open() returns the document (Chromium 141), and loaders chain on it: Akamai
+  // mPulse runs `iframe.contentWindow.document.open()._l = function () {...}`, which threw
+  // a TypeError here and took the page's script down with it.
+  open() {
+    if (this._body) this._body.innerHTML = '';
+    return this;
+  }
   close() {}
 }
 
@@ -16569,7 +16899,7 @@ class _Canvas2D {
 globalThis.CanvasGradient = _CanvasGradient;
 globalThis.CanvasPattern = _CanvasPattern;
 
-class HTMLCanvasElement extends Element {
+class HTMLCanvasElement extends HTMLElement {
   get width() {
     const raw = this.getAttribute('width');
     const parsed = raw === null ? 300 : Number.parseInt(raw, 10);
@@ -16598,6 +16928,7 @@ class HTMLCanvasElement extends Element {
   }
 }
 globalThis.HTMLCanvasElement = HTMLCanvasElement;
+_htmlTagClasses.CANVAS = HTMLCanvasElement;
 
 HTMLCanvasElement.prototype.getContext = function getContext(type) {
   if (type === '2d') {
@@ -19372,6 +19703,19 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
   _iframeRealmGlobalNameSet = _private(new Set(_iframeRealmGlobalNames));
 })();
 
+// Elements in the MathML namespace get this realm's MathMLElement when one is defined as a
+// class over Element (the shim builds a wrapper with `new C(nid)`), and with it the
+// mixin members _distributeElementMembers took off Element.prototype. Read as data, so a
+// getter on the global is not run.
+(function _captureMathMLElement() {
+  const d = _getOwnPropertyDescriptor(globalThis, 'MathMLElement');
+  const C = d ? d.value : undefined;
+  if (typeof C !== 'function' || !C.prototype || !_isPrototypeOf(Element, C)) return;
+  if (!/^class\b/.test(_origToString.call(C))) return;
+  _mathMLElementClass = C;
+  _installElementMixins(C.prototype);
+})();
+
 (function _markBuiltinsNative() {
   var seen = new Set();
   function walk(ctor) {
@@ -19609,7 +19953,8 @@ const _worldCall = (function () {
   const own = (proto, name) => Object.getOwnPropertyDescriptor(proto, name) || {};
   const methods = {
     __proto__: null,
-    focus: EP.focus, click: EP.click, select: EP.select,
+    // focus() and click() are HTMLElement's; applied to any element the world names.
+    focus: HTMLElement.prototype.focus, click: HTMLElement.prototype.click, select: EP.select,
     setSelectionRange: EP.setSelectionRange, setRangeText: EP.setRangeText,
   };
   const accessors = {
@@ -19741,7 +20086,9 @@ function _installIsolatedWorldBridges() {
   accessor('selectionDirection');
 
   const method = (name) => {
-    const original = EP[name];
+    // The prototype that defines it: click() is HTMLElement's, the others Element's.
+    const owner = _objectHasOwn(EP, name) ? EP : HTMLElement.prototype;
+    const original = owner[name];
     if (typeof original !== 'function') return;
     const replacement = {
       [name](...args) {
@@ -19752,7 +20099,7 @@ function _installIsolatedWorldBridges() {
         call('call:' + name, nid, encoded);
       },
     }[name];
-    Object.defineProperty(EP, name, { configurable: true, writable: true, enumerable: false, value: replacement });
+    Object.defineProperty(owner, name, { configurable: true, writable: true, enumerable: false, value: replacement });
   };
   method('click');
   method('select');
@@ -20034,7 +20381,7 @@ function _captureDispatchImpls() {
     closest: findMember(Element.prototype, 'closest'),
     getAttribute: findMember(Element.prototype, 'getAttribute'),
     hasAttribute: findMember(Element.prototype, 'hasAttribute'),
-    click: findMember(Element.prototype, 'click'),
+    click: findMember(HTMLElement.prototype, 'click'),
     tagName: findMember(Element.prototype, 'tagName', 'get'),
     parentElement: findMember(Element.prototype, 'parentElement', 'get'),
     firstElementChild: findMember(Element.prototype, 'firstElementChild', 'get'),
@@ -20258,6 +20605,7 @@ const _hostDom = (function () {
     const proto = typeof C === 'function' ? C.prototype : null;
     if (proto && (proto === NP || NP.isPrototypeOf(proto))) snapshot(proto);
   }
+  const hostClick = own(HTMLElement.prototype, 'click');
   const hostName = { __proto__: null };
   for (let i = 0; i < hostNames.length; i++) hostName[hostNames[i]] = true;
   // An accessor or method from the object's prototype chain, never an own property:
@@ -20275,6 +20623,10 @@ const _hostDom = (function () {
       const d = own(p, name);
       if (d) return d;
     }
+    // click() is HTMLElement's, as in Chromium, so an SVG or null-namespace element has
+    // none. The host's click stands for a user's, which reaches any element: it uses
+    // HTMLElement's, as bootstrap defined it.
+    if (name === 'click' && typeOf(obj) === 1) return hostClick;
     return undefined;
   };
   return _objectFreeze({
