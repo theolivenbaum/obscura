@@ -102,7 +102,11 @@ public sealed partial class PocketCalculatorJsRuntime
         // the state's map while the loader kept reading an empty one, so every
         // page-authored import map was silently ignored. Rust shares a single
         // Rc<RefCell<ImportMap>> for exactly this reason.
-        _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork);
+        _moduleLoader = new PocketCalculatorModuleLoader(baseUrl, proxyUrl, _ops.Page.ImportMap, ModuleNetwork)
+        {
+            // Port addition: blob: modules, from the sources URL.createObjectURL registered.
+            BlobScriptSource = _ops.Page.BlobScripts.Get,
+        };
         _engine = CreateRealmEngine();
         _isolateHandle = new V8IsolateHandle(_engine, _ops.Cancellation);
         _memoryRegistration = ProcessMemoryGuard.Default.Register(_isolateHandle);
@@ -793,11 +797,9 @@ public sealed partial class PocketCalculatorJsRuntime
             "<set-viewport>",
             $"__obscura_host.vars.__obscura_viewport_w={Number(width)};"
             + $"__obscura_host.vars.__obscura_viewport_h={Number(height)};"
+            // visualViewport's width and height follow innerWidth/innerHeight (read-only
+            // VisualViewport attributes in bootstrap.js, as in Chromium).
             + $"globalThis.innerWidth={Number(width)};globalThis.innerHeight={Number(height)};"
-            + "if(globalThis.visualViewport){"
-            + $"globalThis.visualViewport.width={Number(width)};"
-            + $"globalThis.visualViewport.height={Number(height)};"
-            + "}"
             + "if(typeof __obscura_host.vars.__obscura_recompute_intersections==='function'){"
             + "__obscura_host.vars.__obscura_recompute_intersections();"
             + "}"

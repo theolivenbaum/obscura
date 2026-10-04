@@ -69,6 +69,12 @@ public sealed class PocketCalculatorState
     public InternalLoadStore InternalLoadStore { get; } = new();
 
     /// <summary>
+    /// Sources of <c>blob:</c> URLs minted for JavaScript Blobs, for the module loader. The
+    /// page's instance holds every realm's (see <see cref="BlobScriptStore"/>). Port addition.
+    /// </summary>
+    public BlobScriptStore BlobScripts { get; } = new();
+
+    /// <summary>
     /// WHATWG canonical name of the document's character encoding (e.g. "UTF-8",
     /// "EUC-JP"). Backs <c>document.characterSet</c> and the URL query encoding
     /// override for <c>&lt;a&gt;</c>/<c>&lt;area&gt;</c> hrefs in legacy-charset documents.
@@ -497,6 +503,13 @@ public sealed class PocketCalculatorState
     public DocumentWriteStream? WriteStream { get; set; }
 
     /// <summary>
+    /// How many times <c>document.close()</c> has ended a parser <c>document.open()</c>
+    /// started on a loaded document since the CDP layer last looked. Each one is a load
+    /// of the document Chromium reports with lifecycle events.
+    /// </summary>
+    public int ScriptDocumentLoads { get; set; }
+
+    /// <summary>
     /// Whether a mutable borrow is currently outstanding.
     /// </summary>
     /// <remarks>
@@ -720,7 +733,11 @@ public sealed class BaseUrlCache
 }
 
 /// <summary>A console call recorded for the CDP Runtime domain.</summary>
-public sealed record RuntimeConsoleEvent(string Kind, List<JsonNode?> Args, double Timestamp);
+/// <param name="ContextKey">
+/// The CDP execution context of the isolated world the call came from, or 0 for the
+/// page realm (port addition).
+/// </param>
+public sealed record RuntimeConsoleEvent(string Kind, List<JsonNode?> Args, double Timestamp, long ContextKey = 0);
 
 /// <summary>An uncaught script exception recorded for the CDP Runtime domain.</summary>
 public sealed record RuntimeExceptionEvent(

@@ -1906,10 +1906,12 @@ public sealed partial class RuntimeTests
             customElements.define("throws-during-upgrade", ThrowsDuringUpgrade);
             const element = document.getElementById("target");
             customElements.upgrade(document);
+            // A failed upgrade leaves the element in the "failed" state, which :defined
+            // does not match (Chromium 141).
             return [
                 constructorCalls,
                 connectedCalls,
-                element.__customUpgradeFailed === true
+                element.matches(":defined") === false
             ];
             """);
         AssertJson("[1,0,true]", result);
@@ -4634,7 +4636,10 @@ public sealed partial class RuntimeTests
         Assert.Equal(116.0, box[0]!.GetValue<double>());
         Assert.Equal(62.0, box[1]!.GetValue<double>());
         Assert.True(Math.Abs(box[2]!.GetValue<double>() - 123.0) < 0.05);
-        Assert.Equal(67.0, box[3]!.GetValue<double>());
+
+        // Chromium 141: 50.6 + 5 + 6 + 2 + 3 in LayoutUnits; getBoundingClientRect() is not
+        // snapped to whole pixels (clientHeight above is).
+        Assert.Equal(66.59375, box[3]!.GetValue<double>());
 
         // Attribute-backed inline-style changes invalidate the retained render.
         // Borders do not change the padding box; padding does.
@@ -4653,7 +4658,10 @@ public sealed partial class RuntimeTests
             """));
         Assert.Equal(100.0, mutated[0]!.GetValue<double>());
         Assert.Equal(126.0, mutated[1]!.GetValue<double>());
-        Assert.Equal(143.0, mutated[2]!.GetValue<double>());
+
+        // Chromium 141 reports 142.578125: the unrounded border box, with the 4.1px right
+        // border snapped to 4px. The port does not snap border widths yet, so it is 0.1px wider.
+        Assert.True(Math.Abs(mutated[2]!.GetValue<double>() - 142.578125) < 0.125);
 
         // A later CDP/emulation viewport update invalidates the layout too; both the
         // root special case and an ordinary 100vh box are live.
@@ -12800,6 +12808,10 @@ public sealed partial class RuntimeTests
                 assert_eq!(p["winInput"], true);
             }
         */
+        // DEVIATION from the Rust test: Chromium 141 puts the GlobalEventHandlers on
+        // HTMLElement.prototype and SVGElement.prototype, not on Element.prototype (whose
+        // `'oninput' in` is false there), and the port now does the same (see
+        // _distributeElementMembers in bootstrap.js). An element still has them.
         using var fixture = RuntimeFixture.Setup("<div></div>");
         var result = fixture.Runtime.Evaluate("""
             JSON.stringify({
@@ -12807,6 +12819,9 @@ public sealed partial class RuntimeTests
                 docChange: ('onchange' in document),
                 docClick: ('onclick' in document),
                 elProtoInput: ('oninput' in Element.prototype),
+                htmlProtoInput: ('oninput' in HTMLElement.prototype),
+                svgProtoInput: ('oninput' in SVGElement.prototype),
+                divInput: ('oninput' in document.querySelector('div')),
                 winInput: ('oninput' in window)
             })
             """);
@@ -12814,7 +12829,10 @@ public sealed partial class RuntimeTests
         Assert.True(p["docInput"]!.GetValue<bool>());
         Assert.True(p["docChange"]!.GetValue<bool>());
         Assert.True(p["docClick"]!.GetValue<bool>());
-        Assert.True(p["elProtoInput"]!.GetValue<bool>());
+        Assert.False(p["elProtoInput"]!.GetValue<bool>());
+        Assert.True(p["htmlProtoInput"]!.GetValue<bool>());
+        Assert.True(p["svgProtoInput"]!.GetValue<bool>());
+        Assert.True(p["divInput"]!.GetValue<bool>());
         Assert.True(p["winInput"]!.GetValue<bool>());
     }
 

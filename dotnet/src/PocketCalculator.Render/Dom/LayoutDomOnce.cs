@@ -73,6 +73,8 @@ public static partial class RenderDom
         internal TextWrapStyle TextWrapStyle = TextWrapStyle.Auto;
         internal TextTransform TextTransform = TextTransform.None;
         internal bool Italic;
+        internal string FontVariantCaps = "normal";
+        internal float FontStretch = 1f;
         internal BoxSizing BoxSizing = BoxSizing.ContentBox;
         internal bool BorderCollapse;
         internal VerticalAlign? TableVerticalAlign;
@@ -117,6 +119,13 @@ public static partial class RenderDom
         /// </remarks>
         internal bool CbHeightKnown;
 
+        /// <summary>
+        /// Whether an ancestor establishes the containing block for fixed-position
+        /// descendants (a transform, filter, contain and the like), so a fixed box here is
+        /// not anchored to the initial containing block.
+        /// </summary>
+        internal bool InsideFixedCb;
+
         internal Inherited Clone() => new()
         {
             Display = Display,
@@ -155,6 +164,8 @@ public static partial class RenderDom
             TextWrapStyle = TextWrapStyle,
             TextTransform = TextTransform,
             Italic = Italic,
+            FontVariantCaps = FontVariantCaps,
+            FontStretch = FontStretch,
             BoxSizing = BoxSizing,
             BorderCollapse = BorderCollapse,
             TableVerticalAlign = TableVerticalAlign,
@@ -164,6 +175,7 @@ public static partial class RenderDom
             CbHeightDefinite = CbHeightDefinite,
             CbHeight = CbHeight,
             CbHeightKnown = CbHeightKnown,
+            InsideFixedCb = InsideFixedCb,
         };
     }
 
@@ -318,6 +330,7 @@ public static partial class RenderDom
         }
 
         Dictionary<NodeId, Rect> rects = new(styles.Count);
+        Dictionary<NodeId, SubpixelRect> subpixelRects = [];
         Dictionary<NodeId, List<Rect>> inlineFragments = [];
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns = [];
         Dictionary<int, Rect> anonRects = [];
@@ -861,7 +874,10 @@ public static partial class RenderDom
                     textRuns,
                     anonRects,
                     generatedNodes,
-                    generatedRects);
+                    generatedRects,
+                    initialCbX,
+                    0f,
+                    subpixelRects);
 
                 // The used track sizes getComputedStyle() reports for a grid container.
                 foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
@@ -996,6 +1012,7 @@ public static partial class RenderDom
         DomLayout layout = new()
         {
             Rects = rects,
+            SubpixelRects = subpixelRects,
             SvgRects = svgRects,
             InlineFragments = inlineFragments,
             Styles = styles,

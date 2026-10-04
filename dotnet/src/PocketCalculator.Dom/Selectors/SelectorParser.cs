@@ -859,6 +859,7 @@ public static class SelectorParser
             "checked" => PseudoClass.Checked,
             "link" or "any-link" => PseudoClass.Link,
             "visited" => PseudoClass.Visited,
+            "defined" => PseudoClass.Defined,
             _ => throw new ParseFailure($"unsupported pseudo-class ':{name}'"),
         };
 

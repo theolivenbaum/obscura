@@ -45,6 +45,15 @@ public sealed class Page : IDisposable
         {
             throw PocketCalculatorException.Navigation(error.Message);
         }
+
+        // This method promises a loaded page. A navigation whose deadline passed after the
+        // document committed now leaves the page as it stood instead of failing it; here
+        // that is still a failure unless the document reached its load, as it was before.
+        if (Inner.LoadAbandoned && Inner.Readiness < DocumentReadiness.Loaded)
+        {
+            throw PocketCalculatorException.Navigation(
+                $"Network error: navigation exceeded {((ulong)Inner.NavigationTimeout.TotalMilliseconds).ToString(CultureInfo.InvariantCulture)}ms deadline before the page loaded");
+        }
     }
 
     /// <summary>The current URL.</summary>

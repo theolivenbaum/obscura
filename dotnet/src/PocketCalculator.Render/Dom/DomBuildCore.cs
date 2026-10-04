@@ -467,7 +467,13 @@ internal static partial class DomBuild
             bool hasMainAutoMargin = false;
             foreach (NodeId cid in domChildren)
             {
-                if (!context.Styles.TryGetValue(cid, out LayoutStyle? childStyle))
+                // DEVIATION from crates/obscura-render/src/dom.rs, which counts out-of-flow
+                // children too. An absolutely positioned child is not a flex item and its auto
+                // margins absorb nothing, so it must not switch the container's justify-content
+                // off: a `position:absolute; margin:auto` child of a `justify-content:center`
+                // container sat at the start edge instead of centred (Chromium 141).
+                if (!context.Styles.TryGetValue(cid, out LayoutStyle? childStyle)
+                    || childStyle.Position == TaffyPosition.Absolute)
                 {
                     continue;
                 }

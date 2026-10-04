@@ -220,6 +220,7 @@ public sealed partial class PocketCalculatorJsRuntime
         _ops.BindIsolatedWorldOverrides(
             ops,
             world,
+            world.Key,
             world.Document,
             (kind, nid, arg) => WorldCall(world, kind, nid, arg),
             (name, payload) => QueueWorldBindingCall(world.Key, name, payload));

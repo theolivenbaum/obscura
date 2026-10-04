@@ -283,7 +283,8 @@ public static class Input
                                 frame.PageId,
                                 networkEvents,
                                 PocketCalculator.Browser.WaitUntil.Load,
-                                navigated.Lifecycle == PocketCalculator.Browser.LifecycleState.NetworkIdle);
+                                navigated.Lifecycle == PocketCalculator.Browser.LifecycleState.NetworkIdle,
+                                navigated.Readiness);
                         }
                     }
                 }

@@ -51,8 +51,15 @@ internal static class GridAlignment
             trackAlignment = trackAlignment.Reversed();
         }
 
-        // Compute offsets
+        // Compute offsets.
+        //
+        // DEVIATION from vendor/taffy, which adds each track to a plain running f32. Over
+        // thousands of implicit tracks the drift reaches a sizeable fraction of a pixel (a
+        // 1000px item spanning 2000 columns came out 999.94px wide). The rounding pass hid it;
+        // getBoundingClientRect() reports the unrounded box, as Chromium's LayoutUnit sums are
+        // exact. Compensated (Kahan) summation keeps the total within an ulp, still in f32.
         float totalOffset = origin;
+        float compensation = 0.0f;
         bool seenNonCollapsedTrack = false;
         for (int i = 0; i < tracks.Count; i++)
         {
@@ -71,7 +78,10 @@ internal static class GridAlignment
                 : 0.0f;
 
             track.Offset = totalOffset + offset;
-            totalOffset = totalOffset + offset + track.BaseSize;
+            float step = (offset + track.BaseSize) - compensation;
+            float next = totalOffset + step;
+            compensation = (next - totalOffset) - step;
+            totalOffset = next;
             if (isNonCollapsedTrack)
             {
                 seenNonCollapsedTrack = true;
@@ -303,7 +313,8 @@ internal static class GridAlignment
             insetVertical,
             margin.VerticalComponents(),
             baselineShim,
-            Direction.Ltr);
+            Direction.Ltr,
+            blockAxis: true);
 
         var scrollbarSize = new Size<float>(
             overflow.Y == Overflow.Scroll ? scrollbarWidth : 0.0f,
@@ -342,7 +353,8 @@ internal static class GridAlignment
         Line<float?> inset,
         Line<float?> margin,
         float baselineShim,
-        Direction direction)
+        Direction direction,
+        bool blockAxis = false)
     {
         // Calculate the grid area dimension in the axis
         var nonAutoMargin = new Line<float>(
@@ -356,6 +368,20 @@ internal static class GridAlignment
         var resolvedMargin = new Line<float>(
             (margin.Start ?? autoMarginSize) + baselineShim,
             margin.End ?? autoMarginSize);
+
+        // DEVIATION from vendor/taffy/src/compute/grid/alignment.rs, which spreads an
+        // absolutely positioned item's auto margins over the grid area whatever its insets,
+        // and then ignores them when both insets are set. An abspos box's auto margins
+        // resolve only against two non-auto insets and are 0 otherwise, as in Chromium; see
+        // BlockLayout.ResolveAbsoluteMargins.
+        if (position == Position.Absolute)
+        {
+            (float absStart, float absEnd) = BlockLayout.ResolveAbsoluteAxisMargins(
+                margin.Start, margin.End, inset.Start, inset.End,
+                gridAreaSize, resolvedSize, direction.IsRtl(), blockAxis);
+            resolvedMargin = new Line<float>(absStart + baselineShim, absEnd);
+            nonAutoMargin = new Line<float>(absStart + baselineShim, absEnd);
+        }
 
         bool overflows = resolvedSize + nonAutoMargin.Sum() > gridAreaSize;
 

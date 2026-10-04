@@ -289,6 +289,15 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
             }
         }
 
+        // DEVIATION from module_loader.rs, which hands every URL to the network client, so a
+        // data: or blob: module failed with "Failed to fetch module data:..." (reddit.com).
+        // Chromium reads both locally: no request, no cookies, and strict MIME checking.
+        if (string.Equals(resolved.Scheme, "data", StringComparison.Ordinal)
+            || string.Equals(resolved.Scheme, "blob", StringComparison.Ordinal))
+        {
+            return LoadLocalDocument(resolved, url, contextCallback);
+        }
+
         // Module-graph CORS and same-origin credentials are relative to the owning
         // document, not to the importing module. The importer remains the HTTP
         // referrer for a dependency; keeping these URLs distinct prevents a
@@ -402,7 +411,7 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
         var info = new DocumentInfo(new Uri(found.Href))
         {
             Category = ModuleCategory.Standard,
-            ContextCallback = contextCallback,
+            ContextCallback = WithMetaUrl(found.Href, contextCallback),
         };
         var document = new StringDocument(info, code);
 
@@ -424,6 +433,108 @@ public sealed class PocketCalculatorModuleLoader : DocumentLoader, IDisposable
     /// </summary>
     private static string FileModuleFetchFailed(string url) =>
         "Failed to fetch dynamically imported module: " + url;
+
+    /// <summary>
+    /// The <c>import.meta</c> of a module loaded under <paramref name="href"/>: its
+    /// <c>url</c>, plus whatever the caller's context callback supplies.
+    /// </summary>
+    /// <remarks>
+    /// ClearScript leaves <c>import.meta</c> empty unless a document's context callback
+    /// fills it. The runtime seeds <c>url</c> for a graph's root (see
+    /// <c>PocketCalculatorJsRuntime.Instrument</c>), but a module reached by an import, static
+    /// or dynamic, had <c>import.meta.url === undefined</c>; Chromium gives every module its
+    /// URL. Port addition (deno_core supplies it in Rust).
+    /// </remarks>
+    private static DocumentContextCallback WithMetaUrl(string href, DocumentContextCallback? inner) =>
+        info =>
+        {
+            var context = new Dictionary<string, object>(StringComparer.Ordinal);
+            if (inner?.Invoke(info) is { } given)
+            {
+                foreach (var (key, value) in given)
+                {
+                    context[key] = value;
+                }
+            }
+
+            context.TryAdd("url", href);
+            return context;
+        };
+
+    /// <summary>
+    /// The source of a <c>blob:</c> URL minted by <c>URL.createObjectURL</c> for a Blob
+    /// whose type is a JavaScript MIME type, or null when there is none (never minted,
+    /// revoked, or another type, which Chromium's strict MIME check refuses as a module).
+    /// Set by the runtime; null means no blob: module loads.
+    /// </summary>
+    public Func<string, string?>? BlobScriptSource { get; set; }
+
+    /// <summary>
+    /// A <c>data:</c> or <c>blob:</c> module: decoded here, with no network request.
+    /// </summary>
+    /// <remarks>
+    /// The module map is keyed by the URL as for any other module, so importing the same
+    /// <c>data:</c> URL twice yields one module instance, as in Chromium. The body must be
+    /// a JavaScript MIME type (Chromium's strict MIME check: <c>data:text/plain,...</c> and
+    /// an untyped Blob are refused) and is UTF-8 decoded, as every module script is.
+    /// </remarks>
+    private Document LoadLocalDocument(UrlRecord resolved, string url, DocumentContextCallback contextCallback)
+    {
+        string? code = null;
+        if (string.Equals(resolved.Scheme, "data", StringComparison.Ordinal))
+        {
+            if (DataUrl.TryProcess(url, out var essence, out var body) && DataUrl.IsJavaScriptMimeType(essence))
+            {
+                code = DataUrl.Utf8Decode(body);
+            }
+        }
+        else if (BlobScriptSource is { } blobs)
+        {
+            try
+            {
+                code = blobs(resolved.Href);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                code = null;
+            }
+        }
+
+        if (code is null)
+        {
+            throw new ModuleLoadException(FileModuleFetchFailed(url));
+        }
+
+        lock (_gate)
+        {
+            if (_documents.TryGetValue(url, out var cached))
+            {
+                return cached;
+            }
+
+            LoadedSpecifiers.Add(url);
+        }
+
+        // System.Uri refuses a string past its length limit, and a large inline bundle
+        // in a data: URL can exceed it. Such a module is named instead; it can still
+        // import absolute URLs, and a relative import from a data: URL fails in Chromium
+        // too (a data: URL cannot be a base).
+        var info = Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            ? new DocumentInfo(uri) { Category = ModuleCategory.Standard, ContextCallback = WithMetaUrl(url, contextCallback) }
+            : new DocumentInfo(url) { Category = ModuleCategory.Standard, ContextCallback = WithMetaUrl(url, contextCallback) };
+        var document = new StringDocument(info, code);
+        lock (_gate)
+        {
+            if (info.Uri is { } named)
+            {
+                _canonicalHrefs[named.AbsoluteUri] = url;
+            }
+
+            _documents[url] = document;
+        }
+
+        return document;
+    }
 
     /// <summary>
     /// The href to resolve against for a load requested by <paramref name="sourceInfo"/>.

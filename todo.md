@@ -1720,6 +1720,60 @@ This relaxes "the engine never uses host fonts" only on request: with nothing co
 no file is read and output is byte-identical to before. Faces still load with
 `SKTypeface.FromData`, never `FromFamilyName`, and no fontconfig is involved.
 
+### Global interface objects for the objects the shim already hands out
+
+`crates/obscura-js/js/bootstrap.js` leaves some 460 of Chromium 141's 713 global constructors
+undefined, including the interfaces of objects it does hand out, and pages test for them:
+icloud.com sends a Chrome UA without `window.MathMLElement` to `/unsupported_browser/`, TikTok's
+SDK throws `Navigator is not defined`, grammarly.com and mozilla.org `DOMImplementation is not
+defined`.
+
+DEVIATION from crates/obscura-js/js/bootstrap.js. The block "Global interface objects" near the
+end of the port's `bootstrap.js` defines them as the real prototypes of those objects, measured
+against Chromium 141 (typeof, name, length, parent interface, `new`/call errors, toStringTag,
+`instanceof` of the existing instance): Navigator, Location, Performance (+PerformanceTiming,
+PerformanceNavigation), DOMImplementation (now one object per document), HTMLDocument and
+XMLDocument (the realm's document), MutationRecord, NodeIterator, TreeWalker, PluginArray, Plugin,
+MimeTypeArray, MimeType, Permissions, PermissionStatus, Geolocation*, NavigatorUAData,
+MediaCapabilities, Screen, ScreenOrientation, VisualViewport, XMLHttpRequestUpload, External and
+`window.external`, BarProp and the six bar properties, AbstractRange, XPathResult, XPathEvaluator,
+XPathExpression, TextMetrics, FileList, DOMStringList (`location.ancestorOrigins`), the IndexedDB
+interfaces and IDBKeyRange, MediaQueryList, StyleSheet, MediaList, the CSS rule interfaces,
+DOMRectReadOnly/DOMRect, DOMPointReadOnly/DOMPoint, DOMMatrixReadOnly/DOMMatrix (+WebKitCSSMatrix),
+DOMQuad, MathMLElement, Option, WebKitMutationObserver, CloseEvent, PageTransitionEvent,
+BeforeUnloadEvent, DragEvent, FormDataEvent, MediaQueryListEvent, IDBVersionChangeEvent,
+TextEvent, Touch, TouchList, TouchEvent, DataTransfer (+Item, ItemList), the two queuing
+strategies, the stream reader/writer/controller interfaces, IdleDeadline and CustomStateSet.
+Interfaces Chromium does not let script construct throw its "Illegal constructor"; members sit
+on the prototypes as brand-checked accessors ("Illegal invocation" off an instance), so
+navigator, performance, screen and the rest have no own properties. All are non-enumerable on
+the window. Behaviour changes that come with them:
+
+- Element rects (`getBoundingClientRect`, `getClientRects`) are DOMRects, not plain objects with
+  an own `toJSON` and an `__obscuraViewportFixed` property (now a private WeakSet).
+- DOMRect normalises a negative size in top/right/bottom/left; DOMMatrix does real matrix
+  arithmetic and parses CSS transform lists (upstream's answered the identity for every
+  operation). Angles that are multiples of 90 degrees are exact, as in Chromium; other angles
+  can differ from Chromium in the last bit (V8's fdlibm sin against the C library's).
+- A stylesheet's at-rules are CSSMediaRule, CSSSupportsRule, CSSContainerRule, CSSLayerBlockRule,
+  CSSLayerStatementRule, CSSStartingStyleRule, CSSScopeRule, CSSPageRule, CSSFontFaceRule,
+  CSSKeyframesRule/CSSKeyframeRule, CSSImportRule, CSSNamespaceRule and CSSPropertyRule with
+  Chromium's cssText, instead of opaque CSSRules of type 0. @counter-style,
+  @font-feature-values, @view-transition and unknown at-rules stay opaque CSSRules (Chromium drops
+  the unknown ones). `sheet.title` is null without a title attribute, as in Chromium.
+- navigator gains appName, appCodeName and vendorSub; the PDF plugins list their two MIME types,
+  whose enabledPlugin is the plugin.
+- `performance.timeOrigin` and `performance.memory` are written through `_ifaceSet` at page init,
+  since they are read-only accessors now.
+
+Left out on purpose: interfaces that would only be feature-detection stubs (Web Audio nodes,
+WebRTC, Gamepad, MediaSource, Web Speech, WebGL object types, Push, Background Fetch, typed CSS
+OM, TrustedTypes, Navigation API, ...), CompressionStream/DecompressionStream (no deflate in the
+shim), TaskController/TaskSignal (postTask has no priority change), the HTML collections, and the
+members Chromium has only in secure contexts. The IndexedDB objects keep their members as own
+properties (the shim's request records assign to themselves). DOMParser and createHTMLDocument
+documents are still plain objects, not HTMLDocuments. Pinned by `GlobalInterfaceObjects`.
+
 ### A linked stylesheet leaves no element in the DOM
 
 `crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic
@@ -4704,3 +4758,313 @@ Still short of Chromium:
   and still draw CJK as missing glyphs.
 - Emoji are 23px wide at 16px in Chromium and 20px here (unchanged by this work; the port
   used 19.92).
+
+### HTML element interfaces are distinct, and HTMLElement is not Element
+
+`crates/obscura-js/js/bootstrap.js` aliases HTMLElement and about thirty HTML*Element
+interfaces to `Element` (`globalThis.HTMLScriptElement = Element;`), so every element was an
+instance of every one of them. On live sites: `document.createElement('div') instanceof
+HTMLScriptElement` was true, Ensighten's patch of `HTMLScriptElement.prototype.setAttribute` ran
+for every element and threw, and webpack style-loader treated `<head>` as an iframe and never
+injected CSS. DEVIATION: `HTMLElement` is its own class between `Element` and every HTML
+interface, each of the 34 aliased interfaces (and ten Chromium has that were missing:
+HTMLDataElement, HTMLModElement, HTMLMenuElement, HTMLParamElement, HTMLFontElement,
+HTMLFrameElement, HTMLFrameSetElement, HTMLMarqueeElement, HTMLDirectoryElement,
+HTMLSelectedContentElement) is its own subclass, and `_htmlTagClasses` maps every tag to its
+interface with Chromium 141's table (an unlisted name is HTMLUnknownElement, a hyphenated one
+HTMLElement). SVG and null-namespace elements are not HTMLElements. The constructors throw
+"Illegal constructor" as in Chromium, except `new` of a defined autonomous custom element, which
+now creates the element (the shim used to build a wrapper with no node). Wrappers the shim
+builds go through `_constructElement`, which is how the constructor tells them apart.
+
+Members moved off `Element.prototype` to where Chromium keeps them: innerText, hidden, title,
+lang, dir, accessKey, offset*, click, popover and its methods, attachInternals to
+`HTMLElement.prototype`; style, dataset, tabIndex, autofocus, focus, blur and the
+GlobalEventHandlers `on*` to both `HTMLElement.prototype` and `SVGElement.prototype`; the
+window's handlers (`onhashchange`, `onpopstate`, ...) to HTMLBodyElement/HTMLFrameSetElement.
+Added: outerText, contentEditable, isContentEditable, draggable, spellcheck, translate, inert,
+offsetParent, and offsetTop/offsetLeft are now measured from the offsetParent (document-relative
+for `<body>`) rather than being the viewport rect; the anchor/area stringifier returns href.
+Other members Chromium has on the specific interfaces (an anchor's `href`, an iframe's
+`contentWindow`, ...) stay on `Element.prototype`. The host's click (`__obscura_host.dom.call(el,
+'click')`) still reaches SVG elements, which have no click() of their own. The Rust-derived
+`GlobalEventHandlersPresentOnDocumentAndElement` now asserts Chromium's placement. Pinned by
+`HtmlElementInterfacesTests` and `OffsetParentTests`.
+
+### An about:blank iframe's document.open() returns the document
+
+The reference's `_IframeDocument.open()` returns undefined; Chromium's returns the document,
+and Akamai mPulse's `iframe.contentWindow.document.open()._l = ...` threw. Still open: the
+stand-in's `write()` appends through `innerHTML`, so a `<script>` or `<body onload>` written
+into the frame does not run, where Chromium runs it in the frame's realm.
+
+### Workers have `importScripts` and a worker global scope; `data:` and `blob:` modules load
+
+Port addition; Rust has none of it. Measured against Chromium 141 (Playwright 1.56).
+
+- **`importScripts`** (bootstrap.js `Worker`, `Ops/WorkerOps.cs`). Classic workers parse
+  every URL against the worker's URL first (`SyntaxError` DOMException), then fetch and run
+  each in order, synchronously. HTTP(S) loads go through the new sync op
+  `op_worker_import_script`, which blocks the engine thread on the page's client as a
+  static module graph does: page cookies (same-origin credentials), SSRF and mixed-content
+  gates, `Network.setBlockedURLs`, callbacks. Like a module graph it is not offered to CDP
+  `Fetch` interception, because the CDP loop that would resolve the pause is waiting on
+  this thread. A non-2xx response or a type that is not a JavaScript MIME type (no type
+  included) is a `NetworkError`; `data:` and `blob:` imports are decoded in the shim and
+  not type-checked, as in Chromium. An exception from another origin's script is muted to
+  a `NetworkError`; a parse error is a `SyntaxError` naming `importScripts`; a module
+  worker throws `TypeError`. The host hands the source straight to the shim's evaluator
+  (SECURITY.md C3).
+- **Global declarations.** A worker still runs in the page realm under a scope object.
+  Each of its scripts was a direct eval whose top-level `var`/`function`/`let`/`const`/`class`
+  stayed private to that eval, so an `importScripts` library was invisible to its caller.
+  The host scans each script's top-level names (`Ops/ScriptDeclarations.cs`, a tolerant
+  scanner, `op_script_declarations`); a sloppy script's `var`s become scope properties
+  before it runs and its functions after hoisting (also before a nested `importScripts`),
+  and `let`/`const`/`class` go to a per-worker lexical object that later scripts see but
+  `self` does not. Known gaps: a strict script's declarations are copied after it finishes
+  (a snapshot), a block-level function declaration is not hoisted to the scope, and an
+  implicit global assignment still lands on the page's window.
+- **Worker scope.** `self` is a `DedicatedWorkerGlobalScope` (`instanceof WorkerGlobalScope`,
+  `[object DedicatedWorkerGlobalScope]`), `location` is a `WorkerLocation` for the worker's
+  URL, `navigator` a `WorkerNavigator` reading the page's navigator, `name` comes from the
+  options, and `window`, `document` and the other window-only names are `undefined` instead
+  of falling through to the page. `new Worker(new URL(...))` is accepted; a non-2xx worker
+  script is an error instead of running the error page.
+- **`data:` modules** (`PocketCalculatorModuleLoader.LoadLocalDocument`, `Url/DataUrl.cs`):
+  decoded locally with the Fetch data: URL processor, one module per URL, UTF-8, refused
+  unless the type is JavaScript (`data:text/plain,...` fails as in Chromium).
+- **`blob:` modules**: `URL.createObjectURL` registers a Blob whose type is JavaScript with
+  the host (`op_blob_script_register`, `BlobScriptStore`, revoked with the URL); the loader
+  imports from there. An untyped Blob is refused, as by Chromium's strict MIME check.
+- **`import.meta.url`** is now set for every module the loader returns (a document context
+  callback); before, only a graph's root had it.
+
+Still open: module workers (`type: 'module'`) evaluate their source as a classic script;
+`SharedWorker` is a stub that never runs; a failed `import()` rejects with `Error`, where
+Chromium rejects with `TypeError` (ClearScript converts the loader's exception); HTTP
+modules are not MIME-checked. Pinned by `RuntimeTests.WorkerImportScripts*`,
+`DataUrlModules*`, `BlobUrlModulesLoadWhenTheBlobIsJavaScript`,
+`ImportedModulesSeeTheirOwnImportMetaUrl` and `ScriptDeclarationsFindsTopLevelNamesOnly`.
+
+### Geometry is reported at LayoutUnit precision; offsets come from the layout
+
+Rust reports every box from taffy's rounded layout, so `getBoundingClientRect()` was whole
+pixels (a `200.4px` float read 200 and the inline-block after it started at 200), and the shim
+answered `offsetLeft`/`offsetTop`/`offsetWidth`/`offsetHeight` from that same rect, so they
+moved with scrolling and transforms, ignored the offset parent (there was no `offsetParent`),
+and `html`/`body` reported the viewport. Chromium lays out in LayoutUnits (1/64px) and snaps
+only at paint: the bounding rect is fractional, the `offset*` and `client*` values are integers.
+
+- `DomPasses.ComputeAbsoluteRects` keeps taffy's unrounded box beside the snapped one
+  (`DomLayout.SubpixelRects`); `DomLayout.PreciseRect` answers with it, truncated to 1/64px as
+  `LayoutUnit(float)` does, while the box keeps the size it had when recorded. Paint still uses
+  the snapped `Rects`, which is Chromium's pixel snapping, so screenshots do not change.
+  `PreparedRender.DocumentRect` and the client-rect fallback read the precise box, so
+  `getBoundingClientRect()`, `getClientRects()`, IntersectionObserver and the CDP box model see
+  it. `clientWidth`/`scrollWidth` still come from the snapped rect, as before. Quantizing the
+  absolute value rather than each layout step can differ from Chromium by 1/64px.
+- `op_layout_offset` (additive) returns `offsetParent` and the four `offset*` integers from
+  `PreparedRender.OffsetMetrics`: the nearest positioned or containing-block ancestor, `body`, or
+  `td`/`th`/`table` for a static element; the border box relative to the parent's padding edge in
+  untransformed layout space; a static `body` parent measures from the document origin; sizes
+  round on their own (Chromium 141 does not snap them against the offset's fraction).
+- An atomic inline's strut descent splits the leading as text lines do (ascent half floored),
+  so a 20px inline-block in a 16px serif line is 24px, not 23.5 (`DomBuild.StrutDescent`).
+- A unitless `line-height` truncates to LayoutUnits (17px * 1.2 = 20.390625); lengths still
+  round (`FontResolution.UsedLineHeightWithMetrics`). `getComputedStyle` keeps the product.
+- Grid track offsets use compensated summation (`GridAlignment`); plain f32 accumulation over
+  2000 implicit tracks put a 1000px item at 999.94px once the unrounded box was visible.
+
+Not done: border widths are not snapped to whole pixels (Chromium draws `4.1px` as 4px, so the
+box is 0.1px narrower there); an atomic inline shorter than the strut's ascent still sits at the
+line's top instead of on the baseline; a percentage width inside the float-zone flow column
+resolves against the column, not the containing block, and a run of `clear`ing same-side floats
+is laid out side by side. The last two, not rounding, are why wikipedia.org's footer drops
+`.other-projects` below its sidebar. Pinned by `SubpixelGeometryScriptTests`.
+
+### A redirected navigation is reported hop by hop under the loader id
+
+`crates/obscura-browser` records the document under the URL it asked for, and
+`crates/obscura-cdp` finds the navigation's request by matching that URL against the page
+URL. After a redirect the page URL is the final one, so nothing matched, no request carried
+the loader id, and Playwright's and Puppeteer's `page.goto()` resolved to null for every site
+that redirects (50 of 77 in the live survey, `reddit.com` to `www.reddit.com` among them).
+
+DEVIATION from both. The transport keeps each hop's status and headers
+(`Response.RedirectChain`, a synthesized 307 with `Non-Authoritative-Reason: HSTS` for an
+HSTS upgrade), the page marks its document event (`NetworkEvent.IsNavigation`, with the
+final URL and the hops), and `EmitNavigationEvents` reports what Chromium does: one
+`Network.requestWillBeSent` per hop, all with `requestId` = loader id, each after the first
+carrying the previous hop's `redirectResponse` and `redirectHasExtraInfo: false`, then
+`responseReceived`/`loadingFinished` for the final response. Measured on a local 301 -> 302 ->
+200 chain with Playwright 1.56: Chromium and the port now both give `status() 200`, the final
+`url()`, and `redirectedFrom()` walking `/r2` (302) then `/r1`. An unredirected navigation
+keeps its single request, byte for byte. `Fetch.requestPaused` for the document still names
+the URL first requested. Pinned by `NavigationLifecycle.RedirectedNavigationReportsEachHopUnderTheLoaderId`.
+
+### A navigation deadline after the document committed leaves the page as it stood
+
+`crates/obscura-browser` fails a navigation whenever its end-to-end deadline
+(`POCKETCALCULATOR_NAV_TIMEOUT_MS`, 30s) passes, marking the page `Failed`; over CDP that is a
+protocol error from `Page.navigate` on slow, script-heavy sites whose DOM was already built.
+
+DEVIATION. Chromium's `Page.navigate` answers once the navigation commits and leaves the
+load to the client's own `waitUntil` and timeout. The port now separates the two: a deadline
+before the commit (no response, or the body never finished) still fails the navigation; one
+after it (`Page.Readiness >= Committed`: the response is in and the document built) leaves the
+page as it stood, sets `Page.LoadAbandoned`, and abandons the pending work (remaining
+scripts, resource warmup, frames) rather than resuming it, so the deadline still bounds how
+long the navigation holds the page. `document.readyState` is `loading` from the commit until
+the script phase completes it, as in Chromium. `EmitNavigationEvents` reports the document
+only as far as it got: `commit` always, `DOMContentLoaded` and `load` (and `networkIdle`,
+`frameStoppedLoading`) only if the document dispatched them. The port does not resume the
+document later, so a `load` that was cut off never arrives; a client waiting for it times out
+on its own clock, as it would in Chromium for a load that has not happened, while one waiting
+for `commit` gets the page. The CLI `fetch` reads such a page as it stood and prints
+`Warning: <url> did not finish loading within <n>s`; the library's `GotoAsync`, which promises
+a loaded page, still throws unless the document reached its load. Measured with a page whose
+parser-blocking script stalls 12s and a 5s deadline: `goto(waitUntil: 'commit')` now returns
+200 (was a protocol error), `waitUntil: 'load'` times out on the client as in Chromium, and a
+server that never answers is still a navigation error. Pinned by
+`NavigationLifecycle.DeadlineAfterCommitLeavesThePageAsItStood` and
+`DeadlineBeforeCommitStillFails`.
+
+### A reopened document reports its load, and isolated-world console calls are reported
+
+`crates/obscura-js/js/bootstrap.js`'s `document.close()` does nothing, and an isolated world's
+console calls were dropped. Playwright's `page.setContent()` runs `document.open()`, a tagged
+`console.debug`, `write()` and `close()` in its utility world, then waits for the tag and for
+the frame's `load`, so against the port it hung until its timeout.
+
+DEVIATION. A world's console call is now reported with the world's execution context, as
+Chromium reports it (its arguments carry no `objectId`: those name the world's own store,
+which a console id would not reach). `document.open()` on a document that has finished
+loading marks it reopened, and `close()` then calls the new `op_dom` command `document_close`
+(port addition to the op protocol), which counts a load; `Dispatcher.DrainDocumentLoads`
+reports each as Chromium does after `document.close()`: `Page.lifecycleEvent` `init`,
+`Page.domContentEventFired`, `DOMContentLoaded`, `Page.loadEventFired`, `load` (then
+`networkIdle`), under the current loader id, with no `frameNavigated` and no new context.
+While the document is still loading, open/close add nothing, matching Chromium's no-op
+`open()` during parsing. `setContent` now resolves (Chromium 9ms, the port 174ms cold).
+Still different from Chromium, and not fixed here: `document.open()` only empties the body
+and `write()` parses into it, where Chromium replaces the whole document (a written `<title>`
+lands in the body, `document.title` keeps the old one, old listeners stay), and the reopened
+document fires no page-visible `DOMContentLoaded`/`load`. Pinned by
+`NavigationLifecycle.ReopenedDocumentReportsWorldConsoleAndLoadLifecycle` and
+`DocumentCloseDuringLoadAddsNoLifecycle`.
+
+### An absolutely positioned box's auto margins follow the constraint equation
+
+taffy (`vendor/taffy/src/compute/block.rs`) zeroes a pair of auto margins whenever the
+declared size is `>=` the free space, which compares the box with the space *excluding* the
+box: a `position: fixed; left: 0; right: 0; width: 760px; margin: 0 auto` box in a 1280px
+viewport (bing.com's search box, every centred modal) sat at x=0 where Chromium centres it at
+260, and a `max-width`-clamped auto width never centred at all. It also resolves auto margins
+against whatever space a single inset leaves (`right: 10px; margin: auto` landed mid-way
+instead of at the right edge), and `flexbox.rs` and `grid/alignment.rs` spread them over the
+container whatever the insets. C# follows CSS 2.1 10.3.7 / 10.6.4 as Chromium does, in
+`BlockLayout.ResolveAbsoluteMargins` for all three: auto margins resolve only between two
+non-auto insets and are 0 otherwise, against the used (clamped) size; a negative inline-axis
+pair pins the start margin per the containing block's direction, and a negative block-axis
+pair splits equally.
+
+Three neighbours of the same bug:
+
+- `dom.rs` pre-sizes a stretched fixed box to `viewport - left - right` before its margins
+  are resolved, ignoring margins, padding and border, and does so inside a transformed
+  ancestor too, which is the containing block there. C# runs it after the box edges settle,
+  subtracts them, skips it under a fixed containing block (`Inherited.InsideFixedCb`), and
+  resolves a viewport-fixed box's percentages against the initial containing block.
+- `dom.rs` turns a flex container's `justify-content` off when any child has a main-axis auto
+  margin, absolutely positioned children included, so an abspos `margin: auto` child of a
+  `justify-content: center` container sat at the start. C# skips out-of-flow children.
+- The CSSOM snapshot measured a fixed box's insets against its nearest positioned ancestor
+  (`left: -128px`), and reported `auto` for auto margins. It now uses the fixed containing
+  block, reports a specified inset pair as specified and the used value of an auto margin
+  (Chromium: `left: 0px`, `margin-left: 260px`).
+
+Covered by `PositionedAutoMarginTests`.
+
+### Form controls take Chromium's display adjustments, and an inline-level box has no auto margins
+
+`style.rs` keeps an author `display` on a control as written. Chromium (LayoutTheme::
+AdjustStyle) turns `inline`, `inline-table` and every internal table display into
+`inline-block`, and `table` into `block`, on a control that keeps its native appearance
+(every `input` but hidden/file/image, `button`, `select`, `textarea`, `meter`, `progress`);
+`appearance: none` turns that off, but the control is still laid out as an atomic box.
+`display: contents` on a replaced element or a form control computes to `none` (a button
+keeps it), and a drop-down `select` with native appearance ignores the author `line-height`.
+`ComputedStyle.AdjustFormControlStyle` applies all of it at the end of the cascade, and
+`appearance` / `-webkit-appearance` are now parsed and reported. The UA sheet's `meter` and
+`progress` are `inline-block`, where the reference left them `block`.
+
+wikipedia.org's `.lang-list-button { display: inline; margin: 0 auto }` exposed two more:
+
+- `TaffyStyleMapping` handed an inline-level box's auto margins to taffy as auto, so the
+  centred button sat at the right edge of its line. CSS 2.1 10.3.1 / 10.3.9 make them 0.
+- `native_button_intrinsic_content` collapses the collected label as one string, which trims
+  the space between the label and a trailing icon as if it ended the line, so the button came
+  out one space narrower than its content and the icon wrapped onto a second line. C# leaves a
+  marker for an atomic child, so the space is measured (`NormalizeControlLabel`).
+
+Covered by `FormControlDisplayTests`.
+
+### The `font` shorthand takes CSS-wide keywords, and controls reset their whole font
+
+`style.rs` parses `font` by looking for a font-size token, finds none in `inherit`, and drops
+the declaration, so the reset every page ships - `button, input, optgroup, select, textarea {
+font: inherit }` - left all of them on the UA 13.333px Arial (the `font-family: inherit`
+half was fixed earlier as F3). C# expands `inherit`/`unset` to every longhand,
+`initial` to `normal 400 16px/normal "Times New Roman"`, and keeps the cascaded value for
+`revert`, as the longhands do. `font-style: inherit` computed to `normal` and
+`line-height: initial` inherited; both are fixed. The UA control font
+(`-webkit-small-control`) now also resets weight, style, variant and stretch, which the
+reference let inherit from a bold or italic parent.
+
+`font-variant-caps` and `font-stretch` were not modeled at all, so getComputedStyle answered
+the empty string for `font-variant` and `font-stretch`. They are now cascaded, inherited and
+reported, not rendered: the port synthesises no small capitals and the embedded faces have
+no width axis.
+
+Covered by `FontShorthandKeywordTests`.
+
+### Custom elements follow HTML's reactions model
+
+`crates/obscura-js/js/bootstrap.js`'s registry upgraded what `define()` found with
+`querySelectorAll` and called `connectedCallback` from there, and nothing else: an element that
+innerHTML, cloneNode, document.write or a later insertion produced stayed a plain HTMLElement,
+and insertion, removal and attribute changes never reached a callback. YouTube (Polymer), MSN
+(FAST) and Reddit (faceplate) never finished booting. DEVIATION: the registry keeps HTML's
+definitions (callbacks and `observedAttributes` read once at `define()`), each element has a
+reaction queue, and the DOM methods that can enqueue reactions run them before returning
+([CEReactions]) in element-queue order: upgrade (constructor, then `attributeChangedCallback` for
+each observed attribute present, then `connectedCallback`), `connectedCallback` /
+`disconnectedCallback` for every custom element in an inserted or removed subtree in
+shadow-including tree order (a move is a disconnect then a connect), `attributeChangedCallback`
+from setAttribute(NS), removeAttribute(NS), toggleAttribute, reflected properties, classList,
+dataset and Attr nodes (whose `value` setter now writes through to the owner element), and the
+form-associated callbacks (form owner, fieldset/own `disabled`, `form.reset()`).
+`createElement` constructs synchronously and, as Chromium does, reports a constructor that adds
+attributes or children, throws or returns another element, and returns an HTMLUnknownElement in
+the "failed" state. Customized built-ins (`extends` + `is`, parser `is=`, `createElement(tag,
+{is})`) work, and an is value given without an attribute is serialized. `:defined` is supported
+by the selector engine (`ElementData.CustomElementState`, set by the `ce_state` op), so
+`x-foo:not(:defined) { display: none }` hides an element until its upgrade, as in Chromium.
+
+As in Blink (and unlike the spec's inert fragment document), innerHTML, insertAdjacentHTML,
+outerHTML and createContextualFragment queue an upgrade for each defined element they create,
+also under a disconnected element, and the new elements' upgrades run before the old children's
+`disconnectedCallback`s; template contents and DOMParser documents stay inert. Hooks cost one
+compare while nothing is defined; once something is, a connected insertion and a removal (when a
+definition has `disconnectedCallback`) make one `ce_candidates` crossing that walks the subtree
+natively. Pinned by `CustomElementReactionsTests` (Js) and `CustomElementStateTests` (Dom), whose
+expectations are Chromium 141's.
+
+Known differences: the port parses the whole document before running scripts, so an element
+that follows a defining `<script>` in the markup is upgraded by `define()` (its constructor sees
+its children and attributes) rather than constructed by the parser, and `document.write`'s
+elements are upgraded on insertion; `adoptedCallback` never fires, because
+`createHTMLDocument()`/`DOMParser` documents are stand-ins over the page's own tree
+(`ownerDocument` never changes); `connectedMoveCallback` is read but `moveBefore` does not exist;
+reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.

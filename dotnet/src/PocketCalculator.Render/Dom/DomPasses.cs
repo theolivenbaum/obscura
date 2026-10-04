@@ -283,7 +283,10 @@ internal static class DomPasses
         Dictionary<NodeId, List<(Rect Rect, string Text)>> textRuns,
         Dictionary<int, Rect> anonRects,
         IReadOnlyDictionary<TaffyNodeId, int> generatedNodes,
-        Rect?[] generatedRects)
+        Rect?[] generatedRects,
+        float preciseX,
+        float preciseY,
+        Dictionary<NodeId, SubpixelRect> subpixelRects)
     {
         if (!StackGuard.CanDescend())
         {
@@ -295,9 +298,26 @@ internal static class DomPasses
         float y = absY + layout.Location.Y;
         Rect rect = new(x, y, layout.Size.Width, layout.Size.Height);
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which keeps only the rounded taffy
+        // layout. Chromium lays out in LayoutUnits (1/64 px) and snaps only at paint, so
+        // getBoundingClientRect() reports the fractional box. The snapped rect stays the one
+        // paint uses; the unrounded one is kept beside it for geometry reporting.
+        TaffyLayout unrounded = taffyTree.GetUnroundedLayout(taffyId);
+        float px = preciseX + unrounded.Location.X;
+        float py = preciseY + unrounded.Location.Y;
+
         if (idMap.TryGetValue(taffyId, out NodeId domId))
         {
             rects[domId] = rect;
+            Rect precise = new(px, py, unrounded.Size.Width, unrounded.Size.Height);
+            if (precise != rect && SubpixelRect.IsSnapOf(rect, precise))
+            {
+                subpixelRects[domId] = new SubpixelRect(rect, precise);
+            }
+            else
+            {
+                subpixelRects.Remove(domId);
+            }
         }
         else if (taffyTree.TryGetNodeContext(taffyId, out int? item) && item is { } index)
         {
@@ -337,7 +357,10 @@ internal static class DomPasses
                 textRuns,
                 anonRects,
                 generatedNodes,
-                generatedRects);
+                generatedRects,
+                px,
+                py,
+                subpixelRects);
         }
     }
 

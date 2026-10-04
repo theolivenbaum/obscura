@@ -708,6 +708,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
         var body = initialBody;
         var currentUrl = url;
         var redirects = new List<Uri>();
+        var redirectChain = new List<RedirectHop>();
         // Follow up to 20 redirects, matching the Fetch spec and the fetch()/XHR path
         // in obscura-js. The inclusive bound makes MaxRedirects+1 requests (the
         // initial one plus 20 hops), so the 20th redirect is still followed and only
@@ -724,6 +725,15 @@ public sealed class PocketCalculatorHttpClient : IDisposable
             if (Hsts.Upgrade(currentUrl) is { } secure)
             {
                 redirects.Add(currentUrl);
+                // What Chromium reports for the upgrade: a synthesized 307 naming HSTS.
+                redirectChain.Add(new RedirectHop(
+                    currentUrl,
+                    307,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["location"] = secure.AbsoluteUri,
+                        ["non-authoritative-reason"] = "HSTS",
+                    }));
                 currentUrl = secure;
             }
 
@@ -738,6 +748,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                     Headers = new Dictionary<string, string>(StringComparer.Ordinal),
                     Body = [],
                     RedirectedFrom = redirects,
+                    RedirectChain = redirectChain,
                 };
             }
 
@@ -857,6 +868,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
 
                         redirectTainted |= RedirectTaintsOrigin(request, currentUrl, nextUrl);
                         redirects.Add(currentUrl);
+                        redirectChain.Add(new RedirectHop(currentUrl, status, responseHeaders));
                         currentUrl = nextUrl;
                         if (status is 301 or 302 or 303)
                         {
@@ -898,6 +910,7 @@ public sealed class PocketCalculatorHttpClient : IDisposable
                     Headers = responseHeaders,
                     Body = bodyBytes,
                     RedirectedFrom = redirects,
+                    RedirectChain = redirectChain,
                 };
 
                 callbacks?.FireResponse(requestInfo, response);

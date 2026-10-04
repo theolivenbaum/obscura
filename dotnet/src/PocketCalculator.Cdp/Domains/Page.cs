@@ -222,45 +222,30 @@ public static partial class Page
         string pageId,
         IReadOnlyList<NetworkEvent> networkEvents,
         WaitUntil waitUntil,
-        bool reachedNetworkIdle)
+        bool reachedNetworkIdle,
+        DocumentReadiness readiness = DocumentReadiness.Loaded)
     {
         ArgumentNullException.ThrowIfNull(ctx);
         ArgumentNullException.ThrowIfNull(networkEvents);
 
         ctx.CurrentLoaderIds[pageId] = loaderId;
         ctx.NavEventsEmitted.Add(pageId);
+
+        // A document.open()/close() during the navigation belongs to a document this
+        // navigation's own lifecycle already announces; reporting it under the loader
+        // would replay a load the client has just been told about.
+        ctx.GetPage(pageId)?.TakeScriptDocumentLoads();
         string? es = sessionId;
         double ts = Timestamp();
 
         // Real Chrome uses the navigation's loaderId as the main document's request id,
         // and Puppeteer/Playwright identify the navigation response via
         // `requestId === loaderId && type === "Document"` (issue #189).
+        int? navIndex = MainDocumentIndex(networkEvents, pageUrl);
         var navRequestIds = new List<string>(networkEvents.Count);
-        bool navSeen = false;
-        foreach (NetworkEvent networkEvent in networkEvents)
-        {
-            if (!navSeen
-                && string.Equals(networkEvent.ResourceType, "Document", StringComparison.Ordinal)
-                && string.Equals(networkEvent.Url, pageUrl, StringComparison.Ordinal))
-            {
-                navSeen = true;
-                navRequestIds.Add(loaderId);
-            }
-            else
-            {
-                navRequestIds.Add(networkEvent.RequestId);
-            }
-        }
-
-        int? navIndex = null;
         for (int i = 0; i < networkEvents.Count; i++)
         {
-            if (string.Equals(networkEvents[i].ResourceType, "Document", StringComparison.Ordinal)
-                && string.Equals(networkEvents[i].Url, pageUrl, StringComparison.Ordinal))
-            {
-                navIndex = i;
-                break;
-            }
+            navRequestIds.Add(i == navIndex ? loaderId : networkEvents[i].RequestId);
         }
 
         // The main resource's body is stored under its internal request id, but the client
@@ -290,14 +275,7 @@ public static partial class Page
         // BEFORE `Page.frameNavigated` (issue #190).
         if (navIndex is { } mainIndex)
         {
-            NetworkEvent networkEvent = networkEvents[mainIndex];
-            ctx.PendingEvents.Add(new CdpEvent
-            {
-                Method = "Network.requestWillBeSent",
-                Params = RequestWillBeSent(
-                    navRequestIds[mainIndex], loaderId, pageUrl, networkEvent, frameId, "other"),
-                SessionId = es,
-            });
+            EmitDocumentRequests(ctx, es, loaderId, frameId, networkEvents[mainIndex]);
         }
 
         IReadOnlyList<ExecutionContextRecord> contexts =
@@ -358,7 +336,10 @@ public static partial class Page
                         ["requestId"] = rid,
                         ["request"] = new JsonObject
                         {
-                            ["url"] = networkEvent.Url,
+                            // The request as first sent: before redirects, as it always was.
+                            ["url"] = networkEvent.Redirects.Count != 0
+                                ? networkEvent.Redirects[0].Url
+                                : networkEvent.Url,
                             ["method"] = networkEvent.Method,
                             ["headers"] = Headers(networkEvent.Headers),
                         },
@@ -399,33 +380,47 @@ public static partial class Page
             });
         }
 
-        var phase3 = new List<CdpEvent>
+        // A document the navigation deadline left before its DOMContentLoaded or load
+        // (Page.LoadAbandoned) is announced only as far as it got, as Chromium announces a
+        // document whose load has not happened yet: the client's own waitUntil and timeout
+        // decide. Claiming a load that never ran would hand the client a page whose
+        // scripts were cut off mid-way as if it had finished.
+        var phase3 = new List<CdpEvent>();
+        if (readiness >= DocumentReadiness.DomContentLoaded)
         {
-            new()
+            phase3.Add(new CdpEvent
             {
                 Method = "Page.lifecycleEvent",
                 Params = LifecycleEvent(frameId, loaderId, "DOMContentLoaded", ts),
                 SessionId = es,
-            },
-            new()
+            });
+            phase3.Add(new CdpEvent
             {
                 Method = "Page.domContentEventFired",
                 Params = new JsonObject { ["timestamp"] = JsonValue.Create(ts) },
                 SessionId = es,
-            },
-            new()
-            {
-                Method = "Page.lifecycleEvent",
-                Params = LifecycleEvent(frameId, loaderId, "load", ts),
-                SessionId = es,
-            },
-            new()
-            {
-                Method = "Page.loadEventFired",
-                Params = new JsonObject { ["timestamp"] = JsonValue.Create(ts) },
-                SessionId = es,
-            },
-        };
+            });
+        }
+
+        if (readiness < DocumentReadiness.Loaded)
+        {
+            ctx.PendingEvents.AddRange(phase3);
+            ctx.PendingEvents.Add(TargetInfoChanged(ctx, pageId, pageUrl));
+            return;
+        }
+
+        phase3.Add(new CdpEvent
+        {
+            Method = "Page.lifecycleEvent",
+            Params = LifecycleEvent(frameId, loaderId, "load", ts),
+            SessionId = es,
+        });
+        phase3.Add(new CdpEvent
+        {
+            Method = "Page.loadEventFired",
+            Params = new JsonObject { ["timestamp"] = JsonValue.Create(ts) },
+            SessionId = es,
+        });
         if (reachedNetworkIdle || waitUntil is WaitUntil.Load or WaitUntil.DomContentLoaded)
         {
             double idleTs = Timestamp();
@@ -569,6 +564,105 @@ public static partial class Page
         }
     }
 
+    /// <summary>
+    /// The index of the navigation's own document among <paramref name="networkEvents"/>,
+    /// or null when it is not there.
+    /// </summary>
+    /// <remarks>
+    /// The page marks its document request (<see cref="NetworkEvent.IsNavigation"/>). The
+    /// URL match is the fallback for an event list built without the mark. Matching on the
+    /// URL alone found nothing after a redirect, because the page URL is the final one,
+    /// and then no request carried the loader id: <c>page.goto()</c> resolved to null for
+    /// every site that redirects (<c>reddit.com</c> to <c>www.reddit.com</c>). The Rust
+    /// tree has the same gap; this is a fix against Chromium.
+    /// </remarks>
+    internal static int? MainDocumentIndex(IReadOnlyList<NetworkEvent> networkEvents, string pageUrl)
+    {
+        for (int i = 0; i < networkEvents.Count; i++)
+        {
+            if (networkEvents[i].IsNavigation)
+            {
+                return i;
+            }
+        }
+
+        for (int i = 0; i < networkEvents.Count; i++)
+        {
+            if (string.Equals(networkEvents[i].ResourceType, "Document", StringComparison.Ordinal)
+                && string.Equals(networkEvents[i].Url, pageUrl, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The main document's <c>Network.requestWillBeSent</c> events: one per hop of its
+    /// redirect chain, all under the loader id, each after the first carrying the
+    /// response that redirected to it, as Chromium reports a redirected navigation.
+    /// </summary>
+    private static void EmitDocumentRequests(
+        CdpContext ctx,
+        string? sessionId,
+        string loaderId,
+        string frameId,
+        NetworkEvent document)
+    {
+        JsonObject? redirectResponse = null;
+        foreach (NetworkRedirect hop in document.Redirects)
+        {
+            ctx.PendingEvents.Add(new CdpEvent
+            {
+                Method = "Network.requestWillBeSent",
+                Params = DocumentRequest(loaderId, hop.Url, document, frameId, redirectResponse),
+                SessionId = sessionId,
+            });
+            redirectResponse = ResponseObject(hop.Url, hop.Status, hop.Headers);
+        }
+
+        ctx.PendingEvents.Add(new CdpEvent
+        {
+            Method = "Network.requestWillBeSent",
+            Params = DocumentRequest(loaderId, document.Url, document, frameId, redirectResponse),
+            SessionId = sessionId,
+        });
+    }
+
+    private static JsonObject DocumentRequest(
+        string loaderId,
+        string url,
+        NetworkEvent document,
+        string frameId,
+        JsonObject? redirectResponse)
+    {
+        var request = new JsonObject
+        {
+            ["requestId"] = loaderId,
+            ["loaderId"] = loaderId,
+            ["documentURL"] = url,
+            ["request"] = new JsonObject
+            {
+                ["url"] = url,
+                ["method"] = document.Method,
+                ["headers"] = Headers(document.Headers),
+            },
+            ["timestamp"] = JsonValue.Create(document.Timestamp),
+            ["wallTime"] = JsonValue.Create(document.Timestamp),
+            ["initiator"] = new JsonObject { ["type"] = "other" },
+            ["type"] = document.ResourceType,
+            ["frameId"] = frameId,
+        };
+        if (redirectResponse is not null)
+        {
+            request["redirectResponse"] = redirectResponse;
+            request["redirectHasExtraInfo"] = false;
+        }
+
+        return request;
+    }
+
     private static JsonObject LifecycleEvent(string frameId, string loaderId, string name, double ts) =>
         new()
         {
@@ -625,17 +719,23 @@ public static partial class Page
             ["loaderId"] = loaderId,
             ["timestamp"] = JsonValue.Create(networkEvent.Timestamp),
             ["type"] = networkEvent.ResourceType,
-            ["response"] = new JsonObject
-            {
-                ["url"] = networkEvent.Url,
-                ["status"] = networkEvent.Status,
-                ["statusText"] = "",
-                ["headers"] = Headers(networkEvent.ResponseHeaders),
-                ["mimeType"] = networkEvent.ResponseHeaders.TryGetValue("content-type", out string? mime)
-                    ? mime
-                    : string.Empty,
-            },
+            ["response"] = ResponseObject(networkEvent.Url, networkEvent.Status, networkEvent.ResponseHeaders),
             ["frameId"] = frameId,
+        };
+
+    private static JsonObject ResponseObject(
+        string url,
+        int status,
+        IReadOnlyDictionary<string, string> headers) =>
+        new()
+        {
+            ["url"] = url,
+            ["status"] = status,
+            ["statusText"] = "",
+            ["headers"] = Headers(headers),
+            ["mimeType"] = headers.TryGetValue("content-type", out string? mime)
+                ? mime
+                : string.Empty,
         };
 
     private static JsonObject LoadingFinished(string requestId, NetworkEvent networkEvent) => new()
@@ -904,6 +1004,12 @@ public static partial class Page
         }
 
         bool reachedNetworkIdle = page.Lifecycle.IsNetworkIdle();
+        if (page.LoadAbandoned)
+        {
+            CdpLog.Warn(
+                $"navigation deadline passed after the document committed; reporting it as far as it got ({page.Readiness})");
+        }
+
         // Fold in script-initiated requests (fetch/XHR/dynamic resource) so they emit as
         // Network events alongside static subresources (#406).
         page.SyncJsNetworkEvents();
@@ -921,7 +1027,8 @@ public static partial class Page
             pageId,
             networkEvents,
             waitUntil,
-            reachedNetworkIdle);
+            reachedNetworkIdle,
+            page.Readiness);
 
         return new JsonObject
         {
@@ -1339,7 +1446,8 @@ public static partial class Page
                         pageId,
                         networkEvents,
                         WaitUntil.DomContentLoaded,
-                        reachedIdle);
+                        reachedIdle,
+                        navigating.Readiness);
                 }
 
                 return DomainResult.Empty();

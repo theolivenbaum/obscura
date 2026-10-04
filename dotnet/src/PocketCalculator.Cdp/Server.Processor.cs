@@ -136,6 +136,7 @@ public static partial class CdpServer
                     Dispatcher.DrainRuntimeEvents(ctx);
                     Dispatcher.DrainBindingCalls(ctx);
                     Dispatcher.DrainFrameEvents(ctx);
+                    Dispatcher.DrainDocumentLoads(ctx);
                     ForwardPendingEvents(ctx, connectionReplyTx);
                     if (connectionReplyTx is { } pumpReply &&
                         TakeLivePendingNavigation(ctx) is { } pendingNav)

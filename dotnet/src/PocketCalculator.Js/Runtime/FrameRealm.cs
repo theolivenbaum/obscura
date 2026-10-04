@@ -330,12 +330,10 @@ public sealed class FrameRealm : IDisposable
             State.PendingStyleMutations.Clear();
             State.ResolvedScroll = null;
         }
+        // visualViewport's width and height follow innerWidth/innerHeight (read-only
+        // VisualViewport attributes in bootstrap.js, as in Chromium).
         ExecuteScript(
-            $"globalThis.innerWidth={Format(w)};globalThis.innerHeight={Format(h)};"
-            + "if(globalThis.visualViewport){"
-            + $"globalThis.visualViewport.width={Format(w)};"
-            + $"globalThis.visualViewport.height={Format(h)};"
-            + "}");
+            $"globalThis.innerWidth={Format(w)};globalThis.innerHeight={Format(h)};");
     }
 
     /// <summary>

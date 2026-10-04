@@ -709,6 +709,20 @@ internal static class DomCascade
             }
 
             context.CustomProperties[id] = thisProps;
+            ComputedStyle.AdjustFormControlStyle(
+                style,
+                local,
+                string.Equals(elem.Name.Ns, Namespaces.Html, StringComparison.Ordinal),
+                string.Equals(local, "input", StringComparison.Ordinal)
+                    ? (node.GetAttribute("type") ?? "text").Trim().ToLowerInvariant()
+                    : null,
+                node.Parent is { } cascadeParent
+                    && context.Styles.TryGetValue(cascadeParent, out LayoutStyle? cascadeParentStyle)
+                    ? cascadeParentStyle.ComputedAppearance
+                    : null,
+                string.Equals(local, "select", StringComparison.Ordinal)
+                    && node.GetAttribute("multiple") is null
+                    && !(int.TryParse(node.GetAttribute("size"), out int selectSize) && selectSize > 1));
             style.IsReplacedBox |= style.ContentImage is not null;
             style.HasReplacedSizing |= style.ContentImage is not null;
             (LayoutStyle? beforePseudo,

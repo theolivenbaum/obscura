@@ -366,6 +366,8 @@ const _DOM_MUTATION_COMMANDS = _private(new Set([
   "set_attribute", "remove_attribute",
   "set_text_content", "set_inner_html", "set_inner_html_context",
   "set_fragment_html_executable", "document_write",
+  // A custom element upgrade changes what :defined matches.
+  "ce_state",
 ]));
 const _DOM_TREE_MUTATION_COMMANDS = _private(new Set([
   "append_child", "insert_before", "remove_child",
@@ -2175,12 +2177,417 @@ function _eventTargetDispatch(target, event) {
   return !event.defaultPrevented;
 }
 
-// During custom-element upgrade, HTMLElement's constructor must return the
-// already-existing element being upgraded. A class constructor cannot be
-// invoked with `.call(existingElement)`, so the registry and Element
-// constructor coordinate through the same construction-stack shape used by
-// browser custom-element implementations.
-const _customElementConstructionStack = [];
+// ---- Custom element reactions ---------------------------------------------------------------
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose registry upgraded what define()
+// found with querySelectorAll and called connectedCallback from there, and did nothing else:
+// an element that innerHTML, cloneNode, document.write or the parser made after define()
+// stayed a plain HTMLElement, and connectedCallback, disconnectedCallback and
+// attributeChangedCallback never ran on insertion, removal or an attribute change. YouTube's
+// Polymer, MSN's FAST and Reddit's faceplate components never finished booting. This is
+// HTML's model, measured against Chromium 141: a definition keeps the callbacks define()
+// read; each element has a reaction queue; a DOM method that can enqueue reactions runs them
+// before it returns ([CEReactions]), in element-queue order. As in Blink, whose fragment parser
+// creates a defined element with its upgrade already queued, innerHTML upgrades the new
+// children of a disconnected element too (the spec's inert fragment document would not).
+//
+// Every hook is behind `_ceDefCount !== 0`, so a page that defines nothing pays one compare.
+// Element state lives on the wrapper: `_ceState` (undefined for "undefined"/"uncustomized",
+// or "precustomized", "custom", "failed"), `_ceDef` and `_ceReactions`. A custom element
+// always has a wrapper, so an element with no wrapper is never custom.
+let _ceDefCount = 0;
+// Definitions with a disconnectedCallback or form association: only then does a removal scan.
+let _ceRemovalDefCount = 0;
+let _ceFormAssociatedCount = 0;
+const _ceDefs = _private(new Map());
+const _ceDefsByCtor = _private(new Map());
+const _ceWhenDefined = _private(new Map());
+let _ceDefining = false;
+// Open [CEReactions] scopes. A hook at depth 0 runs its reactions before it returns.
+let _ceDepth = 0;
+// The current element queue.
+let _ceQueue = [];
+// > 0 while the shim parses markup for a document with no browsing context (DOMParser,
+// createHTMLDocument): what that creates is not upgraded, as in Chromium.
+let _ceInert = 0;
+// > 0 while the shim creates an element for its own use (a fragment parsing context), which
+// must not run a custom element constructor.
+let _ceNoSync = 0;
+const _CE_ALREADY_CONSTRUCTED = {};
+const _arrayShift = _uncurry(Array.prototype.shift);
+const _reflectConstruct = Reflect.construct;
+
+// HTML "look up a custom element definition", for an HTML-namespace element.
+function _ceLookup(localName, isValue) {
+  let def = _ceDefs.get(localName);
+  if (def !== undefined && def.localName === localName) return def;
+  if (isValue) {
+    def = _ceDefs.get(isValue);
+    if (def !== undefined && def.localName === localName && def.name !== localName) return def;
+  }
+  return null;
+}
+// HTML "report the exception": the window's error event, then the console.
+function _ceReport(error) {
+  let text = "";
+  try {
+    text = error !== null && typeof error === "object"
+      ? String(error.name) + ": " + String(error.message)
+      : String(error);
+  } catch (_) {}
+  let prevented = false;
+  try {
+    const event = new ErrorEvent("error", { message: "Uncaught " + text, error, cancelable: true });
+    _dispatch(globalThis, event);
+    prevented = event.defaultPrevented;
+  } catch (_) {}
+  if (!prevented) { try { console.error(error); } catch (_) {} }
+}
+function _ceReactionsOf(el) {
+  let reactions = el._ceReactions;
+  if (reactions === undefined) {
+    reactions = [];
+    el._ceReactions = reactions;
+  }
+  return reactions;
+}
+// Enqueue a reaction on the element and the element on the current element queue.
+function _ceEnqueue(el, reaction) {
+  const reactions = _ceReactionsOf(el);
+  reactions[reactions.length] = reaction;
+  _ceQueue[_ceQueue.length] = el;
+}
+// HTML "enqueue a custom element callback reaction".
+function _ceCallback(el, name, args) {
+  const def = el._ceDef;
+  if (def === undefined) return;
+  const callback = def.callbacks[name];
+  if (callback === undefined) return;
+  if (name === "attributeChangedCallback" && !def.observed.has(args[0])) return;
+  _ceEnqueue(el, [1, callback, args]);
+}
+function _ceEnqueueUpgrade(el, def) { _ceEnqueue(el, [0, def]); }
+function _ceInvoke(queue) {
+  for (let i = 0; i < queue.length; i++) {
+    const el = queue[i];
+    const reactions = el._ceReactions;
+    if (reactions === undefined) continue;
+    while (reactions.length !== 0) {
+      const reaction = _arrayShift(reactions);
+      try {
+        if (reaction[0] === 0) _ceUpgrade(el, reaction[1]);
+        else _reflectApply(reaction[1], el, reaction[2]);
+      } catch (error) {
+        _ceReport(error);
+      }
+    }
+  }
+}
+function _ceFlush() {
+  while (_ceQueue.length !== 0) {
+    const queue = _ceQueue;
+    _ceQueue = [];
+    _ceInvoke(queue);
+  }
+}
+// The end of a [CEReactions] scope.
+function _ceLeave() {
+  if (--_ceDepth === 0 && _ceQueue.length !== 0) _ceFlush();
+}
+// The end of a hook: outside any scope, the reactions run now.
+function _ceDone() {
+  if (_ceDepth === 0 && _ceQueue.length !== 0) _ceFlush();
+}
+// Run page script the shim starts inside a scope (an inserted <script>) with a fresh one, as
+// its DOM calls are [CEReactions] methods of their own.
+function _ceIsolated(fn, arg) {
+  const depth = _ceDepth;
+  const queue = _ceQueue;
+  _ceDepth = 0;
+  _ceQueue = [];
+  try {
+    return fn(arg);
+  } finally {
+    if (_ceQueue.length !== 0) _ceFlush();
+    _ceDepth = depth;
+    _ceQueue = queue;
+  }
+}
+// The flat [nid, localName, isValue, ...] list of possible custom elements among the
+// shadow-including inclusive descendants of `node`, in shadow-including tree order.
+function _ceCandidates(node) {
+  return _domParse("ce_candidates", node._nid) || [];
+}
+function _ceIsUndefinedState(el) {
+  const state = el._ceState;
+  return state === undefined || state === "undefined";
+}
+// HTML "try to upgrade" for every candidate in `list` (skipping `skipNid`).
+function _ceTryUpgradeList(list, skipNid) {
+  for (let i = 0; i < list.length; i += 3) {
+    const nid = list[i];
+    if (nid === skipNid) continue;
+    const def = _ceLookup(list[i + 1], list[i + 2]);
+    if (def === null) continue;
+    let el = _cache.get(nid);
+    if (el !== undefined && !_ceIsUndefinedState(el)) continue;
+    if (el === undefined) el = _wrapEl(nid);
+    if (el) _ceEnqueueUpgrade(el, def);
+  }
+}
+// HTML removal steps for the custom elements in `list`: disconnectedCallback, and the form
+// owner reset of a form-associated one.
+function _ceDisconnectList(list, skipNid) {
+  for (let i = 0; i < list.length; i += 3) {
+    if (list[i] === skipNid) continue;
+    const el = _cache.get(list[i]);
+    if (el === undefined || el._ceState !== "custom") continue;
+    _ceCallback(el, "disconnectedCallback", []);
+    if (el._ceDef.formAssociated) _ceFormStateChanged(el);
+  }
+}
+// HTML insertion steps for custom elements, after `node` was inserted. `wasConnected` says the
+// node was connected before (a move), so its custom elements are disconnected first, as the
+// remove-then-insert does in Chromium. `connected` is the new parent's connectedness, which
+// the node now shares. Callers check `_ceDefCount !== 0`.
+function _ceInserted(node, wasConnected, connected) {
+  if (!connected && !wasConnected) return;
+  if (!(node instanceof Element) && !(node instanceof DocumentFragment)) return;
+  const list = _ceCandidates(node);
+  if (list.length === 0) return;
+  if (wasConnected && _ceRemovalDefCount !== 0) _ceDisconnectList(list, -1);
+  if (!connected) return;
+  for (let i = 0; i < list.length; i += 3) {
+    const nid = list[i];
+    const el = _cache.get(nid);
+    if (el !== undefined && el._ceState === "custom") {
+      _ceCallback(el, "connectedCallback", []);
+      if (el._ceDef.formAssociated) _ceFormStateChanged(el);
+      continue;
+    }
+    if (el !== undefined && !_ceIsUndefinedState(el)) continue;
+    const def = _ceLookup(list[i + 1], list[i + 2]);
+    if (def !== null) _ceEnqueueUpgrade(el !== undefined ? el : _wrapEl(nid), def);
+  }
+}
+// After `node` (connected before) was removed. Callers check `_ceDefCount !== 0`.
+function _ceRemoved(node) {
+  if (_ceRemovalDefCount === 0) return;
+  if (!(node instanceof Element) && !(node instanceof DocumentFragment)) return;
+  const list = _ceCandidates(node);
+  if (list.length !== 0) _ceDisconnectList(list, -1);
+}
+// New nodes under `root` that markup parsing (innerHTML, insertAdjacentHTML,
+// createContextualFragment) or cloning created: each defined one gets its upgrade queued, as
+// Blink's fragment parser and clone do.
+function _ceCreatedUnder(root, skipRoot) {
+  if (_ceInert !== 0) return;
+  const list = _ceCandidates(root);
+  if (list.length !== 0) _ceTryUpgradeList(list, skipRoot ? root._nid : -1);
+}
+// Before an attribute change: the attribute's old value when `el` is a custom element that
+// observes it (null when absent), or undefined when no attributeChangedCallback can follow.
+// `ns` null is setAttribute's qualified-name lookup, otherwise the attribute's namespace.
+function _ceObservedOld(el, localName, ns) {
+  const def = el._ceDef;
+  if (def === undefined || el._ceState !== "custom" || !def.observed.has(localName)) return undefined;
+  return ns === null
+    ? _domParse("get_attribute", el._nid, localName)
+    : _domParse("get_attribute_ns", el._nid, ns + "\0" + localName);
+}
+// After an attribute change: attributeChangedCallback when `old` is not undefined, and
+// formDisabledCallback when a disabled attribute changed.
+function _ceAttributeChanged(el, localName, old, value, ns) {
+  if (old !== undefined) _ceCallback(el, "attributeChangedCallback", [localName, old, value, ns]);
+  if (localName === "disabled" && _ceFormAssociatedCount !== 0) _ceDisabledChanged(el);
+  _ceDone();
+}
+// HTML "upgrade an element". Its attributeChangedCallback and connectedCallback reactions go
+// on the element's own queue, which the caller is draining.
+function _ceUpgrade(el, def) {
+  if (!_ceIsUndefinedState(el)) return;
+  const nid = el._nid;
+  el._ceDef = def;
+  el._ceState = "failed";
+  const reactions = _ceReactionsOf(el);
+  const changed = def.callbacks.attributeChangedCallback;
+  if (changed !== undefined && def.observed.size !== 0) {
+    const names = _domParse("attribute_names", nid) || [];
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      if (!def.observed.has(name)) continue;
+      reactions[reactions.length] = [1, changed, [name, null, _domParse("get_attribute", nid, name), null]];
+    }
+  }
+  const connected = def.callbacks.connectedCallback;
+  if (connected !== undefined && _dom("is_connected", nid) === "true") {
+    reactions[reactions.length] = [1, connected, []];
+  }
+  const stack = def.stack;
+  stack[stack.length] = el;
+  try {
+    el._ceState = "precustomized";
+    const result = _reflectConstruct(def.ctor, []);
+    if (result !== el) {
+      throw new TypeError("custom element constructors must call super() first and must not return a different object");
+    }
+  } catch (error) {
+    el._ceDef = undefined;
+    el._ceState = "failed";
+    reactions.length = 0;
+    _dom("ce_state", nid, "failed");
+    throw error;
+  } finally {
+    stack.length = stack.length - 1;
+  }
+  el._ceState = "custom";
+  _dom("ce_state", nid, "custom");
+  if (def.formAssociated) {
+    _ceResetFormOwner(el);
+    if (_ceFormDisabled(el)) {
+      el._ceDisabled = true;
+      _ceCallback(el, "formDisabledCallback", [true]);
+    }
+  }
+}
+// HTML "create an element" for an autonomous custom element with the synchronous custom
+// elements flag (createElement): construct, check the result, and on any failure report it
+// and return an HTMLUnknownElement in the "failed" state, as Chromium does.
+function _ceCreateSync(def) {
+  const prefix = "Failed to execute 'createElement' on 'Document': ";
+  try {
+    const result = _reflectConstruct(def.ctor, []);
+    if (!(result instanceof HTMLElement) || typeof result._nid !== "number") {
+      throw new TypeError(prefix + "The result must implement HTMLElement interface");
+    }
+    const nid = result._nid;
+    if ((_domParse("attribute_names", nid) || []).length !== 0) {
+      throw new DOMException(prefix + "The result must not have attributes", "NotSupportedError");
+    }
+    if (_dom("has_child_nodes", nid) === "true") {
+      throw new DOMException(prefix + "The result must not have children", "NotSupportedError");
+    }
+    if (+_dom("parent_node", nid) >= 0) {
+      throw new DOMException(prefix + "The result must not have a parent", "NotSupportedError");
+    }
+    if (_domParse("local_name", nid) !== def.localName) {
+      throw new DOMException(prefix + "The result must have the same localName", "NotSupportedError");
+    }
+    return result;
+  } catch (error) {
+    _ceReport(error);
+    const nid = +_dom("create_element", def.localName);
+    const el = _constructElement(_htmlUnknownElementClass || HTMLElement, nid);
+    el._tagName = def.localName.toUpperCase();
+    el._lname = def.localName;
+    el._ns = "http://www.w3.org/1999/xhtml";
+    el._nullNamespaceAttrs = new Map();
+    el._ceState = "failed";
+    _seedDetachedTreeState(el);
+    _cache.set(nid, el);
+    _dom("ce_state", nid, "failed");
+    return el;
+  }
+}
+// The shim interface a page class derives from: the nearest of HTMLElement, the HTML*Element
+// interfaces or Element in its prototype chain (HTML's "active function object"). Its name is
+// the one Chromium's "Failed to construct '<name>'" gives, so an undefined `class X extends
+// HTMLElement` reports HTMLElement.
+function _elementInterfaceOf(C) {
+  for (let c = C; typeof c === "function"; c = Object.getPrototypeOf(c)) {
+    if (c === Element || _nativeFns.has(c)) return c;
+  }
+  return HTMLElement;
+}
+// Form-associated custom elements: the form owner (the nearest ancestor <form>, or the one a
+// form attribute names) and the disabled state (its own disabled attribute or a disabled
+// <fieldset> ancestor), which decide formAssociatedCallback and formDisabledCallback.
+function _ceFormOwnerOf(el) {
+  const formId = _domParse("get_attribute", el._nid, "form");
+  if (formId !== null) {
+    if (_dom("is_connected", el._nid) !== "true") return null;
+    const byId = globalThis.document && globalThis.document.getElementById(formId);
+    return byId && byId.localName === "form" ? byId : null;
+  }
+  let node = el.parentNode;
+  while (node && node.nodeType === 1) {
+    if (node.localName === "form" && node.namespaceURI === "http://www.w3.org/1999/xhtml") return node;
+    node = node.parentNode;
+  }
+  return null;
+}
+function _ceResetFormOwner(el) {
+  const owner = _ceFormOwnerOf(el);
+  const previous = el._ceFormOwner === undefined ? null : el._ceFormOwner;
+  if (owner === previous) return;
+  el._ceFormOwner = owner;
+  _ceCallback(el, "formAssociatedCallback", [owner]);
+}
+// A form-associated custom element was inserted or removed: its form owner and its disabled
+// state (a <fieldset> ancestor) may have changed.
+function _ceFormStateChanged(el) {
+  _ceResetFormOwner(el);
+  const disabled = _ceFormDisabled(el);
+  if ((el._ceDisabled === true) !== disabled) {
+    el._ceDisabled = disabled;
+    _ceCallback(el, "formDisabledCallback", [disabled]);
+  }
+}
+function _ceFormDisabled(el) {
+  if (_domParse("get_attribute", el._nid, "disabled") !== null) return true;
+  let child = el;
+  let node = el.parentNode;
+  while (node && node.nodeType === 1) {
+    if (node.localName === "fieldset" && _domParse("get_attribute", node._nid, "disabled") !== null) {
+      // A descendant of the fieldset's first <legend> is not disabled by it.
+      let legend = null;
+      for (let c = node.firstElementChild; c; c = c.nextElementSibling) {
+        if (c.localName === "legend") { legend = c; break; }
+      }
+      if (!(legend && (legend === child || legend.contains(child)))) return true;
+    }
+    child = node;
+    node = node.parentNode;
+  }
+  return false;
+}
+// A disabled attribute changed on `el`: the form-associated custom elements whose disabled
+// state that changes get formDisabledCallback. Callers check `_ceFormAssociatedCount !== 0`.
+function _ceDisabledChanged(el) {
+  const ln = el.localName;
+  let list;
+  if (ln === "fieldset") list = _ceCandidates(el);
+  else if (el._ceState === "custom" && el._ceDef.formAssociated) list = [el._nid, ln, ""];
+  else return;
+  for (let i = 0; i < list.length; i += 3) {
+    const target = _cache.get(list[i]);
+    if (target === undefined || target._ceState !== "custom" || !target._ceDef.formAssociated) continue;
+    const disabled = _ceFormDisabled(target);
+    if ((target._ceDisabled === true) === disabled) continue;
+    target._ceDisabled = disabled;
+    _ceCallback(target, "formDisabledCallback", [disabled]);
+  }
+}
+// form.reset(): formResetCallback for each form-associated custom element the form owns.
+function _ceFormReset(form) {
+  if (_ceFormAssociatedCount === 0) return;
+  const list = _ceCandidates(globalThis.document);
+  for (let i = 0; i < list.length; i += 3) {
+    const el = _cache.get(list[i]);
+    if (el === undefined || el._ceState !== "custom" || !el._ceDef.formAssociated) continue;
+    if (_ceFormOwnerOf(el) === form) _ceCallback(el, "formResetCallback", []);
+  }
+  _ceDone();
+}
+// Set by _constructElement just before it runs `new C(nid)`, and consumed by the Element
+// constructor. Every wrapper the shim builds for a node goes through it, so a page-side
+// `new HTMLDivElement()` (which never sets it) can be told apart and refused, as Chromium
+// refuses it. Nothing runs between the set and the read: a derived constructor's own code
+// only runs after super() has returned.
+let _elementConstructKey = false;
+function _constructElement(C, nid) {
+  _elementConstructKey = true;
+  try { return new C(nid); } finally { _elementConstructKey = false; }
+}
 
 function __prepareInsertedScript(script) {
   if (!__obscuraCore.ops.op_script_try_start(script._nid)) return;
@@ -2315,6 +2722,12 @@ function __prepareInsertedSubtree(root) {
       seen.add(script._nid);
     }
   }
+  if (scripts.length === 0) return;
+  // A script that runs inside a DOM method runs its own [CEReactions] scopes.
+  if (_ceDepth !== 0) _ceIsolated(__runInsertedScripts, scripts);
+  else __runInsertedScripts(scripts);
+}
+function __runInsertedScripts(scripts) {
   for (const script of scripts) __prepareInsertedScript(script);
 }
 
@@ -2383,6 +2796,9 @@ class Node {
   }
   get textContent() { return _domParse("text_content", this._nid) ?? ""; }
   set textContent(v) {
+    // The custom elements among the children about to go, while they are still connected.
+    const ceRemoved = _ceDefCount !== 0 && _ceRemovalDefCount !== 0 && this.isConnected
+      ? _ceCandidates(this) : null;
     const oldChildren = _domParse("child_nodes", this._nid) || [];
     for (const c of oldChildren) {
       const child = _wrap(c);
@@ -2400,6 +2816,10 @@ class Node {
     // libs (intersection-driven lazy load, content sync) silently stall.
     if (_hostVars.__mutationObservers?.length) {
       _hostVars.__notifyMutation('childList', this._nid, added, oldChildren);
+    }
+    if (ceRemoved !== null && ceRemoved.length !== 0) {
+      _ceDisconnectList(ceRemoved, this._nid);
+      _ceDone();
     }
   }
   get nodeValue() {
@@ -2447,12 +2867,20 @@ class Node {
     if (!c) return c;
     if (c instanceof DocumentFragment) {
       const children = Array.from(c.childNodes);
-      for (const child of children) this.appendChild(child);
+      // One [CEReactions] scope for the whole fragment, so each inserted custom element's
+      // connectedCallback sees its later siblings already in place, as in Chromium.
+      _ceDepth++;
+      try {
+        for (const child of children) this.appendChild(child);
+      } finally {
+        _ceLeave();
+      }
       return c;
     }
     if (c._shadowParent) c._shadowParent.removeChild(c);
     else if (c.parentNode) _detachStyleSheetsInSubtree(c);
     const parentConnected = this.isConnected;
+    const ceWasConnected = _ceDefCount !== 0 && c.isConnected;
     const inserted = _dom("append_child", this._nid, c._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -2467,6 +2895,10 @@ class Node {
     __prepareInsertedSubtree(c);
     if (c instanceof Element && c.tagName === 'LINK') {
       _loadLinkedStylesheet(c);
+    }
+    if (_ceDefCount !== 0) {
+      _ceInserted(c, ceWasConnected, parentConnected);
+      _ceDone();
     }
     return c;
   }
@@ -2494,6 +2926,10 @@ class Node {
     _detachStyleSheetsInSubtree(c);
     _reconcileWindowNamedProperties(removedWindowNames);
     if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('childList', this._nid, [], [c._nid]);
+    if (_ceDefCount !== 0 && parentConnected) {
+      _ceRemoved(c);
+      _ceDone();
+    }
     return c;
   }
   replaceChild(newChild, oldChild) {
@@ -2507,13 +2943,19 @@ class Node {
     if (newChild === oldChild) return oldChild;
     if (newChild instanceof DocumentFragment) {
       const children = Array.from(newChild.childNodes);
-      for (const child of children) this.insertBefore(child, oldChild);
-      this.removeChild(oldChild);
+      _ceDepth++;
+      try {
+        for (const child of children) this.insertBefore(child, oldChild);
+        this.removeChild(oldChild);
+      } finally {
+        _ceLeave();
+      }
       return oldChild;
     }
     if (newChild._shadowParent) newChild._shadowParent.removeChild(newChild);
     else if (newChild.parentNode) _detachStyleSheetsInSubtree(newChild);
     const parentConnected = this.isConnected;
+    const ceWasConnected = _ceDefCount !== 0 && newChild.isConnected;
     const removedWindowNames = _windowNamedNamesInTree(oldChild);
     const inserted = _dom("insert_before", newChild._nid, oldChild._nid) === "true";
     if (!inserted) {
@@ -2539,6 +2981,12 @@ class Node {
     if (newChild instanceof Element && newChild.tagName === 'LINK') {
       _loadLinkedStylesheet(newChild);
     }
+    if (_ceDefCount !== 0) {
+      // HTML replaces by removing the old child first, so its reactions come first.
+      if (parentConnected) _ceRemoved(oldChild);
+      _ceInserted(newChild, ceWasConnected, parentConnected);
+      _ceDone();
+    }
     return oldChild;
   }
   insertBefore(n, ref) {
@@ -2553,12 +3001,18 @@ class Node {
     if (n === ref) return n;
     if (n instanceof DocumentFragment) {
       const children = Array.from(n.childNodes);
-      for (const child of children) this.insertBefore(child, ref);
+      _ceDepth++;
+      try {
+        for (const child of children) this.insertBefore(child, ref);
+      } finally {
+        _ceLeave();
+      }
       return n;
     }
     if (n._shadowParent) n._shadowParent.removeChild(n);
     else if (n.parentNode) _detachStyleSheetsInSubtree(n);
     const parentConnected = this.isConnected;
+    const ceWasConnected = _ceDefCount !== 0 && n.isConnected;
     const inserted = _dom("insert_before", n._nid, ref._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -2576,6 +3030,10 @@ class Node {
     if (n instanceof Element && n.tagName === 'LINK') {
       _loadLinkedStylesheet(n);
     }
+    if (_ceDefCount !== 0) {
+      _ceInserted(n, ceWasConnected, parentConnected);
+      _ceDone();
+    }
     return n;
   }
   // DEVIATION from crates/obscura-js, which answers only for strict descendants: DOM's
@@ -2590,7 +3048,14 @@ class Node {
   cloneNode(deep) {
     const t = this.nodeType;
     if (t === 1) {
-      return _wrap(+_dom("clone_node", this._nid, deep ? "true" : "false"));
+      const clone = _wrap(+_dom("clone_node", this._nid, deep ? "true" : "false"));
+      // HTML clones create each element with its upgrade queued, so the constructors run
+      // when cloneNode returns, over the finished copy.
+      if (_ceDefCount !== 0 && clone) {
+        _ceCreatedUnder(clone, false);
+        _ceDone();
+      }
+      return clone;
     }
     // Clone structurally via real DOM nodes rather than round-tripping through a
     // throwaway <div>.innerHTML: the fragment parser discards elements that are
@@ -3218,9 +3683,16 @@ function _parseHTMLFragment(html, context) {
   html = String(html == null ? '' : html);
   const ns = context && context.nodeType === 1 ? context.namespaceURI : null;
   const tag = context && context.nodeType === 1 ? context.localName : 'body';
-  const tmp = ns && ns !== 'http://www.w3.org/1999/xhtml'
-    ? document.createElementNS(ns, tag)
-    : document.createElement(tag);
+  // The context element is the shim's own: a custom element name must not construct one.
+  _ceNoSync++;
+  let tmp;
+  try {
+    tmp = ns && ns !== 'http://www.w3.org/1999/xhtml'
+      ? document.createElementNS(ns, tag)
+      : document.createElement(tag);
+  } finally {
+    _ceNoSync--;
+  }
   tmp.innerHTML = html;
   const out = [];
   let child;
@@ -3587,23 +4059,60 @@ function _animationsForTarget(target) {
 }
 
 class Element extends Node {
-  constructor(nid) {
-    const entry = _customElementConstructionStack[_customElementConstructionStack.length - 1];
-    const matchesUpgrade = entry && new.target === entry.constructor;
-    const upgrading = matchesUpgrade && !entry.constructed ? entry.element : null;
-    super(upgrading ? upgrading._nid : nid);
-    if (matchesUpgrade && entry.constructed) {
-      throw new TypeError("Custom element is already being constructed");
+  // No declared parameter, so Element.length is 0 as in Chromium. The node id is the
+  // first argument of the shim's own `new C(nid)` (_constructElement).
+  constructor() {
+    if (_elementConstructKey) {
+      // The shim's own wrapper for an existing node (_constructElement).
+      _elementConstructKey = false;
+      super(arguments[0]);
+      this._style = _styleProxy(new CSSStyleDeclaration(this));
+      return;
     }
-    if (upgrading) {
-      // Keep an already-constructed marker on the stack until the outer class
-      // constructor returns. Recursive `new`/`super` calls for the same
-      // definition must not steal the element currently being upgraded.
-      entry.constructed = true;
-      Object.setPrototypeOf(upgrading, new.target.prototype);
-      return upgrading;
+    // Port addition: page script reached the constructor itself. HTML's element constructors
+    // allow that only for a defined custom element; every other interface (`new
+    // HTMLDivElement()`, an undefined subclass of HTMLElement) throws. The shim used to build
+    // a wrapper with no node behind it.
+    const def = _ceDefsByCtor.get(new.target);
+    const iface = _elementInterfaceOf(new.target);
+    if (def === undefined) {
+      throw new TypeError("Failed to construct '" + (iface.name || "HTMLElement") + "': Illegal constructor");
     }
+    if (def.name === def.localName) {
+      if (iface !== HTMLElement) {
+        throw new TypeError("Failed to construct '" + (iface.name || "HTMLElement") + "': Illegal constructor");
+      }
+    } else if (iface !== _htmlElementClassForTag(def.localName.toUpperCase())) {
+      throw new TypeError("Failed to construct '" + (iface.name || "HTMLElement")
+        + "': Illegal constructor: localName does not match the HTML element interface");
+    }
+    const stack = def.stack;
+    if (stack.length !== 0) {
+      // An upgrade (_ceUpgrade): super() returns the element being upgraded, with the
+      // definition's prototype, and leaves the already-constructed marker in its place.
+      const element = stack[stack.length - 1];
+      if (element === _CE_ALREADY_CONSTRUCTED) {
+        throw new TypeError("Failed to construct 'HTMLElement': This instance is already constructed");
+      }
+      Object.setPrototypeOf(element, new.target.prototype);
+      stack[stack.length - 1] = _CE_ALREADY_CONSTRUCTED;
+      return element;
+    }
+    // `new X()` or createElement: a new element of the definition's local name, already custom.
+    const localName = def.localName;
+    const nid = +_dom("create_element", localName);
+    super(nid);
     this._style = _styleProxy(new CSSStyleDeclaration(this));
+    this._tagName = localName.toUpperCase();
+    this._lname = localName;
+    this._ns = "http://www.w3.org/1999/xhtml";
+    this._nullNamespaceAttrs = new Map();
+    this._ceDef = def;
+    this._ceState = "custom";
+    _seedDetachedTreeState(this);
+    _cache.set(nid, this);
+    _dom("ce_state", nid, "custom");
+    if (def.name !== localName) _dom("ce_is", nid, def.name);
   }
   // Element wrappers always back a nodeType-1 node (_wrap/_wrapEl only build an
   // Element for element nodes, and node ids are never freed-and-reused), so this
@@ -3686,7 +4195,21 @@ class Element extends Node {
     if (observed) {
       oldChildren = _domParse("child_nodes", this._nid) || [];
     }
+    // The custom elements about to be removed, while they are still connected.
+    const ceRemoved = _ceDefCount !== 0 && _ceRemovalDefCount !== 0 && this.isConnected
+      ? _ceCandidates(this) : null;
     _dom("set_inner_html", this._nid, String(v ?? ""));
+    if (_ceDefCount !== 0) {
+      // As in Chromium: the new elements' upgrades (queued as the fragment parser created them)
+      // run before the old elements' disconnectedCallbacks.
+      _ceDepth++;
+      try {
+        _ceCreatedUnder(this, true);
+        if (ceRemoved !== null && ceRemoved.length !== 0) _ceDisconnectList(ceRemoved, this._nid);
+      } finally {
+        _ceDepth--;
+      }
+    }
     // HTML fragment parsing can introduce IDs without calling the JS
     // setAttribute path. Register those elements for Window named access
     // before script can synchronously read `window.someId`.
@@ -3696,6 +4219,7 @@ class Element extends Node {
       newChildren = _domParse("child_nodes", this._nid) || [];
       _hostVars.__notifyMutation('childList', this._nid, newChildren, oldChildren);
     }
+    if (_ceDefCount !== 0) _ceDone();
   }
   get outerHTML() { return _domParse("outer_html", this._nid) ?? ""; }
   // Port addition; the Rust shim has no setter, so an assignment was silently dropped. As
@@ -3713,17 +4237,23 @@ class Element extends Node {
         prefix + "This element's parent is of type '" + parent.nodeName + "', which is not an element node.",
         "NoModificationAllowedError");
     }
-    const fragment = document.createDocumentFragment();
-    for (const node of _parseHTMLFragment(v === null ? '' : String(v), parent)) fragment.appendChild(node);
-    const outer = _childListBatch;
-    const batch = _childListBatch = { target: parent._nid, added: [], removed: [] };
+    // One [CEReactions] scope: the parsed elements' upgrades, then this element's removal.
+    _ceDepth++;
     try {
-      parent.replaceChild(fragment, this);
+      const fragment = document.createDocumentFragment();
+      for (const node of _parseHTMLFragment(v === null ? '' : String(v), parent)) fragment.appendChild(node);
+      const outer = _childListBatch;
+      const batch = _childListBatch = { target: parent._nid, added: [], removed: [] };
+      try {
+        parent.replaceChild(fragment, this);
+      } finally {
+        _childListBatch = outer;
+      }
+      if (batch.added.length || batch.removed.length) {
+        _hostVars.__notifyMutation('childList', parent._nid, batch.added, batch.removed);
+      }
     } finally {
-      _childListBatch = outer;
-    }
-    if (batch.added.length || batch.removed.length) {
-      _hostVars.__notifyMutation('childList', parent._nid, batch.added, batch.removed);
+      _ceLeave();
     }
   }
   // innerText used to be an alias for textContent, so document.body.innerText
@@ -3843,6 +4373,7 @@ class Element extends Node {
       ? this.getAttribute(n)
       : null;
     const value = String(v);
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, null) : undefined;
     _dom("set_attribute", this._nid, n + "\0" + value);
     if (n === "srcdoc" && this.localName === "iframe") {
       _loadIframeSrcdoc(this);
@@ -3881,18 +4412,22 @@ class Element extends Node {
         image._imageSourceChanged();
       }
     }
+    if (_ceDefCount !== 0) _ceAttributeChanged(this, n, ceOld, value, null);
   }
   setAttributeNS(ns, n, v) {
     ns = ns == null || ns === '' ? '' : String(ns);
     n = String(n);
     const value = String(v);
     _ns_validateQualifiedName(ns, n);
+    const ceLocal = _ceDefCount !== 0 ? n.slice(n.indexOf(":") + 1) : "";
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, ceLocal, ns) : undefined;
     _dom("set_attribute_ns", this._nid, ns + "\0" + n + "\0" + value);
     // Namespace-aware writes can replace an attribute by namespace/local name
     // while changing its qualified name. Fall back to native reads afterwards
     // instead of maintaining a second, subtly different key space here.
     this._nullNamespaceAttrs = null;
     if (ns === "" && n === "style") this._style._replaceFromAttribute(value);
+    if (_ceDefCount !== 0) _ceAttributeChanged(this, ceLocal, ceOld, value, ns === "" ? null : ns);
   }
   removeAttribute(n) {
     n = _htmlAttrName(this, n);
@@ -3903,6 +4438,7 @@ class Element extends Node {
     // Removing srcdoc navigates the frame to src (port addition, Chromium 141).
     const removedSrcdoc = n === "srcdoc" && this.localName === "iframe"
       && _hostDom.getAttribute(this, "srcdoc") !== null;
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, null) : undefined;
     _dom("remove_attribute", this._nid, n);
     if (removedSrcdoc) _iframeAttributeChanged(this, n);
     if (this._nullNamespaceAttrs instanceof Map) {
@@ -3929,13 +4465,21 @@ class Element extends Node {
         image._imageSourceChanged();
       }
     }
+    // Removing an absent attribute changes nothing and has no callback.
+    if (_ceDefCount !== 0) {
+      _ceAttributeChanged(this, n, ceOld === null ? undefined : ceOld, null, null);
+    }
   }
   removeAttributeNS(ns, n) {
     ns = String(ns == null ? "" : ns);
     n = String(n);
+    const ceOld = _ceDefCount !== 0 ? _ceObservedOld(this, n, ns) : undefined;
     _dom("remove_attribute_ns", this._nid, ns + "\0" + n);
     this._nullNamespaceAttrs = null;
     if (ns === "" && n === "style") this._style._replaceFromAttribute("");
+    if (_ceDefCount !== 0) {
+      _ceAttributeChanged(this, n, ceOld === null ? undefined : ceOld, null, ns === "" ? null : ns);
+    }
   }
   hasAttribute(n) { return _elCall('getAttribute', this, [n]) !== null; }
   hasAttributes() { return this.attributes.length > 0; }
@@ -3988,26 +4532,32 @@ class Element extends Node {
     const pos = String(position).toLowerCase();
     const parent = this.parentNode;
     const context = (pos === 'beforebegin' || pos === 'afterend') ? parent : this;
-    switch (pos) {
-      case 'beforebegin':
-        if (parent) for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, this);
-        break;
-      case 'afterbegin': {
-        const first = this.firstChild;
-        for (const n of _parseHTMLFragment(html, context)) this.insertBefore(n, first);
-        break;
+    // One [CEReactions] scope over the parse and the insertions.
+    _ceDepth++;
+    try {
+      switch (pos) {
+        case 'beforebegin':
+          if (parent) for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, this);
+          break;
+        case 'afterbegin': {
+          const first = this.firstChild;
+          for (const n of _parseHTMLFragment(html, context)) this.insertBefore(n, first);
+          break;
+        }
+        case 'beforeend':
+          for (const n of _parseHTMLFragment(html, context)) this.appendChild(n);
+          break;
+        case 'afterend':
+          if (parent) { const next = this.nextSibling; for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, next); }
+          break;
+        default:
+          throw new DOMException(
+            "Failed to execute 'insertAdjacentHTML' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
+            "SyntaxError"
+          );
       }
-      case 'beforeend':
-        for (const n of _parseHTMLFragment(html, context)) this.appendChild(n);
-        break;
-      case 'afterend':
-        if (parent) { const next = this.nextSibling; for (const n of _parseHTMLFragment(html, context)) parent.insertBefore(n, next); }
-        break;
-      default:
-        throw new DOMException(
-          "Failed to execute 'insertAdjacentHTML' on 'Element': The value provided ('" + position + "') is not one of 'beforeBegin', 'afterBegin', 'beforeEnd', or 'afterEnd'.",
-          "SyntaxError"
-        );
+    } finally {
+      _ceLeave();
     }
   }
   // Like insertAdjacentHTML but inserts a Text node instead of parsing markup,
@@ -4386,9 +4936,10 @@ class Element extends Node {
     this._dialogClose(result, true);
   }
   attachInternals() {
-    const reg = (typeof customElements !== 'undefined' && customElements._registry) ? customElements._registry : null;
-    if (!reg || !reg.get(this.localName)) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to non-custom elements.", "NotSupportedError");
+    const def = _ceLookup(this.localName, null);
     if (this.getAttribute('is')) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to a customized built-in element.", "NotSupportedError");
+    if (def === null) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to non-custom elements.", "NotSupportedError");
+    if (def.disableInternals) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': ElementInternals is disabled by disabledFeature static field.", "NotSupportedError");
     if (this._internalsAttached) throw new DOMException("Failed to execute 'attachInternals' on 'HTMLElement': ElementInternals for the specified element was already attached.", "NotSupportedError");
     this._internalsAttached = true;
     return new ElementInternals(this);
@@ -5073,16 +5624,34 @@ class Element extends Node {
     });
     return this._dataset;
   }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which answers every offset*
+  // value from getBoundingClientRect(): offsetLeft/offsetTop moved with scrolling and
+  // transforms and were not relative to an offsetParent (which did not exist), html and
+  // body reported the viewport, and once that rect carries Chromium's subpixel
+  // LayoutUnits none of them were integers any more. With the render op present they
+  // come from the layout (op_layout_offset); the old answers remain the fallback for a
+  // build without it.
+  _renderOffsetMetrics() {
+    const op = __obscuraCore.ops.op_layout_offset;
+    if (typeof op !== 'function') return undefined;
+    try {
+      const raw = op(String(this._nid | 0));
+      return raw ? _JSONparse(raw) : null;
+    } catch (_error) {}
+    return null;
+  }
   get offsetWidth() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.width : 0;
     if (this._isViewportRoot()) return globalThis.innerWidth || 1280;
-    return this.getBoundingClientRect().width;
+    return Math.round(this.getBoundingClientRect().width);
   }
   get offsetHeight() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.height : 0;
     if (this._isViewportRoot()) return globalThis.innerHeight || 720;
-    return this.getBoundingClientRect().height;
+    return Math.round(this.getBoundingClientRect().height);
   }
-  get offsetTop() { return this.getBoundingClientRect().top; }
-  get offsetLeft() { return this.getBoundingClientRect().left; }
   // In standards mode documentElement exposes viewport client geometry.
   // Puppeteer's #clickableBox clips boxes to those dimensions; returning the
   // non-render fallback 100x20 there makes every element appear off-screen.
@@ -5140,19 +5709,9 @@ class Element extends Node {
     } catch (_error) {}
     return null;
   }
+  // A DOMRect (see the global interfaces near the end of this file).
   _rectFromRenderGeometry(geometry) {
-    const x = geometry.x, y = geometry.y;
-    const width = geometry.width, height = geometry.height;
-    const rect = {
-      x, y, width, height,
-      top: y, right: x + width, bottom: y + height, left: x,
-      toJSON() { return this; },
-    };
-    Object.defineProperty(rect, "__obscuraViewportFixed", {
-      value: !!geometry.viewportFixed,
-      enumerable: false,
-    });
-    return rect;
+    return _makeDOMRect(geometry.x, geometry.y, geometry.width, geometry.height, !!geometry.viewportFixed);
   }
   get scrollWidth() {
     if (this._isViewportRoot()) {
@@ -5315,11 +5874,7 @@ class Element extends Node {
       if (geometry) return this._rectFromRenderGeometry(geometry);
       // CSSOM View: an element without an associated box has an all-zero
       // bounding rect. Do not leak the non-render 100x20 compatibility cell.
-      return {
-        x: 0, y: 0, width: 0, height: 0,
-        top: 0, right: 0, bottom: 0, left: 0,
-        toJSON() { return this; },
-      };
+      return _makeDOMRect(0, 0, 0, 0, false);
     }
     // Default (non-render) builds keep viewport-sized roots. Without this
     // synthetic fallback every hit test against them clips down to a 100x20
@@ -5327,11 +5882,7 @@ class Element extends Node {
     if (this._isViewportRoot()) {
       const vw = globalThis.innerWidth || 1280;
       const vh = globalThis.innerHeight || 720;
-      return {
-        x: 0, y: 0, width: vw, height: vh,
-        top: 0, right: vw, bottom: vh, left: 0,
-        toJSON() { return this; },
-      };
+      return _makeDOMRect(0, 0, vw, vh, false);
     }
     // No layout engine (default build): synthesize a deterministic position
     // from the node id so Playwright's actionability polling still gets a
@@ -5344,11 +5895,7 @@ class Element extends Node {
     const row = (((cell * 13) | 0) >> 0) % rowsPerScreen;
     const x = 10 + col * GX;
     const y = 10 + row * GY;
-    return {
-      x, y, width: CW, height: CH,
-      top: y, right: x + CW, bottom: y + CH, left: x,
-      toJSON() { return this; },
-    };
+    return _makeDOMRect(x, y, CW, CH, false);
   }
   getClientRects() {
     const geometry = this._renderBoxGeometry();
@@ -5394,7 +5941,7 @@ class Element extends Node {
     const rect = this.getBoundingClientRect();
     // A viewport-fixed subtree is already expressed in the viewport's
     // coordinate space and cannot be brought closer by moving the document.
-    if (rect.__obscuraViewportFixed) return;
+    if (_rectIsViewportFixed(rect)) return;
 
     let block = "start", inline = "nearest";
     if (arg === false) block = "end";
@@ -5499,19 +6046,197 @@ class Element extends Node {
   }
   getAnimations() { return _animationsForTarget(this); }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
-  append(...nodes) { for (const n of _convertNodes(nodes)) this.appendChild(n); }
+  // Each of these is one [CEReactions] scope, so the custom element reactions of all the
+  // nodes run once every node is in place, as in Chromium.
+  append(...nodes) {
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) this.appendChild(n);
+    } finally {
+      _ceLeave();
+    }
+  }
   prepend(...nodes) {
-    const ref = this.firstChild;
-    for (const n of _convertNodes(nodes)) {
-      if (ref) this.insertBefore(n, ref); else this.appendChild(n);
+    _ceDepth++;
+    try {
+      const ref = this.firstChild;
+      for (const n of _convertNodes(nodes)) {
+        if (ref) this.insertBefore(n, ref); else this.appendChild(n);
+      }
+    } finally {
+      _ceLeave();
     }
   }
   replaceChildren(...nodes) {
-    const converted = _convertNodes(nodes);
-    let c;
-    while ((c = this.firstChild)) this.removeChild(c);
-    for (const n of converted) this.appendChild(n);
+    _ceDepth++;
+    try {
+      const converted = _convertNodes(nodes);
+      let c;
+      while ((c = this.firstChild)) this.removeChild(c);
+      for (const n of converted) this.appendChild(n);
+    } finally {
+      _ceLeave();
+    }
   }
+}
+
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where HTMLElement and most HTML*Element
+// interfaces are `= Element` aliases. That made every element an instance of every one of
+// them (a <div> was an HTMLScriptElement, <head> an HTMLIFrameElement), and a page that
+// patched HTMLScriptElement.prototype.setAttribute patched it for all elements. Here
+// HTMLElement is its own interface between Element and the HTML element interfaces, as
+// in Chromium, so SVG and null-namespace elements are not instances of it. The per-tag
+// interfaces are defined with the others further down (_htmlTagClasses).
+class HTMLElement extends Element {
+  // Port additions: HTMLElement members the shim had no form of (Chromium 141).
+  get outerText() { return this.innerText; }
+  set outerText(v) {
+    const parent = this.parentNode;
+    if (!parent || parent.nodeType === 9) {
+      throw new DOMException("Failed to set the 'outerText' property on 'HTMLElement': The element has no parent.", "NoModificationAllowedError");
+    }
+    this.replaceWith(document.createTextNode(v == null ? "" : String(v)));
+  }
+  get contentEditable() {
+    const v = this.getAttribute("contenteditable");
+    if (v === null) return "inherit";
+    const lc = v.toLowerCase();
+    if (lc === "" || lc === "true") return "true";
+    if (lc === "false" || lc === "plaintext-only") return lc;
+    return "inherit";
+  }
+  set contentEditable(v) {
+    const lc = String(v).toLowerCase();
+    if (lc === "inherit") this.removeAttribute("contenteditable");
+    else if (lc === "true" || lc === "false" || lc === "plaintext-only") this.setAttribute("contenteditable", lc);
+    else throw new DOMException("Failed to set the 'contentEditable' property on 'HTMLElement': The value provided ('" + String(v) + "') is not one of 'true', 'false', 'plaintext-only', or 'inherit'.", "SyntaxError");
+  }
+  // The nearest contenteditable attribute with a valid value decides, and designMode
+  // makes the whole document editable.
+  get isContentEditable() {
+    for (let el = this; el && el.nodeType === 1; el = el.parentNode) {
+      const v = el.getAttribute("contenteditable");
+      if (v === null) continue;
+      const lc = v.toLowerCase();
+      if (lc === "" || lc === "true" || lc === "plaintext-only") return true;
+      if (lc === "false") return false;
+    }
+    return String(document.designMode).toLowerCase() === "on";
+  }
+  get inert() { return this.hasAttribute("inert"); }
+  set inert(v) { if (v) this.setAttribute("inert", ""); else this.removeAttribute("inert"); }
+  // true/false attribute, else true for an image and a link with an href.
+  get draggable() {
+    const v = this.getAttribute("draggable");
+    const lc = v === null ? "" : v.toLowerCase();
+    if (lc === "true") return true;
+    if (lc === "false") return false;
+    const ln = this.localName;
+    return ln === "img" || (ln === "a" && this.hasAttribute("href"));
+  }
+  set draggable(v) { this.setAttribute("draggable", v ? "true" : "false"); }
+  // Inherited from the nearest ancestor that says, true by default.
+  get spellcheck() {
+    for (let el = this; el && el.nodeType === 1; el = el.parentNode) {
+      const v = el.getAttribute("spellcheck");
+      if (v === null) continue;
+      const lc = v.toLowerCase();
+      if (lc === "" || lc === "true") return true;
+      if (lc === "false") return false;
+    }
+    return true;
+  }
+  set spellcheck(v) { this.setAttribute("spellcheck", v ? "true" : "false"); }
+  get translate() {
+    for (let el = this; el && el.nodeType === 1; el = el.parentNode) {
+      const v = el.getAttribute("translate");
+      if (v === null) continue;
+      const lc = v.toLowerCase();
+      if (lc === "" || lc === "yes") return true;
+      if (lc === "no") return false;
+    }
+    return true;
+  }
+  set translate(v) { this.setAttribute("translate", v ? "yes" : "no"); }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which has no offsetParent and gives
+  // offsetTop/offsetLeft as getBoundingClientRect()'s viewport position. Chromium measures
+  // them from the offsetParent's padding edge, or from the document when that is <body>,
+  // and code that sums offsetTop up the offsetParent chain needs both halves to agree.
+  // The layout answers all three (op_layout_offset, see _renderOffsetMetrics); the
+  // script-side walk below is the fallback for a build without the render op.
+  get offsetParent() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) {
+      return metrics && metrics.parent !== null && metrics.parent !== undefined
+        ? _wrapEl(metrics.parent) : null;
+    }
+    const p = _offsetParentOf(this);
+    return p === undefined ? null : p;
+  }
+  get offsetTop() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.top : 0;
+    return _offsetCoordinate(this, true);
+  }
+  get offsetLeft() {
+    const metrics = this._renderOffsetMetrics();
+    if (metrics !== undefined) return metrics ? metrics.left : 0;
+    return _offsetCoordinate(this, false);
+  }
+}
+
+// CSSOM View's offsetParent: undefined when the element has no box (detached, or
+// display:none on it or an ancestor), null for <body>, <html> and a fixed-position
+// element, else the nearest positioned ancestor, the nearest td/th/table when the element
+// itself is not positioned, or <body>.
+function _offsetParentOf(el) {
+  if (!el.isConnected) return undefined;
+  const ln = el.localName;
+  const own = _innerTextStyle(el);
+  if (own && own.display === "none") return undefined;
+  const position = own ? String(own.position || "") : "";
+  const selfStatic = position === "" || position === "static";
+  let found = (ln === "body" || ln === "html" || position === "fixed") ? null : undefined;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    const s = _innerTextStyle(a);
+    if (s && s.display === "none") return undefined;
+    if (found !== undefined) continue;
+    const aln = a.localName;
+    const pos = s ? String(s.position || "") : "";
+    const transform = s ? String(s.transform || "") : "";
+    if (aln === "body" || (pos !== "" && pos !== "static") || (transform !== "" && transform !== "none")
+        || (selfStatic && (aln === "td" || aln === "th" || aln === "table"))) {
+      found = a;
+    }
+  }
+  return found === undefined ? null : found;
+}
+function _offsetCoordinate(el, vertical) {
+  if (el.localName === "body") return 0;
+  const parent = _offsetParentOf(el);
+  if (parent === undefined) return 0;
+  const rect = el.getBoundingClientRect();
+  const edge = vertical ? rect.top : rect.left;
+  const own = _innerTextStyle(el);
+  if (parent === null) {
+    // A fixed element is placed against the viewport; anything else against the document.
+    if (own && own.position === "fixed") return Math.round(edge);
+    return Math.round(edge + (vertical ? (globalThis.scrollY || 0) : (globalThis.scrollX || 0)));
+  }
+  if (parent.localName === "body") {
+    return Math.round(edge + (vertical ? (globalThis.scrollY || 0) : (globalThis.scrollX || 0)));
+  }
+  const prect = parent.getBoundingClientRect();
+  const ps = _innerTextStyle(parent);
+  const border = ps ? parseFloat(vertical ? ps.borderTopWidth : ps.borderLeftWidth) || 0 : 0;
+  // A scrolled container between the element and its offsetParent moves the element's box
+  // but not its offset.
+  let scrolled = 0;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    scrolled += (vertical ? a.scrollTop : a.scrollLeft) || 0;
+    if (a === parent) break;
+  }
+  return Math.round(edge - (vertical ? prect.top : prect.left) - border + scrolled);
 }
 
 // WHATWG "convert nodes into a node": a Node argument passes through, anything
@@ -5703,7 +6428,8 @@ function _makeXPathResult(type, nodes) {
     ? XPathResult.UNORDERED_NODE_ITERATOR_TYPE
     : requested;
   let iter = 0;
-  return {
+  // An XPathResult (see the global interfaces near the end of this file).
+  return _wrapXPathResult({
     resultType,
     singleNodeValue: nodes[0] || null,
     snapshotLength: nodes.length,
@@ -5713,7 +6439,7 @@ function _makeXPathResult(type, nodes) {
     numberValue: nodes.length,
     stringValue: nodes[0]?.textContent || "",
     booleanValue: nodes.length > 0,
-  };
+  });
 }
 
 // `document.domain` exposes the document's effective host.  Keep the relaxed
@@ -5869,14 +6595,29 @@ class Document extends Node {
   evaluate(expression, contextNode, namespaceResolver, type, result) {
     return _makeXPathResult(type, _xpathFindNodes(expression, contextNode || this));
   }
-  createElement(t) {
+  createElement(t, options) {
     const localName = String(t).toLowerCase();
+    // ElementCreationOptions' is (or the legacy string form): a customized built-in, or an is
+    // value the element keeps and serializes.
+    let is = null;
+    if (options !== undefined && options !== null) {
+      if (typeof options === "string") is = options;
+      else if (typeof options === "object" && options.is !== undefined) is = String(options.is);
+    }
+    let customized = null;
+    if (_ceDefCount !== 0 && _ceNoSync === 0) {
+      const def = _ceLookup(localName, is);
+      if (def !== null) {
+        if (def.name === def.localName) return _ceCreateSync(def);
+        customized = def;
+      }
+    }
     const nid = +_dom("create_element", localName);
     const C = _elementClassForKnownName(
       "http://www.w3.org/1999/xhtml",
       localName,
     );
-    const el = new C(nid);
+    const el = _constructElement(C, nid);
     // This node was just created from values already known to JS. Seed its
     // immutable metadata instead of rediscovering it through native calls in
     // hydration's tag/local-name checks.
@@ -5890,8 +6631,16 @@ class Document extends Node {
       el._templateContent = this.createDocumentFragment();
       el._templateContent._fragmentContext = 'template';
     }
-    const definition = globalThis.customElements?._registry?.get(localName);
-    if (el && definition) globalThis.customElements._upgradeElement(el, definition);
+    if (is !== null) _dom("ce_is", nid, is);
+    if (customized !== null) {
+      // A customized built-in is created and then upgraded synchronously (HTML "create an
+      // element"); a throwing constructor is reported and leaves the element "failed".
+      try { _ceUpgrade(el, customized); } catch (error) { _ceReport(error); }
+      if (el._ceReactions !== undefined && el._ceReactions.length !== 0) {
+        _ceQueue[_ceQueue.length] = el;
+        _ceDone();
+      }
+    }
     return el;
   }
   createElementNS(ns, t) {
@@ -5909,7 +6658,7 @@ class Document extends Node {
     );
     const effectiveNamespace = namespace == null ? "" : namespace;
     const C = _elementClassForKnownName(effectiveNamespace, qualified);
-    const el = new C(nid);
+    const el = _constructElement(C, nid);
     const localName = qualified.includes(":")
       ? qualified.slice(qualified.indexOf(":") + 1)
       : qualified;
@@ -6002,6 +6751,9 @@ class Document extends Node {
       'transitionevent': TransitionEvent,
       'storageevent': StorageEvent,
     };
+    // The interfaces defined with the global interfaces near the end of this file.
+    const extra = _createEventExtra ? _createEventExtra[normalized] : undefined;
+    if (extra) return extra();
     const Cls = map[normalized];
     if (!Cls) {
       throw new DOMException(
@@ -6374,9 +7126,21 @@ class Document extends Node {
     _dom("document_write_reset");
     this._writeAnchorScript = 0;
     this._writeAnchorNid = 0;
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, whose close() does nothing. A
+    // document reopened after it finished loading gets a script-created parser, and
+    // closing that parser runs the document's load again: Chromium reports init,
+    // DOMContentLoaded and load lifecycle events for it, and Playwright's setContent
+    // (open/write/close in its utility world) waits for that load, so it hung. While the
+    // document is still loading, open() leaves Chromium's parser alone and close() does
+    // nothing either.
+    this._reopened = this.readyState !== 'loading';
     return this;
   }
   close() {
+    if (this._reopened) {
+      this._reopened = false;
+      _dom("document_close");
+    }
     return;
   }
   hasFocus() { return true; }
@@ -6405,10 +7169,18 @@ class DocumentFragment extends Node {
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
   set innerHTML(v) {
     const html = String(v ?? "");
+    // A template's contents are inert (no upgrades); a shadow root's are not.
+    const ce = _ceDefCount !== 0 && this._fragmentContext !== 'template';
+    const ceRemoved = ce && _ceRemovalDefCount !== 0 && this.isConnected ? _ceCandidates(this) : null;
     if (this._fragmentContext) {
       _dom("set_inner_html_context", this._nid, _fragmentContextPayload(this._fragmentContext, html));
     } else {
       _dom("set_inner_html", this._nid, html);
+    }
+    if (ce) {
+      _ceCreatedUnder(this, true);
+      if (ceRemoved !== null && ceRemoved.length !== 0) _ceDisconnectList(ceRemoved, this._nid);
+      _ceDone();
     }
   }
   querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
@@ -6438,6 +7210,12 @@ class DocumentFragment extends Node {
     const nid = +_dom("clone_node", this._nid, deep ? "true" : "false");
     const frag = new DocumentFragment(nid);
     _cache.set(nid, frag);
+    // As Node.cloneNode: the copies' upgrades run before cloneNode returns. A template's
+    // contents are inert, and so is their clone; importNode() upgrades that one.
+    if (_ceDefCount !== 0 && this._fragmentContext !== 'template') {
+      _ceCreatedUnder(frag, true);
+      _ceDone();
+    }
     return frag;
   }
 }
@@ -6566,9 +7344,9 @@ function _imageEncodingError() {
 // layout/paint. The render-only native op owns responsive candidate selection,
 // fetching, and metadata sniffing; bootstrap owns only the observable request
 // state and event timing.
-class HTMLImageElement extends Element {
-  constructor(nid) {
-    super(nid);
+class HTMLImageElement extends HTMLElement {
+  constructor() {
+    super(arguments[0]);
     this._imageRequest = 0;
     this._imageQueued = false;
     this._imageInitialized = false;
@@ -6888,7 +7666,7 @@ _markNative(HTMLImageElement.prototype.decode);
 
 // Report only capabilities backed by a real decoder. Poster rendering is an
 // image operation and does not make any audio/video container playable.
-class HTMLMediaElement extends Element {
+class HTMLMediaElement extends HTMLElement {
   static NETWORK_EMPTY = 0;
   static NETWORK_IDLE = 1;
   static NETWORK_LOADING = 2;
@@ -6962,7 +7740,7 @@ class HTMLVideoElement extends HTMLMediaElement {
   get videoHeight() { return 0; }
 }
 class HTMLAudioElement extends HTMLMediaElement {}
-class HTMLTrackElement extends Element {
+class HTMLTrackElement extends HTMLElement {
   static NONE = 0;
   static LOADING = 1;
   static LOADED = 2;
@@ -7156,57 +7934,64 @@ function _innerTextOf(el) {
   return _innerTextJoin(segments);
 }
 var _htmlTagClasses = null;
-function _elementClassFor(nid) {
-  const tag = _domParse("tag_name", nid);
-  // HTML tagName values are ASCII-uppercase. Foreign SVG names retain their
-  // case, so keep the common HTML path fast and only inspect the native
-  // namespace for possible SVG wrappers.
-  if (tag && tag !== tag.toUpperCase()
-      && _domParse("namespace_uri", nid) === "http://www.w3.org/2000/svg") {
-    if (tag === "path" && globalThis.SVGPathElement) return globalThis.SVGPathElement;
-    if (tag === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
+// MathMLElement, when this realm defines one (captured at the end of bootstrap).
+var _mathMLElementClass = null;
+// HTMLUnknownElement, set with _htmlTagClasses.
+var _htmlUnknownElementClass = null;
+const _XHTML_NS = "http://www.w3.org/1999/xhtml";
+const _SVG_NS = "http://www.w3.org/2000/svg";
+const _MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+// The interface of an HTML-namespace element, by its upper-case local name.
+function _htmlElementClassForTag(tag) {
+  const map = _htmlTagClasses;
+  if (map === null) return Element; // only while bootstrap itself is still running
+  const C = map[tag];
+  if (C !== undefined) return C;
+  // A valid custom element name (it has a hyphen) is an HTMLElement until it is
+  // defined; customElements upgrades it in place. Anything else is unknown.
+  return tag.indexOf("-") > 0 ? HTMLElement : _htmlUnknownElementClass;
+}
+function _foreignElementClass(namespace, localName) {
+  if (namespace === _SVG_NS) {
+    if (localName === "path" && globalThis.SVGPathElement) return globalThis.SVGPathElement;
+    if (localName === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
     if (globalThis.SVGElement) return globalThis.SVGElement;
   }
-  if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-  if (tag === "TEXTAREA" && globalThis.HTMLTextAreaElement) return globalThis.HTMLTextAreaElement;
-  if (tag === "IMG") return HTMLImageElement;
-  if (tag === "CANVAS" && globalThis.HTMLCanvasElement) return globalThis.HTMLCanvasElement;
-  if (tag === "AUDIO") return HTMLAudioElement;
-  if (tag === "VIDEO") return HTMLVideoElement;
-  if (tag === "TRACK") return HTMLTrackElement;
-  const mapped = tag && _htmlTagClasses ? _htmlTagClasses[tag] : undefined;
-  if (typeof mapped === "function") return mapped;
+  if (namespace === _MATHML_NS && _mathMLElementClass !== null) return _mathMLElementClass;
   return Element;
+}
+function _elementClassFor(nid) {
+  const tag = _domParse("tag_name", nid);
+  if (!tag) return Element;
+  // An HTML element in an HTML document has an ASCII-upper-case tagName, so the common
+  // case is one map lookup and no further native call. Foreign (SVG, MathML) names and
+  // the elements of an XML document keep their case: those ask the native tree for the
+  // namespace. An upper-case name the map does not know asks too, so an XML document's
+  // <ROOT> stays a plain Element rather than becoming an HTMLUnknownElement.
+  if (tag === tag.toUpperCase()) {
+    const known = _htmlTagClasses !== null ? _htmlTagClasses[tag] : undefined;
+    if (known !== undefined) return known;
+    if (tag.indexOf("-") > 0 && tag.indexOf(":") < 0) return _htmlElementClassForTag(tag);
+  }
+  const namespace = _domParse("namespace_uri", nid);
+  const colon = tag.indexOf(":");
+  const localName = colon >= 0 ? tag.slice(colon + 1) : tag;
+  if (namespace === _XHTML_NS) return _htmlElementClassForTag(localName.toUpperCase());
+  return _foreignElementClass(namespace, localName);
 }
 function _elementClassForKnownName(namespace, qualifiedName) {
   const localName = qualifiedName.includes(":")
     ? qualifiedName.slice(qualifiedName.indexOf(":") + 1)
     : qualifiedName;
-  if (namespace === "http://www.w3.org/2000/svg") {
-    if (localName === "path" && globalThis.SVGPathElement) return globalThis.SVGPathElement;
-    if (localName === "svg" && globalThis.SVGSVGElement) return globalThis.SVGSVGElement;
-    if (globalThis.SVGElement) return globalThis.SVGElement;
-  }
-  if (namespace === "http://www.w3.org/1999/xhtml") {
-    const tag = localName.toUpperCase();
-    if (tag === "FORM" && globalThis.HTMLFormElement) return globalThis.HTMLFormElement;
-    if (tag === "TEXTAREA" && globalThis.HTMLTextAreaElement) return globalThis.HTMLTextAreaElement;
-    if (tag === "IMG") return HTMLImageElement;
-    if (tag === "CANVAS" && globalThis.HTMLCanvasElement) return globalThis.HTMLCanvasElement;
-    if (tag === "AUDIO") return HTMLAudioElement;
-    if (tag === "VIDEO") return HTMLVideoElement;
-    if (tag === "TRACK") return HTMLTrackElement;
-    const mapped = _htmlTagClasses ? _htmlTagClasses[tag] : undefined;
-    if (typeof mapped === "function") return mapped;
-  }
-  return Element;
+  if (namespace === _XHTML_NS) return _htmlElementClassForTag(localName.toUpperCase());
+  return _foreignElementClass(namespace, localName);
 }
 function _wrap(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
   if (_cache.has(nid)) return _cache.get(nid);
   const t = +_dom("node_type", nid);
   let n;
-  if (t === 1) { const C = _elementClassFor(nid); n = new C(nid); }
+  if (t === 1) n = _constructElement(_elementClassFor(nid), nid);
   else if (t === 3) n = new Text(nid);
   else if (t === 8) n = new Comment(nid);
   else if (t === 9) n = new Document(nid);
@@ -7218,7 +8003,7 @@ function _wrapEl(nid) {
   if (nid < 0 || nid === null || nid === undefined || isNaN(nid)) return null;
   if (_cache.has(nid)) return _cache.get(nid);
   const C = _elementClassFor(nid);
-  const n = new C(nid);
+  const n = _constructElement(C, nid);
   _cache.set(nid, n);
   return n;
 }
@@ -7683,80 +8468,71 @@ function _syncFrameIndices(count) {
   }
 }
 
-// Navigator constructor so that typeof Navigator !== 'undefined' and
-// navigatorPrototype checks don't throw a ReferenceError.
-function Navigator() {}
-_markNative(Navigator);
-
-// PluginArray must exist before navigator is built so the plugins getter can use it.
-function PluginArray(items) {
-  for (var _pi = 0; _pi < items.length; _pi++) this[_pi] = items[_pi];
-  this.length = items.length;
+// Navigator and the plugin interfaces. DEVIATION from crates/obscura-js/js/bootstrap.js,
+// where Navigator is a plain function navigator does not inherit from, and PluginArray,
+// Plugin, MimeType and MimeTypeArray are constructible functions whose instances carry
+// their members as own properties, PluginArray inheriting Array.prototype and every
+// plugin listing no MIME type. Chromium throws Illegal constructor for all five, keeps the
+// members on the prototypes, and gives each of the five PDF plugins its two MIME types,
+// whose enabledPlugin is the plugin (navigator.mimeTypes': the first one). The interface
+// objects are published with the other global interfaces near the end of this file.
+function Navigator() {
+  throw new TypeError(new.target ? "Failed to construct 'Navigator': Illegal constructor" : 'Illegal constructor');
 }
-PluginArray.prototype = Object.create(Array.prototype);
-PluginArray.prototype.constructor = PluginArray;
-PluginArray.prototype.item = function(i) { return this[i] || null; };
-PluginArray.prototype.namedItem = function(name) {
-  for (var _pi = 0; _pi < this.length; _pi++) {
-    if (this[_pi].name === name) return this[_pi];
+function PluginArray() {
+  throw new TypeError(new.target ? "Failed to construct 'PluginArray': Illegal constructor" : 'Illegal constructor');
+}
+function Plugin() {
+  throw new TypeError(new.target ? "Failed to construct 'Plugin': Illegal constructor" : 'Illegal constructor');
+}
+function MimeType() {
+  throw new TypeError(new.target ? "Failed to construct 'MimeType': Illegal constructor" : 'Illegal constructor');
+}
+function MimeTypeArray() {
+  throw new TypeError(new.target ? "Failed to construct 'MimeTypeArray': Illegal constructor" : 'Illegal constructor');
+}
+// navigator.plugins and navigator.mimeTypes, built on first read (after bootstrap, once
+// the interfaces exist) and the same objects from then on: Chromium's fixed PDF list.
+let _pluginData = null;
+function _navigatorPluginData() {
+  if (_pluginData) return _pluginData;
+  const description = 'Portable Document Format';
+  const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
+  const types = ['application/pdf', 'text/pdf'];
+  const plugins = [];
+  for (let i = 0; i < names.length; i++) {
+    const mimes = [];
+    const plugin = _ifaceInstance(Plugin, _ifaceData({ name: names[i], filename: 'internal-pdf-viewer', description, items: mimes }));
+    for (let j = 0; j < types.length; j++) {
+      mimes[j] = _ifaceInstance(MimeType, _ifaceData({ type: types[j], suffixes: 'pdf', description, enabledPlugin: plugin }));
+    }
+    _pluginIndexed(plugin, mimes, 'type');
+    plugins[i] = plugin;
   }
-  return null;
-};
-PluginArray.prototype.refresh = function() {};
-PluginArray.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
-Object.defineProperty(PluginArray.prototype, Symbol.toStringTag, {value: 'PluginArray', configurable: true});
-_markNative(PluginArray);
-_markNative(PluginArray.prototype.item);
-_markNative(PluginArray.prototype.namedItem);
-_markNative(PluginArray.prototype.refresh);
-
-// Plugin / MimeType / MimeTypeArray global interfaces. Chrome exposes these as
-// global constructors; their absence threw "ReferenceError: Plugin is not
-// defined" in site bundles that reference them (issue #305). Plain function
-// declarations (no globalThis assignment) so they survive the V8 snapshot, the
-// same pattern PluginArray uses.
-function Plugin(name, filename, description, mimeTypes) {
-  this.name = name;
-  this.filename = filename;
-  this.description = description;
-  var mt = mimeTypes || [];
-  for (var _i = 0; _i < mt.length; _i++) this[_i] = mt[_i];
-  this.length = mt.length;
+  const pluginArray = _ifaceInstance(PluginArray, _ifaceData({ items: plugins }));
+  _pluginIndexed(pluginArray, plugins, 'name');
+  const mimeTypes = [];
+  for (let j = 0; j < types.length; j++) {
+    mimeTypes[j] = _ifaceInstance(MimeType, _ifaceData({ type: types[j], suffixes: 'pdf', description, enabledPlugin: plugins[0] }));
+  }
+  const mimeTypeArray = _ifaceInstance(MimeTypeArray, _ifaceData({ items: mimeTypes }));
+  _pluginIndexed(mimeTypeArray, mimeTypes, 'type');
+  _pluginData = { plugins: pluginArray, mimeTypes: mimeTypeArray };
+  return _pluginData;
 }
-Plugin.prototype.item = function(i) { return this[i] || null; };
-Plugin.prototype.namedItem = function(name) {
-  for (var _i = 0; _i < this.length; _i++) if (this[_i] && this[_i].type === name) return this[_i];
-  return null;
-};
-Plugin.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
-Object.defineProperty(Plugin.prototype, Symbol.toStringTag, {value: 'Plugin', configurable: true});
-_markNative(Plugin);
-_markNative(Plugin.prototype.item);
-_markNative(Plugin.prototype.namedItem);
-
-function MimeType(type, description, suffixes, plugin) {
-  this.type = type;
-  this.description = description;
-  this.suffixes = suffixes;
-  this.enabledPlugin = plugin || null;
+// The indexed and (unenumerable) named properties of a plugin collection, as Chromium's
+// legacy platform objects carry them.
+function _pluginIndexed(list, items, nameKey) {
+  for (let i = 0; i < items.length; i++) {
+    _defineProperty(list, i, { value: items[i], writable: false, enumerable: true, configurable: true });
+  }
+  for (let i = 0; i < items.length; i++) {
+    const name = _ifaceInner(items[i], items[i] instanceof MimeType ? MimeType : Plugin)[nameKey];
+    if (!_objectHasOwn(list, name)) {
+      _defineProperty(list, name, { value: items[i], writable: false, enumerable: false, configurable: true });
+    }
+  }
 }
-Object.defineProperty(MimeType.prototype, Symbol.toStringTag, {value: 'MimeType', configurable: true});
-_markNative(MimeType);
-
-function MimeTypeArray(items) {
-  for (var _i = 0; _i < items.length; _i++) this[_i] = items[_i];
-  this.length = items.length;
-}
-MimeTypeArray.prototype.item = function(i) { return this[i] || null; };
-MimeTypeArray.prototype.namedItem = function(name) {
-  for (var _i = 0; _i < this.length; _i++) if (this[_i] && this[_i].type === name) return this[_i];
-  return null;
-};
-MimeTypeArray.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
-Object.defineProperty(MimeTypeArray.prototype, Symbol.toStringTag, {value: 'MimeTypeArray', configurable: true});
-_markNative(MimeTypeArray);
-_markNative(MimeTypeArray.prototype.item);
-_markNative(MimeTypeArray.prototype.namedItem);
 
 class NetworkInformation {
   constructor() { this._listeners = Object.create(null); }
@@ -7948,20 +8724,9 @@ globalThis.navigator = {
   defGetter('language', function() { return "en-US"; });
   defGetter('languages', function() { return ["en-US", "en"]; });
 
-  // Cache plugins/mimeTypes so navigator.plugins === navigator.plugins.
-  var _plugins = new PluginArray([
-    new Plugin("PDF Viewer", "internal-pdf-viewer", "Portable Document Format", []),
-    new Plugin("Chrome PDF Viewer", "internal-pdf-viewer", "Portable Document Format", []),
-    new Plugin("Chromium PDF Viewer", "internal-pdf-viewer", "Portable Document Format", []),
-    new Plugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format", []),
-    new Plugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format", []),
-  ]);
-  var _mimeTypes = new MimeTypeArray([
-    new MimeType("application/pdf", "Portable Document Format", "pdf", null),
-    new MimeType("text/pdf", "Portable Document Format", "pdf", null),
-  ]);
-  defGetter('plugins', function() { return _plugins; });
-  defGetter('mimeTypes', function() { return _mimeTypes; });
+  // The same objects on every read (see _navigatorPluginData).
+  defGetter('plugins', function() { return _navigatorPluginData().plugins; });
+  defGetter('mimeTypes', function() { return _navigatorPluginData().mimeTypes; });
 
   // Values set per-page by __obscura_init (avoids own data props on navigator).
   defGetter('hardwareConcurrency', function() { return _hostVars.__obscura_hw || 8; });
@@ -8012,31 +8777,54 @@ globalThis.Notification = class Notification {
 globalThis.WebGLRenderingContext = class WebGLRenderingContext {};
 globalThis.WebGL2RenderingContext = class WebGL2RenderingContext {};
 
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose screen carries its size as
+// page-visible `_w`/`_h`/`_availW`/`_availH` fields and colorDepth, pixelDepth,
+// availTop, availLeft and orientation as own properties, with Screen a constructible class
+// unrelated to EventTarget. Chromium keeps them all on Screen.prototype (an EventTarget),
+// screen has no own properties, and screen.orientation is a ScreenOrientation. The global
+// Screen and ScreenOrientation interfaces are published near the end of this file.
+const _screenFields = _private(new WeakMap());
+function _screenState(screen) {
+  const f = _weakMapGet(_screenFields, screen);
+  if (!f) throw new TypeError('Illegal invocation');
+  return f;
+}
 class Screen {
   constructor(w, h, availW, availH) {
-    this._w = w; this._h = h;
-    this._availW = availW === undefined ? w : availW;
-    this._availH = availH === undefined ? h - 40 : availH;
-    this.colorDepth = 24; this.pixelDepth = 24; this.availTop = 0; this.availLeft = 0;
-    this.orientation = {type:'landscape-primary',angle:0,addEventListener(){},removeEventListener(){},dispatchEvent(){return true;}};
+    _weakMapSet(_screenFields, this, {
+      w, h,
+      availW: availW === undefined ? w : availW,
+      availH: availH === undefined ? h - 40 : availH,
+      orientation: null,
+    });
   }
-  get width() { return this._w; }
-  get height() { return this._h; }
-  get availWidth() { return this._availW; }
-  get availHeight() { return this._availH; }
+  get availWidth() { return _screenState(this).availW; }
+  get availHeight() { return _screenState(this).availH; }
+  get width() { return _screenState(this).w; }
+  get height() { return _screenState(this).h; }
+  get colorDepth() { _screenState(this); return 24; }
+  get pixelDepth() { _screenState(this); return 24; }
+  get availLeft() { _screenState(this); return 0; }
+  get availTop() { _screenState(this); return 0; }
+  get orientation() {
+    const f = _screenState(this);
+    if (!f.orientation) f.orientation = _makeScreenOrientation(f);
+    return f.orientation;
+  }
 }
-['width','height','availWidth','availHeight'].forEach(function(k) {
+['availWidth','availHeight','width','height','colorDepth','pixelDepth','availLeft','availTop','orientation'].forEach(function(k) {
   var d = Object.getOwnPropertyDescriptor(Screen.prototype, k);
   if (d && d.get) _markNative(d.get);
+  Object.defineProperty(Screen.prototype, k, { enumerable: true });
 });
-globalThis.Screen = Screen;
 globalThis.screen = new Screen(1920, 1080);
 function _applyScreenSize(w, h, emulated) {
   if (globalThis.screen instanceof Screen) {
-    globalThis.screen._w = w;
-    globalThis.screen._h = h;
-    globalThis.screen._availW = w;
-    globalThis.screen._availH = emulated ? h : h - 40;
+    const f = _screenState(globalThis.screen);
+    f.w = w;
+    f.h = h;
+    f.availW = w;
+    f.availH = emulated ? h : h - 40;
   } else {
     globalThis.screen = new Screen(w, h, w, emulated ? h : h - 40);
   }
@@ -8747,7 +9535,8 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     this.response = null;
     this.timeout = 0;
     this.withCredentials = false;
-    this.upload = { addEventListener(){}, removeEventListener(){} };
+    // An XMLHttpRequestUpload (see the global interfaces at the end of this file).
+    this.upload = _objectCreate(_xhrUploadProto);
     this._method = "GET";
     this._url = "";
     this._headers = {};
@@ -9074,10 +9863,11 @@ if (typeof URL === 'undefined' || !URL.prototype || !URL.__obscura) {
 globalThis.requestIdleCallback = globalThis.requestIdleCallback || function requestIdleCallback(cb, opts) {
   const start = Date.now();
   return setTimeout(() => {
-    cb({
+    // An IdleDeadline (see the global interfaces near the end of this file).
+    cb(_makeIdleDeadline({
       didTimeout: false,
       timeRemaining() { return Math.max(0, 50 - (Date.now() - start)); },
-    });
+    }));
   }, 1);
 };
 globalThis.cancelIdleCallback = globalThis.cancelIdleCallback || function cancelIdleCallback(id) { clearTimeout(id); };
@@ -9226,11 +10016,17 @@ if (!Element.prototype.replaceWith) {
   // _convertNodes turns any non-node argument (numbers, booleans, null, …) into
   // a Text node via String(n), matching the spec and append()/prepend(); the
   // old `typeof n === 'string'` check corrupted insert_before for other types.
+  // One [CEReactions] scope each, as append() (custom element reactions).
   Element.prototype.replaceWith = function(...nodes) {
     const parent = this.parentNode;
     if (!parent) return;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
-    parent.removeChild(this);
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
+      parent.removeChild(this);
+    } finally {
+      _ceLeave();
+    }
   };
   _markNative(Element.prototype.replaceWith);
 }
@@ -9238,7 +10034,12 @@ if (!Element.prototype.before) {
   Element.prototype.before = function(...nodes) {
     const parent = this.parentNode;
     if (!parent) return;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) parent.insertBefore(n, this);
+    } finally {
+      _ceLeave();
+    }
   };
   _markNative(Element.prototype.before);
 }
@@ -9247,7 +10048,12 @@ if (!Element.prototype.after) {
     const parent = this.parentNode;
     if (!parent) return;
     const ref = this.nextSibling;
-    for (const n of _convertNodes(nodes)) parent.insertBefore(n, ref);
+    _ceDepth++;
+    try {
+      for (const n of _convertNodes(nodes)) parent.insertBefore(n, ref);
+    } finally {
+      _ceLeave();
+    }
   };
   _markNative(Element.prototype.after);
 }
@@ -9864,16 +10670,8 @@ function _evaluateMediaQueryList(query) {
 
 globalThis.matchMedia = _markNative(function matchMedia(q) {
   const media = q == null ? '' : String(q);
-  return {
-    get matches() { return _evaluateMediaQueryList(media); },
-    media,
-    onchange: null,
-    addListener(){},
-    removeListener(){},
-    addEventListener(){},
-    removeEventListener(){},
-    dispatchEvent(){return true;}
-  };
+  // A MediaQueryList (see the global interfaces near the end of this file).
+  return _makeMediaQueryList(media, () => _evaluateMediaQueryList(media));
 });
 // getComputedStyle() returns a fresh declaration object, but those objects all
 // observe the same computed style for an element until the document mutates.
@@ -10087,6 +10885,11 @@ class CSSRule {
   set cssText(_value) {}
   get parentStyleSheet() { return this._parentStyleSheet; }
   get parentRule() { return this._parentRule; }
+  // The sheet of this rule and of every rule nested in it.
+  _setParentSheet(sheet) {
+    this._parentStyleSheet = sheet;
+    if (this._rules) for (const rule of this._rules) rule._setParentSheet(sheet);
+  }
 }
 for (const name of [
   "STYLE_RULE", "CHARSET_RULE", "IMPORT_RULE", "MEDIA_RULE", "FONT_FACE_RULE",
@@ -10121,6 +10924,397 @@ class CSSStyleRule extends CSSRule {
   _changed() {
     if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged();
   }
+}
+
+// The at-rules a stylesheet's cssRules expose, as Chromium's CSSOM types them. DEVIATION
+// from crates/obscura-js/js/bootstrap.js, where every at-rule is an opaque CSSRule of type
+// 0 with no media, conditionText, cssRules, name or style, and CSSMediaRule,
+// CSSSupportsRule, CSSFontFaceRule, CSSKeyframesRule and the rest are undefined. Each
+// parses its prelude and block here (the renderer stays the CSS parser of record) and
+// serializes as Chromium does; an edit through one rewrites the owner's text like a
+// CSSStyleRule edit. At-rules not modelled here (@counter-style, @font-feature-values,
+// @view-transition, ...) and unknown ones stay opaque CSSRules; Chromium drops the
+// unknown ones.
+function _cssCollapse(text) { return _stringTrim(String(text).replace(/\s+/g, ' ')); }
+// A media query list as Chromium serializes it: lower case, one space around `and`,
+// and `(feature: value)`.
+function _cssNormalizeMediaQuery(text) {
+  return _cssCollapse(_stringToLowerCase(String(text)))
+    .replace(/\(\s*([-a-z0-9]+)\s*:\s*/g, '($1: ')
+    .replace(/\s*\)/g, ')')
+    .replace(/\(\s+/g, '(');
+}
+function _cssSplitComma(text) {
+  const out = [];
+  let depth = 0, start = 0, quote = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) { if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    else if (ch === ',' && !depth) { out.push(text.slice(start, i)); start = i + 1; }
+  }
+  out.push(text.slice(start));
+  return out.map(_stringTrim).filter((part) => part !== '');
+}
+function _cssUnquote(text) {
+  const t = _stringTrim(String(text));
+  if (t.length >= 2 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0]) return t.slice(1, -1).replace(/\\(.)/g, '$1');
+  return t;
+}
+function _cssQuote(text) { return '"' + String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; }
+// url(x) or "x" at the start of `text`: [url, rest].
+function _cssTakeUrl(text) {
+  const t = _stringTrim(text);
+  let m = /^url\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^)\s]*)\s*\)/i.exec(t);
+  if (!m) m = /^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/.exec(t);
+  if (!m) return null;
+  return [_cssUnquote(m[1]), _stringTrim(t.slice(m[0].length))];
+}
+function _cssDeclarationBlock(text, onChange) {
+  const declaration = new CSSStyleDeclaration(null, onChange);
+  _parseCssInto(declaration._props, text);
+  declaration._loaded = true;
+  return _styleProxy(declaration);
+}
+function _cssParseRuleList(body, parentRule) {
+  const parsed = _splitTopLevelCssRules(body);
+  const rules = parsed.rules.map(_cssRuleFromText).filter(Boolean);
+  for (const rule of rules) rule._parentRule = parentRule;
+  return rules;
+}
+// A rule's own rule list (CSSGroupingRule, CSSKeyframesRule): the CSSRuleList reads
+// `_rules` through `_refreshFromOwner`, which has nothing to refresh here.
+function _cssInsertRule(owner, iface, rule, index, args) {
+  if (args < 1) throw new TypeError("Failed to execute 'insertRule' on '" + iface + "': 1 argument required, but only 0 present.");
+  const idx = Number(index) >>> 0;
+  if (idx > owner._rules.length) {
+    throw new DOMException("Failed to execute 'insertRule' on '" + iface + "': The index provided (" + idx + ") is larger than the maximum index (" + owner._rules.length + ").", 'IndexSizeError');
+  }
+  const parsed = _splitTopLevelCssRules(String(rule));
+  const cssRule = parsed.valid && parsed.rules.length === 1 ? _cssRuleFromText(parsed.rules[0]) : null;
+  if (!cssRule) throw new DOMException("Failed to execute 'insertRule' on '" + iface + "': Failed to parse the rule '" + rule + "'.", 'SyntaxError');
+  cssRule._parentRule = owner;
+  cssRule._setParentSheet(owner._parentStyleSheet);
+  owner._rules.splice(idx, 0, cssRule);
+  owner._changed();
+  return idx;
+}
+function _cssDeleteRule(owner, iface, index, args) {
+  if (args < 1) throw new TypeError("Failed to execute 'deleteRule' on '" + iface + "': 1 argument required, but only 0 present.");
+  const idx = Number(index) >>> 0;
+  if (idx >= owner._rules.length) {
+    throw new DOMException("Failed to execute 'deleteRule' on '" + iface + "': The index provided (" + idx + ") is larger than the maximum index (" + (owner._rules.length - 1) + ").", 'IndexSizeError');
+  }
+  const [removed] = owner._rules.splice(idx, 1);
+  removed._setParentSheet(null);
+  removed._parentRule = null;
+  owner._changed();
+}
+
+class CSSGroupingRule extends CSSRule {
+  constructor(type, body) {
+    super("", type);
+    this._rules = _cssParseRuleList(body, this);
+    this._cssRules = new CSSRuleList(this);
+  }
+  get cssRules() { return this._cssRules; }
+  insertRule(rule, index = 0) { return _cssInsertRule(this, "CSSGroupingRule", rule, index, arguments.length); }
+  deleteRule(index) { _cssDeleteRule(this, "CSSGroupingRule", index, arguments.length); }
+  _refreshFromOwner() {}
+  _changed() { if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged(); }
+  _block() { return this._rules.length ? " {\n" + this._rules.map((rule) => "  " + rule.cssText).join("\n") + "\n}" : " {\n}"; }
+}
+class CSSConditionRule extends CSSGroupingRule {
+  get conditionText() { return ""; }
+}
+class CSSMediaRule extends CSSConditionRule {
+  constructor(prelude, body) {
+    super(CSSRule.MEDIA_RULE, body);
+    this._media = _makeMediaList(prelude, () => this._changed());
+  }
+  get media() { return this._media; }
+  get conditionText() { return this._media.mediaText; }
+  get cssText() { const t = this._media.mediaText; return "@media" + (t ? " " + t : "") + this._block(); }
+  set cssText(_value) {}
+}
+class CSSSupportsRule extends CSSConditionRule {
+  constructor(prelude, body) {
+    super(CSSRule.SUPPORTS_RULE, body);
+    this._condition = _cssCollapse(prelude);
+  }
+  get conditionText() { return this._condition; }
+  get cssText() { return "@supports " + this._condition + this._block(); }
+  set cssText(_value) {}
+}
+class CSSContainerRule extends CSSConditionRule {
+  constructor(prelude, body) {
+    super(0, body);
+    const text = _cssCollapse(prelude);
+    const m = /^([-_a-zA-Z][-_a-zA-Z0-9]*)\s+(.*)$/.exec(text);
+    const named = m && !/^(not|and|or|style)$/i.test(m[1]);
+    this._name = named ? m[1] : "";
+    this._query = _cssNormalizeMediaQuery(named ? m[2] : text);
+  }
+  get containerName() { return this._name; }
+  get containerQuery() { return this._query; }
+  get conditionText() { return (this._name ? this._name + " " : "") + this._query; }
+  get cssText() { return "@container " + this.conditionText + this._block(); }
+  set cssText(_value) {}
+}
+class CSSLayerBlockRule extends CSSGroupingRule {
+  constructor(prelude, body) {
+    super(0, body);
+    this._name = _cssCollapse(prelude);
+  }
+  get name() { return this._name; }
+  get cssText() { return "@layer" + (this._name ? " " + this._name : "") + this._block(); }
+  set cssText(_value) {}
+}
+class CSSLayerStatementRule extends CSSRule {
+  constructor(prelude) {
+    super("", 0);
+    this._names = Object.freeze(_cssSplitComma(prelude).map(_cssCollapse));
+  }
+  get nameList() { return this._names; }
+  get cssText() { return "@layer " + this._names.join(", ") + ";"; }
+  set cssText(_value) {}
+}
+class CSSStartingStyleRule extends CSSGroupingRule {
+  constructor(prelude, body) { super(0, body); }
+  get cssText() { return "@starting-style" + this._block(); }
+  set cssText(_value) {}
+}
+class CSSScopeRule extends CSSGroupingRule {
+  constructor(prelude, body) {
+    super(0, body);
+    const m = /^\s*(?:\(([^)]*)\))?\s*(?:to\s*\(([^)]*)\))?\s*$/i.exec(String(prelude));
+    this._start = m && m[1] !== undefined ? _cssCollapse(m[1]) : null;
+    this._end = m && m[2] !== undefined ? _cssCollapse(m[2]) : null;
+  }
+  get start() { return this._start; }
+  get end() { return this._end; }
+  get cssText() {
+    return "@scope" + (this._start !== null ? " (" + this._start + ")" : "")
+      + (this._end !== null ? " to (" + this._end + ")" : "") + this._block();
+  }
+  set cssText(_value) {}
+}
+class CSSPageRule extends CSSGroupingRule {
+  constructor(prelude, body) {
+    super(CSSRule.PAGE_RULE, "");
+    this._selectorText = _cssCollapse(prelude);
+    this._style = _cssDeclarationBlock(body, () => this._changed());
+  }
+  get selectorText() { return this._selectorText; }
+  set selectorText(value) { this._selectorText = _cssCollapse(value); this._changed(); }
+  get style() { return this._style; }
+  get cssText() {
+    const d = this._style.cssText;
+    return "@page " + (this._selectorText ? this._selectorText + " " : "") + "{" + (d ? " " + d : "") + " }";
+  }
+  set cssText(_value) {}
+}
+class CSSFontFaceRule extends CSSRule {
+  constructor(prelude, body) {
+    super("", CSSRule.FONT_FACE_RULE);
+    this._style = _cssDeclarationBlock(body, () => this._changed());
+  }
+  get style() { return this._style; }
+  get cssText() { const d = this._style.cssText; return "@font-face {" + (d ? " " + d : "") + " }"; }
+  set cssText(_value) {}
+  _changed() { if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged(); }
+}
+// A keyframe selector list as Chromium serializes it: from is 0%, to is 100%.
+function _cssKeyText(text) {
+  const keys = _cssSplitComma(String(text)).map((key) => {
+    const k = _stringToLowerCase(_stringTrim(key));
+    if (k === "from") return "0%";
+    if (k === "to") return "100%";
+    const m = /^([+-]?(?:\d+\.?\d*|\.\d+))%$/.exec(k);
+    return m && +m[1] >= 0 && +m[1] <= 100 ? (+m[1]) + "%" : null;
+  });
+  return keys.length && keys.indexOf(null) < 0 ? keys.join(", ") : null;
+}
+class CSSKeyframeRule extends CSSRule {
+  constructor(keyText, body) {
+    super("", CSSRule.KEYFRAME_RULE);
+    this._keyText = keyText;
+    this._style = _cssDeclarationBlock(body, () => this._changed());
+  }
+  get keyText() { return this._keyText; }
+  set keyText(value) {
+    const key = _cssKeyText(value);
+    if (key === null) throw new DOMException("Failed to set the 'keyText' property on 'CSSKeyframeRule': The key '" + value + "' is invalid and cannot be parsed", "SyntaxError");
+    this._keyText = key;
+    this._changed();
+  }
+  get style() { return this._style; }
+  get cssText() { const d = this._style.cssText; return this._keyText + " {" + (d ? " " + d : "") + " }"; }
+  set cssText(_value) {}
+  _changed() { if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged(); }
+}
+function _cssKeyframeFromText(text) {
+  const t = _stringTrim(String(text));
+  const open = t.indexOf("{");
+  if (open <= 0 || !t.endsWith("}")) return null;
+  const key = _cssKeyText(t.slice(0, open));
+  return key === null ? null : new CSSKeyframeRule(key, t.slice(open + 1, -1));
+}
+class CSSKeyframesRule extends CSSRule {
+  constructor(prefix, prelude, body) {
+    super("", CSSRule.KEYFRAMES_RULE);
+    this._prefix = prefix;
+    this._name = _cssUnquote(_cssCollapse(prelude));
+    this._rules = _splitTopLevelCssRules(body).rules.map(_cssKeyframeFromText).filter(Boolean);
+    for (const rule of this._rules) rule._parentRule = this;
+    this._cssRules = new CSSRuleList(this);
+  }
+  get name() { return this._name; }
+  set name(value) { this._name = String(value); this._changed(); }
+  get cssRules() { return this._cssRules; }
+  get length() { return this._rules.length; }
+  findRule(key) {
+    const k = _cssKeyText(key);
+    for (let i = this._rules.length - 1; i >= 0; i--) if (this._rules[i]._keyText === k) return this._rules[i];
+    return null;
+  }
+  appendRule(rule) {
+    const keyframe = _cssKeyframeFromText(rule);
+    if (!keyframe) throw new DOMException("Failed to execute 'appendRule' on 'CSSKeyframesRule': Failed to parse the rule '" + rule + "'.", "SyntaxError");
+    keyframe._parentRule = this;
+    keyframe._setParentSheet(this._parentStyleSheet);
+    this._rules.push(keyframe);
+    this._changed();
+  }
+  deleteRule(key) {
+    const found = this.findRule(key);
+    if (!found) return;
+    this._rules.splice(this._rules.lastIndexOf(found), 1);
+    found._setParentSheet(null);
+    found._parentRule = null;
+    this._changed();
+  }
+  get cssText() {
+    return "@" + this._prefix + " " + this._name + " { \n" + this._rules.map((rule) => "  " + rule.cssText).join("\n") + "\n}";
+  }
+  set cssText(_value) {}
+  _refreshFromOwner() {}
+  _changed() { if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged(); }
+}
+class CSSImportRule extends CSSRule {
+  constructor(href, rest) {
+    super("", CSSRule.IMPORT_RULE);
+    this._href = href;
+    let text = rest;
+    this._layer = null;
+    let m = /^layer(?:\(\s*([^)]*?)\s*\))?(?=\s|$|;)/i.exec(text);
+    if (m) { this._layer = m[1] === undefined ? "" : _cssCollapse(m[1]); text = _stringTrim(text.slice(m[0].length)); }
+    this._supports = null;
+    m = /^supports\(/i.exec(text);
+    if (m) {
+      let depth = 0, i = 0;
+      for (; i < text.length; i++) {
+        if (text[i] === "(") depth++;
+        else if (text[i] === ")" && --depth === 0) break;
+      }
+      this._supports = _cssCollapse(text.slice(9, i));
+      text = _stringTrim(text.slice(i + 1));
+    }
+    this._media = _makeMediaList(text, () => this._changed());
+  }
+  get href() { return this._href; }
+  get media() { return this._media; }
+  get styleSheet() { return null; }
+  get layerName() { return this._layer; }
+  get supportsText() { return this._supports; }
+  get cssText() {
+    const media = this._media.mediaText;
+    return "@import url(" + _cssQuote(this._href) + ")"
+      + (this._layer === null ? "" : this._layer ? " layer(" + this._layer + ")" : " layer")
+      + (this._supports === null ? "" : " supports(" + this._supports + ")")
+      + (media ? " " + media : "") + ";";
+  }
+  set cssText(_value) {}
+  _changed() { if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged(); }
+}
+class CSSNamespaceRule extends CSSRule {
+  constructor(prefix, uri) {
+    super("", CSSRule.NAMESPACE_RULE);
+    this._prefix = prefix;
+    this._uri = uri;
+  }
+  get namespaceURI() { return this._uri; }
+  get prefix() { return this._prefix; }
+  get cssText() { return "@namespace " + (this._prefix ? this._prefix + " " : "") + "url(" + _cssQuote(this._uri) + ");"; }
+  set cssText(_value) {}
+}
+class CSSPropertyRule extends CSSRule {
+  constructor(prelude, body) {
+    super("", 0);
+    this._name = _cssCollapse(prelude);
+    const props = {};
+    _parseCssInto(props, body);
+    this._syntax = props.syntax !== undefined ? _cssUnquote(props.syntax) : "";
+    this._inherits = props.inherits !== undefined ? _stringToLowerCase(_stringTrim(props.inherits)) === "true" : false;
+    this._initial = props["initial-value"] !== undefined ? props["initial-value"] : null;
+  }
+  get name() { return this._name; }
+  get syntax() { return this._syntax; }
+  get inherits() { return this._inherits; }
+  get initialValue() { return this._initial; }
+  get cssText() {
+    return "@property " + this._name + " { syntax: " + _cssQuote(this._syntax) + "; inherits: " + this._inherits + ";"
+      + (this._initial !== null ? " initial-value: " + this._initial + ";" : "") + " }";
+  }
+  set cssText(_value) {}
+}
+// The at-rule `text` (a whole rule, as _splitTopLevelCssRules cut it), or null when it is
+// one this shim does not model.
+function _cssAtRuleFromText(text) {
+  const head = /^@([-a-zA-Z0-9]+)/.exec(text);
+  if (!head) return null;
+  const name = _stringToLowerCase(head[1]);
+  let open = -1, quote = "", parens = 0;
+  for (let i = head[0].length; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) { if (ch === quote) quote = ""; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "(") parens++;
+    else if (ch === ")") parens = Math.max(0, parens - 1);
+    else if (ch === "{" && !parens) { open = i; break; }
+  }
+  const block = open >= 0 && text.endsWith("}");
+  const prelude = block ? text.slice(head[0].length, open) : text.slice(head[0].length).replace(/;\s*$/, "");
+  const body = block ? text.slice(open + 1, -1) : "";
+  switch (name) {
+    case "media": return block ? new CSSMediaRule(prelude, body) : null;
+    case "supports": return block ? new CSSSupportsRule(prelude, body) : null;
+    case "container": return block ? new CSSContainerRule(prelude, body) : null;
+    case "layer": return block ? new CSSLayerBlockRule(prelude, body) : new CSSLayerStatementRule(prelude);
+    case "starting-style": return block ? new CSSStartingStyleRule(prelude, body) : null;
+    case "scope": return block ? new CSSScopeRule(prelude, body) : null;
+    case "page": return block ? new CSSPageRule(prelude, body) : null;
+    case "font-face": return block ? new CSSFontFaceRule(prelude, body) : null;
+    case "keyframes": case "-webkit-keyframes": return block ? new CSSKeyframesRule(name, prelude, body) : null;
+    case "property": return block ? new CSSPropertyRule(prelude, body) : null;
+    case "import": {
+      if (block) return null;
+      const url = _cssTakeUrl(prelude);
+      return url ? new CSSImportRule(url[0], url[1]) : null;
+    }
+    case "namespace": {
+      if (block) return null;
+      const t = _stringTrim(prelude);
+      let url = _cssTakeUrl(t);
+      if (url) return new CSSNamespaceRule("", url[0]);
+      const m = /^([-_a-zA-Z][-_a-zA-Z0-9]*)\s+(.*)$/.exec(t);
+      url = m ? _cssTakeUrl(m[2]) : null;
+      return url ? new CSSNamespaceRule(m[1], url[0]) : null;
+    }
+  }
+  return null;
 }
 
 // Split only the stylesheet's top-level rules. The renderer remains the CSS
@@ -10184,7 +11378,7 @@ function _splitTopLevelCssRules(value) {
 function _cssRuleFromText(text) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return null;
-  if (trimmed[0] === "@") return new CSSRule(trimmed, 0);
+  if (trimmed[0] === "@") return _cssAtRuleFromText(trimmed) || new CSSRule(trimmed, 0);
   const open = trimmed.indexOf("{");
   if (open <= 0 || !trimmed.endsWith("}")) return null;
   const selector = trimmed.slice(0, open).trim();
@@ -10234,9 +11428,7 @@ class CSSRuleList {
 const _cssStyleSheetPrivate = _private(new WeakMap());
 
 class CSSStyleSheet {
-  constructor(_options) {
-    this.ownerRule = null;
-    this.disabled = false;
+  constructor(options = undefined) {
     this._ownerNode = null;
     this._sourceNode = null;
     this._rules = [];
@@ -10248,13 +11440,21 @@ class CSSStyleSheet {
       responseUrl: null,
       originClean: true,
       sourceText: "",
+      // StyleSheet's state (see the global interfaces near the end of this file): the
+      // media a constructed sheet was given, its MediaList once read, and disabled.
+      mediaText: options && options.media !== undefined
+        ? (typeof options.media === "string" ? options.media : String(options.media.mediaText ?? options.media))
+        : null,
+      media: null,
+      disabled: !!(options && options.disabled),
     });
   }
+  get ownerRule() { return null; }
+  // Moved onto StyleSheet.prototype with the global interfaces near the end of this file.
   get type() { return "text/css"; }
   get ownerNode() { return this._ownerNode; }
   get parentStyleSheet() { return null; }
   get href() { return _cssStyleSheetPrivate.get(this)?.href || null; }
-  get title() { return this._ownerNode?.getAttribute?.("title") || ""; }
   get cssRules() {
     this._refreshFromOwner();
     this._assertOriginClean();
@@ -10315,9 +11515,9 @@ class CSSStyleSheet {
     state.sourceText = text;
   }
   _setRules(rules) {
-    for (const rule of this._rules) rule._parentStyleSheet = null;
+    for (const rule of this._rules) rule._setParentSheet(null);
     this._rules.splice(0, this._rules.length, ...rules);
-    for (const rule of this._rules) rule._parentStyleSheet = this;
+    for (const rule of this._rules) rule._setParentSheet(this);
   }
   _serializeText() { return this._rules.map(rule => rule.cssText).join("\n"); }
   _ruleChanged() {
@@ -10350,7 +11550,7 @@ class CSSStyleSheet {
     }
     const cssRule = _cssRuleFromText(parsed.rules[0]);
     if (!cssRule) throw new DOMException("The rule could not be parsed", "SyntaxError");
-    cssRule._parentStyleSheet = this;
+    cssRule._setParentSheet(this);
     this._rules.splice(idx, 0, cssRule);
     this._ruleChanged();
     return idx;
@@ -10362,7 +11562,7 @@ class CSSStyleSheet {
     const idx = Number(index) >>> 0;
     if (idx >= this._rules.length) throw new DOMException("Rule index is out of range", "IndexSizeError");
     const [removed] = this._rules.splice(idx, 1);
-    if (removed) removed._parentStyleSheet = null;
+    if (removed) removed._setParentSheet(null);
     this._ruleChanged();
   }
   addRule(selector, style, index) {
@@ -10508,6 +11708,8 @@ globalThis.CSSStyleRule = CSSStyleRule;
 globalThis.CSSRuleList = CSSRuleList;
 globalThis.CSSStyleSheet = CSSStyleSheet;
 globalThis.StyleSheetList = StyleSheetList;
+// The at-rule interfaces are published, with StyleSheet and MediaList, among the global
+// interfaces near the end of this file.
 
 function _syncAdoptedStyleSheet(sheet) {
   for (const root of Array.from(sheet._adopters || [])) {
@@ -10727,16 +11929,14 @@ _hostVars.__notifyMutation = function(type, target_nid, addedNodes, removedNodes
   // is a strong cache entry, so one unrelated observer kept every node a replace loop
   // detached alive until the next task boundary (see _gcWeaken).
   let record = null;
-  const makeRecord = () => record || (record = {
-    type: type, // 'childList', 'attributes', 'characterData'
-    target: target,
-    addedNodes: _wrapIds(addedNodes, _wrap),
-    removedNodes: _wrapIds(removedNodes, _wrap),
-    attributeName: attributeName || null,
-    oldValue: oldValue ?? null,
-    previousSibling: null,
-    nextSibling: null,
-  });
+  // A MutationRecord (see the global interfaces at the end of this file).
+  const makeRecord = () => record || (record = _makeMutationRecord(
+    type, // 'childList', 'attributes', 'characterData'
+    target,
+    _wrapIds(addedNodes, _wrap),
+    _wrapIds(removedNodes, _wrap),
+    attributeName || null,
+    oldValue ?? null));
   // Walk target → ancestors so a subtree-mode observer rooted at any
   // ancestor matches. The previous implementation just checked that
   // `target.contains` and `target.closest` were defined (always true on
@@ -10874,87 +12074,173 @@ function _isValidCustomElementName(name) {
   // PotentialCustomElementName (approx): lowercase start, a hyphen, no uppercase.
   return /^[a-z][a-z0-9._·À-￿-]*-[a-z0-9._·À-￿-]*$/.test(name);
 }
+// HTML's CustomElementRegistry over the definitions and reactions declared with _ceDefs (see
+// "Custom element reactions" above). The messages are Chromium 141's. The registry keeps no
+// own properties, as in Chromium.
 class CustomElementRegistry {
-  constructor() { this._registry = new Map(); this._byCtor = new Map(); this._whenDefinedResolvers = new Map(); this._defining = false; }
-  define(name, cls, opts) {
-    if (!_isConstructorCE(cls)) throw new TypeError("Failed to execute 'define' on 'CustomElementRegistry': parameter 2 is not a constructor.");
-    if (!_isValidCustomElementName(name)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError");
-    if (this._defining) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': operation is not supported while a definition is in progress", "NotSupportedError");
-    if (this._registry.has(name)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': the name \"" + name + "\" has already been used with this registry", "NotSupportedError");
-    if (this._byCtor.has(cls)) throw new DOMException("Failed to execute 'define' on 'CustomElementRegistry': the constructor has already been used with this registry", "NotSupportedError");
-    this._defining = true;
-    try { this._byCtor.set(cls, name); this._defineInner(name, cls, opts); } finally { this._defining = false; }
-  }
-  _defineInner(name, cls, opts) {
-    this._registry.set(name, cls);
-    // Upgrade existing matching elements: instantiate the class on each,
-    // fire connectedCallback if the element is in the document. Without
-    // this, lit / MusicKit / Polymer components never wire up their
-    // shadow DOM or render, leaving heavy chunks of YouTube,
-    // music.apple.com, and any web-component site as empty shells.
+  define(name, constructor, options) {
+    const prefix = "Failed to execute 'define' on 'CustomElementRegistry': ";
+    name = String(name);
+    if (typeof constructor !== "function") throw new TypeError(prefix + "parameter 2 is not of type 'Function'.");
+    let extendsName = null;
+    if (options !== undefined && options !== null) {
+      if (typeof options !== "object" && typeof options !== "function") {
+        throw new TypeError(prefix + "The provided value is not of type 'ElementDefinitionOptions'.");
+      }
+      const ext = options.extends;
+      if (ext !== undefined) extendsName = String(ext);
+    }
+    if (!_isConstructorCE(constructor)) throw new TypeError(prefix + "constructor argument is not a constructor");
+    if (!_isValidCustomElementName(name)) {
+      throw new DOMException(prefix + "\"" + name + "\" is not a valid custom element name", "SyntaxError");
+    }
+    if (_ceDefs.has(name)) {
+      throw new DOMException(prefix + "the name \"" + name + "\" has already been used with this registry", "NotSupportedError");
+    }
+    if (_ceDefsByCtor.has(constructor)) {
+      throw new DOMException(prefix + "this constructor has already been used with this registry", "NotSupportedError");
+    }
+    let localName = name;
+    if (extendsName !== null) {
+      if (_isValidCustomElementName(extendsName)) {
+        throw new DOMException(prefix + "\"" + extendsName + "\" is a valid custom element name", "NotSupportedError");
+      }
+      if (_htmlElementClassForTag(extendsName.toUpperCase()) === _htmlUnknownElementClass) {
+        throw new DOMException(prefix + "\"" + extendsName + "\" is an HTMLUnknownElement", "NotSupportedError");
+      }
+      localName = extendsName;
+    }
+    if (_ceDefining) {
+      throw new DOMException(prefix + "this registry is already defining an element", "NotSupportedError");
+    }
+    // The prototype's callbacks and the constructor's static fields are read once, here, as
+    // HTML does: replacing a callback after define() changes nothing.
+    const callbacks = _objectCreate(null);
+    const observed = _private(new Set());
+    let formAssociated = false;
+    let disableInternals = false;
+    let disableShadow = false;
+    _ceDefining = true;
     try {
-      const matches = globalThis.document?.querySelectorAll(name) || [];
-      for (const el of matches) this._upgradeElement(el, cls);
-    } catch (e) {}
-    const resolvers = this._whenDefinedResolvers.get(name);
-    if (resolvers) {
-      for (const r of resolvers) r(cls);
-      this._whenDefinedResolvers.delete(name);
+      const prototype = constructor.prototype;
+      if (prototype === null || (typeof prototype !== "object" && typeof prototype !== "function")) {
+        throw new TypeError(prefix + "constructor prototype is not an object");
+      }
+      const readCallback = (callbackName) => {
+        const value = prototype[callbackName];
+        if (value === undefined) return;
+        if (typeof value !== "function") {
+          throw new TypeError(prefix + "The '" + callbackName + "' property on the prototype is not a function.");
+        }
+        callbacks[callbackName] = value;
+      };
+      readCallback("connectedCallback");
+      readCallback("disconnectedCallback");
+      readCallback("connectedMoveCallback");
+      readCallback("adoptedCallback");
+      readCallback("attributeChangedCallback");
+      if (callbacks.attributeChangedCallback !== undefined) {
+        const list = constructor.observedAttributes;
+        if (list !== undefined && list !== null) {
+          for (const attribute of list) observed.add(String(attribute));
+        }
+      }
+      const disabled = constructor.disabledFeatures;
+      if (disabled !== undefined && disabled !== null) {
+        for (const feature of disabled) {
+          const f = String(feature);
+          if (f === "internals") disableInternals = true;
+          else if (f === "shadow") disableShadow = true;
+        }
+      }
+      formAssociated = !!constructor.formAssociated;
+      if (formAssociated) {
+        readCallback("formAssociatedCallback");
+        readCallback("formResetCallback");
+        readCallback("formDisabledCallback");
+        readCallback("formStateRestoreCallback");
+      }
+    } finally {
+      _ceDefining = false;
+    }
+    const def = {
+      name, localName, ctor: constructor, callbacks, observed,
+      formAssociated, disableInternals, disableShadow, stack: [],
+    };
+    _ceDefs.set(name, def);
+    _ceDefsByCtor.set(constructor, def);
+    _ceDefCount++;
+    if (callbacks.disconnectedCallback !== undefined || formAssociated) _ceRemovalDefCount++;
+    if (formAssociated) _ceFormAssociatedCount++;
+    _ceDepth++;
+    try {
+      // The upgrade candidates: the document's shadow-including descendants with that local
+      // name (and, for a customized built-in, that is value), in shadow-including tree order.
+      const doc = globalThis.document;
+      if (doc && _ceInert === 0) {
+        const list = _ceCandidates(doc);
+        for (let i = 0; i < list.length; i += 3) {
+          if (list[i + 1] !== localName) continue;
+          if (extendsName !== null && list[i + 2] !== name) continue;
+          let el = _cache.get(list[i]);
+          if (el !== undefined && !_ceIsUndefinedState(el)) continue;
+          if (el === undefined) el = _wrapEl(list[i]);
+          if (el) _ceEnqueueUpgrade(el, def);
+        }
+      }
+      const pending = _ceWhenDefined.get(name);
+      if (pending !== undefined) {
+        _ceWhenDefined.delete(name);
+        pending.resolve(constructor);
+      }
+    } finally {
+      _ceLeave();
     }
   }
-  _upgradeElement(el, cls) {
-    if (el.__customUpgraded) return;
-    el.__customUpgraded = true;
-    try {
-      // Upgrade preserves object identity but installs the definition's
-      // prototype before running its class constructor. HTMLElement's
-      // constructor consumes this entry and returns `el`, so derived class
-      // fields and constructor-side state initialize on the real DOM wrapper.
-      const constructionEntry = { element: el, constructor: cls, constructed: false };
-      _customElementConstructionStack.push(constructionEntry);
-      let constructed;
-      try {
-        constructed = Reflect.construct(cls, []);
-      } finally {
-        const pending = _customElementConstructionStack.lastIndexOf(constructionEntry);
-        if (pending !== -1) _customElementConstructionStack.splice(pending, 1);
-      }
-      if (constructed !== el) {
-        throw new TypeError("Custom element constructor did not produce the element being upgraded");
-      }
-      if (typeof el.connectedCallback === 'function' && globalThis.document?.contains?.(el)) {
-        try { el.connectedCallback(); } catch (e) {}
-      }
-    } catch (e) {
-      el.__customUpgradeFailed = true;
-    }
+  get(name) {
+    const def = _ceDefs.get(String(name));
+    return def === undefined ? undefined : def.ctor;
   }
-  get(name) { return this._registry.get(name); }
-  getName(cls) {
-    if (!_isConstructorCE(cls)) throw new TypeError("Failed to execute 'getName' on 'CustomElementRegistry': parameter 1 is not a constructor.");
-    return this._byCtor.has(cls) ? this._byCtor.get(cls) : null;
+  getName(constructor) {
+    if (typeof constructor !== "function") {
+      throw new TypeError("Failed to execute 'getName' on 'CustomElementRegistry': parameter 1 is not of type 'Function'.");
+    }
+    const def = _ceDefsByCtor.get(constructor);
+    return def === undefined ? null : def.name;
   }
   whenDefined(name) {
-    if (!_isValidCustomElementName(name)) return Promise.reject(new DOMException("Failed to execute 'whenDefined' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError"));
-    const cls = this._registry.get(name);
-    if (cls) return Promise.resolve(cls);
-    return new Promise((resolve) => {
-      const list = this._whenDefinedResolvers.get(name) || [];
-      list.push(resolve);
-      this._whenDefinedResolvers.set(name, list);
-    });
+    name = String(name);
+    if (!_isValidCustomElementName(name)) {
+      return Promise.reject(new DOMException("Failed to execute 'whenDefined' on 'CustomElementRegistry': \"" + name + "\" is not a valid custom element name", "SyntaxError"));
+    }
+    const def = _ceDefs.get(name);
+    if (def !== undefined) return Promise.resolve(def.ctor);
+    // Repeated calls before define() share one promise, as in Chromium.
+    let pending = _ceWhenDefined.get(name);
+    if (pending === undefined) {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      pending = { promise, resolve };
+      _ceWhenDefined.set(name, pending);
+    }
+    return pending.promise;
   }
   upgrade(root) {
-    if (!root || !root.querySelectorAll) return;
-    for (const [name, cls] of this._registry.entries()) {
-      const matches = _qsa(root, name);
-      for (const el of matches) this._upgradeElement(el, cls);
+    if (!(root instanceof Node)) {
+      throw new TypeError("Failed to execute 'upgrade' on 'CustomElementRegistry': parameter 1 is not of type 'Node'.");
+    }
+    if (_ceDefCount === 0) return;
+    _ceDepth++;
+    try {
+      const list = _ceCandidates(root);
+      if (list.length !== 0) _ceTryUpgradeList(list, -1);
+    } finally {
+      _ceLeave();
     }
   }
 }
 globalThis.CustomElementRegistry = CustomElementRegistry;
 globalThis.customElements = new CustomElementRegistry();
-globalThis.HTMLUnknownElement = Element;
 // ElementInternals: form-associated custom element internals. Validity/state
 // are JS-observable; ARIA reflection that needs the accessibility tree is not.
 globalThis.ElementInternals = class ElementInternals {
@@ -10977,7 +12263,8 @@ globalThis.ElementInternals = class ElementInternals {
   get form() { return this._el && this._el.closest ? this._el.closest('form') : null; }
   get labels() { return _nodeList([]); }
   get shadowRoot() { return this._el ? _shadowRootForHost(this._el, true) : null; }
-  get states() { return this._states; }
+  // A CustomStateSet (see the global interfaces near the end of this file).
+  get states() { return _customStateSetFor(this._states); }
 };
 // Full standard constant set (issue #439). The partial version here lacked
 // FILTER_ACCEPT/REJECT/SKIP and most SHOW_* values, so the canonical
@@ -11482,11 +12769,11 @@ function _setFieldValue(el, field, value) {
   el[field] = value;
 }
 
-// Build a FileList-like object: an array with the DOM's `item(i)` accessor.
+// A FileList (see the global interfaces near the end of this file). DEVIATION from
+// crates/obscura-js/js/bootstrap.js, whose list is an Array with an own item(), so
+// `input.files instanceof FileList` threw (no FileList) and Array.isArray answered true.
 function _makeFileList(files) {
-  const list = files.slice();
-  Object.defineProperty(list, "item", { value: (i) => list[i] || null, enumerable: false });
-  return list;
+  return _makeFileListOf(files.slice());
 }
 function _emptyFileList() { return _makeFileList([]); }
 
@@ -12196,7 +13483,11 @@ globalThis.DOMParser = class DOMParser {
       // HTML inputs start with `<!DOCTYPE>` / `<html>` / `<head>` etc.; the
       // fragment parser strips the outer `<html>` and emits its head+body
       // children, which is what callers want.
+      // A parsed document has no browsing context, so nothing in it is upgraded, as in
+      // Chromium (custom elements).
+      _ceInert++;
       try { root.innerHTML = html; } catch (e) { /* leave empty on parse error */ }
+      finally { _ceInert--; }
     }
 
     // For XML mime types, surface a <parsererror> on clearly-malformed input so
@@ -13872,28 +15163,95 @@ globalThis.CSS = {
   escape(s){ return s; }
 };
 
-globalThis.HTMLElement = Element;
-globalThis.HTMLDivElement = Element;
-globalThis.HTMLSpanElement = Element;
-globalThis.HTMLParagraphElement = Element;
-globalThis.HTMLAnchorElement = Element;
+// DEVIATION from crates/obscura-js/js/bootstrap.js, where the interfaces below are
+// `= Element` aliases (see HTMLElement). Each one is its own subclass of HTMLElement,
+// as in Chromium, so `instanceof`, Object.prototype.toString and a patch to one
+// interface's prototype apply to its own elements only. _htmlTagClasses below hands the
+// matching prototype to parsed, created, cloned and imported elements alike.
+globalThis.HTMLElement = HTMLElement;
+class HTMLUnknownElement extends HTMLElement {}
+class HTMLDivElement extends HTMLElement {}
+class HTMLSpanElement extends HTMLElement {}
+class HTMLParagraphElement extends HTMLElement {}
+class HTMLAnchorElement extends HTMLElement {
+  // HTMLHyperlinkElementUtils' stringifier: String(a) is the link's href.
+  toString() { return this.href; }
+}
+class HTMLButtonElement extends HTMLElement {}
+class HTMLLabelElement extends HTMLElement {}
+class HTMLTableElement extends HTMLElement {}
+class HTMLIFrameElement extends HTMLElement {}
+class HTMLScriptElement extends HTMLElement {}
+class HTMLStyleElement extends HTMLElement {}
+class HTMLLinkElement extends HTMLElement {}
+class HTMLMetaElement extends HTMLElement {}
+class HTMLHeadElement extends HTMLElement {}
+class HTMLBodyElement extends HTMLElement {}
+class HTMLHtmlElement extends HTMLElement {}
+class HTMLBRElement extends HTMLElement {}
+class HTMLHRElement extends HTMLElement {}
+class HTMLUListElement extends HTMLElement {}
+class HTMLOListElement extends HTMLElement {}
+class HTMLLIElement extends HTMLElement {}
+class HTMLPreElement extends HTMLElement {}
+class HTMLHeadingElement extends HTMLElement {}
+class HTMLTemplateElement extends HTMLElement {}
+class HTMLSlotElement extends HTMLElement {}
+class HTMLOptionElement extends HTMLElement {}
+class HTMLDataListElement extends HTMLElement {}
+class HTMLFieldSetElement extends HTMLElement {}
+class HTMLLegendElement extends HTMLElement {}
+class HTMLProgressElement extends HTMLElement {}
+class HTMLDetailsElement extends HTMLElement {}
+class HTMLDialogElement extends HTMLElement {}
+// Interfaces Chromium 141 has that the shim had no name for at all.
+class HTMLDataElement extends HTMLElement {}
+class HTMLModElement extends HTMLElement {}
+class HTMLMenuElement extends HTMLElement {}
+class HTMLParamElement extends HTMLElement {}
+class HTMLFontElement extends HTMLElement {}
+class HTMLFrameElement extends HTMLElement {}
+class HTMLFrameSetElement extends HTMLElement {}
+class HTMLMarqueeElement extends HTMLElement {}
+class HTMLDirectoryElement extends HTMLElement {}
+class HTMLSelectedContentElement extends HTMLElement {}
+for (const _ctor of [
+  HTMLElement, HTMLUnknownElement, HTMLDivElement, HTMLSpanElement, HTMLParagraphElement,
+  HTMLAnchorElement, HTMLButtonElement, HTMLLabelElement, HTMLTableElement,
+  HTMLIFrameElement, HTMLScriptElement, HTMLStyleElement, HTMLLinkElement,
+  HTMLMetaElement, HTMLHeadElement, HTMLBodyElement, HTMLHtmlElement, HTMLBRElement,
+  HTMLHRElement, HTMLUListElement, HTMLOListElement, HTMLLIElement, HTMLPreElement,
+  HTMLHeadingElement, HTMLTemplateElement, HTMLSlotElement, HTMLOptionElement,
+  HTMLDataListElement, HTMLFieldSetElement, HTMLLegendElement, HTMLProgressElement,
+  HTMLDetailsElement, HTMLDialogElement, HTMLDataElement, HTMLModElement,
+  HTMLMenuElement, HTMLParamElement, HTMLFontElement, HTMLFrameElement,
+  HTMLFrameSetElement, HTMLMarqueeElement, HTMLDirectoryElement,
+  HTMLSelectedContentElement,
+]) {
+  globalThis[_ctor.name] = _ctor;
+  _markNative(_ctor);
+}
+_markNative(HTMLAnchorElement.prototype.toString);
 globalThis.HTMLImageElement = HTMLImageElement;
 // Port addition: real subclasses, so `instanceof HTMLInputElement` and
 // `instanceof HTMLSelectElement` discriminate as in Chromium (the Rust shim aliases both to
 // Element, so every element was an input and a select). Puppeteer's ::-p-text() reads a
 // form control's value instead of its text, so with the alias it matched nothing. Mapped
 // in _htmlTagClasses below.
-globalThis.HTMLInputElement = class HTMLInputElement extends Element {};
-globalThis.HTMLButtonElement = Element;
-globalThis.HTMLFormElement = class HTMLFormElement extends Element {
+globalThis.HTMLInputElement = class HTMLInputElement extends HTMLElement {};
+globalThis.HTMLFormElement = class HTMLFormElement extends HTMLElement {
   get elements() { return HTMLCollection._from(_qsa(this, "input, select, textarea, button, fieldset, output, object")); }
   get length() { return this.elements.length; }
   // Inherit submit() from Element.prototype: it dispatches the cancelable
   // 'submit' event and (if not prevented) builds form data and navigates.
-  reset() { for (const f of this.elements) { if ('value' in f) f.value = ''; } }
+  reset() {
+    for (const f of this.elements) { if ('value' in f) f.value = ''; }
+    // A form-associated custom element's reset algorithm is its formResetCallback.
+    _ceFormReset(this);
+  }
 };
-globalThis.HTMLSelectElement = class HTMLSelectElement extends Element {};
-globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
+globalThis.HTMLSelectElement = class HTMLSelectElement extends HTMLElement {};
+globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends HTMLElement {
   // `rows`/`cols` reflect the content attributes and drive the control's
   // intrinsic box (the renderer sizes a textarea from them). The attributes
   // are limited to positive non-zero numbers; anything else falls back to the
@@ -13910,34 +15268,6 @@ globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends Element {
   }
   set cols(v) { this.setAttribute('cols', String(v)); }
 };
-globalThis.HTMLLabelElement = Element;
-globalThis.HTMLTableElement = Element;
-globalThis.HTMLIFrameElement = Element;
-globalThis.HTMLCanvasElement = Element;
-// HTMLVideoElement and HTMLAudioElement are defined above with canPlayType support.
-globalThis.HTMLScriptElement = Element;
-globalThis.HTMLStyleElement = Element;
-globalThis.HTMLLinkElement = Element;
-globalThis.HTMLMetaElement = Element;
-globalThis.HTMLHeadElement = Element;
-globalThis.HTMLBodyElement = Element;
-globalThis.HTMLHtmlElement = Element;
-globalThis.HTMLBRElement = Element;
-globalThis.HTMLHRElement = Element;
-globalThis.HTMLUListElement = Element;
-globalThis.HTMLOListElement = Element;
-globalThis.HTMLLIElement = Element;
-globalThis.HTMLPreElement = Element;
-globalThis.HTMLHeadingElement = Element;
-globalThis.HTMLTemplateElement = Element;
-globalThis.HTMLSlotElement = Element;
-globalThis.HTMLOptionElement = Element;
-globalThis.HTMLDataListElement = Element;
-globalThis.HTMLFieldSetElement = Element;
-globalThis.HTMLLegendElement = Element;
-globalThis.HTMLProgressElement = Element;
-globalThis.HTMLDetailsElement = Element;
-globalThis.HTMLDialogElement = Element;
 
 // Interface objects that were missing entirely. Referencing one is enough to
 // throw ReferenceError, and `HTMLTableRowElement` in particular is a common
@@ -13947,7 +15277,7 @@ globalThis.HTMLDialogElement = Element;
 // discriminates: with an alias, every element is an instance of every one of
 // them. `_htmlTagClasses` below is what makes the parser/createElement path
 // hand out the matching prototype.
-class HTMLTableRowElement extends Element {
+class HTMLTableRowElement extends HTMLElement {
   get cells() {
     const out = [];
     for (const child of this.children) {
@@ -13991,7 +15321,7 @@ class HTMLTableRowElement extends Element {
     cells[at].remove();
   }
 }
-class HTMLTableCellElement extends Element {
+class HTMLTableCellElement extends HTMLElement {
   get cellIndex() {
     const row = this.parentNode;
     if (!row || row.nodeType !== 1 || row.tagName !== "TR") return -1;
@@ -14007,7 +15337,7 @@ class HTMLTableCellElement extends Element {
   get rowSpan() { const v = parseInt(this.getAttribute("rowspan"), 10); return Number.isFinite(v) && v >= 0 ? v : 1; }
   set rowSpan(v) { this.setAttribute("rowspan", String(v)); }
 }
-class HTMLTableSectionElement extends Element {
+class HTMLTableSectionElement extends HTMLElement {
   get rows() {
     const out = [];
     for (const child of this.children) {
@@ -14031,33 +15361,35 @@ class HTMLTableSectionElement extends Element {
     rows[at].remove();
   }
 }
-class HTMLTableCaptionElement extends Element {}
-class HTMLTableColElement extends Element {
+class HTMLTableCaptionElement extends HTMLElement {}
+class HTMLTableColElement extends HTMLElement {
   get span() { const v = parseInt(this.getAttribute("span"), 10); return Number.isFinite(v) && v > 0 ? v : 1; }
   set span(v) { this.setAttribute("span", String(v)); }
 }
-class HTMLPictureElement extends Element {}
-class HTMLSourceElement extends Element {}
-class HTMLOptGroupElement extends Element {}
-class HTMLOutputElement extends Element {}
-class HTMLMeterElement extends Element {}
-class HTMLTimeElement extends Element {
+class HTMLPictureElement extends HTMLElement {}
+class HTMLSourceElement extends HTMLElement {}
+class HTMLOptGroupElement extends HTMLElement {}
+class HTMLOutputElement extends HTMLElement {}
+class HTMLMeterElement extends HTMLElement {}
+class HTMLTimeElement extends HTMLElement {
   get dateTime() { return this.getAttribute("datetime") || ""; }
   set dateTime(v) { this.setAttribute("datetime", v == null ? "" : String(v)); }
 }
-class HTMLQuoteElement extends Element {}
-class HTMLDListElement extends Element {}
-class HTMLBaseElement extends Element {}
-class HTMLTitleElement extends Element {
+class HTMLQuoteElement extends HTMLElement {}
+class HTMLDListElement extends HTMLElement {}
+class HTMLBaseElement extends HTMLElement {}
+class HTMLTitleElement extends HTMLElement {
   get text() { return this.textContent; }
   set text(v) { this.textContent = v == null ? "" : String(v); }
 }
-class HTMLMapElement extends Element {
+class HTMLMapElement extends HTMLElement {
   get areas() { return HTMLCollection._from(_qsa(this, "area")); }
 }
-class HTMLAreaElement extends Element {}
-class HTMLObjectElement extends Element {}
-class HTMLEmbedElement extends Element {}
+class HTMLAreaElement extends HTMLElement {
+  toString() { return this.href; }
+}
+class HTMLObjectElement extends HTMLElement {}
+class HTMLEmbedElement extends HTMLElement {}
 
 globalThis.HTMLTableRowElement = HTMLTableRowElement;
 globalThis.HTMLTableCellElement = HTMLTableCellElement;
@@ -14087,39 +15419,60 @@ for (const _ctor of [
   HTMLEmbedElement, globalThis.HTMLInputElement, globalThis.HTMLSelectElement,
 ]) _markNative(_ctor);
 
-// Tag -> wrapper class for the interfaces above. `_elementClassFor` and
-// `_elementClassForKnownName` consult this after their own special cases, so
-// a <tr> parsed from markup and one from createElement('tr') get the same
-// prototype. Declared with `var` so the hoisted binding is visible to those
-// functions, which are defined earlier in the file but only ever run later.
-_htmlTagClasses = {
-  TR: HTMLTableRowElement,
-  TD: HTMLTableCellElement,
-  TH: HTMLTableCellElement,
-  THEAD: HTMLTableSectionElement,
-  TBODY: HTMLTableSectionElement,
-  TFOOT: HTMLTableSectionElement,
-  CAPTION: HTMLTableCaptionElement,
-  COL: HTMLTableColElement,
-  COLGROUP: HTMLTableColElement,
-  PICTURE: HTMLPictureElement,
-  SOURCE: HTMLSourceElement,
-  OPTGROUP: HTMLOptGroupElement,
-  OUTPUT: HTMLOutputElement,
-  METER: HTMLMeterElement,
-  TIME: HTMLTimeElement,
-  BLOCKQUOTE: HTMLQuoteElement,
-  Q: HTMLQuoteElement,
-  DL: HTMLDListElement,
-  BASE: HTMLBaseElement,
-  TITLE: HTMLTitleElement,
-  MAP: HTMLMapElement,
-  AREA: HTMLAreaElement,
-  OBJECT: HTMLObjectElement,
-  EMBED: HTMLEmbedElement,
-  INPUT: globalThis.HTMLInputElement,
-  SELECT: globalThis.HTMLSelectElement,
-};
+// Tag -> wrapper class for every HTML element interface, keyed by the upper-case tagName
+// an HTML element has in an HTML document. `_elementClassFor` and
+// `_elementClassForKnownName` look the name up here, so a <tr> parsed from markup and one
+// from createElement('tr') get the same prototype. A name that is not here is an
+// HTMLElement when it is a valid custom element name and an HTMLUnknownElement otherwise
+// (Chromium 141's mapping, measured over every tag below). Declared with `var` so the
+// hoisted binding is visible to those functions, which are defined earlier in the file but
+// only ever run later. A null-prototype object, so "constructor" or "__proto__" as a tag
+// name finds nothing.
+_htmlTagClasses = Object.create(null);
+_htmlUnknownElementClass = HTMLUnknownElement;
+(function _fillHtmlTagClasses() {
+  const map = {
+    A: HTMLAnchorElement, AREA: HTMLAreaElement, AUDIO: HTMLAudioElement,
+    BASE: HTMLBaseElement, BLOCKQUOTE: HTMLQuoteElement, Q: HTMLQuoteElement,
+    BODY: HTMLBodyElement, BR: HTMLBRElement, BUTTON: HTMLButtonElement,
+    CAPTION: HTMLTableCaptionElement, COL: HTMLTableColElement, COLGROUP: HTMLTableColElement,
+    DATA: HTMLDataElement, DATALIST: HTMLDataListElement, DEL: HTMLModElement, INS: HTMLModElement,
+    DETAILS: HTMLDetailsElement, DIALOG: HTMLDialogElement, DIR: HTMLDirectoryElement,
+    DIV: HTMLDivElement, DL: HTMLDListElement, EMBED: HTMLEmbedElement,
+    FIELDSET: HTMLFieldSetElement, FONT: HTMLFontElement, FORM: globalThis.HTMLFormElement,
+    FRAME: HTMLFrameElement, FRAMESET: HTMLFrameSetElement,
+    H1: HTMLHeadingElement, H2: HTMLHeadingElement, H3: HTMLHeadingElement,
+    H4: HTMLHeadingElement, H5: HTMLHeadingElement, H6: HTMLHeadingElement,
+    HEAD: HTMLHeadElement, HR: HTMLHRElement, HTML: HTMLHtmlElement,
+    IFRAME: HTMLIFrameElement, IMG: HTMLImageElement, INPUT: globalThis.HTMLInputElement,
+    LABEL: HTMLLabelElement, LEGEND: HTMLLegendElement, LI: HTMLLIElement,
+    LINK: HTMLLinkElement, MAP: HTMLMapElement, MARQUEE: HTMLMarqueeElement,
+    MENU: HTMLMenuElement, META: HTMLMetaElement, METER: HTMLMeterElement,
+    OBJECT: HTMLObjectElement, OL: HTMLOListElement, OPTGROUP: HTMLOptGroupElement,
+    OPTION: HTMLOptionElement, OUTPUT: HTMLOutputElement, P: HTMLParagraphElement,
+    PARAM: HTMLParamElement, PICTURE: HTMLPictureElement,
+    PRE: HTMLPreElement, LISTING: HTMLPreElement, XMP: HTMLPreElement,
+    PROGRESS: HTMLProgressElement, SCRIPT: HTMLScriptElement,
+    SELECT: globalThis.HTMLSelectElement, SELECTEDCONTENT: HTMLSelectedContentElement,
+    SLOT: HTMLSlotElement, SOURCE: HTMLSourceElement, SPAN: HTMLSpanElement,
+    STYLE: HTMLStyleElement, TABLE: HTMLTableElement,
+    TBODY: HTMLTableSectionElement, THEAD: HTMLTableSectionElement, TFOOT: HTMLTableSectionElement,
+    TD: HTMLTableCellElement, TH: HTMLTableCellElement, TR: HTMLTableRowElement,
+    TEMPLATE: HTMLTemplateElement, TEXTAREA: globalThis.HTMLTextAreaElement,
+    TIME: HTMLTimeElement, TITLE: HTMLTitleElement, TRACK: HTMLTrackElement,
+    UL: HTMLUListElement, VIDEO: HTMLVideoElement,
+  };
+  for (const tag in map) _htmlTagClasses[tag] = map[tag];
+  // Elements the HTML standard (or Chromium's legacy list) knows that have no interface
+  // of their own. Anything else without a hyphen is an HTMLUnknownElement.
+  const plain = 'ABBR ACRONYM ADDRESS ARTICLE ASIDE B BASEFONT BDI BDO BIG CENTER CITE CODE DD '
+    + 'DFN DT EM FIGCAPTION FIGURE FOOTER HEADER HGROUP I KBD LAYER MAIN MARK NAV NOBR '
+    + 'NOEMBED NOFRAMES NOLAYER NOSCRIPT PLAINTEXT RB RP RT RTC RUBY S SAMP SEARCH SECTION '
+    + 'SMALL STRIKE STRONG SUB SUMMARY SUP TT U VAR WBR';
+  const names = plain.split(' ');
+  for (let i = 0; i < names.length; i++) _htmlTagClasses[names[i]] = HTMLElement;
+})();
+// HTMLCanvasElement is defined with the canvas implementation, further down.
 // As in Chromium, HTMLInputElement.prototype, HTMLSelectElement.prototype and
 // HTMLTextAreaElement.prototype own `value` (and the input its `checked`): React's input
 // tracker reads Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value'). They
@@ -14169,6 +15522,70 @@ globalThis.SVGGraphicsElement = SVGGraphicsElement;
 globalThis.SVGGeometryElement = SVGGeometryElement;
 globalThis.SVGPathElement = SVGPathElement;
 globalThis.SVGSVGElement = SVGSVGElement;
+
+// Where Chromium 141 keeps the members every element used to inherit from Element.prototype.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which defines them all on Element (its
+// HTMLElement is Element). Libraries read them off HTMLElement.prototype by descriptor
+// (`Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText')`), and an SVG
+// element in Chromium has no innerText, click(), hidden or offsetWidth. Each descriptor
+// moves unchanged, so behaviour on HTML elements is what it was:
+// - HTMLElement only: the members below;
+// - HTMLElement and SVGElement (the HTMLOrSVGElement, ElementCSSInlineStyle and
+//   GlobalEventHandlers mixins, which Chromium installs on each interface): style,
+//   dataset, tabIndex, autofocus, focus, blur and the on* handlers other than Element's own;
+// - HTMLBodyElement and HTMLFrameSetElement (WindowEventHandlers): the window's handlers.
+// Members Chromium has on HTMLElement that are not listed here stay on Element.prototype.
+const _htmlOnlyElementMembers = [
+  'accessKey', 'attachInternals', 'click', 'dir', 'hidden', 'hidePopover', 'innerText',
+  'lang', 'offsetHeight', 'offsetLeft', 'offsetTop', 'offsetWidth', 'popover',
+  'showPopover', 'title', 'togglePopover',
+];
+const _windowEventHandlerMembers = [
+  'onbeforeprint', 'onbeforeunload', 'onhashchange', 'onlanguagechange', 'onmessage',
+  'onoffline', 'ononline', 'onpagehide', 'onpageshow', 'onpopstate', 'onrejectionhandled',
+  'onstorage', 'onunhandledrejection', 'onunload',
+];
+// The on* names Chromium keeps on Element.prototype itself.
+const _elementOwnHandlers = _private(new Set([
+  'onbeforecopy', 'onbeforecut', 'onbeforepaste', 'onfullscreenchange', 'onfullscreenerror',
+  'onsearch', 'onwebkitfullscreenchange', 'onwebkitfullscreenerror',
+]));
+// name -> descriptor, for the mixin members, so a later interface (MathMLElement) gets them too.
+const _elementMixinDescriptors = [];
+function _installElementMixins(proto) {
+  for (let i = 0; i < _elementMixinDescriptors.length; i++) {
+    const entry = _elementMixinDescriptors[i];
+    if (!_objectHasOwn(proto, entry[0])) _defineProperty(proto, entry[0], entry[1]);
+  }
+}
+(function _distributeElementMembers() {
+  const EP = Element.prototype;
+  const move = (name, targets) => {
+    const d = _getOwnPropertyDescriptor(EP, name);
+    if (!d) return null;
+    for (let i = 0; i < targets.length; i++) {
+      if (!_objectHasOwn(targets[i], name)) _defineProperty(targets[i], name, d);
+    }
+    delete EP[name];
+    return d;
+  };
+  for (let i = 0; i < _htmlOnlyElementMembers.length; i++) {
+    move(_htmlOnlyElementMembers[i], [HTMLElement.prototype]);
+  }
+  for (let i = 0; i < _windowEventHandlerMembers.length; i++) {
+    move(_windowEventHandlerMembers[i], [HTMLBodyElement.prototype, HTMLFrameSetElement.prototype]);
+  }
+  const mixin = ['style', 'dataset', 'tabIndex', 'autofocus', 'nonce', 'focus', 'blur'];
+  const names = Object.getOwnPropertyNames(EP);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    if (name.length > 2 && name[0] === 'o' && name[1] === 'n' && !_elementOwnHandlers.has(name)) mixin.push(name);
+  }
+  for (let i = 0; i < mixin.length; i++) {
+    const d = move(mixin[i], [HTMLElement.prototype, SVGElement.prototype]);
+    if (d) _elementMixinDescriptors.push([mixin[i], d]);
+  }
+})();
 globalThis.CharacterData = CharacterData;
 globalThis.Text = Text;
 globalThis.Comment = Comment;
@@ -14583,6 +16000,11 @@ globalThis.Range = class Range {
       frag._nid,
       _fragmentContextPayload(context || 'body', html),
     );
+    // Chromium upgrades the fragment's defined elements before this returns.
+    if (_ceDefCount !== 0) {
+      _ceCreatedUnder(frag, true);
+      _ceDone();
+    }
     return frag;
   }
   toString() {
@@ -14715,9 +16137,9 @@ _markNative(globalThis.Selection);
   Element.prototype.getBoundingClientRect, Element.prototype.getClientRects,
   Element.prototype.checkVisibility,
   Element.prototype.addEventListener, Element.prototype.removeEventListener,
-  Element.prototype.dispatchEvent, Element.prototype.click,
-  Element.prototype.focus, Element.prototype.blur,
-  Element.prototype.showPopover, Element.prototype.hidePopover, Element.prototype.togglePopover,
+  Element.prototype.dispatchEvent, HTMLElement.prototype.click,
+  HTMLElement.prototype.focus, HTMLElement.prototype.blur,
+  HTMLElement.prototype.showPopover, HTMLElement.prototype.hidePopover, HTMLElement.prototype.togglePopover,
   Element.prototype.cloneNode, Element.prototype.attachShadow,
   Element.prototype.insertAdjacentHTML, Element.prototype.insertAdjacentText,
   Element.prototype.insertAdjacentElement, Element.prototype.scrollIntoView,
@@ -14879,7 +16301,14 @@ class _IframeDocument {
     if (this._body) this._body.innerHTML += html;
   }
   writeln(html) { this.write(html + '\n'); }
-  open() { if (this._body) this._body.innerHTML = ''; }
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, whose open() returns undefined.
+  // document.open() returns the document (Chromium 141), and loaders chain on it: Akamai
+  // mPulse runs `iframe.contentWindow.document.open()._l = function () {...}`, which threw
+  // a TypeError here and took the page's script down with it.
+  open() {
+    if (this._body) this._body.innerHTML = '';
+    return this;
+  }
   close() {}
 }
 
@@ -15972,9 +17401,10 @@ class _Canvas2D {
     if (_fin(a, b, c, d, e, f)) this._m = [a, b, c, d, e, f];
   }
   resetTransform() { this._m = [1, 0, 0, 1, 0, 0]; }
+  // A DOMMatrix, as in Chromium (see the global interfaces near the end of this file).
   getTransform() {
     const [a, b, c, d, e, f] = this._m;
-    return { a, b, c, d, e, f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 };
+    return _makeDOMMatrix2D(a, b, c, d, e, f);
   }
   save() {
     this._stateStack.push({
@@ -16469,14 +17899,16 @@ class _Canvas2D {
     const fontSize = parseInt(this.font) || 10;
     const scale = Math.max(1, Math.round(fontSize / 10));
     const width = String(t).length * 6 * scale;
-    return {
+    // A TextMetrics (see the global interfaces near the end of this file), which has no
+    // emHeightAscent/emHeightDescent in Chromium 141.
+    return _makeTextMetrics({
       width,
       actualBoundingBoxLeft: 0, actualBoundingBoxRight: width,
       actualBoundingBoxAscent: 7 * scale, actualBoundingBoxDescent: 2 * scale,
       fontBoundingBoxAscent: 7 * scale, fontBoundingBoxDescent: 2 * scale,
       emHeightAscent: 7 * scale, emHeightDescent: 2 * scale,
       alphabeticBaseline: 0, hangingBaseline: 7 * scale, ideographicBaseline: -2 * scale,
-    };
+    });
   }
 
   // -------------------------------------------------------------- pixels
@@ -16569,7 +18001,7 @@ class _Canvas2D {
 globalThis.CanvasGradient = _CanvasGradient;
 globalThis.CanvasPattern = _CanvasPattern;
 
-class HTMLCanvasElement extends Element {
+class HTMLCanvasElement extends HTMLElement {
   get width() {
     const raw = this.getAttribute('width');
     const parsed = raw === null ? 300 : Number.parseInt(raw, 10);
@@ -16598,6 +18030,7 @@ class HTMLCanvasElement extends Element {
   }
 }
 globalThis.HTMLCanvasElement = HTMLCanvasElement;
+_htmlTagClasses.CANVAS = HTMLCanvasElement;
 
 HTMLCanvasElement.prototype.getContext = function getContext(type) {
   if (type === '2d') {
@@ -16826,7 +18259,7 @@ globalThis.RTCIceCandidate = class RTCIceCandidate { constructor(d){this.candida
 // the first `get` because their request's `onsuccess` is never called. Fire
 // `onsuccess` asynchronously with `null` so reads complete-but-empty, which
 // most libraries treat as a cache miss and fall back to the network.
-function _idbRequest(produceResult) {
+function _idbRequest(produceResult, kind) {
   const req = {
     result: undefined,
     error: null,
@@ -16838,6 +18271,9 @@ function _idbRequest(produceResult) {
     addEventListener(type, fn) { req['on' + type] = fn; },
     removeEventListener(type, fn) { if (req['on' + type] === fn) req['on' + type] = null; },
   };
+  // An IDBRequest (IDBOpenDBRequest for open()); see the global interfaces near the end
+  // of this file.
+  _idbBrand(req, kind || 'IDBRequest');
   Promise.resolve().then(() => {
     try {
       req.result = produceResult();
@@ -16857,7 +18293,7 @@ function _idbRequest(produceResult) {
 
 function _idbObjectStore(name) {
   const data = new Map();
-  return {
+  return _idbBrand({
     name,
     keyPath: null,
     autoIncrement: false,
@@ -16874,10 +18310,10 @@ function _idbObjectStore(name) {
     count() { return _idbRequest(() => data.size); },
     openCursor() { return _idbRequest(() => null); },
     openKeyCursor() { return _idbRequest(() => null); },
-    createIndex() { return { name: '', keyPath: '', unique: false, multiEntry: false, get() { return _idbRequest(() => undefined); } }; },
-    index() { return { get() { return _idbRequest(() => undefined); }, getAll() { return _idbRequest(() => []); }, count() { return _idbRequest(() => 0); }, openCursor() { return _idbRequest(() => null); } }; },
+    createIndex() { return _idbBrand({ name: '', keyPath: '', unique: false, multiEntry: false, get() { return _idbRequest(() => undefined); } }, 'IDBIndex'); },
+    index() { return _idbBrand({ get() { return _idbRequest(() => undefined); }, getAll() { return _idbRequest(() => []); }, count() { return _idbRequest(() => 0); }, openCursor() { return _idbRequest(() => null); } }, 'IDBIndex'); },
     deleteIndex() {},
-  };
+  }, 'IDBObjectStore');
 }
 
 function _idbTransaction(storeNames) {
@@ -16901,6 +18337,7 @@ function _idbTransaction(storeNames) {
     addEventListener(type, fn) { tx['on' + type] = fn; },
     removeEventListener(type, fn) { if (tx['on' + type] === fn) tx['on' + type] = null; },
   };
+  _idbBrand(tx, 'IDBTransaction');
   Promise.resolve().then(() => {
     if (typeof tx.oncomplete === 'function') {
       try { tx.oncomplete({ target: tx, type: 'complete' }); } catch (e) {}
@@ -16910,7 +18347,7 @@ function _idbTransaction(storeNames) {
 }
 
 function _idbDatabase(name, version) {
-  return {
+  return _idbBrand({
     name,
     version,
     objectStoreNames: { contains() { return false; }, length: 0, item() { return null; } },
@@ -16924,12 +18361,12 @@ function _idbDatabase(name, version) {
     close() {},
     onversionchange: null, onabort: null, onerror: null, onclose: null,
     addEventListener() {}, removeEventListener() {},
-  };
+  }, 'IDBDatabase');
 }
 
 globalThis.indexedDB = {
   open(name, version) {
-    return _idbRequest(() => _idbDatabase(name, version || 1));
+    return _idbRequest(() => _idbDatabase(name, version || 1), 'IDBOpenDBRequest');
   },
   deleteDatabase(_name) { return _idbRequest(() => undefined); },
   databases() { return Promise.resolve([]); },
@@ -16996,44 +18433,162 @@ navigator.wakeLock = { request() { return Promise.reject(new DOMException('Not a
 
 globalThis.opener = null;
 
+// Workers run in this realm. A worker's scripts are evaluated under a scope object that
+// stands in for its global, a DedicatedWorkerGlobalScope; nothing here is a separate
+// isolate. DEVIATION from crates/obscura-js/js/bootstrap.js, whose worker had no
+// importScripts (pinterest.com and netflix.com logged "importScripts is not defined"),
+// no WorkerLocation or WorkerNavigator (self.location was the page's), no
+// WorkerGlobalScope prototype chain, accepted only a string URL (not new URL(...)), and
+// leaked window-only globals (typeof document was "object"). Each script's top-level
+// var/function/let/const/class also stayed private to that script, which made a library
+// loaded with importScripts invisible to the script that loaded it.
+const _workerEvalIntrinsic = globalThis.eval;
+const _WorkerFunction = Function;
+const _WorkerURL = URL;
+const _WorkerSyntaxError = SyntaxError;
+const _WorkerTypeError = TypeError;
+const _WorkerDOMException = DOMException;
+// Every worker script is a direct eval in this function. Its `eval` parameter is the
+// intrinsic, so the call is a direct eval however the worker's own `eval` is bound; the
+// two object environments are the worker's global lexical scope (its scripts' let, const
+// and class) and its global object. The first statement hands back a resolver for this
+// function's own environment, where a sloppy script's var and function declarations land
+// (they are hoisted, so it works while the script is still running); the trailer the
+// shim appends to the source hands back one for the script's own scope.
+const _workerEvaluator = _WorkerFunction(
+  'eval', '__obscura_scope', '__obscura_lexical', '__obscura_source', '__obscura_capture',
+  '__obscura_capture(0, function (__obscura_name) { return eval(__obscura_name); });\n' +
+  'with (__obscura_scope) { with (__obscura_lexical) { return eval(__obscura_source); } }');
+const _workerTrailer = '\n;__obscura_capture(1, function (__obscura_name) { return eval(__obscura_name); });';
+// The evaluator's own names never resolve to a property a worker script set on its global.
+const _workerUnscopables = _objectFreeze({
+  __proto__: null, eval: true, __obscura_scope: true, __obscura_lexical: true,
+  __obscura_source: true, __obscura_capture: true,
+});
+const _workerKey = {};
+const _workerJsMime = new Set(['application/ecmascript', 'application/javascript', 'application/x-ecmascript',
+  'application/x-javascript', 'text/ecmascript', 'text/javascript', 'text/javascript1.0', 'text/javascript1.1',
+  'text/javascript1.2', 'text/javascript1.3', 'text/javascript1.4', 'text/javascript1.5', 'text/jscript',
+  'text/livescript', 'text/x-ecmascript', 'text/x-javascript']);
+function _isJavaScriptMime(type) {
+  const raw = _String(type || '');
+  const semi = _stringIndexOf(raw, ';');
+  return _setHas(_workerJsMime, _stringToLowerCase(_stringTrim(semi < 0 ? raw : _stringSlice(raw, 0, semi))));
+}
+
+function WorkerGlobalScope() { throw new _WorkerTypeError('Illegal constructor'); }
+function DedicatedWorkerGlobalScope() { throw new _WorkerTypeError('Illegal constructor'); }
+Object.setPrototypeOf(DedicatedWorkerGlobalScope, WorkerGlobalScope);
+Object.setPrototypeOf(DedicatedWorkerGlobalScope.prototype, WorkerGlobalScope.prototype);
+_defineProperty(WorkerGlobalScope.prototype, Symbol.toStringTag, { value: 'WorkerGlobalScope', configurable: true });
+_defineProperty(DedicatedWorkerGlobalScope.prototype, Symbol.toStringTag, { value: 'DedicatedWorkerGlobalScope', configurable: true });
+_markNative(WorkerGlobalScope); _markNative(DedicatedWorkerGlobalScope);
+
+class WorkerLocation {
+  #url;
+  constructor(key, href) {
+    if (key !== _workerKey) throw new _WorkerTypeError('Illegal constructor');
+    this.#url = new _WorkerURL(href);
+  }
+  get href() { return this.#url.href; }
+  get origin() { return this.#url.origin; }
+  get protocol() { return this.#url.protocol; }
+  get host() { return this.#url.host; }
+  get hostname() { return this.#url.hostname; }
+  get port() { return this.#url.port; }
+  get pathname() { return this.#url.pathname; }
+  get search() { return this.#url.search; }
+  get hash() { return this.#url.hash; }
+  toString() { return this.#url.href; }
+}
+_defineProperty(WorkerLocation.prototype, Symbol.toStringTag, { value: 'WorkerLocation', configurable: true });
+_markNative(WorkerLocation);
+
+// The page's navigator, seen through the members WorkerNavigator has, so a worker reports
+// the same identity as its document.
+class WorkerNavigator {
+  constructor(key) { if (key !== _workerKey) throw new _WorkerTypeError('Illegal constructor'); }
+}
+for (const name of ['appCodeName', 'appName', 'appVersion', 'platform', 'product', 'userAgent',
+  'language', 'languages', 'onLine', 'hardwareConcurrency', 'deviceMemory', 'userAgentData',
+  'connection', 'storage', 'locks', 'gpu', 'permissions', 'mediaCapabilities']) {
+  _defineProperty(WorkerNavigator.prototype, name, {
+    get() { const nav = globalThis.navigator; return nav ? nav[name] : undefined; },
+    enumerable: true, configurable: true,
+  });
+}
+_defineProperty(WorkerNavigator.prototype, Symbol.toStringTag, { value: 'WorkerNavigator', configurable: true });
+_markNative(WorkerNavigator);
+
 globalThis.Worker = class Worker {
-  constructor(url) {
+  constructor(url, options) {
+    if (arguments.length === 0) {
+      throw new _WorkerTypeError("Failed to construct 'Worker': 1 argument required, but only 0 present.");
+    }
     this.onmessage = null;
     this.onerror = null;
     this._terminated = false;
     this._listeners = {};
     this._scope = null;
+    this._scopeObject = null;
+    this._lexical = _objectCreate(null);
+    this._declared = _objectCreate(null);
+    this._running = [];
     this._pendingMessages = [];
+    this._type = options && options.type === 'module' ? 'module' : 'classic';
+    this._name = options && options.name !== undefined ? _String(options.name) : '';
     const worker = this;
 
-    let resolvedUrl = url;
-    if (typeof url === 'string') {
-      const blob = _hostVars.__blobStore?.[url];
-      if (blob) {
-        worker._code = blob;
-        // Auto-start on next tick so caller can set onmessage first.
-        setTimeout(() => worker._autoRun(), 0);
-        return;
-      }
-      // Resolve relative URLs against the current page.
-      if (!url.startsWith('http') && !url.startsWith('blob:') && !url.startsWith('data:')) {
-        try { resolvedUrl = new URL(url, globalThis.location?.href || '').href; } catch(e) {}
-      }
-      (async () => {
-        try {
-          const resp = await fetch(resolvedUrl);
-          worker._code = await resp.text();
-          if (!worker._terminated) worker._autoRun();
-        } catch(e) { if (worker.onerror) worker.onerror(e); }
-      })();
+    // A URL object (new Worker(new URL('w.js', import.meta.url)), the bundler idiom) is
+    // stringified, as WebIDL does for a USVString argument.
+    url = _String(url);
+    const blob = _hostVars.__blobStore?.[url];
+    if (blob !== undefined) {
+      worker._url = url;
+      worker._code = blob;
+      // Auto-start on next tick so caller can set onmessage first.
+      setTimeout(() => worker._autoRun(), 0);
+      return;
     }
+    let resolvedUrl;
+    try {
+      resolvedUrl = new _WorkerURL(url, globalThis.location?.href || undefined).href;
+    } catch (e) {
+      throw new _WorkerDOMException("Failed to construct 'Worker': The URL '" + url + "' is invalid.", 'SyntaxError');
+    }
+    worker._url = resolvedUrl;
+    if (resolvedUrl.startsWith('data:')) {
+      try { worker._code = _decodeDataScriptUrl(resolvedUrl); } catch (e) { worker._code = ''; }
+      setTimeout(() => worker._autoRun(), 0);
+      return;
+    }
+    (async () => {
+      try {
+        const resp = await fetch(resolvedUrl);
+        // A failed load is an error event, not the error page's body run as script.
+        if (resp.ok === false) throw new Error("Failed to load worker script '" + resolvedUrl + "'");
+        worker._code = await resp.text();
+        if (!worker._terminated) worker._autoRun();
+      } catch(e) { if (worker.onerror) worker.onerror(e); }
+    })();
   }
   _makeScope() {
     const worker = this;
-    const scope = {
+    const scope = _objectCreate(DedicatedWorkerGlobalScope.prototype);
+    const members = {
       onmessage: null,
-      WorkerGlobalScope: function WorkerGlobalScope() {},
-      DedicatedWorkerGlobalScope: function DedicatedWorkerGlobalScope() {},
+      onmessageerror: null,
+      onerror: null,
+      name: worker._name,
+      WorkerGlobalScope,
+      DedicatedWorkerGlobalScope,
+      WorkerLocation,
+      WorkerNavigator,
+      location: new WorkerLocation(_workerKey, worker._url),
+      navigator: new WorkerNavigator(_workerKey),
+      origin: (() => { try { return new _WorkerURL(worker._url).origin; } catch (e) { return 'null'; } })(),
+      isSecureContext: globalThis.isSecureContext,
+      importScripts: function importScripts() { worker._importScripts(arguments); },
       postMessage: (msg) => {
         if (worker._terminated) return;
         const evt = { data: msg };
@@ -17045,6 +18600,9 @@ globalThis.Worker = class Worker {
         if (!scope._ev) scope._ev = {};
         if (!scope._ev[type]) scope._ev[type] = [];
         scope._ev[type].push(fn);
+      },
+      removeEventListener: (type, fn) => {
+        if (scope._ev && scope._ev[type]) scope._ev[type] = scope._ev[type].filter(h => h !== fn);
       },
       close: () => { worker.terminate(); },
       crypto: globalThis.crypto,
@@ -17062,19 +18620,153 @@ globalThis.Worker = class Worker {
       fetch: globalThis.fetch,
       console: globalThis.console,
       performance: globalThis.performance,
-      location: globalThis.location,
     };
-    scope.self = scope;
+    for (const key of _objectKeys(members)) {
+      _defineProperty(scope, key, { value: members[key], writable: true, enumerable: true, configurable: true });
+    }
+    // Window-only globals a worker does not have. Without these the lookup fell through to
+    // the page's window, so environment checks (typeof window, typeof document) took the
+    // browser-page path inside a worker.
+    for (const key of ['window', 'document', 'parent', 'top', 'frames', 'opener', 'frameElement',
+      'localStorage', 'sessionStorage', 'history', 'customElements', 'alert', 'confirm', 'prompt',
+      'print', 'open']) {
+      _defineProperty(scope, key, { value: undefined, writable: true, enumerable: false, configurable: true });
+    }
+    _defineProperty(scope, Symbol.unscopables, { value: _workerUnscopables, writable: false, enumerable: false, configurable: false });
+    _defineProperty(scope, 'self', { value: scope, writable: true, enumerable: true, configurable: true });
+    _defineProperty(scope, 'globalThis', { value: scope, writable: true, enumerable: false, configurable: true });
     return scope;
+  }
+  // Runs one classic script in the worker's global scope, as a global script: its var and
+  // function declarations become properties of the scope, its let/const/class are seen by
+  // the worker's later scripts. Throws what the script throws.
+  _evaluate(source, url) {
+    const scope = this._scopeObject;
+    const declared = this._declared;
+    let decls;
+    try { decls = _JSONparse(__obscuraCore.ops.op_script_declarations(source)); } catch (e) { decls = null; }
+    if (!decls || !_isArray(decls.v) || !_isArray(decls.f) || !_isArray(decls.l)) decls = { s: false, v: [], f: [], l: [] };
+    if (!decls.s) {
+      // A sloppy script's var assignments resolve through the scope object first, so a
+      // var the global does not have yet is made a property of it before the script runs.
+      for (let i = 0; i < decls.v.length; i++) {
+        const name = decls.v[i];
+        if (name in scope || _workerUnscopables[name]) continue;
+        _defineProperty(scope, name, { value: undefined, writable: true, enumerable: true, configurable: false });
+        declared[name] = true;
+      }
+    }
+    const frame = { decls, outer: null, inner: null };
+    const capture = (kind, resolver) => { if (kind === 0) frame.outer = resolver; else frame.inner = resolver; };
+    let text = source + _workerTrailer;
+    if (/^(?:https?|blob):/.test(url) && !/[\r\n]/.test(url)) text += '\n//# sourceURL=' + url;
+    _arrayPush(this._running, frame);
+    try {
+      return _reflectApply(_workerEvaluator, scope, [_workerEvalIntrinsic, scope, this._lexical, text, capture]);
+    } finally {
+      this._running.length--;
+      this._publish(frame, true);
+    }
+  }
+  // Gives the scope the declarations of a script that is running or has run.
+  _publish(frame, done) {
+    const scope = this._scopeObject;
+    const declared = this._declared;
+    const decls = frame.decls;
+    const read = decls.s ? frame.inner : frame.outer;
+    if (read) {
+      for (let i = 0; i < decls.f.length; i++) {
+        const name = decls.f[i];
+        if (_workerUnscopables[name] || (_objectHasOwn(scope, name) && !declared[name])) continue;
+        let value;
+        try { value = read(name); } catch (e) { continue; }
+        if (typeof value !== 'function') continue;
+        _defineProperty(scope, name, { value, writable: true, enumerable: true, configurable: false });
+        declared[name] = true;
+      }
+    }
+    if (!done || !frame.inner) return;
+    const inner = frame.inner;
+    if (decls.s) {
+      for (let i = 0; i < decls.v.length; i++) {
+        const name = decls.v[i];
+        if (_workerUnscopables[name] || (_objectHasOwn(scope, name) && !declared[name])) continue;
+        let value;
+        try { value = inner(name); } catch (e) { continue; }
+        _defineProperty(scope, name, { value, writable: true, enumerable: true, configurable: false });
+        declared[name] = true;
+      }
+    }
+    for (let i = 0; i < decls.l.length; i++) {
+      const name = decls.l[i];
+      if (_workerUnscopables[name]) continue;
+      try { this._lexical[name] = inner(name); } catch (e) {}
+    }
+  }
+  _importScripts(args) {
+    const prefix = "Failed to execute 'importScripts' on 'WorkerGlobalScope': ";
+    if (this._type === 'module') {
+      throw new _WorkerTypeError(prefix + "Module scripts don't support importScripts().");
+    }
+    // Every URL is parsed before anything is fetched; one bad URL loads nothing.
+    const urls = [];
+    for (let i = 0; i < args.length; i++) {
+      const raw = _String(args[i]);
+      let href;
+      try { href = new _WorkerURL(raw, this._url).href; }
+      catch (e) { throw new _WorkerDOMException(prefix + "The URL '" + raw + "' is invalid.", 'SyntaxError'); }
+      _arrayPush(urls, href);
+    }
+    // A script that calls importScripts has its function declarations hoisted already;
+    // the imported scripts may call them.
+    for (let i = 0; i < this._running.length; i++) this._publish(this._running[i], false);
+    for (let i = 0; i < urls.length; i++) this._importScript(urls[i], prefix);
+  }
+  // Fetches and runs one imported script synchronously, in order. A failed load is a
+  // NetworkError; an exception the script throws is rethrown, except from another
+  // origin's script, whose errors are muted to a NetworkError; a script that does not
+  // parse is a SyntaxError naming importScripts.
+  _importScript(href, prefix) {
+    const worker = this;
+    const failed = () => new _WorkerDOMException(prefix + "The script at '" + href + "' failed to load.", 'NetworkError');
+    const outcome = { ran: false, threw: false, error: undefined, parse: false, muted: false };
+    const run = (scope, source, url, muted) => {
+      outcome.ran = true;
+      outcome.muted = !!muted;
+      try {
+        worker._evaluate(source, url);
+      } catch (e) {
+        outcome.threw = true;
+        outcome.error = e;
+        if (e instanceof _WorkerSyntaxError) {
+          try { _WorkerFunction(source); } catch (p) { outcome.parse = true; }
+        }
+      }
+    };
+    if (href.startsWith('data:')) {
+      let source;
+      try { source = _decodeDataScriptUrl(href); } catch (e) { throw failed(); }
+      run(this._scopeObject, source, href, false);
+    } else if (href.startsWith('blob:')) {
+      const source = _hostVars.__blobStore[href];
+      if (typeof source !== 'string') throw failed();
+      run(this._scopeObject, source, href, false);
+    } else {
+      // The host fetches over the page's transport and passes the source to `run`
+      // without it becoming a value page script can reach (SECURITY.md C3).
+      const status = __obscuraCore.ops.op_worker_import_script(href, this._url, this._scopeObject, run);
+      if (status !== '' || !outcome.ran) throw failed();
+    }
+    if (!outcome.threw) return;
+    if (outcome.muted) throw failed();
+    if (outcome.parse) throw new _WorkerSyntaxError(prefix + (outcome.error && outcome.error.message));
+    throw outcome.error;
   }
   _autoRun() {
     if (this._terminated || this._scope || this._code === undefined) return;
-    const scope = this._makeScope();
+    const scope = this._scopeObject = this._makeScope();
     try {
-      // Direct eval preserves script directives and resolves bare handler names
-      // against the worker scope. Run once so message closures retain their state.
-      const fn = new Function('scope', 'source', 'with (scope) { eval(source); }');
-      fn.call(scope, scope, this._code);
+      this._evaluate(this._code, this._url);
     } catch(e) {
       console.error('Worker error:', e.message);
       if (this.onerror) this.onerror(e);
@@ -17159,12 +18851,20 @@ URL.createObjectURL = function(blob) {
     // failed (net::ERR_FAILED), which broke AWS WAF's proof-of-work worker.
     // The obscura Blob materializes _bytes in its constructor; fall back to
     // the async text() store only for foreign Blob shims without _bytes.
+    //
+    // A JavaScript Blob's text is also registered with the host, whose module loader
+    // imports blob: URLs (port addition; any other type is refused as a module by
+    // Chromium's strict MIME check, so its text is not copied).
+    const registerScript = _isJavaScriptMime(blob.type)
+      ? (text) => { try { __obscuraCore.ops.op_blob_script_register(id, text); } catch (e) {} }
+      : null;
     if (blob._bytes) {
       let text = '';
       try { text = new TextDecoder().decode(blob._bytes); } catch (e) {}
       _hostVars.__blobStore[id] = text;
+      if (registerScript) registerScript(text);
     } else if (typeof blob.text === 'function') {
-      blob.text().then(text => { _hostVars.__blobStore[id] = text; });
+      blob.text().then(text => { _hostVars.__blobStore[id] = text; if (registerScript) registerScript(text); });
     } else {
       _hostVars.__blobStore[id] = '';
     }
@@ -17173,6 +18873,7 @@ URL.createObjectURL = function(blob) {
 };
 URL.revokeObjectURL = function(url) {
   delete _hostVars.__blobStore[url];
+  try { __obscuraCore.ops.op_blob_script_revoke(_String(url)); } catch (e) {}
 };
 
 // Window-level scrolling (issue #468). #431 gave elements functional
@@ -17286,7 +18987,8 @@ if (typeof ReadableStream === 'undefined') {
       this._error = null;
       this.locked = false;
       const stream = this;
-      this._controller = {
+      // A ReadableStreamDefaultController (see the global interfaces near the end of this file).
+      this._controller = _wrapStreamPart('ReadableStreamDefaultController', {
         enqueue(chunk) {
           if (stream._state !== "readable") return;
           const pending = stream._reads.shift();
@@ -17307,7 +19009,7 @@ if (typeof ReadableStream === 'undefined') {
           while (stream._reads.length) stream._reads.shift().reject(error);
         },
         get desiredSize() { return Math.max(0, 1 - stream._queue.length); },
-      };
+      });
       try {
         const started = source.start?.(this._controller);
         if (started && typeof started.then === "function") {
@@ -17412,7 +19114,14 @@ if (typeof WritableStream === 'undefined') {
       this._chain = Promise.resolve();
       this.locked = false;
       try {
-        const started = sink.start?.({});
+        const stream = this;
+        let signal = null;
+        // A WritableStreamDefaultController (see the global interfaces near the end of this file).
+        const controller = _wrapStreamPart('WritableStreamDefaultController', {
+          error(e) { if (stream._state === "writable") { stream._state = "errored"; stream._error = e; } },
+          get signal() { return signal || (signal = new AbortController().signal); },
+        });
+        const started = sink.start?.(controller);
         if (started && typeof started.then === "function") this._chain = Promise.resolve(started);
       } catch (error) {
         this._state = "errored";
@@ -17469,6 +19178,14 @@ if (typeof TransformStream === 'undefined') {
           controller.close();
         },
         abort(reason) { controller.error(reason); },
+      });
+      // A TransformStreamDefaultController (see the global interfaces near the end of this file).
+      const readableController = controller;
+      controller = _wrapStreamPart('TransformStreamDefaultController', {
+        enqueue(chunk) { readableController.enqueue(chunk); },
+        error(e) { readableController.error(e); },
+        terminate() { readableController.close(); },
+        get desiredSize() { return readableController.desiredSize; },
       });
       try { transformer.start?.(controller); }
       catch (error) { controller.error(error); }
@@ -18594,7 +20311,16 @@ if (typeof URLPattern === 'undefined') {
 }
 
 if (typeof Document !== 'undefined' && !Document.prototype.importNode) {
-  Document.prototype.importNode = function(node, deep) { return node?.cloneNode(!!deep) || null; };
+  Document.prototype.importNode = function(node, deep) {
+    const clone = node?.cloneNode(!!deep) || null;
+    // The copy belongs to this document, so its defined elements are upgraded even when the
+    // source was inert template contents (custom elements; cloneNode skipped those).
+    if (clone && _ceDefCount !== 0) {
+      _ceCreatedUnder(clone, false);
+      _ceDone();
+    }
+    return clone;
+  };
 }
 
 // Document.adoptNode: standard DOM (HTML living spec). Frameworks that move
@@ -18731,6 +20457,8 @@ function _pageInit() {
 
   const documentNid = +_dom("document_node_id");
   globalThis.document = new Document(documentNid);
+  // An HTMLDocument (an XMLDocument for an XML page), as Chromium's document is.
+  _adoptDocumentInterface(globalThis.document);
   _realmDocument = globalThis.document;
   // parentNode on <html> reaches the backing document node. Keep that wrapper
   // canonical so getRootNode(), isConnected, and identity comparisons return
@@ -18754,7 +20482,8 @@ function _pageInit() {
   const vh = Number.isFinite(_hostVars.__obscura_viewport_h) && _hostVars.__obscura_viewport_h > 0
     ? _hostVars.__obscura_viewport_h : sh - 80;
   _applyScreenSize(sw, sh, !!_hostVars.__obscura_screen_emulated);
-  globalThis.visualViewport = { width:vw, height:vh, offsetLeft:0, offsetTop:0, scale:1, addEventListener(){}, removeEventListener(){} };
+  // A VisualViewport (see the global interfaces at the end of this file).
+  globalThis.visualViewport = _makeVisualViewport(vw, vh);
   // Screen dimensions do not determine the output device scale. The embedding
   // browser applies an explicit device metric after page initialization; the
   // standalone runtime has the same 1x default as Obscura's render surface.
@@ -18770,7 +20499,9 @@ function _pageInit() {
   // A navigation start precedes the wall clock, so skew into the past only: an
   // origin ahead of it makes performance.now() and the rAF timestamp negative.
   const t0 = Date.now() - 1 - Math.floor(_fpRand(641) * 100);
-  globalThis.performance.timeOrigin = t0;
+  // performance's attributes are read-only accessors on Performance.prototype (see the
+  // global interfaces at the end of this file); the shim writes its state directly.
+  _ifaceSet(globalThis.performance, 'timeOrigin', t0);
   // performance.timing is a live projection of _navTiming now, so the marks
   // are seeded here rather than pinned to navigationStart.
   _perfUserEntries = [];
@@ -18782,11 +20513,11 @@ function _pageInit() {
   _navTimingReset(Date.now() - t0);
   _installNavigationTimingHooks();
   var _totalHeap = 15000000 + Math.floor(_fpRand(620) * 85000000);
-  globalThis.performance.memory = {
+  _ifaceSet(globalThis.performance, 'memory', {
     jsHeapSizeLimit: 4294705152,
     totalJSHeapSize: _totalHeap,
     usedJSHeapSize: Math.floor(_totalHeap * (0.3 + _fpRand(621) * 0.5)),
-  };
+  });
   globalThis.Notification.permission = "default";
 
   // userAgentData brands and getHighEntropyValues now derive the Chrome
@@ -18945,11 +20676,31 @@ if (!globalThis.Attr) {
     constructor(name, value = '', namespaceURI = null, prefix = null) {
       this.name = name;
       this.localName = name;
-      this.value = value;
+      this._value = String(value);
       this.namespaceURI = namespaceURI;
       this.prefix = prefix;
       this.ownerElement = null;
       this.specified = true;
+    }
+    // Port addition: an owned Attr is a view of its element's attribute, so setting its value
+    // changes the element (and reaches attributeChangedCallback), as in Chromium. The shim's
+    // Attr used to be a detached copy.
+    get value() {
+      const owner = this.ownerElement;
+      if (owner) {
+        const current = this.namespaceURI
+          ? owner.getAttributeNS(this.namespaceURI, this.localName)
+          : owner.getAttribute(this.name);
+        if (current !== null) return current;
+      }
+      return this._value;
+    }
+    set value(v) {
+      this._value = String(v);
+      const owner = this.ownerElement;
+      if (!owner) return;
+      if (this.namespaceURI) owner.setAttributeNS(this.namespaceURI, this.name, this._value);
+      else owner.setAttribute(this.name, this._value);
     }
     get nodeName() { return this.name; }
     get nodeValue() { return this.value; }
@@ -19372,6 +21123,27 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
   _iframeRealmGlobalNameSet = _private(new Set(_iframeRealmGlobalNames));
 })();
 
+// MathMLElement (port addition): the interface of every element in the MathML namespace,
+// over Element as in Chromium, where pages test for it (icloud.com sends a Chrome UA
+// without `window.MathMLElement` to /unsupported_browser/). Page script cannot construct
+// it (Element's constructor throws Illegal constructor); _captureMathMLElement below maps
+// MathML elements to it and gives it the style/focus/on* members.
+class MathMLElement extends Element {}
+_defineProperty(globalThis, 'MathMLElement', { value: MathMLElement, writable: true, enumerable: false, configurable: true });
+
+// Elements in the MathML namespace get this realm's MathMLElement when one is defined as a
+// class over Element (the shim builds a wrapper with `new C(nid)`), and with it the
+// mixin members _distributeElementMembers took off Element.prototype. Read as data, so a
+// getter on the global is not run.
+(function _captureMathMLElement() {
+  const d = _getOwnPropertyDescriptor(globalThis, 'MathMLElement');
+  const C = d ? d.value : undefined;
+  if (typeof C !== 'function' || !C.prototype || !_isPrototypeOf(Element, C)) return;
+  if (!/^class\b/.test(_origToString.call(C))) return;
+  _mathMLElementClass = C;
+  _installElementMixins(C.prototype);
+})();
+
 (function _markBuiltinsNative() {
   var seen = new Set();
   function walk(ctor) {
@@ -19609,7 +21381,8 @@ const _worldCall = (function () {
   const own = (proto, name) => Object.getOwnPropertyDescriptor(proto, name) || {};
   const methods = {
     __proto__: null,
-    focus: EP.focus, click: EP.click, select: EP.select,
+    // focus() and click() are HTMLElement's; applied to any element the world names.
+    focus: HTMLElement.prototype.focus, click: HTMLElement.prototype.click, select: EP.select,
     setSelectionRange: EP.setSelectionRange, setRangeText: EP.setRangeText,
   };
   const accessors = {
@@ -19741,7 +21514,9 @@ function _installIsolatedWorldBridges() {
   accessor('selectionDirection');
 
   const method = (name) => {
-    const original = EP[name];
+    // The prototype that defines it: click() is HTMLElement's, the others Element's.
+    const owner = _objectHasOwn(EP, name) ? EP : HTMLElement.prototype;
+    const original = owner[name];
     if (typeof original !== 'function') return;
     const replacement = {
       [name](...args) {
@@ -19752,7 +21527,7 @@ function _installIsolatedWorldBridges() {
         call('call:' + name, nid, encoded);
       },
     }[name];
-    Object.defineProperty(EP, name, { configurable: true, writable: true, enumerable: false, value: replacement });
+    Object.defineProperty(owner, name, { configurable: true, writable: true, enumerable: false, value: replacement });
   };
   method('click');
   method('select');
@@ -20034,7 +21809,7 @@ function _captureDispatchImpls() {
     closest: findMember(Element.prototype, 'closest'),
     getAttribute: findMember(Element.prototype, 'getAttribute'),
     hasAttribute: findMember(Element.prototype, 'hasAttribute'),
-    click: findMember(Element.prototype, 'click'),
+    click: findMember(HTMLElement.prototype, 'click'),
     tagName: findMember(Element.prototype, 'tagName', 'get'),
     parentElement: findMember(Element.prototype, 'parentElement', 'get'),
     firstElementChild: findMember(Element.prototype, 'firstElementChild', 'get'),
@@ -20171,6 +21946,1726 @@ function _hostValueJson(value) {
   return walk(value);
 }
 
+// ---- Global interface objects (port addition) ----------------------------------------
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which leaves these interface names
+// undefined on the global (or defines them as plain functions unrelated to the objects
+// that carry them). Chromium 141 exposes every one, and pages test for them:
+// icloud.com sends a Chrome UA without `window.MathMLElement` to /unsupported_browser/,
+// TikTok's SDK reads `Navigator`, grammarly.com and mozilla.org `DOMImplementation`. Each
+// interface below is the real prototype of the objects the shim already hands out, so
+// `navigator instanceof Navigator` and `Object.getPrototypeOf(navigator) ===
+// Navigator.prototype` hold as in Chromium, and an interface Chromium does not let script
+// construct throws its "Illegal constructor" TypeError. Names that would only be a
+// feature-detection stub (Web Audio nodes, WebRTC, Gamepad, MediaSource, ...) are left
+// undefined on purpose: a constructor whose objects do nothing sends a page down a path
+// that then fails.
+//
+// An instance's state lives in a closure WeakMap (its "inner" record), and the
+// interface's prototype carries brand-checked accessors and operations that forward to it,
+// as Chromium's do: the instance has no own properties, and a member called on anything
+// else throws "Illegal invocation".
+const _ifaceState = _private(new WeakMap());
+// True once this section has run; objects the shim builds before then stay plain.
+var _ifaceReady = false;
+// The interface objects defined here, by name, for the shim's own use (page script can
+// replace the globals).
+const _ifaces = { __proto__: null };
+const _reflectGetAtBoot = Reflect.get;
+const _reflectOwnKeysAtBoot = Reflect.ownKeys;
+const _objectSetPrototypeOf = Object.setPrototypeOf;
+function _ifaceIllegalInvocation() { throw new TypeError('Illegal invocation'); }
+// The state record of `obj` when it is a C (or a subclass); throws Illegal invocation
+// otherwise. `inner` holds the members; `self` makes them run with `inner` as `this` (an
+// object of the shim's own that assigns to its fields).
+function _ifaceRecord(obj, C) {
+  const r = (obj !== null && typeof obj === 'object') ? _weakMapGet(_ifaceState, obj) : undefined;
+  if (r === undefined || (r.C !== C && !_isPrototypeOf(C.prototype, r.C.prototype))) _ifaceIllegalInvocation();
+  return r;
+}
+function _ifaceInner(obj, C) { return _ifaceRecord(obj, C).inner; }
+function _ifaceHas(obj, C) {
+  const r = (obj !== null && typeof obj === 'object') ? _weakMapGet(_ifaceState, obj) : undefined;
+  return r !== undefined && (r.C === C || _isPrototypeOf(C.prototype, r.C.prototype));
+}
+// Shape C as a WebIDL interface object named `name`: a non-writable prototype whose
+// constructor is C, inheriting from `parent`, with its toStringTag, published on the
+// global as a non-enumerable property.
+function _ifaceDefine(name, C, parent, proto) {
+  if (proto) C.prototype = proto;
+  const P = C.prototype;
+  _defineProperty(C, 'prototype', { writable: false, enumerable: false, configurable: false });
+  _defineProperty(P, 'constructor', { value: C, writable: true, enumerable: false, configurable: true });
+  if (parent) {
+    if (_getPrototypeOf(C) !== parent) _objectSetPrototypeOf(C, parent);
+    if (_getPrototypeOf(P) !== parent.prototype) _objectSetPrototypeOf(P, parent.prototype);
+  }
+  _defineProperty(P, Symbol.toStringTag, { value: name, writable: false, enumerable: false, configurable: true });
+  _markNative(C);
+  _defineProperty(globalThis, name, { value: C, writable: true, enumerable: false, configurable: true });
+  _ifaces[name] = C;
+  return C;
+}
+// An interface script cannot construct: `new X()` and `X()` throw as Chromium's do.
+function _ifaceIllegalFunction(name) {
+  return ({ [name]: function () {
+    throw new TypeError(new.target ? "Failed to construct '" + name + "': Illegal constructor" : 'Illegal constructor');
+  } })[name];
+}
+function _ifaceIllegal(name, parent, proto) {
+  return _ifaceDefine(name, _ifaceIllegalFunction(name), parent, proto);
+}
+// The TypeError Chromium throws when a constructible interface is called without `new`.
+function _ifaceRequireNew(name, target) {
+  if (!target) {
+    throw new TypeError("Failed to construct '" + name + "': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+  }
+}
+function _ifaceNative(fn, length) {
+  if (length !== undefined && fn.length !== length) _defineProperty(fn, 'length', { value: length, configurable: true });
+  return _markNative(fn);
+}
+// A read-only (or, with `settable`, writable) attribute of C, read from the inner record.
+// Event handler attributes (on*) take a function or object and store null otherwise.
+function _ifaceAttr(C, key, settable) {
+  const P = C.prototype;
+  if (_objectHasOwn(P, key)) return;
+  const getter = _getOwnPropertyDescriptor({
+    get [key]() {
+      const r = _ifaceRecord(this, C);
+      return _reflectGetAtBoot(r.inner, key, r.self ? r.inner : this);
+    },
+  }, key).get;
+  let setter;
+  if (settable) {
+    const handler = typeof key === 'string' && _stringSlice(key, 0, 2) === 'on';
+    setter = _getOwnPropertyDescriptor({
+      set [key](v) {
+        const r = _ifaceRecord(this, C);
+        const inner = r.inner;
+        const d = _getOwnPropertyDescriptor(inner, key);
+        if (d && d.set) { _reflectApply(d.set, r.self ? inner : this, [v]); return; }
+        inner[key] = handler ? ((typeof v === 'function' || (v !== null && typeof v === 'object')) ? v : null) : v;
+      },
+    }, key).set;
+    _markNative(setter);
+  }
+  _defineProperty(P, key, { get: _markNative(getter), set: setter, enumerable: true, configurable: true });
+}
+// An operation of C, forwarding to the inner record's function of that name.
+function _ifaceMethod(C, key, length) {
+  const P = C.prototype;
+  if (_objectHasOwn(P, key)) return;
+  const fn = ({ [key](...args) {
+    const r = _ifaceRecord(this, C);
+    return _reflectApply(r.inner[key], r.self ? r.inner : this, args);
+  } })[key];
+  _defineProperty(P, key, { value: _ifaceNative(fn, length), writable: true, enumerable: true, configurable: true });
+}
+// An operation of C implemented here, with the inner record as its first argument.
+function _ifaceOp(C, key, length, impl) {
+  const fn = ({ [key](...args) {
+    const r = _ifaceRecord(this, C);
+    return _reflectApply(impl, this, [r.inner, args]);
+  } })[key];
+  _defineProperty(C.prototype, key, { value: _ifaceNative(fn, length), writable: true, enumerable: true, configurable: true });
+}
+// An attribute of C computed here from the inner record.
+function _ifaceGetter(C, key, impl, setImpl) {
+  const getter = _getOwnPropertyDescriptor({
+    get [key]() { return _reflectApply(impl, this, [_ifaceInner(this, C)]); },
+  }, key).get;
+  const setter = setImpl ? _getOwnPropertyDescriptor({
+    set [key](v) { _reflectApply(setImpl, this, [_ifaceInner(this, C), v]); },
+  }, key).set : undefined;
+  _defineProperty(C.prototype, key, {
+    get: _markNative(getter), set: setter ? _markNative(setter) : undefined, enumerable: true, configurable: true,
+  });
+}
+// The members of C that `inner` carries: a function is an operation, anything else an
+// attribute (settable when it had a setter, is an event handler or is named in
+// `settable`). The shim's own `_*` fields stay internal.
+function _ifaceMembersFrom(C, inner, settable) {
+  const keys = _reflectOwnKeysAtBoot(inner);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (typeof key !== 'string' || _stringCharAt(key, 0) === '_' || key === 'constructor') continue;
+    const d = _getOwnPropertyDescriptor(inner, key);
+    if ('value' in d && typeof d.value === 'function') _ifaceMethod(C, key, d.value.length);
+    else _ifaceAttr(C, key, !!d.set || _stringSlice(key, 0, 2) === 'on' || (!!settable && _arrayIndexOf(settable, key) >= 0));
+  }
+}
+// A new instance of C whose state is `inner`.
+function _ifaceInstance(C, inner) {
+  const obj = _objectCreate(C.prototype);
+  _weakMapSet(_ifaceState, obj, { C, inner, self: false });
+  return obj;
+}
+// A new instance of C fronting one of the shim's own objects, whose members keep running
+// with that object as `this`. C's members are declared up front (_ifaceAttrs).
+function _ifaceWrap(C, inner) {
+  const obj = _objectCreate(C.prototype);
+  _weakMapSet(_ifaceState, obj, { C, inner, self: true });
+  return obj;
+}
+// Make an object the shim already hands out an instance of C: its own members (and those
+// of `extra`, a prototype of the shim's) move into its inner record, accessors and methods
+// keep running with the instance as `this`, C's prototype gains forwarders for them, and
+// its prototype becomes C.prototype.
+function _ifaceAdopt(obj, C, extra, settable) {
+  const inner = { __proto__: null };
+  const sources = extra ? [extra, obj] : [obj];
+  for (let s = 0; s < sources.length; s++) {
+    const src = sources[s];
+    const keys = _reflectOwnKeysAtBoot(src);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (typeof key !== 'string' || key === 'constructor') continue;
+      const d = _getOwnPropertyDescriptor(src, key);
+      d.configurable = true;
+      d.enumerable = true;
+      if ('value' in d) d.writable = true;
+      _defineProperty(inner, key, d);
+      if (src === obj) delete obj[key];
+    }
+  }
+  _ifaceMembersFrom(C, inner, settable);
+  _weakMapSet(_ifaceState, obj, { C, inner, self: false });
+  _objectSetPrototypeOf(obj, C.prototype);
+  return obj;
+}
+// The shim's own write to an adopted instance's state (a member page script may not set).
+function _ifaceSet(obj, key, value) {
+  const r = _weakMapGet(_ifaceState, obj);
+  if (r === undefined) { obj[key] = value; return; }
+  _defineProperty(r.inner, key, { value, writable: true, enumerable: true, configurable: true });
+  _ifaceAttr(r.C, key, _stringSlice(key, 0, 2) === 'on');
+}
+// Attributes (`settable` names writable) and operations (name: length) of C.
+function _ifaceAttrs(C, attrs, settable) {
+  for (let i = 0; i < attrs.length; i++) _ifaceAttr(C, attrs[i], !!settable && _arrayIndexOf(settable, attrs[i]) >= 0);
+}
+function _ifaceMethods(C, methods) {
+  const keys = _objectKeys(methods);
+  for (let i = 0; i < keys.length; i++) _ifaceMethod(C, keys[i], methods[keys[i]]);
+}
+function _ifaceConst(C, key, value) {
+  const d = { value, writable: false, enumerable: true, configurable: false };
+  if (!_objectHasOwn(C, key)) _defineProperty(C, key, d);
+  if (!_objectHasOwn(C.prototype, key)) _defineProperty(C.prototype, key, d);
+}
+// A plain-data inner record.
+function _ifaceData(fields) {
+  const inner = { __proto__: null };
+  const keys = _objectKeys(fields);
+  for (let i = 0; i < keys.length; i++) inner[keys[i]] = fields[keys[i]];
+  return inner;
+}
+
+// An indexed collection's members, as Chromium's legacy platform objects have them: a
+// length attribute, item(), an iterator that is Array.prototype.values, and the items as
+// read-only own index properties. `inner.items` is the array.
+const _arrayValuesAtBoot = Array.prototype.values;
+function _ifaceListMembers(C, name) {
+  _ifaceGetter(C, 'length', (inner) => inner.items.length);
+  _ifaceOp(C, 'item', 1, function (inner, args) {
+    if (args.length < 1) throw new TypeError("Failed to execute 'item' on '" + name + "': 1 argument required, but only 0 present.");
+    const i = _Number(args[0]) >>> 0;
+    return i < inner.items.length ? inner.items[i] : null;
+  });
+  _defineProperty(C.prototype, Symbol.iterator, { value: _arrayValuesAtBoot, writable: true, enumerable: false, configurable: true });
+}
+function _ifaceListIndices(list, items) {
+  for (let i = 0; i < items.length; i++) {
+    _defineProperty(list, i, { value: items[i], writable: false, enumerable: true, configurable: true });
+  }
+  return list;
+}
+
+// Navigator: navigator's members move from its own properties and the shim's prototype hop
+// onto Navigator.prototype, so navigator has no own property, as in Chromium.
+_ifaceDefine('Navigator', Navigator);
+(function () {
+  const nav = globalThis.navigator;
+  const hop = _getPrototypeOf(nav);
+  const extra = hop && hop !== Navigator.prototype && hop !== Object.prototype ? hop : { __proto__: null };
+  // Chromium's constant answers, which the shim did not carry at all.
+  _defineProperty(extra, 'appCodeName', { value: 'Mozilla', writable: true, enumerable: true, configurable: true });
+  _defineProperty(extra, 'appName', { value: 'Netscape', writable: true, enumerable: true, configurable: true });
+  _defineProperty(extra, 'vendorSub', { value: '', writable: true, enumerable: true, configurable: true });
+  _ifaceAdopt(nav, Navigator, extra);
+})();
+// clientInformation is navigator under another name.
+_defineProperty(globalThis, 'clientInformation', {
+  get: _markNative(_getOwnPropertyDescriptor({ get clientInformation() { return globalThis.navigator; } }, 'clientInformation').get),
+  set: _markNative(_getOwnPropertyDescriptor({ set clientInformation(v) {
+    _defineProperty(globalThis, 'clientInformation', { value: v, writable: true, enumerable: true, configurable: true });
+  } }, 'clientInformation').set),
+  enumerable: true,
+  configurable: true,
+});
+
+// The PDF plugin list (see _navigatorPluginData).
+_ifaceDefine('PluginArray', PluginArray);
+_ifaceListMembers(PluginArray, 'PluginArray');
+_ifaceOp(PluginArray, 'namedItem', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'namedItem' on 'PluginArray': 1 argument required, but only 0 present.");
+  const name = _String(args[0]);
+  for (let i = 0; i < inner.items.length; i++) if (_ifaceInner(inner.items[i], Plugin).name === name) return inner.items[i];
+  return null;
+});
+_ifaceOp(PluginArray, 'refresh', 0, function () {});
+_ifaceDefine('Plugin', Plugin);
+_ifaceAttr(Plugin, 'name'); _ifaceAttr(Plugin, 'filename'); _ifaceAttr(Plugin, 'description');
+_ifaceListMembers(Plugin, 'Plugin');
+_ifaceOp(Plugin, 'namedItem', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'namedItem' on 'Plugin': 1 argument required, but only 0 present.");
+  const type = _String(args[0]);
+  for (let i = 0; i < inner.items.length; i++) if (_ifaceInner(inner.items[i], MimeType).type === type) return inner.items[i];
+  return null;
+});
+_ifaceDefine('MimeType', MimeType);
+_ifaceAttr(MimeType, 'type'); _ifaceAttr(MimeType, 'suffixes'); _ifaceAttr(MimeType, 'description'); _ifaceAttr(MimeType, 'enabledPlugin');
+_ifaceDefine('MimeTypeArray', MimeTypeArray);
+_ifaceListMembers(MimeTypeArray, 'MimeTypeArray');
+_ifaceOp(MimeTypeArray, 'namedItem', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'namedItem' on 'MimeTypeArray': 1 argument required, but only 0 present.");
+  const type = _String(args[0]);
+  for (let i = 0; i < inner.items.length; i++) if (_ifaceInner(inner.items[i], MimeType).type === type) return inner.items[i];
+  return null;
+});
+
+// navigator's sub-objects: userAgentData, permissions, geolocation, mediaCapabilities.
+const _navInner = _ifaceInner(globalThis.navigator, Navigator);
+_ifaceIllegal('NavigatorUAData');
+if (_navInner.userAgentData) _ifaceAdopt(_navInner.userAgentData, _ifaces.NavigatorUAData);
+_ifaceIllegal('MediaCapabilities');
+if (_navInner.mediaCapabilities) _ifaceAdopt(_navInner.mediaCapabilities, _ifaces.MediaCapabilities);
+
+_ifaceIllegal('PermissionStatus', EventTarget);
+_ifaceAttr(_ifaces.PermissionStatus, 'name');
+_ifaceAttr(_ifaces.PermissionStatus, 'state');
+_ifaceAttr(_ifaces.PermissionStatus, 'onchange', true);
+_ifaceIllegal('Permissions');
+if (_navInner.permissions) {
+  const perms = _navInner.permissions;
+  const queryImpl = perms.query;
+  // query() answers a PermissionStatus; the shim's own answer is a plain {state} record.
+  perms.query = function query(descriptor) {
+    if (arguments.length < 1) {
+      return Promise.reject(new TypeError("Failed to execute 'query' on 'Permissions': 1 argument required, but only 0 present."));
+    }
+    if (descriptor === null || typeof descriptor !== 'object' || descriptor.name === undefined) {
+      return Promise.reject(new TypeError("Failed to execute 'query' on 'Permissions': Failed to read the 'name' property from 'PermissionDescriptor': Required member is undefined."));
+    }
+    const name = _String(descriptor.name);
+    return _reflectApply(_promiseThenAtBoot, _reflectApply(queryImpl, this, [descriptor]), [
+      (status) => _ifaceInstance(_ifaces.PermissionStatus, _ifaceData({ name, state: status && status.state, onchange: null })),
+    ]);
+  };
+  _ifaceAdopt(perms, _ifaces.Permissions);
+}
+
+_ifaceIllegal('GeolocationCoordinates');
+for (const key of ['accuracy', 'altitude', 'altitudeAccuracy', 'heading', 'latitude', 'longitude', 'speed']) _ifaceAttr(_ifaces.GeolocationCoordinates, key);
+_ifaceOp(_ifaces.GeolocationCoordinates, 'toJSON', 0, function (inner) {
+  return { accuracy: inner.accuracy, latitude: inner.latitude, longitude: inner.longitude, altitude: inner.altitude,
+    altitudeAccuracy: inner.altitudeAccuracy, heading: inner.heading, speed: inner.speed };
+});
+_ifaceIllegal('GeolocationPosition');
+_ifaceAttr(_ifaces.GeolocationPosition, 'coords'); _ifaceAttr(_ifaces.GeolocationPosition, 'timestamp');
+_ifaceOp(_ifaces.GeolocationPosition, 'toJSON', 0, function (inner) {
+  return { timestamp: inner.timestamp, coords: _reflectApply(_ifaces.GeolocationCoordinates.prototype.toJSON, inner.coords, []) };
+});
+_ifaceIllegal('GeolocationPositionError');
+_ifaceConst(_ifaces.GeolocationPositionError, 'PERMISSION_DENIED', 1);
+_ifaceConst(_ifaces.GeolocationPositionError, 'POSITION_UNAVAILABLE', 2);
+_ifaceConst(_ifaces.GeolocationPositionError, 'TIMEOUT', 3);
+_ifaceAttr(_ifaces.GeolocationPositionError, 'code'); _ifaceAttr(_ifaces.GeolocationPositionError, 'message');
+_ifaceIllegal('Geolocation');
+if (_navInner.geolocation) {
+  const geo = _navInner.geolocation;
+  const toPosition = (pos) => _ifaceInstance(_ifaces.GeolocationPosition, _ifaceData({
+    coords: _ifaceInstance(_ifaces.GeolocationCoordinates, _ifaceData(pos.coords)),
+    timestamp: pos.timestamp,
+  }));
+  for (const name of ['getCurrentPosition', 'watchPosition']) {
+    const impl = geo[name];
+    geo[name] = ({ [name](success, error, options) {
+      if (arguments.length < 1) {
+        throw new TypeError("Failed to execute '" + name + "' on 'Geolocation': 1 argument required, but only 0 present.");
+      }
+      if (typeof success !== 'function') {
+        throw new TypeError("Failed to execute '" + name + "' on 'Geolocation': parameter 1 is not of type 'Function'.");
+      }
+      return _reflectApply(impl, this, [(pos) => success(toPosition(pos)), error, options]);
+    } })[name];
+  }
+  _ifaceAdopt(geo, _ifaces.Geolocation);
+}
+
+// Location: location's members stay its own (Location is [LegacyUnforgeable] in
+// Chromium); only the interface and ancestorOrigins were missing.
+_ifaceIllegal('Location');
+_objectSetPrototypeOf(_locationObj, _ifaces.Location.prototype);
+_ifaceIllegal('DOMStringList');
+_ifaceListMembers(_ifaces.DOMStringList, 'DOMStringList');
+_ifaceOp(_ifaces.DOMStringList, 'contains', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'contains' on 'DOMStringList': 1 argument required, but only 0 present.");
+  return _arrayIndexOf(inner.items, _String(args[0])) >= 0;
+});
+function _makeDOMStringList(strings) {
+  return _ifaceListIndices(_ifaceInstance(_ifaces.DOMStringList, _ifaceData({ items: strings })), strings);
+}
+// A new list on every read, as in Chromium.
+_defineProperty(_locationObj, 'ancestorOrigins', {
+  get: _markNative(_getOwnPropertyDescriptor({ get ancestorOrigins() {
+    // The origins of the documents this one is nested in, nearest first.
+    const origins = [];
+    try {
+      for (let w = globalThis, depth = 0; depth < 64; depth++) {
+        const parent = w.parent;
+        if (!parent || parent === w) break;
+        let origin = 'null';
+        try { origin = _String(parent.location.origin); } catch (_) {}
+        origins[origins.length] = origin;
+        w = parent;
+      }
+    } catch (_) {}
+    return _makeDOMStringList(origins);
+  } }, 'ancestorOrigins').get),
+  set: undefined,
+  enumerable: true,
+  configurable: true,
+});
+
+// Performance: performance's members move onto Performance.prototype (an EventTarget);
+// timing and navigation are the PerformanceTiming and PerformanceNavigation they are in
+// Chromium, the same objects on every read.
+_ifaceIllegal('Performance', EventTarget);
+_ifaceAdopt(globalThis.performance, _ifaces.Performance);
+_ifaceIllegal('PerformanceTiming');
+const _perfTimingFields = ['navigationStart', 'unloadEventStart', 'unloadEventEnd', 'redirectStart', 'redirectEnd',
+  'fetchStart', 'domainLookupStart', 'domainLookupEnd', 'connectStart', 'connectEnd', 'secureConnectionStart',
+  'requestStart', 'responseStart', 'responseEnd', 'domLoading', 'domInteractive', 'domContentLoadedEventStart',
+  'domContentLoadedEventEnd', 'domComplete', 'loadEventStart', 'loadEventEnd'];
+for (const key of _perfTimingFields) _ifaceGetter(_ifaces.PerformanceTiming, key, () => _perfLegacyTiming()[key]);
+_ifaceOp(_ifaces.PerformanceTiming, 'toJSON', 0, function () { return _perfLegacyTiming(); });
+_ifaceIllegal('PerformanceNavigation');
+_ifaceConst(_ifaces.PerformanceNavigation, 'TYPE_NAVIGATE', 0);
+_ifaceConst(_ifaces.PerformanceNavigation, 'TYPE_RELOAD', 1);
+_ifaceConst(_ifaces.PerformanceNavigation, 'TYPE_BACK_FORWARD', 2);
+_ifaceConst(_ifaces.PerformanceNavigation, 'TYPE_RESERVED', 255);
+_ifaceAttr(_ifaces.PerformanceNavigation, 'type'); _ifaceAttr(_ifaces.PerformanceNavigation, 'redirectCount');
+_ifaceOp(_ifaces.PerformanceNavigation, 'toJSON', 0, function (inner) { return { type: inner.type, redirectCount: inner.redirectCount }; });
+(function () {
+  const inner = _ifaceInner(globalThis.performance, _ifaces.Performance);
+  const nav = inner.navigation || { type: 0, redirectCount: 0 };
+  _ifaceSet(globalThis.performance, 'timing', _ifaceInstance(_ifaces.PerformanceTiming, { __proto__: null }));
+  _ifaceSet(globalThis.performance, 'navigation',
+    _ifaceInstance(_ifaces.PerformanceNavigation, _ifaceData({ type: nav.type | 0, redirectCount: nav.redirectCount | 0 })));
+})();
+
+// DOMImplementation: document.implementation is one object per document (Chromium's is
+// [SameObject]); the shim built a new literal on every read.
+_ifaceIllegal('DOMImplementation');
+_ifaceMethods(_ifaces.DOMImplementation, { createDocumentType: 3, createDocument: 2, createHTMLDocument: 0, hasFeature: 0 });
+(function () {
+  const d = _getOwnPropertyDescriptor(Document.prototype, 'implementation');
+  if (!d || !d.get) return;
+  const build = d.get;
+  const impls = _private(new WeakMap());
+  _defineProperty(Document.prototype, 'implementation', {
+    get: _markNative(_getOwnPropertyDescriptor({ get implementation() {
+      let impl = _weakMapGet(impls, this);
+      if (!impl) {
+        const made = _reflectApply(build, this, []);
+        if (made === null || typeof made !== 'object') return made;
+        // Chromium's hasFeature() is a no-op that answers true.
+        if (!('hasFeature' in made)) made.hasFeature = function hasFeature() { return true; };
+        impl = _ifaceAdopt(made, _ifaces.DOMImplementation);
+        _weakMapSet(impls, this, impl);
+      }
+      return impl;
+    } }, 'implementation').get),
+    set: undefined,
+    enumerable: d.enumerable,
+    configurable: true,
+  });
+})();
+
+// HTMLDocument and XMLDocument: the realm's document is an HTMLDocument (an XMLDocument
+// when the page is XML), whose prototype chain runs through Document.prototype. A
+// `new Document()` stays a Document, as in Chromium. DOMParser's and createHTMLDocument's
+// documents are still the shim's plain objects (a known gap).
+_ifaceIllegal('HTMLDocument', Document);
+_ifaceIllegal('XMLDocument', Document, globalThis.XMLDocument && globalThis.XMLDocument.prototype);
+const _htmlDocumentProto = _ifaces.HTMLDocument.prototype;
+const _xmlDocumentProto = _ifaces.XMLDocument.prototype;
+function _adoptDocumentInterface(doc) {
+  if (!doc || _getPrototypeOf(doc) !== Document.prototype) return;
+  _objectSetPrototypeOf(doc, _isXMLDocument(doc) ? _xmlDocumentProto : _htmlDocumentProto);
+}
+
+// MutationRecord: the records MutationObserver delivers.
+_ifaceIllegal('MutationRecord');
+for (const key of ['type', 'target', 'addedNodes', 'removedNodes', 'previousSibling', 'nextSibling',
+  'attributeName', 'attributeNamespace', 'oldValue']) _ifaceAttr(_ifaces.MutationRecord, key);
+function _makeMutationRecord(type, target, addedNodes, removedNodes, attributeName, oldValue) {
+  return _ifaceInstance(_ifaces.MutationRecord, {
+    __proto__: null, type, target, addedNodes, removedNodes, previousSibling: null, nextSibling: null,
+    attributeName, attributeNamespace: null, oldValue,
+  });
+}
+// Chromium still exposes the prefixed name, as the same constructor.
+_defineProperty(globalThis, 'WebKitMutationObserver', { value: globalThis.MutationObserver, writable: true, enumerable: false, configurable: true });
+
+// NodeIterator and TreeWalker: the objects createNodeIterator / createTreeWalker build stay
+// the shim's, fronted by an instance of the interface.
+_ifaceIllegal('NodeIterator');
+_ifaceAttrs(_ifaces.NodeIterator, ['root', 'referenceNode', 'pointerBeforeReferenceNode', 'whatToShow', 'filter']);
+_ifaceMethods(_ifaces.NodeIterator, { nextNode: 0, previousNode: 0, detach: 0 });
+_ifaceIllegal('TreeWalker');
+_ifaceAttrs(_ifaces.TreeWalker, ['root', 'whatToShow', 'filter', 'currentNode'], ['currentNode']);
+_ifaceMethods(_ifaces.TreeWalker, { parentNode: 0, firstChild: 0, lastChild: 0, previousSibling: 0, nextSibling: 0,
+  previousNode: 0, nextNode: 0 });
+(function () {
+  const DP = Document.prototype;
+  const iter = DP.createNodeIterator;
+  const walk = DP.createTreeWalker;
+  _defineProperty(DP, 'createNodeIterator', {
+    value: _ifaceNative(function createNodeIterator(root, whatToShow, filter) {
+      if (arguments.length < 1) throw new TypeError("Failed to execute 'createNodeIterator' on 'Document': 1 argument required, but only 0 present.");
+      return _ifaceWrap(_ifaces.NodeIterator, _reflectApply(iter, this, arguments));
+    }, 1),
+    writable: true, enumerable: false, configurable: true,
+  });
+  _defineProperty(DP, 'createTreeWalker', {
+    value: _ifaceNative(function createTreeWalker(root, whatToShow, filter) {
+      if (arguments.length < 1) throw new TypeError("Failed to execute 'createTreeWalker' on 'Document': 1 argument required, but only 0 present.");
+      return _ifaceWrap(_ifaces.TreeWalker, _reflectApply(walk, this, arguments));
+    }, 1),
+    writable: true, enumerable: false, configurable: true,
+  });
+})();
+
+// Screen and ScreenOrientation.
+_ifaceIllegal('Screen', EventTarget, Screen.prototype);
+_ifaceIllegal('ScreenOrientation', EventTarget);
+_ifaceAttr(_ifaces.ScreenOrientation, 'type');
+_ifaceAttr(_ifaces.ScreenOrientation, 'angle');
+_ifaceAttr(_ifaces.ScreenOrientation, 'onchange', true);
+// Chromium 141 (headless) settles lock() without changing the orientation.
+_ifaceOp(_ifaces.ScreenOrientation, 'lock', 1, function (inner, args) {
+  if (args.length < 1) {
+    return Promise.reject(new TypeError("Failed to execute 'lock' on 'ScreenOrientation': 1 argument required, but only 0 present."));
+  }
+  return Promise.resolve(undefined);
+});
+_ifaceOp(_ifaces.ScreenOrientation, 'unlock', 0, function () {});
+function _makeScreenOrientation(fields) {
+  return _ifaceInstance(_ifaces.ScreenOrientation, {
+    __proto__: null,
+    get type() { return fields.w >= fields.h ? 'landscape-primary' : 'portrait-primary'; },
+    angle: 0,
+    onchange: null,
+  });
+}
+
+// VisualViewport: window.visualViewport.
+_ifaceIllegal('VisualViewport', EventTarget);
+for (const key of ['offsetLeft', 'offsetTop', 'pageLeft', 'pageTop', 'width', 'height', 'scale']) _ifaceAttr(_ifaces.VisualViewport, key);
+for (const key of ['onresize', 'onscroll', 'onscrollend']) _ifaceAttr(_ifaces.VisualViewport, key, true);
+// Its size is the layout viewport's, which the host sets as innerWidth/innerHeight (page
+// init, Emulation, a frame's embedding box); `width`/`height` answer until those are set.
+function _makeVisualViewport(width, height) {
+  const size = (key, fallback) => { const v = +globalThis[key]; return v > 0 ? v : fallback; };
+  return _ifaceInstance(_ifaces.VisualViewport, {
+    __proto__: null,
+    offsetLeft: 0, offsetTop: 0,
+    get pageLeft() { return +globalThis.scrollX || 0; },
+    get pageTop() { return +globalThis.scrollY || 0; },
+    get width() { return size('innerWidth', width); },
+    get height() { return size('innerHeight', height); },
+    scale: 1,
+    onresize: null, onscroll: null, onscrollend: null,
+  });
+}
+globalThis.visualViewport = _makeVisualViewport(1920, 1000);
+
+// XMLHttpRequestUpload: xhr.upload.
+_ifaceIllegal('XMLHttpRequestUpload', XMLHttpRequestEventTarget);
+const _xhrUploadProto = _ifaces.XMLHttpRequestUpload.prototype;
+
+// window.external and the window's BarProps (locationbar, menubar, ...), [Replaceable]
+// attributes in Chromium: an own accessor whose setter replaces it with the value.
+function _defineReplaceable(name, value) {
+  _defineProperty(globalThis, name, {
+    get: _markNative(_getOwnPropertyDescriptor({ get [name]() { return value; } }, name).get),
+    set: _markNative(_getOwnPropertyDescriptor({ set [name](v) {
+      _defineProperty(globalThis, name, { value: v, writable: true, enumerable: true, configurable: true });
+    } }, name).set),
+    enumerable: true,
+    configurable: true,
+  });
+}
+_ifaceIllegal('External');
+// Both are no-ops in Chromium.
+_ifaceOp(_ifaces.External, 'AddSearchProvider', 0, function () {});
+_ifaceOp(_ifaces.External, 'IsSearchProviderInstalled', 0, function () {});
+_defineReplaceable('external', _ifaceInstance(_ifaces.External, { __proto__: null }));
+_ifaceIllegal('BarProp');
+_ifaceAttr(_ifaces.BarProp, 'visible');
+for (const name of ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'statusbar', 'toolbar']) {
+  _defineReplaceable(name, _ifaceInstance(_ifaces.BarProp, _ifaceData({ visible: true })));
+}
+
+// AbstractRange: Range's and StaticRange's parent, which carries their boundary points.
+_ifaceIllegal('AbstractRange');
+(function () {
+  const RP = globalThis.Range.prototype, SP = globalThis.StaticRange.prototype;
+  _objectSetPrototypeOf(globalThis.Range, _ifaces.AbstractRange);
+  _objectSetPrototypeOf(RP, _ifaces.AbstractRange.prototype);
+  _objectSetPrototypeOf(globalThis.StaticRange, _ifaces.AbstractRange);
+  _objectSetPrototypeOf(SP, _ifaces.AbstractRange.prototype);
+  for (const key of ['startContainer', 'startOffset', 'endContainer', 'endOffset', 'collapsed']) {
+    const d = _getOwnPropertyDescriptor(RP, key);
+    if (!d || !d.get) continue;
+    const get = d.get;
+    delete RP[key];
+    delete SP[key];
+    _defineProperty(_ifaces.AbstractRange.prototype, key, {
+      get: _markNative(_getOwnPropertyDescriptor({ get [key]() {
+        if (!_isPrototypeOf(RP, this) && !_isPrototypeOf(SP, this)) _ifaceIllegalInvocation();
+        return _reflectApply(get, this, []);
+      } }, key).get),
+      set: undefined,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+})();
+
+// XPathResult: document.evaluate()'s result, fronting the shim's own record.
+_ifaceIllegal('XPathResult', null, globalThis.XPathResult && globalThis.XPathResult.prototype);
+for (const [key, value] of [['ANY_TYPE', 0], ['NUMBER_TYPE', 1], ['STRING_TYPE', 2], ['BOOLEAN_TYPE', 3],
+  ['UNORDERED_NODE_ITERATOR_TYPE', 4], ['ORDERED_NODE_ITERATOR_TYPE', 5], ['UNORDERED_NODE_SNAPSHOT_TYPE', 6],
+  ['ORDERED_NODE_SNAPSHOT_TYPE', 7], ['ANY_UNORDERED_NODE_TYPE', 8], ['FIRST_ORDERED_NODE_TYPE', 9]]) {
+  _ifaceConst(_ifaces.XPathResult, key, value);
+}
+_ifaceAttrs(_ifaces.XPathResult, ['resultType', 'numberValue', 'stringValue', 'booleanValue', 'singleNodeValue',
+  'invalidIteratorState', 'snapshotLength']);
+_ifaceMethods(_ifaces.XPathResult, { iterateNext: 0, snapshotItem: 1 });
+function _wrapXPathResult(record) { return _ifaceWrap(_ifaces.XPathResult, record); }
+// XPathEvaluator and XPathExpression: document.evaluate() as an object.
+(function () {
+  const evaluate = Document.prototype.evaluate;
+  const XPathEvaluator = function XPathEvaluator() {
+    _ifaceRequireNew('XPathEvaluator', new.target);
+    _weakMapSet(_ifaceState, this, { C: XPathEvaluator, inner: { __proto__: null }, self: false });
+  };
+  _ifaceDefine('XPathEvaluator', XPathEvaluator);
+  const run = (expression, contextNode, resolver, type, result) => {
+    const doc = (contextNode && contextNode.nodeType === 9) ? contextNode
+      : (contextNode && contextNode.ownerDocument) || globalThis.document;
+    return _reflectApply(evaluate, doc, [expression, contextNode, resolver, type, result]);
+  };
+  _ifaceOp(XPathEvaluator, 'createExpression', 1, function (inner, args) {
+    if (args.length < 1) throw new TypeError("Failed to execute 'createExpression' on 'XPathEvaluator': 1 argument required, but only 0 present.");
+    return _ifaceInstance(_ifaces.XPathExpression, _ifaceData({ expression: _String(args[0]), resolver: args[1] === undefined ? null : args[1] }));
+  });
+  _ifaceOp(XPathEvaluator, 'createNSResolver', 1, function (inner, args) {
+    if (args.length < 1) throw new TypeError("Failed to execute 'createNSResolver' on 'XPathEvaluator': 1 argument required, but only 0 present.");
+    return args[0];
+  });
+  _ifaceOp(XPathEvaluator, 'evaluate', 2, function (inner, args) {
+    if (args.length < 2) throw new TypeError("Failed to execute 'evaluate' on 'XPathEvaluator': 2 arguments required, but only " + args.length + " present.");
+    return run(args[0], args[1], args[2], args[3], args[4]);
+  });
+  _ifaceIllegal('XPathExpression');
+  _ifaceOp(_ifaces.XPathExpression, 'evaluate', 1, function (inner, args) {
+    if (args.length < 1) throw new TypeError("Failed to execute 'evaluate' on 'XPathExpression': 1 argument required, but only 0 present.");
+    return run(inner.expression, args[0], inner.resolver, args[1], args[2]);
+  });
+})();
+
+// TextMetrics: CanvasRenderingContext2D.measureText()'s answer.
+_ifaceIllegal('TextMetrics');
+for (const key of ['width', 'actualBoundingBoxLeft', 'actualBoundingBoxRight', 'fontBoundingBoxAscent',
+  'fontBoundingBoxDescent', 'actualBoundingBoxAscent', 'actualBoundingBoxDescent', 'hangingBaseline',
+  'alphabeticBaseline', 'ideographicBaseline']) _ifaceAttr(_ifaces.TextMetrics, key);
+function _makeTextMetrics(fields) { return _ifaceInstance(_ifaces.TextMetrics, _ifaceData(fields)); }
+
+// FileList: a file input's files.
+_ifaceIllegal('FileList');
+_ifaceListMembers(_ifaces.FileList, 'FileList');
+function _makeFileListOf(files) {
+  return _ifaceListIndices(_ifaceInstance(_ifaces.FileList, _ifaceData({ items: files })), files);
+}
+
+// IndexedDB: the shim's non-persistent IndexedDB objects are instances of Chromium's
+// interfaces, so `request instanceof IDBRequest` (the idb library, Dexie) holds. Their
+// members stay their own properties: the request and transaction records assign to
+// themselves as they settle.
+_ifaceIllegal('IDBFactory');
+_ifaceAdopt(globalThis.indexedDB, _ifaces.IDBFactory);
+_ifaceIllegal('IDBRequest', EventTarget);
+_ifaceIllegal('IDBOpenDBRequest', _ifaces.IDBRequest);
+_ifaceIllegal('IDBDatabase', EventTarget);
+_ifaceIllegal('IDBTransaction', EventTarget);
+_ifaceIllegal('IDBObjectStore');
+_ifaceIllegal('IDBIndex');
+_ifaceIllegal('IDBCursor');
+_ifaceIllegal('IDBCursorWithValue', _ifaces.IDBCursor);
+function _idbBrand(obj, name) {
+  const C = _ifaces[name];
+  if (C) _objectSetPrototypeOf(obj, C.prototype);
+  return obj;
+}
+// IDB key order: arrays > binary > strings > dates > numbers.
+function _idbKeyRank(key) {
+  if (typeof key === 'number') return key === key ? 1 : -1;
+  if (key instanceof Date) return key.getTime() === key.getTime() ? 2 : -1;
+  if (typeof key === 'string') return 3;
+  if (key instanceof ArrayBuffer || ArrayBuffer.isView(key)) return 4;
+  if (_isArray(key)) return 5;
+  return -1;
+}
+function _idbAssertKey(key, what) {
+  if (_idbKeyRank(key) < 0) throw new DOMException("Failed to execute '" + what + "' on 'IDBKeyRange': The parameter is not a valid key.", 'DataError');
+}
+function _idbCompare(a, b) {
+  const ra = _idbKeyRank(a), rb = _idbKeyRank(b);
+  if (ra !== rb) return ra < rb ? -1 : 1;
+  if (ra === 1 || ra === 2) { const x = +a, y = +b; return x < y ? -1 : x > y ? 1 : 0; }
+  if (ra === 3) return a < b ? -1 : a > b ? 1 : 0;
+  if (ra === 4) {
+    const x = new Uint8Array(a.buffer || a, a.byteOffset || 0, a.byteLength), y = new Uint8Array(b.buffer || b, b.byteOffset || 0, b.byteLength);
+    for (let i = 0; i < x.length && i < y.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+    return x.length === y.length ? 0 : x.length < y.length ? -1 : 1;
+  }
+  for (let i = 0; i < a.length && i < b.length; i++) { const c = _idbCompare(a[i], b[i]); if (c) return c; }
+  return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+}
+_ifaceIllegal('IDBKeyRange');
+_ifaceAttrs(_ifaces.IDBKeyRange, ['lower', 'upper', 'lowerOpen', 'upperOpen']);
+_ifaceOp(_ifaces.IDBKeyRange, 'includes', 1, function (r, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'includes' on 'IDBKeyRange': 1 argument required, but only 0 present.");
+  const key = args[0];
+  _idbAssertKey(key, 'includes');
+  if (r.lower !== undefined) { const c = _idbCompare(r.lower, key); if (c > 0 || (c === 0 && r.lowerOpen)) return false; }
+  if (r.upper !== undefined) { const c = _idbCompare(r.upper, key); if (c < 0 || (c === 0 && r.upperOpen)) return false; }
+  return true;
+});
+function _idbRange(lower, upper, lowerOpen, upperOpen) {
+  return _ifaceInstance(_ifaces.IDBKeyRange, _ifaceData({ lower, upper, lowerOpen: !!lowerOpen, upperOpen: !!upperOpen }));
+}
+for (const [name, length, make] of [
+  ['only', 1, (args) => { _idbAssertKey(args[0], 'only'); return _idbRange(args[0], args[0], false, false); }],
+  ['lowerBound', 1, (args) => { _idbAssertKey(args[0], 'lowerBound'); return _idbRange(args[0], undefined, args[1], true); }],
+  ['upperBound', 1, (args) => { _idbAssertKey(args[0], 'upperBound'); return _idbRange(undefined, args[0], true, args[1]); }],
+  ['bound', 2, (args) => {
+    _idbAssertKey(args[0], 'bound'); _idbAssertKey(args[1], 'bound');
+    const c = _idbCompare(args[0], args[1]);
+    if (c > 0 || (c === 0 && (args[2] || args[3]))) {
+      throw new DOMException("Failed to execute 'bound' on 'IDBKeyRange': The lower key is greater than the upper key.", 'DataError');
+    }
+    return _idbRange(args[0], args[1], args[2], args[3]);
+  }],
+]) {
+  _defineProperty(_ifaces.IDBKeyRange, name, {
+    value: _ifaceNative(({ [name](...args) {
+      if (args.length < length) {
+        throw new TypeError("Failed to execute '" + name + "' on 'IDBKeyRange': " + length + " argument" + (length > 1 ? 's' : '') + " required, but only " + args.length + " present.");
+      }
+      return make(args);
+    } })[name], length),
+    writable: true, enumerable: true, configurable: true,
+  });
+}
+
+// MediaQueryList: matchMedia()'s answer, an EventTarget whose addListener/removeListener
+// are its 'change' listeners. Change events are not fired (the viewport the media
+// queries see does not change under a page).
+_ifaceIllegal('MediaQueryList', EventTarget);
+_ifaceAttrs(_ifaces.MediaQueryList, ['media', 'matches', 'onchange'], ['onchange']);
+_ifaceOp(_ifaces.MediaQueryList, 'addListener', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'addListener' on 'MediaQueryList': 1 argument required, but only 0 present.");
+  if (args[0] != null) _reflectApply(EventTarget.prototype.addEventListener, this, ['change', args[0]]);
+});
+_ifaceOp(_ifaces.MediaQueryList, 'removeListener', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'removeListener' on 'MediaQueryList': 1 argument required, but only 0 present.");
+  if (args[0] != null) _reflectApply(EventTarget.prototype.removeEventListener, this, ['change', args[0]]);
+});
+function _makeMediaQueryList(media, matches) {
+  return _ifaceInstance(_ifaces.MediaQueryList, { __proto__: null, media, get matches() { return matches(); }, onchange: null });
+}
+
+// ---- Geometry: DOMRectReadOnly/DOMRect, DOMPointReadOnly/DOMPoint, DOMMatrixReadOnly/
+// DOMMatrix, DOMQuad. DEVIATION from crates/obscura-js/js/bootstrap.js, whose DOMRect,
+// DOMPoint and DOMMatrix are classes with own data fields and no read-only parents, whose
+// DOMRect computes top/bottom without normalising a negative height, whose DOMMatrix
+// answers the identity for every operation (multiply, translate, inverse, ...), and whose
+// element rects (getBoundingClientRect) are plain objects. These follow the Geometry
+// Interfaces spec as Chromium implements it.
+// NaN propagates, as in Chromium (new DOMRect(1, 1, NaN, 3).left is NaN).
+const _geoMin = _MathMin;
+const _geoMax = _MathMax;
+
+const DOMRectReadOnlyI = function DOMRectReadOnly(x = 0, y = 0, width = 0, height = 0) {
+  _ifaceRequireNew('DOMRectReadOnly', new.target);
+  _weakMapSet(_ifaceState, this, { C: DOMRectReadOnlyI,
+    inner: { __proto__: null, x: +x, y: +y, width: +width, height: +height }, self: false });
+};
+const DOMRectI = function DOMRect(x = 0, y = 0, width = 0, height = 0) {
+  _ifaceRequireNew('DOMRect', new.target);
+  _weakMapSet(_ifaceState, this, { C: DOMRectI, inner: { __proto__: null, x: +x, y: +y, width: +width, height: +height }, self: false });
+};
+_ifaceDefine('DOMRectReadOnly', DOMRectReadOnlyI);
+_ifaceDefine('DOMRect', DOMRectI, DOMRectReadOnlyI);
+for (const key of ['x', 'y', 'width', 'height']) {
+  _ifaceGetter(DOMRectReadOnlyI, key, (r) => r[key]);
+  _ifaceGetter(DOMRectI, key, (r) => r[key], (r, v) => { r[key] = +v; });
+}
+_ifaceGetter(DOMRectReadOnlyI, 'top', (r) => _geoMin(r.y, r.y + r.height));
+_ifaceGetter(DOMRectReadOnlyI, 'right', (r) => _geoMax(r.x, r.x + r.width));
+_ifaceGetter(DOMRectReadOnlyI, 'bottom', (r) => _geoMax(r.y, r.y + r.height));
+_ifaceGetter(DOMRectReadOnlyI, 'left', (r) => _geoMin(r.x, r.x + r.width));
+_ifaceOp(DOMRectReadOnlyI, 'toJSON', 0, function (r) {
+  return { x: r.x, y: r.y, width: r.width, height: r.height,
+    top: _geoMin(r.y, r.y + r.height), right: _geoMax(r.x, r.x + r.width),
+    bottom: _geoMax(r.y, r.y + r.height), left: _geoMin(r.x, r.x + r.width) };
+});
+function _geoRectInit(other) {
+  const o = other == null ? {} : other;
+  if (typeof o !== 'object' && typeof o !== 'function') throw new TypeError("Failed to execute 'fromRect': The provided value is not of type 'DOMRectInit'.");
+  return [o.x === undefined ? 0 : +o.x, o.y === undefined ? 0 : +o.y,
+    o.width === undefined ? 0 : +o.width, o.height === undefined ? 0 : +o.height];
+}
+_defineProperty(DOMRectReadOnlyI, 'fromRect', { value: _ifaceNative(function fromRect(other) {
+  const v = _geoRectInit(other); return new DOMRectReadOnlyI(v[0], v[1], v[2], v[3]);
+}, 0), writable: true, enumerable: true, configurable: true });
+_defineProperty(DOMRectI, 'fromRect', { value: _ifaceNative(function fromRect(other) {
+  const v = _geoRectInit(other); return new DOMRectI(v[0], v[1], v[2], v[3]);
+}, 0), writable: true, enumerable: true, configurable: true });
+// An element's or a range's client rect. A viewport-fixed one is recorded beside it
+// (scrollIntoView reads it), not on it as upstream's __obscuraViewportFixed property.
+const _viewportFixedRects = _private(new WeakSet());
+const _weakSetAdd = _uncurry(WeakSet.prototype.add);
+const _weakSetHas = _uncurry(WeakSet.prototype.has);
+function _makeDOMRect(x, y, width, height, viewportFixed) {
+  const rect = new DOMRectI(x, y, width, height);
+  if (viewportFixed) _weakSetAdd(_viewportFixedRects, rect);
+  return rect;
+}
+function _rectIsViewportFixed(rect) {
+  return rect !== null && typeof rect === 'object' && _weakSetHas(_viewportFixedRects, rect);
+}
+
+const DOMPointReadOnlyI = function DOMPointReadOnly(x = 0, y = 0, z = 0, w = 1) {
+  _ifaceRequireNew('DOMPointReadOnly', new.target);
+  _weakMapSet(_ifaceState, this, { C: DOMPointReadOnlyI, inner: { __proto__: null, x: +x, y: +y, z: +z, w: +w }, self: false });
+};
+const DOMPointI = function DOMPoint(x = 0, y = 0, z = 0, w = 1) {
+  _ifaceRequireNew('DOMPoint', new.target);
+  _weakMapSet(_ifaceState, this, { C: DOMPointI, inner: { __proto__: null, x: +x, y: +y, z: +z, w: +w }, self: false });
+};
+_ifaceDefine('DOMPointReadOnly', DOMPointReadOnlyI);
+_ifaceDefine('DOMPoint', DOMPointI, DOMPointReadOnlyI);
+for (const key of ['x', 'y', 'z', 'w']) {
+  _ifaceGetter(DOMPointReadOnlyI, key, (p) => p[key]);
+  _ifaceGetter(DOMPointI, key, (p) => p[key], (p, v) => { p[key] = +v; });
+}
+_ifaceOp(DOMPointReadOnlyI, 'matrixTransform', 0, function (p, args) {
+  const m = _geoMatrixFromInit(args[0], 'matrixTransform', 'DOMPointReadOnly');
+  return _geoTransformPoint(m, p.x, p.y, p.z, p.w);
+});
+_ifaceOp(DOMPointReadOnlyI, 'toJSON', 0, function (p) { return { x: p.x, y: p.y, z: p.z, w: p.w }; });
+function _geoPointInit(other) {
+  const o = other == null ? {} : other;
+  return [o.x === undefined ? 0 : +o.x, o.y === undefined ? 0 : +o.y, o.z === undefined ? 0 : +o.z, o.w === undefined ? 1 : +o.w];
+}
+_defineProperty(DOMPointReadOnlyI, 'fromPoint', { value: _ifaceNative(function fromPoint(other) {
+  const v = _geoPointInit(other); return new DOMPointReadOnlyI(v[0], v[1], v[2], v[3]);
+}, 0), writable: true, enumerable: true, configurable: true });
+_defineProperty(DOMPointI, 'fromPoint', { value: _ifaceNative(function fromPoint(other) {
+  const v = _geoPointInit(other); return new DOMPointI(v[0], v[1], v[2], v[3]);
+}, 0), writable: true, enumerable: true, configurable: true });
+
+// Matrices: m is [m11, m12, m13, m14, m21, ..., m44] (a=m11, b=m12, c=m21, d=m22, e=m41,
+// f=m42), with is2D tracked as the spec says.
+const _GEO_KEYS = ['m11', 'm12', 'm13', 'm14', 'm21', 'm22', 'm23', 'm24', 'm31', 'm32', 'm33', 'm34', 'm41', 'm42', 'm43', 'm44'];
+const _GEO_2D = { a: 0, b: 1, c: 4, d: 5, e: 12, f: 13 };
+function _geoIdentity() { return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]; }
+function _geoFrom2D(a, b, c, d, e, f) { return [a, b, 0, 0, c, d, 0, 0, 0, 0, 1, 0, e, f, 0, 1]; }
+// a * b, with points transformed as row vectors times the matrix (CSS order).
+function _geoMul(a, b) {
+  const out = new Array(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      out[i * 4 + j] = b[i * 4] * a[j] + b[i * 4 + 1] * a[4 + j] + b[i * 4 + 2] * a[8 + j] + b[i * 4 + 3] * a[12 + j];
+    }
+  }
+  return out;
+}
+function _geoInvert(m) {
+  const inv = new Array(16);
+  inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+  inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+  inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+  inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+  inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+  inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+  inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+  inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+  inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+  inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+  inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+  inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+  inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+  inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+  inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+  inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+  const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+  if (!det || det !== det || det === Infinity || det === -Infinity) return null;
+  for (let i = 0; i < 16; i++) inv[i] /= det;
+  return inv;
+}
+function _geoTransformPoint(st, x, y, z, w) {
+  const m = st.m;
+  return new DOMPointI(
+    x * m[0] + y * m[4] + z * m[8] + w * m[12],
+    x * m[1] + y * m[5] + z * m[9] + w * m[13],
+    x * m[2] + y * m[6] + z * m[10] + w * m[14],
+    x * m[3] + y * m[7] + z * m[11] + w * m[15]);
+}
+const _geoTan = (deg) => Math.tan(deg * Math.PI / 180);
+// Chromium's sine and cosine of an angle in degrees: exact at multiples of 90.
+function _geoSinCos(deg) {
+  const r = deg % 360;
+  if (r % 90 === 0) {
+    const q = ((r / 90) % 4 + 4) % 4;
+    return [[0, 1, 0, -1][q], [1, 0, -1, 0][q]];
+  }
+  const rad = deg * Math.PI / 180;
+  return [Math.sin(rad), Math.cos(rad)];
+}
+// A rotation of `deg` degrees about the axis (x, y, z), in Rodrigues' form.
+function _geoRotationAxis(x, y, z, deg) {
+  const len2 = x * x + y * y + z * z;
+  if (!len2) return _geoIdentity();
+  if (len2 !== 1) { const k = 1 / Math.sqrt(len2); x *= k; y *= k; z *= k; }
+  const sc = _geoSinCos(deg), sn = sc[0], c = sc[1], t = 1 - c;
+  return [
+    c + x * x * t, x * y * t + z * sn, x * z * t - y * sn, 0,
+    x * y * t - z * sn, c + y * y * t, y * z * t + x * sn, 0,
+    x * z * t + y * sn, y * z * t - x * sn, c + z * z * t, 0,
+    0, 0, 0, 1,
+  ];
+}
+function _geoIsIdentity(m) {
+  const id = _geoIdentity();
+  for (let i = 0; i < 16; i++) if (m[i] !== id[i]) return false;
+  return true;
+}
+// A DOMMatrixInit (or a matrix) as a matrix state; TypeError on an inconsistent one.
+function _geoMatrixFromInit(init, op, iface) {
+  if (init === undefined || init === null) return { m: _geoIdentity(), is2D: true };
+  if (typeof init !== 'object' && typeof init !== 'function') {
+    throw new TypeError("Failed to execute '" + op + "' on '" + iface + "': The provided value is not of type 'DOMMatrixInit'.");
+  }
+  const r = (init !== null && typeof init === 'object') ? _weakMapGet(_ifaceState, init) : undefined;
+  if (r && (r.C === DOMMatrixI || r.C === DOMMatrixReadOnlyI)) return { m: r.inner.m.slice(), is2D: r.inner.is2D };
+  const num = (v, d) => (v === undefined ? d : +v);
+  const pairs = [['a', 'm11', 1], ['b', 'm12', 0], ['c', 'm21', 0], ['d', 'm22', 1], ['e', 'm41', 0], ['f', 'm42', 0]];
+  const m = _geoIdentity();
+  for (const [short, long, d] of pairs) {
+    const sv = init[short], lv = init[long];
+    if (sv !== undefined && lv !== undefined && !(+sv === +lv || (+sv !== +sv && +lv !== +lv))) {
+      throw new TypeError("Failed to execute '" + op + "' on '" + iface + "': Property mismatch on matrix initialization.");
+    }
+    m[_GEO_2D[short]] = lv !== undefined ? +lv : num(sv, d);
+  }
+  const rest = { m13: 2, m14: 3, m23: 6, m24: 7, m31: 8, m32: 9, m33: 10, m34: 11, m43: 14, m44: 15 };
+  let flat = true;
+  for (const key of _objectKeys(rest)) {
+    const d = (key === 'm33' || key === 'm44') ? 1 : 0;
+    m[rest[key]] = num(init[key], d);
+    if (m[rest[key]] !== d) flat = false;
+  }
+  let is2D = init.is2D;
+  if (is2D === true && !flat) {
+    throw new TypeError("Failed to execute '" + op + "' on '" + iface + "': The is2D member is set to true but the input matrix is a 3d matrix.");
+  }
+  if (is2D === undefined) is2D = flat;
+  return { m, is2D: !!is2D };
+}
+// A CSS transform list (DOMMatrix(string), setMatrixValue). Lengths must be absolute.
+const _GEO_LEN = { px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, pt: 96 / 72, pc: 16 };
+const _GEO_ANGLE = { deg: 1, rad: 180 / Math.PI, grad: 0.9, turn: 360 };
+function _geoParseTransformList(text, iface) {
+  const fail = () => new DOMException("Failed to construct '" + iface + "': Failed to parse '" + text + "'.", 'SyntaxError');
+  const src = _stringTrim(_String(text));
+  if (src === '' || _stringToLowerCase(src) === 'none') return { m: _geoIdentity(), is2D: true };
+  let m = _geoIdentity(), is2D = true, pos = 0;
+  const re = /\s*([a-zA-Z0-9]+)\(([^)]*)\)\s*/y;
+  while (pos < src.length) {
+    re.lastIndex = pos;
+    const hit = re.exec(src);
+    if (!hit) throw fail();
+    pos = re.lastIndex;
+    const name = _stringToLowerCase(hit[1]);
+    const raw = _stringTrim(hit[2]);
+    const parts = raw === '' ? [] : (raw.indexOf(',') >= 0 ? raw.split(',') : raw.split(/\s+/));
+    const vals = [];
+    for (let i = 0; i < parts.length; i++) {
+      const p = /^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)([a-zA-Z%]*)\s*$/i.exec(parts[i]);
+      if (!p) throw fail();
+      vals[i] = { n: +p[1], u: _stringToLowerCase(p[2]) };
+    }
+    const len = (v) => {
+      if (v.u === '' && v.n === 0) return 0;
+      if (v.u === '' && (name === 'matrix' || name === 'matrix3d')) return v.n;
+      if (_GEO_LEN[v.u] === undefined) {
+        if (v.u === '') throw fail();
+        throw new DOMException("Failed to construct '" + iface + "': Values must be resolvable at parse time", 'SyntaxError');
+      }
+      return v.n * _GEO_LEN[v.u];
+    };
+    const ang = (v) => {
+      if (v.u === '' && v.n === 0) return 0;
+      if (_GEO_ANGLE[v.u] === undefined) throw fail();
+      return v.n * _GEO_ANGLE[v.u];
+    };
+    const num = (v) => { if (v.u !== '') throw fail(); return v.n; };
+    const need = (lo, hi) => { if (vals.length < lo || vals.length > hi) throw fail(); };
+    let t;
+    switch (name) {
+      case 'matrix': need(6, 6); t = _geoFrom2D(num(vals[0]), num(vals[1]), num(vals[2]), num(vals[3]), num(vals[4]), num(vals[5])); break;
+      case 'matrix3d': need(16, 16); t = vals.map(num); is2D = false; break;
+      case 'translate': need(1, 2); t = _geoFrom2D(1, 0, 0, 1, len(vals[0]), vals[1] ? len(vals[1]) : 0); break;
+      case 'translatex': need(1, 1); t = _geoFrom2D(1, 0, 0, 1, len(vals[0]), 0); break;
+      case 'translatey': need(1, 1); t = _geoFrom2D(1, 0, 0, 1, 0, len(vals[0])); break;
+      case 'translatez': need(1, 1); t = _geoIdentity(); t[14] = len(vals[0]); is2D = false; break;
+      case 'translate3d': need(3, 3); t = _geoIdentity(); t[12] = len(vals[0]); t[13] = len(vals[1]); t[14] = len(vals[2]); is2D = false; break;
+      case 'scale': need(1, 2); t = _geoFrom2D(num(vals[0]), 0, 0, vals[1] ? num(vals[1]) : num(vals[0]), 0, 0); break;
+      case 'scalex': need(1, 1); t = _geoFrom2D(num(vals[0]), 0, 0, 1, 0, 0); break;
+      case 'scaley': need(1, 1); t = _geoFrom2D(1, 0, 0, num(vals[0]), 0, 0); break;
+      case 'scalez': need(1, 1); t = _geoIdentity(); t[10] = num(vals[0]); is2D = false; break;
+      case 'scale3d': need(3, 3); t = _geoIdentity(); t[0] = num(vals[0]); t[5] = num(vals[1]); t[10] = num(vals[2]); is2D = false; break;
+      case 'rotate': case 'rotatez': need(1, 1); t = _geoRotationAxis(0, 0, 1, ang(vals[0])); if (name === 'rotatez') is2D = false; break;
+      case 'rotatex': need(1, 1); t = _geoRotationAxis(1, 0, 0, ang(vals[0])); is2D = false; break;
+      case 'rotatey': need(1, 1); t = _geoRotationAxis(0, 1, 0, ang(vals[0])); is2D = false; break;
+      case 'rotate3d': need(4, 4); t = _geoRotationAxis(num(vals[0]), num(vals[1]), num(vals[2]), ang(vals[3])); is2D = false; break;
+      case 'skew': need(1, 2); t = _geoFrom2D(1, _geoTan(vals[1] ? ang(vals[1]) : 0), _geoTan(ang(vals[0])), 1, 0, 0); break;
+      case 'skewx': need(1, 1); t = _geoFrom2D(1, 0, _geoTan(ang(vals[0])), 1, 0, 0); break;
+      case 'skewy': need(1, 1); t = _geoFrom2D(1, _geoTan(ang(vals[0])), 0, 1, 0, 0); break;
+      case 'perspective': {
+        need(1, 1); t = _geoIdentity();
+        const d = len(vals[0]);
+        if (d) t[11] = -1 / d;
+        is2D = false;
+        break;
+      }
+      default: throw fail();
+    }
+    m = _geoMul(m, t);
+  }
+  return { m, is2D };
+}
+function _geoMatrixInit(init, iface) {
+  if (init === undefined) return { m: _geoIdentity(), is2D: true };
+  if (typeof init === 'string') return _geoParseTransformList(init, iface);
+  if (init !== null && typeof init === 'object' && typeof init[Symbol.iterator] === 'function') {
+    const v = Array.from(init, Number);
+    if (v.length === 6) return { m: _geoFrom2D(v[0], v[1], v[2], v[3], v[4], v[5]), is2D: true };
+    if (v.length === 16) return { m: v, is2D: false };
+    throw new TypeError("Failed to construct '" + iface + "': The sequence must contain 6 elements for a 2D matrix or 16 elements for a 3D matrix.");
+  }
+  return _geoParseTransformList(_String(init), iface);
+}
+const DOMMatrixReadOnlyI = function DOMMatrixReadOnly(init = undefined) {
+  _ifaceRequireNew('DOMMatrixReadOnly', new.target);
+  _weakMapSet(_ifaceState, this, { C: DOMMatrixReadOnlyI, inner: _geoMatrixInit(init, 'DOMMatrixReadOnly'), self: false });
+};
+const DOMMatrixI = function DOMMatrix(init = undefined) {
+  _ifaceRequireNew('DOMMatrix', new.target);
+  _weakMapSet(_ifaceState, this, { C: DOMMatrixI, inner: _geoMatrixInit(init, 'DOMMatrix'), self: false });
+};
+_ifaceDefine('DOMMatrixReadOnly', DOMMatrixReadOnlyI);
+_ifaceDefine('DOMMatrix', DOMMatrixI, DOMMatrixReadOnlyI);
+// WebKitCSSMatrix is DOMMatrix under its legacy name.
+_defineProperty(globalThis, 'WebKitCSSMatrix', { value: DOMMatrixI, writable: true, enumerable: false, configurable: true });
+function _geoNewMatrix(st) {
+  const obj = _objectCreate(DOMMatrixI.prototype);
+  _weakMapSet(_ifaceState, obj, { C: DOMMatrixI, inner: st, self: false });
+  return obj;
+}
+function _makeDOMMatrix2D(a, b, c, d, e, f) { return _geoNewMatrix({ m: _geoFrom2D(a, b, c, d, e, f), is2D: true }); }
+const _geoAttrKeys = ['a', 'b', 'c', 'd', 'e', 'f'].concat(_GEO_KEYS);
+for (const key of _geoAttrKeys) {
+  const idx = _GEO_2D[key] !== undefined ? _GEO_2D[key] : _arrayIndexOf(_GEO_KEYS, key);
+  _ifaceGetter(DOMMatrixReadOnlyI, key, (st) => st.m[idx]);
+  const flatValue = (idx === 10 || idx === 15) ? 1 : 0;
+  const breaks2D = _arrayIndexOf([2, 3, 6, 7, 8, 9, 10, 11, 14, 15], idx) >= 0;
+  _ifaceGetter(DOMMatrixI, key, (st) => st.m[idx], (st, v) => {
+    st.m[idx] = +v;
+    if (breaks2D && +v !== flatValue) st.is2D = false;
+  });
+}
+_ifaceGetter(DOMMatrixReadOnlyI, 'is2D', (st) => st.is2D);
+_ifaceGetter(DOMMatrixReadOnlyI, 'isIdentity', (st) => _geoIsIdentity(st.m));
+// The in-place operations, shared by DOMMatrix's *Self methods and the read-only ones
+// (which run them on a copy).
+const _geoOps = {
+  multiplySelf(st, other) { const o = _geoMatrixFromInit(other, 'multiplySelf', 'DOMMatrix'); st.m = _geoMul(st.m, o.m); if (!o.is2D) st.is2D = false; },
+  preMultiplySelf(st, other) { const o = _geoMatrixFromInit(other, 'preMultiplySelf', 'DOMMatrix'); st.m = _geoMul(o.m, st.m); if (!o.is2D) st.is2D = false; },
+  translateSelf(st, tx = 0, ty = 0, tz = 0) {
+    const t = _geoIdentity(); t[12] = +tx; t[13] = +ty; t[14] = +tz;
+    st.m = _geoMul(st.m, t);
+    if (+tz !== 0) st.is2D = false;
+  },
+  scaleSelf(st, sx = 1, sy, sz = 1, ox = 0, oy = 0, oz = 0) {
+    if (sy === undefined) sy = sx;
+    _geoOps.translateSelf(st, ox, oy, oz);
+    const t = _geoIdentity(); t[0] = +sx; t[5] = +sy; t[10] = +sz;
+    st.m = _geoMul(st.m, t);
+    _geoOps.translateSelf(st, -ox, -oy, -oz);
+    if (+sz !== 1 || +oz !== 0) st.is2D = false;
+  },
+  scale3dSelf(st, s = 1, ox = 0, oy = 0, oz = 0) {
+    _geoOps.translateSelf(st, ox, oy, oz);
+    const t = _geoIdentity(); t[0] = t[5] = t[10] = +s;
+    st.m = _geoMul(st.m, t);
+    _geoOps.translateSelf(st, -ox, -oy, -oz);
+    if (+s !== 1) st.is2D = false;
+  },
+  rotateSelf(st, rx = 0, ry, rz) {
+    if (ry === undefined && rz === undefined) { rz = rx; rx = 0; ry = 0; }
+    rx = +rx; ry = ry === undefined ? 0 : +ry; rz = rz === undefined ? 0 : +rz;
+    if (rx !== 0 || ry !== 0) st.is2D = false;
+    if (rz) st.m = _geoMul(st.m, _geoRotationAxis(0, 0, 1, rz));
+    if (ry) st.m = _geoMul(st.m, _geoRotationAxis(0, 1, 0, ry));
+    if (rx) st.m = _geoMul(st.m, _geoRotationAxis(1, 0, 0, rx));
+  },
+  rotateFromVectorSelf(st, x = 0, y = 0) {
+    x = +x; y = +y;
+    const angle = (x === 0 && y === 0) ? 0 : Math.atan2(y, x) * 180 / Math.PI;
+    if (angle) st.m = _geoMul(st.m, _geoRotationAxis(0, 0, 1, angle));
+  },
+  rotateAxisAngleSelf(st, x = 0, y = 0, z = 0, angle = 0) {
+    x = +x; y = +y; z = +z; angle = +angle;
+    if (x !== 0 || y !== 0) st.is2D = false;
+    if (angle) st.m = _geoMul(st.m, _geoRotationAxis(x, y, z, angle));
+  },
+  skewXSelf(st, sx = 0) { st.m = _geoMul(st.m, _geoFrom2D(1, 0, _geoTan(+sx), 1, 0, 0)); },
+  skewYSelf(st, sy = 0) { st.m = _geoMul(st.m, _geoFrom2D(1, _geoTan(+sy), 0, 1, 0, 0)); },
+  invertSelf(st) {
+    const inv = _geoInvert(st.m);
+    if (!inv) { st.m = [NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]; st.is2D = false; return; }
+    st.m = inv;
+  },
+};
+for (const name of _objectKeys(_geoOps)) {
+  _ifaceOp(DOMMatrixI, name, 0, function (st, args) { _reflectApply(_geoOps[name], null, [st].concat(args)); return this; });
+}
+_ifaceOp(DOMMatrixI, 'setMatrixValue', 1, function (st, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'setMatrixValue' on 'DOMMatrix': 1 argument required, but only 0 present.");
+  const parsed = _geoParseTransformList(_String(args[0]), 'DOMMatrix');
+  st.m = parsed.m; st.is2D = parsed.is2D;
+  return this;
+});
+const _geoCopy = (st) => ({ m: st.m.slice(), is2D: st.is2D });
+for (const [name, self] of [['translate', 'translateSelf'], ['scale', 'scaleSelf'], ['scale3d', 'scale3dSelf'],
+  ['rotate', 'rotateSelf'], ['rotateFromVector', 'rotateFromVectorSelf'], ['rotateAxisAngle', 'rotateAxisAngleSelf'],
+  ['skewX', 'skewXSelf'], ['skewY', 'skewYSelf'], ['multiply', 'multiplySelf'], ['inverse', 'invertSelf']]) {
+  _ifaceOp(DOMMatrixReadOnlyI, name, 0, function (st, args) {
+    const copy = _geoCopy(st);
+    _reflectApply(_geoOps[self], null, [copy].concat(args));
+    return _geoNewMatrix(copy);
+  });
+}
+_ifaceOp(DOMMatrixReadOnlyI, 'scaleNonUniform', 0, function (st, args) {
+  const copy = _geoCopy(st);
+  _geoOps.scaleSelf(copy, args[0] === undefined ? 1 : args[0], args[1] === undefined ? 1 : args[1], 1, 0, 0, 0);
+  return _geoNewMatrix(copy);
+});
+_ifaceOp(DOMMatrixReadOnlyI, 'flipX', 0, function (st) { return _geoNewMatrix({ m: _geoMul(st.m, _geoFrom2D(-1, 0, 0, 1, 0, 0)), is2D: st.is2D }); });
+_ifaceOp(DOMMatrixReadOnlyI, 'flipY', 0, function (st) { return _geoNewMatrix({ m: _geoMul(st.m, _geoFrom2D(1, 0, 0, -1, 0, 0)), is2D: st.is2D }); });
+_ifaceOp(DOMMatrixReadOnlyI, 'transformPoint', 0, function (st, args) {
+  const v = _geoPointInit(args[0]);
+  return _geoTransformPoint(st, v[0], v[1], v[2], v[3]);
+});
+_ifaceOp(DOMMatrixReadOnlyI, 'toFloat32Array', 0, function (st) { return new Float32Array(st.m); });
+_ifaceOp(DOMMatrixReadOnlyI, 'toFloat64Array', 0, function (st) { return new Float64Array(st.m); });
+_ifaceOp(DOMMatrixReadOnlyI, 'toJSON', 0, function (st) {
+  const m = st.m;
+  const out = { a: m[0], b: m[1], c: m[4], d: m[5], e: m[12], f: m[13] };
+  for (let i = 0; i < 16; i++) out[_GEO_KEYS[i]] = m[i];
+  out.is2D = st.is2D;
+  out.isIdentity = _geoIsIdentity(m);
+  return out;
+});
+_ifaceOp(DOMMatrixReadOnlyI, 'toString', 0, function (st) {
+  const m = st.m;
+  for (let i = 0; i < 16; i++) {
+    if (!isFinite(m[i])) throw new DOMException("Failed to execute 'toString' on 'DOMMatrixReadOnly': DOMMatrix cannot be serialized with NaN or Infinity values.", 'InvalidStateError');
+  }
+  const n = (v) => _String(v === 0 ? 0 : v);
+  if (st.is2D) return 'matrix(' + [m[0], m[1], m[4], m[5], m[12], m[13]].map(n).join(', ') + ')';
+  return 'matrix3d(' + m.map(n).join(', ') + ')';
+});
+for (const [C, name] of [[DOMMatrixReadOnlyI, 'DOMMatrixReadOnly'], [DOMMatrixI, 'DOMMatrix']]) {
+  const make = (st) => {
+    const obj = _objectCreate(C.prototype);
+    _weakMapSet(_ifaceState, obj, { C, inner: st, self: false });
+    return obj;
+  };
+  _defineProperty(C, 'fromMatrix', { value: _ifaceNative(function fromMatrix(other) {
+    return make(_geoMatrixFromInit(other, 'fromMatrix', name));
+  }, 0), writable: true, enumerable: true, configurable: true });
+  for (const [key, Typed] of [['fromFloat32Array', Float32Array], ['fromFloat64Array', Float64Array]]) {
+    _defineProperty(C, key, { value: _ifaceNative(({ [key](array) {
+      if (!(array instanceof Typed)) throw new TypeError("Failed to execute '" + key + "' on '" + name + "': parameter 1 is not of type '" + Typed.name + "'.");
+      if (array.length === 6) return make({ m: _geoFrom2D(array[0], array[1], array[2], array[3], array[4], array[5]), is2D: true });
+      if (array.length === 16) return make({ m: Array.from(array), is2D: false });
+      throw new TypeError("Failed to execute '" + key + "' on '" + name + "': The sequence must contain 6 elements for a 2D matrix or 16 elements for a 3D matrix.");
+    } })[key], 1), writable: true, enumerable: true, configurable: true });
+  }
+}
+
+// DOMQuad: four points.
+const DOMQuadI = function DOMQuad(p1 = undefined, p2 = undefined, p3 = undefined, p4 = undefined) {
+  _ifaceRequireNew('DOMQuad', new.target);
+  const pt = (p) => { const v = _geoPointInit(p); return new DOMPointI(v[0], v[1], v[2], v[3]); };
+  _weakMapSet(_ifaceState, this, { C: DOMQuadI, inner: { __proto__: null, p1: pt(p1), p2: pt(p2), p3: pt(p3), p4: pt(p4) }, self: false });
+};
+_ifaceDefine('DOMQuad', DOMQuadI);
+_ifaceAttrs(DOMQuadI, ['p1', 'p2', 'p3', 'p4']);
+function _geoQuadBounds(q) {
+  const xs = [q.p1.x, q.p2.x, q.p3.x, q.p4.x], ys = [q.p1.y, q.p2.y, q.p3.y, q.p4.y];
+  let minX = xs[0], maxX = xs[0], minY = ys[0], maxY = ys[0];
+  for (let i = 1; i < 4; i++) {
+    if (xs[i] !== xs[i] || minX !== minX) minX = NaN; else minX = Math.min(minX, xs[i]);
+    if (xs[i] !== xs[i] || maxX !== maxX) maxX = NaN; else maxX = Math.max(maxX, xs[i]);
+    if (ys[i] !== ys[i] || minY !== minY) minY = NaN; else minY = Math.min(minY, ys[i]);
+    if (ys[i] !== ys[i] || maxY !== maxY) maxY = NaN; else maxY = Math.max(maxY, ys[i]);
+  }
+  return new DOMRectI(minX, minY, maxX - minX, maxY - minY);
+}
+_ifaceOp(DOMQuadI, 'getBounds', 0, function (q) { return _geoQuadBounds(q); });
+_ifaceOp(DOMQuadI, 'toJSON', 0, function (q) { return { p1: q.p1, p2: q.p2, p3: q.p3, p4: q.p4 }; });
+_defineProperty(DOMQuadI, 'fromRect', { value: _ifaceNative(function fromRect(other) {
+  const v = _geoRectInit(other);
+  return new DOMQuadI({ x: v[0], y: v[1] }, { x: v[0] + v[2], y: v[1] }, { x: v[0] + v[2], y: v[1] + v[3] }, { x: v[0], y: v[1] + v[3] });
+}, 0), writable: true, enumerable: true, configurable: true });
+_defineProperty(DOMQuadI, 'fromQuad', { value: _ifaceNative(function fromQuad(other) {
+  const o = other == null ? {} : other;
+  return new DOMQuadI(o.p1, o.p2, o.p3, o.p4);
+}, 0), writable: true, enumerable: true, configurable: true });
+
+// Option: the legacy factory for <option>, `new Option(text, value, defaultSelected,
+// selected)`, whose prototype is HTMLOptionElement's as in Chromium.
+(function () {
+  const Option = function Option(text = undefined, value = undefined, defaultSelected = undefined, selected = undefined) {
+    _ifaceRequireNew('Option', new.target);
+    const option = globalThis.document.createElement('option');
+    if (text !== undefined && _String(text) !== '') option.appendChild(globalThis.document.createTextNode(_String(text)));
+    if (value !== undefined) option.setAttribute('value', _String(value));
+    if (defaultSelected) option.setAttribute('selected', '');
+    if (option.selected !== !!selected) option.selected = !!selected;
+    return option;
+  };
+  Option.prototype = HTMLOptionElement.prototype;
+  _defineProperty(Option, 'prototype', { writable: false, enumerable: false, configurable: false });
+  _markNative(Option);
+  _defineProperty(globalThis, 'Option', { value: Option, writable: true, enumerable: false, configurable: true });
+})();
+
+// ---- CSSOM: StyleSheet, MediaList and the CSS rule interfaces.
+// MediaList: a sheet's, an @media rule's or an @import rule's media query list.
+_ifaceIllegal('MediaList');
+function _mediaListSync(list, inner) {
+  for (let i = inner.shown; i > inner.items.length; i--) delete list[i - 1];
+  for (let i = 0; i < inner.items.length; i++) {
+    _defineProperty(list, i, { value: inner.items[i], writable: false, enumerable: true, configurable: true });
+  }
+  inner.shown = inner.items.length;
+}
+function _mediaListParse(text) { return _cssSplitComma(String(text)).map(_cssNormalizeMediaQuery); }
+function _makeMediaList(text, onChange) {
+  const inner = { __proto__: null, items: _mediaListParse(text == null ? '' : text), shown: 0, onChange: onChange || null };
+  const list = _ifaceInstance(_ifaces.MediaList, inner);
+  _mediaListSync(list, inner);
+  return list;
+}
+function _mediaListChanged(list, inner) {
+  _mediaListSync(list, inner);
+  if (inner.onChange) inner.onChange();
+}
+_ifaceGetter(_ifaces.MediaList, 'mediaText', (inner) => inner.items.join(', '), function (inner, v) {
+  inner.items = _mediaListParse(v == null ? '' : v);
+  _mediaListChanged(this, inner);
+});
+_ifaceGetter(_ifaces.MediaList, 'length', (inner) => inner.items.length);
+_ifaceOp(_ifaces.MediaList, 'item', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'item' on 'MediaList': 1 argument required, but only 0 present.");
+  const i = _Number(args[0]) >>> 0;
+  return i < inner.items.length ? inner.items[i] : null;
+});
+_ifaceOp(_ifaces.MediaList, 'appendMedium', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'appendMedium' on 'MediaList': 1 argument required, but only 0 present.");
+  const medium = _cssNormalizeMediaQuery(args[0]);
+  if (medium && _arrayIndexOf(inner.items, medium) < 0) { inner.items.push(medium); _mediaListChanged(this, inner); }
+});
+_ifaceOp(_ifaces.MediaList, 'deleteMedium', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'deleteMedium' on 'MediaList': 1 argument required, but only 0 present.");
+  const idx = _arrayIndexOf(inner.items, _cssNormalizeMediaQuery(args[0]));
+  if (idx < 0) throw new DOMException("Failed to execute 'deleteMedium' on 'MediaList': Failed to delete '" + args[0] + "'.", 'NotFoundError');
+  inner.items.splice(idx, 1);
+  _mediaListChanged(this, inner);
+});
+_ifaceOp(_ifaces.MediaList, 'toString', 0, function (inner) { return inner.items.join(', '); });
+_defineProperty(_ifaces.MediaList.prototype, Symbol.iterator, { value: _arrayValuesAtBoot, writable: true, enumerable: false, configurable: true });
+
+// StyleSheet: CSSStyleSheet's parent, which carries type, href, ownerNode,
+// parentStyleSheet, title, media and disabled.
+_ifaceIllegal('StyleSheet');
+(function () {
+  const CP = CSSStyleSheet.prototype;
+  _objectSetPrototypeOf(CSSStyleSheet, _ifaces.StyleSheet);
+  _objectSetPrototypeOf(CP, _ifaces.StyleSheet.prototype);
+  const SP = _ifaces.StyleSheet.prototype;
+  const sheetState = (sheet) => {
+    const state = _isPrototypeOf(CP, sheet) ? _cssStyleSheetPrivate.get(sheet) : undefined;
+    if (!state) _ifaceIllegalInvocation();
+    return state;
+  };
+  const define = (key, get, set) => {
+    _defineProperty(SP, key, {
+      get: _markNative(_getOwnPropertyDescriptor({ get [key]() { sheetState(this); return _reflectApply(get, this, []); } }, key).get),
+      set: set ? _markNative(_getOwnPropertyDescriptor({ set [key](v) { sheetState(this); _reflectApply(set, this, [v]); } }, key).set) : undefined,
+      enumerable: true,
+      configurable: true,
+    });
+  };
+  for (const key of ['type', 'href', 'ownerNode', 'parentStyleSheet']) {
+    const d = _getOwnPropertyDescriptor(CP, key);
+    if (d && d.get) { delete CP[key]; define(key, d.get); }
+  }
+  delete CP.title;
+  // Chromium: null when the owner has no title attribute.
+  define('title', function () {
+    const owner = this._ownerNode;
+    return owner && typeof owner.getAttribute === 'function' ? owner.getAttribute('title') : null;
+  });
+  define('media', function () {
+    const state = sheetState(this);
+    if (!state.media) {
+      const owner = this._ownerNode;
+      const text = state.mediaText !== null ? state.mediaText
+        : (owner && typeof owner.getAttribute === 'function' ? owner.getAttribute('media') : null);
+      state.media = _makeMediaList(text || '', null);
+    }
+    return state.media;
+  }, function (v) {
+    const media = _reflectGetAtBoot(_ifaces.StyleSheet.prototype, 'media', this);
+    _reflectApply(_getOwnPropertyDescriptor(_ifaces.MediaList.prototype, 'mediaText').set, media, [v]);
+  });
+  define('disabled', function () { return sheetState(this).disabled; }, function (v) { sheetState(this).disabled = !!v; });
+})();
+
+// The CSS rule interfaces: their prototypes are the shim's rule classes; page script
+// cannot construct any of them, as in Chromium.
+_ifaceIllegal('CSSRule', null, CSSRule.prototype);
+for (const [key, value] of [['STYLE_RULE', 1], ['CHARSET_RULE', 2], ['IMPORT_RULE', 3], ['MEDIA_RULE', 4],
+  ['FONT_FACE_RULE', 5], ['PAGE_RULE', 6], ['KEYFRAMES_RULE', 7], ['KEYFRAME_RULE', 8], ['MARGIN_RULE', 9],
+  ['NAMESPACE_RULE', 10], ['COUNTER_STYLE_RULE', 11], ['SUPPORTS_RULE', 12], ['FONT_FEATURE_VALUES_RULE', 14]]) {
+  _ifaceConst(_ifaces.CSSRule, key, value);
+}
+for (const [name, cls, parent] of [
+  ['CSSStyleRule', CSSStyleRule, 'CSSRule'],
+  ['CSSGroupingRule', CSSGroupingRule, 'CSSRule'],
+  ['CSSConditionRule', CSSConditionRule, 'CSSGroupingRule'],
+  ['CSSMediaRule', CSSMediaRule, 'CSSConditionRule'],
+  ['CSSSupportsRule', CSSSupportsRule, 'CSSConditionRule'],
+  ['CSSContainerRule', CSSContainerRule, 'CSSConditionRule'],
+  ['CSSLayerBlockRule', CSSLayerBlockRule, 'CSSGroupingRule'],
+  ['CSSLayerStatementRule', CSSLayerStatementRule, 'CSSRule'],
+  ['CSSStartingStyleRule', CSSStartingStyleRule, 'CSSGroupingRule'],
+  ['CSSScopeRule', CSSScopeRule, 'CSSGroupingRule'],
+  ['CSSPageRule', CSSPageRule, 'CSSGroupingRule'],
+  ['CSSFontFaceRule', CSSFontFaceRule, 'CSSRule'],
+  ['CSSKeyframesRule', CSSKeyframesRule, 'CSSRule'],
+  ['CSSKeyframeRule', CSSKeyframeRule, 'CSSRule'],
+  ['CSSImportRule', CSSImportRule, 'CSSRule'],
+  ['CSSNamespaceRule', CSSNamespaceRule, 'CSSRule'],
+  ['CSSPropertyRule', CSSPropertyRule, 'CSSRule'],
+]) {
+  _ifaceIllegal(name, _ifaces[parent], cls.prototype);
+  // Members are enumerable WebIDL attributes and operations; the shim's own `_*` stay
+  // internal but are left where the classes put them.
+  const keys = _reflectOwnKeysAtBoot(cls.prototype);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (typeof key !== 'string' || key === 'constructor' || _stringCharAt(key, 0) === '_') continue;
+    const d = _getOwnPropertyDescriptor(cls.prototype, key);
+    if (d.get) _markNativeAs(d.get, 'function get ' + key + '() { [native code] }');
+    if (d.set) _markNativeAs(d.set, 'function set ' + key + '() { [native code] }');
+    if (typeof d.value === 'function') _markNative(d.value);
+    if (!d.enumerable && !/^[A-Z_]+$/.test(key)) _defineProperty(cls.prototype, key, { enumerable: true });
+  }
+}
+
+// ---- Events Chromium constructs (or hands out) that the shim had no interface for. Their
+// fields are attributes on the prototype, read from the event's state; the Event fields
+// stay as the shim's Event class keeps them.
+function _ifaceEventClass(name, Parent, length, fields) {
+  const holder = {
+    [name]: class extends Parent {
+      constructor(type, init = undefined) {
+        if (arguments.length < length) {
+          throw new TypeError("Failed to construct '" + name + "': " + length + " argument" + (length > 1 ? 's' : '')
+            + " required, but only " + arguments.length + " present.");
+        }
+        const dict = init == null ? {} : Object(init);
+        super(type, dict);
+        const inner = { __proto__: null };
+        for (let i = 0; i < fields.length; i++) inner[fields[i][0]] = fields[i][1](dict[fields[i][0]], dict);
+        _weakMapSet(_ifaceState, this, { C: holder[name], inner, self: false });
+      }
+    },
+  };
+  const C = holder[name];
+  _defineProperty(C, 'length', { value: length, configurable: true });
+  _ifaceDefine(name, C, Parent);
+  for (let i = 0; i < fields.length; i++) _ifaceAttr(C, fields[i][0]);
+  return C;
+}
+// An event of an interface script cannot construct (createEvent's), with the Event state
+// the shim's Event constructor gives every event.
+function _ifaceEventInstance(C, Base, inner) {
+  const ev = Reflect.construct(Base, [''], C);
+  _weakMapSet(_ifaceState, ev, { C, inner, self: false });
+  return ev;
+}
+const _evBool = (v) => !!v;
+const _evString = (v) => (v === undefined ? '' : _String(v));
+const _evNullable = (v) => (v === undefined ? null : v);
+const _evNumber = (v) => (v === undefined ? 0 : +v);
+const _evRequired = (iface, dict, member) => (v) => {
+  if (v === undefined) {
+    throw new TypeError("Failed to construct '" + iface + "': Failed to read the '" + member + "' property from '" + dict + "': Required member is undefined.");
+  }
+  return v;
+};
+_ifaceEventClass('CloseEvent', Event, 1, [
+  ['wasClean', _evBool],
+  ['code', (v) => (v === undefined ? 0 : (_Number(v) >>> 0) & 0xFFFF)],
+  ['reason', _evString],
+]);
+_ifaceEventClass('PageTransitionEvent', Event, 1, [['persisted', _evBool]]);
+_ifaceEventClass('MediaQueryListEvent', Event, 1, [['media', _evString], ['matches', _evBool]]);
+_ifaceEventClass('IDBVersionChangeEvent', Event, 1, [
+  ['oldVersion', _evNumber],
+  ['newVersion', (v) => (v === undefined || v === null ? null : +v)],
+  ['dataLoss', (v) => (v === undefined ? 'none' : _String(v))],
+  ['dataLossMessage', _evString],
+]);
+_ifaceEventClass('FormDataEvent', Event, 2, [['formData', _evRequired('FormDataEvent', 'FormDataEventInit', 'formData')]]);
+_ifaceEventClass('DragEvent', MouseEvent, 1, [['dataTransfer', _evNullable]]);
+// BeforeUnloadEvent and TextEvent: no constructor in Chromium; createEvent makes them.
+_ifaceIllegal('BeforeUnloadEvent', Event);
+_ifaceGetter(_ifaces.BeforeUnloadEvent, 'returnValue', (inner) => inner.returnValue, (inner, v) => { inner.returnValue = _String(v); });
+_ifaceIllegal('TextEvent', UIEvent);
+_ifaceAttr(_ifaces.TextEvent, 'data');
+_ifaceOp(_ifaces.TextEvent, 'initTextEvent', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'initTextEvent' on 'TextEvent': 1 argument required, but only 0 present.");
+  _reflectApply(Event.prototype.initEvent, this, [args[0], args[1], args[2]]);
+  this.view = args[3] === undefined ? null : args[3];
+  inner.data = args[4] === undefined ? '' : _String(args[4]);
+});
+// Touch, TouchList and TouchEvent. Chromium (desktop) exposes the interfaces but fires no
+// touch events and leaves `ontouchstart` off the window, as the shim does.
+const TouchI = function Touch(init) {
+  _ifaceRequireNew('Touch', new.target);
+  if (arguments.length < 1) throw new TypeError("Failed to construct 'Touch': 1 argument required, but only 0 present.");
+  const d = init == null ? {} : Object(init);
+  const required = (member) => {
+    if (d[member] === undefined) throw new TypeError("Failed to construct 'Touch': Failed to read the '" + member + "' property from 'TouchInit': Required member is undefined.");
+    return d[member];
+  };
+  const identifier = _Number(required('identifier')) | 0;
+  const target = required('target');
+  _weakMapSet(_ifaceState, this, { C: TouchI, inner: _ifaceData({
+    identifier, target,
+    screenX: _evNumber(d.screenX), screenY: _evNumber(d.screenY),
+    clientX: _evNumber(d.clientX), clientY: _evNumber(d.clientY),
+    pageX: _evNumber(d.pageX), pageY: _evNumber(d.pageY),
+    radiusX: _evNumber(d.radiusX), radiusY: _evNumber(d.radiusY),
+    rotationAngle: _evNumber(d.rotationAngle), force: _evNumber(d.force),
+  }), self: false });
+};
+_ifaceDefine('Touch', TouchI);
+_ifaceAttrs(TouchI, ['identifier', 'target', 'screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY',
+  'radiusX', 'radiusY', 'rotationAngle', 'force']);
+_ifaceIllegal('TouchList');
+_ifaceListMembers(_ifaces.TouchList, 'TouchList');
+function _makeTouchList(touches) {
+  const items = [];
+  if (touches != null) for (const t of touches) items[items.length] = t;
+  return _ifaceListIndices(_ifaceInstance(_ifaces.TouchList, _ifaceData({ items })), items);
+}
+_ifaceEventClass('TouchEvent', UIEvent, 1, [
+  ['touches', (v) => _makeTouchList(v)],
+  ['targetTouches', (v) => _makeTouchList(v)],
+  ['changedTouches', (v) => _makeTouchList(v)],
+  ['altKey', _evBool], ['metaKey', _evBool], ['ctrlKey', _evBool], ['shiftKey', _evBool],
+]);
+// document.createEvent's answers for the interfaces above (see Document.createEvent).
+var _createEventExtra = {
+  __proto__: null,
+  closeevent: () => new _ifaces.CloseEvent(''),
+  dragevent: () => new _ifaces.DragEvent(''),
+  pagetransitionevent: () => new _ifaces.PageTransitionEvent(''),
+  beforeunloadevent: () => _ifaceEventInstance(_ifaces.BeforeUnloadEvent, Event, _ifaceData({ returnValue: '' })),
+  textevent: () => _ifaceEventInstance(_ifaces.TextEvent, UIEvent, _ifaceData({ data: '' })),
+};
+
+// DataTransfer, an in-memory drag data store as `new DataTransfer()` makes one, with its
+// DataTransferItemList and DataTransferItems. No drag-and-drop fills one.
+_ifaceIllegal('DataTransferItem');
+_ifaceAttrs(_ifaces.DataTransferItem, ['kind', 'type']);
+_ifaceOp(_ifaces.DataTransferItem, 'getAsString', 1, function (inner, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'getAsString' on 'DataTransferItem': 1 argument required, but only 0 present.");
+  const callback = args[0];
+  if (inner.kind === 'string' && typeof callback === 'function') {
+    const data = inner.data;
+    setTimeout(() => { callback(data); }, 0);
+  }
+});
+_ifaceOp(_ifaces.DataTransferItem, 'getAsFile', 0, function (inner) { return inner.kind === 'file' ? inner.file : null; });
+_ifaceOp(_ifaces.DataTransferItem, 'webkitGetAsEntry', 0, function () { return null; });
+_ifaceOp(_ifaces.DataTransferItem, 'getAsFileSystemHandle', 0, function () { return Promise.resolve(null); });
+_ifaceIllegal('DataTransferItemList');
+function _dtNormalize(format) {
+  const f = _stringToLowerCase(_String(format));
+  return f === 'text' ? 'text/plain' : f === 'url' ? 'text/uri-list' : f;
+}
+function _dtSync(store) {
+  const list = store.list;
+  for (let i = store.shown; i > store.items.length; i--) delete list[i - 1];
+  for (let i = 0; i < store.items.length; i++) {
+    _defineProperty(list, i, { value: store.items[i], writable: false, enumerable: true, configurable: true });
+  }
+  store.shown = store.items.length;
+}
+function _dtItem(kind, type, data, file) {
+  return _ifaceInstance(_ifaces.DataTransferItem, _ifaceData({ kind, type, data, file }));
+}
+_ifaceGetter(_ifaces.DataTransferItemList, 'length', (store) => store.items.length);
+_ifaceOp(_ifaces.DataTransferItemList, 'add', 1, function (store, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'add' on 'DataTransferItemList': 1 argument required, but only 0 present.");
+  let item;
+  if (typeof File === 'function' && args[0] instanceof File) {
+    item = _dtItem('file', args[0].type, '', args[0]);
+  } else {
+    if (args.length < 2) throw new TypeError("Failed to execute 'add' on 'DataTransferItemList': parameter 1 is not of type 'File'.");
+    const type = _stringToLowerCase(_String(args[1]));
+    for (const existing of store.items) {
+      if (_ifaceInner(existing, _ifaces.DataTransferItem).kind === 'string' && _ifaceInner(existing, _ifaces.DataTransferItem).type === type) {
+        throw new DOMException("Failed to execute 'add' on 'DataTransferItemList': An item already exists for type '" + type + "'.", 'NotSupportedError');
+      }
+    }
+    item = _dtItem('string', type, _String(args[0]), null);
+  }
+  store.items.push(item);
+  _dtSync(store);
+  return item;
+});
+_ifaceOp(_ifaces.DataTransferItemList, 'remove', 1, function (store, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'remove' on 'DataTransferItemList': 1 argument required, but only 0 present.");
+  const i = _Number(args[0]) >>> 0;
+  if (i < store.items.length) { store.items.splice(i, 1); _dtSync(store); }
+});
+_ifaceOp(_ifaces.DataTransferItemList, 'clear', 0, function (store) { store.items.length = 0; _dtSync(store); });
+const DataTransferI = function DataTransfer() {
+  _ifaceRequireNew('DataTransfer', new.target);
+  const store = { __proto__: null, items: [], shown: 0, list: null, dropEffect: 'none', effectAllowed: 'none' };
+  store.list = _ifaceInstance(_ifaces.DataTransferItemList, store);
+  _weakMapSet(_ifaceState, this, { C: DataTransferI, inner: store, self: false });
+};
+_ifaceDefine('DataTransfer', DataTransferI);
+const _dtStrings = (store) => store.items.map((item) => _ifaceInner(item, _ifaces.DataTransferItem));
+_ifaceGetter(DataTransferI, 'dropEffect', (store) => store.dropEffect, (store, v) => {
+  const value = _String(v);
+  if (['none', 'copy', 'link', 'move'].indexOf(value) >= 0) store.dropEffect = value;
+});
+_ifaceGetter(DataTransferI, 'effectAllowed', (store) => store.effectAllowed, (store, v) => {
+  const value = _String(v);
+  if (['none', 'copy', 'copyLink', 'copyMove', 'link', 'linkMove', 'move', 'all', 'uninitialized'].indexOf(value) >= 0) store.effectAllowed = value;
+});
+_ifaceGetter(DataTransferI, 'items', (store) => store.list);
+_ifaceGetter(DataTransferI, 'types', (store) => {
+  const types = [];
+  let files = false;
+  for (const item of _dtStrings(store)) {
+    if (item.kind === 'string') types.push(item.type);
+    else files = true;
+  }
+  if (files) types.push('Files');
+  return Object.freeze(types);
+});
+_ifaceGetter(DataTransferI, 'files', (store) => _makeFileListOf(_dtStrings(store).filter((item) => item.kind === 'file').map((item) => item.file)));
+_ifaceOp(DataTransferI, 'setDragImage', 3, function (store, args) {
+  if (args.length < 3) throw new TypeError("Failed to execute 'setDragImage' on 'DataTransfer': 3 arguments required, but only " + args.length + " present.");
+});
+_ifaceOp(DataTransferI, 'getData', 1, function (store, args) {
+  if (args.length < 1) throw new TypeError("Failed to execute 'getData' on 'DataTransfer': 1 argument required, but only 0 present.");
+  const type = _dtNormalize(args[0]);
+  for (const item of _dtStrings(store)) {
+    if (item.kind !== 'string' || item.type !== type) continue;
+    if (_String(_stringToLowerCase(_String(args[0]))) === 'url') {
+      const lines = item.data.split(/\r?\n/);
+      for (const line of lines) if (line && line[0] !== '#') return line;
+      return '';
+    }
+    return item.data;
+  }
+  return '';
+});
+_ifaceOp(DataTransferI, 'setData', 2, function (store, args) {
+  if (args.length < 2) throw new TypeError("Failed to execute 'setData' on 'DataTransfer': 2 arguments required, but only " + args.length + " present.");
+  const type = _dtNormalize(args[0]);
+  const items = _dtStrings(store);
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === 'string' && items[i].type === type) { store.items.splice(i, 1); break; }
+  }
+  store.items.push(_dtItem('string', type, _String(args[1]), null));
+  _dtSync(store);
+});
+_ifaceOp(DataTransferI, 'clearData', 0, function (store, args) {
+  const type = args.length && args[0] !== undefined ? _dtNormalize(args[0]) : null;
+  const items = _dtStrings(store);
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].kind === 'string' && (type === null || items[i].type === type)) store.items.splice(i, 1);
+  }
+  _dtSync(store);
+});
+
+// Queuing strategies.
+for (const [name, sizeFn] of [
+  ['ByteLengthQueuingStrategy', ({ size(chunk) { return chunk.byteLength; } }).size],
+  ['CountQueuingStrategy', ({ size() { return 1; } }).size],
+]) {
+  _markNative(sizeFn);
+  const C = ({ [name]: function (init) {
+    _ifaceRequireNew(name, new.target);
+    if (arguments.length < 1) throw new TypeError("Failed to construct '" + name + "': 1 argument required, but only 0 present.");
+    const d = init == null ? {} : Object(init);
+    if (d.highWaterMark === undefined) {
+      throw new TypeError("Failed to construct '" + name + "': Failed to read the 'highWaterMark' property from 'QueuingStrategyInit': Required member is undefined.");
+    }
+    _weakMapSet(_ifaceState, this, { C, inner: _ifaceData({ highWaterMark: +d.highWaterMark }), self: false });
+  } })[name];
+  _ifaceDefine(name, C);
+  _ifaceAttr(C, 'highWaterMark');
+  _ifaceGetter(C, 'size', () => sizeFn);
+}
+
+// Stream readers, writers and controllers: the shim's ReadableStream, WritableStream and
+// TransformStream hand out instances of them.
+_ifaceIllegal('ReadableStreamDefaultController');
+_ifaceAttrs(_ifaces.ReadableStreamDefaultController, ['desiredSize']);
+_ifaceMethods(_ifaces.ReadableStreamDefaultController, { close: 0, enqueue: 0, error: 0 });
+_ifaceIllegal('WritableStreamDefaultController');
+_ifaceAttrs(_ifaces.WritableStreamDefaultController, ['signal']);
+_ifaceMethods(_ifaces.WritableStreamDefaultController, { error: 0 });
+_ifaceIllegal('TransformStreamDefaultController');
+_ifaceAttrs(_ifaces.TransformStreamDefaultController, ['desiredSize']);
+_ifaceMethods(_ifaces.TransformStreamDefaultController, { enqueue: 0, error: 0, terminate: 0 });
+for (const [name, getName, Stream] of [
+  ['ReadableStreamDefaultReader', 'getReader', globalThis.ReadableStream],
+  ['WritableStreamDefaultWriter', 'getWriter', globalThis.WritableStream],
+]) {
+  if (typeof Stream !== 'function' || typeof Stream.prototype[getName] !== 'function') continue;
+  const get = Stream.prototype[getName];
+  const C = ({ [name]: function (stream) {
+    _ifaceRequireNew(name, new.target);
+    if (arguments.length < 1) throw new TypeError("Failed to construct '" + name + "': 1 argument required, but only 0 present.");
+    if (!(stream instanceof Stream)) throw new TypeError("Failed to construct '" + name + "': parameter 1 is not of type '" + Stream.name + "'.");
+    _weakMapSet(_ifaceState, this, { C, inner: _reflectApply(get, stream, []), self: true });
+  } })[name];
+  _ifaceDefine(name, C);
+  if (name === 'ReadableStreamDefaultReader') {
+    _ifaceAttrs(C, ['closed']);
+    _ifaceMethods(C, { read: 0, releaseLock: 0, cancel: 0 });
+  } else {
+    _ifaceAttrs(C, ['closed', 'desiredSize', 'ready']);
+    _ifaceMethods(C, { abort: 0, close: 0, releaseLock: 0, write: 0 });
+  }
+  _defineProperty(Stream.prototype, getName, {
+    value: _ifaceNative(({ [getName]() { return _ifaceWrap(C, _reflectApply(get, this, arguments)); } })[getName], 0),
+    writable: true, enumerable: true, configurable: true,
+  });
+}
+// The shim's own controller records, fronted by their interface once bootstrap is done.
+function _wrapStreamPart(name, record) {
+  return _ifaceReady && _ifaces[name] ? _ifaceWrap(_ifaces[name], record) : record;
+}
+
+// IdleDeadline: requestIdleCallback's argument.
+_ifaceIllegal('IdleDeadline');
+_ifaceAttrs(_ifaces.IdleDeadline, ['didTimeout']);
+_ifaceMethods(_ifaces.IdleDeadline, { timeRemaining: 0 });
+function _makeIdleDeadline(record) { return _ifaceReady ? _ifaceWrap(_ifaces.IdleDeadline, record) : record; }
+
+// CustomStateSet: ElementInternals.states, a set of strings over the shim's own Set.
+_ifaceIllegal('CustomStateSet');
+_ifaceGetter(_ifaces.CustomStateSet, 'size', (set) => set.size);
+for (const [name, length, run] of [
+  ['add', 1, (set, args) => { set.add(_String(args[0])); }],
+  ['clear', 0, (set) => { set.clear(); }],
+  ['delete', 1, (set, args) => set.delete(_String(args[0]))],
+  ['has', 1, (set, args) => set.has(_String(args[0]))],
+  ['entries', 0, (set) => set.entries()],
+  ['forEach', 1, function (set, args) {
+    if (typeof args[0] !== 'function') throw new TypeError("Failed to execute 'forEach' on 'CustomStateSet': The callback provided as parameter 1 is not a function.");
+    for (const value of Array.from(set)) _reflectApply(args[0], args[1], [value, value, this]);
+  }],
+  ['values', 0, (set) => set.values()],
+]) {
+  _ifaceOp(_ifaces.CustomStateSet, name, length, function (set, args) {
+    if (args.length < length) throw new TypeError("Failed to execute '" + name + "' on 'CustomStateSet': " + length + " argument required, but only 0 present.");
+    return _reflectApply(run, this, [set, args]);
+  });
+}
+_defineProperty(_ifaces.CustomStateSet.prototype, 'keys', { value: _ifaces.CustomStateSet.prototype.values, writable: true, enumerable: true, configurable: true });
+_defineProperty(_ifaces.CustomStateSet.prototype, Symbol.iterator, { value: _ifaces.CustomStateSet.prototype.values, writable: true, enumerable: false, configurable: true });
+const _customStateSets = _private(new WeakMap());
+function _customStateSetFor(set) {
+  let wrapper = _weakMapGet(_customStateSets, set);
+  if (!wrapper) { wrapper = _ifaceInstance(_ifaces.CustomStateSet, set); _weakMapSet(_customStateSets, set, wrapper); }
+  return wrapper;
+}
+
+// Interface objects the shim defines as anonymous classes (`MouseEvent = globalThis.MouseEvent
+// = class extends Event`) had an empty name, so String(MouseEvent) was "function () { [native
+// code] }"; Chromium's carry their interface name.
+(function () {
+  const names = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const first = _stringCharCodeAt(name, 0);
+    if (first < 65 || first > 90 || _setHas(_engineGlobalNames, name)) continue;
+    const d = _getOwnPropertyDescriptor(globalThis, name);
+    const C = d && d.value;
+    if (typeof C !== 'function' || C.name !== '' || !C.prototype || C.prototype.constructor !== C) continue;
+    _defineProperty(C, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  }
+})();
+_ifaceReady = true;
+// ---- End of global interface objects ------------------------------------------------
+
 // Built-ins host script uses, as bootstrap left them (port addition, SECURITY.md L10).
 //
 // DEVIATION from crates/obscura-cdp and crates/obscura-mcp, whose snippets call
@@ -20258,6 +23753,7 @@ const _hostDom = (function () {
     const proto = typeof C === 'function' ? C.prototype : null;
     if (proto && (proto === NP || NP.isPrototypeOf(proto))) snapshot(proto);
   }
+  const hostClick = own(HTMLElement.prototype, 'click');
   const hostName = { __proto__: null };
   for (let i = 0; i < hostNames.length; i++) hostName[hostNames[i]] = true;
   // An accessor or method from the object's prototype chain, never an own property:
@@ -20275,6 +23771,10 @@ const _hostDom = (function () {
       const d = own(p, name);
       if (d) return d;
     }
+    // click() is HTMLElement's, as in Chromium, so an SVG or null-namespace element has
+    // none. The host's click stands for a user's, which reaches any element: it uses
+    // HTMLElement's, as bootstrap defined it.
+    if (name === 'click' && typeOf(obj) === 1) return hostClick;
     return undefined;
   };
   return _objectFreeze({

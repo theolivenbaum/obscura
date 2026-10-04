@@ -386,6 +386,12 @@ public sealed partial class Page
     public IReadOnlyList<(uint FrameId, string Name, string Payload)> TakePendingFrameBindingCalls() =>
         Js?.TakePendingFrameBindingCalls() ?? [];
 
+    /// <summary>
+    /// Drain the document loads script caused with <c>document.open()</c> and
+    /// <c>close()</c> on a loaded document, for the CDP layer to report.
+    /// </summary>
+    public int TakeScriptDocumentLoads() => Js?.TakeScriptDocumentLoads() ?? 0;
+
     public IReadOnlyList<RuntimeEvent> TakePendingRuntimeEvents() =>
         Js?.TakePendingRuntimeEvents() ?? [];
 
