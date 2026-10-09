@@ -2930,6 +2930,11 @@ tree and new whole-document maps that survive to the next pass. What no longer a
   plan use slot-indexed pooled arrays instead of maps over every node;
 - `DomTraversal.IsAnyLocal` takes a `params ReadOnlySpan`, and the per-style loops over a
   style's two pseudos iterate a stack span instead of a new array per style.
+- the table pass's floor of definite content widths (`DomTableSupport.DefiniteContentWidthIndex`)
+  walks only the subtrees of the tables it is asked about, memoized per node, instead of the
+  whole document on the first question (nvidia.com asks about 16 small anonymous tables on
+  every pass; its `tables` phase went 12.4 -> 9.0ms a pass, live). Pinned by
+  `DefiniteContentWidthIndexTests`.
 
 `POCKETCALCULATOR_LAYOUT_PROFILE=1` now also prints, per pass, the collections and GC pause it
 saw, what it allocated, why a retained restyle fell back to a full one, and the table passes.
