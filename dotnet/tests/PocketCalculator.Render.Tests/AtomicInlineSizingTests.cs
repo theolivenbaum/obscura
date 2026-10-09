@@ -155,4 +155,36 @@ public class AtomicInlineSizingTests
         Assert.True(MathF.Abs(Width("dd") - 139f) < 0.01f, $"dd: {Width("dd")}");
         Assert.True(MathF.Abs(Width("leaf") - 107f) < 0.01f, $"leaf: {Width("leaf")}");
     }
+
+    /// <summary>
+    /// A <c>width: 100%</c> under a box with a fixed <c>px</c> width resolves against that box,
+    /// even when a content-sized flex item sits further up: the fixed box breaks the cycle.
+    /// youtube.com's logo (a 100% SVG in a 93x20 <c>yt-icon</c>) drew at 300px without this.
+    /// Chromium 141 numbers; render-repros/svg-percent-under-fixed-icon.html is the same page.
+    /// </summary>
+    [Fact]
+    public void PercentageUnderFixedWidthBoxIsNotCyclicThroughContentSizedFlexItem()
+    {
+        DomTree tree = Parse(
+            """
+            <style>
+                html,body{margin:0}
+                .row{display:flex;height:40px}
+                .icon{display:inline-flex;width:93px;height:20px;padding:10px 14px 10px 16px}
+                .shape{display:flex;width:100%;height:100%}
+                .shape>div{width:100%;height:100%}
+                svg{display:block;width:100%;height:100%}
+            </style>
+            <div class="row"><a><span class="icon"><span class="shape" id="shape"><div><svg id="logo" viewBox="0 0 93 20"></svg></div></span></span></a></div>
+            <div class="row"><div><div style="display:flex;width:120px;height:30px"><span class="shape"><svg id="block" viewBox="0 0 12 3" width="12" height="3"></svg></span></div></div></div>
+            <div class="row"><div><div style="display:flex;width:93px;height:20px"><span class="shape"><svg id="auto" viewBox="0 0 93 20" style="height:auto"></svg></span></div></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 800f));
+        Rect Box(string id) => laid.Rects[Id(tree, id)];
+
+        Assert.Equal((16f, 10f, 93f, 20f), (Box("logo").X, Box("logo").Y, Box("logo").Width, Box("logo").Height));
+        Assert.Equal(93f, Box("shape").Width);
+        Assert.Equal((120f, 30f), (Box("block").Width, Box("block").Height));
+        Assert.Equal((93f, 20f), (Box("auto").Width, Box("auto").Height));
+    }
 }

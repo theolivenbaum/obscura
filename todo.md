@@ -904,26 +904,35 @@ thumbnails, a sidebar and float columns 406.9 -> 347.3 ms; screenshots of the 57
 `render-repros/` and bench pages are byte-identical except the two whose animation makes the
 base build differ from itself. A paragraph of 2,000 anchored floats lays out in about a second.
 
-Status: 60 of 61 conformance pages match Chromium (element boxes within 1px, inline line
+Status: 61 of 61 conformance pages match Chromium (60 before floats split inline fragments; element boxes within 1px, inline line
 fragments within 2px; 56 before line alignment was fixed, see "Line alignment follows
 text-align, white-space and direction" under Known deviations), and 7 of the 8 older float pages at the top of `render-repros/` (the
 eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
 where Chromium gives an empty box after it, as before). Open:
 
-- [ ] `elementFromPoint` is the shim's nid-order heuristic in `bootstrap.js`, so a point inside
-      a float returns the later in-flow block instead of the float (out of scope here: the
-      shim is being edited elsewhere)
-- [ ] `Range.getClientRects()` is a stub returning the element's box; line rects are measured
-      through inline elements' `getClientRects()` instead
-- [ ] an inline box split by a float inside it reports one fragment where Chromium reports
-      two (`float-in-inline`)
+- [x] `elementFromPoint` was the shim's nid-order heuristic in `bootstrap.js`, so a point inside
+      a float returned the later in-flow block instead of the float (174 of 272 hit checks
+      matched); it is the renderer's hit test now and all 272 match (see "Hit testing is the
+      renderer's, in Chromium's paint order" under Known deviations)
+- [x] `Range.getClientRects()` was a stub returning the element's box; it is measured from the
+      line fragments now (see "Range rects come from the line fragments" under Known
+      deviations)
+- [x] an inline box split by a float inside it reported one fragment where Chromium reports
+      two (`float-in-inline`): a culled inline box (no inline border, padding or margin, no
+      background, not positioned) is split where a float is anchored strictly inside it on a
+      line, a decorated one keeps one fragment (`InlineOwnerLineFragments(culled)`); a float
+      inside an inline box the run keeps (one with a border or padding) is anchored too, where
+      the run used to become a flex row holding the float; and a float after the space a line
+      wraps at is on that line, which the space does not count against (Chromium 141 keeps a
+      20px float beside "Before long words " in 150px). `FloatInInlineTests`; 61 of 61 pages
 - [x] right-to-left paragraphs started at the left, and centred/right-aligned lines counted
       their trailing space (the `rtl`/`text-align-*`/`control-no-float` pages); fixed with line
       alignment
-- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line
-      (a float before any text in it is placed before it, one after text splits it);
-      its items' percentages resolve against the block, not the narrowed run
-      (`PercentBasisFromContainingBlock`), which is what wikipedia.org's footer needs
+- [x] a run that does not fold (atomic inlines) was one float-avoiding block, not line by line;
+      a run holding inline-blocks, images or controls now folds, and its lines are narrowed
+      beside the floats one by one ("Atomic inlines are laid out in their lines";
+      `ib-float-narrow`, `ib-float-nav`, `ib-percent-beside-float`). A run that still does not
+      fold (a block-level child) keeps the old behaviour
 - [ ] floats inside multi-column containers lay out in the first column only
 
 ## 9. Validation
@@ -1124,6 +1133,11 @@ DEVIATION comment at the C# code that differs.
   height error got worse.** One route's width error moved, `view/Pivot` 0.416 -> 0.571,
   and it is not this change: its `tss-pivot-line` tab underline lays out 0px wide in both
   builds, and the after capture happened to have four of them on screen instead of two.
+
+  **Superseded for runs that now fold** ("Atomic inlines are laid out in their lines"): an
+  atomic in a shaped line is aligned on its own baseline and the strut is always present. What
+  follows is left for the flex-row stand-in, which still lays out a run beside a block-level
+  child.
 
   **Still open, and it is only about boxes the flex-row stand-in lays out.** A block whose
   inline content is all text folds to one shaped buffer and never reaches taffy
@@ -1504,17 +1518,172 @@ passing), the port now:
 Left-aligned left-to-right text is laid out as before (screenshots of the render-repros pages
 are byte-identical; see the commit). Still open:
 
-- [ ] a row of atomic inlines (a run holding an inline-block or image) in a `dir=rtl` block is
-      ordered right to left item by item; Chromium keeps Latin text and the inline-blocks
-      between its words in left-to-right order (UAX#9 N1 over the atomic inlines)
-- [ ] in such rows a space between a text item and an atomic inline is dropped
-      (`alpha <ib>` centred: the box is 2.2px right of Chromium), a removed space after an
-      atomic at a line end still takes room (4.45px), and a centred right-to-left row is about
-      0.6px off
+- [x] a row of atomic inlines in a `dir=rtl` block was ordered right to left item by item, a
+      space between a text item and an atomic was dropped, a removed space after an atomic at a
+      line end took room (4.45px): the atomics are now object replacement characters in the
+      shaped line (neutral for bidi, so UAX#9 N1 orders them with the Latin around them) and the
+      white space around them collapses as text does (`ib-rtl`, `ib-rtl-center`,
+      `ib-trailing-space`, `ib-center` within 0.05px)
 - [ ] bidi stays reduced: no explicit embeddings or isolates, so an inline `dir` attribute
       does not isolate its text; an ordered list's marker is not reordered right to left
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
+
+### Hit testing is the renderer's, in Chromium's paint order
+
+DEVIATION from `crates/obscura-js/js/bootstrap.js`, whose `document.elementFromPoint` returns the
+element with the highest node id whose bounding rect holds the point (`elementsFromPoint` is
+that element alone, a shadow root's asks the document), and from `crates/obscura-cdp`, whose
+mouse events go to that element and are not composed. A point inside a float hit the paragraph
+after it, a later block's background beat the text painted over it, z-index, transforms,
+`pointer-events` and `visibility` were ignored, and a CDP click on shadow content went to the
+host. Now `PreparedRender.HitTest` (`Paint/HitTest.cs`) walks the flat tree in reverse paint
+order as Blink's `NodeAtPoint` does: per stacking context its positive and zero layers
+(positioned boxes and stacking contexts, highest z and latest first), its own content, its
+negative layers, then its own background; own content in three phases, foreground (inline boxes'
+fragments, the content of line boxes from first to last glyph, which hits their block, and
+atomic inlines and flex/grid items as units), floats (as units), block backgrounds (latest
+first); the root element for any point in the viewport, after everything. A text hit is its
+flat-tree parent; table rows and row groups are not hit. Points are mapped through each box's
+scroll movement and the inverse of its accumulated transform, and must be inside the box's
+inherited overflow clip. `op_hit_test(x, y, scope, all)` (additive) returns node ids; the shim
+retargets nothing itself: with the document's or a shadow root's node id as scope the op
+retargets each hit against it and drops duplicates, and the host's
+`__obscura_host.dom.elementFromPoint` (CDP Input, frame descent) and `nodeIdAtPoint`
+(`DOM.getNodeForLocation`, a port addition) pass -1 for the deepest element. Mouse and wheel
+events from `Input.dispatchMouseEvent` are composed. Without layout the old heuristic remains
+the fallback.
+
+Measured against Chromium 141 (`scripts/float-conformance/conformance.mjs --grid 10` on the ten
+pages of `render-repros/hit-test/`, generated by `scripts/hit-test-conformance/gen-pages.mjs`,
+28,800 sample points): `elementFromPoint` 12,354 -> 28,631 match, `elementsFromPoint` 0 -> 28,635
+(the heuristic listed one element), a shadow root's own `elementFromPoint` 220/480 -> 466/480;
+the float pages' per-element checks (`--hit`) 172/272 -> 272/272, text-align 274/274. What still
+differs:
+
+- [x] a row of inline-blocks or images was laid out as a flex row (`inline-blocks`, 145
+      points): with atomic inlines in their lines `elementFromPoint` is 28,774/28,800 and
+      `elementsFromPoint` 28,778/28,800; what is left on that page is a text field 8px narrower
+      than Chromium's (the control's intrinsic width, not its placement)
+- [ ] an inline element slotted into a shadow tree has no fragments, so its text hits the
+      slot's block (`shadow`, 14 points)
+- [ ] the edge of an inline box is hit to its unrounded end, Chromium's to a pixel-snapped one
+      (2 points each on `float-text` and `inline-content`); a rotated box's edge differs by
+      under a pixel (`transforms`, 6 points). Text is hit on its pixel-snapped rect, as
+      `HitTestTextItem` does (a span whose font box starts at y 2.23 is hit at y 2), for text
+      runs and for an inline box with text of its own
+- [ ] hit areas are border boxes: no border-radius, clip-path or SVG geometry (SVG shapes hit by
+      their bounding box, an inline `<svg>` atomic included); flex and grid items are hit in tree order, not order-modified
+      document order; generated content and list markers hit their element's box
+- [ ] Playwright's headless Chromium hides scrollbars, so the `clip-scroll` page's scroller sets
+      `scrollbar-width: none` to compare like with like
+
+### List markers are placed and drawn as Blink does
+
+DEVIATION from `crates/obscura-render/src/paint.rs`, which draws "•", "◦", "▪" or "1." with the
+static face 6px left of the item's padding edge at its content box's top, and has no
+`list-style-position`. Chromium 141 draws disc, circle and square as shapes sized from the
+font's rounded ascent `a`: a square of side `(a*2/3+1)/2`, 1px into a box two wider, at
+`3*(a - a*2/3)/2` below the baseline less the ascent; an outside symbol box starts
+`a*2/3 + 8` before the content edge, on the right in a right-to-left item; marker text ("1. ",
+suffix space included) ends at the content edge, shaped in the item's font and direction; an
+inside marker is the start of the first line and indents it like `text-indent` (a symbol by its
+box less 1px plus 1em, text by its width); the marker sits on the first line's baseline.
+`Paint/ListMarkers.cs`, `InlineItem.MarkerIndent`; `list-style-position` (inherited) and the
+`list-style` shorthand's position are parsed; a list's UA `padding-inline-start` moves to the
+right in a `dir=rtl` list (`LayoutStyle.UaListPadding`; author logical padding still maps to
+the left, as before); `<ol start>` and `<li value>` number the items. Measured by the ink of the
+markers in `render-repros/list-markers.html` at 16 and 32px: every marker within 1px of
+Chromium (outside disc 11px right and 5px down before, inside markers drawn outside, a
+right-to-left marker 40px outside the list), and the inside items' text at Chromium's x
+(`ListMarkerTests`). Open:
+
+- [ ] string markers (`list-style-type: '- '`), `::marker` styles, `list-style-image` and the
+      other counter styles still draw a disc or nothing
+- [ ] an inside marker indents only the item's own first line; when the item starts with a
+      block, Chromium puts the marker in that block's first line
+
+### Range rects come from the line fragments
+
+DEVIATION from `crates/obscura-js/js/bootstrap.js`, whose `Range.getClientRects()` is the common
+ancestor element's box (empty for a collapsed range) and `getBoundingClientRect()` that box.
+`op_range_rects(startNid, startOffset, endNid, endOffset)` (additive) answers with
+`PreparedRender.RangeClientRects`, CSSOM View's definition: the `getClientRects()` of every
+element the range contains whose parent it does not, and for every text node it contains or
+partly contains one rect per line of the selected text, in tree order; the bounding rect is the
+union of the rects with both a width and a height, else the first. A text rect runs from the
+first selected glyph to the last on its line (inline-box edges, alignment and relative offsets
+applied; white space removed at a line end excluded), as tall as the text's font box on its own
+baseline; a collapsed range in a text node is a zero-wide caret rect; a preserved newline is a
+zero-wide rect at its line's end. Each shaped item records where its text nodes' collapsed text
+starts (`TextNodeChunk`: offset, white-space state, transform), and a DOM offset is mapped by
+replaying the collapse (`Inline.CollectedOffset`). Measured against Chromium 141 on a page of
+partial words, a span with padding across a wrap, a centred paragraph, an element boundary, a
+collapsed range and a `pre` newline: every rect within 0.03px (`RangeClientRectsTests`). Open:
+
+- [ ] text laid out outside a shaped context (the word-split fallback, a run with a block-level
+      child) reports whole words; a run of atomic inlines is shaped now
+- [ ] right-to-left text: the rect is the visual extent of the selected glyphs on each line,
+      where Chromium gives one rect per bidi run
+
+### Atomic inlines are laid out in their lines
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which folds a block's inline content into one
+shaped buffer only when it is all text, and lays a run holding an inline-block, an image or a
+control out as a wrapping flex row of word boxes (the "flex-row stand-in" of the strut entries
+above): every item hung from its line's top, a right-to-left row was ordered item by item, a
+space next to an atomic was dropped, and the row avoided a float as one block. The port shapes
+such a run as one inline formatting context (`TextEngine.TryBuild(..., allowAtomics: true)`):
+
+- each atomic inline (inline-block, inline-flex, inline-grid, `<img>` and the other replaced
+  elements, form controls, inline `<svg>`) is an object replacement character in the collected
+  text, with its index in `TextAttrs.Atomic`; shaping gives it one synthetic glyph as wide as
+  its margin box (`InlineGeometry.MetaAtomic`), and line breaking takes a break before and
+  after it, as Chromium does even after a no-break space or an opening parenthesis;
+- its box is a child of the context's taffy node, laid out by `TaffyTree.ComputeInlineAtomicLayout`
+  (`Layout/TaffyTreeInline.cs`): the children are sized first (shrink-to-fit for an auto
+  width), handed to the text engine (`TextEngine.SetAtomic`) with their baselines
+  (`InlineAtomicHost`: an inline-block's last line box, its bottom margin edge with no line box
+  or with `overflow` other than `visible`; an inline-flex or inline-grid box's first baseline;
+  a replaced element's bottom margin edge; a text field or select centred on its text; a
+  button on its label's baseline or, empty, its content-box bottom), and placed where the
+  shaped lines put their glyphs (`TextEngine.AtomicPosition`);
+- an atomic contributes its margin box to its line box through `vertical-align` (baseline,
+  middle, top/bottom, text-top/bottom, sub/super, lengths and percentages;
+  `TextEngine.AtomicLineMetrics`), so it grows the line as CSS 2.1 10.8.1 says; text-align,
+  justification, white space, bidi order and float narrowing then apply to it as to a word;
+- an inline-block's content is shrink-wrapped at LayoutUnit precision (an inline-block holding
+  "About us" is 75.16px, not 76; `InlineItem.LayoutUnitWidth`), and its lines are broken at
+  that unrounded width (`LayoutDomOnce.FinalizeShapedItems`), not the snapped box's;
+- a retained relayout that carries such a context over gives its atomics the boxes the previous
+  pass gave them (`TextEngine.CarryAtomics`), since it does not lay them out again.
+
+A run whose content is all text is shaped exactly as before: screenshots of the 106
+deterministic render-repros and test-html-files pages without an atomic inline are
+byte-identical before and after (`animation-fill-forwards` differs between two runs of either
+build), and a 1,500-paragraph text page relayouts as fast (15 width changes: median 22.9s ->
+19.8s on a loaded machine, interleaved; min 17.6 -> 17.0), while the same page with an
+inline-block and an image per paragraph went 19.7s -> 7.9s (no word boxes any more).
+
+Measured against Chromium 141 with `scripts/float-conformance/conformance.mjs
+render-repros/inline-atomic --tol 0.5` (29 pages from `scripts/inline-atomic-conformance/gen-pages.mjs`):
+pages 0/29 -> 27/29, elements 91/202 -> 196/202, text runs 5/76 -> 75/76, hit points 170/201 ->
+200/201. `InlineAtomicTests`, `LineBoxStrutTests`, and differential coverage in
+`IncrementalLayoutDifferentialTests` (an atomic fixture and the 29 pages under random mutation).
+Open:
+
+- [ ] form controls keep their own intrinsic widths, which differ from Chromium's: a `size=8`
+      text field is 81px against 89, a select 43.91 against 45, a button 34 against 33.78
+      (`form-controls`); their placement in the line is right
+- [ ] only inline-blocks shrink-wrap at LayoutUnit precision; a float, a table cell or an
+      absolutely positioned box still rounds its content's width up to a whole pixel (Rust's
+      measure), so a cell holding "cell" and a 70px box is 101px against 100.47
+      (`ib-shrink-to-fit`) and three float pages are within 1px but not 0.5
+      (`blockify-span`, `nav-bar`, `wikipedia-thumb`). Changing it moves every shrink-to-fit
+      box on text-only pages, so it wants its own survey
+- [ ] a run with a block-level child (a mixed block) still lays its atomics out in the
+      flex-row stand-in between the blocks; quirks mode's line-height rules are not modelled
+      (Chromium gives a line holding only an atomic no strut in quirks mode)
 
 ### Floats are CSS floats, not flex rows
 
@@ -2274,6 +2443,80 @@ tracker disabled, 5 of 5 pass with it. A `fetch()`-shaped test is deliberately n
 because that window is between `PageInFlight.Decrement()` and ClearScript resolving the promise
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
+
+### A Web Animation's start time is the first frame after `animate()`, not the call
+
+`op_waapi_create` in Rust takes the document timeline's wall clock at the moment of the call as
+the effect's start time. Chromium 141 leaves a new animation pending (`startTime` null,
+`currentTime` 0) and resolves its start time to the timeline time of the first frame rendered
+after it: with a 300 ms busy wait after `animate()`, `startTime` was that later frame's time,
+not the call's. The port marks a new effect `StartPending` (`WaapiAnimation`, Render/Core/Animation.cs)
+and `RenderState.EnsurePreparedRender` resolves it to the document-time sample of the next style
+flush; until then its local time is 0. A `play()` of a pending effect leaves it pending.
+
+Under the Rust rule `ForwardWaapiSampleUpdatesRetainedStyleAndPaint` measured however long the
+first capture took (0 to 0.45 opacity where 0.5 was expected); it fails on every run before the
+change. `WaapiStartTimeIsTheFirstFrameAfterAnimateNotTheCallTime` pins Chromium's rule with the
+wall clock 400 ms ahead of the host's frame. CSS animations still start at their mutation's
+wall-clock time (the scoped "birth epochs" in `DomOps`), as in Rust.
+
+### A navigation waits for frame documents still loading when it builds the frames
+
+`build_document_frames` in `page.rs` pumps 50 ms rounds and stops at the first round in which
+no frame moved. A frame document that took longer than one round to answer (any server slower
+than 50 ms, or a loaded host) then never got its realm during the navigation, and its scripts
+were not requested until something else pumped the page:
+`FrameDocumentReferrerPolicyHeaderGovernsItsRequests` timed out under load that way. Chromium's
+load event waits for the frame. The port counts frame document loads in flight
+(`PocketCalculatorState.FrameDocumentLoadsInFlight`, kept by `FetchOps.OpFetchUrlAsync` for
+internal `navigate` loads) and `Page.BuildDocumentFramesAsync` keeps pumping while one is in
+flight, plus one round after the last answers; those rounds do not count against the eight, and
+a 5 s grace bounds the wait so a hanging frame server cannot hold the navigation.
+`AFrameDocumentSlowerThanOneRoundStillLoadsDuringNavigation` (Browser) serves the frame 400 ms
+late.
+
+### A bounded event-loop wait pumps once after a park, even past its deadline
+
+`run_event_loop_bounded` in Rust is `tokio::time::timeout(budget, run_event_loop())`; tokio polls
+the inner future before the timer, so work that came due while the loop was parked still runs on
+the wake that finds the budget spent. `RunEventLoopBoundedAsync` checked the deadline first, and
+when a park overshot it (a loaded host) returned without running that work: a 40 ms wait over a
+0 ms interval ran no tick (`FixedDurationEventLoopYieldsFromContinuouslyReadyTasks`). One pump now
+follows every park. The difference from Rust is the loop's shape, not its result.
+
+### The document timeline reads a replaceable clock
+
+`PocketCalculatorState.AnimationClock` (a `TimeProvider`, the system clock by default) is what
+`AnimationTimelineElapsedMilliseconds` reads, and `Page.AnimationClock` hands one to every new
+document's runtime. Rust reads `Instant::now()` directly. Nothing in the engine sets it; tests
+install a manual clock (`RenderCaptureSupport.FreezeAnimationTimeline`, `ManualAnimationClock`)
+so CSS animation births and screencast frames land at exact times on a loaded host.
+
+### Timing-sensitive tests wait on the engine, not the wall clock
+
+Not a behavioural deviation; recorded so the next port of a Rust test does not reintroduce the
+pattern. Many Rust tests pump the loop for a fixed 40-300 ms and then assert what happened, or
+resolve a promise from a `setTimeout` racing the work. The port's first layout in a process
+takes a few hundred ms (JIT, font setup), and a host shared with other builds stretches every
+step, so those failed intermittently under load and some (`IntersectionObserverCanBeReusedAfterDisconnect`)
+deterministically when run alone. The C# tests now:
+
+- drive the loop until it is idle (`EventLoopWait.UntilIdleAsync`, a 20 s deadline that returns
+  as soon as nothing is pending) or until a page condition holds (`EventLoopWait.UntilAsync`);
+- in page script, take the next step (a scroll, the resolve) from the previous observation
+  rather than from a timer, and keep a short tail after the last expected record so a spurious
+  extra one still shows;
+- measure complexity bounds in the test thread's CPU time (`ThreadCpuTime`), not wall time;
+- keep the settle-policy bounds (`QuiescentEventLoop*`) but widen the gap between "bounded" and
+  "consumed the budget" (larger budgets and intervals) instead of tightening on wall time;
+- poll CDP frame state against a 20 s deadline rather than a count of 50 ms sleeps.
+
+With IntersectionObserver checkpoints disabled and the rAF cadence removed, the 15 converted
+IntersectionObserver and animation-frame tests fail rather than hang; the new WAAPI and frame
+tests fail with their fixes taken out.
+`PublicSuffixList.TryGetRegistrableDomain` no longer calls `ContainsAnyInRange('A', 'Z')`,
+whose ReadyToRun body allocates 96 bytes a call until tiered compilation replaces it:
+`LookupDoesNotAllocate` failed every time alone and whenever the background compiler was slow.
 
 ### Collapsing table borders are resolved per edge and split between the two boxes
 
@@ -5993,3 +6236,106 @@ about 380 instance-own members on the sampled objects that Chromium keeps on pro
 Event's state, Blob/File, FileReader, the stream objects, CanvasRenderingContext2D's
 attributes, Animation, PerformanceEntry); OfflineAudioContext still inherits AudioContext
 (resume/suspend not its own). Pinned by `WebIdlDescriptorTests` (Js).
+
+### A fixed-width box ends the cyclic-percentage walk
+
+`DeferCyclicFlexInlineSizes` (`Dom/DomPassesSubgrid.cs`) walks up from a percentage inline
+size to the content-sized flex item that makes it cyclic. `dom.rs` climbs past every box on
+the way; the port stops at a box whose `width` is a fixed `px` length (not a table part, not
+a flexible row flex item, which the walk still reports first), because that box is the
+percentage's basis and nothing above it can make the percentage cyclic (CSS Sizing 3 5.2.1).
+youtube.com's logo is `ytd-logo > yt-icon (inline-flex, 93x20) > span (flex, 100%) > div
+(100%) > svg (100%, viewBox only)` inside a content-sized flex item: the 100% was
+neutralized, the span's automatic minimum was re-derived from the SVG's 300px default object
+size, and the logo drew 300x65 where Chromium 141 draws 93x20. Pinned by
+`AtomicInlineSizingTests.PercentageUnderFixedWidthBoxIsNotCyclicThroughContentSizedFlexItem`
+and `render-repros/svg-percent-under-fixed-icon.html`.
+
+### `clip: rect()` is implemented
+
+`style.rs` has no `clip` property. The port parses `clip: rect(top, right, bottom, left)`
+(commas optional, lengths or `auto`) into `LayoutStyle.Clip`, reports it in the CSSOM snapshot
+(`auto` or `rect(0px, auto, 10px, 0px)`, whatever the position, as Chromium 141 does), and
+for an absolutely or fixed positioned box intersects it into the box's own clip and its
+subtree's (`OverflowClip.WithClipProperty`, applied in `DomTransforms.ResolveClipRects`,
+`PreparedRender.ResolveClips` and `ScrollPaintState.ViewportFixedClipMap`). The
+visually-hidden idiom `position: fixed; clip: rect(0 0 0 0)` (msn.com's "Skip to footer")
+painted in full. The element-capture clip-scope path and scrolling-overflow extents do not
+read it. Pinned by `ClipPropertyTests` and `render-repros/clip-rect-visually-hidden.html`.
+
+### Custom elements and unknown tags are `display: inline`
+
+`ua_style` falls back to `block` for every tag it does not list. `display` initially is
+`inline`, and Chromium's UA sheet has no rule for an autonomous custom element, an unknown
+HTML tag, or `picture`, `map`, `nobr`, `acronym`, `strike`, `blink`, `rb`, `rtc`, `spacer`,
+so Chromium 141 reports `inline` for all of them; the port now does too
+(`ComputedStyle.KnownHtmlTags`). Known HTML tags the old fallback made `block` are unchanged
+(canvas, video, iframe, embed, object, svg, math, audio and the like still compute `block`
+in the port, where Chromium reports `inline`; that is the replaced-element path and is left
+to it). A block `cs-common-settings-dialog` was one of the boxes that widened msn.com's
+header. Pinned by `UaDisplayTests`.
+
+### The render-resource warmup scans shadow trees
+
+`render_resource_candidates` walks the document's descendants, which stops at shadow hosts.
+`Page.RenderResourceCandidates` also walks every connected shadow root, so a `url()` in a
+shadow tree's `<style>` (adopted sheets are bridged into one) is prefetched like a document
+one. msn.com's logo is such a background, and a CDP capture (which only observes, see
+`PrepareCaptureResourcesIfRequestedAsync`) painted it missing. Pinned by
+`RenderResourceTransportTests.RenderResourceWarmupScansShadowTreeStylesheets`.
+
+### Only list-item boxes have markers, and `::marker { content }` is honoured
+
+`paint.rs` draws a marker for every `li`, and `style.rs` rejects `display: list-item`. The
+port gives `li` the UA display `list-item` (`LayoutStyle.ListItemDisplay`, reported as
+`list-item` in the CSSOM snapshot, as Chromium 141 does), accepts an authored `list-item`
+(laid out as a block), and drops the marker when an author display replaces it. It also
+indexes `::marker` rules (`Stylesheet.MarkerRules`) and reads only their `content`: an empty
+string removes the marker and a string replaces it (`LayoutStyle.MarkerText`); `content:
+none`, counters and the other `::marker` properties are not read, and a `display: inherit`
+child of a list item does not inherit the marker. Markers are still drawn only for `li`
+elements. grammarly.com's feature carousel (`li::marker { content: "" }` on flex-item
+slides) painted a bullet in front of every card. Pinned by `ListItemDisplayTests` and
+`render-repros/list-item-display.html`.
+
+### A shadow root keeps its adopted sheets when its children are replaced, and `:host(...) x` matches
+
+Two shadow-styling gaps msn.com's cards fell into (both visible as the hero card's missing
+text overlay):
+
+- `bootstrap.js` materializes an adopted sheet as a `<style data-obscura-adopted>` child of
+  the shadow root, so `root.innerHTML = ...`, `root.textContent = ...` and
+  `root.replaceChildren(...)` removed it, and with it every rule of a component that set
+  `adoptedStyleSheets` before rendering. `_restoreAdoptedStyles` re-syncs after each of those
+  three. Removing the bridge node with `removeChild` still loses it.
+- `Matcher.Matches` matched every rule without a shadow scope, so `:host(...)` could only
+  match the host itself (`HostRules`), never as the left-hand compound of a rule styling a
+  shadow-tree element (`:host([immersive]) .media { position: absolute; z-index: -1 }`). A
+  selector with `:host` whose subject is inside a shadow tree is now matched with that tree's
+  host as the scope, as `MatchesInShadowScope` already did for `::slotted()`.
+  `shadowRoot.querySelector(':host .x')` still answers null (Chromium matches).
+
+Pinned by `ShadowAdoptedStylesTests` (Js).
+
+### `contain` and `will-change` boxes are stacking contexts, and a sub-pass paints its root first
+
+`paint.rs` isolates only z-index, opacity and transform roots. `PaintDom.IsolatesPaint` also
+treats a box with `contain: layout | paint | content | strict` or a stacking `will-change`
+as a stacking context, painted as an atomic unit in its normal-flow slot, so a `z-index: -1`
+descendant stays inside it. And a sub-pass (a stacking context, float, opacity or transform
+root) now paints its root's own box before the negative z-index layers, per CSS 2.1 Appendix
+E; it used to paint the root after them, so a `z-index: -1` child vanished under its own
+stacking context's background. msn.com's hero image (`position: absolute; z-index: -1` in a
+`contain: content` card) was painted under the card's #333 background. Filter and
+backdrop-filter, which also make stacking contexts, are not included. Pinned by
+`ContainStackingTests` and `render-repros/contain-negative-z.html`.
+
+### A descendant's `max-width` caps a button's intrinsic label width
+
+`native_button_intrinsic_content` sums a button's descendant text and atomic widths whatever
+their own sizing. `DomStyleFixups.NativeButtonWalk` now caps a descendant with a definite
+`max-width` at that width (less its edges under `border-box`). msn.com's settings button hides
+its "Page settings" label in a `max-width: 0; overflow: hidden` span beside a 24px icon:
+Chromium 141 sizes it 40px, the port 132px, which widened the header until its overflow
+logic hid the Sign in button. Percentage max-widths are not applied. Pinned by
+`FormControlDisplayTests.ButtonIntrinsicWidthHonoursADescendantMaxWidth`.

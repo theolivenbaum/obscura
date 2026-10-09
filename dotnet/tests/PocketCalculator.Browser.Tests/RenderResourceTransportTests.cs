@@ -78,6 +78,38 @@ public sealed class RenderResourceTransportTests
         Assert.Equal(PageHelpers.MaxStylesheetResources, loadable.Count + rejected.Count);
     }
 
+    /// <summary>
+    /// A url() in a shadow tree's stylesheet (adopted sheets are bridged into a shadow
+    /// <c>style</c>) is a render resource like one in the document's (msn.com's logo).
+    /// </summary>
+    [Fact]
+    public void RenderResourceWarmupScansShadowTreeStylesheets()
+    {
+        using Page page = PageFixtures.NewPage("warmup-shadow");
+        page.Js = PageFixtures.RuntimeFor(
+            "https://example.test/page",
+            "<html><body><div id=\"host\"></div></body></html>");
+        page.Url = UrlRecord.Parse("https://example.test/page")!;
+        page.Js.Evaluate(
+            """
+            (() => {
+              const root = document.getElementById('host').attachShadow({ mode: 'open' });
+              const sheet = new CSSStyleSheet();
+              sheet.replaceSync('.logo { background: url(https://assets.test/logo.svg) center no-repeat; }');
+              root.adoptedStyleSheets = [sheet];
+              const inner = document.createElement('div');
+              root.appendChild(inner);
+              inner.attachShadow({ mode: 'open' }).innerHTML =
+                '<style>.mark { background-image: url(/nested.png); }</style><span class="mark"></span>';
+            })()
+            """);
+
+        (List<RenderResourceMiss> loadable, List<RenderResourceMiss> rejected) = page.RenderResourceCandidates();
+        List<string> urls = [.. loadable.Concat(rejected).Select(miss => miss.Url)];
+        Assert.Contains("https://assets.test/logo.svg", urls);
+        Assert.Contains("https://example.test/nested.png", urls);
+    }
+
     [Fact]
     public async Task CacheOnlyLayoutNeverBlocksOnASlowAssetAndLateBytesUpdateGeometry()
     {
@@ -290,14 +322,16 @@ public sealed class RenderResourceTransportTests
             """);
         page.QueuePendingRenderResources();
         Assert.True(page.HasPendingRenderResources, "the font is a layout miss");
-        await page.Js.RunEventLoopForDurationAsync(2_200);
+        // 3.5 s rather than 2.2 s: the font lands 1.2 s in either way, and the longer wait
+        // leaves a loaded host 2.2 s rather than 0.9 s to apply it inside the wait.
+        await page.Js.RunEventLoopForDurationAsync(3_500);
         string json = page.Js.Evaluate("JSON.stringify(window.__samples)")!.GetValue<string>();
         double[][] samples = JsonSerializer.Deserialize<double[][]>(json)!;
         Assert.True(samples.Length > 20, $"timers must have run: {json}");
         double first = samples[0][1];
         double[]? changed = samples.FirstOrDefault(sample => sample[1] != first);
         Assert.True(changed is not null, $"a sample inside the wait must show the applied font: {json}");
-        Assert.True(changed![0] < 2_100, $"observed only at {changed[0]} ms");
+        Assert.True(changed![0] < 3_400, $"observed only at {changed[0]} ms");
     }
 
     /// <summary>

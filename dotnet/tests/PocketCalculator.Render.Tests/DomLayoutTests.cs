@@ -5547,6 +5547,7 @@ public class DomLayoutTests
     {
         DomTree tree = Parse(
             """
+            <!doctype html>
             <style>
                 * { box-sizing:border-box }
                 html,body { margin:0 }
@@ -5568,11 +5569,16 @@ public class DomLayoutTests
         Rect bulk = Get("bulk");
         Rect submit = Get("submit");
 
-        Assert.True(MathF.Abs(group.Height - 55f) < 0.1f, $"{group}");
+        // Chromium 141: group and actions 59 tall, field 55, bulk at y 0 and submit at y 3.
+        // The empty link's baseline is its bottom margin edge and the empty button's is its
+        // content-box bottom (3px of border and padding up), and the strut's descent hangs
+        // below the shared baseline. This used to assert a 55px row with both boxes at y 0.
+        Assert.True(MathF.Abs(group.Height - 59f) < 0.1f, $"{group}");
         Assert.True(MathF.Abs(field.Height - 55f) < 0.1f, $"{field}");
-        Assert.True(MathF.Abs(actions.Height - 55f) < 0.1f, $"{actions}");
+        Assert.True(MathF.Abs(actions.Height - 59f) < 0.1f, $"{actions}");
         Assert.True(MathF.Abs(submit.X - (bulk.X + bulk.Width)) < 0.1f);
-        Assert.True(MathF.Abs(bulk.Y - submit.Y) < 0.1f);
+        Assert.True(MathF.Abs(bulk.Y) < 0.1f, $"{bulk}");
+        Assert.True(MathF.Abs(submit.Y - 3f) < 0.1f, $"{submit}");
         Assert.True(MathF.Abs(submit.X + submit.Width - (group.X + group.Width)) < 0.1f);
     }
 

@@ -46,7 +46,9 @@ public sealed class ChildFrameNewDocumentScripts
     private static async Task<string> NavigateAsync(CdpContext ctx, string session, string url)
     {
         await CoreCdp.CdpAsync(ctx, 50, "Page.navigate", new JsonObject { ["url"] = url }, session);
-        for (int attempt = 0; attempt < 40; attempt++)
+        // Polls until a deadline, not a number of attempts: a loaded host can take longer than
+        // a fixed count of 50 ms sleeps to load a frame, and the deadline still fails a hang.
+        for (var clock = System.Diagnostics.Stopwatch.StartNew(); clock.ElapsedMilliseconds < 20_000;)
         {
             await CoreCdp.CdpAsync(ctx, 51, "Runtime.evaluate", new JsonObject { ["expression"] = "1" }, session);
             JsonNode tree = await CoreCdp.CdpAsync(ctx, 52, "Page.getFrameTree", new JsonObject(), session);
@@ -203,7 +205,9 @@ public sealed class ChildFrameNewDocumentScripts
         }
 
         string? url = null;
-        for (int attempt = 0; attempt < 40 && url?.EndsWith("/next.html", StringComparison.Ordinal) != true; attempt++)
+        // Polls until a deadline, not a number of attempts: a loaded host can take longer than
+        // a fixed count of 50 ms sleeps to load a frame, and the deadline still fails a hang.
+        for (var clock = System.Diagnostics.Stopwatch.StartNew(); clock.ElapsedMilliseconds < 20_000 && url?.EndsWith("/next.html", StringComparison.Ordinal) != true;)
         {
             // What the connection's autonomous pump does between commands.
             await ctx.GetSessionPageMut(session)!.RunAutonomousEventLoopTurnAsync();

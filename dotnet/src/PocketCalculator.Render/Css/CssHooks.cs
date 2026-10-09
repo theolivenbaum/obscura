@@ -116,7 +116,7 @@ internal static class CssSupportsOracle
     {
         "display" => lower is "none" or "flex" or "inline-flex" or "inline" or "inline-block"
             or "grid" or "inline-grid" or "block" or "flow-root" or "table" or "inline-table"
-            or "-webkit-box" or "-webkit-inline-box" or "contents",
+            or "-webkit-box" or "-webkit-inline-box" or "contents" or "list-item",
         "direction" => lower is "ltr" or "rtl",
         "position" => lower is "static" or "relative" or "absolute" or "fixed" or "sticky",
         "box-sizing" => lower is "content-box" or "border-box",
@@ -626,7 +626,7 @@ internal static class CssSupportsOracle
         "scrollbar-gutter", "visibility", "opacity", "animation", "animation-name",
         "animation-duration", "animation-delay", "animation-fill-mode",
         "animation-iteration-count", "animation-direction", "animation-play-state", "z-index",
-        "clear", "vertical-align", "list-style", "list-style-type", "gap", "grid-gap",
+        "clear", "vertical-align", "list-style", "list-style-type", "list-style-position", "gap", "grid-gap",
         "row-gap", "grid-row-gap", "column-gap", "grid-column-gap", "-webkit-column-gap",
         "column-count", "-webkit-column-count", "columns", "-webkit-columns", "break-inside",
         "-webkit-column-break-inside", "border-spacing", "border-collapse", "table-layout",

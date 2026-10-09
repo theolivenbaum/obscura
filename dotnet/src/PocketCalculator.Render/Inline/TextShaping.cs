@@ -223,6 +223,9 @@ public sealed class TextShaper(FontDatabase database)
 
     private const int WordCacheLimit = 1 << 16;
 
+    /// <summary>The character an atomic inline stands as in the collected text.</summary>
+    internal const char ObjectReplacementChar = '￼';
+
     /// <summary>The longest word, in glyphs, the per-shaper word cache keeps.</summary>
     private const int MaxCachedWordGlyphs = 4096;
 
@@ -597,7 +600,51 @@ public sealed class TextShaper(FontDatabase database)
     /// </summary>
     private static CssBreakData BuildBreakData(string span, int spanStart, AttrsList attrsList)
     {
+        // An atomic inline has a soft wrap opportunity before and after it whatever its
+        // neighbours are, as Chromium 141 breaks them: after "(" and after a no-break space
+        // before it, and before a no-break space after it (UAX#14 would glue both). A space
+        // after it is already a break after the space. Its own class is taken as ID.
+        List<int>? atomicBreaks = null;
+        if (span.Contains(ObjectReplacementChar))
+        {
+            atomicBreaks = [];
+            for (int i = 0; i < span.Length; i++)
+            {
+                if (span[i] != ObjectReplacementChar)
+                {
+                    continue;
+                }
+
+                if (i > 0)
+                {
+                    atomicBreaks.Add(i);
+                }
+
+                if (i + 1 < span.Length && span[i + 1] is not (' ' or '\t' or '\n'))
+                {
+                    atomicBreaks.Add(i + 1);
+                }
+            }
+
+            span = span.Replace(ObjectReplacementChar, '一');
+        }
+
         List<int> normalBreaks = LineBreaking.Breaks(span);
+        if (atomicBreaks is { Count: > 0 })
+        {
+            normalBreaks.AddRange(atomicBreaks);
+            normalBreaks.Sort();
+            int unique = 0;
+            for (int i = 0; i < normalBreaks.Count; i++)
+            {
+                if (i == 0 || normalBreaks[i] != normalBreaks[i - 1])
+                {
+                    normalBreaks[unique++] = normalBreaks[i];
+                }
+            }
+
+            normalBreaks.RemoveRange(unique, normalBreaks.Count - unique);
+        }
         // At most one cluster per code unit; sized once rather than grown (SECURITY.md M7).
         var clusters = new List<(int End, BreakClass Class, BreakClass BreakAllClass, bool VerticalLine, CssLineBreak? Policy)>(span.Length);
         foreach ((int start, int length) in LineBreaking.GraphemeClusters(span))
@@ -833,6 +880,23 @@ public sealed class TextShaper(FontDatabase database)
         }
 
         TextAttrs attrs = attrsList.GetSpan(startRun);
+        if (attrs.Atomic >= 0)
+        {
+            // An atomic inline's object replacement character: no font glyph, an advance of its
+            // margin box, and its line-box halves as the glyph's box metrics.
+            glyphs.Add(new ShapeGlyph
+            {
+                Start = startRun,
+                End = endRun,
+                XAdvance = attrs.AtomicWidth,
+                FontId = attrs.FontId ?? default,
+                GlyphId = 0,
+                Metadata = attrs.Metadata,
+                Metrics = attrs.Metrics,
+            });
+            return;
+        }
+
         FaceRecord? selected = attrs.FontId is { } id ? _database.Face(id) : null;
 
         // The fallback order walks every face of the database, and a run with a selected face

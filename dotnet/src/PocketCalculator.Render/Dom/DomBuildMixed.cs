@@ -71,19 +71,55 @@ internal static partial class DomBuild
         bool IsWhitespace(NodeId cid) =>
             tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).AsSpan().Trim().Length == 0;
 
+        // A float inside an inline box the run keeps (one with a border, padding or margin is
+        // not spliced away) is in the run too: it is anchored like a float the run holds
+        // directly, where the run used to be laid out as a flex row with the float as an item.
+        bool HasNestedFloat(NodeId cid, int depth)
+        {
+            if (depth > 64
+                || !context.Styles.TryGetValue(cid, out LayoutStyle? style)
+                || style.Display != Display.Inline
+                || style.IsInlineBlock
+                || style.Float is not null
+                || DomTraversal.ElementLocalName(tree, cid) is not { } local
+                || Inline.IsReplaced(local))
+            {
+                return false;
+            }
+
+            foreach (NodeId child in DomTraversal.EachRenderedChild(tree, cid))
+            {
+                if (IsFloat(child) || HasNestedFloat(child, depth + 1))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         List<Seg> expanded = new(segs.Count);
         for (int index = 0; index < segs.Count; index++)
         {
             Seg seg = segs[index];
             if (seg.Kind != SegKind.Run || !seg.Run.Exists(IsFloat))
             {
+                if (seg.Kind == SegKind.Run
+                    && seg.Run.Exists(cid => HasNestedFloat(cid, 0))
+                    && !((beforePending && index == 0) || (afterPending && index + 1 == segs.Count))
+                    && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles, allowAtomics: true))
+                {
+                    expanded.Add(new Seg { Kind = SegKind.Run, Run = seg.Run, Anchored = true });
+                    continue;
+                }
+
                 expanded.Add(seg);
                 continue;
             }
 
             bool onlyFloats = seg.Run.TrueForAll(cid => IsFloat(cid) || IsWhitespace(cid));
             bool joinsPseudo = (beforePending && index == 0) || (afterPending && index + 1 == segs.Count);
-            if (!onlyFloats && !joinsPseudo && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles))
+            if (!onlyFloats && !joinsPseudo && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles, allowAtomics: true))
             {
                 expanded.Add(new Seg { Kind = SegKind.Run, Run = seg.Run, Anchored = true });
                 continue;
@@ -365,7 +401,7 @@ internal static partial class DomBuild
 
             // Fast path: the whole run folds to one shaped leaf.
             if (!joinBefore && !joinAfter
-                && context.Engine.TryBuildRun(tree, id, run, context.Styles, seg.Anchored) is { } item)
+                && context.Engine.TryBuildRun(tree, id, run, context.Styles, seg.Anchored, allowAtomics: true) is { } item)
             {
                 TaffyStyle leafStyle = RunLeafStyle();
                 if (floatFlow)
@@ -375,10 +411,16 @@ internal static partial class DomBuild
                 }
 
                 TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(leafStyle, item);
+                AttachAtomics(context, leaf, item);
                 if (!context.Ifc.Runs.TryGetValue(id, out List<int>? items))
                 {
                     items = [];
                     context.Ifc.Runs[id] = items;
+                    if (childIds.Count == 0)
+                    {
+                        // The item's first line is this run's: an inside marker indents it.
+                        ListMarkers.ApplyInsideMarker(context.Engine, tree, id, style, item);
+                    }
                 }
 
                 items.Add(item);

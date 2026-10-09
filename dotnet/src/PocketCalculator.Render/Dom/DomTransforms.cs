@@ -58,6 +58,15 @@ internal static class DomTransforms
             translates[id] = (tx, ty);
         }
 
+        // DEVIATION from crates/obscura-render/src/dom.rs, which has no `clip` property.
+        // `clip: rect(...)` on an absolutely positioned box clips the box itself as well as
+        // everything inside it, so it joins this node's own entry, not only its children's.
+        if (style is { Clip: not null } && rects.TryGetValue(id, out Rect clipBox))
+        {
+            inherited = OverflowClip.WithClipProperty(inherited, style, clipBox, tx, ty);
+            clipRects[id] = inherited;
+        }
+
         Affine2 transform = parentTransform.Then(ownTransform);
         if (!transform.IsIdentity())
         {

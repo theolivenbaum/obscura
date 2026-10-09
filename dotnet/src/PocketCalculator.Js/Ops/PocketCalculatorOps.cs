@@ -365,6 +365,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLayoutOffset(Page, S(nid))));
         Bind(ops, "op_layout_offset_parent", (Func<object?, string>)(
             nid => RenderOps.OpLayoutOffsetParent(Page, S(nid))));
+        Bind(ops, "op_hit_test", (Func<object?, object?, object?, object?, string>)(
+            (x, y, scope, all) => RenderOps.OpHitTest(Page, D(x), D(y), D(scope), B(all))));
+        Bind(ops, "op_range_rects", (Func<object?, object?, object?, object?, string>)(
+            (sc, so, ec, eo) => RenderOps.OpRangeRects(Page, D(sc), D(so), D(ec), D(eo))));
         Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
             nids => RenderOps.OpResizeObserverMeasurements(Page, S(nids))));
         Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(
@@ -522,6 +526,10 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => RenderOps.OpLayoutOffset(document, S(nid))));
         Bind(ops, "op_layout_offset_parent", (Func<object?, string>)(
             nid => RenderOps.OpLayoutOffsetParent(document, S(nid))));
+        Bind(ops, "op_hit_test", (Func<object?, object?, object?, object?, string>)(
+            (x, y, scope, all) => RenderOps.OpHitTest(document, D(x), D(y), D(scope), B(all))));
+        Bind(ops, "op_range_rects", (Func<object?, object?, object?, object?, string>)(
+            (sc, so, ec, eo) => RenderOps.OpRangeRects(document, D(sc), D(so), D(ec), D(eo))));
         Bind(ops, "op_resize_observer_measurements", (Func<object?, string>)(
             nids => RenderOps.OpResizeObserverMeasurements(document, S(nids))));
         Bind(ops, "op_intersection_observer_measurements", (Func<object?, string>)(

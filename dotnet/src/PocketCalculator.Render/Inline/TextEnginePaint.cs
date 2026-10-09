@@ -117,6 +117,23 @@ public sealed partial class TextEngine
                     continue;
                 }
 
+                // An atomic inline's box paints itself; its glyph holds only its place.
+                if (InlineGeometry.IsAtomic(glyph.Metadata))
+                {
+                    if (segment is { } open)
+                    {
+                        underlines.Add((
+                            open.X0,
+                            open.X1,
+                            baseY + open.Relative.Y + F32.Max(open.FontSize * 0.12f, 1f),
+                            F32.Max(open.FontSize / 14f, 1f),
+                            open.Color));
+                        segment = null;
+                    }
+
+                    continue;
+                }
+
                 (float X, float Y) relative = InlineGeometry.GlyphRelativeOffset(
                     item.RelativeOwnerRanges,
                     lineSourceStart,
@@ -230,6 +247,11 @@ public sealed partial class TextEngine
                 if (item.Marker is { } marker
                     && marker.LineIndex == lineIndex
                     && glyph.X + lineOffset + glyph.W > marker.ContentEnd)
+                {
+                    continue;
+                }
+
+                if (InlineGeometry.IsAtomic(glyph.Metadata))
                 {
                     continue;
                 }

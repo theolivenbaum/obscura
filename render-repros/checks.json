@@ -351,6 +351,22 @@
     {"name": "text alignment does not shrink a flex item", "color": "#087f5b", "x": 20, "y": 20, "width": 360, "height": 80},
     {"name": "inherited text alignment centers inline content", "color": "#c2255c", "x": 150, "y": 100, "width": 100, "height": 20}
   ],
+  "clip-rect-visually-hidden": [
+    {"name": "clip rect clips the absolutely positioned box itself", "color": "#1971c2", "x": 160, "y": 30, "width": 50, "height": 30},
+    {"name": "clip rect clips an absolutely positioned descendant", "color": "#087f5b", "x": 160, "y": 60, "width": 50, "height": 20},
+    {"name": "clip is ignored on a static box", "color": "#7048e8", "x": 0, "y": 120, "width": 100, "height": 40}
+  ],
+  "contain-negative-z": [
+    {"name": "z-index -1 inside contain: content paints over the card background", "color": "#2f9e44", "x": 0, "y": 0, "width": 100, "height": 60},
+    {"name": "z-index -1 inside a z-index stacking context paints over its background", "color": "#2f9e44", "x": 0, "y": 140, "width": 100, "height": 60}
+  ],
+  "list-item-display": [
+    {"name": "display: block li cards in a flex row", "color": "#1971c2", "x": 40, "y": 20, "width": 100, "height": 40}
+  ],
+  "svg-percent-under-fixed-icon": [
+    {"name": "100% svg under a fixed-width inline-flex icon keeps the icon width", "color": "#e03131", "x": 16, "y": 10, "width": 93, "height": 20},
+    {"name": "100% svg under a fixed-width flex box keeps the box width", "color": "#1971c2", "x": 0, "y": 40, "width": 120, "height": 30}
+  ],
   "supports-var-feature-query": [
     {"name": "variable feature query enables implemented grid support", "color": "#2f9e44", "x": 0, "y": 0, "width": 240, "height": 40}
   ],

@@ -118,6 +118,26 @@ public sealed class FrameRequestProfileTests
         Assert.Null(Header(fetch, "cookie"));
     }
 
+    /// <summary>
+    /// A frame document that answers after the first 50 ms round of frame building still
+    /// gets its realm, and its scripts load, before the navigation returns. The frame-building
+    /// loop took a round with no frame progress as the end of the frames, so on a loaded host
+    /// (and against any server slower than 50 ms) the frame's scripts were never requested
+    /// unless something pumped the page afterwards. Chromium's load event waits for the frame.
+    /// </summary>
+    [Fact]
+    public async Task AFrameDocumentSlowerThanOneRoundStillLoadsDuringNavigation()
+    {
+        using var fx = new Fixture();
+        fx.Serve("/start", TestResponse.Html($"<iframe src=\"{fx.FrameSite("/frame")}\"></iframe>"));
+        fx.Serve("/frame", FrameDocument("<script src=\"/frame.js\"></script>") with { DelayMs = 400 });
+
+        await fx.Page.NavigateAsync(fx.PageSite("/start"));
+
+        Assert.Contains(fx.Server.Requests, request => request.Path.Split('?')[0] == "/frame.js");
+        Assert.Single(fx.Page.Frames);
+    }
+
     [Fact]
     public async Task FrameDocumentReferrerPolicyHeaderGovernsItsRequests()
     {

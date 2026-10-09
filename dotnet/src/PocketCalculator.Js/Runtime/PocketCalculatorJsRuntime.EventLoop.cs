@@ -411,10 +411,17 @@ public sealed partial class PocketCalculatorJsRuntime
         var token = ArmWatchdog(
             TimeSpan.FromMilliseconds(budgetMs + SynchronousTaskFloorMs + WatchdogSchedulingMarginMs));
         string? fatal = null;
+        // DEVIATION from the reference's tokio::time::timeout(budget, run_event_loop()), in
+        // shape only: tokio polls the loop before the timeout, so work that came due while
+        // the loop was parked still runs on the wake that finds the deadline passed. Checking
+        // the deadline first skipped it whenever a park overshot (a loaded host), and a 40 ms
+        // wait over a 0 ms timer could return having run nothing. One pump follows every park.
+        var parked = false;
         try
         {
-            while (clock.Elapsed.TotalMilliseconds < budgetMs)
+            while (parked || clock.Elapsed.TotalMilliseconds < budgetMs)
             {
+                parked = false;
                 LoopTick tick;
                 string? error;
                 try
@@ -448,6 +455,7 @@ public sealed partial class PocketCalculatorJsRuntime
                 if (tick == LoopTick.Waiting)
                 {
                     await ParkAsync(TimeSpan.FromMilliseconds(Math.Min(remaining, 50))).ConfigureAwait(false);
+                    parked = true;
                 }
                 else
                 {

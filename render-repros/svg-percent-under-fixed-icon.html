@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>percentage-sized svg under a fixed-width icon in a content-sized flex item</title>
+  <style>
+    html, body { margin: 0; }
+    /* youtube.com's masthead logo: ytd-logo > yt-icon (93x20, inline-flex) >
+       span.yt-icon-shape (flex, 100%) > div (100%) > svg (100%, viewBox only). The
+       content-sized flex item above the icon must not make the 100% cyclic. */
+    .row { display: flex; height: 40px; }
+    .icon { display: inline-flex; width: 93px; height: 20px; padding: 10px 14px 10px 16px; }
+    .shape { display: flex; width: 100%; height: 100%; }
+    .shape > div { width: 100%; height: 100%; }
+    svg { display: block; width: 100%; height: 100%; }
+    .block-icon { display: flex; width: 120px; height: 30px; }
+  </style>
+</head>
+<body>
+  <div class="row"><a><span class="icon"><span class="shape"><div><svg id="logo" viewBox="0 0 93 20"><rect width="93" height="20" fill="#e03131"/></svg></div></span></span></a></div>
+  <div class="row"><div><div class="block-icon"><span class="shape"><svg id="block" viewBox="0 0 12 3" width="12" height="3"><rect width="12" height="3" fill="#1971c2"/></svg></span></div></div></div>
+</body>
+</html>

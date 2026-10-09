@@ -84,17 +84,16 @@ public class InlineClientRectTests
     }
 
     [Fact]
-    public void WrapperOfAnImageGetsTheImageExtent()
+    public void WrapperOfAnImageGetsItsFontBoxAtTheImageWidth()
     {
-        // The run holds a replaced element, so it does not fold into one shaped item. Chromium
-        // 141 reports the link as the image's width over the link's font box (20x17); the
-        // union of the content is the image's box. Either is a target a click can hit.
+        // Chromium 141: link 8,22,20,17, image 8,16,20,20. The image is an atomic inline on
+        // the line, so the link spans its width over the link's own font box, and the image
+        // sits on the baseline with its bottom edge there. This used to assert that the link
+        // took the image's box, from before images were laid out inside the line.
         (DomTree tree, DomLayout laid) = Lay(
             "<p><a id=a href=#><img id=i width=20 height=20></a></p>");
-        Rect link = laid.Rects[Id(tree, "a")];
-        Rect image = laid.Rects[Id(tree, "i")];
-        Assert.Equal(image, link);
-        Assert.Equal(20f, link.Width);
+        AssertRect(laid.Rects[Id(tree, "a")], 8f, 22f, 20f, 17f);
+        AssertRect(laid.Rects[Id(tree, "i")], 8f, 16f, 20f, 20f);
     }
 
     [Fact]

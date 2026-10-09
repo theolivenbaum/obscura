@@ -375,34 +375,6 @@ internal static class PaintText
         }
     }
 
-    /// <summary>The marker text for a list item, or <c>null</c> when markers are suppressed.</summary>
-    internal static string? ListMarkerText(DomTree tree, NodeId nid, ListStyle? style) => style switch
-    {
-        ListStyle.Disc => "•",
-        ListStyle.Circle => "◦",
-        ListStyle.Square => "▪",
-        ListStyle.Decimal => DecimalMarker(tree, nid),
-        _ => null,
-    };
-
-    private static string DecimalMarker(DomTree tree, NodeId nid)
-    {
-        int n = 1;
-        NodeId? current = tree.GetNode(nid)?.PrevSibling;
-        while (current is { } sibling)
-        {
-            if (tree.GetNode(sibling)?.AsElement() is { } element
-                && string.Equals(element.Name.Local, "li", StringComparison.Ordinal))
-            {
-                n++;
-            }
-
-            current = tree.GetNode(sibling)?.PrevSibling;
-        }
-
-        return n.ToString(CultureInfo.InvariantCulture) + ".";
-    }
-
     internal static string? SelectedOptionLabel(DomTree tree, NodeId select)
     {
         string? first = null;

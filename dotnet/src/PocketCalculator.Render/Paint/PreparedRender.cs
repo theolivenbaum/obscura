@@ -421,6 +421,18 @@ public sealed partial class PreparedRender
         bool startsViewportFixed = viewportFixed.Contains(id)
             && (DomTraversal.RenderedParent(tree, id) is not { } parent || !viewportFixed.Contains(parent));
         OverflowClip? active = startsViewportFixed ? null : inherited;
+
+        // `clip: rect(...)` clips the box itself too (DomTransforms.ResolveClipRects).
+        if (laid.Styles.TryGetValue(id, out LayoutStyle? clipStyle)
+            && clipStyle.Clip is not null
+            && laid.Rects.TryGetValue(id, out Rect clipBox))
+        {
+            (float X, float Y) authored = laid.Translates.TryGetValue(id, out (float X, float Y) at) ? at : (0f, 0f);
+            (float X, float Y) moved = id.Index < movement.Count ? movement[id.Index] : (0f, 0f);
+            active = OverflowClip.WithClipProperty(
+                active, clipStyle, clipBox, authored.X + moved.X, authored.Y + moved.Y);
+        }
+
         if (id.Index < output.Count)
         {
             output[id.Index] = active?.Clone();
@@ -835,6 +847,13 @@ public sealed partial class PreparedRender
         // undeclared value.
         output["visibility"] = style.ComputedVisibilityHidden ? "hidden" : "visible";
         output["opacity"] = PaintCssValues.CssNumber(style.Opacity ?? 1f);
+
+        // DEVIATION from crates/obscura-render, which has no `clip`: Chromium 141 reports
+        // `auto` or `rect(0px, auto, 10px, 0px)`, whatever the box's position.
+        output["clip"] = style.Clip is { } clip
+            ? $"rect({ClipSide(clip.Top)}, {ClipSide(clip.Right)}, {ClipSide(clip.Bottom)}, {ClipSide(clip.Left)})"
+            : "auto";
+        static string ClipSide(float? side) => side is { } px ? PaintCssValues.CssNumber(px) + "px" : "auto";
         RgbaColor background = style.BackgroundColor ?? new RgbaColor(0, 0, 0, 0);
         output["background-color"] = style.BackgroundColorIsSrgbFunction
             ? PaintCssValues.SrgbFunctionColor(background)
@@ -1376,6 +1395,7 @@ public sealed partial class PreparedRender
                 // so a block box still carrying the flag was declared `flow-root`, or
                 // inherited that declaration through `display: inherit`.
                 (Display.Block, false) when style.FlowRoot => "flow-root",
+                (Display.Block, false) when style.ListItemDisplay && !isPseudo => "list-item",
                 _ => "block",
             };
         }
@@ -2021,6 +2041,18 @@ public sealed partial class PreparedRender
         Layout.CustomProperties.TryGetValue(id, out IReadOnlyDictionary<string, string>? properties)
             ? new Dictionary<string, string>(properties, StringComparer.Ordinal)
             : null;
+
+    /// <summary>
+    /// The elements under viewport point (<paramref name="x"/>, <paramref name="y"/>), topmost
+    /// first and not retargeted out of shadow trees (see <see cref="HitTester"/>); only the
+    /// topmost unless <paramref name="all"/>. Empty outside the viewport.
+    /// </summary>
+    public List<NodeId> HitTest(DomTree tree, ResolvedScrollState scroll, float x, float y, bool all)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        ArgumentNullException.ThrowIfNull(scroll);
+        return HitTester.Run(tree, Layout, scroll, ViewportSize, x, y, all);
+    }
 
     /// <summary>Border box in the current root viewport.</summary>
     public Rect? ViewportRect(NodeId id, (float X, float Y) requestedScroll)

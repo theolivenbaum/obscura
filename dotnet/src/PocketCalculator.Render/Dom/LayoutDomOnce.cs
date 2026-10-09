@@ -67,6 +67,7 @@ public static partial class RenderDom
         internal bool HasZeroOpacity;
         internal SvgPaintValues Svg = SvgPaintValues.Initial;
         internal ListStyle ListStyle = ListStyle.Disc;
+        internal bool ListStyleInside;
         internal LineHeight LineHeight = LineHeight.Normal;
         internal WhiteSpace WhiteSpace = WhiteSpace.Normal;
         internal OverflowWrap OverflowWrap = OverflowWrap.Normal;
@@ -165,6 +166,7 @@ public static partial class RenderDom
             && HasZeroOpacity == other.HasZeroOpacity
             && Equals(Svg, other.Svg)
             && ListStyle == other.ListStyle
+            && ListStyleInside == other.ListStyleInside
             && LineHeight.Equals(other.LineHeight)
             && WhiteSpace == other.WhiteSpace
             && OverflowWrap == other.OverflowWrap
@@ -217,6 +219,7 @@ public static partial class RenderDom
             HasZeroOpacity = HasZeroOpacity,
             Svg = Svg,
             ListStyle = ListStyle,
+            ListStyleInside = ListStyleInside,
             LineHeight = LineHeight,
             WhiteSpace = WhiteSpace,
             OverflowWrap = OverflowWrap,
@@ -838,6 +841,7 @@ public static partial class RenderDom
                     return new Layout.Size<float>(known.Width ?? width, known.Height ?? content.Height);
                 }
 
+                taffyTree.InlineAtomics = new InlineAtomicHost(tree, taffyTree, idMap, styles, engine);
                 if (taffyTree.HasFloats)
                 {
                     taffyTree.ExclusionMeasure = (known, avail, node, ctx, style, bands, runMode) =>
@@ -1133,7 +1137,7 @@ public static partial class RenderDom
 
         LayoutPhaseProfile.Mark("clips");
         FinalizeShapedItems(
-            engine, ifcItems, rects, styles, clipRects, translates, anonRects, viewport);
+            engine, ifcItems, rects, subpixelRects, styles, clipRects, translates, anonRects, viewport);
         LayoutPhaseProfile.Mark("finalize");
 
         // Pure-text IFC descendants do not own Taffy nodes. Once their shared buffer has its
@@ -1494,7 +1498,15 @@ public static partial class RenderDom
         Dictionary<NodeId, List<((int Item, int Line) Order, Rect Rect)>> fragments = [];
         Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
         Dictionary<NodeId, (float Ascent, float Descent)> fontBoxes = [];
-        List<InlineOwnerLineFragment> lineFragments = engine.InlineOwnerLineFragments();
+        // A culled inline box (no box fragment of its own) is split where a float sits in it.
+        bool Culled(NodeId owner) =>
+            styles.TryGetValue(owner, out LayoutStyle? ownerStyle)
+            && ownerStyle.Position is null
+            && !ownerStyle.PositionSticky
+            && ownerStyle.BackgroundColor is not { A: > 0 }
+            && ownerStyle.BackgroundGradient is null
+            && ownerStyle.BackgroundImage is null;
+        List<InlineOwnerLineFragment> lineFragments = engine.InlineOwnerLineFragments(Culled);
         LayoutPhaseProfile.Mark("ownerLines");
         foreach (InlineOwnerLineFragment shaped in lineFragments)
         {
@@ -1758,6 +1770,7 @@ public static partial class RenderDom
         TextEngine engine,
         IfcRegistry ifcItems,
         IReadOnlyDictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, SubpixelRect> subpixelRects,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         IReadOnlyDictionary<NodeId, OverflowClip?> clipRects,
         IReadOnlyDictionary<NodeId, (float X, float Y)> translates,
@@ -1774,6 +1787,17 @@ public static partial class RenderDom
 
             (float X, float Y) origin = Inline.ContentOrigin(rect, style);
             float cw = Inline.ContentWidth(rect, style);
+
+            // An inline-block is shrink-wrapped to its content at LayoutUnit precision
+            // (InlineItem.LayoutUnitWidth), and its snapped box can be a fraction narrower than
+            // that content: break its lines at the unrounded width, as Blink lays out, or its
+            // last word wraps onto a line the box has no height for.
+            if (engine.Items[idx].LayoutUnitWidth
+                && subpixelRects.TryGetValue(nid, out SubpixelRect subpixel)
+                && subpixel.Resolve(rect) is { } precise)
+            {
+                cw = F32.Max(cw, Inline.ContentWidth(precise, style));
+            }
 
             // A table cell stretched taller than its text aligns its content per
             // vertical-align; the pure-text leaf path has no inner box to align.

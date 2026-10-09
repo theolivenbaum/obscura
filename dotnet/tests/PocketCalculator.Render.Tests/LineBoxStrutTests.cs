@@ -114,9 +114,8 @@ public class LineBoxStrutTests
         DomLayout laid = RenderDom.LayoutDom(tree, (1000f, 400f));
 
         Assert.Equal(14f, Height(tree, laid, "img"), 2);
-        Assert.True(
-            Height(tree, laid, "input") < 13f,
-            $"a form control keeps its own text baseline: {Height(tree, laid, "input")}");
+        // The snapped rect rounds 12.5 up; the LayoutUnit-precise one is Chromium's.
+        Assert.Equal(12.5f, laid.PreciseRect(Id(tree, "input"))!.Value.Height, 2);
     }
 
     /// <summary>

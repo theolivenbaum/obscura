@@ -153,7 +153,7 @@ public sealed class ShadowSlotTests
               }, 0);
             }, 0);
             """);
-        await rt.RunEventLoopBoundedAsync(500);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(
             "sync,sa:true:false:true,root:sa,sd:true:false:true,root:sd,microtask,-- append,sd:true:false:true,root:sd,"
             + "-- slot attr,sa:true:false:true,root:sa,-- rename,-- remove,sa:true:false:true,sn:true:false:true,root:sn,-- text,end",
@@ -182,7 +182,7 @@ public sealed class ShadowSlotTests
             sr.firstChild.addEventListener('slotchange', listener);
             host.append(document.createElement('p'));
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("true:x,true:x,true:slotchange", Eval(rt, "seen.join(',')"));
     }
 

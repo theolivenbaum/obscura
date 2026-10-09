@@ -500,7 +500,16 @@ internal sealed class RetainedTaffyLayout
             int slot = Slot(node);
             if (state[slot] == 1)
             {
-                tree.TransplantFrom(node, old, new TaffyNodeId(partnerOf[slot]));
+                TaffyNodeId oldNode = new(partnerOf[slot]);
+
+                // A carried context with atomic inlines is not laid out again, so its atomics
+                // take the boxes the previous pass gave them.
+                if (tree.GetNodeContext(node) is { } context && old.GetNodeContext(oldNode) is { } oldContext)
+                {
+                    engine.CarryAtomics(context, previous.Engine, oldContext);
+                }
+
+                tree.TransplantFrom(node, old, oldNode);
                 carried++;
             }
         }

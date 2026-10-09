@@ -6,7 +6,9 @@ namespace PocketCalculator.Js.Tests;
 /// SECURITY.md M11: building a deep chain with <c>appendChild</c> must cost time linear in its
 /// depth. Two ancestor walks per append made it quadratic: 20000 levels took about 20 s
 /// connected and 30000 levels took 21 s detached, against well under a second each now.
-/// The bounds below are loose enough for a loaded machine and far below the old cost.
+/// The bounds below are far below the old cost and are on the test thread's CPU time, not
+/// wall time, so other processes holding every core do not move them (40000 sibling appends
+/// once took 14 s of wall time that way).
 /// </summary>
 public sealed class DeepTreeMutationTests
 {
@@ -14,7 +16,8 @@ public sealed class DeepTreeMutationTests
     public void BuildingADeepConnectedChainIsLinear()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
-        var result = fixture.Runtime.Evaluate(
+        System.Text.Json.Nodes.JsonNode? result = null;
+        var cpuMs = ThreadCpuTime.Measure(() => result = fixture.Runtime.Evaluate(
             """
             (() => {
               const t0 = Date.now();
@@ -26,18 +29,19 @@ public sealed class DeepTreeMutationTests
               }
               return JSON.stringify({ ms: Date.now() - t0, root: p.getRootNode() === document, connected: p.isConnected });
             })()
-            """);
+            """));
         var state = System.Text.Json.Nodes.JsonNode.Parse(result!.GetValue<string>())!;
         Assert.True(state["root"]!.GetValue<bool>());
         Assert.True(state["connected"]!.GetValue<bool>());
-        Assert.True(state["ms"]!.GetValue<double>() < 8000, $"20000 connected appends took {state["ms"]}ms");
+        Assert.True(cpuMs < 8000, $"20000 connected appends took {cpuMs:F0} ms of CPU ({state["ms"]} ms wall)");
     }
 
     [Fact]
     public void BuildingADeepDetachedChainIsLinear()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
-        var result = fixture.Runtime.Evaluate(
+        System.Text.Json.Nodes.JsonNode? result = null;
+        var cpuMs = ThreadCpuTime.Measure(() => result = fixture.Runtime.Evaluate(
             """
             (() => {
               const t0 = Date.now();
@@ -51,10 +55,10 @@ public sealed class DeepTreeMutationTests
               }
               return JSON.stringify({ ms: Date.now() - t0, root: p.getRootNode() === top });
             })()
-            """);
+            """));
         var state = System.Text.Json.Nodes.JsonNode.Parse(result!.GetValue<string>())!;
         Assert.True(state["root"]!.GetValue<bool>());
-        Assert.True(state["ms"]!.GetValue<double>() < 8000, $"30000 detached appends took {state["ms"]}ms");
+        Assert.True(cpuMs < 8000, $"30000 detached appends took {cpuMs:F0} ms of CPU ({state["ms"]} ms wall)");
     }
 
     /// <summary>
@@ -66,7 +70,8 @@ public sealed class DeepTreeMutationTests
     public void AppendingManySiblingsIsLinear()
     {
         using var fixture = RuntimeFixture.Setup("<html><body><p id=\"p\"></p></body></html>");
-        var result = fixture.Runtime.Evaluate(
+        System.Text.Json.Nodes.JsonNode? result = null;
+        var cpuMs = ThreadCpuTime.Measure(() => result = fixture.Runtime.Evaluate(
             """
             (() => {
               const p = document.getElementById('p');
@@ -81,10 +86,10 @@ public sealed class DeepTreeMutationTests
               p.appendChild(p.children[p.children.length - 2]);
               return JSON.stringify({ ms: Date.now() - t0, count: p.children.length });
             })()
-            """);
+            """));
         var state = System.Text.Json.Nodes.JsonNode.Parse(result!.GetValue<string>())!;
         Assert.Equal(40000, state["count"]!.GetValue<int>());
-        Assert.True(state["ms"]!.GetValue<double>() < 8000, $"40000 sibling appends took {state["ms"]}ms");
+        Assert.True(cpuMs < 8000, $"40000 sibling appends took {cpuMs:F0} ms of CPU ({state["ms"]} ms wall)");
     }
 
     [Fact]

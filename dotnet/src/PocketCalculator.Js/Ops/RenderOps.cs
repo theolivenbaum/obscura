@@ -271,6 +271,178 @@ public static class RenderOps
         string.Empty);
 
     /// <summary>
+    /// <c>op_hit_test</c>. The elements under a viewport point, topmost first, as a JSON array
+    /// of node ids: just the topmost unless <paramref name="all"/>. A non-negative
+    /// <paramref name="scope"/> is the node id of the document or shadow root asking, and every
+    /// hit is retargeted against it (DOM's retargeting: a node in a shadow tree the scope is not
+    /// in becomes its host) and duplicates dropped; a negative one reports the deepest elements,
+    /// shadow trees included, which is what input dispatch targets.
+    /// </summary>
+    /// <remarks>
+    /// Additive: crates/obscura-js has no hit testing, and its shim's elementFromPoint picks the
+    /// highest node id whose bounding rect holds the point. See <see cref="PreparedRender.HitTest"/>.
+    /// </remarks>
+    public static string OpHitTest(PocketCalculatorState state, double x, double y, double scope, bool all) => OpGuard.Run(
+        "op_hit_test",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (!RenderState.EnsureResolvedScrollForGeometry(state)
+                || state.Dom is not { } dom
+                || state.ResolvedScroll is not { } resolved
+                || state.PreparedRender is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            List<NodeId> hits = prepared.HitTest(dom, resolved.State, (float)x, (float)y, all);
+            NodeId? scopeRoot = scope >= 0 && scope <= uint.MaxValue ? NodeId.New((uint)scope) : null;
+            var sb = new StringBuilder(16 + (hits.Count * 6));
+            sb.Append('[');
+            HashSet<NodeId>? emitted = scopeRoot is null ? null : [];
+            bool first = true;
+            foreach (NodeId hit in hits)
+            {
+                NodeId target = scopeRoot is { } root ? Retarget(dom, hit, root) : hit;
+                if (emitted is not null && !emitted.Add(target))
+                {
+                    continue;
+                }
+
+                if (!first)
+                {
+                    sb.Append(',');
+                }
+
+                first = false;
+                sb.Append(target.Value.ToString(CultureInfo.InvariantCulture));
+                if (!all)
+                {
+                    break;
+                }
+            }
+
+            sb.Append(']');
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
+    /// <c>op_range_rects</c>. <c>Range.getClientRects()</c> for the range between two boundary
+    /// points, as a JSON array of <c>[x, y, width, height]</c> in the viewport, or the empty
+    /// string when there is no layout to measure. Additive: crates/obscura-js answers every
+    /// range with its common ancestor element's box. See <see cref="PreparedRender.RangeClientRects"/>.
+    /// </summary>
+    public static string OpRangeRects(
+        PocketCalculatorState state,
+        double startNid,
+        double startOffset,
+        double endNid,
+        double endOffset) => OpGuard.Run(
+        "op_range_rects",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            if (!(startNid >= 0 && startNid <= uint.MaxValue && endNid >= 0 && endNid <= uint.MaxValue))
+            {
+                return string.Empty;
+            }
+
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (!RenderState.EnsureResolvedScrollForGeometry(state)
+                || state.Dom is not { } dom
+                || state.ResolvedScroll is not { } resolved
+                || state.PreparedRender is not { } prepared)
+            {
+                return string.Empty;
+            }
+
+            List<Rect> rects = prepared.RangeClientRects(
+                dom,
+                resolved.State,
+                NodeId.New((uint)startNid),
+                (int)Math.Clamp(startOffset, 0, int.MaxValue),
+                NodeId.New((uint)endNid),
+                (int)Math.Clamp(endOffset, 0, int.MaxValue));
+            var sb = new StringBuilder(2 + (rects.Count * 32));
+            sb.Append('[');
+            for (int i = 0; i < rects.Count; i++)
+            {
+                if (i > 0)
+                {
+                    sb.Append(',');
+                }
+
+                Rect r = rects[i];
+                sb.Append('[').Append(SerdeJson.NumberF32(r.X));
+                sb.Append(',').Append(SerdeJson.NumberF32(r.Y));
+                sb.Append(',').Append(SerdeJson.NumberF32(r.Width));
+                sb.Append(',').Append(SerdeJson.NumberF32(r.Height)).Append(']');
+            }
+
+            sb.Append(']');
+            return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>DOM's retargeting of <paramref name="node"/> against tree root <paramref name="scope"/>.</summary>
+    private static NodeId Retarget(DomTree dom, NodeId node, NodeId scope)
+    {
+        NodeId current = node;
+        for (int guard = 0; guard < 1024; guard++)
+        {
+            NodeId root = RootOf(dom, current);
+            if (!dom.IsShadowRoot(root) || ShadowIncludingInclusiveAncestor(dom, root, scope))
+            {
+                return current;
+            }
+
+            if (dom.ShadowRootInfo(root) is not { } info)
+            {
+                return current;
+            }
+
+            current = info.Host;
+        }
+
+        return current;
+    }
+
+    private static bool ShadowIncludingInclusiveAncestor(DomTree dom, NodeId root, NodeId scope)
+    {
+        NodeId current = scope;
+        for (int guard = 0; guard < 1024; guard++)
+        {
+            NodeId currentRoot = RootOf(dom, current);
+            if (current == root || currentRoot == root)
+            {
+                return true;
+            }
+
+            if (dom.ShadowRootInfo(currentRoot) is not { } info)
+            {
+                return false;
+            }
+
+            current = info.Host;
+        }
+
+        return false;
+    }
+
+    private static NodeId RootOf(DomTree dom, NodeId node)
+    {
+        NodeId current = node;
+        for (int guard = 0; guard < 1 << 20 && dom.GetNode(current)?.Parent is { } parent; guard++)
+        {
+            current = parent;
+        }
+
+        return current;
+    }
+
+    /// <summary>
     /// <c>op_layout_offset</c>. CSSOM View's <c>offsetParent</c> and <c>offset*</c> integers for
     /// an element, or the empty string when it has no box.
     /// </summary>
@@ -736,6 +908,9 @@ public static class RenderOps
                 Easing = parsed.EasingBezier,
                 LinearEasing = parsed.LinearEasing,
                 StartTimeMs = startTimeMs,
+                // Resolved at the next document-time style flush, as Chromium resolves it at
+                // the next frame (see WaapiAnimation.StartPending).
+                StartPending = true,
                 HoldTimeMs = null,
                 PlayState = WaapiPlayState.Running,
             });

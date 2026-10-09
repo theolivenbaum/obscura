@@ -13,6 +13,63 @@ public readonly record struct ClipTextFill(float Angle, List<(RgbaColor Color, f
 /// </summary>
 internal readonly record struct OwnerTextChunk(int Start, int End, int Node);
 
+/// <summary>
+/// One DOM text node's place in an inline formatting context's collected text: the collected
+/// offset its text starts at, and the white-space state and transform it was collapsed with,
+/// which is enough to map a DOM offset in it to a collected offset again (see
+/// <c>TextEngine.CollectedOffset</c>). Kept for <c>Range.getClientRects()</c>.
+/// </summary>
+internal readonly record struct TextNodeChunk(
+    NodeId Node,
+    int Start,
+    int End,
+    bool LastWasSpace,
+    WhiteSpace WhiteSpace,
+    TextTransform Transform);
+
+/// <summary>
+/// One atomic inline (an inline-block, inline-flex or inline-grid box, an image or another
+/// replaced element, a form control) in an inline formatting context: a single object
+/// replacement character in the collected text whose glyph takes the atomic's margin box.
+/// </summary>
+/// <remarks>
+/// Not in crates/obscura-render, which lays a run holding one out as a wrapping flex row of
+/// word boxes and atomics. The atomic's box is a child of the context's taffy node, sized and
+/// placed by <c>TaffyTree</c>'s inline layout from the glyph's position on its line.
+/// </remarks>
+internal sealed class AtomicInline
+{
+    public required NodeId Node { get; init; }
+
+    /// <summary>The offset of its object replacement character in the collected text.</summary>
+    public required int Offset { get; init; }
+
+    /// <summary>The atomic's own <c>vertical-align</c>.</summary>
+    public InlineVerticalAlign? VerticalAlign { get; init; }
+
+    /// <summary>The inline box the atomic sits in: its font size, face and baseline.</summary>
+    public required float ParentFontSize { get; init; }
+
+    public required FaceMetrics ParentMetrics { get; init; }
+
+    public required float ParentShift { get; init; }
+
+    public required LineBoxAlign ParentAlign { get; init; }
+
+    /// <summary>The used <c>line-height</c> of the atomic, for a percentage <c>vertical-align</c>.</summary>
+    public required float LineHeight { get; init; }
+
+    /// <summary>The margin box and baseline (from the margin box's top) last set, or NaN.</summary>
+    public float Width = float.NaN;
+
+    public float Height = float.NaN;
+
+    public float? Baseline;
+
+    /// <summary>The margin box and baseline of the context's last final layout.</summary>
+    public (float Width, float Height, float? Baseline)? Final;
+}
+
 /// <summary>An inline owner and the owner open around it (an index, -1 for none).</summary>
 internal readonly record struct OwnerChainNode(NodeId Owner, int Parent);
 
@@ -93,6 +150,19 @@ public sealed class InlineItem
     internal TextBuffer? SourceBuffer { get; set; }
 
     internal Dimension TextIndent { get; init; }
+
+    /// <summary>
+    /// The context is an inline-block's content: its shaped width is ceiled to a LayoutUnit
+    /// (1/64px) rather than a whole pixel (<see cref="InlineGeometry.BufferSize"/>).
+    /// </summary>
+    internal bool LayoutUnitWidth { get; init; }
+
+    /// <summary>
+    /// The inline advance of an inside list marker at the start of the first line (its box and
+    /// margins), which the first line is indented by like <see cref="TextIndent"/>; 0 for none.
+    /// Set by the box build for a list item's own context (<c>ListMarkers</c>).
+    /// </summary>
+    internal float MarkerIndent { get; set; }
 
     /// <summary>
     /// The buffer as built, before a float layout split its lines; captured by the first
@@ -200,6 +270,12 @@ public sealed class InlineItem
 
     internal List<OwnerChainNode> OwnerChain { get; init; } = [];
 
+    /// <summary>The DOM text nodes collected into this context, in order.</summary>
+    internal List<TextNodeChunk> TextNodes { get; init; } = [];
+
+    /// <summary>The atomic inlines in this context, in order; null for none.</summary>
+    internal List<AtomicInline>? Atomics { get; init; }
+
     internal List<InlineOwnerBox> OwnerBoxes { get; init; } = [];
 
     internal List<InlineBoundaryEvent> BoundaryEvents { get; init; } = [];
@@ -234,7 +310,15 @@ internal static class InlineGeometry
 
     public const ulong MetaVariationMask = ((1UL << MetaVariationBits) - 1) << MetaVariationShift;
 
-    public const ulong MetaFillMask = ((1UL << MetaVariationShift) - 1) & ~MetaUnderline;
+    /// <summary>
+    /// The glyph stands for an atomic inline (an inline-block, image or form control): it takes
+    /// the atomic's margin box in the line and paints nothing of its own.
+    /// </summary>
+    public const ulong MetaAtomic = 1UL << (MetaVariationShift - 1);
+
+    public const ulong MetaFillMask = ((1UL << MetaVariationShift) - 1) & ~MetaUnderline & ~MetaAtomic;
+
+    public static bool IsAtomic(ulong metadata) => (metadata & MetaAtomic) != 0;
 
     public static int? MetadataFill(ulong metadata)
     {
@@ -430,7 +514,11 @@ internal static class InlineGeometry
         }
 
         bool clamped = item.LineClamp is { } limit && nonemptyLines > limit;
-        return (MathF.Ceiling(w), clamped ? clampHeight ?? h : h, clamped);
+        // An inline-block's content is shrink-to-fit at LayoutUnit precision, as Blink sizes it
+        // (an inline-block holding "About us" is 75.16px wide, not 76); other contexts keep the
+        // whole-pixel ceiling of crates/obscura-render (taffy's measure).
+        float width = item.LayoutUnitWidth ? MathF.Ceiling(w * 64f) / 64f : MathF.Ceiling(w);
+        return (width, clamped ? clampHeight ?? h : h, clamped);
     }
 
     /// <summary>

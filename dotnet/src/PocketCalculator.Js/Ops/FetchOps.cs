@@ -341,6 +341,12 @@ public static partial class FetchOps
         bool internalLoad = false,
         PocketCalculatorState? document = null)
     {
+        bool frameDocument = internalLoad && string.Equals(mode, "navigate", StringComparison.Ordinal);
+        if (frameDocument)
+        {
+            state.FrameDocumentLoadsInFlight.Increment();
+        }
+
         try
         {
             // `origin` is the shim's argument slot and is ignored as an origin: see
@@ -362,6 +368,13 @@ public static partial class FetchOps
         catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
         {
             throw new OpException(ex.Message);
+        }
+        finally
+        {
+            if (frameDocument)
+            {
+                state.FrameDocumentLoadsInFlight.Decrement();
+            }
         }
     }
 

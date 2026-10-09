@@ -288,6 +288,7 @@ public sealed partial class TextEngine : IDisposable
         return x.LayoutWrap == y.LayoutWrap
             && x.MinContentWrap == y.MinContentWrap
             && x.TextIndent == y.TextIndent
+            && x.MarkerIndent.Equals(y.MarkerIndent)
             && x.BalanceWrap == y.BalanceWrap
             && x.Align == y.Align
             && x.ForcedMinHeight.Equals(y.ForcedMinHeight)
@@ -295,7 +296,8 @@ public sealed partial class TextEngine : IDisposable
             && x.EllipsisOverflow == y.EllipsisOverflow
             && string.Equals(x.OwnerText, y.OwnerText, StringComparison.Ordinal)
             && x.OwnerBoxes.Count == y.OwnerBoxes.Count
-            && x.BoundaryEvents.Count == y.BoundaryEvents.Count;
+            && x.BoundaryEvents.Count == y.BoundaryEvents.Count
+            && (x.Atomics?.Count ?? 0) == (y.Atomics?.Count ?? 0);
     }
 
     private TextEngine? _adoptFrom;
@@ -518,14 +520,22 @@ public sealed partial class TextEngine : IDisposable
     /// <c>null</c> means the container is not a pure-text IFC and should build through the
     /// normal (block / flex / word-split) path.
     /// </remarks>
-    public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles) =>
+        TryBuild(tree, id, styles, allowAtomics: false);
+
+    /// <summary>
+    /// <see cref="TryBuild(DomTree, NodeId, IReadOnlyDictionary{NodeId, LayoutStyle})"/>, laying
+    /// atomic inlines out in the context when <paramref name="allowAtomics"/>: the caller then
+    /// builds their boxes as children of the context's node (see <see cref="AtomicNodes"/>).
+    /// </summary>
+    internal int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles, bool allowAtomics)
     {
         if (TakeAdoptedItem(id) is { } adopted)
         {
             return adopted;
         }
 
-        if (!Inline.IsPureTextIfc(tree, id, styles))
+        if (!Inline.IsPureTextIfc(tree, id, styles, allowAtomics))
         {
             return null;
         }
@@ -536,6 +546,11 @@ public sealed partial class TextEngine : IDisposable
         }
 
         var collector = new Collector();
+        if (allowAtomics)
+        {
+            collector.Atomics = [];
+        }
+
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -562,13 +577,14 @@ public sealed partial class TextEngine : IDisposable
         NodeId parent,
         IReadOnlyList<NodeId> run,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        bool allowFloats = false)
+        bool allowFloats = false,
+        bool allowAtomics = false)
     {
         run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
-            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats))
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats, allowAtomics))
             {
                 return null;
             }
@@ -588,6 +604,11 @@ public sealed partial class TextEngine : IDisposable
         if (allowFloats)
         {
             collector.FloatAnchors = [];
+        }
+
+        if (allowAtomics)
+        {
+            collector.Atomics = [];
         }
 
         ResolvedFont font = FontResolution.ResolveLoadedFont(
@@ -614,13 +635,14 @@ public sealed partial class TextEngine : IDisposable
         DomTree tree,
         NodeId parent,
         IReadOnlyList<NodeId> run,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowAtomics = false)
     {
         run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
-            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats: true))
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats: true, allowAtomics))
             {
                 return false;
             }
@@ -853,8 +875,9 @@ public sealed partial class TextEngine : IDisposable
             }
         }
 
+        List<AtomicInline>? atomicInlines = collector.Atomics is { Count: > 0 } collected ? collected : null;
         string? ownerText = null;
-        if (ownerBoxes.Count > 0 || floatAnchors is not null)
+        if (ownerBoxes.Count > 0 || floatAnchors is not null || atomicInlines is not null)
         {
             var builder = new StringBuilder(textLength);
             foreach ((string text, SpanAttrs _) in spans)
@@ -1024,6 +1047,7 @@ public sealed partial class TextEngine : IDisposable
             MinContentWrap = minContentWrap,
             SourceBuffer = sourceBuffer,
             TextIndent = textIndent,
+            LayoutUnitWidth = baseStyle.IsInlineBlock,
             FirstLineOffset = 0f,
             BalanceWrap = baseStyle.TextWrapStyle == TextWrapStyle.Balance,
             Align = align,
@@ -1040,6 +1064,8 @@ public sealed partial class TextEngine : IDisposable
             OwnerText = ownerText,
             OwnerChunks = ownerChunks,
             OwnerChain = collector.OwnerChain,
+            TextNodes = collector.TextNodes,
+            Atomics = atomicInlines,
             OwnerBoxes = ownerBoxes,
             BoundaryEvents = boundaryEvents,
             RelativeOwnerRanges = [],
@@ -1312,9 +1338,22 @@ public sealed partial class TextEngine : IDisposable
                 next++;
             }
 
+            // A float after the space a line wraps at is met before the line breaks, so it is on
+            // that line (Chromium 141), not at the start of the next.
+            int endWithSpace = end;
+            while (endWithSpace >= 0 && endWithSpace < run.Text.Length && run.Text[endWithSpace] == ' ')
+            {
+                endWithSpace++;
+            }
+
             while (next < offsets.Length
                 && offsets[next] >= lineStart
-                && (run.Glyphs.Count == 0 || offsets[next] - lineStart < end))
+                && (run.Glyphs.Count == 0
+                    || offsets[next] - lineStart < end
+                    || (endWithSpace > 0
+                        && endWithSpace <= run.Text.Length
+                        && run.Text[endWithSpace - 1] == ' '
+                        && offsets[next] - lineStart <= endWithSpace)))
             {
                 result[next] = AnchorOn(run, offsets[next] - lineStart);
                 next++;
@@ -1335,8 +1374,20 @@ public sealed partial class TextEngine : IDisposable
 
         return result;
 
-        static (float Top, float Height, float Width, float Used) AnchorOn(LayoutRun line, int local)
+        (float Top, float Height, float Width, float Used) AnchorOn(LayoutRun line, int local)
         {
+            // DEVIATION from vendor/taffy's float context, which has no anchored floats: white
+            // space the line would remove if it ended at the float does not count against it.
+            // Chromium 141 keeps a 20px float on a 150px line holding "Before long words "
+            // (128.97 without the space, 133.42 with it).
+            if (item.Buffer.Lines[line.LineIndex].AlignOptions.Trailing == TrailingSpace.Removed)
+            {
+                while (local > 0 && local <= line.Text.Length && line.Text[local - 1] == ' ')
+                {
+                    local--;
+                }
+            }
+
             float lineStartX = line.Glyphs.Count > 0 ? F32.Min(line.Glyphs[0].X, line.X) : line.X;
             float used = F32.Max(InlineGeometry.RunCursorX(line, Math.Max(local, 0)) - lineStartX, 0f);
             return (line.LineTop, line.LineHeight, line.LineWidth, used);
@@ -1390,6 +1441,7 @@ public sealed partial class TextEngine : IDisposable
     /// </summary>
     public void Finalize(int index, (float X, float Y) contentOrigin, float contentWidth, Rect? clip)
     {
+        RestoreFinalAtomics(index);
         InlineItem item = _items[index];
         contentWidth = F32.Max(contentWidth, 0f);
         ShapeWithTextIndent(item, contentWidth, item.LayoutWrap, item.FloatBands);
@@ -1586,7 +1638,21 @@ public sealed partial class TextEngine : IDisposable
     /// Provenance is a sidecar rather than glyph metadata, so changing DOM owners never creates
     /// a font-shaping boundary or disables ligatures.
     /// </remarks>
-    public List<InlineOwnerLineFragment> InlineOwnerLineFragments()
+    public List<InlineOwnerLineFragment> InlineOwnerLineFragments() => InlineOwnerLineFragments(null);
+
+    /// <summary>
+    /// <see cref="InlineOwnerLineFragments()"/>, with the fragments of every owner
+    /// <paramref name="culled"/> accepts split where a float is anchored inside it.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which has no anchored floats. Blink
+    /// reports the client rects of a culled inline box (one with no box fragment of its own: no
+    /// inline border, padding or margin, no background, not positioned) from its pieces of
+    /// text, and a float anchored inside it separates them: Chromium 141 gives
+    /// <c>&lt;em&gt;emph &lt;float/&gt;after&lt;/em&gt;</c> two rects on one line, meeting where
+    /// the float sits in the text, and a decorated one a single rect.
+    /// </remarks>
+    internal List<InlineOwnerLineFragment> InlineOwnerLineFragments(Func<NodeId, bool>? culled)
     {
         List<InlineOwnerLineFragment> output = [];
         Dictionary<(NodeId Owner, int Line), int> existingByOwner = [];
@@ -1774,6 +1840,43 @@ public sealed partial class TextEngine : IDisposable
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
                     float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
+
+                    if (culled is not null
+                        && !lineHasRtl
+                        && !empty
+                        && item.FloatAnchors is { Count: > 0 } floats
+                        && owner.StartEdge.Advance == 0f
+                        && owner.EndEdge.Advance == 0f
+                        && culled(owner.Owner))
+                    {
+                        float pieceLeft = x;
+                        bool split = false;
+                        foreach ((NodeId _, int anchor) in floats)
+                        {
+                            if (anchor <= owner.Start || anchor >= owner.End || anchor <= lineStart || anchor >= lineEnd)
+                            {
+                                continue;
+                            }
+
+                            float at = item.Origin.X + firstLineOffset + alignmentShift
+                                + CursorX(anchor - lineStart)
+                                + InlineGeometry.LineAdvanceBeforeText(item, anchor, lineStart, lineEnd);
+                            if (at <= pieceLeft || at >= x + width)
+                            {
+                                continue;
+                            }
+
+                            output.Add(new InlineOwnerLineFragment(owner.Owner, itemIndex, lineIndex, pieceLeft, baselineY, at - pieceLeft));
+                            pieceLeft = at;
+                            split = true;
+                        }
+
+                        if (split)
+                        {
+                            output.Add(new InlineOwnerLineFragment(owner.Owner, itemIndex, lineIndex, pieceLeft, baselineY, x + width - pieceLeft));
+                            continue;
+                        }
+                    }
 
                     // Keyed lookup: a linear search of the output made nested inline boxes,
                     // which put every open owner on every line, quadratic in fragments.
@@ -2113,7 +2216,7 @@ public sealed partial class TextEngine : IDisposable
     /// </remarks>
     private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap, FloatBands? bands = null)
     {
-        float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width);
+        float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width) + item.MarkerIndent;
         // The first line is aligned in the full width and then moved: by the indent on the
         // left of a left-aligned line, half of it when centred, none when right-aligned. Right
         // to left, the indent is on the right, so each moves back by all of it. A justified
@@ -2967,7 +3070,16 @@ public sealed partial class TextEngine : IDisposable
 
         if (node.Data is TextData text)
         {
+            int start = collector.TextLength;
+            bool lastWasSpace = collector.LastWasSpace;
             Inline.PushText(text.Contents, context.Transform, context.WhiteSpace, context.ToSpanAttrs(), output, collector);
+            collector.TextNodes.Add(new TextNodeChunk(
+                cid,
+                start,
+                collector.TextLength,
+                lastWasSpace,
+                context.WhiteSpace,
+                context.Transform));
             return;
         }
 
@@ -2988,6 +3100,31 @@ public sealed partial class TextEngine : IDisposable
         {
             // Out of the inline flow: remember where it sits for the block formatting context.
             floatAnchors.Add((cid, collector.TextLength));
+            return;
+        }
+
+        if (collector.Atomics is { } atomics
+            && style is not null
+            && Inline.IsAtomicInline(element.Name.Local, style))
+        {
+            // An atomic inline is one object replacement character whose glyph takes its margin
+            // box (sized once it is laid out, see SetAtomic): it breaks like an ideograph, is a
+            // neutral to bidi, and is not white space to collapsing.
+            atomics.Add(new AtomicInline
+            {
+                Node = cid,
+                Offset = collector.TextLength,
+                VerticalAlign = style.InlineVerticalAlign,
+                ParentFontSize = context.FontSize,
+                ParentMetrics = context.FontMetrics,
+                ParentShift = context.BaselineShift,
+                ParentAlign = context.Align,
+                LineHeight = FontResolution.UsedLineHeight(style),
+            });
+            collector.FlushLastSpan(output);
+            output.Add((ObjectReplacement, context.ToSpanAttrs() with { Atomic = atomics.Count - 1 }));
+            collector.RecordText(1);
+            collector.LastWasSpace = false;
             return;
         }
 

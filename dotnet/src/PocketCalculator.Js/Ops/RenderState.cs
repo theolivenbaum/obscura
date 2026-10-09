@@ -49,6 +49,11 @@ public static class RenderState
             state.AnimationTimeline.MaterializeStartCandidates(candidateDom);
         }
 
+        if (animationSample.Mode == AnimationSampleMode.DocumentTime)
+        {
+            state.AnimationTimeline.ResolvePendingWaapiStarts(animationSample.Time.Milliseconds);
+        }
+
         PreparedRender? previous = null;
         if (!incompatible && renderMedia == CssMediaType.Screen)
         {
