@@ -58,6 +58,10 @@ public static class RenderState
 
         var mutations = state.PendingStyleMutations.ToArray();
         state.PendingStyleMutations.Clear();
+        if (PrepTrace && state.Dom is { } traced)
+        {
+            TracePrepare(traced, mutations, previous is not null);
+        }
 
         if (state.Dom is not { } dom)
         {
@@ -157,6 +161,65 @@ public static class RenderState
             && (prepared.AnimationSample() == state.AnimationSample
                 || prepared.CanReuseGeometryForAnimationSample(state.AnimationSample));
         return reusable ? state.PreparedRender : EnsurePreparedRender(state);
+    }
+
+    /// <summary>
+    /// A diagnostic: <c>POCKETCALCULATOR_PREP_TRACE=1</c> writes, for every prepare, the op that
+    /// forced it and the mutations it consumes to stderr.
+    /// </summary>
+    private static readonly bool PrepTrace =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_PREP_TRACE") == "1";
+
+    private static void TracePrepare(DomTree dom, RetainedStyleMutation[] mutations, bool retained)
+    {
+        string op = "?";
+        foreach (string frame in Environment.StackTrace.Split('\n'))
+        {
+            int at = frame.IndexOf("Ops.RenderOps.", StringComparison.Ordinal);
+            if (at < 0)
+            {
+                at = frame.IndexOf("Ops.DomOps.", StringComparison.Ordinal);
+            }
+
+            if (at >= 0)
+            {
+                op = frame[(at + 4)..].Split('(')[0].Trim();
+                break;
+            }
+        }
+
+        string Describe(NodeId node)
+        {
+            if (dom.GetNode(node) is not { } n)
+            {
+                return $"#{node.Index}(gone)";
+            }
+
+            if (n.AsElement() is { } element)
+            {
+                string? id = n.GetAttribute("id");
+                string? cls = n.GetAttribute("class");
+                return $"{element.Name.Local}{(id is null ? "" : "#" + id)}{(cls is null ? "" : "." + cls.Split(' ')[0])}";
+            }
+
+            return n.IsText ? "text" : "node";
+        }
+
+        var parts = new List<string>();
+        foreach (RetainedStyleMutation mutation in mutations.Take(12))
+        {
+            parts.Add(mutation switch
+            {
+                RetainedStyleMutation.Attribute a => $"attr {Describe(a.Mutation.Node)} {a.Mutation.Name}",
+                RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert i } => $"insert {Describe(i.Node)} into {Describe(i.NewParent)}",
+                RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove r } => $"remove {Describe(r.Node)} from {Describe(r.OldParent)}",
+                RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text t } => $"text in {(t.Parent is { } p ? Describe(p) : "?")}",
+                RetainedStyleMutation.Resource => "resource",
+                _ => mutation.GetType().Name,
+            });
+        }
+
+        Console.Error.WriteLine($"PREP {(retained ? "retained" : "full")} by {op} n={mutations.Length}: {string.Join(" | ", parts)}");
     }
 
     /// <summary>Samples the live document timeline once per host/HTML task.</summary>
