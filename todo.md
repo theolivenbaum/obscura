@@ -6003,3 +6003,13 @@ stacking context's background. msn.com's hero image (`position: absolute; z-inde
 `contain: content` card) was painted under the card's #333 background. Filter and
 backdrop-filter, which also make stacking contexts, are not included. Pinned by
 `ContainStackingTests` and `render-repros/contain-negative-z.html`.
+
+### A descendant's `max-width` caps a button's intrinsic label width
+
+`native_button_intrinsic_content` sums a button's descendant text and atomic widths whatever
+their own sizing. `DomStyleFixups.NativeButtonWalk` now caps a descendant with a definite
+`max-width` at that width (less its edges under `border-box`). msn.com's settings button hides
+its "Page settings" label in a `max-width: 0; overflow: hidden` span beside a 24px icon:
+Chromium 141 sizes it 40px, the port 132px, which widened the header until its overflow
+logic hid the Sign in button. Percentage max-widths are not applied. Pinned by
+`FormControlDisplayTests.ButtonIntrinsicWidthHonoursADescendantMaxWidth`.
