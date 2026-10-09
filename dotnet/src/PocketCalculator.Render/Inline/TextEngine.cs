@@ -1404,9 +1404,17 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>Lines at most this long are always probed whole.</summary>
-    private const int ProbeWindowMinLine = 2048;
+    /// <remarks>
+    /// Was 2048. Below it every line of a paragraph re-shaped the whole remainder, so a 2000
+    /// character post body cost ~40 times its length, and a min-content measurement (one
+    /// word per line) far more: reddit.com's feed shaped 2.35M characters in one cold layout
+    /// pass, 0.33M with these windows. The window is exact whatever its size (see
+    /// <see cref="ProbeFirstLine"/>).
+    /// </remarks>
+    private const int ProbeWindowMinLine = 256;
 
-    private const int ProbeInitialWindow = 256;
+    /// <summary>The first window probed; later lines start at four times the last split.</summary>
+    private const int ProbeInitialWindow = 64;
 
     /// <summary>
     /// Lay out the first visual line of <paramref name="line"/> at <paramref name="available"/>,
