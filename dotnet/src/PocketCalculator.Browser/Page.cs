@@ -175,6 +175,12 @@ public sealed partial class Page : IDisposable
     private List<uint> _suspendedStartedScriptIds = [];
     private CdpObjectState _suspendedCdpObjectState = new();
     private readonly CallbackRegistry _callbacks = new();
+
+    /// <summary>
+    /// This page's <c>sessionStorage</c> areas (one top-level browsing context), which its
+    /// navigations keep, as in Chromium.
+    /// </summary>
+    public PocketCalculator.Js.Ops.WebStorage SessionStorage { get; } = new();
     private bool _disposed;
 
     public Page(string id, BrowserContext context)
@@ -517,6 +523,7 @@ public sealed partial class Page : IDisposable
             _screenMetricsEmulated);
 
         rt.SetCookieJar(Context.CookieJar);
+        rt.SetWebStorage(Context.LocalStorage, SessionStorage);
         rt.SetHttpClient(HttpClient);
         rt.SetCallbacks(_callbacks);
         rt.SetBlockedUrls(BlockedUrlPatterns);

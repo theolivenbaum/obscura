@@ -2195,6 +2195,83 @@ members Chromium has only in secure contexts. The IndexedDB objects keep their m
 properties (the shim's request records assign to themselves). DOMParser and createHTMLDocument
 documents are still plain objects, not HTMLDocuments. Pinned by `GlobalInterfaceObjects`.
 
+### Live-site boot blockers (October 2026)
+
+Fixes from loading vk.com, duolingo.com, mail.ru, weather.com and steamcommunity.com in the
+port and in Chromium 141 and chasing the first thing that stopped each app from booting.
+Values measured in Chromium 141 (headless, Playwright); facts in
+`PocketCalculator.Js.Tests/LiveSiteInterfaceTests.cs` and the Browser tests named below.
+
+- **IntersectionObserverEntry is an interface.** DEVIATION from
+  crates/obscura-js/js/bootstrap.js, whose entries are plain objects and whose
+  `IntersectionObserverEntry` is an empty class. duolingo.com's inline browser check needs
+  `"isIntersecting" in IntersectionObserverEntry.prototype` and sent the port to
+  /errors/not-supported.html (then /errors/404.html: 19 elements against 4288). Entries are
+  now instances with Chromium's eight enumerable prototype accessors (`isVisible` is false:
+  IntersectionObserver v2 is not implemented), `new` throws "Illegal constructor", and the
+  three rectangles, like a ResizeObserverEntry's `contentRect`, are DOMRectReadOnly.
+- **Reflected content attributes.** DEVIATION from crates/obscura-js/js/bootstrap.js, which has
+  none of them: `source.srcset` was undefined and mail.ru's Svelte hydration
+  (`e.srcset.split(",")`) threw before the page rendered its content. The block
+  `_reflectContentAttributes` adds about 150 plain reflections (string, boolean, long,
+  unsigned long, non-negative long, URL, enumerated and CORS-settings kinds) on the interfaces
+  Chromium defines them on: source srcset/media/width/height, input
+  defaultValue/defaultChecked/maxLength/minLength/size/readOnly/required/multiple/pattern,
+  script/link crossOrigin/integrity/fetchPriority, link `as`, form enctype/encoding, the table
+  and legacy presentational attributes, template shadowRoot*, media autoplay/loop/controls, and
+  so on. `_addMissingMembers` adds CharacterData next/previousElementSibling,
+  DocumentFragment.childElementCount, Element.hasAttributeNS and webkitMatchesSelector,
+  HTMLSelectElement length/item/namedItem/selectedOptions, HTMLOptionElement index/label and
+  HTMLTextAreaElement defaultValue/textLength. Still missing: script `async` (its force-async
+  flag), input/button form* overrides and `list`, the HTMLTableElement row/section API,
+  `autocomplete`, meter low/high/optimum, media preload/playbackRate and friends.
+- **Shadow ops act on the calling realm.** Port fix (the reference runs frames in the page
+  realm, so it has no such binding): `op_shadow_attach` and `op_shadow_root_info` were bound to
+  the page's state, so `attachShadow` in a child frame resolved the frame's node id in the
+  page's arena. vkvideo.ru's player inside mail.ru threw NotSupportedError on a `<div>`, and
+  an id the page also had got its shadow root on the page's node. They are now bound per realm
+  with the other document ops (`FrameShadowRootTests`).
+- **IDBIndex getKey/getAllKeys/openKeyCursor** answer empty like the rest of the in-memory
+  IndexedDB shim; mail.ru's api-cache GC called `index(...).getAllKeys`.
+- **Web Storage outlives the document.** DEVIATION from crates/obscura-js/js/bootstrap.js,
+  whose areas lived in the realm, so every navigation (a reload included) started
+  localStorage and sessionStorage empty. The areas are now host-held (`WebStorage`, through
+  the new `op_storage`): localStorage per browser context, sessionStorage per page, keyed by
+  origin, and for a frame with a cross-site ancestor also by the top-level origin (Chromium
+  partitions by top-level site). Chromium's 5 MiB-of-UTF-16 quota throws QuotaExceededError.
+  An opaque origin keeps the realm-local map. Neither area is written to `--storage-dir`, and
+  no `storage` event reaches other documents yet. Key order is insertion order; Chromium's is
+  unspecified (neither insertion nor sorted). `WebStorageTests`.
+- **reportError reports the exception.** DEVIATION: the shim's `reportError` only logged;
+  it now dispatches the cancelable, trusted ErrorEvent (window.onerror, `error` listeners)
+  that `_reportException` builds for uncaught errors.
+- **XMLHttpRequest uses the shim's fetch.** DEVIATION: XHR called the page-replaceable global
+  `fetch`, so a page's fetch wrapper saw every XHR (weather.com's and our own probes did).
+- **fetch and XHR answer data: and blob: URLs.** DEVIATION: both went to the network op and
+  failed with net::ERR_FAILED. They now follow Fetch's scheme fetch: the data: URL processor
+  (percent-decoding, forgiving base64, MIME serialization, `text/plain;charset=US-ASCII`
+  default) and the blob URL store (`URL.createObjectURL` keeps the Blob), with Chromium's 200
+  `OK` basic response and "Failed to fetch" for a bad or revoked URL.
+- **`<link rel=preload>` and `rel=modulepreload` load.** DEVIATION from
+  crates/obscura-js/js/bootstrap.js and crates/obscura-browser, which ignore both rels, so
+  their `load`/`error` never fired: the loadCSS pattern (`onload="this.rel='stylesheet'"`,
+  vk.com's clone-and-insert) never applied its sheets and vk.com painted a blank page (its
+  VKUI layout had no CSS). Parsed links are loaded by the host once the document is parsed
+  (`__obscura_host.loadDocumentPreloads`, and at frame-realm start), inserted ones on
+  insertion; a link with no valid `as` fetches nothing. Gaps: no preload cache (the real load
+  fetches again), and a cross-origin no-cors preload is opaque, so a 404 there fires `load`
+  where Chromium fires `error`. A parser-inserted `rel=stylesheet` whose fetch fails still
+  fires no `error` (Chromium does). `LinkPreloadTests`.
+- **The autonomous CDP pump backs off instead of stopping.** DEVIATION from
+  crates/obscura-cdp/src/server.rs, which disarms a connection's page pump after the fourth
+  consecutive turn that overruns the task budget, until the next inbound frame. weather.com's
+  ad scripts poll `getComputedStyle` while the page mutates, each call a full restyle of
+  about a second, so four timer tasks overran 5.5 s and the page then froze between client
+  commands: the Amplitude experiment script never ran and the forecast was never fetched
+  (998 elements against Chromium's 2115; 1302 after). The pump now stands down for 1 s and
+  resumes (`ServerTests.AutonomousPumpResumesAfterRepeatedOverrunningTasks`). The restyle
+  cost itself is the open problem: `op_computed_style` spent 7 s over 1,100 calls there.
+
 ### A linked stylesheet leaves no element in the DOM
 
 `crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic

@@ -14,6 +14,9 @@ public static partial class CdpServer
     /// </summary>
     private const int ScreencastTickMs = 33;
 
+    /// <summary>How long the autonomous pump stands down after repeated failed turns.</summary>
+    private const int RuntimePumpBackoffMs = 1_000;
+
     /// <summary>Per-connection CDP processor.</summary>
     /// <remarks>
     /// Each connection runs its own processor, with its own <see cref="CdpContext"/>
@@ -57,6 +60,13 @@ public static partial class CdpServer
         // no polling budget.
         var runtimePumpArmed = false;
         var runtimePumpErrorStreak = 0;
+        // When the pump stood down after repeated failed turns: the tick it comes back at.
+        // DEVIATION from crates/obscura-cdp/src/server.rs, which disarms the pump after a
+        // fourth consecutive failed turn until the next inbound frame. A page whose timers
+        // keep overrunning the task budget (weather.com's ad scripts forcing full restyles)
+        // then froze between client commands: its later timers, script loads and fetches
+        // never ran, though Chromium runs them. The pump now backs off and resumes.
+        long? runtimePumpResumeAt = null;
 
         using var loopStop = CancellationTokenSource.CreateLinkedTokenSource(shutdown, stop);
 
@@ -126,6 +136,15 @@ public static partial class CdpServer
                     // other arm, so it is checked before anything can park.
                     msg = ready;
                 }
+                else if (!runtimePumpArmed && runtimePumpResumeAt is { } resumeAt
+                    && Environment.TickCount64 >= resumeAt)
+                {
+                    // Back off over: try the page again. The streak is kept, so a turn that
+                    // fails again stands the pump down for another back-off.
+                    runtimePumpResumeAt = null;
+                    runtimePumpArmed = AnyPageHasJs(ctx);
+                    continue;
+                }
                 else if (rx.Completion.IsCompleted)
                 {
                     // `rx.recv()` answering None: the reader side is finished, so
@@ -166,6 +185,9 @@ public static partial class CdpServer
                         }
 
                         runtimePumpArmed = runtimePumpErrorStreak <= 3 && AnyPageHasJs(ctx);
+                        runtimePumpResumeAt = !runtimePumpArmed && AnyPageHasJs(ctx)
+                            ? Environment.TickCount64 + RuntimePumpBackoffMs
+                            : null;
                         CdpLog.Warn($"autonomous page task failed: {error.Message}");
                         await Task.Yield();
                     }
@@ -219,6 +241,12 @@ public static partial class CdpServer
                     {
                         var delay = Math.Max(0, screencastDue - Environment.TickCount64);
                         arms.Add(Task.Delay((int)delay, loopStop.Token));
+                    }
+
+                    if (!runtimePumpArmed && runtimePumpResumeAt is { } resume)
+                    {
+                        var wait = Math.Max(0, resume - Environment.TickCount64);
+                        arms.Add(Task.Delay((int)Math.Min(wait + 1, int.MaxValue), loopStop.Token));
                     }
 
                     if (NextParkedDeadlineMs(ctx) is { } parkedDelay)
@@ -287,6 +315,7 @@ public static partial class CdpServer
                 // timer.
                 runtimePumpArmed = AnyPageHasJs(ctx);
                 runtimePumpErrorStreak = 0;
+                runtimePumpResumeAt = null;
             }
         }
     }

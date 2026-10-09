@@ -546,6 +546,29 @@ public static class StateHelpers
     }
 
     /// <summary>The page's URL for a frame's document; null for the page's own.</summary>
+    /// <summary>
+    /// The Web Storage key of the document: its origin, and for a frame with a cross-site
+    /// ancestor also the top-level origin (Chromium partitions third-party storage by
+    /// top-level site; the port keys by top-level origin). Null for an opaque origin, whose
+    /// storage stays in its realm. Port addition.
+    /// </summary>
+    public static string? StorageKey(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        var origin = DocumentOrigin(state);
+        if (origin == "null")
+        {
+            return null;
+        }
+
+        if (state.CrossSiteAncestor && TopLevelUri(state) is { } top)
+        {
+            return origin + " " + top.GetLeftPart(UriPartial.Authority);
+        }
+
+        return origin;
+    }
+
     public static Uri? TopLevelUri(PocketCalculatorState state) =>
         state.TopLevelUrl is { } top && Uri.TryCreate(top, UriKind.Absolute, out var parsed) ? parsed : null;
 
