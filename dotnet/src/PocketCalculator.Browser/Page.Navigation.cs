@@ -583,6 +583,14 @@ public sealed partial class Page
 
         _documentTimelineOrigin = Stopwatch.GetTimestamp();
         Js?.ResetAnimationTimeline();
+        if (Js is { } preloadJs)
+        {
+            // DEVIATION from crates/obscura-browser, which never loads <link rel=preload> or
+            // rel=modulepreload, so their load and error events never fired (the loadCSS
+            // pattern behind vk.com's stylesheets). See _loadPreloadLink in bootstrap.js.
+            TryExecuteHost(preloadJs, "<link-preload>", "__obscura_host.loadDocumentPreloads();");
+        }
+
         if (Js is { } iframeJs)
         {
             // DEVIATION from crates/obscura-browser, which loads each iframe[src] through the

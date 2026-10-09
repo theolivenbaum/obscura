@@ -2083,6 +2083,16 @@ Values measured in Chromium 141 (headless, Playwright); facts in
   (percent-decoding, forgiving base64, MIME serialization, `text/plain;charset=US-ASCII`
   default) and the blob URL store (`URL.createObjectURL` keeps the Blob), with Chromium's 200
   `OK` basic response and "Failed to fetch" for a bad or revoked URL.
+- **`<link rel=preload>` and `rel=modulepreload` load.** DEVIATION from
+  crates/obscura-js/js/bootstrap.js and crates/obscura-browser, which ignore both rels, so
+  their `load`/`error` never fired: the loadCSS pattern (`onload="this.rel='stylesheet'"`,
+  vk.com's clone-and-insert) never applied its sheets and vk.com painted a blank page (its
+  VKUI layout had no CSS). Parsed links are loaded by the host once the document is parsed
+  (`__obscura_host.loadDocumentPreloads`, and at frame-realm start), inserted ones on
+  insertion; a link with no valid `as` fetches nothing. Gaps: no preload cache (the real load
+  fetches again), and a cross-origin no-cors preload is opaque, so a 404 there fires `load`
+  where Chromium fires `error`. A parser-inserted `rel=stylesheet` whose fetch fails still
+  fires no `error` (Chromium does). `LinkPreloadTests`.
 - **The autonomous CDP pump backs off instead of stopping.** DEVIATION from
   crates/obscura-cdp/src/server.rs, which disarms a connection's page pump after the fourth
   consecutive turn that overruns the task budget, until the next inbound frame. weather.com's

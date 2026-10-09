@@ -855,13 +855,66 @@ function _registerLinkedStylesheet(link, explicitHref, responseUrl) {
 // live cascade, and then fire load. Framework route chunks commonly await this
 // event before revealing their content; firing it while discarding the CSS
 // left the DOM loaded but unstyled. Issue #409.
+// <link rel=preload> and <link rel=modulepreload>: fetch the resource and fire `load`, or
+// `error` when the fetch fails. DEVIATION from crates/obscura-js/js/bootstrap.js, which
+// ignored both rels, so neither event ever fired: the widespread loadCSS pattern
+// (`<link rel=preload as=style onload="this.rel='stylesheet'">`, or vk.com's clone-and-insert
+// variant) never applied its stylesheets, and vk.com painted a blank page. A preload with no
+// valid `as` fetches nothing and fires nothing, as in Chromium. The fetched bytes are not kept
+// for the later real load (no preload cache), and a cross-origin no-cors preload is opaque, so
+// its HTTP status cannot fail it here.
+const _preloadDestinations = ['audio', 'audioworklet', 'document', 'embed', 'fetch', 'font', 'image',
+  'json', 'manifest', 'object', 'paintworklet', 'report', 'script', 'serviceworker', 'sharedworker',
+  'style', 'track', 'video', 'webidentity', 'worker', 'xslt'];
+const _preloadsStarted = _private(new WeakSet());
+async function _loadPreloadLink(link, rels) {
+  if (_preloadsStarted.has(link)) return;
+  const href = _elCall('getAttribute', link, ['href']);
+  if (!href) return;
+  const module = _arrayIndexOf(rels, 'modulepreload') >= 0;
+  let as = _stringToLowerCase(_String(_elCall('getAttribute', link, ['as']) || ''));
+  if (module) {
+    if (as === '') as = 'script';
+  } else if (_arrayIndexOf(_preloadDestinations, as) < 0) {
+    return;
+  }
+  _preloadsStarted.add(link);
+  const crossOrigin = _elCall('getAttribute', link, ['crossorigin']);
+  const cors = module || crossOrigin !== null || as === 'fetch';
+  const credentials = crossOrigin !== null && _stringToLowerCase(_String(crossOrigin)) === 'use-credentials'
+    ? 'include' : (cors ? 'same-origin' : 'include');
+  let ok = false;
+  try {
+    const response = await _fetchAtBoot(_resolveResourceUrl(href), { mode: cors ? 'cors' : 'no-cors', credentials });
+    ok = response.type === 'opaque' || response.ok;
+  } catch (_) {}
+  try { _dispatch(link, new Event(ok ? 'load' : 'error')); } catch (_) {}
+}
+// The preload links of a parsed document, by the host once the document is parsed and in a
+// frame realm at start (see _loadDocumentFrames); each link is fetched once.
+function _loadDocumentPreloads() {
+  const doc = _realmDocument;
+  if (!doc) return;
+  const links = _qsa(doc, 'link[rel]');
+  for (let i = 0; i < links.length; i++) {
+    const rels = _String(_elCall('getAttribute', links[i], ['rel']) || '').toLowerCase().split(/[\t\n\f\r ]+/);
+    if (_arrayIndexOf(rels, 'preload') >= 0 || _arrayIndexOf(rels, 'modulepreload') >= 0) _loadPreloadLink(links[i], rels);
+  }
+}
+
 async function _loadLinkedStylesheet(c) {
   // obscura does not yet reflect the `rel` IDL attribute back to the content
   // attribute, so `link.rel = "stylesheet"` leaves getAttribute('rel') null.
   // Read both so the property-assignment form (the common framework pattern)
   // and the parsed-from-HTML form are both recognized.
   const rel = (c.getAttribute('rel') || c.rel || '').toString().toLowerCase();
-  if (!rel.split(/\s+/).includes('stylesheet')) return;
+  const rels = rel.split(/\s+/);
+  if (_arrayIndexOf(rels, 'preload') >= 0 || _arrayIndexOf(rels, 'modulepreload') >= 0) {
+    if (!c.getAttribute('rel') && c.rel) c.setAttribute('rel', String(c.rel));
+    if (c.isConnected) _loadPreloadLink(c, rels);
+    return;
+  }
+  if (!rels.includes('stylesheet')) return;
   const href = c.getAttribute('href');
   if (!href) return;
   // Upstream 04418a5: the renderer reads rel, media and disabled from content attributes,
@@ -21735,6 +21788,7 @@ function _pageInit() {
   // loaded its frames.
   if (!_realmIsolatedWorld) {
     _loadDocumentFrames();
+    _loadDocumentPreloads();
   } else {
     _installIsolatedWorldBridges();
   }
@@ -26162,6 +26216,7 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // Port addition: start the parsed document's frames (srcdoc and src), for the host once
   // the document is in place. See _loadDocumentFrames.
   loadDocumentFrames: () => { _loadDocumentFrames(); },
+  loadDocumentPreloads: () => { _loadDocumentPreloads(); },
   // Port addition: child frame `frameId` navigated itself (a link, location, a form's
   // GET), so its <iframe> here loads `url` in its place, as a new frame. The Rust engine
   // processes only the page's own navigation, so a click on a link inside a frame did
