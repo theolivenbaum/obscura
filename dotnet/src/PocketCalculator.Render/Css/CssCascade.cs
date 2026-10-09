@@ -285,6 +285,104 @@ public sealed class StylesheetCache
         return (sheet, false);
     }
 
+    // ------------------------------------------------------------ shadow roots
+
+    private const int MaxShadowSourceBytes = 8 * 1024 * 1024;
+
+    private readonly Dictionary<string, ShadowEntry> _shadow = new(StringComparer.Ordinal);
+    private (uint, uint) _shadowViewportBits;
+    private CssMediaType _shadowMediaType;
+    private long _shadowPass;
+    private long _shadowBytes;
+
+    private sealed class ShadowEntry(Stylesheet sheet, int sourceBytes)
+    {
+        public Stylesheet Sheet { get; } = sheet;
+
+        public int SourceBytes { get; } = sourceBytes;
+
+        public long LastPass { get; set; }
+    }
+
+    /// <summary>Distinct shadow-root source sets currently retained.</summary>
+    public int ShadowEntryCount => _shadow.Count;
+
+    /// <summary>Start a render pass's shadow-root lookups (<see cref="GetOrParseShadow"/>).</summary>
+    internal void BeginShadowPass((float Width, float Height) viewport, CssMediaType mediaType)
+    {
+        var viewportBits = (
+            (uint)BitConverter.SingleToInt32Bits(viewport.Width),
+            (uint)BitConverter.SingleToInt32Bits(viewport.Height));
+        if (viewportBits != _shadowViewportBits || mediaType != _shadowMediaType)
+        {
+            _shadow.Clear();
+            _shadowBytes = 0;
+            _shadowViewportBits = viewportBits;
+            _shadowMediaType = mediaType;
+        }
+
+        _shadowPass++;
+    }
+
+    /// <summary>
+    /// The compiled sheet for one shadow root's ordered sources, parsed once for every root
+    /// that carries the same sources and kept for the next pass.
+    /// </summary>
+    /// <remarks>
+    /// A web-component page gives every instance of a component its own shadow root with
+    /// the same styles (Lit, FAST and Stencil adopt one constructed sheet into each), and
+    /// every style or layout read after a mutation used to parse and index all of them
+    /// again: on reddit.com's 170 roots that was ~2s per <c>getComputedStyle()</c>. The
+    /// key is the exact source text (no hashing), so two roots share a sheet only when they
+    /// would have parsed to the same one; a sheet is immutable once parsed and holds no
+    /// root, which is supplied as the scope at match time.
+    /// </remarks>
+    internal Stylesheet GetOrParseShadow(DomTree tree, List<string> sources)
+    {
+        string key = sources.Count == 1 ? sources[0] : string.Join('\0', sources);
+        if (_shadow.TryGetValue(key, out ShadowEntry? entry))
+        {
+            entry.LastPass = _shadowPass;
+            return entry.Sheet;
+        }
+
+        var viewport = (
+            BitConverter.Int32BitsToSingle((int)_shadowViewportBits.Item1),
+            BitConverter.Int32BitsToSingle((int)_shadowViewportBits.Item2));
+        var sheet = Stylesheet.ParseForViewportAndMedia(tree, sources, viewport, _shadowMediaType);
+        if (_shadowBytes + key.Length <= MaxShadowSourceBytes)
+        {
+            _shadow[key] = new ShadowEntry(sheet, key.Length) { LastPass = _shadowPass };
+            _shadowBytes += key.Length;
+        }
+
+        return sheet;
+    }
+
+    /// <summary>Drop the source sets the pass that just ended did not use.</summary>
+    internal void EndShadowPass()
+    {
+        List<string>? stale = null;
+        foreach ((string key, ShadowEntry entry) in _shadow)
+        {
+            if (entry.LastPass != _shadowPass)
+            {
+                (stale ??= []).Add(key);
+            }
+        }
+
+        if (stale is null)
+        {
+            return;
+        }
+
+        foreach (string key in stale)
+        {
+            _shadowBytes -= _shadow[key].SourceBytes;
+            _shadow.Remove(key);
+        }
+    }
+
     private static bool SourcesEqual(string[] left, IReadOnlyList<string> right)
     {
         if (left.Length != right.Count)
