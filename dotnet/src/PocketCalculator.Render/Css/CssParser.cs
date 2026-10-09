@@ -406,7 +406,7 @@ public static class CssParser
         if (CssAtRules.Prelude(at, "layer") is { } layerPrelude)
         {
             LayerOrder? layer;
-            if (layerPrelude.Trim().Length == 0)
+            if (layerPrelude.AsSpan().Trim().Length == 0)
             {
                 layer = layers.RegisterAnonymous(currentLayer);
             }
@@ -720,7 +720,7 @@ public static class CssParser
 
         if (CssAtRules.Prelude(at, "layer") is { } layerPrelude)
         {
-            var layer = layerPrelude.Trim().Length == 0
+            var layer = layerPrelude.AsSpan().Trim().Length == 0
                 ? layers.RegisterAnonymous(currentLayer)
                 : layers.RegisterNamed(currentLayer, layerPrelude);
             if (layer is not null)

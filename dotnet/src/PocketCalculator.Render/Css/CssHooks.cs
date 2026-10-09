@@ -154,7 +154,7 @@ internal static class CssSupportsOracle
         "text-decoration" or "text-decoration-line" =>
             lower.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).All(token => token is "none" or "underline"),
         "font-style" => lower is "normal" or "italic" || lower.StartsWith("oblique", StringComparison.Ordinal),
-        "font-family" => value.Trim().Length != 0,
+        "font-family" => value.AsSpan().Trim().Length != 0,
         "cursor" => PocketCalculator.Render.ComputedStyle.IsCursorKeyword(lower),
         "pointer-events" => PocketCalculator.Render.ComputedStyle.IsPointerEventsKeyword(lower),
         "clear" => lower is "none" or "left" or "right" or "both" or "inline-start" or "inline-end",
@@ -189,7 +189,7 @@ internal static class CssSupportsOracle
             lower == "normal" || Dimension(value, auto: false),
         "line-height" => lower == "normal" || FiniteNumber(value) || Dimension(value, auto: false),
         "border-spacing" => Dimensions(value, auto: false, max: 2),
-        "animation" or "animation-name" => value.Trim().Length != 0,
+        "animation" or "animation-name" => value.AsSpan().Trim().Length != 0,
         "transform" => CssText.EqualsAscii(value, "none") || ComputedStyle.ParseTransformOps(value) is not null,
         "translate" => lower == "none" || Dimensions(value, auto: false, max: 3),
         "rotate" => lower == "none" || ComputedStyle.AngleDegrees(value) is not null,

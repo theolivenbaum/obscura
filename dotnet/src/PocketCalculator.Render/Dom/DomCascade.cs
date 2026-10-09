@@ -301,13 +301,13 @@ internal static class DomCascade
                 continue;
             }
 
-            if (source.GetAttribute("srcset") is not { } srcset || srcset.Trim().Length == 0)
+            if (source.GetAttribute("srcset") is not { } srcset || srcset.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
 
             if (source.GetAttribute("media") is { } media
-                && media.Trim().Length != 0
+                && media.AsSpan().Trim().Length != 0
                 && !CssMediaQuery.AppliesForViewport(media, viewport))
             {
                 continue;
@@ -1334,7 +1334,7 @@ internal static class DomCascade
 
                 string? media = node.GetAttribute("media");
                 if (media is not null
-                    && media.Trim().Length != 0
+                    && media.AsSpan().Trim().Length != 0
                     && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
                 {
                     continue;

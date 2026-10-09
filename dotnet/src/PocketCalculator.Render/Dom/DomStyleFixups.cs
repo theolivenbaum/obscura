@@ -157,7 +157,7 @@ internal static class DomStyleFixups
             default:
                 // A block container stacks only once something in it is block-level; a run of
                 // inline children shares one line and keeps accumulating.
-                foreach (NodeId child in DomTraversal.RenderedChildren(tree, container))
+                foreach (NodeId child in DomTraversal.EachRenderedChild(tree, container))
                 {
                     if (IsBlockLevelChild(tree, child, styles))
                     {
@@ -975,7 +975,7 @@ internal static class DomStyleFixups
             return false;
         }
 
-        foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             if (tree.GetNode(cid) is not { } node)
             {
@@ -984,7 +984,7 @@ internal static class DomStyleFixups
 
             if (node.TextContentOfTextNode is { } contents)
             {
-                if (contents.Trim().Length != 0)
+                if (contents.AsSpan().Trim().Length != 0)
                 {
                     return true;
                 }
@@ -1040,7 +1040,7 @@ internal static class DomStyleFixups
             return;
         }
 
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, parent))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, parent))
         {
             styles.TryGetValue(child, out LayoutStyle? style);
             bool transparent = style is not null

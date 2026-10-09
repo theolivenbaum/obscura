@@ -567,7 +567,7 @@ internal static class DomTableSupport
 
         // Source formatting between table-internal boxes is not content; CSS 2.1 17.2.1 drops
         // it rather than wrapping it in an anonymous cell.
-        return tree.GetNode(id) is { IsElement: false } && tree.TextContent(id).Trim().Length == 0;
+        return tree.GetNode(id) is { IsElement: false } && tree.TextContent(id).AsSpan().Trim().Length == 0;
     }
 
     /// <summary>The same, for a node.</summary>

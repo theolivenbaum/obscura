@@ -2930,6 +2930,11 @@ tree and new whole-document maps that survive to the next pass. What no longer a
   plan use slot-indexed pooled arrays instead of maps over every node;
 - `DomTraversal.IsAnyLocal` takes a `params ReadOnlySpan`, and the per-style loops over a
   style's two pseudos iterate a stack span instead of a new array per style.
+- the box-tree build reads children off the sibling chain (`DomTraversal.EachRenderedChild`)
+  where it only looks at them, tests text for white space on a span (`AsSpan().Trim()`, here
+  and throughout the render library, instead of a trimmed copy), and sorts flex and grid items
+  by `order` only when some item has one (`DomBuild.StableOrderBy`, the same stable order the
+  LINQ sort gave);
 - the table pass's floor of definite content widths (`DomTableSupport.DefiniteContentWidthIndex`)
   walks only the subtrees of the tables it is asked about, memoized per node, instead of the
   whole document on the first question (nvidia.com asks about 16 small anonymous tables on

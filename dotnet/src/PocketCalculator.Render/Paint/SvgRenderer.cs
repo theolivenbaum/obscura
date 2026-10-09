@@ -517,7 +517,7 @@ internal static class SvgRenderer
             case "text":
             {
                 string content = TextContent(element);
-                if (content.Trim().Length == 0)
+                if (content.AsSpan().Trim().Length == 0)
                 {
                     return;
                 }
@@ -1051,7 +1051,7 @@ internal static class SvgRenderer
         SvgFontDatabase fonts)
     {
         string content = TextContent(element);
-        if (content.Trim().Length == 0)
+        if (content.AsSpan().Trim().Length == 0)
         {
             return;
         }
@@ -1638,7 +1638,7 @@ internal static class SvgRenderer
 
     internal static SKMatrix? ParseTransform(string? value)
     {
-        if (value is null || value.Trim().Length == 0)
+        if (value is null || value.AsSpan().Trim().Length == 0)
         {
             return null;
         }

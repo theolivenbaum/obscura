@@ -289,7 +289,7 @@ public static partial class RenderDom
 
             string? media = node.GetAttribute("media");
             if (media is not null
-                && media.Trim().Length != 0
+                && media.AsSpan().Trim().Length != 0
                 && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
             {
                 continue;

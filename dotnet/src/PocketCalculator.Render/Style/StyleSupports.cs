@@ -1304,7 +1304,7 @@ public static partial class ComputedStyle
             case "font-weight":
                 return SpecifiedFontWeight(value) is not null;
             case "font-family":
-                return value.Trim().Length != 0;
+                return value.AsSpan().Trim().Length != 0;
             case "font-style":
                 return lower is "normal" or "italic" || lower.StartsWith("oblique", StringComparison.Ordinal);
             case "text-align":
@@ -1361,7 +1361,7 @@ public static partial class ComputedStyle
 
             case "animation":
             case "animation-name":
-                return value.Trim().Length != 0;
+                return value.AsSpan().Trim().Length != 0;
             case "background":
             case "font":
             case "grid-template":

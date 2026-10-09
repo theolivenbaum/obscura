@@ -789,7 +789,7 @@ public sealed partial class TextEngine : IDisposable
             foreach ((string text, SpanAttrs _) in spans)
             {
                 bool empty = text.Length == 0
-                    || (collapsible && text.Trim().Length == 0 && !text.Contains('\n', StringComparison.Ordinal));
+                    || (collapsible && text.AsSpan().Trim().Length == 0 && !text.Contains('\n', StringComparison.Ordinal));
                 if (!empty)
                 {
                     allEmpty = false;
@@ -2794,7 +2794,7 @@ public sealed partial class TextEngine : IDisposable
         List<(string Text, SpanAttrs Attrs)> output,
         Collector collector)
     {
-        foreach (NodeId cid in Inline.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             CollectNodeSpans(tree, cid, styles, context, output, collector);
         }

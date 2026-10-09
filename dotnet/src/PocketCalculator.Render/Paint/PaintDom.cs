@@ -1240,7 +1240,7 @@ internal static class PaintDomPainter
                 if (!painted && string.Equals(localName, "img", StringComparison.Ordinal))
                 {
                     string? alt = node.GetAttribute("alt");
-                    if (alt is not null && alt.Trim().Length > 0)
+                    if (alt is not null && alt.AsSpan().Trim().Length > 0)
                     {
                         PaintText.DrawText(
                             pixmap,

@@ -1788,7 +1788,7 @@ public static partial class ComputedStyle
             case "background":
                 // A shorthand resets every omitted background longhand. An empty
                 // value is invalid (an unresolved var()), so keep the prior winner.
-                if (value.Trim().Length != 0)
+                if (value.AsSpan().Trim().Length != 0)
                 {
                     style.BackgroundColor = null;
                     style.BackgroundColorIsSrgbFunction = false;
@@ -1832,7 +1832,7 @@ public static partial class ComputedStyle
 
             case "background-size":
                 style.BackgroundSize = ParseBackgroundSize(value);
-                style.BackgroundSizeExpression = value.Trim().Length != 0 ? value.Trim() : null;
+                style.BackgroundSizeExpression = value.AsSpan().Trim().Length != 0 ? value.Trim() : null;
                 style.BackgroundSizeFit = ParseBackgroundSizeFit(value);
                 return true;
 

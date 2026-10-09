@@ -203,7 +203,7 @@ internal static partial class DomBuild
             List<TaffyNodeId> spliced = [];
             try
             {
-                foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+                foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
                 {
                     spliced.AddRange(BuildAny(context, cid));
                 }
@@ -257,7 +257,7 @@ internal static partial class DomBuild
             List<TaffyNodeId> flattened = [];
             try
             {
-                foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+                foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
                 {
                     flattened.AddRange(BuildAny(context, cid));
                 }
@@ -560,6 +560,53 @@ internal static partial class DomBuild
     /// contents form an inline formatting context. Splitting a text node into one taffy item
     /// per word is only valid inside our flex-wrap IFC stand-in.
     /// </remarks>
+    /// <summary>
+    /// <paramref name="items"/> stably sorted by <paramref name="key"/> (source order breaks
+    /// ties), as <c>OrderBy(key).ThenBy(index)</c>; the list itself when every key is equal,
+    /// which is every flex and grid container without an authored <c>order</c>. The LINQ sort
+    /// allocated an iterator chain and a tuple per item for every container on every pass.
+    /// </summary>
+    internal static List<T> StableOrderBy<T>(List<T> items, Func<T, int> key)
+    {
+        if (items.Count < 2)
+        {
+            return items;
+        }
+
+        int first = key(items[0]);
+        bool equal = true;
+        for (int index = 1; index < items.Count && equal; index++)
+        {
+            equal = key(items[index]) == first;
+        }
+
+        if (equal)
+        {
+            return items;
+        }
+
+        int[] keys = new int[items.Count];
+        for (int index = 0; index < items.Count; index++)
+        {
+            keys[index] = key(items[index]);
+        }
+
+        int[] order = new int[items.Count];
+        for (int index = 0; index < order.Length; index++)
+        {
+            order[index] = index;
+        }
+
+        Array.Sort(order, (a, b) => keys[a] != keys[b] ? keys[a].CompareTo(keys[b]) : a.CompareTo(b));
+        List<T> sorted = new(items.Count);
+        foreach (int index in order)
+        {
+            sorted.Add(items[index]);
+        }
+
+        return sorted;
+    }
+
     internal static List<TaffyNodeId> BuildFlexGridChildren(BuildContext context, NodeId parent)
     {
         DomTree tree = context.Tree;
@@ -569,14 +616,12 @@ internal static partial class DomBuild
         effectiveChildren.RemoveAll(child =>
             child.Kind == EffectiveGridChildKind.Dom
             && tree.GetNode(child.Node)?.IsElement != true
-            && tree.TextContent(child.Node).Trim().Length == 0);
+            && tree.TextContent(child.Node).AsSpan().Trim().Length == 0);
 
         // CSS `order` uses a stable sort so source order is the tie-break.
-        List<EffectiveGridChild> ordered = [.. effectiveChildren
-            .Select((child, index) => (child, index))
-            .OrderBy(pair => DomStyleFixups.EffectiveGridChildStyle(pair.child, context.Styles)?.Order ?? 0)
-            .ThenBy(pair => pair.index)
-            .Select(pair => pair.child)];
+        List<EffectiveGridChild> ordered = StableOrderBy(
+            effectiveChildren,
+            child => DomStyleFixups.EffectiveGridChildStyle(child, context.Styles)?.Order ?? 0);
 
         List<TaffyNodeId> children = [];
         int cursor = 0;
@@ -761,7 +806,7 @@ internal static partial class DomBuild
         // text node was a fifth of a retained build, most of it the copy.
         foreach (string token in TokenizeWithSpaces(text))
         {
-            if (token.Trim().Length == 0)
+            if (token.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
@@ -858,7 +903,7 @@ internal static partial class DomBuild
 
             // A pure-whitespace token keeps its width so adjacent inline content stays visually
             // separated, but contributes no height.
-            float height = token.Trim().Length == 0 ? 0f : F32.Max(lineHeight, 0f);
+            float height = token.AsSpan().Trim().Length == 0 ? 0f : F32.Max(lineHeight, 0f);
             TaffyStyle taffyStyle = TaffyStyle.Default;
             taffyStyle.Size = new Layout.Size<TaffyDimension>(
                 TaffyDimension.FromLength(width),
@@ -985,7 +1030,7 @@ internal static partial class DomBuild
         List<TaffyNodeId> children = [];
 
         // CSS table fixup discards whitespace-only text between table structures.
-        if (content is { Length: > 0 } && !(pseudo.IsTableBox && content.Trim().Length == 0))
+        if (content is { Length: > 0 } && !(pseudo.IsTableBox && content.AsSpan().Trim().Length == 0))
         {
             children = BuildPseudoContent(context, host, content, pseudo);
         }
@@ -1129,7 +1174,7 @@ internal static partial class DomBuild
         }
 
         bool sawBlock = false;
-        foreach (NodeId cid in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             if (tree.GetNode(cid) is not { } node)
             {
@@ -1138,7 +1183,7 @@ internal static partial class DomBuild
 
             if (node.TextContentOfTextNode is { } contents)
             {
-                if (contents.Trim().Length != 0)
+                if (contents.AsSpan().Trim().Length != 0)
                 {
                     return false;
                 }
@@ -1436,7 +1481,7 @@ internal static partial class DomBuild
 
             if (!node.IsElement)
             {
-                if (tree.TextContent(child).Trim().Length != 0)
+                if (tree.TextContent(child).AsSpan().Trim().Length != 0)
                 {
                     visible.Add(child);
                 }
@@ -1500,10 +1545,10 @@ internal static partial class DomBuild
         }
 
         bool hasDirectText = false;
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
         {
             if (tree.GetNode(child)?.TextContentOfTextNode is { } contents
-                && contents.Trim().Length != 0)
+                && contents.AsSpan().Trim().Length != 0)
             {
                 hasDirectText = true;
                 break;

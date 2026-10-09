@@ -619,7 +619,7 @@ public static class Inline
 
         if (node.Data is TextData text)
         {
-            if (text.Contents.Trim().Length != 0)
+            if (text.Contents.AsSpan().Trim().Length != 0)
             {
                 hasText = true;
             }

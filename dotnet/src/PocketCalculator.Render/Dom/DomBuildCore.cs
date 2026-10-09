@@ -186,7 +186,7 @@ internal static partial class DomBuild
                 // An auto-width inline-block shrink-fits to its max-content width when that
                 // fits the available line.
                 bool inlineBlockHasBlockChild = false;
-                foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+                foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
                 {
                     if (context.Styles.TryGetValue(child, out LayoutStyle? childStyle)
                         && DomStyleFixups.IsInFlowBlockLevel(childStyle))
@@ -244,7 +244,7 @@ internal static partial class DomBuild
                 style.FontSize ?? 16f,
                 node.GetAttribute("controls") is not null,
                 !string.Equals(local, "embed", StringComparison.Ordinal)
-                    || (node.GetAttribute("src") is { } src && src.Trim().Length != 0));
+                    || (node.GetAttribute("src") is { } src && src.AsSpan().Trim().Length != 0));
             if (defaultIntrinsic is { } intrinsicSize)
             {
                 int replacedContext = context.Engine.RegisterReplaced(
@@ -429,15 +429,13 @@ internal static partial class DomBuild
             FlattenContentsChildren(tree, domChildren, context.Styles, flat);
             domChildren = flat;
             domChildren.RemoveAll(cid =>
-                tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).Trim().Length == 0);
+                tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).AsSpan().Trim().Length == 0);
 
             // Flex and grid placement consume the order-modified document order; a stable sort
             // preserves source order for equal values, exactly the CSS tie-break.
-            domChildren = [.. domChildren
-                .Select((cid, index) => (cid, index))
-                .OrderBy(pair => context.Styles.TryGetValue(pair.cid, out LayoutStyle? s) ? s.Order : 0)
-                .ThenBy(pair => pair.index)
-                .Select(pair => pair.cid)];
+            domChildren = StableOrderBy(
+                domChildren,
+                cid => context.Styles.TryGetValue(cid, out LayoutStyle? s) ? s.Order : 0);
         }
         else if (style.Display == Display.Block)
         {
@@ -445,7 +443,7 @@ internal static partial class DomBuild
             if (!hasInlineIshContent)
             {
                 domChildren.RemoveAll(cid =>
-                    tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).Trim().Length == 0);
+                    tree.GetNode(cid)?.IsElement != true && tree.TextContent(cid).AsSpan().Trim().Length == 0);
             }
 
             // A float nested directly in a transparent inline wrapper belongs to the ancestor

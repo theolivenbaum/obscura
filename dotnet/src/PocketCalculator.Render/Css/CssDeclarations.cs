@@ -118,7 +118,7 @@ public static class CssDeclarations
 
     internal static void AppendDeclarationStream(StringBuilder target, string declarations)
     {
-        if (declarations.Trim().Length == 0)
+        if (declarations.AsSpan().Trim().Length == 0)
         {
             return;
         }
