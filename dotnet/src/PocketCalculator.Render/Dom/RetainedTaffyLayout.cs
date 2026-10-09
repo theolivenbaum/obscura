@@ -33,10 +33,17 @@ namespace PocketCalculator.Render;
 /// in the same position under a carried parent), no DOM node it was built from is in the pass's
 /// dirty set or above a node that is, its taffy style is equal and holds no <c>calc()</c> handle
 /// (whose resolution context lives outside the style), its measure context is equivalent, its
-/// children pair one for one, and the previous pass neither left its cache empty nor computed it
-/// in a block formatting context that had floats. A carried cache asked for in a context with
-/// floats, or in a different block-context mode, is dropped on the spot
-/// (<c>TaffyTree.TaffyView.ComputeChildLayoutInner</c>).
+/// children pair one for one, and the previous pass neither left its cache empty nor laid it out
+/// reading the floats of its formatting context. A carried cache asked for in a different
+/// block-context mode is dropped on the spot (<c>TaffyTree.TaffyView.ComputeChildLayoutInner</c>).
+/// </para>
+/// <para>
+/// A page with floats carries its layouts over the same way. A box laid out in its parent's
+/// block formatting context is cached only when that layout read nothing of the floats, with
+/// what it asked recorded beside the entry, and the entry answers only where the floats placed
+/// so far give the same answers (<c>FloatDependencies</c>); a box beside a float is laid out
+/// again on every pass, as before. Nothing is carried across a pass that gained or lost its
+/// floats, which builds its block containers differently.
 /// </para>
 /// <para>
 /// <c>POCKETCALCULATOR_FULL_RELAYOUT=1</c> turns this off.
@@ -84,9 +91,8 @@ internal sealed class RetainedTaffyLayout
     internal required TextEngine Engine { get; init; }
 
     /// <summary>
-    /// Whether the pass had a float. Inline items are not taken over from or into such a pass
-    /// (a float's exclusions reach every inline item of its block formatting context), and only
-    /// float-free subtrees carry their layout over; see <see cref="Transplant"/>.
+    /// Whether the pass had a float. Neither layouts nor inline items are carried across a pass
+    /// that gained or lost its floats; see <see cref="Transplant"/>.
     /// </summary>
     internal required bool HadFloats { get; init; }
 
@@ -272,8 +278,17 @@ internal sealed class RetainedTaffyLayout
         }
 
         previous.Consumed = true;
+
+        // A tree with a float builds and lays out its block containers through the float
+        // paths (DomBuild.BuildMixedBlock, BlockLayout), so nothing one tree computed answers
+        // for the other.
+        if (tree.HasFloats != previous.HadFloats)
+        {
+            return 0;
+        }
+
         TaffyTree old = previous.Tree;
-        bool floats = tree.HasFloats || previous.HadFloats;
+        bool floats = tree.HasFloats;
 
         // A DOM node that generated more than one box on either side pairs ambiguously.
         Dictionary<NodeId, TaffyNodeId> oldByDom = new(previous.IdMap.Count);
@@ -405,6 +420,10 @@ internal sealed class RetainedTaffyLayout
                 return false;
             }
 
+            // A box whose layout read the floats of its formatting context (a line box beside
+            // one, a float it placed): what that layout left in its inline item (the exclusions
+            // Finalize lays the lines out around again) is not carried with the cache, and a hit
+            // on an ancestor would skip the layout that sets it.
             if (old.IsFloatDependent(oldNode))
             {
                 return false;
@@ -416,18 +435,10 @@ internal sealed class RetainedTaffyLayout
                 return false;
             }
 
-            // With floats, carry over only a subtree that holds none: its layout is then a
-            // function of the subtree alone wherever it sits, since a box that establishes a
-            // formatting context keeps outside floats out of it.
-            if (floats && style.Float != Layout.Float.None)
-            {
-                return false;
-            }
-
             // An empty previous cache would break taffy's dirty-propagation invariant (an empty
             // node under a non-empty ancestor) - except under display:none, which is never
             // cached and always laid out hidden, and for a box a tree with floats laid out in its
-            // parent's formatting context, which it never caches (TaffyTree.HasFloats). That box
+            // parent's formatting context, which it caches only when float-blind. That box
             // is only reached through its formatting context's root, which re-lays it out, or
             // answers from its own cache and leaves the carried layouts in place; and MarkDirty
             // walks to the root once anything is carried over.

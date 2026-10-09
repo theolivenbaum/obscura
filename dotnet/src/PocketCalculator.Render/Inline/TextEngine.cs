@@ -289,6 +289,11 @@ public sealed partial class TextEngine : IDisposable
         item.Clip = null;
         item.Marker = null;
         item.RelativeOwnerRanges = [];
+
+        // The exclusions of the last final layout beside floats: a carried final layout of
+        // this item's box exists only for a layout that read no float (TaffyTree's float-blind
+        // cache), and any other layout records its own before Finalize reads them.
+        item.FloatBands = null;
         int index = _items.Count;
         _items.Add(item);
         return index;

@@ -2883,18 +2883,52 @@ was built from is in the pass's dirty closure (restyled nodes, tree/text/attribu
 targets and parents, changed image intrinsics, changed generated/counter text, closed upward),
 its taffy style is equal and holds no `calc()` handle, its measure context matches (replaced
 sizing bit for bit), its children pair one for one, and the previous pass did not lay it out
-beside floats. Two departures from vendor/taffy back it: a carried cache asked for in a context
-with floats or a different block-context mode is dropped (`ComputeChildLayoutInner`), and a
-cache entry keeps the block-context float contribution its computation left behind
+reading the floats of its formatting context. Two departures from vendor/taffy back it: a
+carried cache asked for in a different block-context mode is dropped (`ComputeChildLayoutInner`),
+and a cache entry keeps the block-context float contribution its computation left behind
 (`Cache.GetCarried`), handed back the first time a carried entry answers, since taffy's cache
-otherwise drops that side channel and the root's height came out differently. With a float in
-the tree only float-free subtrees that establish their own formatting context are carried
-(the float rewrite computes same-BFC layout uncached there).
+otherwise drops that side channel and the root's height came out differently. Nothing is
+carried across a pass that gained or lost its floats (the box tree is built differently).
+
+**Float-blind layouts are cached in a block formatting context with floats** (October 2026).
+The float rewrite computed every box laid out in its parent's BFC uncached as soon as the tree
+had one float anywhere, so nvidia.com's single float in its navigation (`navglobicon`) made the
+whole document's block flow and its line breaking run on every pass, and its inline items were
+never taken over. Now every such layout records what it asked the BFC's float context
+(`FloatDependencies`, through the `BlockContext` methods): the lowest block offset it asked
+about, the sides a `clear` in it asked about, and whether any answer was one only a float
+gives (a float placed, a slot or line band beside one, a cleared float bottom). A layout that
+saw no float is *float-blind*: its result depends on its `LayoutInput` alone wherever the
+floats give it the same answers, which holds when the lowest float edge is above the lowest
+offset it asked about (with a margin of 1px + 1e-5 of the offset for the rounding of sub-context
+offsets) and the sides it cleared have no float. Such layouts go to a second cache per node
+(`NodeData.BlockCache`; the same node probed as its own formatting context answers the same
+inputs differently), recorded relative to the box's border-top, so a box below every float
+keeps its cached layout when a mutation above moves it, and its float contribution is handed
+back on every hit (the uncached path always contributed it). A layout that saw a float is
+computed as before and drops its final-layout entry, and any final layout drops the other
+cache's final entry, so a final-layout hit always describes the stored layouts below it. A leaf
+holding anchored floats is never answered from the cache (its caller reads that layout's lines).
+This is the part of Chromium's `MaySkipLayoutWithinBlockFormattingContext` that needs no exact
+match of the exclusion space; a box beside a float is laid out again on every pass, as before.
+`POCKETCALCULATOR_FULL_RELAYOUT=1` turns it off (`TaffyTree.FloatBlindCache`), so the
+differential test's reference is the uncached float path.
 
 Unchanged whole-container inline items are taken over by the next pass's engine
-(`TextEngine.AdoptInlineItems`) instead of being collected and shaped again; not on a page with
-floats, whose exclusions live in the items. The previous engine is released once the box tree
-is built (a fact pins that the first pass's engine is collectable).
+(`TextEngine.AdoptInlineItems`) instead of being collected and shaped again, on float pages too
+(the exclusions of an item's last final layout are reset on adoption: a carried final layout of
+its box exists only for a float-blind layout, and any other sets them before `Finalize` reads
+them). The previous engine is released once the box tree is built (a fact pins that the first
+pass's engine is collectable).
+
+Measured on a local snapshot of nvidia.com (Chromium-serialized DOM and CSS, 4,060 boxes, one
+float), CLI `fetch --eval`, a one-element `margin-left` write and a read of another element,
+median of the last 30 retained passes, against 1001c70: a pass 158ms -> 100ms (taffy 11.4 ->
+2.5ms, the repair relayouts 14.9 -> 3.4ms, box-tree build 19.4 -> 11.1ms with 1,029 inline items
+taken over, boxes carried 1,815 -> 3,613). On a 40-section float article (thumbnails, a
+sidebar and float columns in one BFC) 93-116ms -> 81-86ms (build 19-24 -> 4-5ms, taffy 15 ->
+6-7ms). Soaked at 10 seeds per fixture and 8 per float page (558 runs, none diverging); pinned
+by `AFloatPageCarriesOverBlocksBelowItsFloats`.
 
 `POCKETCALCULATOR_FULL_RELAYOUT=1` turns both off (`RetainedTaffyLayout.ForceFullRelayout` per
 execution context, for tests). `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints per-phase timings of

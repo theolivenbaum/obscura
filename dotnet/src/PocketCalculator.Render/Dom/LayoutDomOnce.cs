@@ -594,9 +594,11 @@ public static partial class RenderDom
                     tree, source, freshStyles, layoutMutations ?? [], intrinsic, styles);
                 source.Consume();
 
-                // Not with a float on either side: its exclusions reach every inline item of its
-                // block formatting context, and the item keeps what the last layout gave it.
-                if (!anyFloat && !source.HadFloats)
+                // Not across a pass that gained or lost its floats, which builds the box tree
+                // differently (RetainedTaffyLayout.Transplant carries nothing then either). An
+                // item keeps nothing of the floats it was laid out beside that a later layout
+                // reads without setting first (TextEngine.TakeAdoptedItem).
+                if (anyFloat == source.HadFloats)
                 {
                     engine.AdoptInlineItems(source.Engine, source.Whole, dirtyNodes);
                 }
@@ -615,6 +617,7 @@ public static partial class RenderDom
                 HasFloats = anyFloat,
             };
             taffyTree.HasFloats = buildContext.HasFloats;
+            taffyTree.FloatBlindCache = RetainedTaffyLayout.Enabled;
 
             TaffyNodeId? builtTaffyRoot = DomBuild.Build(buildContext, rootId);
             engine.EndInlineItemAdoption();

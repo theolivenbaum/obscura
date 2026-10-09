@@ -10,8 +10,97 @@ public sealed class BlockFormattingContext
     /// <summary>The float positioning context for this Block Formatting Context.</summary>
     internal FloatContext FloatContext { get; } = new();
 
+    /// <summary>
+    /// The innermost same-BFC layout whose reads of this context are being recorded, or
+    /// <c>null</c>. Not in vendor/taffy; see <see cref="FloatDependencies"/>.
+    /// </summary>
+    internal FloatDependencies? Recording { get; set; }
+
     /// <summary>Create an initial <see cref="BlockContext"/> for this formatting context.</summary>
     public BlockContext RootBlockContext() => new(this, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, isRoot: true);
+}
+
+/// <summary>
+/// What one layout of a box inside its parent's block formatting context read of that context's
+/// floats. Not in vendor/taffy, which caches such a layout like any other and so cannot see the
+/// floats; the port computed it uncached whenever the tree had a float.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A layout is <em>float-blind</em> when every question it asked the float context got the
+/// answer an empty one gives: no float active at or below any block offset it asked about, no
+/// float bottom on a side a <c>clear</c> in it asked about, and it placed no float and asked for
+/// no slot beside one. Its result is then a function of its <see cref="LayoutInput"/> alone in
+/// any float context that gives those same answers, which <see cref="Admits"/> checks without
+/// laying the box out: the lowest float edge is above the lowest offset it asked about (with a
+/// margin for the rounding of the offset arithmetic), and the sides it cleared have no float.
+/// Only such a layout is cached (<c>TaffyTree.TaffyView</c>); one that saw a float is computed
+/// afresh, as before.
+/// </para>
+/// <para>
+/// Chromium keys a cached layout result on the incoming exclusion space for the same reason
+/// (<c>MaySkipLayoutWithinBlockFormattingContext</c>); this is the part of that test which needs
+/// no exact match of the float geometry, so a box below every float keeps its cached layout
+/// when a mutation above it moves it down.
+/// </para>
+/// </remarks>
+internal sealed class FloatDependencies
+{
+    /// <summary>A <c>clear</c> asked about left floats.</summary>
+    internal const byte ClearLeft = 1;
+
+    /// <summary>A <c>clear</c> asked about right floats.</summary>
+    internal const byte ClearRight = 2;
+
+    /// <summary>The lowest block offset asked about, in the BFC root's coordinates.</summary>
+    internal float MinY = float.PositiveInfinity;
+
+    /// <summary>The sides a <c>clear</c> asked about (<see cref="ClearLeft"/>, <see cref="ClearRight"/>).</summary>
+    internal byte ClearSides;
+
+    /// <summary>Some question got an answer only a float gives; the layout is not cached.</summary>
+    internal bool SawFloats;
+
+    /// <summary>Adds a nested layout's reads to this one.</summary>
+    internal void Absorb(float minY, byte clearSides, bool sawFloats)
+    {
+        MinY = Sys.F32Min(MinY, minY);
+        ClearSides |= clearSides;
+        SawFloats |= sawFloats;
+    }
+
+    /// <summary>
+    /// The slack between the lowest float edge and the lowest offset a cached float-blind
+    /// layout asked about: offsets are sums of sub-context offsets, so a box laid out again at
+    /// a new position asks at offsets that can differ from the recorded ones by the rounding of
+    /// those sums.
+    /// </summary>
+    private static float Slack(float y) => 1.0f + (MathF.Abs(y) * 1e-5f);
+
+    /// <summary>
+    /// Whether a float-blind layout that asked about offsets from <paramref name="minY"/> down
+    /// (BFC coordinates) and cleared <paramref name="clearSides"/> gets the same answers from
+    /// <paramref name="floats"/>.
+    /// </summary>
+    internal static bool Admits(FloatContext floats, float minY, byte clearSides)
+    {
+        if (!floats.HasFloats)
+        {
+            return true;
+        }
+
+        if ((clearSides & ClearLeft) != 0 && floats.ClearedThreshold(Clear.Left).HasValue)
+        {
+            return false;
+        }
+
+        if ((clearSides & ClearRight) != 0 && floats.ClearedThreshold(Clear.Right).HasValue)
+        {
+            return false;
+        }
+
+        return float.IsPositiveInfinity(minY) || floats.LowestFloatBottom + Slack(minY) <= minY;
+    }
 }
 
 /// <summary>
@@ -83,15 +172,60 @@ public sealed class BlockContext
         _contentBoxInsetRight = _insetRight + contentBoxXInsetRight;
     }
 
+    /// <summary>The formatting context this block belongs to.</summary>
+    internal BlockFormattingContext FormattingContext => _bfc;
+
+    /// <summary>The block's border-top offset from the BFC root's border-top.</summary>
+    internal float YOffset => _yOffset;
+
+    // Every read of the float context below also notes, for the same-BFC layout being recorded
+    // (BlockFormattingContext.Recording), what it asked and whether only a float could have
+    // given the answer; see FloatDependencies. Not in vendor/taffy.
+    private void Asked(float y, bool sawFloat)
+    {
+        if (_bfc.Recording is { } recording)
+        {
+            recording.MinY = Sys.F32Min(recording.MinY, y);
+            recording.SawFloats |= sawFloat;
+        }
+    }
+
+    private void SawFloats()
+    {
+        if (_bfc.Recording is { } recording)
+        {
+            recording.SawFloats = true;
+        }
+    }
+
     /// <summary>Whether the float context contains any floats.</summary>
-    public bool HasFloats => _bfc.FloatContext.HasFloats;
+    public bool HasFloats
+    {
+        get
+        {
+            bool has = _bfc.FloatContext.HasFloats;
+            if (has)
+            {
+                SawFloats();
+            }
+
+            return has;
+        }
+    }
 
     /// <summary>Whether the float context contains any floats that extend to or below min_y.</summary>
-    public bool HasActiveFloats(float minY) => _bfc.FloatContext.HasActiveFloats(minY + _yOffset);
+    public bool HasActiveFloats(float minY)
+    {
+        float y = minY + _yOffset;
+        bool active = _bfc.FloatContext.HasActiveFloats(y);
+        Asked(y, active);
+        return active;
+    }
 
     /// <summary>Position a floated box within the context.</summary>
     public Point<float> PlaceFloatedBox(Size<float> floatedBox, float minY, FloatDirection direction, Clear clear)
     {
+        SawFloats();
         var pos = _bfc.FloatContext.PlaceFloatedBox(
             floatedBox, minY + _yOffset, _contentBoxInsetLeft, _contentBoxInsetRight, direction, clear);
         pos.Y -= _yOffset;
@@ -105,6 +239,7 @@ public sealed class BlockContext
     /// <summary>Search for a space suitable for laying out non-floated content into.</summary>
     public ContentSlot FindContentSlot(float minY, Clear clear, int? after)
     {
+        SawFloats();
         var slot = _bfc.FloatContext.FindContentSlot(
             minY + _yOffset, _contentBoxInsetLeft, _contentBoxInsetRight, clear, after);
         slot.Y -= _yOffset;
@@ -117,8 +252,13 @@ public sealed class BlockContext
     /// around, relative to this block's content box, whose edges sit the given distances inside
     /// its border box. <c>null</c> when no float reaches the content box.
     /// </summary>
-    public FloatBands? FloatBandsFor(float contentTop, float contentLeft, float contentRight) =>
-        _bfc.FloatContext.Bands(_yOffset + contentTop, _insetLeft + contentLeft, _insetRight + contentRight);
+    public FloatBands? FloatBandsFor(float contentTop, float contentLeft, float contentRight)
+    {
+        float y = _yOffset + contentTop;
+        FloatBands? bands = _bfc.FloatContext.Bands(y, _insetLeft + contentLeft, _insetRight + contentRight);
+        Asked(y, bands is not null);
+        return bands;
+    }
 
     /// <summary>
     /// The float-free slot for a float-avoiding box (a block formatting context root or a
@@ -127,19 +267,34 @@ public sealed class BlockContext
     /// </summary>
     public (float X, float Width) SlotOver(float y, float height)
     {
+        SawFloats();
         (float left, float right) = _bfc.FloatContext.InsetsOver(
             y + _yOffset, height, _contentBoxInsetLeft, _contentBoxInsetRight);
         return (left - _insetLeft, _bfc.FloatContext.AvailableWidth - left - right);
     }
 
     /// <summary>The next float edge below <paramref name="y"/> (this block's coordinates), or <c>null</c>.</summary>
-    public float? NextFloatEdgeBelow(float y) =>
-        _bfc.FloatContext.NextEdgeBelow(y + _yOffset) is { } edge ? edge - _yOffset : null;
+    public float? NextFloatEdgeBelow(float y)
+    {
+        SawFloats();
+        return _bfc.FloatContext.NextEdgeBelow(y + _yOffset) is { } edge ? edge - _yOffset : null;
+    }
 
     /// <summary>Get the bottom of the lowest relevant float for the specified clear property.</summary>
     public float? ClearedThreshold(Clear clear)
     {
         float? threshold = _bfc.FloatContext.ClearedThreshold(clear);
+        if (_bfc.Recording is { } recording && clear != Clear.None)
+        {
+            recording.ClearSides |= clear switch
+            {
+                Clear.Left => FloatDependencies.ClearLeft,
+                Clear.Right => FloatDependencies.ClearRight,
+                _ => FloatDependencies.ClearLeft | FloatDependencies.ClearRight,
+            };
+            recording.SawFloats |= threshold.HasValue;
+        }
+
         return threshold.HasValue ? threshold.Value - _yOffset : null;
     }
 

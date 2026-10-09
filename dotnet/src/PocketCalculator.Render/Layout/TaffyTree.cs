@@ -115,8 +115,24 @@ internal sealed class NodeData(Style style)
     /// <summary>The computation result from the layout algorithm.</summary>
     public DetailedLayoutInfo DetailedLayoutInfo = DetailedLayoutInfo.None;
 
+    /// <summary>
+    /// Not in vendor/taffy. The float-blind layouts of this node computed inside its parent's
+    /// block formatting context in a tree with floats (see <c>FloatDependencies</c>), kept apart
+    /// from <see cref="Cache"/>: the same node laid out as the root of its own formatting
+    /// context (an intrinsic-size probe) answers the same inputs differently. Allocated on the
+    /// first such layout.
+    /// </summary>
+    public Cache? BlockCache;
+
     /// <summary>Marks a node as requiring relayout.</summary>
-    public ClearState MarkDirty() => Cache.Clear();
+    public ClearState MarkDirty()
+    {
+        ClearState state = Cache.Clear();
+        return BlockCache is { } block && block.Clear() == ClearState.Cleared ? ClearState.Cleared : state;
+    }
+
+    /// <summary>Whether neither cache holds an entry.</summary>
+    public bool CachesEmpty => Cache.IsEmpty() && (BlockCache is null || BlockCache.IsEmpty());
 
     // Not in vendor/taffy: cross-pass layout reuse (RetainedTaffyLayout). Every flag below
     // describes this pass only; a new tree starts with all of them clear.
@@ -172,6 +188,13 @@ public sealed class TaffyTree<TNodeContext>
     /// and every code path are exactly vendor/taffy's.
     /// </summary>
     public bool HasFloats { get; set; }
+
+    /// <summary>
+    /// Whether a same-BFC layout in a tree with floats may be answered from its float-blind
+    /// cache (see <c>FloatDependencies</c>). Off, every such layout is computed, as it was before
+    /// that cache existed; the reference a forced full relayout compares against.
+    /// </summary>
+    public bool FloatBlindCache { get; set; } = true;
 
     /// <summary>
     /// Measures leaves in a block formatting context with floats; see
@@ -509,7 +532,7 @@ public sealed class TaffyTree<TNodeContext>
     }
 
     /// <summary>Indicates whether the layout of this node needs to be recomputed.</summary>
-    public bool IsDirty(NodeId node) => _nodes[node].Cache.IsEmpty();
+    public bool IsDirty(NodeId node) => _nodes[node].CachesEmpty;
 
     /// <summary>
     /// Not in vendor/taffy. Carries <paramref name="sourceNode"/>'s layout cache and stored
@@ -523,6 +546,8 @@ public sealed class TaffyTree<TNodeContext>
         to.Cache = from.Cache;
         to.Cache.MarkCarried();
         from.Cache = new Cache();
+        to.BlockCache = from.BlockCache;
+        from.BlockCache = null;
         to.UnroundedLayout = from.UnroundedLayout;
         to.FinalLayout = from.FinalLayout;
         to.DetailedLayoutInfo = from.DetailedLayoutInfo;
@@ -551,7 +576,7 @@ public sealed class TaffyTree<TNodeContext>
         _nodes[node].SawBlockContext && !_nodes[node].SawNoBlockContext;
 
     /// <summary>Whether <paramref name="node"/> holds any cached layout result.</summary>
-    internal bool HasCachedLayout(NodeId node) => !_nodes[node].Cache.IsEmpty();
+    internal bool HasCachedLayout(NodeId node) => !_nodes[node].CachesEmpty;
 
     /// <summary>Whether <paramref name="node"/> still exists in this tree.</summary>
     internal bool Contains(NodeId node) => _nodes.ContainsKey(node);
@@ -662,19 +687,18 @@ public sealed class TaffyTree<TNodeContext>
             }
 
             // Not in vendor/taffy: a cache carried over from the previous pass (see
-            // TaffyTree.TransplantFrom) holds results computed without any float in the node's
-            // block formatting context and in the same block-context mode. taffy's cache key
-            // knows neither, so a request that differs in either drops the carried results
-            // and computes afresh, as a pass with no carried cache would.
+            // TaffyTree.TransplantFrom) holds results computed in one block-context mode, which
+            // taffy's cache key does not know, so a request in the other mode drops the carried
+            // results and computes afresh, as a pass with no carried cache would. What a carried
+            // float-blind entry read of the floats is checked per entry (FloatDependencies).
             NodeData data = _taffy._nodes[nodeId];
             bool sharedContext = blockCtx is not null;
-            bool floatsBefore = blockCtx is { HasFloats: true };
             if (data.Transplanted
-                && (floatsBefore
-                    || (sharedContext ? data.PreviousSawNoBlockContext : data.PreviousSawBlockContext)))
+                && (sharedContext ? data.PreviousSawNoBlockContext : data.PreviousSawBlockContext))
             {
                 data.Transplanted = false;
                 data.Cache.Clear();
+                data.BlockCache?.Clear();
             }
 
             if (sharedContext)
@@ -688,14 +712,81 @@ public sealed class TaffyTree<TNodeContext>
 
             // DEVIATION from vendor/taffy/src/tree/taffy_tree.rs, which caches a same-BFC child
             // like any other. Its layout reads, and its floats write, the BFC's shared float
-            // context, so the same inputs can give a different answer: compute it afresh when
-            // the tree has floats. The BFC root is still cached.
-            LayoutOutput output = blockCtx is not null && _taffy.HasFloats
-                ? ComputeUncachedInner(this, nodeId, inputs, blockCtx)
-                : ComputeCachedLayoutForNode(nodeId, inputs, blockCtx);
-            if (floatsBefore || blockCtx is { HasFloats: true })
+            // context, so the same inputs can give a different answer: with floats in the tree
+            // it is cached only when it read nothing of the floats, and only answered from
+            // that cache where the floats give it the same answers (ComputeInFloatContext).
+            if (blockCtx is not null && _taffy.HasFloats)
+            {
+                return _taffy.FloatBlindCache
+                    ? ComputeInFloatContext(nodeId, data, inputs, blockCtx)
+                    : ComputeUncachedInner(this, nodeId, inputs, blockCtx);
+            }
+
+            return ComputeCachedLayoutForNode(nodeId, inputs, blockCtx);
+        }
+
+        /// <summary>
+        /// Not in vendor/taffy. The layout of a box in its parent's block formatting context in
+        /// a tree with floats: answered from the node's float-blind cache when the floats placed
+        /// so far give every question it asked the same answer (see <c>FloatDependencies</c>),
+        /// computed otherwise, and cached when that computation read nothing of the floats.
+        /// </summary>
+        private LayoutOutput ComputeInFloatContext(NodeId nodeId, NodeData data, LayoutInput inputs, BlockContext blockCtx)
+        {
+            BlockFormattingContext bfc = blockCtx.FormattingContext;
+            FloatDependencies? outer = bfc.Recording;
+
+            // A leaf holding anchored floats is laid out again after each one is placed, and the
+            // caller reads the lines of that very layout (InlineAnchorLines): never a cache hit.
+            bool anchored = _taffy.FloatAnchors is { } anchors && anchors.ContainsKey(nodeId);
+            if (!anchored
+                && data.BlockCache is { } cache
+                && cache.GetFloatBlind(in inputs, out float contribution, out float minY, out byte clearSides) is { } hit
+                && FloatDependencies.Admits(bfc.FloatContext, blockCtx.YOffset + minY, clearSides))
+            {
+                blockCtx.AddChildFloatedContentHeightContribution(contribution);
+                outer?.Absorb(blockCtx.YOffset + minY, clearSides, false);
+                return hit;
+            }
+
+            FloatDependencies recording = new();
+            bfc.Recording = recording;
+            LayoutOutput output;
+            try
+            {
+                output = ComputeUncachedInner(this, nodeId, inputs, blockCtx);
+            }
+            finally
+            {
+                bfc.Recording = outer;
+            }
+
+            bool sawFloats = recording.SawFloats || anchored;
+            outer?.Absorb(recording.MinY, recording.ClearSides, sawFloats);
+
+            // A final layout replaces the stored layouts of the whole subtree, which the final
+            // entry of the other cache (laid out as its own formatting context) described.
+            if (inputs.RunMode == RunMode.PerformLayout)
+            {
+                data.Cache.ClearFinalLayout();
+            }
+
+            if (sawFloats)
             {
                 data.FloatDependent = true;
+                if (inputs.RunMode == RunMode.PerformLayout)
+                {
+                    data.BlockCache?.ClearFinalLayout();
+                }
+            }
+            else
+            {
+                (data.BlockCache ??= new Cache()).StoreFloatBlind(
+                    in inputs,
+                    in output,
+                    blockCtx.FloatedContentHeightContribution(),
+                    recording.MinY - blockCtx.YOffset,
+                    recording.ClearSides);
             }
 
             return output;
@@ -718,6 +809,12 @@ public sealed class TaffyTree<TNodeContext>
             }
 
             LayoutOutput computed = ComputeUncachedInner(this, nodeId, inputs, blockCtx);
+            if (inputs.RunMode == RunMode.PerformLayout)
+            {
+                // See ComputeInFloatContext: the subtree's stored layouts are this computation's now.
+                _taffy._nodes[nodeId].BlockCache?.ClearFinalLayout();
+            }
+
             _taffy._nodes[nodeId].Cache.Store(
                 in inputs,
                 in computed,
@@ -813,7 +910,7 @@ public sealed class TaffyTree<TNodeContext>
         public void CacheStore(NodeId nodeId, in LayoutInput input, in LayoutOutput layoutOutput) =>
             _taffy._nodes[nodeId].Cache.Store(in input, in layoutOutput);
 
-        public void CacheClear(NodeId nodeId) => _taffy._nodes[nodeId].Cache.Clear();
+        public void CacheClear(NodeId nodeId) => _taffy._nodes[nodeId].MarkDirty();
 
         public Layout GetUnroundedLayout(NodeId nodeId) => _taffy._nodes[nodeId].UnroundedLayout;
 

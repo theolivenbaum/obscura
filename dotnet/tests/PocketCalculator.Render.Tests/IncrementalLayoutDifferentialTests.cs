@@ -345,9 +345,9 @@ public class IncrementalLayoutDifferentialTests
     }
 
     /// <summary>
-    /// A page with floats still carries over a float-free subtree that establishes its own
-    /// formatting context (here an <c>overflow: hidden</c> block), whose layout outside floats
-    /// cannot reach.
+    /// A page with floats carries over a float-free subtree that establishes its own formatting
+    /// context (here an <c>overflow: hidden</c> block), whose layout outside floats cannot reach,
+    /// and takes over its inline items.
     /// </summary>
     [Fact]
     public void AFloatPageCarriesOverAFloatFreeFormattingContext()
@@ -371,8 +371,50 @@ public class IncrementalLayoutDifferentialTests
             [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a c"))])!;
 
         Assert.True(second.Layout.TransplantedBoxes > 30, $"carried {second.Layout.TransplantedBoxes}");
-        Assert.Equal(0, second.Layout.AdoptedInlineItems);
+        Assert.True(second.Layout.AdoptedInlineItems >= 30, $"adopted {second.Layout.AdoptedInlineItems}");
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
+    /// <summary>
+    /// With a float at the top of the page, the paragraphs below it share its block formatting
+    /// context; their layouts read nothing of the float (it ends above them), so they are
+    /// carried over, their inline items taken over, and a mutation that moves them answers
+    /// them from the float-blind cache.
+    /// </summary>
+    [Fact]
+    public void AFloatPageCarriesOverBlocksBelowItsFloats()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + "</style></head><body><div class=flt id=f>float</div><p id=t class=a>toggle text beside the float</p><div class=clr id=below>");
+        for (int i = 0; i < 30; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i} with some words in it</p>");
+        }
+
+        html.Append("</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+
+        // A mutation below the float: everything else is carried over.
+        NodeId last = tree.GetElementById("p29")!.Value;
+        tree.GetNode(last)!.SetAttribute("class", "c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(last, "class", null, "c"))])!;
+        Assert.True(second.Layout.TransplantedBoxes > 25, $"carried {second.Layout.TransplantedBoxes}");
+        Assert.True(second.Layout.AdoptedInlineItems > 25, $"adopted {second.Layout.AdoptedInlineItems}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+
+        // A mutation beside the float that moves everything below it.
+        NodeId target = tree.GetElementById("t")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "a big");
+        PreparedRender third = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, second,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a big"))])!;
+        Assert.True(third.Layout.AdoptedInlineItems > 25, $"adopted {third.Layout.AdoptedInlineItems}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, third));
     }
 
     private static PreparedRender Reference(DomTree tree)
@@ -458,12 +500,27 @@ public class IncrementalLayoutDifferentialTests
             }
             else
             {
-                next = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations);
+                try
+                {
+                    next = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    throw new InvalidOperationException($"fixture {fixture} seed {seed} step {step}: the incremental pass failed\nmutations:\n{log}", exception);
+                }
             }
 
             Assert.NotNull(next);
             string incremental = Snapshot(tree, next);
-            string reference = Snapshot(tree, Reference(tree));
+            string reference;
+            try
+            {
+                reference = Snapshot(tree, Reference(tree));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                throw new InvalidOperationException($"fixture {fixture} seed {seed} step {step}: the reference failed\nmutations:\n{log}", exception);
+            }
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
             {
                 if (Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_DUMP") is { } dumpDir)
