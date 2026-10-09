@@ -114,6 +114,14 @@ public interface IBlockItemStyle : ICoreStyle
 
     /// <summary>Whether the item clears floats.</summary>
     EClear Clear => EClear.None;
+
+    /// <summary>
+    /// Whether the item establishes an independent block formatting context (CSS 2.1 9.4.1:
+    /// <c>display: flow-root</c>, an inline-block, a table cell, an overflow clip and so on), so
+    /// it neither shares its parent's floats nor lets its own escape. Not in vendor/taffy, which
+    /// only knows scroll containers; set by the DOM builder for documents that have floats.
+    /// </summary>
+    bool EstablishesBfc => false;
 }
 
 /// <summary>The set of styles required for a Flexbox container.</summary>
@@ -136,6 +144,13 @@ public interface IFlexboxContainerStyle : ICoreStyle
 
     /// <summary>How should this node's children be aligned in the main axis.</summary>
     EAlignContent? JustifyContent => null;
+
+    /// <summary>
+    /// The container is an anonymous stand-in for a run of inline-level boxes (a line box), so
+    /// its items' percentages resolve against the block that contains the line, which is the
+    /// container's own percentage basis, not its (float-narrowed) width. Not in vendor/taffy.
+    /// </summary>
+    bool PercentBasisFromContainingBlock => false;
 }
 
 /// <summary>The set of styles required for a Flexbox item.</summary>
@@ -276,6 +291,12 @@ public sealed class Style
 
     /// <summary>Should the box clear floats.</summary>
     public EClear Clear { get; set; } = EClear.None;
+
+    /// <summary>See <see cref="IBlockItemStyle.EstablishesBfc"/>.</summary>
+    public bool EstablishesBfc { get; set; }
+
+    /// <summary>See <see cref="IFlexboxContainerStyle.PercentBasisFromContainingBlock"/>.</summary>
+    public bool PercentBasisFromContainingBlock { get; set; }
 
     /// <summary>What should the <c>position</c> value of this struct use as a base offset?</summary>
     public EPosition Position { get; set; } = EPosition.Relative;
@@ -425,6 +446,8 @@ public sealed class Style
         ScrollbarWidth = ScrollbarWidth,
         Float = Float,
         Clear = Clear,
+        EstablishesBfc = EstablishesBfc,
+        PercentBasisFromContainingBlock = PercentBasisFromContainingBlock,
         Position = Position,
         Inset = Inset,
         Size = Size,
@@ -483,6 +506,8 @@ public sealed class Style
             && ScrollbarWidth.Equals(other.ScrollbarWidth)
             && Float == other.Float
             && Clear == other.Clear
+            && EstablishesBfc == other.EstablishesBfc
+            && PercentBasisFromContainingBlock == other.PercentBasisFromContainingBlock
             && Position == other.Position
             && Inset == other.Inset
             && Size == other.Size

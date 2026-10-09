@@ -112,6 +112,30 @@ public sealed class BlockContext
         return slot;
     }
 
+    /// <summary>
+    /// The float exclusions an inline formatting context in this block lays its lines out
+    /// around, relative to this block's content box, whose edges sit the given distances inside
+    /// its border box. <c>null</c> when no float reaches the content box.
+    /// </summary>
+    public FloatBands? FloatBandsFor(float contentTop, float contentLeft, float contentRight) =>
+        _bfc.FloatContext.Bands(_yOffset + contentTop, _insetLeft + contentLeft, _insetRight + contentRight);
+
+    /// <summary>
+    /// The float-free slot for a float-avoiding box (a block formatting context root or a
+    /// replaced element) whose border box would span <c>[y, y + height)</c> in this block:
+    /// its left edge relative to this block's border box, and its width.
+    /// </summary>
+    public (float X, float Width) SlotOver(float y, float height)
+    {
+        (float left, float right) = _bfc.FloatContext.InsetsOver(
+            y + _yOffset, height, _contentBoxInsetLeft, _contentBoxInsetRight);
+        return (left - _insetLeft, _bfc.FloatContext.AvailableWidth - left - right);
+    }
+
+    /// <summary>The next float edge below <paramref name="y"/> (this block's coordinates), or <c>null</c>.</summary>
+    public float? NextFloatEdgeBelow(float y) =>
+        _bfc.FloatContext.NextEdgeBelow(y + _yOffset) is { } edge ? edge - _yOffset : null;
+
     /// <summary>Get the bottom of the lowest relevant float for the specified clear property.</summary>
     public float? ClearedThreshold(Clear clear)
     {
@@ -444,8 +468,12 @@ public static class BlockLayout
         // Root BFCs contain floats
         if (blockCtx.IsBfcRoot || isScrollContainer)
         {
-            intrinsicOuterHeight =
-                Sys.F32Max(intrinsicOuterHeight, blockCtx.FloatedContentHeightContribution());
+            // The floats' margin boxes end inside the content box; vendor/taffy compared them
+            // with the border-box height and so lost the bottom padding and border.
+            intrinsicOuterHeight = Sys.F32Max(
+                intrinsicOuterHeight,
+                blockCtx.FloatedContentHeightContribution()
+                    + (tree.HasFloats && blockCtx.HasFloats ? resolvedContentBoxInset.Bottom : 0.0f));
         }
 
         float containerOuterHeight =
@@ -509,7 +537,10 @@ public static class BlockLayout
         for (int i = 0; i < items.Count; i++)
         {
             var item = items[i];
-            if (item.Position != Position.Absolute && !item.CanBeCollapsedThrough)
+            // A float is out of flow: a block holding nothing but floats is still empty, and its
+            // margins collapse through it (CSS 2.1 8.3.1). vendor/taffy counted floats here.
+            if (item.Position != Position.Absolute && !item.CanBeCollapsedThrough
+                && !(tree.HasFloats && item.Float.IsFloated()))
             {
                 allInFlowChildrenCanBeCollapsedThrough = false;
                 break;
@@ -621,7 +652,7 @@ public static class BlockLayout
             bool isScrollContainer = overflow.X.IsScrollContainer() || overflow.Y.IsScrollContainer();
 
             bool isInSameBfc = isBlock && !isTable && position != Position.Absolute && isNotFloated
-                && !isScrollContainer;
+                && !isScrollContainer && !childStyle.EstablishesBfc;
 
             items.Add(new BlockItem
             {
@@ -675,6 +706,18 @@ public static class BlockLayout
         float maxChildWidth = 0.0f;
         var floatContribution = new FloatIntrinsicWidthCalculator(availableWidth);
 
+        // Floats before an in-flow box share its line in a max-content layout (Chromium's
+        // block min/max sizes add them to the next in-flow child until a clear). vendor/taffy
+        // took the max of the floats and the in-flow content instead.
+        var blockTree = tree as ILayoutBlockContainer;
+        bool addFloats = blockTree is { HasFloats: true } && availableWidth.Kind != AvailableSpaceKind.MinContent;
+        float floatsLeft = 0.0f;
+        float floatsRight = 0.0f;
+
+        // The floats anchored in the last inline formatting context share its line too.
+        (NodeId Float, int Offset)[]? lineAnchors = null;
+        float lineWidth = 0.0f;
+
         for (int i = 0; i < items.Count; i++)
         {
             var item = items[i];
@@ -701,10 +744,59 @@ public static class BlockLayout
             width = Sys.F32Max(width, item.PaddingBorderSum.Width) + itemXMarginSum;
 
             var floatDirection = item.Float.FloatDirection();
+            if (addFloats)
+            {
+                if (item.Clear is Clear.Left or Clear.Both)
+                {
+                    floatsLeft = 0.0f;
+                }
+
+                if (item.Clear is Clear.Right or Clear.Both)
+                {
+                    floatsRight = 0.0f;
+                }
+            }
+
             if (floatDirection.HasValue)
             {
                 floatContribution.AddFloat(width, floatDirection.Value, item.Clear);
+                if (addFloats && lineAnchors is not null && Array.Exists(lineAnchors, a => a.Float == item.NodeId))
+                {
+                    lineWidth += width;
+                    if (availableWidth.Kind == AvailableSpaceKind.Definite)
+                    {
+                        lineWidth = Sys.F32Min(lineWidth, Sys.F32Max(availableWidth.Unwrap(), 0.0f));
+                    }
+
+                    maxChildWidth = Sys.F32Max(maxChildWidth, lineWidth);
+                    continue;
+                }
+
+                if (addFloats)
+                {
+                    if (floatDirection.Value == FloatDirection.Left)
+                    {
+                        floatsLeft += width;
+                    }
+                    else
+                    {
+                        floatsRight += width;
+                    }
+                }
+
                 continue;
+            }
+
+            if (addFloats)
+            {
+                width += floatsLeft + floatsRight;
+                if (floatsLeft + floatsRight > 0.0f && availableWidth.Kind == AvailableSpaceKind.Definite)
+                {
+                    width = Sys.F32Min(width, Sys.F32Max(availableWidth.Unwrap(), 0.0f));
+                }
+
+                lineAnchors = blockTree!.InlineFloatAnchors(item.NodeId);
+                lineWidth = width;
             }
 
             maxChildWidth = Sys.F32Max(maxChildWidth, width);
@@ -758,6 +850,9 @@ public static class BlockLayout
         bool hasActiveFloats = blockCtx.HasActiveFloats(committedYOffset);
         float yOffsetForFloat = resolvedContentBoxInset.Top;
 
+        // Floats anchored in an inline formatting context, placed while laying that out.
+        HashSet<NodeId>? placedAnchors = null;
+
         for (int itemIndex = 0; itemIndex < items.Count; itemIndex++)
         {
             var item = items[itemIndex];
@@ -784,40 +879,21 @@ public static class BlockLayout
             {
                 hasActiveFloats = true;
 
-                var floatLayout = tree.PerformChildLayout(
-                    item.NodeId,
-                    GeometryExtensions.SizeNone,
-                    parentSize,
-                    GeometryExtensions.SizeMaxContent,
-                    SizingMode.InherentSize,
-                    GeometryExtensions.LineTrue);
-                var marginBox = floatLayout.Size.Add(itemNonAutoMargin.SumAxes());
-
-                var floatLocation = blockCtx.PlaceFloatedBox(
-                    marginBox, yOffsetForFloat, itemFloatDirection.Value, item.Clear);
-
-                // Convert the margin-box location returned by float placement into a border-box
-                // location for the output Layout
-                floatLocation.Y += itemNonAutoMargin.Top;
-                floatLocation.X += itemNonAutoMargin.Left;
-
-                var floatFinalLayout = new Layout
+                // A float anchored in an earlier inline formatting context was placed with it.
+                if (placedAnchors is not null && placedAnchors.Contains(item.NodeId))
                 {
-                    Order = item.Order,
-                    Size = floatLayout.Size,
-                    ContentSize = floatLayout.ContentSize,
-                    ScrollbarSize = scrollbarSize,
-                    Location = floatLocation,
-                    Padding = item.Padding,
-                    Border = item.Border,
-                    Margin = itemNonAutoMargin,
-                };
-                tree.SetUnroundedLayout(item.NodeId, in floatFinalLayout);
+                    continue;
+                }
 
-                inflowContentSize = inflowContentSize.F32Max(
-                    ContentSizeHelper.ComputeContentSizeContribution(
-                        floatLocation, floatLayout.Size, floatLayout.ContentSize, item.Overflow));
-
+                inflowContentSize = inflowContentSize.F32Max(PlaceFloat(
+                    tree,
+                    item,
+                    blockCtx,
+                    parentSize,
+                    containerInnerWidth,
+                    containerOuterWidth,
+                    yOffsetForFloat,
+                    itemFloatDirection.Value));
                 continue;
             }
 
@@ -844,7 +920,14 @@ public static class BlockLayout
 
                 float minY = committedYOffset + yMarginOffset;
 
-                if (hasActiveFloats)
+                if (hasActiveFloats && tree.HasFloats)
+                {
+                    // Placed by PlaceFloatAvoidingItem below, which needs the box's size.
+                    stretchWidth = containerInnerWidth - itemNonAutoXMarginSum;
+                    floatAvoidingPosition = new Point<float>(resolvedContentBoxInset.Left, minY);
+                    floatAvoidingWidth = containerInnerWidth;
+                }
+                else if (hasActiveFloats)
                 {
                     var slot = blockCtx.FindContentSlot(minY, item.Clear, null);
                     hasActiveFloats = slot.SegmentId.HasValue;
@@ -900,12 +983,54 @@ public static class BlockLayout
                 float insetLeft = itemNonAutoMargin.Left + contentBoxInset.Left;
                 float insetRight = containerOuterWidth - width - insetLeft;
 
-                var childBlockCtx = blockCtx.SubContext(
-                    Sys.F32Max(yOffsetForAbsolute + itemNonAutoMargin.Top, clearPos), insetLeft, insetRight);
+                float childTop = tree.HasFloats
+                    ? SameBfcChildTop(
+                        tree,
+                        item,
+                        itemNonAutoMargin.Top,
+                        containerInnerWidth,
+                        committedYOffset,
+                        activeCollapsibleMarginSet,
+                        isCollapsingWithFirstMarginSet && ownMarginsCollapseWithChildren.Start,
+                        clearPos)
+                    : Sys.F32Max(yOffsetForAbsolute + itemNonAutoMargin.Top, clearPos);
+                var childBlockCtx = blockCtx.SubContext(childTop, insetLeft, insetRight);
+                if (tree.HasFloats && tree.InlineFloatAnchors(item.NodeId) is { } anchors)
+                {
+                    hasActiveFloats = true;
+                    placedAnchors ??= [];
+                    inflowContentSize = inflowContentSize.F32Max(PlaceAnchoredFloats(
+                        tree,
+                        item,
+                        anchors,
+                        items,
+                        childInputs,
+                        childBlockCtx,
+                        blockCtx,
+                        childTop,
+                        parentSize,
+                        containerInnerWidth,
+                        containerOuterWidth,
+                        placedAnchors));
+                }
+
                 itemLayout = tree.ComputeBlockChildLayout(item.NodeId, childInputs, childBlockCtx);
 
                 float childContribution = childBlockCtx.FloatedContentHeightContribution();
-                blockCtx.AddChildFloatedContentHeightContribution(yOffsetForAbsolute + childContribution);
+                blockCtx.AddChildFloatedContentHeightContribution(
+                    (tree.HasFloats ? childTop : yOffsetForAbsolute) + childContribution);
+            }
+            else if (hasActiveFloats && tree.HasFloats)
+            {
+                (itemLayout, stretchWidth, floatAvoidingPosition, floatAvoidingWidth) = PlaceFloatAvoidingItem(
+                    tree,
+                    item,
+                    blockCtx,
+                    childInputs,
+                    floatAvoidingPosition.Y,
+                    clearPos,
+                    containerInnerWidth,
+                    itemNonAutoMargin);
             }
             else
             {
@@ -981,7 +1106,9 @@ public static class BlockLayout
                             - finalSize.Width
                             - resolvedMargin.Right
                             + insetOffset.X,
-                    Sys.F32Max(committedYOffset, clearPos) + yMarginOffset + insetOffset.Y);
+                    (tree.HasFloats
+                        ? ClearedBorderTop(committedYOffset + yMarginOffset, item.Clear, clearPos)
+                        : Sys.F32Max(committedYOffset, clearPos) + yMarginOffset) + insetOffset.Y);
             }
             else
             {
@@ -1078,7 +1205,12 @@ public static class BlockLayout
                 committedYOffset = location.Y - insetOffset.Y + itemLayout.Size.Height;
                 activeCollapsibleMarginSet = bottomMarginSet;
                 yOffsetForAbsolute = committedYOffset + activeCollapsibleMarginSet.Resolve();
-                yOffsetForFloat = committedYOffset;
+
+                // DEVIATION from vendor/taffy/src/compute/block.rs, which places a following
+                // float at the previous box's border edge. Chromium 141 (NextBorderEdge in
+                // NGBlockLayoutAlgorithm) adds the pending margin: a float after a block with
+                // `margin-bottom: 25px` sits 25px below it, level with the next block.
+                yOffsetForFloat = tree.HasFloats ? yOffsetForAbsolute : committedYOffset;
             }
         }
 
@@ -1089,6 +1221,424 @@ public static class BlockLayout
         committedYOffset += resolvedContentBoxInset.Bottom + bottomYMarginOffset;
         float contentHeight = Sys.F32Max(0.0f, committedYOffset);
         return (inflowContentSize, contentHeight, firstChildTopMarginSet, lastChildBottomMarginSet);
+    }
+
+    /// <summary>
+    /// Lay a float out (shrink-to-fit unless it has a width) and place it in the BFC no higher
+    /// than <paramref name="minY"/> (this block's coordinates, CSS 2.1 9.5.1). Returns its
+    /// content-size contribution.
+    /// </summary>
+    private static Size<float> PlaceFloat(
+        ILayoutBlockContainer tree,
+        BlockItem item,
+        BlockContext blockCtx,
+        Size<float?> parentSize,
+        float containerInnerWidth,
+        float containerOuterWidth,
+        float minY,
+        FloatDirection direction)
+    {
+        var calc = tree.CalcResolver();
+        var itemNonAutoMargin = item.Margin
+            .Map(m => m.ResolveToOption(containerOuterWidth, calc))
+            .Map(static m => m ?? 0.0f);
+        float itemNonAutoXMarginSum = itemNonAutoMargin.HorizontalAxisSum();
+        var scrollbarSize = new Size<float>(
+            item.Overflow.Y == Overflow.Scroll ? item.ScrollbarWidth : 0.0f,
+            item.Overflow.X == Overflow.Scroll ? item.ScrollbarWidth : 0.0f);
+
+        var floatLayout = LayoutFloat(tree, item, parentSize, containerInnerWidth, itemNonAutoXMarginSum);
+        var marginBox = floatLayout.Size.Add(itemNonAutoMargin.SumAxes());
+
+        // A negative margin can make the margin box narrower than nothing; it still
+        // occupies no space then, and its border box is placed from the margin edge.
+        marginBox = new Size<float>(Sys.F32Max(marginBox.Width, 0.0f), Sys.F32Max(marginBox.Height, 0.0f));
+
+        var floatLocation = blockCtx.PlaceFloatedBox(marginBox, minY, direction, item.Clear);
+
+        // Convert the margin-box location returned by float placement into a border-box
+        // location for the output Layout
+        floatLocation.Y += itemNonAutoMargin.Top;
+        floatLocation.X += itemNonAutoMargin.Left;
+
+        var floatFinalLayout = new Layout
+        {
+            Order = item.Order,
+            Size = floatLayout.Size,
+            ContentSize = floatLayout.ContentSize,
+            ScrollbarSize = scrollbarSize,
+            Location = floatLocation,
+            Padding = item.Padding,
+            Border = item.Border,
+            Margin = itemNonAutoMargin,
+        };
+        tree.SetUnroundedLayout(item.NodeId, in floatFinalLayout);
+
+        return ContentSizeHelper.ComputeContentSizeContribution(
+            floatLocation, floatLayout.Size, floatLayout.ContentSize, item.Overflow);
+    }
+
+    /// <summary>The float's size: its own width, or shrink-to-fit in the containing block.</summary>
+    /// <remarks>
+    /// DEVIATION from vendor/taffy/src/compute/block.rs, which lays a float out at max-content
+    /// with collapsible margins. CSS 2.1 10.3.5: an auto-width float is shrink-to-fit against
+    /// its containing block, and it establishes a BFC, so its margins never collapse with its
+    /// children. Chromium 141 wraps a float holding a long paragraph at the containing block's
+    /// width.
+    /// </remarks>
+    private static LayoutOutput LayoutFloat(
+        ILayoutBlockContainer tree,
+        BlockItem item,
+        Size<float?> parentSize,
+        float containerInnerWidth,
+        float marginX)
+    {
+        float available = Sys.F32Max(containerInnerWidth - marginX, 0.0f);
+        var floatAvailable = new Size<AvailableSpace>(AvailableSpace.Definite(available), AvailableSpace.MaxContent);
+        var floatKnown = GeometryExtensions.SizeNone;
+        if (!item.Size.Width.HasValue && tree.HasFloats)
+        {
+            floatKnown.Width = ShrinkToFitWidth(tree, item, parentSize, available);
+        }
+
+        return tree.PerformChildLayout(
+            item.NodeId,
+            floatKnown,
+            parentSize,
+            floatAvailable,
+            SizingMode.InherentSize,
+            GeometryExtensions.LineFalse);
+    }
+
+    /// <summary>
+    /// How many anchored floats of one inline formatting context each get a fresh layout of its
+    /// lines before being placed; see <see cref="PlaceAnchoredFloats"/>.
+    /// </summary>
+    private const int MaxAnchorRelayouts = 32;
+
+    /// <summary>
+    /// Place the floats anchored in a same-BFC inline formatting context leaf, in order: each
+    /// on the line holding its text offset when its margin box fits in what that line has left,
+    /// below that line otherwise (CSS 2.1 9.5.1 rules 6 and 8; Chromium's line breaker places
+    /// a float when it reaches it). The leaf is laid out again after each, so the lines from
+    /// there on see it. Returns the floats' content-size contribution.
+    /// </summary>
+    /// <remarks>
+    /// New behaviour, not a port: vendor/taffy has no inline layout, and
+    /// crates/obscura-render/src/dom.rs split the paragraph at the float.
+    /// </remarks>
+    private static Size<float> PlaceAnchoredFloats(
+        ILayoutBlockContainer tree,
+        BlockItem leaf,
+        (NodeId Float, int Offset)[] anchors,
+        List<BlockItem> items,
+        LayoutInput leafInputs,
+        BlockContext leafCtx,
+        BlockContext blockCtx,
+        float leafTop,
+        Size<float?> parentSize,
+        float containerInnerWidth,
+        float containerOuterWidth,
+        HashSet<NodeId> placed)
+    {
+        var contribution = GeometryExtensions.SizeZero;
+        var calc = tree.CalcResolver();
+        float contentTop = leaf.Padding.Top + leaf.Border.Top;
+        int relayouts = 0;
+        int anchorIndex = 0;
+        while (anchorIndex < anchors.Length)
+        {
+            // Lay the lines out around the floats placed so far, to find the anchors' lines.
+            // Each float can move every line after it, so the leaf is laid out again before
+            // the next one; past MaxAnchorRelayouts the rest are placed from one layout, which
+            // keeps a paragraph of thousands of floats linear.
+            tree.ComputeBlockChildLayout(leaf.NodeId, leafInputs, leafCtx);
+            bool batch = ++relayouts > MaxAnchorRelayouts;
+            int count = batch ? anchors.Length - anchorIndex : 1;
+            int[] offsets = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                offsets[i] = anchors[anchorIndex + i].Offset;
+            }
+
+            var lines = tree.InlineAnchorLines(leaf.NodeId, offsets);
+            for (int i = 0; i < count; i++)
+            {
+                NodeId floatNode = anchors[anchorIndex + i].Float;
+                BlockItem? floatItem = null;
+                foreach (BlockItem candidate in items)
+                {
+                    if (candidate.NodeId == floatNode)
+                    {
+                        floatItem = candidate;
+                        break;
+                    }
+                }
+
+                if (floatItem?.Float.FloatDirection() is not { } direction || placed.Contains(floatNode))
+                {
+                    continue;
+                }
+
+                float minY = leafTop + contentTop;
+                if (lines[i] is { } line)
+                {
+                    float marginX = floatItem.Margin
+                        .Map(m => m.ResolveToOption(containerOuterWidth, calc))
+                        .Map(static m => m ?? 0.0f)
+                        .HorizontalAxisSum();
+                    var size = LayoutFloat(tree, floatItem, parentSize, containerInnerWidth, marginX);
+                    float width = Sys.F32Max(size.Size.Width + marginX, 0.0f);
+                    bool fits = line.Used <= 0.01f || line.Used + width <= line.Width + 0.01f;
+                    minY += line.Top + (fits ? 0.0f : line.Height);
+                }
+
+                contribution = contribution.F32Max(PlaceFloat(
+                    tree, floatItem, blockCtx, parentSize, containerInnerWidth, containerOuterWidth, minY, direction));
+                placed.Add(floatNode);
+            }
+
+            anchorIndex += count;
+        }
+
+        return contribution;
+    }
+
+    /// <summary>
+    /// CSS 2.1 10.3.5: the used width of an auto-width float is
+    /// <c>min(max(min-content, available), max-content)</c>, then clamped by its min and max
+    /// width. Measuring the box at the available width instead gave the widest line it wrapped
+    /// to, narrower than Chromium's box when the text wraps.
+    /// </summary>
+    private static float ShrinkToFitWidth(
+        ILayoutBlockContainer tree,
+        BlockItem item,
+        Size<float?> parentSize,
+        float available)
+    {
+        float maxContent = tree.MeasureChildSize(
+            item.NodeId,
+            GeometryExtensions.SizeNone,
+            parentSize,
+            new Size<AvailableSpace>(AvailableSpace.MaxContent, AvailableSpace.MaxContent),
+            SizingMode.ContentSize,
+            AbsoluteAxis.Horizontal,
+            GeometryExtensions.LineFalse);
+        float width = maxContent;
+        if (maxContent > available)
+        {
+            float minContent = tree.MeasureChildSize(
+                item.NodeId,
+                GeometryExtensions.SizeNone,
+                parentSize,
+                new Size<AvailableSpace>(AvailableSpace.MinContent, AvailableSpace.MaxContent),
+                SizingMode.ContentSize,
+                AbsoluteAxis.Horizontal,
+                GeometryExtensions.LineFalse);
+            width = Sys.F32Max(minContent, available);
+        }
+
+        width = Sys.F32Max(width, item.PaddingBorderSum.Width);
+        if (item.MaxSize.Width is { } max)
+        {
+            width = Sys.F32Min(width, max);
+        }
+
+        if (item.MinSize.Width is { } min)
+        {
+            width = Sys.F32Max(width, min);
+        }
+
+        return width;
+    }
+
+    /// <summary>
+    /// The border-top of a box whose hypothetical position (margins collapsed, no clearance)
+    /// is <paramref name="hypothetical"/>: CSS 2.1 9.5.2 gives it clearance only when that
+    /// position is above the relevant floats' bottom, and then puts its border edge there.
+    /// </summary>
+    private static float ClearedBorderTop(float hypothetical, Clear clear, float clearPos) =>
+        clear != Clear.None && clearPos > hypothetical ? clearPos : hypothetical;
+
+    /// <summary>
+    /// The border-top of a same-BFC child relative to its parent's border-top, before the child
+    /// is laid out: what its sub-context needs so floats and line boxes inside it line up with
+    /// the BFC.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from vendor/taffy/src/compute/block.rs, which offsets the sub-context by the
+    /// previous margin plus the child's own margin, uncollapsed, and so put a float inside
+    /// `&lt;div&gt;&lt;p style="margin-top:30px"&gt;` 30px off the line boxes beside it. The child's
+    /// margin collapses with the pending one and with the top margins of its first in-flow
+    /// descendants that adjoin it (Chromium resolves the BFC offset only once those are known);
+    /// when the child is the first in a parent whose margin it collapses with, all of that
+    /// escapes the parent and the child sits at the content top.
+    /// </remarks>
+    private static float SameBfcChildTop(
+        ILayoutBlockContainer tree,
+        BlockItem item,
+        float ownTopMargin,
+        float containerInnerWidth,
+        float committedYOffset,
+        CollapsibleMarginSet active,
+        bool marginsEscapeParent,
+        float clearPos)
+    {
+        if (marginsEscapeParent)
+        {
+            return ClearedBorderTop(committedYOffset, item.Clear, clearPos);
+        }
+
+        var set = active
+            .CollapseWithMargin(ownTopMargin)
+            .CollapseWithSet(DescendantTopMarginChain(tree, item.NodeId, containerInnerWidth));
+        return ClearedBorderTop(committedYOffset + set.Resolve(), item.Clear, clearPos);
+    }
+
+    /// <summary>
+    /// The top margins of the first in-flow descendants that collapse through
+    /// <paramref name="node"/>'s top edge, read from the styles (CSS 2.1 8.3.1). A chain stops at
+    /// a top border or padding, a formatting context root or a box that is not a block.
+    /// </summary>
+    private static CollapsibleMarginSet DescendantTopMarginChain(
+        ILayoutBlockContainer tree,
+        NodeId node,
+        float width)
+    {
+        var calc = tree.CalcResolver();
+        var set = CollapsibleMarginSet.Zero;
+        for (int depth = 0; depth < 64; depth++)
+        {
+            var style = tree.GetBlockContainerStyle(node);
+            if (!style.IsBlock
+                || style.Overflow.X.IsScrollContainer()
+                || style.Overflow.Y.IsScrollContainer()
+                || tree.GetBlockChildStyle(node).EstablishesBfc
+                || style.Padding.Top.ResolveOrZero((float?)width, calc) > 0.0f
+                || style.Border.Top.ResolveOrZero((float?)width, calc) > 0.0f
+                || tree.ChildCount(node) == 0)
+            {
+                return set;
+            }
+
+            NodeId? first = null;
+            foreach (var child in tree.ChildIds(node))
+            {
+                var childStyle = tree.GetBlockChildStyle(child);
+                if (childStyle.BoxGenerationMode == BoxGenerationMode.None
+                    || childStyle.Position == Position.Absolute
+                    || childStyle.Float.IsFloated())
+                {
+                    continue;
+                }
+
+                first = child;
+                break;
+            }
+
+            if (first is not { } next)
+            {
+                return set;
+            }
+
+            var nextStyle = tree.GetBlockChildStyle(next);
+            if (nextStyle.Clear != Clear.None)
+            {
+                return set;
+            }
+
+            set = set.CollapseWithMargin(nextStyle.Margin.Top.ResolveOrZero((float?)width, calc));
+            if (!nextStyle.IsBlock || nextStyle.IsTable)
+            {
+                return set;
+            }
+
+            node = next;
+        }
+
+        return set;
+    }
+
+    /// <summary>
+    /// Place an in-flow box that must not overlap floats (a block formatting context root, a
+    /// table or a replaced box; CSS 2.1 9.5): at the first position at or below
+    /// <paramref name="minY"/> where its margin box fits beside the floats over its whole
+    /// height, narrowing an auto-width box to the space left there.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from vendor/taffy/src/compute/block.rs, which takes the float-free slot at
+    /// <paramref name="minY"/> whatever its width, so a 300px `overflow: hidden` block beside a
+    /// 150px float in a 400px container overflowed it; Chromium 141 moves it below the float.
+    /// </remarks>
+    private static (LayoutOutput Layout, float StretchWidth, Point<float> Position, float SlotWidth)
+        PlaceFloatAvoidingItem(
+            ILayoutBlockContainer tree,
+            BlockItem item,
+            BlockContext blockCtx,
+            LayoutInput childInputs,
+            float minY,
+            float clearPos,
+            float containerInnerWidth,
+            Rect<float> margin)
+    {
+        float y = item.Clear != Clear.None ? Sys.F32Max(minY, clearPos) : minY;
+        float marginX = margin.HorizontalAxisSum();
+        float marginY = margin.VerticalAxisSum();
+        bool autoWidth = !item.IsTable && !item.Size.Width.HasValue;
+        LayoutOutput layout = default;
+        float stretch = 0.0f;
+        (float X, float Width) slot = default;
+
+        for (int attempt = 0; attempt < 256; attempt++)
+        {
+            PocketCalculator.Dom.WorkCancellation.ThrowIfCancellationRequested();
+            slot = blockCtx.SlotOver(y, 0.0f);
+            for (int pass = 0; pass < 2; pass++)
+            {
+                stretch = slot.Width - marginX;
+                layout = LayoutAtStretch(tree, item, childInputs, stretch);
+                var over = blockCtx.SlotOver(y, layout.Size.Height + marginY);
+                if (!autoWidth || over.Width >= slot.Width - 0.01f)
+                {
+                    slot = over;
+                    break;
+                }
+
+                slot = over;
+            }
+
+            bool intruded = slot.Width < containerInnerWidth - 0.01f;
+            if (!intruded || layout.Size.Width + marginX <= slot.Width + 0.01f)
+            {
+                break;
+            }
+
+            if (blockCtx.NextFloatEdgeBelow(y) is not { } next)
+            {
+                break;
+            }
+
+            y = next;
+        }
+
+        return (layout, stretch, new Point<float>(slot.X, y), slot.Width);
+    }
+
+    private static LayoutOutput LayoutAtStretch(
+        ILayoutBlockContainer tree,
+        BlockItem item,
+        LayoutInput childInputs,
+        float stretch)
+    {
+        if (!item.IsTable)
+        {
+            var known = childInputs.KnownDimensions;
+            known.Width = (item.Size.Width ?? stretch).MaybeClamp(item.MinSize.Width, item.MaxSize.Width);
+            childInputs.KnownDimensions = known.MaybeClamp(item.MinSize, item.MaxSize);
+        }
+
+        childInputs.AvailableSpace = childInputs.AvailableSpace.MapWidth(_ => AvailableSpace.Definite(stretch));
+        return tree.ComputeChildLayout(item.NodeId, childInputs);
     }
 
     /// <summary>Perform absolute layout on all absolutely positioned children.</summary>

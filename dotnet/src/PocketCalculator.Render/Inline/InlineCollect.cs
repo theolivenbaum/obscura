@@ -240,6 +240,13 @@ internal sealed class Collector
     public List<InlineBoundaryEvent> BoundaryEvents = [];
     public int TextLength;
 
+    /// <summary>
+    /// Floats met in the inline content, with the text offset they sit at, when the caller
+    /// lays them out as CSS floats anchored to their line (see <c>TextEngine.TryBuildRun</c>);
+    /// null otherwise.
+    /// </summary>
+    public List<(NodeId Float, int Offset)>? FloatAnchors;
+
     // Text appended to output[^1] and not yet written back into it. Concatenating onto the
     // last span's string for every run that shares its attributes copied the paragraph so far
     // each time, quadratic for a paragraph of many alike sibling elements.
@@ -596,7 +603,8 @@ public static class Inline
         DomTree tree,
         NodeId cid,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        ref bool hasText)
+        ref bool hasText,
+        bool allowFloats = false)
     {
         if (!StackGuard.CanDescend())
         {
@@ -640,6 +648,13 @@ public static class Inline
             return true;
         }
 
+        // A float in a document laid out with CSS floats is anchored to the line it sits on
+        // and laid out by the block formatting context; it adds nothing to the text.
+        if (allowFloats && style.Float is not null && style.Position != Position.Absolute)
+        {
+            return true;
+        }
+
         // A replaced element or an atomic inline-block has its own box with non-text content.
         if (IsReplaced(element.Name.Local) || style.IsInlineBlock)
         {
@@ -664,7 +679,7 @@ public static class Inline
 
         foreach (NodeId grandchild in RenderedChildren(tree, cid))
         {
-            if (!InlineChildOk(tree, grandchild, styles, ref hasText))
+            if (!InlineChildOk(tree, grandchild, styles, ref hasText, allowFloats))
             {
                 return false;
             }

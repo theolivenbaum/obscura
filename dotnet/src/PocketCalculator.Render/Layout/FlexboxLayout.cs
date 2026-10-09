@@ -179,6 +179,16 @@ internal sealed class AlgoConstants
     /// <summary>The content-box size of the node being laid out (if known).</summary>
     public Size<float?> NodeInnerSize;
 
+    /// <summary>
+    /// The width the items' percentages resolve against when it is not the container's own
+    /// (<see cref="IFlexboxContainerStyle.PercentBasisFromContainingBlock"/>); null otherwise.
+    /// </summary>
+    public float? ChildPercentBasisWidth;
+
+    /// <summary>What the items' percentages resolve against.</summary>
+    public Size<float?> ChildPercentBasis =>
+        ChildPercentBasisWidth is { } width ? new Size<float?>(width, NodeInnerSize.Height) : NodeInnerSize;
+
     /// <summary>The size of the virtual container containing the flex items.</summary>
     public Size<float> ContainerSize;
 
@@ -500,6 +510,12 @@ public static class FlexboxLayout
             JustifyContent = justifyContent,
             NodeOuterSize = nodeOuterSize,
             NodeInnerSize = nodeInnerSize,
+            // DEVIATION from vendor/taffy/src/compute/flexbox.rs, where items' percentages are
+            // always of the container. The DOM builder's stand-in for a line of inline-blocks
+            // beside a float is narrowed to the space the float leaves, but a percentage on an
+            // inline-block is of the block that holds the line (Chromium 141: wikipedia.org's
+            // 65% `.other-projects` beside its 35% float is 815px, not 65% of the 815px left).
+            ChildPercentBasisWidth = style.PercentBasisFromContainingBlock ? parentSize.Width : null,
             ContainerSize = GeometryExtensions.SizeZero,
             InnerContainerSize = GeometryExtensions.SizeZero,
         };
@@ -533,8 +549,9 @@ public static class FlexboxLayout
 
             float? aspectRatio = childStyle.AspectRatio;
             var rawSize = childStyle.Size;
-            var padding = childStyle.Padding.ResolveOrZero(constants.NodeInnerSize.Width, calc);
-            var border = childStyle.Border.ResolveOrZero(constants.NodeInnerSize.Width, calc);
+            var percentBasis = constants.ChildPercentBasis;
+            var padding = childStyle.Padding.ResolveOrZero(percentBasis.Width, calc);
+            var border = childStyle.Border.ResolveOrZero(percentBasis.Width, calc);
             var pbSum = padding.Add(border).SumAxes();
             var boxSizingAdjustment =
                 childStyle.BoxSizing == BoxSizing.ContentBox ? pbSum : GeometryExtensions.SizeZero;
@@ -542,15 +559,15 @@ public static class FlexboxLayout
                 childStyle.AspectRatioUsesContentBox ? pbSum : boxSizingAdjustment;
 
             var size = MaybeApplyPreferredAspectRatio(
-                rawSize.MaybeResolve(constants.NodeInnerSize, calc).MaybeAdd(boxSizingAdjustment),
+                rawSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment),
                 aspectRatio,
                 aspectRatioAdjustment);
             var minSize = MaybeApplyPreferredAspectRatio(
-                childStyle.MinSize.MaybeResolve(constants.NodeInnerSize, calc).MaybeAdd(boxSizingAdjustment),
+                childStyle.MinSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment),
                 aspectRatio,
                 aspectRatioAdjustment);
             var maxSize = MaybeApplyPreferredAspectRatio(
-                childStyle.MaxSize.MaybeResolve(constants.NodeInnerSize, calc).MaybeAdd(boxSizingAdjustment),
+                childStyle.MaxSize.MaybeResolve(percentBasis, calc).MaybeAdd(boxSizingAdjustment),
                 aspectRatio,
                 aspectRatioAdjustment);
 
@@ -566,8 +583,8 @@ public static class FlexboxLayout
                 CrossSizeIsAuto = rawSize.Cross(constants.Dir).IsAuto,
 
                 Inset = childStyle.Inset.ZipSize(
-                    constants.NodeInnerSize, (p, s) => p.MaybeResolve(s, calc)),
-                Margin = childStyle.Margin.ResolveOrZero(constants.NodeInnerSize.Width, calc),
+                    percentBasis, (p, s) => p.MaybeResolve(s, calc)),
+                Margin = childStyle.Margin.ResolveOrZero(percentBasis.Width, calc),
                 MarginIsAuto = childStyle.Margin.Map(static m => m.IsAuto),
                 Padding = padding,
                 Border = border,

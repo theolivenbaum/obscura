@@ -355,13 +355,14 @@ public sealed partial class TextEngine : IDisposable
         DomTree tree,
         NodeId parent,
         IReadOnlyList<NodeId> run,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowFloats = false)
     {
         run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
-            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText))
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats))
             {
                 return null;
             }
@@ -378,6 +379,11 @@ public sealed partial class TextEngine : IDisposable
         }
 
         var collector = new Collector();
+        if (allowFloats)
+        {
+            collector.FloatAnchors = [];
+        }
+
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -392,6 +398,29 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return PushShapedItem(style, context, spans, collector);
+    }
+
+    /// <summary>
+    /// Whether <see cref="TryBuildRun"/> with floats allowed would fold <paramref name="run"/>,
+    /// without building anything.
+    /// </summary>
+    internal static bool CanFoldRun(
+        DomTree tree,
+        NodeId parent,
+        IReadOnlyList<NodeId> run,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        run = LiftFlattenedWrappers(tree, parent, run, styles);
+        bool hasText = false;
+        foreach (NodeId cid in run)
+        {
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats: true))
+            {
+                return false;
+            }
+        }
+
+        return hasText && styles.ContainsKey(parent);
     }
 
     /// <summary>
@@ -600,8 +629,18 @@ public sealed partial class TextEngine : IDisposable
             };
         }
 
+        List<(NodeId Float, int Offset)>? floatAnchors = null;
+        if (collector.FloatAnchors is { Count: > 0 } anchors)
+        {
+            floatAnchors = new List<(NodeId Float, int Offset)>(anchors.Count);
+            foreach ((NodeId floatNode, int offset) in anchors)
+            {
+                floatAnchors.Add((floatNode, Math.Min(offset, textLength)));
+            }
+        }
+
         string? ownerText = null;
-        if (ownerBoxes.Count > 0)
+        if (ownerBoxes.Count > 0 || floatAnchors is not null)
         {
             var builder = new StringBuilder(textLength);
             foreach ((string text, SpanAttrs _) in spans)
@@ -778,6 +817,7 @@ public sealed partial class TextEngine : IDisposable
             OwnerBoxes = ownerBoxes,
             BoundaryEvents = boundaryEvents,
             RelativeOwnerRanges = [],
+            FloatAnchors = floatAnchors,
         });
         return index;
     }
@@ -990,6 +1030,134 @@ public sealed partial class TextEngine : IDisposable
         return new Size<float>(measuredWidth, measuredHeight);
     }
 
+    /// <summary>Forget the float exclusions recorded by the last final layout of an IFC.</summary>
+    internal void ForgetFloatBands(int index)
+    {
+        if ((index & ReplacedContextBit) == 0 && index < _items.Count)
+        {
+            _items[index].FloatBands = null;
+        }
+    }
+
+    /// <summary>The floats anchored in inline context <paramref name="index"/>, or null.</summary>
+    internal List<(NodeId Float, int Offset)>? FloatAnchorsOf(int index) =>
+        (index & ReplacedContextBit) == 0 && index < _items.Count ? _items[index].FloatAnchors : null;
+
+    /// <summary>
+    /// For each of <paramref name="offsets"/> (ascending text offsets), the line box of the
+    /// last layout of context <paramref name="index"/> that holds it, relative to the content
+    /// box: its top, its height, its width (the space floats leave it), and how much of that
+    /// the content before the offset already uses. A float anchored there is placed on that
+    /// line when it fits in the rest (CSS 2.1 9.5.1 rule 8: as high as possible), below it
+    /// otherwise.
+    /// </summary>
+    public (float Top, float Height, float Width, float Used)?[] AnchorLines(int index, int[] offsets)
+    {
+        var result = new (float Top, float Height, float Width, float Used)?[offsets.Length];
+        if ((index & ReplacedContextBit) != 0 || index >= _items.Count || offsets.Length == 0)
+        {
+            return result;
+        }
+
+        InlineItem item = _items[index];
+        if (item.OwnerText is not { } source)
+        {
+            return result;
+        }
+
+        List<int> starts = InlineGeometry.SourceLineStarts(item.Buffer, source);
+        int next = 0;
+        LayoutRun? previous = null;
+        int previousStart = 0;
+        foreach (LayoutRun run in item.Buffer.LayoutRuns())
+        {
+            int lineStart = run.LineIndex < starts.Count ? starts[run.LineIndex] : 0;
+            int end = int.MinValue;
+            foreach (LayoutGlyph glyph in run.Glyphs)
+            {
+                end = Math.Max(end, glyph.End);
+            }
+
+            // An offset before this run's start belongs to the line before (a line ends at
+            // its last glyph; the collapsed space after it starts nothing).
+            while (next < offsets.Length && previous is not null && offsets[next] < lineStart)
+            {
+                result[next] = AnchorOn(previous, offsets[next] - previousStart);
+                next++;
+            }
+
+            while (next < offsets.Length
+                && offsets[next] >= lineStart
+                && (run.Glyphs.Count == 0 || offsets[next] - lineStart < end))
+            {
+                result[next] = AnchorOn(run, offsets[next] - lineStart);
+                next++;
+            }
+
+            previous = run;
+            previousStart = lineStart;
+            if (next == offsets.Length)
+            {
+                break;
+            }
+        }
+
+        for (; next < offsets.Length && previous is not null; next++)
+        {
+            result[next] = AnchorOn(previous, offsets[next] - previousStart);
+        }
+
+        return result;
+
+        static (float Top, float Height, float Width, float Used) AnchorOn(LayoutRun line, int local)
+        {
+            float lineStartX = line.Glyphs.Count > 0 ? F32.Min(line.Glyphs[0].X, line.X) : line.X;
+            float used = F32.Max(InlineGeometry.RunCursorX(line, Math.Max(local, 0)) - lineStartX, 0f);
+            return (line.LineTop, line.LineHeight, line.LineWidth, used);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="MeasureTaffy"/> for a leaf in a block formatting context with floats:
+    /// <paramref name="bands"/> are the floats beside its content box. A final layout records
+    /// them, so <see cref="Finalize"/> breaks the lines the way the box was sized.
+    /// </summary>
+    public Size<float> MeasureTaffyAroundFloats(
+        int index,
+        Size<float?> known,
+        Size<AvailableSpace> available,
+        FloatBands? bands,
+        RunMode runMode)
+    {
+        if ((index & ReplacedContextBit) != 0)
+        {
+            return MeasureTaffy(index, known, available);
+        }
+
+        InlineItem item = _items[index];
+        float? width = known.Width ?? (available.Width.Kind == AvailableSpaceKind.Definite
+            ? available.Width.Unwrap()
+            : null);
+        if (!bands!.Intrudes || width is not { } definite)
+        {
+            if (runMode == RunMode.PerformLayout)
+            {
+                item.FloatBands = null;
+            }
+
+            return MeasureTaffy(index, known, available);
+        }
+
+        if (runMode == RunMode.PerformLayout)
+        {
+            item.FloatBands = bands;
+        }
+
+        ShapeWithTextIndent(item, definite, item.LayoutWrap, bands);
+        (float shapedWidth, float height, bool clamped) = InlineGeometry.BufferSize(item);
+        return new Size<float>(shapedWidth, clamped ? height : F32.Max(height, item.ForcedMinHeight));
+    }
+
     /// <summary>
     /// After layout, pin each context to its final content-box origin and clip, reshaping once
     /// at the resolved width so paint draws the same line breaks the box was sized for.
@@ -998,8 +1166,8 @@ public sealed partial class TextEngine : IDisposable
     {
         InlineItem item = _items[index];
         contentWidth = F32.Max(contentWidth, 0f);
-        ShapeWithTextIndent(item, contentWidth, item.LayoutWrap);
-        float balancedWidth = item.BalanceWrap
+        ShapeWithTextIndent(item, contentWidth, item.LayoutWrap, item.FloatBands);
+        float balancedWidth = item.BalanceWrap && item.FloatBands is null
             ? BalanceWrapWidth(item.Buffer, contentWidth) ?? contentWidth
             : contentWidth;
         float alignmentInset = F32.Max(contentWidth - balancedWidth, 0f) * item.Align switch
@@ -1228,7 +1396,7 @@ public sealed partial class TextEngine : IDisposable
                     || runs[runIndex + 1].LineIndex != run.LineIndex;
                 float firstLineOffset = lineIndex == 0 ? item.FirstLineOffset : 0f;
                 float alignmentShift = InlineGeometry.LineEdgeAlignmentShift(item, lineStart, lineEnd);
-                float lineRight = run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
+                float lineRight = run.X + run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
 
                 // DEVIATION from crates/obscura-render/src/inline.rs, whose continuing fragment
                 // runs to the line's full advance. The white space a soft wrap leaves at the
@@ -1541,7 +1709,7 @@ public sealed partial class TextEngine : IDisposable
     /// edges force an earlier break. Only final visual-line boundaries split buffer lines, so
     /// ligatures and kerning are not broken merely because an inline element starts or ends.
     /// </remarks>
-    private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap)
+    private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap, FloatBands? bands = null)
     {
         float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width);
         item.FirstLineOffset = indent * item.Align switch
@@ -1551,8 +1719,20 @@ public sealed partial class TextEngine : IDisposable
             _ => 1f,
         };
 
+        if (bands is not null && width is { } floatWidth)
+        {
+            ShapeAroundFloats(item, floatWidth, indent, wrap, bands);
+            return;
+        }
+
         if (item.SourceBuffer is not { } source)
         {
+            if (item.PristineBuffer is { } pristine)
+            {
+                // A float layout split the lines; start again from the paragraphs as built.
+                item.Buffer = pristine.Clone();
+            }
+
             item.Buffer.SetWrap(wrap);
             item.Buffer.SetSize(width is { } value ? F32.Max(value, 0f) : null, null);
             item.Buffer.ShapeUntilScroll(_shaper);
@@ -1703,6 +1883,214 @@ public sealed partial class TextEngine : IDisposable
 
         item.Buffer.SetSize(width is { } finalWidth ? F32.Max(finalWidth, 0f) : null, null);
         item.Buffer.ShapeUntilScroll(_shaper);
+    }
+
+    /// <summary>
+    /// Lay the IFC's lines out around floats (CSS 2.1 9.5): each line box is shortened by the
+    /// floats beside it, and a line whose first word does not fit beside them moves down to the
+    /// next float edge. Every visual line becomes its own buffer line, laid out (and aligned)
+    /// at its own width and drawn from its own left edge.
+    /// </summary>
+    /// <remarks>
+    /// New behaviour, not a port: crates/obscura-render lays floats out as flex rows and its
+    /// line breaker only knows one width.
+    /// </remarks>
+    private void ShapeAroundFloats(InlineItem item, float width, float indent, Wrap wrap, FloatBands bands)
+    {
+        TextBuffer source = item.SourceBuffer ?? (item.PristineBuffer ??= item.Buffer.Clone());
+        item.Buffer = source.Clone();
+        TextBuffer buffer = item.Buffer;
+        buffer.SetWrap(wrap);
+        TextMetrics metrics = buffer.Metrics;
+        float? mono = buffer.MonospaceWidth;
+        int tabWidth = buffer.TabWidth;
+        float fullWidth = F32.Max(width, 0f);
+        string? sourceText = item.OwnerText;
+        float strut = F32.Max(metrics.Above + metrics.Below, 0f);
+        bool windowable = true;
+        foreach (BufferLine paragraph in source.Lines)
+        {
+            if (Bidi.AnyRightToLeft(paragraph.Text))
+            {
+                windowable = false;
+                break;
+            }
+        }
+
+        int sourceOffset = 0;
+        bool sourceAfterBreak = false;
+        float y = 0f;
+        int lineIndex = 0;
+        while (lineIndex < buffer.Lines.Count)
+        {
+            WorkCancellation.ThrowIfCancellationRequested();
+            int lineOffset = sourceOffset;
+            bool lineAfterBreak = sourceAfterBreak;
+            int globalStart = sourceText is null
+                ? 0
+                : InlineGeometry.NextSourceLineStart(
+                    buffer.Lines[lineIndex].Text, sourceText, ref sourceOffset, ref sourceAfterBreak);
+            float firstIndent = lineIndex == 0 ? indent : 0f;
+
+            float lineTop = y;
+            float probeHeight = strut;
+            float left = 0f;
+            float lineWidth = fullWidth;
+            int? split = null;
+            float height = strut;
+            for (int attempt = 0; attempt < 512; attempt++)
+            {
+                (float bandLeft, float bandRight) = bands.Insets(lineTop, probeHeight);
+                left = bandLeft;
+                lineWidth = F32.Max(fullWidth - bandLeft - bandRight, 0f);
+                bool intruded = bandLeft > 0f || bandRight > 0f;
+                float baseAvailable = F32.Max(lineWidth - firstIndent, 0f);
+                (LayoutLine? first, split) = LayoutFirstLine(
+                    item, buffer.Lines[lineIndex], windowable, globalStart, baseAvailable, metrics, wrap, mono, tabWidth);
+                if (first is null)
+                {
+                    break;
+                }
+
+                height = buffer.LineBox(first).Height;
+                float firstWidth = first.W + (split is { } end
+                    ? InlineGeometry.LineEdgeAdvance(item, globalStart, globalStart + end)
+                    : 0f);
+                if (intruded
+                    && first.Glyphs.Count != 0
+                    && firstWidth > baseAvailable + 0.01f
+                    && bands.NextEdgeBelow(lineTop) is { } next)
+                {
+                    // Not even the first word fits beside the floats: try below the next edge.
+                    lineTop = next;
+                    probeHeight = strut;
+                    continue;
+                }
+
+                if (height > probeHeight + 0.01f)
+                {
+                    // A tall inline box reaches further down than the strut did; the floats
+                    // over the whole line box decide its width.
+                    (float tallLeft, float tallRight) = bands.Insets(lineTop, height);
+                    if (tallLeft > bandLeft + 0.01f || tallRight > bandRight + 0.01f)
+                    {
+                        probeHeight = height;
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
+            BufferLine current = buffer.Lines[lineIndex];
+            if (split is { } splitAt)
+            {
+                string text = current.Text;
+                splitAt = SkipTrailingWhitespace(text, splitAt);
+                if (splitAt > 0 && splitAt < text.Length)
+                {
+                    BufferLine tail = current.SplitOff(splitAt);
+                    buffer.Lines.Insert(lineIndex + 1, tail);
+                    if (sourceText is not null)
+                    {
+                        sourceOffset = lineOffset;
+                        sourceAfterBreak = lineAfterBreak;
+                        InlineGeometry.NextSourceLineStart(
+                            current.Text, sourceText, ref sourceOffset, ref sourceAfterBreak);
+                    }
+                }
+            }
+
+            current.ResetLayout();
+            current.WidthOverride = lineWidth;
+            current.OffsetX = left;
+            current.GapBefore = lineTop - y;
+            y = lineTop + height;
+            lineIndex++;
+        }
+
+        buffer.SetSize(fullWidth, null);
+        buffer.ShapeUntilScroll(_shaper);
+    }
+
+    /// <summary>
+    /// The first visual line of <paramref name="line"/> at <paramref name="baseAvailable"/>,
+    /// and where it ends, paying for the inline boxes' margins, borders and padding on it the
+    /// way <see cref="ShapeWithTextIndent"/> does.
+    /// </summary>
+    private (LayoutLine? First, int? Split) LayoutFirstLine(
+        InlineItem item,
+        BufferLine line,
+        bool windowable,
+        int globalStart,
+        float baseAvailable,
+        TextMetrics metrics,
+        Wrap wrap,
+        float? mono,
+        int tabWidth)
+    {
+        int lineSourceEnd = globalStart + line.Text.Length;
+        float negativeEdges = item.BoundaryEvents.Count == 0
+            ? 0f
+            : item.EdgeIndex.NegativeEdges(globalStart, lineSourceEnd);
+        float available = F32.Max(baseAvailable - negativeEdges, 0f);
+        LayoutLine? first = null;
+        int? split = null;
+
+        // Shape a window of a long line rather than all of it for each visual line (see
+        // ProbeFirstLine), or a long paragraph beside floats is quadratic in its length.
+        BufferLine? probe = null;
+        int probeChars = ProbeInitialWindow;
+        for (int attempt = 0; attempt <= item.BoundaryEvents.Count; attempt++)
+        {
+            line.ResetLayout();
+            probe?.ResetLayout();
+            List<LayoutLine> layouts = windowable
+                ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
+                : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
+            if (layouts.Count == 0)
+            {
+                break;
+            }
+
+            first = layouts[0];
+            int? candidate = null;
+            foreach (LayoutGlyph glyph in first.Glyphs)
+            {
+                candidate = candidate is { } current ? Math.Max(current, glyph.End) : glyph.End;
+            }
+
+            if (candidate is not { } candidateEndLocal)
+            {
+                split = null;
+                break;
+            }
+
+            split = candidateEndLocal;
+            if (item.BoundaryEvents.Count == 0)
+            {
+                break;
+            }
+
+            float edges = InlineGeometry.LineEdgeAdvance(item, globalStart, globalStart + candidateEndLocal);
+            float requiredAvailable = F32.Max(baseAvailable - edges, 0f);
+            if (first.W + edges > baseAvailable + 0.01f
+                && LastWordStartX(line.Text, first) is { } lastWordCut
+                && lastWordCut > requiredAvailable)
+            {
+                // See ShapeWithTextIndent: never retry below the width that drops the last word.
+                requiredAvailable = lastWordCut;
+            }
+
+            if (first.W + edges <= baseAvailable + 0.01f || requiredAvailable + 0.01f >= available)
+            {
+                break;
+            }
+
+            available = requiredAvailable;
+        }
+
+        return (first, split);
     }
 
     /// <summary>
@@ -1973,6 +2361,15 @@ public sealed partial class TextEngine : IDisposable
         styles.TryGetValue(cid, out LayoutStyle? style);
         if (style is not null && style.Display == Display.None)
         {
+            return;
+        }
+
+        if (collector.FloatAnchors is { } floatAnchors
+            && style is { Float: not null }
+            && style.Position != Position.Absolute)
+        {
+            // Out of the inline flow: remember where it sits for the block formatting context.
+            floatAnchors.Add((cid, collector.TextLength));
             return;
         }
 
