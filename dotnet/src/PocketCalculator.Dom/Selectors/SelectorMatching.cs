@@ -378,7 +378,7 @@ public static class SelectorMatching
                     return false;
                 }
 
-                return Nested(context, () => MatchesComplexSelector(slotted.Selector, element, context));
+                return MatchesNestedComplex(slotted.Selector, element, context);
 
             case PseudoElementComponent:
                 // Obscura matches pseudo-elements through the render cascade's base selector, never
@@ -413,7 +413,7 @@ public static class SelectorMatching
                     return true;
                 }
 
-                return Nested(context, () => MatchesComplexSelector(inner, element, context));
+                return MatchesNestedComplex(inner, element, context);
             }
 
             case ScopeComponent:
@@ -425,19 +425,13 @@ public static class SelectorMatching
                 return MatchesGenericNthChild(element, context, nth.Data, nth.Of);
 
             case IsComponent isComponent:
-                return Nested(
-                    context,
-                    () => MatchesComplexSelectorList(isComponent.List.Selectors, element, context));
+                return MatchesNestedList(isComponent.List.Selectors, element, context);
 
             case WhereComponent where:
-                return Nested(
-                    context,
-                    () => MatchesComplexSelectorList(where.List.Selectors, element, context));
+                return MatchesNestedList(where.List.Selectors, element, context);
 
             case NegationComponent negation:
-                return NestedForNegation(
-                    context,
-                    () => !MatchesComplexSelectorList(negation.List.Selectors, element, context));
+                return MatchesNegation(negation.List.Selectors, element, context);
 
             case HasComponent has:
                 return MatchesRelativeSelectors(has.Relatives, element, context);
@@ -452,6 +446,18 @@ public static class SelectorMatching
                 return false;
         }
     }
+
+    // The nested matches live in their own methods: a lambda in MatchesSimpleSelector made the
+    // compiler allocate its closure on entry to every call, whatever the component, which was
+    // the selector engine's largest allocation (every element of every query and cascade).
+    private static bool MatchesNestedComplex(Selector selector, DomElement element, MatchingContext context) =>
+        Nested(context, () => MatchesComplexSelector(selector, element, context));
+
+    private static bool MatchesNestedList(Selector[] selectors, DomElement element, MatchingContext context) =>
+        Nested(context, () => MatchesComplexSelectorList(selectors, element, context));
+
+    private static bool MatchesNegation(Selector[] selectors, DomElement element, MatchingContext context) =>
+        NestedForNegation(context, () => !MatchesComplexSelectorList(selectors, element, context));
 
     private static bool Nested(MatchingContext context, Func<bool> body)
     {

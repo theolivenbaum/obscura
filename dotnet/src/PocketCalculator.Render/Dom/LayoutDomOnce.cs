@@ -385,7 +385,7 @@ public static partial class RenderDom
         TaffyTree taffyTree = TaffyStyleMapping.NewTaffyTree<int?>(tree.SlotCount + 16);
         Dictionary<TaffyNodeId, NodeId> idMap = new(styles.Count);
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
-        TextEngine engine = new(fonts, needsEmojiFont, needsCjkFont);
+        TextEngine engine = TextEngine.ForPass(fonts, needsEmojiFont, needsCjkFont, previousLayout?.TextEngine);
         LayoutPhaseProfile.Mark("engine");
 
         // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
@@ -1089,7 +1089,8 @@ public static partial class RenderDom
 
         DomPasses.SyncPositionedPseudoPercentagePadding(rects, styles);
 
-        Dictionary<NodeId, OverflowClip?> clipRects = new(styles.Count);
+        // An entry per rendered node, text included: sized to the tree, not to the styles.
+        Dictionary<NodeId, OverflowClip?> clipRects = new(tree.Count + 1);
         Dictionary<NodeId, (float X, float Y)> translates = [];
         Dictionary<NodeId, Affine2> transforms = [];
         if (root is { } clipRootId)

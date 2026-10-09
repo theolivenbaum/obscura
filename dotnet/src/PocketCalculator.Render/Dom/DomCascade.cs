@@ -1266,6 +1266,13 @@ internal static class DomCascade
         CssMediaType mediaType,
         StylesheetCache? cache = null)
     {
+        // A document with no shadow root has nothing to collect; walking every node of it to
+        // find out cost a whole-document walk on every pass.
+        if (!tree.HasShadowRoots)
+        {
+            return [];
+        }
+
         List<NodeId> roots = [];
         List<NodeId> stack = [tree.Document];
         HashSet<NodeId> visited = [];

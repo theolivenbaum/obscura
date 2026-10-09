@@ -2876,6 +2876,42 @@ under sibling-combinator, `:has()`, `:nth-child`, `:empty`, attribute selectors,
 fixture and 4 per float page without a divergence. `POCKETCALCULATOR_FULL_RELAYOUT=1` turns the
 cascade and top-down skipping off.
 
+### The whole-document work around a layout pass is shared, skipped or memoized
+
+DEVIATION from `crates/obscura-render`, which repeats all of it on every pass. Measured with an
+allocation trace and a sampled CPU trace of 400 forced reads on the nvidia.com snapshot, a pass
+allocated about 25 MB and spent a fifth of its time in garbage collection; most of the
+whole-document walks around the layout were allocation, not work:
+
+- the document's flat tree is walked once per prepare and the list shared by every walk that
+  reads it (images, fonts, the retained-style plan, fixed and sticky boxes, the scroll tree):
+  `DomTraversal.ShareDocumentWalk` (the DOM does not change while a prepare runs);
+- the walks that recurse per node (scroll owners, scrolling overflow, the clip walk) read a
+  node's children off the sibling chain (`DomTraversal.EachRenderedChild`) instead of
+  allocating a list per node; the clip walk shares one `OverflowClip` between the boxes under
+  it instead of copying it twice per node (nothing moves a stored clip in place: painters
+  clone first), and sizes its map to the tree;
+- shadow stylesheets are not looked for in a document without a shadow root, fixed-position
+  and sticky geometry are not walked without a fixed or sticky element, sticky geometry keeps
+  its per-node state in slot-indexed arrays, and `html` is found among the document's children
+  rather than by matching a selector against every element;
+- the font database and the families resolved from it are taken over from the previous pass's
+  engine when the font set is the same (`TextEngine.ForPass`; the same test that already lets a
+  pass take over shaped paragraphs; each engine keeps its own shaper and glyph caches), and a
+  `DomLayout` no longer builds a throwaway engine (and so a font database) in its initializer;
+- the per-word fallback's Skia advances are memoized by face and word (`DomTextMeasure`, bounded
+  at 65,536 words; the width is the same function of the memoized sum), and a word leaf's style
+  is copied once per text node instead of once per word;
+- a carried box no longer gets a fresh empty cache left behind in the consumed tree;
+- selector matching no longer allocates a closure on every simple-selector test (the C#
+  compiler hoisted the lambdas of the nested cases to the method's entry).
+
+Measured on the nvidia.com snapshot, the same loop of a `margin-left` write and a read: 424
+passes in 45s before, 611 after; allocation ~25 -> ~19 MB a pass; median retained pass ~80 ->
+~70ms (the scroll tree 4.7 -> 3.1ms, clips 3.9 -> 2.8ms, engine 4.4 -> under 0.8ms, fixed
+nodes and sticky under 0.8ms). Results are unchanged by construction; the Render, Dom and Js
+suites pin them.
+
 ### The font work of a pass is memoized by the text it reads
 
 DEVIATION from `crates/obscura-render`, which on every pass parses the `@font-face` rules out of

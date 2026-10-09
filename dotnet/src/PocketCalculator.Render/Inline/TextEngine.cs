@@ -22,8 +22,11 @@ public sealed partial class TextEngine : IDisposable
     /// <summary>Marks a measure context as a replaced box rather than an inline item.</summary>
     private const int ReplacedContextBit = unchecked((int)0x8000_0000);
 
-    private readonly FontDatabase _database = new();
-    private readonly Dictionary<string, LoadedFamily> _loadedFamilies = new(StringComparer.Ordinal);
+    private readonly FontDatabase _database;
+    private readonly Dictionary<string, LoadedFamily> _loadedFamilies;
+
+    /// <summary>Whether <see cref="_database"/> is another engine's; see <see cref="ForPass"/>.</summary>
+    private readonly bool _sharesDatabase;
     private readonly List<InlineItem> _items = [];
     private readonly List<ReplacedItem> _replaced = [];
     private readonly TextShaper _shaper;
@@ -49,12 +52,84 @@ public sealed partial class TextEngine : IDisposable
     {
     }
 
+    /// <summary>
+    /// An engine for one layout pass that takes over <paramref name="previous"/>'s font database
+    /// and loaded families when both are built from the same fonts.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which builds the font database on every pass. Loading the
+    /// bundled faces and the page's web fonts parses every face's tables again (nvidia.com: a
+    /// tenth of a forced read). The database and the families resolved from it are a function
+    /// of the face list - the bundled faces, the font directories, the emoji and CJK faces and
+    /// the web fonts, in order - and nothing adds to either after the constructor; the same test
+    /// that lets a pass take over the previous pass's shaped paragraphs
+    /// (<see cref="AdoptShapeCache"/>) decides it. Each engine keeps its own shaper and glyph
+    /// caches, so what a pass leaves behind is bounded as before.
+    /// </remarks>
+    internal static TextEngine ForPass(
+        IReadOnlyList<WebFont> fonts,
+        bool loadEmoji,
+        bool loadCjk,
+        TextEngine? previous)
+    {
+        FontDirectorySet directoryFonts = FontDirectories.Current;
+        return previous is not null
+            && !ShapeCache.Disabled
+            && ReferenceEquals(previous._directoryFonts, directoryFonts)
+            && previous._loadsEmoji == loadEmoji
+            && previous._loadsCjk == loadCjk
+            && SameFonts(previous._fonts, fonts)
+                ? new TextEngine(previous, fonts)
+                : new TextEngine(fonts, loadEmoji, directoryFonts, loadCjk);
+
+        static bool SameFonts(WebFont[] mine, IReadOnlyList<WebFont> theirs)
+        {
+            if (mine.Length != theirs.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < mine.Length; index++)
+            {
+                WebFont a = mine[index];
+                WebFont b = theirs[index];
+                if (!ReferenceEquals(a, b)
+                    && !(ReferenceEquals(a.Data, b.Data)
+                        && string.Equals(a.Family, b.Family, StringComparison.Ordinal)
+                        && a.Weight == b.Weight
+                        && a.Italic == b.Italic))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    private TextEngine(TextEngine fontsOf, IReadOnlyList<WebFont> fonts)
+    {
+        _database = fontsOf._database;
+        _loadedFamilies = fontsOf._loadedFamilies;
+        _sharesDatabase = true;
+        _directoryFonts = fontsOf._directoryFonts;
+        _loadsEmoji = fontsOf._loadsEmoji;
+        _loadsCjk = fontsOf._loadsCjk;
+        _shaper = new TextShaper(_database);
+        _rasterizer = new GlyphRasterizer(_database);
+        _variableCache = new VariableGlyphCache(_database);
+        _fonts = [.. fonts];
+    }
+
     internal TextEngine(
         IReadOnlyList<WebFont> fonts,
         bool loadEmoji,
         FontDirectorySet directoryFonts,
         bool loadCjk = false)
     {
+        _database = new FontDatabase();
+        _loadedFamilies = new(StringComparer.Ordinal);
+
         // Build a database from embedded and page-provided faces. The host's font set is never
         // consulted implicitly: it would make layout differ machine to machine and add a
         // multi-millisecond startup scan. The one exception is a font directory the operator
@@ -2876,6 +2951,11 @@ public sealed partial class TextEngine : IDisposable
     public void Dispose()
     {
         _rasterizer.Dispose();
-        _database.Dispose();
+
+        // A shared database belongs to the engine that built it (ForPass).
+        if (!_sharesDatabase)
+        {
+            _database.Dispose();
+        }
     }
 }

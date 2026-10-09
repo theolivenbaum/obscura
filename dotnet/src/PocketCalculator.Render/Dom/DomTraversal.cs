@@ -19,6 +19,66 @@ internal static class DomTraversal
     internal static List<NodeId> RenderedChildren(DomTree tree, NodeId id) =>
         Inline.RenderedChildren(tree, id);
 
+    /// <summary>
+    /// <see cref="RenderedChildren"/> without the list: a node that is not a shadow host, a slot
+    /// or a <c>details</c> renders exactly its DOM children, read off the sibling chain, and only
+    /// the others build the list. For the whole-document walks of every pass, which allocated a
+    /// list per node.
+    /// </summary>
+    internal static RenderedChildEnumerable EachRenderedChild(DomTree tree, NodeId id)
+    {
+        if (tree.GetNode(id) is not { } node)
+        {
+            return default;
+        }
+
+        bool plain = tree.ShadowRootOf(id) is null
+            && !(node.AsElement() is { } element
+                && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+                && element.Name.Local is "slot" or "details");
+        return plain
+            ? new RenderedChildEnumerable(tree, node.FirstChild, null)
+            : new RenderedChildEnumerable(tree, null, RenderedChildren(tree, id));
+    }
+
+    internal readonly struct RenderedChildEnumerable(DomTree? tree, NodeId? first, List<NodeId>? list)
+    {
+        public Enumerator GetEnumerator() => new(tree, first, list);
+
+        internal struct Enumerator(DomTree? tree, NodeId? first, List<NodeId>? list)
+        {
+            private NodeId? _next = first;
+            private int _index = -1;
+            private int _steps;
+
+            public NodeId Current { get; private set; }
+
+            public bool MoveNext()
+            {
+                if (list is not null)
+                {
+                    if (++_index < list.Count)
+                    {
+                        Current = list[_index];
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                // The sibling-chain bound of DomTree.Children.
+                if (_next is not { } id || tree is null || ++_steps > tree.SlotCount)
+                {
+                    return false;
+                }
+
+                Current = id;
+                _next = tree.GetNode(id)?.NextSibling;
+                return true;
+            }
+        }
+    }
+
     /// <summary>The parent of <paramref name="id"/> in the flattened rendering tree.</summary>
     /// <remarks>
     /// Shadow-root children are parented to the host for layout/paint ancestry; an assigned
@@ -51,6 +111,50 @@ internal static class DomTraversal
     /// assignment/tree graph; a valid flat tree visits every generated node once.
     /// </remarks>
     internal static List<NodeId> RenderedDescendants(DomTree tree, NodeId root)
+    {
+        if (root == tree.Document && ReferenceEquals(t_walkTree, tree))
+        {
+            return t_documentWalk ??= WalkRenderedDescendants(tree, root);
+        }
+
+        return WalkRenderedDescendants(tree, root);
+    }
+
+    // The document's flat tree for the prepare running on this thread; see DocumentWalkScope.
+    [ThreadStatic]
+    private static DomTree? t_walkTree;
+
+    [ThreadStatic]
+    private static List<NodeId>? t_documentWalk;
+
+    /// <summary>
+    /// Within the scope, <see cref="RenderedDescendants"/> of <paramref name="tree"/>'s document
+    /// is walked once and the same list handed to every caller, which only reads it.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render. A prepare walks the whole flat tree for images, fonts,
+    /// the retained-style plan, fixed and sticky boxes and the scroll tree, each allocating its
+    /// own list and visited set (nvidia.com: eight walks of 7,000 nodes a forced read). Nothing
+    /// mutates the DOM while a prepare runs, so they all walk the same tree.
+    /// </remarks>
+    internal static DocumentWalkScope ShareDocumentWalk(DomTree tree)
+    {
+        DocumentWalkScope scope = new(t_walkTree, t_documentWalk);
+        t_walkTree = tree;
+        t_documentWalk = null;
+        return scope;
+    }
+
+    internal readonly struct DocumentWalkScope(DomTree? savedTree, List<NodeId>? savedWalk) : IDisposable
+    {
+        public void Dispose()
+        {
+            t_walkTree = savedTree;
+            t_documentWalk = savedWalk;
+        }
+    }
+
+    private static List<NodeId> WalkRenderedDescendants(DomTree tree, NodeId root)
     {
         int limit = tree.Count;
         List<NodeId> result = root == tree.Document ? new(limit) : [];
@@ -163,6 +267,27 @@ internal static class DomTraversal
         }
 
         return children;
+    }
+
+    /// <summary>
+    /// <c>tree.QuerySelector("html")</c>: the first <c>html</c> element in document order,
+    /// which is the document element whenever that is one - read off the document's children
+    /// rather than matched against every element of the document, as the selector did on every
+    /// prepare.
+    /// </summary>
+    internal static NodeId? HtmlElement(DomTree tree)
+    {
+        foreach (NodeId child in tree.Children(tree.Document))
+        {
+            if (tree.GetNode(child)?.AsElement() is { } element)
+            {
+                return string.Equals(element.Name.Local, "html", StringComparison.Ordinal)
+                    ? child
+                    : tree.QuerySelector("html");
+            }
+        }
+
+        return tree.QuerySelector("html");
     }
 
     internal static List<NodeId> ElementChildren(DomTree tree, NodeId parent)

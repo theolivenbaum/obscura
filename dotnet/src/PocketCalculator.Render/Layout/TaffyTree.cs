@@ -537,7 +537,9 @@ public sealed class TaffyTree<TNodeContext>
     /// <summary>
     /// Not in vendor/taffy. Carries <paramref name="sourceNode"/>'s layout cache and stored
     /// layouts over from a previous pass's tree onto <paramref name="node"/>, whose subtree the
-    /// caller has proven lays out identically. The source node keeps an empty cache.
+    /// caller has proven lays out identically. The source tree is consumed: it is never laid
+    /// out again, so its node keeps the moved cache rather than a fresh empty one (one
+    /// allocation per carried box, every pass).
     /// </summary>
     internal void TransplantFrom(NodeId node, TaffyTree<TNodeContext> source, NodeId sourceNode)
     {
@@ -545,9 +547,7 @@ public sealed class TaffyTree<TNodeContext>
         NodeData from = source._nodes[sourceNode];
         to.Cache = from.Cache;
         to.Cache.MarkCarried();
-        from.Cache = new Cache();
         to.BlockCache = from.BlockCache;
-        from.BlockCache = null;
         to.UnroundedLayout = from.UnroundedLayout;
         to.FinalLayout = from.FinalLayout;
         to.DetailedLayoutInfo = from.DetailedLayoutInfo;
