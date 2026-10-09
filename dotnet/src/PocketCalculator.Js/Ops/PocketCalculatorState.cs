@@ -286,6 +286,13 @@ public sealed class PocketCalculatorState
     /// </summary>
     public List<PendingFrame> PendingFrames { get; } = [];
 
+    /// <summary>
+    /// Frame document loads (<c>op_fetch_url</c> in <c>navigate</c> mode for an iframe) that
+    /// have not answered yet. The Page keeps building a new document's frames while one is in
+    /// flight, rather than taking a quiet 50 ms as the end of them.
+    /// </summary>
+    public InFlightCounter FrameDocumentLoadsInFlight { get; } = new();
+
     /// <summary>Total URL and HTML bytes held by <see cref="PendingFrames"/>.</summary>
     public long PendingFrameBytes { get; set; }
 

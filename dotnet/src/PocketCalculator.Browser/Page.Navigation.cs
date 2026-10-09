@@ -727,13 +727,24 @@ public sealed partial class Page
         const int Rounds = 8;
         const ulong RoundMs = 50;
 
+        // DEVIATION from crates/obscura-browser/src/page.rs build_document_frames, which ends
+        // at the first 50 ms round in which no frame moved. A frame document still on the
+        // wire after 50 ms (a loaded host, a slow server) then never got a realm during the
+        // navigation, and nothing loaded its scripts until something else pumped the page.
+        // Chromium's load event waits for the frame. A round spent waiting on a frame
+        // document load does not count as one of the eight, and the wait is bounded so a
+        // hanging frame server cannot hold the navigation past this grace.
+        const double FrameDocumentGraceMs = 5_000;
+        var started = Stopwatch.GetTimestamp();
+        bool waitedOnLoad = false;
+
         bool hasIframe = WithDom(dom => dom.TryQuerySelector("iframe", out NodeId? found, out _) && found is not null);
         if (!hasIframe)
         {
             return;
         }
 
-        for (int round = 0; round < Rounds; round++)
+        for (int round = 0; round < Rounds && !cancellationToken.IsCancellationRequested;)
         {
             if (Js is { } js)
             {
@@ -746,10 +757,21 @@ public sealed partial class Page
                     // A page-local error does not stop frame construction.
                 }
             }
-            if (!await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false))
+            if (await AdvanceFramesAsync(cancellationToken).ConfigureAwait(false))
+            {
+                round++;
+                waitedOnLoad = false;
+                continue;
+            }
+            // One more round after the last load answers: its continuation, which queues
+            // the frame, runs on the next pump.
+            bool loading = Js?.State.FrameDocumentLoadsInFlight.Value > 0;
+            if (!(loading || waitedOnLoad)
+                || Stopwatch.GetElapsedTime(started).TotalMilliseconds >= FrameDocumentGraceMs)
             {
                 break;
             }
+            waitedOnLoad = loading;
         }
     }
 
