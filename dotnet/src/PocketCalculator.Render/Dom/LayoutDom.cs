@@ -321,7 +321,7 @@ public static partial class RenderDom
         }
 
         Dictionary<NodeId, Stylesheet> shadowSheets =
-            DomCascade.CollectShadowStylesheets(tree, viewport, mediaType);
+            DomCascade.CollectShadowStylesheets(tree, viewport, mediaType, stylesheetCache);
 
         int retainedRequested = retained?.Styles.Count ?? 0;
         (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? reuse = null;
