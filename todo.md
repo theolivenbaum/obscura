@@ -498,6 +498,34 @@ Found during the review, not from upstream:
   walks skipped for clean subtrees. `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints
   the per-phase split of every prepare.
 
+  Phase 2 (October 2026): float-heavy formatting contexts carry over, the cascade
+  and top-down pass walk only the paths to fresh styles, the whole-document
+  walks around a pass are shared or memoized, a pass allocates about a quarter
+  less, a consumed box tree is emptied so the GC stops promoting it, and a
+  removal restyles only what it can reach (see the matching Known deviations
+  sections). Interleaved against 1001c70, same build settings, three runs each:
+  nvidia.com (live, CDP) goto 30.2-30.4s -> 20.2-30.2s (the cap is hit in the
+  page variant whose removals restyle the document), forced reads 21.1-22.0s
+  for ~117 -> 12.4-14.4s for ~175, 75 `offsetParent` reads 4.2-4.8s (base
+  reached only 30-31 of them in 10.1-10.4s), `clientWidth` 31-33 reads in
+  3.7-3.8s -> 41-55 in 3.8-4.4s, 20 `offsetHeight` 2.6-3.0s -> 1.4-2.6s,
+  `getBoundingClientRect` 3.3-3.6s -> 1.8-2.4s, peak RSS 1.30-1.85GB ->
+  0.90-1.21GB; reddit.com goto 16.5-30.3s -> 15.4-17.4s, peak RSS 0.76-1.03GB
+  -> 0.82-1.23GB. 2,000 grid items: 50 toggles 8.0-9.1s -> 4.1-4.4s; 2,000
+  list items 6.6-7.3s -> 3.1-3.7s; float article, top paragraph growing
+  134-172ms -> 51-68ms. Render layout performance classes: LargeTree 19-20s ->
+  14.5-15.7s, the others within noise.
+
+  Not done: patching the retained box tree in place (step 3). `LayoutStyle`s
+  are written in place by the top-down pass, the fixups and the repairs, so
+  "this subtree's inputs did not change" has no sound signal short of
+  comparing outputs, which is what `RetainedTaffyLayout.Transplant` already
+  does; the build was made cheaper instead. Scoped layout (step 5) is not
+  started. The early passes of a page are dominated by JIT warmup (bin builds
+  run tier-0 code): `DOTNET_TC_CallCountingDelayMs=0` cut the first 30 passes
+  on the nvidia.com snapshot 5.4s -> 3.1s with no cold-start regression, and a
+  ReadyToRun publish removes most of it; neither is applied by the engine.
+
 - **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
   attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
   route runs ~33 prepares totalling 13.4s, of which #7-#31 are twenty-five
