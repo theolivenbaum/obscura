@@ -59,7 +59,8 @@ public static partial class RenderDom
         internal bool LetterSpacingNonNormal;
         internal ContainerType ContainerType = ContainerType.Normal;
         internal List<string> ContainerNames = NoContainerNames;
-        internal TaffyAlignItems? TextAlign;
+        internal TextAlignKeyword? TextAlign;
+        internal TextAlignKeyword? TextAlignLast;
         internal Dimension TextIndent = Dimension.Px(0f);
         internal bool LegacyCenter;
         internal bool VisibilityHidden;
@@ -151,6 +152,7 @@ public static partial class RenderDom
             ContainerType = ContainerType,
             ContainerNames = ContainerNames,
             TextAlign = TextAlign,
+            TextAlignLast = TextAlignLast,
             TextIndent = TextIndent,
             LegacyCenter = LegacyCenter,
             VisibilityHidden = VisibilityHidden,

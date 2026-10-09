@@ -897,20 +897,31 @@ public sealed partial class TextEngine : IDisposable
             markerBuffer.ShapeUntilScroll(_shaper);
         }
 
-        Align? align = baseStyle.TextAlign is { } textAlign
-            ? textAlign.GetKeyword() switch
+        // DEVIATION from crates/obscura-render/src/inline.rs, which aligns only `center` and
+        // `right`/`end` (to the right), ignores `justify`, `text-align-last` and `direction`,
+        // and lets each paragraph's first strong character pick its direction. The paragraph
+        // direction is the block's (Chromium 141 starts a dir=rtl paragraph at the right),
+        // start/end resolve against it, the last line takes text-align-last, and the white
+        // space a line ends with stays out of its alignment (TextLayout).
+        bool rtl = baseStyle.Direction == Layout.Direction.Rtl;
+        Align align = PhysicalAlign(baseStyle.TextAlignKeyword ?? TextAlignKeyword.Start, rtl);
+        Align lastAlign = baseStyle.TextAlignLast is { } lastKeyword
+            ? PhysicalAlign(lastKeyword, rtl)
+            : align == Align.Justified ? PhysicalAlign(TextAlignKeyword.Start, rtl) : align;
+        var alignOptions = new LineAlignOptions(
+            lastAlign,
+            whiteSpace switch
             {
-                AlignItemsKeyword.Center => Align.Center,
-                AlignItemsKeyword.FlexEnd => Align.End,
-                _ => null,
-            }
-            : null;
-        if (align is { } alignment)
+                WhiteSpace.Normal or WhiteSpace.NoWrap or WhiteSpace.PreLine => TrailingSpace.Removed,
+                WhiteSpace.PreWrap => TrailingSpace.HangsAtSoftWrap,
+                _ => TrailingSpace.Counts,
+            },
+            SoftWrapEnd: false);
+        foreach (BufferLine line in buffer.Lines)
         {
-            foreach (BufferLine line in buffer.Lines)
-            {
-                line.SetAlign(alignment);
-            }
+            line.SetAlign(align);
+            line.AlignOptions = alignOptions;
+            line.BaseRtl = rtl;
         }
 
         int index = _items.Count;
@@ -928,6 +939,7 @@ public sealed partial class TextEngine : IDisposable
             FirstLineOffset = 0f,
             BalanceWrap = baseStyle.TextWrapStyle == TextWrapStyle.Balance,
             Align = align,
+            Rtl = rtl,
             ForcedMinHeight = forcedMinHeight,
             Origin = (0f, 0f),
             Clip = null,
@@ -1491,6 +1503,7 @@ public sealed partial class TextEngine : IDisposable
         List<InlineOwnerLineFragment> output = [];
         Dictionary<(NodeId Owner, int Line), int> existingByOwner = [];
         Dictionary<int, float> cursorByOffset = [];
+        List<(float Left, float Right)> extents = [];
         for (int itemIndex = 0; itemIndex < _items.Count; itemIndex++)
         {
             InlineItem item = _items[itemIndex];
@@ -1522,16 +1535,31 @@ public sealed partial class TextEngine : IDisposable
                     || runs[runIndex + 1].LineIndex != run.LineIndex;
                 float firstLineOffset = lineIndex == 0 ? item.FirstLineOffset : 0f;
                 float alignmentShift = InlineGeometry.LineEdgeAlignmentShift(item, lineStart, lineEnd);
-                float lineRight = run.X + run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
+                // The line's content starts where its first glyph is: an aligned line does not
+                // start at the line box's left edge, and a continuing fragment runs to the
+                // content's end, not to the line box's width past it (Chromium 141: a
+                // right-aligned line of 280.13 in 300px is 280.13 wide, where this gave 264.68).
+                float lineRight = (run.Glyphs.Count > 0 && !run.Rtl ? run.Glyphs[0].X : run.X)
+                    + run.LineW + InlineGeometry.LineEdgeAdvance(item, lineStart, lineEnd);
 
                 // DEVIATION from crates/obscura-render/src/inline.rs, whose continuing fragment
                 // runs to the line's full advance. The white space a soft wrap leaves at the
                 // end of a line hangs, and Chromium 141 ends the fragment before it: the
                 // first line of a span wrapped after "three " is 36.47 wide ("three"), where
-                // this gave 40.91.
-                if (item.OwnerBoxes.Count > 0)
+                // this gave 40.91. White space that is removed (normal, nowrap, pre-line) ends
+                // no fragment and starts none, before a <br> or at a soft wrap alike; pre and
+                // break-spaces keep theirs; pre-wrap's hangs at a soft wrap, and Chromium
+                // reports it as a fragment of its own past the line's content.
+                LineAlignOptions lineOptions = item.Buffer.Lines[run.LineIndex].AlignOptions;
+                bool softWrapHere = !lastRunOfLine || lineOptions.SoftWrapEnd;
+                bool trailingRemoved = lineOptions.Trailing == TrailingSpace.Removed;
+                bool trailingHangs = lineOptions.Trailing == TrailingSpace.HangsAtSoftWrap && softWrapHere;
+                float trailingAdvance = 0f;
+                int contentEnd = int.MaxValue;
+                if (item.OwnerBoxes.Count > 0 && (trailingRemoved || trailingHangs))
                 {
-                    lineRight -= TrailingSpaceAdvance(run);
+                    trailingAdvance = TrailingSpaceAdvance(run, out contentEnd);
+                    lineRight -= trailingAdvance;
                 }
 
                 // RunCursorX scans the run's glyphs, and every owner open across the line asks
@@ -1549,6 +1577,10 @@ public sealed partial class TextEngine : IDisposable
                 }
 
                 bool lineHasRtl = item.OwnerBoxes.Count > 0 && LineHasRtlGlyph(run);
+                int rtlTrailingFrom = lineHasRtl && (trailingRemoved || trailingHangs)
+                    ? LogicalContentEnd(run)
+                    : int.MaxValue;
+                float[]? visualShifts = lineHasRtl ? InlineGeometry.VisualEdgeShifts(item, run, lineStart, lineEnd) : null;
                 foreach (InlineOwnerBox owner in item.OwnerBoxes)
                 {
                     bool empty = owner.Start == owner.End;
@@ -1573,19 +1605,82 @@ public sealed partial class TextEngine : IDisposable
                             + InlineGeometry.LineAdvanceBeforeEvent(item, owner.EndEvent, lineStart, lineEnd)
                             + owner.EndEdge.BorderPadding
                         : lineRight;
+                    bool onlyTrailing = false;
+                    if (trailingAdvance > 0f && !empty && !lineHasRtl)
+                    {
+                        float baseX = item.Origin.X + firstLineOffset + alignmentShift;
+                        if (trailingHangs && owner.End - lineStart > contentEnd)
+                        {
+                            float hangLeft = F32.Max(lineRight, rawLeft);
+                            float hangRight = F32.Min(
+                                lineRight + trailingAdvance,
+                                F32.Max(last ? rawRight : lineRight + trailingAdvance, hangLeft));
+                            output.Add(new InlineOwnerLineFragment(
+                                owner.Owner,
+                                itemIndex,
+                                lineIndex,
+                                baseX + hangLeft,
+                                item.Origin.Y + OwnerBaselineY(run, owner.Extent),
+                                F32.Max(hangRight - hangLeft, 0f)));
+                        }
+
+                        onlyTrailing = owner.Start - lineStart >= contentEnd;
+                        rawRight = F32.Min(rawRight, lineRight);
+                    }
+
+                    if (onlyTrailing)
+                    {
+                        continue;
+                    }
                     // DEVIATION from crates/obscura-render/src/inline.rs, which measures from
                     // the logical start cursor to the logical end cursor. On a right-to-left
                     // line the start cursor is the right edge, so the width came out negative
                     // and clamped to 0: Chromium 141 reports a `direction: rtl` span of
                     // Arabic at 1235,37 wide where this gave 1263.4,0. A line with any
                     // right-to-left glyph takes the visual extent of the owner's glyphs.
-                    if (!empty
-                        && lineHasRtl
-                        && OwnerGlyphExtent(run, owner.Start - lineStart, owner.End - lineStart)
-                            is { } visual)
+                    // Chromium gives an owner one fragment per bidi run it has on the line,
+                    // left to right (a dir=rtl span of Hebrew, English and Hebrew is three).
+                    if (!empty && lineHasRtl)
                     {
-                        rawLeft = visual.Left;
-                        rawRight = visual.Right;
+                        bool startOnRight = OwnerGlyphExtents(item, run, lineStart, lineEnd, owner, rtlTrailingFrom, visualShifts, extents);
+                        if (extents.Count > 0)
+                        {
+                            // The box's own border and padding sit outside its glyphs, on the
+                            // start side where it opens on this line and the end side where it
+                            // closes; the start is on the right when its text is right to left.
+                            int startSide = startOnRight ? extents.Count - 1 : 0;
+                            int endSide = startOnRight ? 0 : extents.Count - 1;
+                            if (first)
+                            {
+                                extents[startSide] = startOnRight
+                                    ? (extents[startSide].Left, extents[startSide].Right + owner.StartEdge.BorderPadding)
+                                    : (extents[startSide].Left - owner.StartEdge.BorderPadding, extents[startSide].Right);
+                            }
+
+                            if (last)
+                            {
+                                extents[endSide] = startOnRight
+                                    ? (extents[endSide].Left - owner.EndEdge.BorderPadding, extents[endSide].Right)
+                                    : (extents[endSide].Left, extents[endSide].Right + owner.EndEdge.BorderPadding);
+                            }
+
+                            rawLeft = extents[0].Left;
+                            rawRight = extents[0].Right;
+                            for (int more = 1; more < extents.Count; more++)
+                            {
+                                output.Add(new InlineOwnerLineFragment(
+                                    owner.Owner,
+                                    itemIndex,
+                                    lineIndex,
+                                    item.Origin.X + firstLineOffset + alignmentShift + extents[more].Left,
+                                    item.Origin.Y + OwnerBaselineY(run, owner.Extent),
+                                    F32.Max(extents[more].Right - extents[more].Left, 0f)));
+                            }
+                        }
+                        else if (owner.Start - lineStart >= rtlTrailingFrom)
+                        {
+                            continue;
+                        }
                     }
 
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
@@ -1622,8 +1717,11 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>The advance of the spaces a left-to-right visual line ends with.</summary>
-    private static float TrailingSpaceAdvance(LayoutRun run)
+    /// <param name="run">The line.</param>
+    /// <param name="from">The text offset the trailing spaces start at; <c>int.MaxValue</c> when none.</param>
+    private static float TrailingSpaceAdvance(LayoutRun run, out int from)
     {
+        from = int.MaxValue;
         if (run.Rtl)
         {
             return 0f;
@@ -1657,9 +1755,34 @@ public sealed partial class TextEngine : IDisposable
             }
 
             advance += glyph.W;
+            from = Math.Min(from, glyph.Start);
         }
 
         return advance;
+    }
+
+    /// <summary>The end of the last glyph, in text order, that is not a space.</summary>
+    private static int LogicalContentEnd(LayoutRun run)
+    {
+        int end = 0;
+        foreach (LayoutGlyph glyph in run.Glyphs)
+        {
+            if (glyph.End <= end || glyph.Start < 0 || glyph.End > run.Text.Length)
+            {
+                continue;
+            }
+
+            for (int at = glyph.Start; at < glyph.End; at++)
+            {
+                if (run.Text[at] != ' ')
+                {
+                    end = glyph.End;
+                    break;
+                }
+            }
+        }
+
+        return end;
     }
 
     private static bool LineHasRtlGlyph(LayoutRun run)
@@ -1681,20 +1804,74 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>The visual x extent of the glyphs whose text lies in <c>start..end</c>.</summary>
-    private static (float Left, float Right)? OwnerGlyphExtent(LayoutRun run, int start, int end)
+    /// <param name="run">The line.</param>
+    /// <param name="start">The owner's first text offset.</param>
+    /// <param name="end">The owner's text end.</param>
+    /// <param name="trailingFrom">Glyphs from this text offset on are white space the line
+    /// ends with, removed or hanging, and belong to no fragment.</param>
+    /// <param name="shifts">The line's <see cref="InlineGeometry.VisualEdgeShifts"/>.</param>
+    /// <param name="extents">Receives one extent per bidi run, left to right, each glyph moved
+    /// by the inline-box edges the way paint moves it.</param>
+    /// <returns>Whether the owner's logically first glyph on the line is right to left.</returns>
+    private static bool OwnerGlyphExtents(
+        InlineItem item,
+        LayoutRun run,
+        int lineStart,
+        int lineEnd,
+        InlineOwnerBox owner,
+        int trailingFrom,
+        float[]? shifts,
+        List<(float Left, float Right)> extents)
     {
+        extents.Clear();
+        int start = owner.Start - lineStart;
+        int end = owner.End - lineStart;
+        int firstStart = int.MaxValue;
+        bool firstRtl = item.Rtl;
+        int glyphIndex = -1;
         float left = float.PositiveInfinity;
         float right = float.NegativeInfinity;
+        int level = -1;
         foreach (LayoutGlyph glyph in run.Glyphs)
         {
-            if (glyph.Start < end && glyph.End > start)
+            glyphIndex++;
+            bool owned = glyph.Start < end && glyph.End > start && glyph.Start < trailingFrom;
+            if (owned && glyph.Start < firstStart)
             {
-                left = F32.Min(left, glyph.X);
-                right = F32.Max(right, glyph.X + glyph.W);
+                firstStart = glyph.Start;
+                firstRtl = (glyph.Level & 1) != 0;
             }
+
+            if (!owned || glyph.Level != level)
+            {
+                if (left <= right)
+                {
+                    extents.Add((left, right));
+                }
+
+                left = float.PositiveInfinity;
+                right = float.NegativeInfinity;
+                level = owned ? glyph.Level : -1;
+                if (!owned)
+                {
+                    continue;
+                }
+            }
+
+            float x = glyph.X + (shifts is not null
+                ? shifts[glyphIndex]
+                : InlineGeometry.LineAdvanceBeforeText(item, lineStart + glyph.Start, lineStart, lineEnd));
+            left = F32.Min(left, x);
+            right = F32.Max(right, x + glyph.W);
         }
 
-        return left <= right ? (left, right) : null;
+        if (left <= right)
+        {
+            extents.Add((left, right));
+        }
+
+        extents.Sort((a, b) => a.Left.CompareTo(b.Left));
+        return firstRtl;
     }
 
     /// <summary>Lines at most this long are always probed whole.</summary>
@@ -1753,7 +1930,7 @@ public sealed partial class TextEngine : IDisposable
                     return line.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
                 }
 
-                probe = new BufferLine(text[..cut], line.AttrsList.Prefix(cut)) { Align = line.Align };
+                probe = new BufferLine(text[..cut], line.AttrsList.Prefix(cut)) { Align = line.Align, BaseRtl = line.BaseRtl };
             }
 
             List<LayoutLine> layouts = probe.Layout(_shaper, fontSize, available, wrap, mono, tabWidth);
@@ -1825,6 +2002,17 @@ public sealed partial class TextEngine : IDisposable
         return secondEnd <= lastStart;
     }
 
+    /// <summary>A <c>text-align</c> keyword as the physical side a line aligns to.</summary>
+    internal static Align PhysicalAlign(TextAlignKeyword keyword, bool rtl) => keyword switch
+    {
+        TextAlignKeyword.Center => Align.Center,
+        TextAlignKeyword.Justify => Align.Justified,
+        TextAlignKeyword.Left => Align.Left,
+        TextAlignKeyword.Right => Align.Right,
+        TextAlignKeyword.End => rtl ? Align.Left : Align.Right,
+        _ => rtl ? Align.Right : Align.Left,
+    };
+
     /// <summary>
     /// Shape one IFC with first-line indent and ordinary-inline boundary advances.
     /// </summary>
@@ -1838,11 +2026,23 @@ public sealed partial class TextEngine : IDisposable
     private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap, FloatBands? bands = null)
     {
         float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width);
+        // The first line is aligned in the full width and then moved: by the indent on the
+        // left of a left-aligned line, half of it when centred, none when right-aligned. Right
+        // to left, the indent is on the right, so each moves back by all of it. A justified
+        // line, and a line with a negative indent, which can be wider than the box, are laid
+        // out in the width the indent leaves (see NarrowLines), so they move by the indent left
+        // to right and not at all right to left.
+        // DEVIATION from crates/obscura-render/src/inline.rs, which has no right-to-left case
+        // and indents a justified line by moving it, past the right edge, and lays a line out
+        // of a negative indent in the box's width, where it wrapped again (Chromium 141 keeps
+        // "... adipiscing", 280px, on the first line of a 270px box with text-indent:-30px).
         item.FirstLineOffset = indent * item.Align switch
         {
-            Align.Center => 0.5f,
-            Align.End or Align.Right => 0f,
-            _ => 1f,
+            _ when indent < 0f => item.Rtl ? 0f : 1f,
+            Align.Justified => item.Rtl ? 0f : 1f,
+            Align.Center => item.Rtl ? -0.5f : 0.5f,
+            Align.End or Align.Right => item.Rtl ? -1f : 0f,
+            _ => item.Rtl ? 0f : 1f,
         };
 
         if (bands is not null && width is { } floatWidth)
@@ -1873,7 +2073,7 @@ public sealed partial class TextEngine : IDisposable
             TextMetrics metrics = item.Buffer.Metrics;
             float? mono = item.Buffer.MonospaceWidth;
             int tabWidth = item.Buffer.TabWidth;
-            bool windowable = !Bidi.AnyRightToLeft(sourceText);
+            bool windowable = !item.Rtl && !Bidi.AnyRightToLeft(sourceText);
             int probeChars = ProbeInitialWindow;
             int lineIndex = 0;
 
@@ -2008,7 +2208,58 @@ public sealed partial class TextEngine : IDisposable
         }
 
         item.Buffer.SetSize(width is { } finalWidth ? F32.Max(finalWidth, 0f) : null, null);
+        if (width is { } narrowWidth)
+        {
+            NarrowLines(item, narrowWidth, indent);
+        }
+
         item.Buffer.ShapeUntilScroll(_shaper);
+    }
+
+    /// <summary>
+    /// A justified line fills the width its indent and its inline boxes' margins, borders
+    /// and padding leave, so it is laid out in that width rather than in the whole and moved
+    /// (Chromium 141: a 300px paragraph with text-indent:40px justifies its first line to
+    /// 40..300, and a span with 5px side padding on a justified line takes 10px from the
+    /// spaces). Other alignments place the line in the whole width and shift it instead,
+    /// except below a negative indent, where the first line can be wider than the box.
+    /// </summary>
+    private static void NarrowLines(InlineItem item, float width, float indent)
+    {
+        List<BufferLine> lines = item.Buffer.Lines;
+        if (lines.Count == 0)
+        {
+            return;
+        }
+
+        if (item.Align != Align.Justified && lines[^1].AlignOptions.Last != Align.Justified)
+        {
+            if (indent < 0f)
+            {
+                lines[0].WidthOverride = (lines[0].WidthOverride ?? width) - indent;
+            }
+
+            return;
+        }
+
+        bool edges = item.BoundaryEvents.Count > 0 && item.OwnerText is not null;
+        if (indent == 0f && !edges)
+        {
+            return;
+        }
+
+        List<int>? starts = edges ? InlineGeometry.SourceLineStarts(item.Buffer, item.OwnerText!) : null;
+        for (int index = 0; index < lines.Count; index++)
+        {
+            BufferLine line = lines[index];
+            float narrowed = (line.WidthOverride ?? width) - (index == 0 ? indent : 0f);
+            if (starts is not null && index < starts.Count)
+            {
+                narrowed -= InlineGeometry.LineEdgeAdvance(item, starts[index], starts[index] + line.Text.Length);
+            }
+
+            line.WidthOverride = F32.Max(narrowed, 0f);
+        }
     }
 
     /// <summary>
@@ -2033,7 +2284,7 @@ public sealed partial class TextEngine : IDisposable
         float fullWidth = F32.Max(width, 0f);
         string? sourceText = item.OwnerText;
         float strut = F32.Max(metrics.Above + metrics.Below, 0f);
-        bool windowable = true;
+        bool windowable = !item.Rtl;
         foreach (BufferLine paragraph in source.Lines)
         {
             if (Bidi.AnyRightToLeft(paragraph.Text))
@@ -2129,6 +2380,7 @@ public sealed partial class TextEngine : IDisposable
 
             current.ResetLayout();
             current.WidthOverride = lineWidth;
+
             current.OffsetX = left;
             current.GapBefore = lineTop - y;
             y = lineTop + height;
@@ -2136,6 +2388,7 @@ public sealed partial class TextEngine : IDisposable
         }
 
         buffer.SetSize(fullWidth, null);
+        NarrowLines(item, fullWidth, indent);
         buffer.ShapeUntilScroll(_shaper);
     }
 

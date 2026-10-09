@@ -133,6 +133,9 @@ public sealed class InlineItem
     /// </summary>
     internal Align? Align { get; init; }
 
+    /// <summary>The block's <c>direction</c> is <c>rtl</c>: its lines start at the right.</summary>
+    internal bool Rtl { get; init; }
+
     /// <summary>
     /// Minimum block-size contributed by explicit <c>&lt;br&gt;</c> breaks. The shaped buffer
     /// omits the final empty run for a trailing newline, while CSS still gives a break-only or
@@ -240,6 +243,13 @@ internal static class InlineGeometry
     public static float LineEdgeAdvance(InlineItem item, int lineStart, int lineEnd) =>
         item.BoundaryEvents.Count == 0 ? 0f : item.EdgeIndex.Advance(lineStart, lineEnd, int.MaxValue);
 
+    /// <summary>
+    /// How far a line moves for the inline boxes' margins, borders and padding on it, which
+    /// the text was aligned without: they push the content right (see
+    /// <see cref="VisualEdgeShifts"/> for a line with right-to-left text), so an aligned line
+    /// moves back left by the share its alignment gives that side. A justified line was laid
+    /// out in the width they leave and does not move.
+    /// </summary>
     public static float LineEdgeAlignmentShift(InlineItem item, int lineStart, int lineEnd) =>
         -LineEdgeAdvance(item, lineStart, lineEnd) * item.Align switch
         {
@@ -248,11 +258,139 @@ internal static class InlineGeometry
             _ => 0f,
         };
 
+    /// <summary>
+    /// For a line holding right-to-left glyphs, how far each glyph (by index in the run)
+    /// moves right for the inline-box edges visually to its left; <c>null</c> when the line
+    /// has none of either, and <see cref="LineAdvanceBeforeText"/> applies.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which moves every glyph right by
+    /// the edges logically before it. That is the visual order only left to right: in a
+    /// dir=rtl paragraph an inline box's padding pushed the text after it the wrong way, and
+    /// Chromium 141 puts a padded, bordered span opening a right-to-left line at the line's
+    /// right edge, its border included. An edge sits where the cursor at its text offset is,
+    /// so the boxes order as the text they hold does.
+    /// </remarks>
+    public static float[]? VisualEdgeShifts(InlineItem item, LayoutRun run, int lineStart, int lineEnd)
+    {
+        List<InlineBoundaryEvent> events = item.BoundaryEvents;
+        if (events.Count == 0)
+        {
+            return null;
+        }
+
+        bool anyRtl = false;
+        foreach (LayoutGlyph glyph in run.Glyphs)
+        {
+            if ((glyph.Level & 1) != 0)
+            {
+                anyRtl = true;
+                break;
+            }
+        }
+
+        if (!anyRtl)
+        {
+            return null;
+        }
+
+        int first = 0;
+        int hi = events.Count;
+        while (first < hi)
+        {
+            int mid = (first + hi) >>> 1;
+            if (events[mid].Position < lineStart)
+            {
+                first = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        List<(float X, float Advance)> edges = [];
+        float before = item.EdgeIndex.Advance(lineStart, lineEnd, first);
+        for (int index = first; index < events.Count && events[index].Position <= lineEnd; index++)
+        {
+            float through = item.EdgeIndex.Advance(lineStart, lineEnd, index + 1);
+            float advance = through - before;
+            before = through;
+            if (advance != 0f)
+            {
+                edges.Add((EdgeX(run, events[index].Position - lineStart, events[index].IsStart), advance));
+            }
+        }
+
+        if (edges.Count == 0)
+        {
+            return null;
+        }
+
+        var shifts = new float[run.Glyphs.Count];
+        for (int g = 0; g < shifts.Length; g++)
+        {
+            LayoutGlyph glyph = run.Glyphs[g];
+            float center = glyph.X + (glyph.W / 2f);
+            float shift = 0f;
+            foreach ((float x, float advance) in edges)
+            {
+                if (x < center)
+                {
+                    shift += advance;
+                }
+            }
+
+            shifts[g] = shift;
+        }
+
+        return shifts;
+    }
+
     public static float LineAdvanceBeforeEvent(InlineItem item, int eventIndex, int lineStart, int lineEnd) =>
         item.BoundaryEvents.Count == 0 ? 0f : item.EdgeIndex.Advance(lineStart, lineEnd, eventIndex);
 
     public static float LineAdvanceBeforeText(InlineItem item, int globalPosition, int lineStart, int lineEnd) =>
         item.BoundaryEvents.Count == 0 ? 0f : item.EdgeIndex.AdvanceBeforeText(globalPosition, lineStart, lineEnd);
+
+    /// <summary>
+    /// Where an inline box's edge at <paramref name="offset"/> sits on a line: an opening
+    /// edge before the character there, a closing one after the character before it, on the
+    /// side that character's direction puts first or last.
+    /// </summary>
+    private static float EdgeX(LayoutRun run, int offset, bool opening)
+    {
+        int at = opening ? offset : offset - 1;
+        LayoutGlyph? found = null;
+        foreach (LayoutGlyph glyph in run.Glyphs)
+        {
+            if (glyph.Start <= at && at < glyph.End)
+            {
+                found = glyph;
+                break;
+            }
+        }
+
+        if (found is not { } hit)
+        {
+            // Nothing on the line holds it (an empty box, or white space the line dropped):
+            // fall back to the other neighbour, then to the logical cursor.
+            int other = opening ? offset - 1 : offset;
+            foreach (LayoutGlyph glyph in run.Glyphs)
+            {
+                if (glyph.Start <= other && other < glyph.End)
+                {
+                    bool rtl = (glyph.Level & 1) != 0;
+                    return opening == rtl ? glyph.X : glyph.X + glyph.W;
+                }
+            }
+
+            return RunCursorX(run, offset);
+        }
+
+        bool hitRtl = (hit.Level & 1) != 0;
+        return opening == hitRtl ? hit.X + hit.W : hit.X;
+    }
 
     /// <summary>Total shaped size of a buffer: widest line, and the bottom of the last line.</summary>
     public static (float Width, float Height, bool Clamped) BufferSize(InlineItem item)

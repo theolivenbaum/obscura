@@ -1367,7 +1367,13 @@ internal static class PaintDomPainter
                 float markerSize = style.FontSize ?? 16f;
                 RgbaColor markerColor = style.Color ?? new RgbaColor(0, 0, 0, 255);
                 float markerWidth = PaintText.MeasureText(marker, markerSize, false, style.FontFamily);
-                float mx = rect.X + style.Padding.Left - markerWidth - 6f;
+                // DEVIATION from crates/obscura-render/src/paint.rs, which always draws the
+                // marker left of the content box. An outside marker sits at the inline start:
+                // in a dir=rtl list Chromium 141 draws it right of the content box, as far out
+                // as it draws it left of a left-to-right one.
+                float mx = style.Direction == Layout.Direction.Rtl
+                    ? rect.X + rect.Width - style.Border.Right - style.Padding.Right + 6f
+                    : rect.X + style.Padding.Left - markerWidth - 6f;
                 float my = rect.Y + style.Border.Top + style.Padding.Top;
                 PaintText.DrawText(
                     pixmap,

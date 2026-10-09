@@ -94,11 +94,13 @@ public static partial class RenderDom
 
                     inh.ContainerType = retainedStyle.ContainerType;
                     inh.ContainerNames = [.. retainedStyle.ContainerNames];
-                    if (retainedStyle.TextAlign is { } align)
+                    if (retainedStyle.TextAlignKeyword is { } align)
                     {
                         inh.TextAlign = align;
                         inh.LegacyCenter = retainedStyle.LegacyCenter;
                     }
+
+                    inh.TextAlignLast = retainedStyle.TextAlignLast;
 
                     if (retainedStyle.TextIndent is { } indent)
                     {
@@ -1021,24 +1023,37 @@ public static partial class RenderDom
         }
 
         bool isTable = DomTraversal.IsLocal(tree, id, "table");
-        if (isTable && inh.LegacyCenter && style.TextAlign is null)
+        if (isTable && inh.LegacyCenter && style.TextAlignKeyword is null)
         {
             // The vendor alignment used by <center> centers the table outer box but does not
             // leak into its internal formatting context.
-            style.TextAlign = TaffyAlignItems.FlexStart;
+            style.TextAlignKeyword = TextAlignKeyword.Start;
             style.LegacyCenter = false;
-            inh.TextAlign = style.TextAlign;
+            inh.TextAlign = style.TextAlignKeyword;
             inh.LegacyCenter = false;
         }
-        else if (style.TextAlign is { } textAlign)
+        else if (style.TextAlignKeyword is { } textAlign)
         {
             inh.TextAlign = textAlign;
             inh.LegacyCenter = style.LegacyCenter;
         }
         else
         {
-            style.TextAlign = inh.TextAlign;
+            style.TextAlignKeyword = inh.TextAlign;
             style.LegacyCenter = inh.LegacyCenter;
+        }
+
+        if (style.TextAlignLast is { } textAlignLast)
+        {
+            inh.TextAlignLast = textAlignLast;
+        }
+        else if (style.TextAlignLastAuto)
+        {
+            inh.TextAlignLast = null;
+        }
+        else
+        {
+            style.TextAlignLast = inh.TextAlignLast;
         }
 
         if (style.TextIndent is { } textIndent)
@@ -1444,7 +1459,8 @@ public static partial class RenderDom
         bool? hostItalic = style.FontStyleItalic;
         string? hostVariantCaps = style.FontVariantCaps;
         float? hostStretch = style.FontStretch;
-        TaffyAlignItems? hostTextAlign = style.TextAlign;
+        TextAlignKeyword? hostTextAlign = style.TextAlignKeyword;
+        TextAlignKeyword? hostTextAlignLast = style.TextAlignLast;
         Dimension? hostTextIndent = style.TextIndent;
         bool hostInvisible = style.EffectivelyInvisible;
         bool hostVisibilityHidden = style.ComputedVisibilityHidden;
@@ -1680,7 +1696,12 @@ public static partial class RenderDom
             pseudo.FontStyleItalic ??= hostItalic;
             pseudo.FontVariantCaps ??= hostVariantCaps;
             pseudo.FontStretch ??= hostStretch;
-            pseudo.TextAlign ??= hostTextAlign;
+            pseudo.TextAlignKeyword ??= hostTextAlign;
+            if (!pseudo.TextAlignLastAuto)
+            {
+                pseudo.TextAlignLast ??= hostTextAlignLast;
+            }
+
             if (pseudo.TextIndent is { } indent)
             {
                 pseudo.TextIndent = indent.Resolve(pseudoUnits, rootFs, vw, vh);

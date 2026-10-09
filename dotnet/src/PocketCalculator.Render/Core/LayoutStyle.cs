@@ -1378,14 +1378,46 @@ public sealed class LayoutStyle
     public List<FontVariationSetting>? FontVariationSettings;
 
     /// <summary>
-    /// Inherited <c>text-align</c>, represented with the matching horizontal alignment
-    /// keywords.
+    /// Computed inherited <c>text-align</c> keyword; <c>null</c> during cascade means inherit,
+    /// and after the inheritance pass means the initial <c>start</c>.
+    /// </summary>
+    public TextAlignKeyword? TextAlignKeyword;
+
+    /// <summary>
+    /// Computed inherited <c>text-align-last</c>; <c>null</c> is <c>auto</c> (and inherit during
+    /// cascade).
+    /// </summary>
+    public TextAlignKeyword? TextAlignLast;
+
+    /// <summary>
+    /// Cascade only: <c>text-align-last: auto</c> was declared, which stops inheritance where a
+    /// <c>null</c> <see cref="TextAlignLast"/> alone would inherit.
+    /// </summary>
+    public bool TextAlignLastAuto;
+
+    /// <summary>
+    /// <c>text-align</c> as the flex alignment the line-box stand-ins use (an inline run's row
+    /// wrapper, an aligned block's column), resolved against this box's own direction. Those
+    /// containers carry the same <c>direction</c>, so flex-start is the start side: right to
+    /// left, <c>left</c> is flex-end and <c>right</c> flex-start.
     /// </summary>
     /// <remarks>
     /// Kept separate from flex/grid <c>align-items</c>: using one field for both made
     /// <c>text-align:left</c> shrink-wrap flex children.
+    /// DEVIATION from crates/obscura-render/src/style.rs, which stores this flex value itself
+    /// and maps <c>left</c>/<c>start</c>/<c>justify</c> to flex-start and <c>right</c>/<c>end</c>
+    /// to flex-end whatever the direction, so right-to-left text started at the left
+    /// (Chromium 141 starts a <c>dir=rtl</c> paragraph at the right).
     /// </remarks>
-    public Layout.AlignItems? TextAlign;
+    public Layout.AlignItems? TextAlign => TextAlignKeyword switch
+    {
+        null => null,
+        Render.TextAlignKeyword.Center => Layout.AlignItems.Center,
+        Render.TextAlignKeyword.End => Layout.AlignItems.FlexEnd,
+        Render.TextAlignKeyword.Left => Direction == Layout.Direction.Rtl ? Layout.AlignItems.FlexEnd : Layout.AlignItems.FlexStart,
+        Render.TextAlignKeyword.Right => Direction == Layout.Direction.Rtl ? Layout.AlignItems.FlexStart : Layout.AlignItems.FlexEnd,
+        _ => Layout.AlignItems.FlexStart,
+    };
 
     /// <summary>Computed inherited <c>text-indent</c>.</summary>
     /// <remarks>

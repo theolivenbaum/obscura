@@ -75,7 +75,7 @@ public static partial class ComputedStyle
         }
         else if (tag == "center")
         {
-            style.TextAlign = Layout.AlignItems.Center;
+            style.TextAlignKeyword = TextAlignKeyword.Center;
             style.LegacyCenter = true;
         }
         else if (tag is "head" or "script" or "style" or "title" or "meta" or "link" or "noscript"
@@ -158,7 +158,7 @@ public static partial class ComputedStyle
             style.Cursor = "default";
             style.Display = Display.Inline;
             style.IsInlineBlock = true;
-            style.TextAlign = Layout.AlignItems.Center;
+            style.TextAlignKeyword = TextAlignKeyword.Center;
             style.BoxSizing = BoxSizing.BorderBox;
             style.Padding = new Edges(1.0f, 6.0f, 1.0f, 6.0f);
 
@@ -999,6 +999,18 @@ public static partial class ComputedStyle
     }
 
     /// <summary>Rust <c>apply_text_indent</c>.</summary>
+    /// <summary>A <c>text-align</c> / <c>text-align-last</c> keyword other than <c>auto</c>.</summary>
+    internal static TextAlignKeyword? ParseTextAlignKeyword(string value) => value switch
+    {
+        "start" => TextAlignKeyword.Start,
+        "end" => TextAlignKeyword.End,
+        "left" => TextAlignKeyword.Left,
+        "right" => TextAlignKeyword.Right,
+        "center" => TextAlignKeyword.Center,
+        "justify" => TextAlignKeyword.Justify,
+        _ => null,
+    };
+
     internal static void ApplyTextIndent(LayoutStyle style, string value)
     {
         switch (CssText.AsciiLower(value.Trim()))
@@ -2054,23 +2066,24 @@ public static partial class ComputedStyle
             }
 
             case "text-align":
-                switch (value)
+                if (ParseTextAlignKeyword(value) is { } keyword)
                 {
-                    case "right":
-                    case "end":
-                        style.TextAlign = Layout.AlignItems.FlexEnd;
-                        style.LegacyCenter = false;
-                        break;
-                    case "center":
-                        style.TextAlign = Layout.AlignItems.Center;
-                        style.LegacyCenter = false;
-                        break;
-                    case "left":
-                    case "start":
-                    case "justify":
-                        style.TextAlign = Layout.AlignItems.FlexStart;
-                        style.LegacyCenter = false;
-                        break;
+                    style.TextAlignKeyword = keyword;
+                    style.LegacyCenter = false;
+                }
+
+                return true;
+
+            case "text-align-last":
+                if (value == "auto")
+                {
+                    style.TextAlignLast = null;
+                    style.TextAlignLastAuto = true;
+                }
+                else if (ParseTextAlignKeyword(value) is { } last)
+                {
+                    style.TextAlignLast = last;
+                    style.TextAlignLastAuto = false;
                 }
 
                 return true;

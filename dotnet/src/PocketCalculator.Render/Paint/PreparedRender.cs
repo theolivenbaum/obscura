@@ -781,14 +781,11 @@ public sealed partial class PreparedRender
             PocketCalculator.Render.WordBreak.KeepAll => "keep-all",
             _ => "break-word",
         };
-        output["text-align"] = style.TextAlign is { } align
-            ? align.Keyword switch
-            {
-                TaffyAlignItemsKeyword.Center => "center",
-                TaffyAlignItemsKeyword.FlexEnd or TaffyAlignItemsKeyword.End => "end",
-                _ => "start",
-            }
-            : "start";
+        // DEVIATION from crates/obscura-render/src/paint.rs, which reports the flex value the
+        // keyword was folded into: `left` and `justify` read back as "start", `right` as "end".
+        // Chromium 141 reports the computed keyword.
+        output["text-align"] = TextAlignCss(style.TextAlignKeyword ?? TextAlignKeyword.Start);
+        output["text-align-last"] = style.TextAlignLast is { } last ? TextAlignCss(last) : "auto";
 
         if (style.IgnoresUsedBoxSizes())
         {
@@ -2052,4 +2049,13 @@ public sealed partial class PreparedRender
         return true;
     }
 
+    private static string TextAlignCss(TextAlignKeyword keyword) => keyword switch
+    {
+        TextAlignKeyword.End => "end",
+        TextAlignKeyword.Left => "left",
+        TextAlignKeyword.Right => "right",
+        TextAlignKeyword.Center => "center",
+        TextAlignKeyword.Justify => "justify",
+        _ => "start",
+    };
 }

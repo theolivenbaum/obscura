@@ -35,6 +35,38 @@ public enum Align
     End,
 }
 
+/// <summary>
+/// Whether the white space a line ends with takes part in its alignment (CSS Text 3 4.1.3,
+/// phase II).
+/// </summary>
+public enum TrailingSpace : byte
+{
+    /// <summary>It does: <c>pre</c>, <c>break-spaces</c>, and buffers that are not CSS text.</summary>
+    Counts = 0,
+
+    /// <summary>It is removed at the end of every line: <c>normal</c>, <c>nowrap</c>, <c>pre-line</c>.</summary>
+    Removed,
+
+    /// <summary>It hangs at a soft wrap and counts before a forced break: <c>pre-wrap</c>.</summary>
+    HangsAtSoftWrap,
+}
+
+/// <summary>
+/// What aligning a paragraph's lines needs beyond <see cref="Align"/>; the default is
+/// cosmic-text's behaviour.
+/// </summary>
+/// <param name="Last">
+/// The alignment of the paragraph's last line (<c>text-align-last</c>, or start for
+/// <c>justify</c>); <c>null</c> keeps cosmic-text's rule, which aligns it like the others and
+/// does not justify it.
+/// </param>
+/// <param name="Trailing">How the white space each line ends with is treated.</param>
+/// <param name="SoftWrapEnd">
+/// The paragraph was cut from a longer one at a soft wrap, so its last line is not the end
+/// of the CSS paragraph: it is justified, and its trailing white space hangs.
+/// </param>
+public readonly record struct LineAlignOptions(Align? Last, TrailingSpace Trailing, bool SoftWrapEnd);
+
 /// <summary>What an inline box's <c>vertical-align</c> aligns it to.</summary>
 public enum LineBoxAlign : byte
 {
@@ -343,6 +375,40 @@ public sealed class BufferLine
 
     public Align? Align { get; set; }
 
+    /// <summary>Last-line alignment and trailing white space; see <see cref="LineAlignOptions"/>.</summary>
+    public LineAlignOptions AlignOptions
+    {
+        get => _alignOptions;
+        set
+        {
+            if (_alignOptions != value)
+            {
+                _alignOptions = value;
+                _layout = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The paragraph's base direction from CSS <c>direction</c> (true: right to left), or
+    /// <c>null</c> for cosmic-text's first-strong-character rule (UAX#9 P2/P3).
+    /// </summary>
+    public bool? BaseRtl
+    {
+        get => _baseRtl;
+        set
+        {
+            if (_baseRtl != value)
+            {
+                _baseRtl = value;
+                ResetShaping();
+            }
+        }
+    }
+
+    private LineAlignOptions _alignOptions;
+    private bool? _baseRtl;
+
     /// <summary>
     /// Float layout only: the line box's own width when floats shorten it, used instead of the
     /// buffer width to lay this (pre-split, single visual) line out and align it.
@@ -383,7 +449,7 @@ public sealed class BufferLine
     {
         if (_shape is null)
         {
-            _shape = shaper.ShapeParagraph(Text, AttrsList, tabWidth);
+            _shape = shaper.ShapeParagraph(Text, AttrsList, tabWidth, _baseRtl);
             _layout = null;
         }
 
@@ -402,8 +468,8 @@ public sealed class BufferLine
         {
             ShapeLine shape = Shape(shaper, tabWidth);
             _layout = shaper.Cache is { } cache
-                ? cache.Layout(shape, fontSize, width, wrap, Align, matchMonoWidth)
-                : TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, Align, matchMonoWidth);
+                ? cache.Layout(shape, fontSize, width, wrap, Align, matchMonoWidth, _alignOptions)
+                : TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, Align, matchMonoWidth, _alignOptions);
         }
 
         return _layout;
@@ -416,12 +482,16 @@ public sealed class BufferLine
         Text = Text[..index];
         AttrsList tailAttrs = AttrsList.SplitOff(index);
         ResetShaping();
-        return new BufferLine(tailText, tailAttrs) { Align = Align };
+        var tail = new BufferLine(tailText, tailAttrs) { Align = Align, _alignOptions = _alignOptions, _baseRtl = _baseRtl };
+
+        // The head now ends where the paragraph soft-wraps.
+        _alignOptions = _alignOptions with { SoftWrapEnd = true };
+        return tail;
     }
 
     public BufferLine Clone()
     {
-        var copy = new BufferLine(Text, AttrsList.Clone()) { Align = Align };
+        var copy = new BufferLine(Text, AttrsList.Clone()) { Align = Align, _alignOptions = _alignOptions, _baseRtl = _baseRtl };
         return copy;
     }
 }
