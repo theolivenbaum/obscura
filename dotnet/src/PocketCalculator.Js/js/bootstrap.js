@@ -3646,6 +3646,7 @@ class Node {
       _ceDisconnectList(ceRemoved, this._nid);
       _ceDone();
     }
+    _restoreAdoptedStyles(this);
   }
   get nodeValue() {
     const t = this.nodeType;
@@ -6838,6 +6839,7 @@ class Element extends Node {
     } finally {
       _ceLeave();
     }
+    _restoreAdoptedStyles(this);
   }
 }
 
@@ -7935,6 +7937,7 @@ class DocumentFragment extends Node {
       if (ceRemoved !== null && ceRemoved.length !== 0) _ceDisconnectList(ceRemoved, this._nid);
       _ceDone();
     }
+    _restoreAdoptedStyles(this);
   }
   querySelector(s) { return _wrapEl(+_dom("query_selector_scoped", this._nid, s)); }
   querySelectorAll(s) {
@@ -12495,6 +12498,18 @@ function _adoptedStyleTarget(root) {
   if (!root) return null;
   if (root.nodeType === 9) return root.head || root.documentElement;
   return root instanceof globalThis.ShadowRoot ? root : null;
+}
+
+// DEVIATION from crates/obscura-js/js/bootstrap.js: an adopted sheet is materialized as a
+// <style> child of the shadow root, so replacing the root's children (`innerHTML =`,
+// `textContent =`, `replaceChildren()`) removed the page's styling with it. In Chromium the
+// adopted sheets are not children and survive. Lit-style components that set
+// adoptedStyleSheets and then render through innerHTML (msn.com's cards) lost every rule.
+function _restoreAdoptedStyles(node) {
+  if (node.nodeType === 11 && node._adoptedStyleSheets !== undefined
+      && node._adoptedStyleSheets.length !== 0) {
+    _syncAdoptedStyles(node);
+  }
 }
 
 function _syncAdoptedStyles(root) {

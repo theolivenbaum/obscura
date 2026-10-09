@@ -5971,3 +5971,22 @@ child of a list item does not inherit the marker. Markers are still drawn only f
 elements. grammarly.com's feature carousel (`li::marker { content: "" }` on flex-item
 slides) painted a bullet in front of every card. Pinned by `ListItemDisplayTests` and
 `render-repros/list-item-display.html`.
+
+### A shadow root keeps its adopted sheets when its children are replaced, and `:host(...) x` matches
+
+Two shadow-styling gaps msn.com's cards fell into (both visible as the hero card's missing
+text overlay):
+
+- `bootstrap.js` materializes an adopted sheet as a `<style data-obscura-adopted>` child of
+  the shadow root, so `root.innerHTML = ...`, `root.textContent = ...` and
+  `root.replaceChildren(...)` removed it, and with it every rule of a component that set
+  `adoptedStyleSheets` before rendering. `_restoreAdoptedStyles` re-syncs after each of those
+  three. Removing the bridge node with `removeChild` still loses it.
+- `Matcher.Matches` matched every rule without a shadow scope, so `:host(...)` could only
+  match the host itself (`HostRules`), never as the left-hand compound of a rule styling a
+  shadow-tree element (`:host([immersive]) .media { position: absolute; z-index: -1 }`). A
+  selector with `:host` whose subject is inside a shadow tree is now matched with that tree's
+  host as the scope, as `MatchesInShadowScope` already did for `::slotted()`.
+  `shadowRoot.querySelector(':host .x')` still answers null (Chromium matches).
+
+Pinned by `ShadowAdoptedStylesTests` (Js).

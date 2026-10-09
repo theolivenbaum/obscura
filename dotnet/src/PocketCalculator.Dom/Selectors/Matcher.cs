@@ -84,6 +84,20 @@ public sealed class Matcher
             return false;
         }
 
+        // `:host(...) .item` in a shadow tree's sheet walks out of the tree onto its host, and
+        // :host only matches with that host as the scope (MatchesInShadowScope). A subject in a
+        // shadow tree is matched against its own tree's sheets, so the containing shadow root's
+        // host is the scope. Without it msn.com's `:host([immersive]) .media` never matched.
+        // The ancestor bloom tracks DOM ancestors, which stop at the shadow root, so it is
+        // not consulted for these.
+        if ((compiled.Selector.Flags & SelectorFlags.HasHost) != 0
+            && tree.HasShadowRoots
+            && tree.ContainingShadowRoot(nid) is { } shadowRoot
+            && tree.ShadowRootInfo(shadowRoot) is { } shadowInfo)
+        {
+            return MatchesInShadowScope(tree, nid, compiled, shadowInfo.Host);
+        }
+
         var context = new MatchingContext(QuirksMode.NoQuirks) { BloomFilter = _ancestors.Filter, HasCache = _hasCache };
         return SelectorMatching.MatchesSelector(
             compiled.Selector,
