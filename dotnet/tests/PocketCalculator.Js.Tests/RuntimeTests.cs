@@ -5795,6 +5795,9 @@ public sealed partial class RuntimeTests
     {
         using var owner = RenderCaptureSupport.AnimationEpochRuntime();
         var rt = owner.Runtime;
+        // Frozen, the re-insertion lands exactly at 1000 rather than 1000 plus however long
+        // a loaded host takes to reach it (50 ms of that already failed the 5 px floor).
+        RenderCaptureSupport.FreezeAnimationTimeline(rt);
         rt.Evaluate(
             "var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)");
         Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(1_000.0f)));
@@ -5814,6 +5817,9 @@ public sealed partial class RuntimeTests
     {
         using var owner = RenderCaptureSupport.AnimationEpochRuntime();
         var rt = owner.Runtime;
+        // Frozen, each insertion lands exactly at the time rewound to (see
+        // RemoveAndReappendRestartsAnimationWithoutIntermediateFlush).
+        RenderCaptureSupport.FreezeAnimationTimeline(rt);
         RenderCaptureSupport.RewindAnimationTimeline(rt, 100);
         rt.Evaluate(
             "var a=document.createElement('div');a.id='first';a.className='anim';document.body.appendChild(a)");
@@ -5841,6 +5847,10 @@ public sealed partial class RuntimeTests
     {
         using var owner = RenderCaptureSupport.AnimationEpochRuntime();
         var rt = owner.Runtime;
+        // Animation births read the timeline's clock; frozen, they land exactly at 0, 300 and
+        // 800. On the live clock a cold or loaded host spent more than the 50 ms of slack the
+        // first range allows (25 to 35 px at 300 ms) between page init and the insertion.
+        RenderCaptureSupport.FreezeAnimationTimeline(rt);
         rt.Evaluate(
             "var box=document.createElement('div');box.id='box';box.className='anim';document.body.appendChild(box)");
         Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(300.0f)));

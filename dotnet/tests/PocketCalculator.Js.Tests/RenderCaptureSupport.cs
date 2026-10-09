@@ -74,6 +74,20 @@ internal static class RenderCaptureSupport
             : throw new InvalidOperationException($"expected animated pixel width, got {width}");
     }
 
+    /// <summary>
+    /// Stops the document timeline's clock and puts the timeline at 0, so animation births
+    /// that read the wall clock land at exactly the times a test rewinds to. Without it the
+    /// time between a rewind and the mutation that follows it counts too, and a cold or
+    /// loaded host stretched that past a test's tolerance.
+    /// </summary>
+    public static ManualAnimationClock FreezeAnimationTimeline(PocketCalculatorJsRuntime runtime)
+    {
+        var clock = new ManualAnimationClock();
+        runtime.State.AnimationClock = clock;
+        RewindAnimationTimeline(runtime, 0);
+        return clock;
+    }
+
     /// <summary>Moves the document timeline origin the given span into the past.</summary>
     public static void RewindAnimationTimeline(PocketCalculatorJsRuntime runtime, int milliseconds) =>
         runtime.State.SetAnimationTimelineElapsed(TimeSpan.FromMilliseconds(milliseconds));
@@ -86,4 +100,16 @@ internal static class RenderCaptureSupport
             System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(16, 4)),
             System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(20, 4)));
     }
+}
+
+/// <summary>A document-timeline clock that moves only when a test advances it.</summary>
+internal sealed class ManualAnimationClock : TimeProvider
+{
+    private long _ticks;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public override long GetTimestamp() => Interlocked.Read(ref _ticks);
+
+    public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
 }

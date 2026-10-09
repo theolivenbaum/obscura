@@ -28,6 +28,7 @@ namespace PocketCalculator.Js.Ops;
 /// </remarks>
 public sealed class PocketCalculatorState
 {
+    private TimeProvider _animationClock = TimeProvider.System;
     private long _animationTimelineOrigin = Stopwatch.GetTimestamp();
     private int _borrowDepth;
 
@@ -375,16 +376,34 @@ public sealed class PocketCalculatorState
         set => _animationTimelineOrigin = value;
     }
 
+    /// <summary>
+    /// The clock the document timeline reads; the system's monotonic clock unless a test
+    /// installs a manual one, so animation births land at exact times however slow the
+    /// host is. Replacing it keeps the current elapsed time.
+    /// </summary>
+    public TimeProvider AnimationClock
+    {
+        get => _animationClock;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            var elapsed = AnimationTimelineElapsedMilliseconds;
+            _animationClock = value;
+            SetAnimationTimelineElapsed(TimeSpan.FromMilliseconds(elapsed));
+        }
+    }
+
     /// <summary>Milliseconds since <see cref="AnimationTimelineOrigin"/>.</summary>
     public double AnimationTimelineElapsedMilliseconds =>
-        (Stopwatch.GetTimestamp() - _animationTimelineOrigin) * 1000.0 / Stopwatch.Frequency;
+        (_animationClock.GetTimestamp() - _animationTimelineOrigin) * 1000.0 / _animationClock.TimestampFrequency;
 
     /// <summary>Restarts the document timeline, as <c>Instant::now()</c> does in Rust.</summary>
-    public void ResetAnimationTimelineOrigin() => _animationTimelineOrigin = Stopwatch.GetTimestamp();
+    public void ResetAnimationTimelineOrigin() => _animationTimelineOrigin = _animationClock.GetTimestamp();
 
     /// <summary>Moves the timeline origin <paramref name="elapsed"/> into the past.</summary>
     public void SetAnimationTimelineElapsed(TimeSpan elapsed) =>
-        _animationTimelineOrigin = Stopwatch.GetTimestamp() - (long)(elapsed.TotalSeconds * Stopwatch.Frequency);
+        _animationTimelineOrigin = _animationClock.GetTimestamp()
+            - (long)(elapsed.TotalSeconds * _animationClock.TimestampFrequency);
 
     /// <summary>
     /// Host/HTML task epoch for document-timeline sampling. Geometry and

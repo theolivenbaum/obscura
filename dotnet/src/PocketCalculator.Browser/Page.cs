@@ -272,6 +272,13 @@ public sealed partial class Page : IDisposable
     public (float Width, float Height) Viewport { get; private set; } = (1280.0f, 720.0f);
 
     /// <summary>
+    /// The clock every document's animation timeline reads. The system's monotonic clock
+    /// unless a test installs one it advances by hand, which makes CSS and Web Animations land
+    /// at exact times however slow the host is. Takes effect from the next document.
+    /// </summary>
+    public TimeProvider AnimationClock { get; set; } = TimeProvider.System;
+
+    /// <summary>
     /// Output device pixels per CSS pixel for CDP surface capture. Layout and CSSOM
     /// stay in CSS pixels; <c>Emulation.setDeviceMetricsOverride</c> owns this
     /// independent raster scale.
@@ -490,6 +497,7 @@ public sealed partial class Page : IDisposable
         // op_fetch_url so dynamic imports and JS fetch() honour the configured
         // upstream proxy. A null proxy is a direct connection.
         var rt = PocketCalculatorJsRuntime.WithBaseUrlAndProxy(UrlString(), Context.ProxyUrl);
+        rt.State.AnimationClock = AnimationClock;
         rt.SetUrl(UrlString());
         rt.SetEncoding(Encoding);
         rt.SetTitle(Title);
