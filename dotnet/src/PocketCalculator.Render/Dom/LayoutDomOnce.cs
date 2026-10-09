@@ -786,11 +786,6 @@ public static partial class RenderDom
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
 
-                if (DomPasses.ApplyFloatContinuations(tree, taffyTree, idMap, styles, ifcItems))
-                {
-                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
-                }
-
                 if (DomPasses.ApplyTableRowGeometry(taffyTree, idMap, styles, ifcItems))
                 {
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);

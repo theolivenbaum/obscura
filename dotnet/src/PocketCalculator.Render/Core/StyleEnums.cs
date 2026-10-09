@@ -74,8 +74,8 @@ public readonly record struct FontVariationSetting(string Tag, float Value);
 
 /// <summary><c>float: left|right</c>.</summary>
 /// <remarks>
-/// True CSS float needs per-line reflow around the float's shape, which taffy's block/flex/grid
-/// modes do not do; see the DOM float-zone grouping for the bounded approximation this drives.
+/// Laid out as a CSS float by the block formatting context, with line boxes shortened around
+/// it; see <c>DomBuild.BuildMixedBlock</c> and "Float layout (CSS 2.1 9.5)" in todo.md.
 /// </remarks>
 public enum Float
 {

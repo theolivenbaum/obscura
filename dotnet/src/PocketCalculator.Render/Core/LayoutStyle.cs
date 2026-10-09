@@ -2129,8 +2129,8 @@ public sealed class LayoutStyle
     public int? ZIndex;
 
     /// <summary>
-    /// <c>clear</c>, when set: this element moves below preceding floats on the given side(s),
-    /// ending their float zone.
+    /// <c>clear</c>, when set: this element moves below preceding floats on the given side(s)
+    /// (CSS 2.1 9.5.2 clearance).
     /// </summary>
     public Clear? Clear;
 

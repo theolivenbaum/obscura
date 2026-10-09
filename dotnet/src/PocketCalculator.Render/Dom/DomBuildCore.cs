@@ -371,7 +371,7 @@ internal static partial class DomBuild
             string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
             && string.Equals(local, "details", StringComparison.Ordinal)
             && node.GetAttribute("open") is null;
-        if (!isClosedHtmlDetails && !context.Ifc.FloatAwareBlocks.Contains(id))
+        if (!isClosedHtmlDetails)
         {
             if (context.Engine.TryBuild(tree, id, context.Styles) is { } item)
             {
@@ -513,15 +513,14 @@ internal static partial class DomBuild
             }
         }
 
-        // A block container with floated children in a document that has floats lays them
-        // out as CSS floats: see BuildMixedBlock.
+        // A block container with floated children lays them out as CSS floats: see
+        // BuildMixedBlock. A multi-column container keeps its own build below; its floats are
+        // still taffy floats (MarkBlockFormattingContextRoots), placed in the first column.
         if (floatFlowContainer && hasFloatChild && style.ColumnCount is not (> 1))
         {
             return BuildMixedBlock(context, id, style, taffyStyle, domChildren, floatFlow: true);
         }
 
-        bool nativeFloatBand = hasFloatChild
-            && DomTableSupport.CanUseNativeFloatBand(tree, style, domChildren, context.Styles);
         bool hasInFlowBlockChild = false;
         foreach (NodeId cid in domChildren)
         {
@@ -568,7 +567,6 @@ internal static partial class DomBuild
 
         if (stacksChildrenVertically
             && hasInlineIshContent
-            && !nativeFloatBand
             && !(hasFloatChild && hasInFlowBlockChild))
         {
             taffyStyle.Display = TaffyDisplay.Flex;
@@ -600,22 +598,8 @@ internal static partial class DomBuild
             taffyStyle.AlignItems = TaffyAlignItems.FlexStart;
         }
 
-        if (nativeFloatBand)
-        {
-            // Native float placement requires a real block formatting context on the parent.
-            taffyStyle.Display = TaffyDisplay.Block;
-        }
-
         List<TaffyNodeId> childIds;
-        if (nativeFloatBand)
-        {
-            childIds = BuildChildrenWithNativeFloatBand(context, id, style, domChildren);
-        }
-        else if (hasFloatChild)
-        {
-            childIds = BuildChildrenWithFloatZone(context, id, domChildren);
-        }
-        else if (style.Display is Display.Flex or Display.Grid && !style.InternalFlexContainer)
+        if (style.Display is Display.Flex or Display.Grid && !style.InternalFlexContainer)
         {
             childIds = BuildFlexGridChildren(context, id);
         }
@@ -628,7 +612,6 @@ internal static partial class DomBuild
             }
         }
 
-        if (!nativeFloatBand)
         {
             if (BuildInFlowPseudo(context, id, GeneratedBoxKind.Before, style.BeforePseudo)
                 is { } before)

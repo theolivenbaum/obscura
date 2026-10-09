@@ -23,12 +23,6 @@ internal sealed class MulticolBuild
     internal required List<TaffyNodeId> Children { get; init; }
 }
 
-internal readonly record struct FloatContinuation(
-    NodeId Owner,
-    TaffyNodeId Float,
-    TaffyNodeId Flow,
-    Float Side);
-
 /// <summary>
 /// Registry of shaped inline formatting contexts created during the taffy-tree build.
 /// </summary>
@@ -78,17 +72,11 @@ internal sealed class IfcRegistry
     /// </summary>
     internal Dictionary<TaffyNodeId, (NodeId Owner, LayoutStyle Style)> AnonymousTables { get; } = [];
 
-    /// <summary>Floats whose exclusion can continue through later descendant blocks.</summary>
-    internal List<FloatContinuation> FloatContinuations { get; } = [];
-
     /// <summary>
     /// Floats anchored in an inline formatting context leaf, keyed by the leaf: each float's
     /// taffy node (a later sibling of the leaf) and the text offset it sits at.
     /// </summary>
     internal Dictionary<TaffyNodeId, (TaffyNodeId Float, int Offset)[]> FloatAnchors { get; } = [];
-
-    /// <summary>Ordinary blocks participating in a native float band.</summary>
-    internal HashSet<NodeId> FloatAwareBlocks { get; } = [];
 
     /// <summary>CSS multi-column containers built as a row of anonymous fragmentainers.</summary>
     internal List<MulticolBuild> Multicol { get; } = [];
@@ -1404,56 +1392,6 @@ internal static partial class DomBuild
         }
 
         context.TaffyTree.SetStyle(node, native);
-    }
-
-    internal static List<TaffyNodeId> BuildChildrenWithNativeFloatBand(
-        BuildContext context,
-        NodeId parentId,
-        LayoutStyle parentStyle,
-        IReadOnlyList<NodeId> domChildren)
-    {
-        List<TaffyNodeId> result = [];
-        foreach ((GeneratedBoxKind kind, LayoutStyle? pseudo) in new[]
-        {
-            (GeneratedBoxKind.Before, parentStyle.BeforePseudo),
-            (GeneratedBoxKind.After, parentStyle.AfterPseudo),
-        })
-        {
-            if (kind == GeneratedBoxKind.After)
-            {
-                foreach (NodeId id in domChildren)
-                {
-                    if (!context.Styles.TryGetValue(id, out LayoutStyle? style))
-                    {
-                        continue;
-                    }
-
-                    if (style.Float is null
-                        && style.Display == Display.Block
-                        && !DomStyleFixups.EstablishesBlockFormattingContext(style))
-                    {
-                        context.Ifc.FloatAwareBlocks.Add(id);
-                    }
-
-                    foreach (TaffyNodeId node in BuildAny(context, id))
-                    {
-                        SetNativeFloatClear(context, node, style, false);
-                        result.Add(node);
-                    }
-                }
-            }
-
-            if (BuildInFlowPseudo(context, parentId, kind, pseudo) is { } built && pseudo is not null)
-            {
-                foreach (TaffyNodeId node in built.Nodes)
-                {
-                    SetNativeFloatClear(context, node, pseudo, true);
-                    result.Add(node);
-                }
-            }
-        }
-
-        return result;
     }
 
     internal static NodeId? InlineWrapperFloat(
