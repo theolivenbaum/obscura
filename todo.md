@@ -5990,3 +5990,16 @@ text overlay):
   `shadowRoot.querySelector(':host .x')` still answers null (Chromium matches).
 
 Pinned by `ShadowAdoptedStylesTests` (Js).
+
+### `contain` and `will-change` boxes are stacking contexts, and a sub-pass paints its root first
+
+`paint.rs` isolates only z-index, opacity and transform roots. `PaintDom.IsolatesPaint` also
+treats a box with `contain: layout | paint | content | strict` or a stacking `will-change`
+as a stacking context, painted as an atomic unit in its normal-flow slot, so a `z-index: -1`
+descendant stays inside it. And a sub-pass (a stacking context, float, opacity or transform
+root) now paints its root's own box before the negative z-index layers, per CSS 2.1 Appendix
+E; it used to paint the root after them, so a `z-index: -1` child vanished under its own
+stacking context's background. msn.com's hero image (`position: absolute; z-index: -1` in a
+`contain: content` card) was painted under the card's #333 background. Filter and
+backdrop-filter, which also make stacking contexts, are not included. Pinned by
+`ContainStackingTests` and `render-repros/contain-negative-z.html`.
