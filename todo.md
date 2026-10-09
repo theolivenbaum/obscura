@@ -3069,6 +3069,31 @@ write + `getBoundingClientRect` 187ms -> 139ms; peak RSS unchanged. Pinned by
 `LineLayoutMemoTests` (Render). `POCKETCALCULATOR_DISABLE_SHAPE_CACHE=1` turns this off with the
 shape cache.
 
+### A document with shadow roots keeps its retained styles
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which restyles the whole document on any
+mutation once a shadow root carries a stylesheet (and so carries no layout over either), as the
+port did. Web-component pages pay a whole-document cascade and layout for every forced read
+(reddit.com: ~170 shadow roots). `RetainedStylePlanner.AddShadowDamage` plans every shadow
+sheet against the mutations as the document's is planned, covers what the planner cannot key
+structurally (an attribute change on a host restyles its shadow tree, for `:host(...)` and
+`::part`; `part`, `exportparts` and `slot` restyle the element's subtree; a slot inserted,
+removed or renamed restyles its host and the host's light children; an insertion or removal of
+a host's light child restyles the host), fails closed on `:host-context()`, and closes the
+damage over the flat tree (a damaged host's shadow tree and a damaged slot's assigned nodes,
+plus flat-tree context chains). The sheets must be the very ones the retained styles were
+cascaded with, root for root (`RetainedStyleMaps.ShadowSheets`); any other shadow sheet set
+restyles the document as before. The retained pass's set of styled nodes is now every
+shadow-including descendant when there are shadow roots, as the full cascade styles them (a
+slot's fallback content and a host's unassigned children are not in the flat tree; the walk over
+the flat tree dropped their styles). Interleaved on one binary
+(`POCKETCALCULATOR_NO_SHADOW_RETAINED=1` restores the old path), 400 web components each with a
+shadow stylesheet, 30 class toggles each followed by a read, three runs: allocation 1377MB ->
+340MB, layout CPU 7.0-7.4s -> 4.7-4.9s, same answers. Pinned by the shadow fixture of
+`IncrementalLayoutDifferentialTests` (shared shadow sheet, `:host`, `::slotted`, named slots,
+`::part`, inherited custom properties, a nested host; 60 seeds clean) and
+`AShadowRootPageRestylesOnlyWhatAMutationReaches`.
+
 ### A split paragraph's lines are taken from the line they were cut from
 
 DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and

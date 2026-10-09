@@ -119,6 +119,8 @@ internal sealed class RetainedStyleMaps
 
     internal required Dictionary<NodeId, IReadOnlyDictionary<string, string>> CustomProperties { get; init; }
 
+    /// <summary>The shadow stylesheets the styles were cascaded with, by shadow root.</summary>
+    internal IReadOnlyDictionary<NodeId, Css.Stylesheet>? ShadowSheets { get; init; }
 }
 
 /// <summary>Per-element border boxes after layout, in viewport coordinates.</summary>
@@ -132,6 +134,9 @@ public sealed class DomLayout
 
     /// <summary>The document stylesheet this layout was cascaded with.</summary>
     internal Css.Stylesheet? DocumentSheet { get; init; }
+
+    /// <summary>The shadow stylesheets this layout was cascaded with, by shadow root.</summary>
+    internal IReadOnlyDictionary<NodeId, Css.Stylesheet>? ShadowSheets { get; init; }
 
     /// <summary>
     /// What this layout's top-down style pass left for the next retained pass; see
@@ -271,6 +276,7 @@ public sealed class DomLayout
         {
             Styles = Styles,
             CustomProperties = CustomProperties,
+            ShadowSheets = ShadowSheets,
         };
         Styles = [];
         CustomProperties = [];

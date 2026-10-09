@@ -708,6 +708,46 @@ public class IncrementalLayoutDifferentialTests
         return text.ToString();
     }
 
+    /// <summary>
+    /// A document whose shadow roots carry stylesheets keeps its retained styles and layout
+    /// across a mutation (it used to restyle and lay out the whole document), and restyles a
+    /// host's shadow tree when the host changes.
+    /// </summary>
+    [Fact]
+    public void AShadowRootPageRestylesOnlyWhatAMutationReaches()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss + "</style></head><body>");
+        for (int i = 0; i < 40; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture,
+                $"<x-item id=h{i}><template shadowrootmode=open><style>:host{{display:block;padding:2px}} :host(.c) b{{font-size:20px}} ::slotted(p){{margin:3px}}</style><b>item {i}</b><slot></slot></template><p id=p{i}>text {i}</p></x-item>");
+        }
+
+        html.Append("</body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        string[] targets = ["p7", "h8", "p30", "h8"];
+        for (int step = 0; step < targets.Length; step++)
+        {
+            NodeId target = tree.GetElementById(targets[step])!.Value;
+            string? old = tree.GetNode(target)!.GetAttribute("class");
+            string value = old == "c" ? "a" : "c";
+            tree.GetNode(target)!.SetAttribute("class", value);
+            previous = RenderPaint.PrepareDomWithRetainedStyles(
+                tree, Viewport, null, resources, [], cache, previous,
+                [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", old, value))])!;
+            if (step > 0)
+            {
+                Assert.True(previous.Layout.TopDownVisits < 40, $"step {step} visited {previous.Layout.TopDownVisits}");
+                Assert.True(previous.Layout.TransplantedBoxes > 50, $"step {step} carried {previous.Layout.TransplantedBoxes}");
+            }
+
+            Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, previous));
+        }
+    }
+
     private static PreparedRender Reference(DomTree tree)
     {
         using IDisposable full = RetainedTaffyLayout.ForceFullRelayout();

@@ -666,6 +666,63 @@ public static partial class RenderDom
         || name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
         || name.StartsWith("aria-", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_SHADOW_RETAINED=1</c>.</summary>
+    private static readonly bool ShadowRetainedDisabled =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_SHADOW_RETAINED") == "1";
+
+    /// <summary>Every node below <paramref name="root"/>, shadow trees included.</summary>
+    private static List<NodeId> ShadowIncludingDescendants(DomTree tree, NodeId root)
+    {
+        List<NodeId> result = [];
+        Stack<NodeId> pending = new();
+        pending.Push(root);
+        while (pending.Count != 0)
+        {
+            NodeId node = pending.Pop();
+            if (node != root)
+            {
+                result.Add(node);
+            }
+
+            if (result.Count > tree.SlotCount)
+            {
+                break;
+            }
+
+            if (tree.ShadowRootOf(node) is { } shadow)
+            {
+                pending.Push(shadow);
+            }
+
+            for (NodeId? child = tree.GetNode(node)?.LastChild; child is { } id; child = tree.GetNode(id)?.PrevSibling)
+            {
+                pending.Push(id);
+            }
+        }
+
+        return result;
+    }
+
+    private static bool SameShadowSheets(
+        IReadOnlyDictionary<NodeId, Stylesheet>? before,
+        IReadOnlyDictionary<NodeId, Stylesheet> now)
+    {
+        if (before is null || before.Count != now.Count)
+        {
+            return false;
+        }
+
+        foreach ((NodeId root, Stylesheet sheet) in now)
+        {
+            if (!before.TryGetValue(root, out Stylesheet? previous) || !ReferenceEquals(previous, sheet))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? PrepareRetainedStyles(
         DomTree tree,
         Stylesheet sheet,
@@ -687,7 +744,12 @@ public static partial class RenderDom
             }
         }
 
-        if (shadowSheets.Count != 0 && !resourceOnly)
+        // A document with shadow roots is planned with every shadow sheet as well
+        // (RetainedStylePlanner.AddShadowDamage), provided the sheets are the very ones the
+        // retained styles were cascaded with: a sheet's sources live in the shadow trees, and a
+        // changed sheet restyles the document.
+        bool shadowed = shadowSheets.Count != 0 && !resourceOnly;
+        if (shadowed && (ShadowRetainedDisabled || !SameShadowSheets(retained.ShadowSheets, shadowSheets)))
         {
             LayoutPhaseProfile.Note("restyleShadowSheets", shadowSheets.Count);
             return null;
@@ -724,7 +786,15 @@ public static partial class RenderDom
                 node.Index < tree.SlotCount && connected[node.Index] == node.Value + 1;
 
             connected[tree.Document.Index] = tree.Document.Value + 1;
-            foreach (NodeId node in DomTraversal.RenderedDescendants(tree, tree.Document))
+
+            // With shadow roots, what the cascade styles is every shadow-including descendant:
+            // a slot's fallback content and a host's unassigned children are not in the flat
+            // tree, but a full pass cascades them all the same, and a retained one must keep
+            // (or compute) the same styles.
+            List<NodeId> walk = tree.HasShadowRoots
+                ? ShadowIncludingDescendants(tree, tree.Document)
+                : DomTraversal.RenderedDescendants(tree, tree.Document);
+            foreach (NodeId node in walk)
             {
                 connected[node.Index] = node.Value + 1;
                 if (!retained.Styles.ContainsKey(node) && tree.GetNode(node)?.IsElement == true)
@@ -772,6 +842,12 @@ public static partial class RenderDom
         }
 
         HashSet<NodeId> dirty = plan.Dirty;
+        if (shadowed && !RetainedStylePlanner.AddShadowDamage(tree, sheet, shadowSheets, mutations, dirty))
+        {
+            LayoutPhaseProfile.Note("restyleShadowFull", mutations.Count);
+            return null;
+        }
+
         foreach (NodeId node in unstyled)
         {
             RetainedStylePlanner.AddStyleSubtree(tree, node, dirty);

@@ -360,6 +360,231 @@ public static class RetainedStylePlanner
         }
     }
 
+    /// <summary>
+    /// Extend a retained plan to a document with shadow roots, or return false for a full
+    /// restyle.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, which restyles the whole document on any
+    /// mutation once a shadow root carries a stylesheet, as the port did: on reddit.com, ~170
+    /// shadow roots made every forced read a whole-document cascade and a layout that carried
+    /// nothing over. The plan is the union of three parts. Each shadow stylesheet is planned
+    /// against the mutations exactly as the document's is (its rules can only match inside its
+    /// tree, so planning them over the whole tree over-approximates). Rules the planner cannot
+    /// key are covered structurally: an attribute change on a shadow host restyles its shadow
+    /// tree (<c>:host(...)</c>, <c>::part</c> of the document's rules), <c>part</c>,
+    /// <c>exportparts</c> and <c>slot</c> restyle the element's subtree, a slot's <c>name</c> and
+    /// a slot inserted or removed restyle its host, and an insertion or removal of a host's
+    /// light child restyles the host. <c>:host-context()</c> fails closed. Then the damage is
+    /// closed over the flat tree: a damaged host's shadow tree and a damaged slot's assigned
+    /// nodes inherit from it, and every damaged node's flat-tree ancestors are re-cascaded as
+    /// context, as <see cref="AddStyleSubtree"/> does for the light tree.
+    /// </remarks>
+    internal static bool AddShadowDamage(
+        DomTree tree,
+        Stylesheet documentSheet,
+        IReadOnlyDictionary<NodeId, Stylesheet> shadowSheets,
+        IReadOnlyList<RetainedStyleMutation> mutations,
+        HashSet<NodeId> dirty)
+    {
+        HashSet<Stylesheet> sheets = new(ReferenceEqualityComparer.Instance) { documentSheet };
+        foreach (Stylesheet sheet in shadowSheets.Values)
+        {
+            sheets.Add(sheet);
+        }
+
+        HashSet<NodeId> own = [];
+        foreach (Stylesheet sheet in sheets)
+        {
+            if (sheet.InvalidationMap.StateDependencies("host-context").Count != 0
+                || OwnStyleDamage(tree, sheet, mutations) is not { } damaged)
+            {
+                return false;
+            }
+
+            own.UnionWith(damaged);
+        }
+
+        void OwnSubtree(NodeId root)
+        {
+            own.Add(root);
+            foreach (NodeId descendant in tree.Descendants(root))
+            {
+                own.Add(descendant);
+            }
+        }
+
+        // A slot added, removed or renamed reassigns the host's light children: the ones it
+        // releases are no longer anywhere the closure below can find them from.
+        void HostOf(NodeId node)
+        {
+            if (tree.ContainingShadowRoot(node) is { } root && tree.ShadowRootInfo(root) is { } info)
+            {
+                own.Add(info.Host);
+                foreach (NodeId child in tree.Children(info.Host))
+                {
+                    OwnSubtree(child);
+                }
+            }
+        }
+
+        bool HoldsSlot(NodeId root)
+        {
+            if (tree.IsHtmlSlotElement(root))
+            {
+                return true;
+            }
+
+            foreach (NodeId descendant in tree.Descendants(root))
+            {
+                if (tree.IsHtmlSlotElement(descendant))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        foreach (RetainedStyleMutation mutation in mutations)
+        {
+            switch (mutation)
+            {
+                case RetainedStyleMutation.Attribute { Mutation: var attribute }:
+                {
+                    NodeId node = attribute.Node;
+                    string name = attribute.Name.ToLowerInvariant();
+                    if (tree.ShadowRootOf(node) is not null)
+                    {
+                        own.Add(node);
+                    }
+
+                    if (name is "part" or "exportparts" or "slot")
+                    {
+                        OwnSubtree(node);
+                    }
+
+                    if (name == "name" && tree.IsHtmlSlotElement(node))
+                    {
+                        HostOf(node);
+                    }
+
+                    break;
+                }
+
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert insert }:
+                    if (HoldsSlot(insert.Node))
+                    {
+                        HostOf(insert.NewParent);
+                        if (insert.OldParent is { } from)
+                        {
+                            HostOf(from);
+                        }
+                    }
+
+                    if (tree.ShadowRootOf(insert.NewParent) is not null)
+                    {
+                        own.Add(insert.NewParent);
+                    }
+
+                    if (insert.OldParent is { } previous && tree.ShadowRootOf(previous) is not null)
+                    {
+                        own.Add(previous);
+                    }
+
+                    break;
+
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove remove }:
+                    if (HoldsSlot(remove.Node))
+                    {
+                        HostOf(remove.OldParent);
+                    }
+
+                    if (tree.ShadowRootOf(remove.OldParent) is not null)
+                    {
+                        own.Add(remove.OldParent);
+                    }
+
+                    break;
+            }
+        }
+
+        // Close over the flat tree: what inherits from a damaged host or slot is damaged too.
+        Stack<NodeId> pending = new(own);
+        while (pending.Count != 0)
+        {
+            NodeId node = pending.Pop();
+            WorkCancellation.ThrowIfCancellationRequested();
+            if (tree.ShadowRootOf(node) is { } shadow)
+            {
+                foreach (NodeId descendant in tree.Descendants(shadow))
+                {
+                    if (own.Add(descendant))
+                    {
+                        pending.Push(descendant);
+                    }
+                }
+            }
+
+            if (tree.IsHtmlSlotElement(node) && tree.AssignedNodes(node) is { } assigned)
+            {
+                foreach (NodeId slotted in assigned)
+                {
+                    if (own.Add(slotted))
+                    {
+                        pending.Push(slotted);
+                    }
+
+                    foreach (NodeId descendant in tree.Descendants(slotted))
+                    {
+                        if (own.Add(descendant))
+                        {
+                            pending.Push(descendant);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Context chains, in the DOM and in the flat tree.
+        Stack<NodeId> chain = new();
+        foreach (NodeId node in own)
+        {
+            dirty.Add(node);
+            chain.Push(node);
+        }
+
+        HashSet<NodeId> climbed = [];
+        while (chain.Count != 0)
+        {
+            NodeId node = chain.Pop();
+            if (!climbed.Add(node) || tree.GetNode(node) is not { } current)
+            {
+                continue;
+            }
+
+            if (current.Parent is { } parent)
+            {
+                dirty.Add(parent);
+                chain.Push(parent);
+            }
+
+            if (DomTraversal.RenderedParent(tree, node) is { } rendered)
+            {
+                dirty.Add(rendered);
+                chain.Push(rendered);
+            }
+
+            if (tree.ShadowRootInfo(node) is { } info)
+            {
+                dirty.Add(info.Host);
+                chain.Push(info.Host);
+            }
+        }
+
+        return true;
+    }
+
     internal static void AddStyleSubtree(DomTree tree, NodeId root, HashSet<NodeId> dirty)
     {
         dirty.Add(root);

@@ -1252,6 +1252,7 @@ public static partial class RenderDom
             TopDownVisits = topDownVisits,
             AdoptedInlineItems = engine.AdoptedItemCount,
             DocumentSheet = sheet,
+            ShadowSheets = shadowSheets,
             RetainedBoxes = builtRoot is { } keptRoot
                 ? new RetainedTaffyLayout
                 {
