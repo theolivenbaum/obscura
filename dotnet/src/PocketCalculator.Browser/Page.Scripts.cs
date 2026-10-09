@@ -241,8 +241,10 @@ public sealed partial class Page
                         PerformanceOps.UnixMilliseconds());
                     return (index, url, response);
                 }
-                catch (Exception error) when (error is not OperationCanceledException)
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
                 {
+                    // One script's failure, its own request timeout included, drops that
+                    // script; the catch below would otherwise drop every fetched one.
                     return null;
                 }
             });
@@ -414,8 +416,11 @@ public sealed partial class Page
                                 .PrepareModuleAsync(fullUrl, prepareBudgetMs)
                                 .ConfigureAwait(false);
                         }
-                        catch (Exception error) when (error is not OperationCanceledException)
+                        catch (Exception) when (!cancellationToken.IsCancellationRequested)
                         {
+                            // Any failure but the navigation's own cancellation is this
+                            // module's: a module load that times out, or a watchdog
+                            // interrupt, must not end the script phase.
                             continue;
                         }
                         moduleUrl = fullUrl;
@@ -432,8 +437,11 @@ public sealed partial class Page
                                 .PrepareInlineModuleAsync(script.Inline, script.BaseUrl, prepareBudgetMs)
                                 .ConfigureAwait(false);
                         }
-                        catch (Exception error) when (error is not OperationCanceledException)
+                        catch (Exception) when (!cancellationToken.IsCancellationRequested)
                         {
+                            // Any failure but the navigation's own cancellation is this
+                            // module's: a module load that times out, or a watchdog
+                            // interrupt, must not end the script phase.
                             continue;
                         }
                         moduleUrl = null;
@@ -458,7 +466,8 @@ public sealed partial class Page
                         await EvaluateModuleAsync(
                             scheduled,
                             scriptDeadline,
-                            moduleHostcallGraceMs).ConfigureAwait(false);
+                            moduleHostcallGraceMs,
+                            cancellationToken).ConfigureAwait(false);
                     }
                     else
                     {
@@ -492,7 +501,7 @@ public sealed partial class Page
                     ExecuteClassic(allScripts[classic.Index], Take(fetched, classic.Index));
                     break;
                 case ScheduledScript.Module module:
-                    await EvaluateModuleAsync(module, scriptDeadline, moduleHostcallGraceMs)
+                    await EvaluateModuleAsync(module, scriptDeadline, moduleHostcallGraceMs, cancellationToken)
                         .ConfigureAwait(false);
                     break;
                 default:
@@ -551,7 +560,8 @@ public sealed partial class Page
     private async Task EvaluateModuleAsync(
         ScheduledScript.Module module,
         DateTime scriptDeadline,
-        ulong moduleHostcallGraceMs)
+        ulong moduleHostcallGraceMs,
+        CancellationToken cancellationToken)
     {
         ulong? remainingPageMs = RemainingBudgetMs(scriptDeadline);
         if (remainingPageMs is not { } pageMs)
@@ -567,8 +577,13 @@ public sealed partial class Page
         {
             await js.EvaluatePreparedModuleAsync(module.Prepared, budget).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
+            // A module that fails, or overruns its budget, is the page's problem and the
+            // next script still runs. Only the navigation's own cancellation ends the phase:
+            // ClearScript's ScriptInterruptedException is an OperationCanceledException, and
+            // letting a module watchdog's interrupt through as one failed the navigation
+            // (reddit.com's challenge follow-up, whose components overran a module budget).
             return;
         }
         if (module.Url is { } url)
