@@ -167,8 +167,12 @@ public static class RenderState
     /// A diagnostic: <c>POCKETCALCULATOR_PREP_TRACE=1</c> writes, for every prepare, the op that
     /// forced it and the mutations it consumes to stderr.
     /// </summary>
-    private static readonly bool PrepTrace =
+    internal static readonly bool PrepTrace =
         Environment.GetEnvironmentVariable("POCKETCALCULATOR_PREP_TRACE") == "1";
+
+    /// <summary>The node the read being traced asked about (<see cref="PrepTrace"/> only).</summary>
+    [ThreadStatic]
+    internal static NodeId? TraceQuery;
 
     private static void TracePrepare(DomTree dom, RetainedStyleMutation[] mutations, bool retained)
     {
@@ -210,7 +214,7 @@ public static class RenderState
         {
             parts.Add(mutation switch
             {
-                RetainedStyleMutation.Attribute a => $"attr {Describe(a.Mutation.Node)} {a.Mutation.Name}",
+                RetainedStyleMutation.Attribute a => $"attr {Describe(a.Mutation.Node)} {a.Mutation.Name}={(dom.GetNode(a.Mutation.Node)?.GetAttribute(a.Mutation.Name) is { } v ? v[..Math.Min(v.Length, 80)] : "-")}",
                 RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert i } => $"insert {Describe(i.Node)} into {Describe(i.NewParent)}",
                 RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove r } => $"remove {Describe(r.Node)} from {Describe(r.OldParent)}",
                 RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text t } => $"text in {(t.Parent is { } p ? Describe(p) : "?")}",
@@ -219,7 +223,36 @@ public static class RenderState
             });
         }
 
-        Console.Error.WriteLine($"PREP {(retained ? "retained" : "full")} by {op} n={mutations.Length}: {string.Join(" | ", parts)}");
+        string query = TraceQuery is { } asked ? Describe(asked) : "?";
+        Console.Error.WriteLine($"PREP {(retained ? "retained" : "full")} by {op} of {query} n={mutations.Length}: {string.Join(" | ", parts)}");
+    }
+
+    /// <summary>
+    /// The prepared render a box-existence or <c>offsetParent</c> read may consult while style
+    /// mutations are still pending (see <see cref="PreparedRender.TryRetainedOffsetParent"/>),
+    /// or null when the read should prepare as usual: nothing is pending (the geometry fast
+    /// path already answers), or the render is stale for any reason other than those mutations.
+    /// </summary>
+    internal static PreparedRender? PreparedWithPendingMutations(PocketCalculatorState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        // Pending animation start candidates are not checked, unlike EnsurePreparedGeometry: they
+        // are birth times for animations of the elements the next cascade restyles, and the
+        // answer is taken only for elements whose styles that cascade cannot change.
+        if (state.PendingStyleMutations.Count == 0
+            || state.PreparedRender is not { } prepared
+            || prepared.Viewport() != state.Viewport
+            || state.RenderMedia != CssMediaType.Screen)
+        {
+            return null;
+        }
+
+        var baseUrl = StateHelpers.DocumentBaseUrlMemoized(state);
+        return string.Equals(prepared.BaseUrl(), baseUrl, StringComparison.Ordinal)
+            && (prepared.AnimationSample() == state.AnimationSample
+                || prepared.CanReuseGeometryForAnimationSample(state.AnimationSample))
+            ? prepared
+            : null;
     }
 
     /// <summary>Samples the live document timeline once per host/HTML task.</summary>

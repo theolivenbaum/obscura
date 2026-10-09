@@ -572,6 +572,142 @@ public sealed partial class PreparedRender
             F32.Round(rect.Height));
     }
 
+    /// <summary>Kill switch for an A/B on one binary: <c>POCKETCALCULATOR_NO_RETAINED_READS=1</c>.</summary>
+    internal static bool RetainedReadsDisabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_RETAINED_READS") == "1";
+
+    /// <summary>
+    /// Answer whether <paramref name="id"/> generates a box, and if it does its
+    /// <c>offsetParent</c>, from this render while <paramref name="pending"/> mutations have
+    /// not been laid out yet, or return false when they may have changed either.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which lays the document out before answering any read.
+    /// Both answers are functions of the computed styles of the element and its ancestors and
+    /// of the ancestor chain itself, never of geometry: so when no mutation can change the
+    /// computed style of any of them (<see cref="RetainedStylePlanner.OwnStyleDamage"/>, the
+    /// retained planner's own invalidation without the context chains it re-cascades) and the
+    /// chain is still connected, the layout the mutations would produce answers exactly as this
+    /// one does. A box is taken as certain only where it does not depend on content: an element
+    /// hidden by a <c>display: none</c> on the chain has none, and a block-level element that
+    /// had one keeps it. Lazy loaders read <c>offsetParent</c> to skip hidden elements after
+    /// each insertion (nvidia.com: ~75 image components, each read a whole relayout).
+    /// Anything the planner cannot bound, animation damage, container queries and shadow trees
+    /// (whose sheets the planner does not see) fail closed.
+    /// </remarks>
+    public bool TryRetainedOffsetParent(
+        DomTree tree,
+        IReadOnlyList<RetainedStyleMutation> pending,
+        NodeId id,
+        out bool hasBox,
+        out NodeId? offsetParent)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        ArgumentNullException.ThrowIfNull(pending);
+        hasBox = false;
+        offsetParent = null;
+        if (RetainedReadsDisabled
+            || tree.HasShadowRoots
+            || Layout.DocumentSheet is not { } sheet
+            || sheet.HasContainerQueries()
+            || tree.GetNode(id)?.IsElement != true)
+        {
+            return false;
+        }
+
+        foreach (RetainedStyleMutation mutation in pending)
+        {
+            if (mutation is RetainedStyleMutation.Animation or RetainedStyleMutation.WaapiAnimation)
+            {
+                return false;
+            }
+        }
+
+        if (RetainedStylePlanner.OwnStyleDamage(tree, sheet, pending) is not { } damaged)
+        {
+            return false;
+        }
+
+        // Walk up to the document. Above the highest node whose style may change, every style is
+        // the one this render has: a `display: none` there hides the element whatever happens
+        // below it, and with no such node at all the whole chain is as it was.
+        bool hidden = false;
+        bool chainDamaged = false;
+        int steps = 0;
+        NodeId current = id;
+        while (true)
+        {
+            if (++steps > tree.SlotCount)
+            {
+                return false;
+            }
+
+            if (damaged.Contains(current))
+            {
+                chainDamaged = true;
+                hidden = false;
+            }
+            else if (!hidden
+                && Layout.Styles.TryGetValue(current, out LayoutStyle? chainStyle)
+                && chainStyle.Display == Display.None
+                && !Layout.Rects.ContainsKey(current)
+                && Layout.PreciseRect(current) is null)
+            {
+                // Only where this render did leave the element out: a `display: none` table row
+                // is still laid out (a deviation of its own from Chromium, which gives it no box).
+                hidden = true;
+            }
+
+            if (current == tree.Document)
+            {
+                break;
+            }
+
+            if (tree.GetNode(current)?.Parent is not { } parent)
+            {
+                // Disconnected by a removal: the next layout has nothing to say about it.
+                return false;
+            }
+
+            current = parent;
+        }
+
+        if (hidden)
+        {
+            return true;
+        }
+
+        if (chainDamaged)
+        {
+            return false;
+        }
+
+        // Table parts and their children are left out: which boxes a table generates depends on
+        // its structure (anonymous rows and cells, a row group that ends up empty), not on style.
+        if (!Layout.Styles.TryGetValue(id, out LayoutStyle? style)
+            || style.DisplayContents
+            || LayoutStyleExtensions.IsInlineLevelBox(style)
+            || IsTablePart(tree, id, style)
+            || (tree.GetNode(id)?.Parent is { } owner
+                && (!Layout.Styles.TryGetValue(owner, out LayoutStyle? ownerStyle) || IsTablePart(tree, owner, ownerStyle)))
+            || OffsetMetrics(tree, id) is not { } metrics)
+        {
+            return false;
+        }
+
+        hasBox = true;
+        offsetParent = metrics.Parent;
+        return true;
+    }
+
+    private static bool IsTablePart(DomTree tree, NodeId id, LayoutStyle style) =>
+        style.IsTableBox
+        || style.IsTableCellBox
+        || style.AuthoredTableDisplay != TableInternalDisplay.None
+        || style.InternalFlexContainer
+        || tree.GetNode(id)?.AsElement()?.Name.Local is "table" or "caption" or "colgroup" or "col"
+            or "thead" or "tbody" or "tfoot" or "tr" or "td" or "th";
+
     private static bool IsHtmlElement(DomTree tree, NodeId id, string localName) =>
         tree.GetNode(id)?.AsElement() is { } element
         && string.Equals(element.Name.Local, localName, StringComparison.Ordinal)

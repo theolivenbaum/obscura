@@ -6927,6 +6927,18 @@ class HTMLElement extends Element {
   // The layout answers all three (op_layout_offset, see _renderOffsetMetrics); the
   // script-side walk below is the fallback for a build without the render op.
   get offsetParent() {
+    // op_layout_offset_parent answers from styles alone, so a read that pending mutations
+    // cannot affect does not wait for the layout they need (RenderOps.OpLayoutOffsetParent).
+    const parentOp = __obscuraCore.ops.op_layout_offset_parent;
+    if (typeof parentOp === 'function') {
+      try {
+        const raw = parentOp(String(this._nid | 0));
+        const found = raw ? _JSONparse(raw) : null;
+        return found && found.parent !== null && found.parent !== undefined ? _wrapEl(found.parent) : null;
+      } catch (_error) {
+        return null;
+      }
+    }
     const metrics = this._renderOffsetMetrics();
     if (metrics !== undefined) {
       return metrics && metrics.parent !== null && metrics.parent !== undefined

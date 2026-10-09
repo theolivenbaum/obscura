@@ -118,6 +118,7 @@ internal sealed class RetainedStyleMaps
     internal required Dictionary<NodeId, LayoutStyle> Styles { get; init; }
 
     internal required Dictionary<NodeId, IReadOnlyDictionary<string, string>> CustomProperties { get; init; }
+
 }
 
 /// <summary>Per-element border boxes after layout, in viewport coordinates.</summary>
@@ -128,6 +129,9 @@ public sealed class DomLayout
     /// pass to carry unchanged subtrees over from. See <see cref="RetainedTaffyLayout"/>.
     /// </summary>
     internal RetainedTaffyLayout? RetainedBoxes { get; set; }
+
+    /// <summary>The document stylesheet this layout was cascaded with.</summary>
+    internal Css.Stylesheet? DocumentSheet { get; init; }
 
     /// <summary>
     /// What this layout's top-down style pass left for the next retained pass; see

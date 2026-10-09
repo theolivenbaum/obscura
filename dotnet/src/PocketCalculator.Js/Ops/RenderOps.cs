@@ -220,6 +220,11 @@ public static class RenderOps
         {
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
+            if (RenderState.PrepTrace)
+            {
+                RenderState.TraceQuery = nid;
+            }
+
             RenderState.SampleLiveDocumentAnimations(state);
             if (!RenderState.EnsureResolvedScrollForGeometry(state))
             {
@@ -282,6 +287,17 @@ public static class RenderOps
             ArgumentNullException.ThrowIfNull(state);
             var nid = ParseNode(nidStr);
             RenderState.SampleLiveDocumentAnimations(state);
+
+            // An element the pending mutations cannot give a box has offset metrics of zero
+            // whatever else they change; see PreparedRender.TryRetainedOffsetParent.
+            if (state.Dom is { } pendingDom
+                && RenderState.PreparedWithPendingMutations(state) is { } retained
+                && retained.TryRetainedOffsetParent(pendingDom, state.PendingStyleMutations, nid, out var hasBox, out _)
+                && !hasBox)
+            {
+                return string.Empty;
+            }
+
             // A geometry consumer, like op_layout_geometry and op_layout_metrics: offset* read
             // only box rects, so a newer animation sample whose effects are paint-only (opacity,
             // color) leaves them exact. Through EnsurePreparedRender every offsetWidth read in a
@@ -310,6 +326,55 @@ public static class RenderOps
             sb.Append(",\"height\":").Append(SerdeJson.NumberF32(offset.Height));
             sb.Append('}');
             return sb.ToString();
+        },
+        string.Empty);
+
+    /// <summary>
+    /// <c>op_layout_offset_parent</c>. CSSOM View's <c>offsetParent</c> alone:
+    /// <c>{"parent":nid|null}</c>, or the empty string when the node has no box.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-js (see <see cref="OpLayoutOffset"/>). Split from
+    /// <c>op_layout_offset</c> because it depends on computed styles only, so it can be answered
+    /// from the prepared render while mutations that provably leave the element's styles and
+    /// ancestors alone are still pending (<see cref="PreparedRender.TryRetainedOffsetParent"/>),
+    /// where the offsets need the layout those mutations produce.
+    /// </remarks>
+    public static string OpLayoutOffsetParent(PocketCalculatorState state, string nidStr) => OpGuard.Run(
+        "op_layout_offset_parent",
+        () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var nid = ParseNode(nidStr);
+            RenderState.SampleLiveDocumentAnimations(state);
+            if (state.Dom is not { } dom)
+            {
+                return string.Empty;
+            }
+
+            bool hasBox;
+            NodeId? parent;
+            if (RenderState.PreparedWithPendingMutations(state) is { } retained
+                && retained.TryRetainedOffsetParent(dom, state.PendingStyleMutations, nid, out hasBox, out parent))
+            {
+                // Answered without a layout.
+            }
+            else if (RenderState.EnsurePreparedGeometry(state)?.OffsetMetrics(dom, nid) is { } offset)
+            {
+                hasBox = true;
+                parent = offset.Parent;
+            }
+            else
+            {
+                return string.Empty;
+            }
+
+            if (!hasBox)
+            {
+                return string.Empty;
+            }
+
+            return parent is { } found ? "{\"parent\":" + found.Value + "}" : "{\"parent\":null}";
         },
         string.Empty);
 

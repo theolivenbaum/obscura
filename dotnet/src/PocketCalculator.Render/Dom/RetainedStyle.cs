@@ -331,12 +331,46 @@ public static class RetainedStylePlanner
         return RetainedAttributeMutationKind.Selector;
     }
 
+    /// <summary>
+    /// While set, <see cref="Plan"/> records only the nodes whose own computed style may change,
+    /// leaving out the ancestors it re-cascades as context (<see cref="OwnStyleDamage"/>).
+    /// </summary>
+    [ThreadStatic]
+    private static bool t_ownStyleOnly;
+
+    /// <summary>
+    /// The nodes whose computed style <paramref name="mutations"/> may change under
+    /// <paramref name="sheet"/>, without the context chains a retained cascade revisits, or
+    /// <c>null</c> when the plan is a full restyle.
+    /// </summary>
+    internal static HashSet<NodeId>? OwnStyleDamage(
+        DomTree tree,
+        Stylesheet sheet,
+        IReadOnlyList<RetainedStyleMutation> mutations)
+    {
+        bool outer = t_ownStyleOnly;
+        t_ownStyleOnly = true;
+        try
+        {
+            return Plan(tree, sheet, mutations) is RetainedStylePlan.Reuse reuse ? reuse.Dirty : null;
+        }
+        finally
+        {
+            t_ownStyleOnly = outer;
+        }
+    }
+
     internal static void AddStyleSubtree(DomTree tree, NodeId root, HashSet<NodeId> dirty)
     {
         dirty.Add(root);
         foreach (NodeId descendant in tree.Descendants(root))
         {
             dirty.Add(descendant);
+        }
+
+        if (t_ownStyleOnly)
+        {
+            return;
         }
 
         // Rebuild the context chain too. A retained ancestor may carry a final post-layout Px
@@ -627,6 +661,13 @@ public static class RetainedStylePlanner
 
     private static void AddStyleContextChain(DomTree tree, NodeId node, HashSet<NodeId> dirty)
     {
+        // Context only: the chain is re-cascaded so that its descendants see the context a
+        // full pass gives them, not because its own style can change.
+        if (t_ownStyleOnly)
+        {
+            return;
+        }
+
         dirty.Add(node);
         foreach (NodeId ancestor in tree.Ancestors(node))
         {

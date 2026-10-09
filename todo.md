@@ -3095,6 +3095,33 @@ grid items, cold layout, four runs: taffy 1.50-1.68s -> 1.18-1.25s, the pass 2.4
 none on the render repros, the snapshots or six live sites. Pinned by `LineCarryTests` (Render),
 which lays ten pages out both ways and compares the whole render.
 
+### `offsetParent`, and the offsets of a box-less element, are read before pending mutations are laid out
+
+DEVIATION from `crates/obscura-render` and `crates/obscura-js`, which lay the document out before
+answering any layout read (and have no `offsetParent`). Whether an element generates a box, and
+its `offsetParent`, are functions of the computed styles of the element and its ancestors and of
+the ancestor chain, never of geometry. `PreparedRender.TryRetainedOffsetParent` answers them from
+the prepared render while mutations are pending when the retained planner's own invalidation,
+without the context chains it re-cascades (`RetainedStylePlanner.OwnStyleDamage`), cannot reach
+the element or any ancestor and the chain is still connected: an element below a `display: none`
+ancestor that this render left out has no box whatever happens below that ancestor, and a
+block-level element that had one keeps it and its offset parent. Shadow trees, container queries
+and animation damage fail closed. The new `op_layout_offset_parent` answers `offsetParent` alone;
+`op_layout_offset` answers a box-less element's zeros the same way. AEM's lazy image component
+inserts an image and reads the component's `offsetParent` to skip hidden ones (nvidia.com: 75
+reads, each a whole relayout). Interleaved on one binary
+(`POCKETCALCULATOR_NO_RETAINED_READS=1` restores the old path), nvidia.com through CDP, three runs:
+the 75 `offsetParent` reads 3.8-7.3s -> 0.7-1.0s, all forced reads 16.0-20.1s -> 11.3-12.5s,
+goto 25.8-31.4s -> 19.2-25.2s (load average 10-13); 100 components on a local repro 2.7-5.9s ->
+1.4-1.7s (Chromium 2ms), same answers as Chromium. `IncrementalLayoutDifferentialTests` checks
+every answer the previous render gives against a full layout at every step, and
+`LayoutReadCacheTests.OffsetParentReadsAfterInsertionsAreAnsweredBeforeTheLayout` (Js) pins the
+values against Chromium 141.
+
+Found on the way, not fixed: a `display: none` table row is still laid out (offsetHeight 20,
+offsetParent the table) where Chromium gives it no box; the shortcut does not treat such a row as
+hidden.
+
 ### An `<img>` source swap restyles the image, not the document
 
 DEVIATION from `crates/obscura-render/src/dom.rs` (`retained_attribute_mutation_kind`), which
