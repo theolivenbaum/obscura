@@ -5924,3 +5924,15 @@ neutralized, the span's automatic minimum was re-derived from the SVG's 300px de
 size, and the logo drew 300x65 where Chromium 141 draws 93x20. Pinned by
 `AtomicInlineSizingTests.PercentageUnderFixedWidthBoxIsNotCyclicThroughContentSizedFlexItem`
 and `render-repros/svg-percent-under-fixed-icon.html`.
+
+### `clip: rect()` is implemented
+
+`style.rs` has no `clip` property. The port parses `clip: rect(top, right, bottom, left)`
+(commas optional, lengths or `auto`) into `LayoutStyle.Clip`, reports it in the CSSOM snapshot
+(`auto` or `rect(0px, auto, 10px, 0px)`, whatever the position, as Chromium 141 does), and
+for an absolutely or fixed positioned box intersects it into the box's own clip and its
+subtree's (`OverflowClip.WithClipProperty`, applied in `DomTransforms.ResolveClipRects`,
+`PreparedRender.ResolveClips` and `ScrollPaintState.ViewportFixedClipMap`). The
+visually-hidden idiom `position: fixed; clip: rect(0 0 0 0)` (msn.com's "Skip to footer")
+painted in full. The element-capture clip-scope path and scrolling-overflow extents do not
+read it. Pinned by `ClipPropertyTests` and `render-repros/clip-rect-visually-hidden.html`.

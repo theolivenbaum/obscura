@@ -1675,6 +1675,21 @@ public static partial class ComputedStyle
 
                 return true;
 
+            case "clip":
+                // DEVIATION from crates/obscura-render/src/style.rs, which ignores `clip`. The
+                // visually-hidden idiom `position: absolute; clip: rect(0 0 0 0)` (msn.com's
+                // "Skip to footer" link) painted in full.
+                if (CssText.AsciiLower(value.Trim()) is "auto" or "initial" or "unset" or "revert" or "revert-layer")
+                {
+                    style.Clip = null;
+                }
+                else if (ParseClipRect(value) is { } clipRect)
+                {
+                    style.Clip = clipRect;
+                }
+
+                return true;
+
             case "border":
                 ApplyBorderShorthand(style, null, value);
                 return true;

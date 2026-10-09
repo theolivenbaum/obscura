@@ -234,6 +234,12 @@ public readonly record struct FilterFunction(
 /// <see cref="LayoutStyle"/>, with the same value it had before, and a write of the default
 /// value does not allocate this object. See "Known deviations" in todo.md.
 /// </remarks>
+/// <summary>
+/// <c>clip: rect(top, right, bottom, left)</c> in px offsets from the border box's top-left
+/// corner; a <c>null</c> side is <c>auto</c> (that border edge).
+/// </summary>
+public readonly record struct ClipRect(float? Top, float? Right, float? Bottom, float? Left);
+
 internal sealed class LayoutStyleRare
 {
     public BorderModel? BorderCascadeBase;
@@ -293,6 +299,8 @@ internal sealed class LayoutStyleRare
     public Dimension? FontSizeRaw;
 
     public Dimension? LetterSpacingRaw;
+
+    public ClipRect? Clip;
 
     /// <summary>A shallow copy; <see cref="LayoutStyle.Clone"/> deep-copies what needs it.</summary>
     public LayoutStyleRare Clone() => (LayoutStyleRare)MemberwiseClone();
@@ -971,6 +979,22 @@ public sealed class LayoutStyle
     /// <c>null</c> is the computed <c>none</c> value.
     /// </summary>
     public ClipPathPolygon? ClipPath;
+
+    /// <summary>
+    /// The CSS 2.1 <c>clip: rect(...)</c> property. <c>null</c> is <c>auto</c>; it applies only
+    /// to an absolutely positioned box (CSS Masking 1 section 9.1).
+    /// </summary>
+    public ClipRect? Clip
+    {
+        get => m_rare?.Clip;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.Clip = value;
+            }
+        }
+    }
 
     /// <summary>RGBA for the paint step. Parsed always (cheap), used only with paint.</summary>
     public RgbaColor? BackgroundColor;
