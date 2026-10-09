@@ -383,6 +383,33 @@ public class IncrementalLayoutDifferentialTests
         Assert.True(latest.Layout.AdoptedInlineItems > 0);
     }
 
+    /// <summary>
+    /// The box tree a retained pass carried its layouts over from is emptied once they are
+    /// carried: its slot arrays are large objects, which a young-generation collection treats as
+    /// live, so a tree left holding its boxes kept every box tree built since the last full
+    /// collection from being collected young.
+    /// </summary>
+    [Fact]
+    public void AConsumedBoxTreeLetsGoOfItsBoxes()
+    {
+        DomTree tree = HtmlParsing.ParseHtml(Html(0));
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        RetainedTaffyLayout boxes = first.Layout.RetainedBoxes!;
+        Assert.True(boxes.Tree.TotalNodeCount() > 20);
+        NodeId target = tree.GetElementById("d1")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "b c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "b", "b c"))])!;
+
+        Assert.True(second.Layout.TransplantedBoxes > 0);
+        Assert.True(boxes.Consumed);
+        Assert.Equal(0, boxes.Tree.TotalNodeCount());
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (PreparedRender Latest, WeakReference First) Chain(DomTree tree, RenderResourceCache resources, StylesheetCache cache)
     {

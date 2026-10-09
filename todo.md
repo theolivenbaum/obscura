@@ -2936,6 +2936,15 @@ tree and new whole-document maps that survive to the next pass. What no longer a
   every pass; its `tables` phase went 12.4 -> 9.0ms a pass, live). Pinned by
   `DefiniteContentWidthIndexTests`.
 
+The consumed box tree is emptied as soon as its layouts are carried over (`TaffyTree.Clear` in
+`LayoutDomOnce`, after `RetainedTaffyLayout.Transplant`). Its slot arrays are large objects,
+which a young-generation collection treats as live, so every box tree built since the last
+full collection kept its boxes, styles and child lists alive through every young collection
+until the next full one: on the nvidia.com snapshot each gen0 collection promoted ~50 MB (a
+dozen trees) and paused ~170ms. Emptied, it promotes ~5 MB and pauses ~55ms; GC pause over a
+20s write/read loop 2.5 -> 1.4s, 90th-percentile pass 170 -> 110ms. Pinned by
+`AConsumedBoxTreeLetsGoOfItsBoxes`.
+
 `POCKETCALCULATOR_LAYOUT_PROFILE=1` now also prints, per pass, the collections and GC pause it
 saw, what it allocated, why a retained restyle fell back to a full one, and the table passes.
 Measured on the nvidia.com snapshot (20s loop of a `margin-left` write and a read, interleaved

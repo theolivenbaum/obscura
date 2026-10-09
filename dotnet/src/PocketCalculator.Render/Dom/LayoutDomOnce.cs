@@ -795,6 +795,16 @@ public static partial class RenderDom
                         ifcItems.NativeControlContent,
                         engine,
                         dirtyNodes);
+
+                    // The consumed tree is never read again. Let go of its boxes now rather than
+                    // when the tree itself is collected: its slot arrays are large objects, which
+                    // a young-generation collection treats as live, so every box tree built since
+                    // the last full collection was promoted with them (nvidia.com: ~50 MB, a
+                    // dozen trees' boxes, at every young collection).
+                    if (carriedSource.Consumed)
+                    {
+                        carriedSource.Tree.Clear();
+                    }
                 }
 
                 LayoutPhaseProfile.Mark("transplant");
