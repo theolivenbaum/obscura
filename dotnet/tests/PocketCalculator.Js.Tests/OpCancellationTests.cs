@@ -98,6 +98,60 @@ public sealed class OpCancellationTests
     }
 
     [Fact]
+    public async Task AModuleTimeoutThatStopsAPageTaskInsideAnOpIsAnErrorNotACancellation()
+    {
+        // reddit.com: a module's top-level await kept the loop running the page's queued
+        // tasks, one of them an animation frame whose layout read overran the module's budget.
+        // The op that saw the watchdog's cancellation keeps the isolate interrupted until the
+        // watchdog is disarmed, so the bookkeeping after the timeout was interrupted too, and
+        // its ScriptInterruptedException (an OperationCanceledException) escaped: the page
+        // read it as its own navigation being cancelled and failed to load.
+        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        var rt = fixture.Runtime;
+        rt.Evaluate(
+            "(() => { setTimeout(() => { document.getElementById('deep').getBoundingClientRect(); }, 0);"
+            + " return 0; })()");
+
+        var clock = Stopwatch.StartNew();
+        var error = await Assert.ThrowsAsync<JsRuntimeException>(() =>
+            rt.LoadInlineModuleAsync(
+                "await new Promise(resolve => setTimeout(resolve, 10));",
+                "http://example.com/test",
+                300));
+
+        Assert.Contains("Inline module evaluation timed out after", error.Message, StringComparison.Ordinal);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(15), $"the module ran {clock.Elapsed}");
+        Assert.Equal(2.0, rt.Evaluate("1 + 1")!.GetValue<double>());
+    }
+
+    [Fact]
+    public async Task AnInterruptedTimerLeavesTheRestOfItsBatchForTheNextTurn()
+    {
+        // reddit.com: an animation-frame timer forced a multi-second layout, the pump's
+        // watchdog interrupted it, and the zero-delay timers taken in the same batch (each
+        // the execution of a dynamic script) were dropped. Their scripts never ran, never
+        // fired load, and the document's load event waited out the script deadline.
+        using var fixture = RuntimeFixture.Setup("<html><body></body></html>");
+        var rt = fixture.Runtime;
+        rt.Evaluate(
+            "(() => { globalThis.__runs = []; "
+            + "setTimeout(() => { __runs.push('spin'); while (true) {} }, 0); "
+            + "setTimeout(() => { __runs.push('second'); }, 0); "
+            + "setTimeout(() => { __runs.push('third'); }, 0); return 0; })()");
+
+        using (var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+        using (rt.InterruptOnCancellation(deadline.Token))
+        {
+            await rt.RunEventLoopBoundedAsync(10_000);
+        }
+
+        await rt.RunEventLoopBoundedAsync(500);
+
+        // The interrupted callback is not run again; the two after it run, in order.
+        Assert.Equal("""["spin","second","third"]""", rt.Evaluate("JSON.stringify(__runs)")!.GetValue<string>());
+    }
+
+    [Fact]
     public void ACallersTokenThatNeverFiresChangesNothing()
     {
         using var fixture = RuntimeFixture.Setup("<html><body></body></html>");

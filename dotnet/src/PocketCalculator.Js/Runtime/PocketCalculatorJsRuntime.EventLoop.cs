@@ -93,45 +93,59 @@ public sealed partial class PocketCalculatorJsRuntime
         // Posted tasks first: the shim treats op_posted_task as the task source
         // that must run before the next timer batch, which is what keeps a
         // rendering checkpoint ahead of the callbacks it schedules.
+        //
+        // A watchdog interrupt ends the turn at the task it stopped. The tasks after it
+        // were already taken off their queues, so they are handed back (RequeuePostedTasks,
+        // TimerQueue.Restore) to run on the next turn: dropping them lost their work for
+        // good, and a dynamic script whose execution was one of them never ran and never
+        // let the document's load event fire. The stopped task itself is not re-run.
         var posted = DrainPostedTasks();
-        foreach (var deliver in posted)
+        for (var index = 0; index < posted.Length; index++)
         {
             try
             {
-                deliver(0);
-            }
-            catch (ScriptInterruptedException)
-            {
-                throw;
-            }
-            catch (ScriptEngineException error)
-            {
-                taskError ??= $"Event loop error: {error.Message}";
-            }
-            PerformMicrotaskCheckpoint();
-        }
-
-        var due = Timers.TakeDue();
-        if (due.Count > 0)
-        {
-            ranTimers = true;
-            foreach (var callback in due)
-            {
                 try
                 {
-                    (callback as ScriptObject)?.InvokeAsFunction();
-                }
-                catch (ScriptInterruptedException)
-                {
-                    throw;
+                    posted[index](0);
                 }
                 catch (ScriptEngineException error)
                 {
-                    // A timer callback that throws is a page-local task error:
-                    // report it and keep scheduling (#699).
                     taskError ??= $"Event loop error: {error.Message}";
                 }
                 PerformMicrotaskCheckpoint();
+            }
+            catch (ScriptInterruptedException)
+            {
+                RequeuePostedTasks(posted, index + 1);
+                throw;
+            }
+        }
+
+        var due = Timers.TakeDueTimers();
+        if (due.Count > 0)
+        {
+            ranTimers = true;
+            for (var index = 0; index < due.Count; index++)
+            {
+                try
+                {
+                    try
+                    {
+                        (due[index].Callback as ScriptObject)?.InvokeAsFunction();
+                    }
+                    catch (ScriptEngineException error)
+                    {
+                        // A timer callback that throws is a page-local task error:
+                        // report it and keep scheduling (#699).
+                        taskError ??= $"Event loop error: {error.Message}";
+                    }
+                    PerformMicrotaskCheckpoint();
+                }
+                catch (ScriptInterruptedException)
+                {
+                    Timers.Restore(due, index + 1);
+                    throw;
+                }
             }
             return LoopTick.Progressed;
         }
@@ -141,22 +155,62 @@ public sealed partial class PocketCalculatorJsRuntime
             return LoopTick.Progressed;
         }
 
-        return Timers.Count > 0 || _postedTasks.Count > 0 || HasPendingAsyncOps || HasPendingNetworkRequests()
+        return Timers.Count > 0 || PostedTaskCount > 0 || HasPendingAsyncOps || HasPendingNetworkRequests()
             ? LoopTick.Waiting
             : LoopTick.Idle;
     }
 
+    // Locked for the reason TimerQueue is: op_post_task can be called from a promise
+    // continuation that ClearScript runs on the thread that completed an async op.
+    private int PostedTaskCount
+    {
+        get
+        {
+            lock (_postedTasks)
+            {
+                return _postedTasks.Count;
+            }
+        }
+    }
+
     private Action<double>[] DrainPostedTasks()
     {
-        if (_postedTasks.Count == 0)
+        lock (_postedTasks)
         {
-            return [];
+            if (_postedTasks.Count == 0)
+            {
+                return [];
+            }
+            // Snapshot before running: a task that posts another belongs to the next
+            // turn, or a self-reposting scheduler starves everything after it.
+            var drained = _postedTasks.ToArray();
+            _postedTasks.Clear();
+            return drained;
         }
-        // Snapshot before running: a task that posts another belongs to the next
-        // turn, or a self-reposting scheduler starves everything after it.
-        var drained = _postedTasks.ToArray();
-        _postedTasks.Clear();
-        return drained;
+    }
+
+    /// <summary>Put the tasks a turn took but did not run back at the head of the queue.</summary>
+    private void RequeuePostedTasks(Action<double>[] taken, int start)
+    {
+        if (start >= taken.Length)
+        {
+            return;
+        }
+
+        lock (_postedTasks)
+        {
+            var later = _postedTasks.ToArray();
+            _postedTasks.Clear();
+            for (var index = start; index < taken.Length; index++)
+            {
+                _postedTasks.Enqueue(taken[index]);
+            }
+
+            foreach (var task in later)
+            {
+                _postedTasks.Enqueue(task);
+            }
+        }
     }
 
     private async Task<LoopTick> ParkAsync(TimeSpan cap)
