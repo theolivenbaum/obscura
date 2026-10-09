@@ -2083,6 +2083,15 @@ Values measured in Chromium 141 (headless, Playwright); facts in
   (percent-decoding, forgiving base64, MIME serialization, `text/plain;charset=US-ASCII`
   default) and the blob URL store (`URL.createObjectURL` keeps the Blob), with Chromium's 200
   `OK` basic response and "Failed to fetch" for a bad or revoked URL.
+- **The autonomous CDP pump backs off instead of stopping.** DEVIATION from
+  crates/obscura-cdp/src/server.rs, which disarms a connection's page pump after the fourth
+  consecutive turn that overruns the task budget, until the next inbound frame. weather.com's
+  ad scripts poll `getComputedStyle` while the page mutates, each call a full restyle of
+  about a second, so four timer tasks overran 5.5 s and the page then froze between client
+  commands: the Amplitude experiment script never ran and the forecast was never fetched
+  (998 elements against Chromium's 2115; 1302 after). The pump now stands down for 1 s and
+  resumes (`ServerTests.AutonomousPumpResumesAfterRepeatedOverrunningTasks`). The restyle
+  cost itself is the open problem: `op_computed_style` spent 7 s over 1,100 calls there.
 
 ### A linked stylesheet leaves no element in the DOM
 

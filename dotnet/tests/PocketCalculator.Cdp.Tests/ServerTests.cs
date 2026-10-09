@@ -118,6 +118,105 @@ public sealed class ServerTests
         await processor.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    /// <summary>
+    /// Four timer tasks in a row that overrun the task budget stand the autonomous pump down,
+    /// but only for a back-off: a later timer still runs with no CDP traffic, as every timer
+    /// does in Chromium. The reference (and the port before) froze the page until the next
+    /// inbound frame; weather.com's ad scripts did this and its forecast never loaded.
+    /// </summary>
+    [Fact]
+    public async Task AutonomousPumpResumesAfterRepeatedOverrunningTasks()
+    {
+        var server = Channel.CreateUnbounded<ServerMessage>();
+        var replies = Channel.CreateUnbounded<string>();
+        using var shutdown = new CancellationTokenSource();
+        using var stop = new CancellationTokenSource();
+        var defaultContext = CdpContext.New().DefaultContext;
+        var processor = CdpServer.CdpProcessorAsync(
+            server.Reader, defaultContext, shutdown.Token, stop.Token);
+
+        Assert.True(server.Writer.TryWrite(new ServerMessage.NewConnection(replies.Writer)));
+        await Receive(replies.Reader, TimeSpan.FromSeconds(2), "processor init");
+
+        void Send(JsonNode value) =>
+            Assert.True(server.Writer.TryWrite(
+                new ServerMessage.Cdp(CdpJson.Serialize(value), replies.Writer)));
+
+        async Task<JsonNode?> Reply(ulong id, string what)
+        {
+            while (true)
+            {
+                var value = CdpJson.Parse(await Receive(replies.Reader, TimeSpan.FromSeconds(10), what));
+                if (value.Get("id").AsU64() == id)
+                {
+                    return value;
+                }
+            }
+        }
+
+        Send(new JsonObject
+        {
+            ["id"] = 1,
+            ["method"] = "Target.createTarget",
+            ["params"] = new JsonObject { ["url"] = "about:blank" },
+        });
+        string? sessionId = null;
+        while (true)
+        {
+            var value = CdpJson.Parse(
+                await Receive(replies.Reader, TimeSpan.FromSeconds(5), "create target response"));
+            sessionId ??= value.Get("params").Get("sessionId").AsString();
+            if (value.Get("id").AsU64() == 1)
+            {
+                break;
+            }
+        }
+
+        Assert.NotNull(sessionId);
+
+        Send(new JsonObject
+        {
+            ["id"] = 4,
+            ["method"] = "Runtime.evaluate",
+            ["sessionId"] = sessionId,
+            ["params"] = new JsonObject
+            {
+                ["expression"] = """
+                    (() => {
+                      const spin = () => { const t = Date.now(); while (Date.now() - t < 7000) {} };
+                      for (let i = 0; i < 4; i++) setTimeout(spin, 10 + i);
+                      setTimeout(() => { globalThis.__ranAt = Date.now(); }, 50);
+                      return 'armed';
+                    })()
+                    """,
+                ["returnByValue"] = true,
+            },
+        });
+        await Reply(4, "timer arm response");
+        var armed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // No CDP message while the four tasks overrun and the back-off passes.
+        await Task.Delay(TimeSpan.FromSeconds(28));
+        var asked = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        Send(new JsonObject
+        {
+            ["id"] = 5,
+            ["method"] = "Runtime.evaluate",
+            ["sessionId"] = sessionId,
+            ["params"] = new JsonObject
+            {
+                ["expression"] = "globalThis.__ranAt || 0",
+                ["returnByValue"] = true,
+            },
+        });
+        var ranAt = (await Reply(5, "observation")).Get("result").Get("result").Get("value").AsF64() ?? 0;
+        Assert.True(ranAt > armed && ranAt < asked, $"the last timer ran at {ranAt}, armed {armed}, asked {asked}");
+
+        server.Writer.TryComplete();
+        await processor.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     private static string NativeHead(string host) =>
         $"GET /devtools/browser HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
 
