@@ -44,6 +44,18 @@
     <PackageReference Include="System.CommandLine" />
   </ItemGroup>
 
+  <!-- Tier-0 code runs until the JIT starts counting calls, which it holds off while
+       methods keep being jitted for the first time (100 ms by default, restarted on each
+       new one). A page's early layout passes keep tripping that delay, so they run
+       unoptimized: the first 30 passes on an nvidia.com snapshot took 5.4 s, 3.1 s with no
+       delay. Measured on a 2,000-item page (five interleaved rounds, ReadyToRun publish,
+       medians): default 8.96 s and 648 ms cold start on a trivial page; 0 ms 7.52 s but
+       721 ms cold start; 20 ms 8.18 s and 589 ms. 20 ms keeps cold start and takes about
+       half the gain. Written to runtimeconfig.json, so it ships with the binary. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.Runtime.TieredCompilation.CallCountingDelayMs" Value="20" />
+  </ItemGroup>
+
   <!-- Emit `pocket-calculator` (and `pocket-calculator-worker`) next to the apphost,
        the same two-binary layout as the Rust build's obscura / obscura-worker. -->
   <Target Name="CopyPocketCalculatorLauncher" AfterTargets="Build"

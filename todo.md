@@ -523,8 +523,12 @@ Found during the review, not from upstream:
   does; the build was made cheaper instead. Scoped layout (step 5) is not
   started. The early passes of a page are dominated by JIT warmup (bin builds
   run tier-0 code): `DOTNET_TC_CallCountingDelayMs=0` cut the first 30 passes
-  on the nvidia.com snapshot 5.4s -> 3.1s with no cold-start regression, and a
-  ReadyToRun publish removes most of it; neither is applied by the engine.
+  on the nvidia.com snapshot 5.4s -> 3.1s, and a ReadyToRun publish removes most
+  of it. The CLI now ships `System.Runtime.TieredCompilation.CallCountingDelayMs=20`
+  in its runtimeconfig (PocketCalculator.Cli.csproj): on a ReadyToRun publish, 0 ms
+  cut a 2,000-item benchmark 16% but added ~70ms (11%) to cold start on a trivial
+  page, 20 ms cut it 9% with no cold-start cost. Library consumers set it in their
+  own host's runtimeconfig if they want it.
 
 - **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
   attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
