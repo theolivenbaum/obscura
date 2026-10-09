@@ -131,7 +131,7 @@ public sealed class GlobalInterfaceObjects
             }).observe(document.body, { childList: true });
             document.body.appendChild(document.createElement('i'));
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("true,0,childList,1,,[object MutationRecord]", Eval(rt, "__rec"));
         Assert.Equal("true,0,BODY,true,1,BODY/P/MATH/MI/I", Eval(rt, """
             (() => {

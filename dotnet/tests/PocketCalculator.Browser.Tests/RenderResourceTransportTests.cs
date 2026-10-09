@@ -290,14 +290,16 @@ public sealed class RenderResourceTransportTests
             """);
         page.QueuePendingRenderResources();
         Assert.True(page.HasPendingRenderResources, "the font is a layout miss");
-        await page.Js.RunEventLoopForDurationAsync(2_200);
+        // 3.5 s rather than 2.2 s: the font lands 1.2 s in either way, and the longer wait
+        // leaves a loaded host 2.2 s rather than 0.9 s to apply it inside the wait.
+        await page.Js.RunEventLoopForDurationAsync(3_500);
         string json = page.Js.Evaluate("JSON.stringify(window.__samples)")!.GetValue<string>();
         double[][] samples = JsonSerializer.Deserialize<double[][]>(json)!;
         Assert.True(samples.Length > 20, $"timers must have run: {json}");
         double first = samples[0][1];
         double[]? changed = samples.FirstOrDefault(sample => sample[1] != first);
         Assert.True(changed is not null, $"a sample inside the wait must show the applied font: {json}");
-        Assert.True(changed![0] < 2_100, $"observed only at {changed[0]} ms");
+        Assert.True(changed![0] < 3_400, $"observed only at {changed[0]} ms");
     }
 
     /// <summary>

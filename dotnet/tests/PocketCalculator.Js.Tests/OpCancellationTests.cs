@@ -80,7 +80,11 @@ public sealed class OpCancellationTests
         using var fixture = RuntimeFixture.Setup("<html><body><p id=p style='height:10px'>x</p></body></html>");
         var rt = fixture.Runtime;
         var watchdog = rt.ArmWatchdog(TimeSpan.FromMilliseconds(50));
-        Thread.Sleep(200);
+        // Wait for the firing itself rather than a fixed 200 ms: the watchdog thread can be
+        // scheduled late on a loaded host, and the test is about what follows a firing.
+        Assert.True(
+            SpinWait.SpinUntil(() => watchdog.HasFired, TimeSpan.FromSeconds(20)),
+            "the watchdog never fired");
         Assert.True(rt.DisarmWatchdog(watchdog));
 
         Assert.Equal(10.0, rt.Evaluate("document.getElementById('p').getBoundingClientRect().height")!.GetValue<double>());

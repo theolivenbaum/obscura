@@ -148,7 +148,7 @@ public sealed class IsolatedWorldTests
             """);
         Assert.Equal("a", runtime.Evaluate("document.getElementById('p').parentNode.id")?.GetValue<string>());
         await InWorld(runtime, "document.getElementById('b').appendChild(document.getElementById('p')); document.getElementById('b').setAttribute('title', 't'); 1");
-        await runtime.RunEventLoopBoundedAsync(20);
+        await EventLoopWait.UntilIdleAsync(runtime);
         Assert.Equal("b", runtime.Evaluate("document.getElementById('p').parentNode.id")?.GetValue<string>());
         var records = runtime.Evaluate("pageRecords.join('|')")?.GetValue<string>() ?? string.Empty;
         Assert.Contains("childList:b", records);

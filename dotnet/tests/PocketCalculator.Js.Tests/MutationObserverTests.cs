@@ -38,7 +38,7 @@ public sealed class MutationObserverTests
             __order.push("sync");
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson(
             """["sync","microtask-before","observer","microtask-after","timer"]""",
             rt.Evaluate("__order"));
@@ -63,7 +63,7 @@ public sealed class MutationObserverTests
             document.getElementById("a").appendChild(document.createElement("i"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""{"calls":1,"records":1}""", rt.Evaluate("__seen"));
     }
 
@@ -83,7 +83,7 @@ public sealed class MutationObserverTests
             observer.disconnect();
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(0.0, rt.Evaluate("__calls")!.GetValue<double>());
     }
 
@@ -106,7 +106,7 @@ public sealed class MutationObserverTests
             host.appendChild(document.createElement("i"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""{"calls":1,"records":1}""", rt.Evaluate("__seen"));
     }
 
@@ -128,7 +128,7 @@ public sealed class MutationObserverTests
             host.setAttribute("data-ignored", "1");
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["data-watched"]""", rt.Evaluate("__names"));
     }
 
@@ -150,7 +150,7 @@ public sealed class MutationObserverTests
             for (let i = 0; i < 40; i++) host.appendChild(document.createElement("i"));
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""{"calls":1,"records":40}""", rt.Evaluate("__seen"));
     }
 
@@ -170,7 +170,7 @@ public sealed class MutationObserverTests
             __state.taken = observer.takeRecords().length;
             """);
 
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""{"taken":1,"calls":0}""", rt.Evaluate("__state"));
     }
 }
