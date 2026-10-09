@@ -68,7 +68,11 @@ public sealed class ShapeCacheAdoptionTests
             [RetainedStyleMutation.From(new AttributeStyleMutation(box, "style", null, null))])!;
 
         (int _, int hits, int missesAfter) = second.Layout.TextEngine.ShapeCacheStats;
-        Assert.True(hits > 0, "the relayout reshaped text the previous pass had shaped");
+        // The paragraph is unchanged, so the relayout either takes over its inline item outright
+        // (RetainedTaffyLayout) or shapes it again through the carried-over cache.
+        Assert.True(
+            hits > 0 || second.Layout.AdoptedInlineItems > 0,
+            "the relayout reshaped text the previous pass had shaped");
         Assert.Equal(misses, missesAfter);
         Assert.Equal(20f, second.DocumentRect(box)!.Value.Height);
     }

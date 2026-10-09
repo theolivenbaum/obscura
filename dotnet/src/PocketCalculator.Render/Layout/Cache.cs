@@ -83,7 +83,11 @@ public sealed class Cache
     }
 
     /// <summary>Cached intermediate layout results.</summary>
-    private readonly record struct CacheEntry<T>(CacheKey Key, T Content);
+    /// <remarks>
+    /// <see cref="FloatContribution"/> and <see cref="Carried"/> are not in vendor/taffy; see
+    /// <see cref="GetCarried"/>.
+    /// </remarks>
+    private readonly record struct CacheEntry<T>(CacheKey Key, T Content, float FloatContribution = 0f, bool Carried = false);
 
     /// <summary>The block-layout metadata required by a preliminary size contribution.</summary>
     private readonly record struct MeasureOutput(
@@ -264,15 +268,136 @@ public sealed class Cache
         }
     }
 
+    /// <summary>
+    /// Not in vendor/taffy. <see cref="Get"/> for a cache whose entries may have been carried
+    /// over from a previous pass (<c>TaffyTree.TransplantFrom</c>), answering also the
+    /// block-context float contribution the entry's computation left behind - but only the
+    /// first time a carried entry answers.
+    /// </summary>
+    /// <remarks>
+    /// A child laid out in its parent's block formatting context reports, besides its
+    /// <see cref="LayoutOutput"/>, a float-content height contribution through the shared
+    /// block context (<c>BlockContext.FloatedContentHeightContribution</c>), and taffy's cache
+    /// does not keep it: a cache hit contributes nothing. Within one pass that is the reference
+    /// behaviour, and the first request for a key is always computed. A carried entry answers
+    /// what would have been that first, computed request, so it hands back the contribution
+    /// once and behaves as an ordinary entry afterwards.
+    /// </remarks>
+    internal LayoutOutput? GetCarried(in LayoutInput input, out float? carriedContribution)
+    {
+        carriedContribution = null;
+        var key = KeyFrom(input);
+        switch (input.RunMode)
+        {
+            case RunMode.PerformLayout:
+                if (_finalLayoutEntry is { } entry && entry.Key == key)
+                {
+                    if (entry.Carried)
+                    {
+                        carriedContribution = entry.FloatContribution;
+                        _finalLayoutEntry = entry with { Carried = false };
+                    }
+
+                    return entry.Content;
+                }
+
+                return null;
+
+            case RunMode.ComputeSize:
+                if (_measureEntries is not { } entries)
+                {
+                    return null;
+                }
+
+                byte marginKey = VerticalMarginContextKey(input);
+                for (int i = 0; i < entries.Length; i++)
+                {
+                    if (entries[i] is not { } measure || !Matches(measure, key, marginKey))
+                    {
+                        continue;
+                    }
+
+                    if (measure.Carried)
+                    {
+                        carriedContribution = measure.FloatContribution;
+                        entries[i] = measure with { Carried = false };
+                    }
+
+                    return measure.Content.IntoLayoutOutput();
+                }
+
+                if (_overflow is { } overflow)
+                {
+                    for (int i = 0; i < _overflowCount; i++)
+                    {
+                        if (!Matches(overflow[i], key, marginKey))
+                        {
+                            continue;
+                        }
+
+                        if (overflow[i].Carried)
+                        {
+                            carriedContribution = overflow[i].FloatContribution;
+                            overflow[i] = overflow[i] with { Carried = false };
+                        }
+
+                        return overflow[i].Content.IntoLayoutOutput();
+                    }
+                }
+
+                return null;
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Not in vendor/taffy. Marks every entry as carried over from a previous pass; see
+    /// <see cref="GetCarried"/>.
+    /// </summary>
+    internal void MarkCarried()
+    {
+        if (_finalLayoutEntry is { } entry)
+        {
+            _finalLayoutEntry = entry with { Carried = true };
+        }
+
+        if (_measureEntries is { } entries)
+        {
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (entries[i] is { } measure)
+                {
+                    entries[i] = measure with { Carried = true };
+                }
+            }
+        }
+
+        if (_overflow is { } overflow)
+        {
+            for (int i = 0; i < _overflowCount; i++)
+            {
+                overflow[i] = overflow[i] with { Carried = true };
+            }
+        }
+    }
+
     /// <summary>Store a computed size in the cache.</summary>
-    public void Store(in LayoutInput input, in LayoutOutput layoutOutput)
+    public void Store(in LayoutInput input, in LayoutOutput layoutOutput) => Store(input, layoutOutput, 0f);
+
+    /// <summary>
+    /// Store a computed size in the cache, with the block-context float contribution its
+    /// computation left behind (not in vendor/taffy; see <see cref="GetCarried"/>).
+    /// </summary>
+    internal void Store(in LayoutInput input, in LayoutOutput layoutOutput, float floatContribution)
     {
         var key = KeyFrom(input);
         switch (input.RunMode)
         {
             case RunMode.PerformLayout:
                 _isEmpty = false;
-                _finalLayoutEntry = new CacheEntry<LayoutOutput>(key, layoutOutput);
+                _finalLayoutEntry = new CacheEntry<LayoutOutput>(key, layoutOutput, floatContribution);
                 break;
 
             case RunMode.ComputeSize:
@@ -285,7 +410,7 @@ public sealed class Cache
                 }
 
                 _measureEntries[cacheSlot] =
-                    new CacheEntry<MeasureOutput>(key, MeasureOutput.New(input, layoutOutput));
+                    new CacheEntry<MeasureOutput>(key, MeasureOutput.New(input, layoutOutput), floatContribution);
                 break;
 
             default:

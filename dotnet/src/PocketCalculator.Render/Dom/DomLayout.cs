@@ -123,6 +123,18 @@ internal sealed class RetainedStyleMaps
 /// <summary>Per-element border boxes after layout, in viewport coordinates.</summary>
 public sealed class DomLayout
 {
+    /// <summary>
+    /// The box tree this layout was computed on, with its layout caches, for the next retained
+    /// pass to carry unchanged subtrees over from. See <see cref="RetainedTaffyLayout"/>.
+    /// </summary>
+    internal RetainedTaffyLayout? RetainedBoxes { get; set; }
+
+    /// <summary>How many boxes this pass carried over from the previous one.</summary>
+    internal int TransplantedBoxes { get; init; }
+
+    /// <summary>How many inline items this pass took over from the previous one.</summary>
+    internal int AdoptedInlineItems { get; init; }
+
     /// <summary>Border boxes keyed by DOM node.</summary>
     public Dictionary<NodeId, Rect> Rects { get; internal set; } = [];
 
@@ -245,6 +257,7 @@ public sealed class DomLayout
     internal DerivedLayoutState DerivedLayoutState(DomTree tree, (float Width, float Height) viewport)
     {
         HashSet<NodeId> viewportFixed = ViewportFixedNodes(tree);
+        LayoutPhaseProfile.Mark("fixedNodes");
         DerivedGeometryState geometry = DerivedGeometryWithFixed(tree, viewport, viewportFixed);
         return new DerivedLayoutState
         {
@@ -262,8 +275,11 @@ public sealed class DomLayout
     {
         (float Width, float Height) contentSize =
             ScrollingContentSizeWithFixed(tree, viewport, viewportFixed);
+        LayoutPhaseProfile.Mark("contentSize");
         ScrollTree scrollTree = BuildScrollTree(tree, viewport, contentSize, viewportFixed);
+        LayoutPhaseProfile.Mark("scrollTree");
         StickyLayout sticky = StickyLayoutWithGeometry(tree, viewport, contentSize, scrollTree);
+        LayoutPhaseProfile.Mark("sticky");
         return new DerivedGeometryState
         {
             ContentSize = contentSize,

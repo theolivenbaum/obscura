@@ -115,6 +115,7 @@ internal static class DomPasses
                 padding = padding with { Left = left * containingBlockWidth };
             }
 
+            RememberPaddingBeforeUsedSync(style);
             style.Padding = padding;
         }
     }
@@ -260,7 +261,102 @@ internal static class DomPasses
                     };
                 }
 
+                RememberPaddingBeforeUsedSync(pseudo);
                 pseudo.Padding = padding;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keep the padding a style had before a post-layout pass wrote the used percentage padding
+    /// into it, so <see cref="RestorePaddingBeforeUsedSync"/> can undo the write.
+    /// </summary>
+    private static void RememberPaddingBeforeUsedSync(LayoutStyle style) =>
+        style.PaddingBeforeUsedSync ??= style.Padding;
+
+    /// <summary>
+    /// Undo the previous pass's used-padding writes on retained styles before this pass reads
+    /// them.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/dom.rs, where the same writes land on styles
+    /// that are discarded with the layout. The port carries computed styles over to the next
+    /// retained pass, which then laid out with the previous layout's used padding as if it were
+    /// the computed value: a table with <c>padding: 5%</c> came out 47px wider on a retained
+    /// pass that changed nothing. Same reason as <c>ResetScrollbarGutters</c>.
+    /// </remarks>
+    internal static void RestorePaddingBeforeUsedSync(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            Restore(style);
+            if (style.BeforePseudo is { } before)
+            {
+                Restore(before);
+            }
+
+            if (style.AfterPseudo is { } after)
+            {
+                Restore(after);
+            }
+        }
+
+        static void Restore(LayoutStyle style)
+        {
+            if (style.PaddingBeforeUsedSync is { } saved)
+            {
+                style.PaddingUsedByPreviousLayout = style.Padding;
+                style.Padding = saved;
+                style.PaddingBeforeUsedSync = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Put back what <see cref="RestorePaddingBeforeUsedSync"/> undid, for a pass that keeps the
+    /// previous layout instead of running one: its styles must describe that layout.
+    /// </summary>
+    internal static void ReapplyPaddingUsedByPreviousLayout(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            Reapply(style);
+            if (style.BeforePseudo is { } before)
+            {
+                Reapply(before);
+            }
+
+            if (style.AfterPseudo is { } after)
+            {
+                Reapply(after);
+            }
+        }
+
+        static void Reapply(LayoutStyle style)
+        {
+            if (style.PaddingUsedByPreviousLayout is { } used)
+            {
+                style.PaddingBeforeUsedSync = style.Padding;
+                style.Padding = used;
+                style.PaddingUsedByPreviousLayout = null;
+            }
+        }
+    }
+
+    /// <summary>Forget the previous layout's used padding once this pass lays out afresh.</summary>
+    internal static void ForgetPaddingUsedByPreviousLayout(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            style.PaddingUsedByPreviousLayout = null;
+            if (style.BeforePseudo is { } before)
+            {
+                before.PaddingUsedByPreviousLayout = null;
+            }
+
+            if (style.AfterPseudo is { } after)
+            {
+                after.PaddingUsedByPreviousLayout = null;
             }
         }
     }

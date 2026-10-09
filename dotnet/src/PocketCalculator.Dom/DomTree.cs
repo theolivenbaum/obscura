@@ -919,7 +919,18 @@ public sealed partial class DomTree
 
     public List<NodeId> Children(NodeId nodeId)
     {
-        var result = new List<NodeId>();
+        // Counted first so the list is allocated at its final size: layout asks for the children
+        // of every node on every pass, and growing each list by doubling was a tenth of a
+        // retained relayout (the discarded arrays and the copies). A childless node gets a list
+        // with no backing array at all.
+        int count = 0;
+        for (var probe = Slot(nodeId)?.FirstChild; probe is { } probeId && count <= _nodes.Count;
+            probe = Slot(probeId)?.NextSibling)
+        {
+            count++;
+        }
+
+        var result = new List<NodeId>(count);
         var current = Slot(nodeId)?.FirstChild;
         while (current is { } childId)
         {
@@ -1389,6 +1400,16 @@ public sealed partial class DomTree
                 return comment.Contents;
             case ProcessingInstructionData pi:
                 return pi.Data;
+        }
+
+        // An element whose only child is one text node - every <style> as parsed - has that
+        // node's text as its text content: hand back the string itself rather than a copy, so
+        // a caller that asks on every render pass gets the same string while it is unchanged.
+        if (Slot(nodeId)?.FirstChild is { } only
+            && Slot(only) is { Data: TextData single } onlyNode
+            && onlyNode.NextSibling is null)
+        {
+            return single.Contents;
         }
 
         var buf = new System.Text.StringBuilder();

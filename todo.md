@@ -475,6 +475,29 @@ Found during the review, not from upstream:
   per-pass `TextEngine` font database 6% each), which needs the retained box
   tree above.
 
+  Partly done (October 2026): a retained pass now carries the previous pass's
+  layout results over to every unchanged subtree and takes over unchanged inline
+  items (see "A relayout carries the previous pass's layout results over" under
+  Known deviations). Interleaved A/B against c77530b, same build settings, three
+  runs, CLI `fetch --eval` on a local page of 2000 grid items: class write +
+  `offsetWidth` 889-983ms -> 127-184ms, style write + `getBoundingClientRect`
+  759-853ms -> 106-115ms, 50 interleaved class toggles + reads 47.5-48.6s ->
+  7.8-8.1s, 1000 reads without writes 3-6ms both; peak RSS 961-1006MB ->
+  924-930MB. On 2000 block list items the gain is smaller (50 toggles 8.1-8.8s
+  -> 6.4-6.7s), since layout was not the cost there. nvidia.com (live, CDP,
+  three runs): goto 30.0-30.4s -> 29.3-30.4s, 75 `offsetParent` reads
+  11.2-12.0s -> 10.3-11.2s, peak RSS 1465-1559MB -> 1505-1660MB. What is left
+  per forced read on nvidia.com (~165ms) is no longer one cost: with floats
+  on the page the root formatting context is laid out uncached (~50ms: the
+  float rewrite computes same-BFC layout without the cache, so only float-free
+  formatting contexts carry over), the box-tree build 23ms, `@font-face`
+  collection 9ms, cascade and top-down 17ms, derived scroll/sticky geometry
+  17ms, and a dozen smaller whole-document walks. Each is O(document); making
+  them proportional to the change needs the box tree itself retained (patched
+  in place rather than rebuilt and paired), and the style and derived-geometry
+  walks skipped for clean subtrees. `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints
+  the per-phase split of every prepare.
+
 - **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
   attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
   route runs ~33 prepares totalling 13.4s, of which #7-#31 are twenty-five
@@ -2793,6 +2816,55 @@ away (nvidia.com: 49-75 swaps, each a whole-document cascade). The Rust selector
 "image resource mutation" now expects Incremental in `DomLayoutTests`; pinned by
 `RetainedImageSourceSwapMatchesForcedFull` (Render, against a forced full layout, including a
 source that has no intrinsic size yet) and `LayoutReadCacheTests` (Js, against Chromium 141).
+
+### A relayout carries the previous pass's layout results over to unchanged subtrees
+
+DEVIATION from `crates/obscura-render`, which builds a fresh taffy tree and lays the whole
+document out on every pass, as the port did. A forced read after a small mutation cost a
+whole-document layout. The box tree is still rebuilt each pass, but `RetainedTaffyLayout`
+(kept on `DomLayout.RetainedBoxes`, one per prepared render, consumed by the next retained
+pass) pairs each new box with the previous pass's box for the same content and, when the
+whole subtree is provably unchanged, moves the previous box's taffy cache and stored layouts
+over (`TaffyTree.TransplantFrom`). taffy's own cache then answers clean subtrees whose
+constraints are unchanged and re-runs layout only along the dirty path. It fails closed: a box
+is carried only when it maps to the same DOM node (or the same anonymous position), nothing it
+was built from is in the pass's dirty closure (restyled nodes, tree/text/attribute mutation
+targets and parents, changed image intrinsics, changed generated/counter text, closed upward),
+its taffy style is equal and holds no `calc()` handle, its measure context matches (replaced
+sizing bit for bit), its children pair one for one, and the previous pass did not lay it out
+beside floats. Two departures from vendor/taffy back it: a carried cache asked for in a context
+with floats or a different block-context mode is dropped (`ComputeChildLayoutInner`), and a
+cache entry keeps the block-context float contribution its computation left behind
+(`Cache.GetCarried`), handed back the first time a carried entry answers, since taffy's cache
+otherwise drops that side channel and the root's height came out differently. With a float in
+the tree only float-free subtrees that establish their own formatting context are carried
+(the float rewrite computes same-BFC layout uncached there).
+
+Unchanged whole-container inline items are taken over by the next pass's engine
+(`TextEngine.AdoptInlineItems`) instead of being collected and shaped again; not on a page with
+floats, whose exclusions live in the items. The previous engine is released once the box tree
+is built (a fact pins that the first pass's engine is collectable).
+
+`POCKETCALCULATOR_FULL_RELAYOUT=1` turns both off (`RetainedTaffyLayout.ForceFullRelayout` per
+execution context, for tests). `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints per-phase timings of
+every prepare to stderr. Pinned by `IncrementalLayoutDifferentialTests` (Render): random
+sequences of class, style, text, insert, remove, move, `<img>` src and attribute mutations on
+six fixtures and the 61 float conformance pages, each step compared with a from-scratch full
+layout in every computed style, every rect (snapped and LayoutUnit), inline fragment, text run,
+generated box and the painted pixels; soaked at 40 seeds per fixture and 6 per float page (615 runs, none diverging).
+A cancelled incremental pass leaves no retained state (RenderState drops the previous render
+when a prepare throws) and the next pass is exact (`ACancelledPassLeavesTheNextPassExact`).
+Read-after-write timing and carry-over pinned in `LayoutReadCacheTests` (Js).
+
+Found by the same test, fixed: `GrowTrailingAutoCells` took its own flex-grow from the previous
+pass for an authored one; the used percentage padding written after layout
+(`SyncResolvedPercentagePadding`) was read back as computed padding by the next retained pass
+(undone before the pass, restored when the reuse gate keeps the layout); the reuse gate kept the
+previous layout for attributes the box build reads directly (`colspan`, `size`, ...).
+
+Also: `DomTree.Children` allocates its list at the final size, `DomTree.TextContent` of an
+element with one text child returns that child's string, and the second clip walk after inline
+owner fragments is skipped when no replaced owner rect feeds it.
 
 ### The CDP watchdog scans its slots in a separate frame
 
