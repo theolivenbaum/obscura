@@ -288,6 +288,7 @@ public sealed partial class TextEngine : IDisposable
         return x.LayoutWrap == y.LayoutWrap
             && x.MinContentWrap == y.MinContentWrap
             && x.TextIndent == y.TextIndent
+            && x.MarkerIndent.Equals(y.MarkerIndent)
             && x.BalanceWrap == y.BalanceWrap
             && x.Align == y.Align
             && x.ForcedMinHeight.Equals(y.ForcedMinHeight)
@@ -2114,7 +2115,7 @@ public sealed partial class TextEngine : IDisposable
     /// </remarks>
     private void ShapeWithTextIndent(InlineItem item, float? width, Wrap wrap, FloatBands? bands = null)
     {
-        float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width);
+        float indent = InlineGeometry.UsedTextIndent(item.TextIndent, width) + item.MarkerIndent;
         // The first line is aligned in the full width and then moved: by the indent on the
         // left of a left-aligned line, half of it when centred, none when right-aligned. Right
         // to left, the indent is on the right, so each moves back by all of it. A justified

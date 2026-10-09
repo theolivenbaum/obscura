@@ -382,6 +382,7 @@ internal static partial class DomBuild
                     taffyStyle.Display = TaffyDisplay.Block;
                 }
 
+                ListMarkers.ApplyInsideMarker(context.Engine, tree, id, style, item);
                 TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(taffyStyle, item);
                 context.IdMap[leaf] = id;
                 context.Ifc.Whole[id] = item;

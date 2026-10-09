@@ -379,6 +379,11 @@ internal static partial class DomBuild
                 {
                     items = [];
                     context.Ifc.Runs[id] = items;
+                    if (childIds.Count == 0)
+                    {
+                        // The item's first line is this run's: an inside marker indents it.
+                        ListMarkers.ApplyInsideMarker(context.Engine, tree, id, style, item);
+                    }
                 }
 
                 items.Add(item);

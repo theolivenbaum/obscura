@@ -78,6 +78,115 @@ public sealed partial class TextEngine
         }
     }
 
+    private readonly Lock _transientGate = new();
+
+    /// <summary>Indent item <paramref name="index"/>'s first line by an inside list marker.</summary>
+    internal void SetMarkerIndent(int index, float advance)
+    {
+        if (index < 0 || index >= _items.Count || !float.IsFinite(advance))
+        {
+            return;
+        }
+
+        InlineItem item = _items[index];
+        if (item.MarkerIndent.Equals(advance))
+        {
+            return;
+        }
+
+        // The first line's own wrap boundary is derived from the unsplit source, as for a
+        // text indent (ShapeWithTextIndent).
+        item.SourceBuffer ??= (item.PristineBuffer ?? item.Buffer).Clone();
+        item.MarkerIndent = advance;
+        item.ShapedFor = null;
+    }
+
+    /// <summary>The baseline of item <paramref name="index"/>'s first line, in document coordinates.</summary>
+    internal float? FirstLineBaseline(int index)
+    {
+        if (index < 0 || index >= _items.Count)
+        {
+            return null;
+        }
+
+        InlineItem item = _items[index];
+        foreach (LayoutRun run in item.Buffer.LayoutRuns())
+        {
+            return item.Origin.Y + run.LineY;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The width of list-marker text shaped in <paramref name="style"/>'s font, its trailing
+    /// space kept (the marker's <c>white-space: pre</c>). Pushes an item only to shape it.
+    /// </summary>
+    internal float MeasureMarkerText(string text, LayoutStyle style)
+    {
+        lock (_transientGate)
+        {
+            if (PushGeneratedText(text, style, WhiteSpace.Pre) is not { } index)
+            {
+                return 0f;
+            }
+
+            try
+            {
+                return F32.Max(MeasureWord(index).Width, 0f);
+            }
+            finally
+            {
+                _items.RemoveRange(index, _items.Count - index);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Paint list-marker text shaped in <paramref name="style"/>'s font with its left edge at
+    /// <paramref name="left"/> and its baseline at <paramref name="baselineY"/> (surface
+    /// coordinates before raster scale), without leaving an item behind.
+    /// </summary>
+    internal void PaintTransientText(
+        string text,
+        LayoutStyle style,
+        float left,
+        float baselineY,
+        Pixmap pixmap,
+        Rect? clip,
+        Mask? clipMask,
+        float rasterScale,
+        bool printEconomy)
+    {
+        lock (_transientGate)
+        {
+            if (PushGeneratedText(text, style, WhiteSpace.Pre) is not { } index)
+            {
+                return;
+            }
+
+            try
+            {
+                MeasureWord(index);
+                InlineItem item = _items[index];
+                float lineY = 0f;
+                foreach (LayoutRun run in item.Buffer.LayoutRuns())
+                {
+                    lineY = run.LineY;
+                    break;
+                }
+
+                item.Origin = (left, baselineY - lineY);
+                item.Clip = clip;
+                PaintItemWithClipMaskScaledForPrint(index, pixmap, (0f, 0f), clip, clipMask, rasterScale, printEconomy);
+            }
+            finally
+            {
+                _items.RemoveRange(index, _items.Count - index);
+            }
+        }
+    }
+
     /// <summary>The DOM text nodes collected into item <paramref name="index"/>.</summary>
     internal IReadOnlyList<TextNodeChunk> TextNodeChunks(int index) =>
         index >= 0 && index < _items.Count ? _items[index].TextNodes : [];

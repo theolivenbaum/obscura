@@ -67,6 +67,7 @@ public static partial class RenderDom
         internal bool HasZeroOpacity;
         internal SvgPaintValues Svg = SvgPaintValues.Initial;
         internal ListStyle ListStyle = ListStyle.Disc;
+        internal bool ListStyleInside;
         internal LineHeight LineHeight = LineHeight.Normal;
         internal WhiteSpace WhiteSpace = WhiteSpace.Normal;
         internal OverflowWrap OverflowWrap = OverflowWrap.Normal;
@@ -165,6 +166,7 @@ public static partial class RenderDom
             && HasZeroOpacity == other.HasZeroOpacity
             && Equals(Svg, other.Svg)
             && ListStyle == other.ListStyle
+            && ListStyleInside == other.ListStyleInside
             && LineHeight.Equals(other.LineHeight)
             && WhiteSpace == other.WhiteSpace
             && OverflowWrap == other.OverflowWrap
@@ -217,6 +219,7 @@ public static partial class RenderDom
             HasZeroOpacity = HasZeroOpacity,
             Svg = Svg,
             ListStyle = ListStyle,
+            ListStyleInside = ListStyleInside,
             LineHeight = LineHeight,
             WhiteSpace = WhiteSpace,
             OverflowWrap = OverflowWrap,

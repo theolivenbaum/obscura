@@ -1564,6 +1564,31 @@ differs:
 - [ ] Playwright's headless Chromium hides scrollbars, so the `clip-scroll` page's scroller sets
       `scrollbar-width: none` to compare like with like
 
+### List markers are placed and drawn as Blink does
+
+DEVIATION from `crates/obscura-render/src/paint.rs`, which draws "•", "◦", "▪" or "1." with the
+static face 6px left of the item's padding edge at its content box's top, and has no
+`list-style-position`. Chromium 141 draws disc, circle and square as shapes sized from the
+font's rounded ascent `a`: a square of side `(a*2/3+1)/2`, 1px into a box two wider, at
+`3*(a - a*2/3)/2` below the baseline less the ascent; an outside symbol box starts
+`a*2/3 + 8` before the content edge, on the right in a right-to-left item; marker text ("1. ",
+suffix space included) ends at the content edge, shaped in the item's font and direction; an
+inside marker is the start of the first line and indents it like `text-indent` (a symbol by its
+box less 1px plus 1em, text by its width); the marker sits on the first line's baseline.
+`Paint/ListMarkers.cs`, `InlineItem.MarkerIndent`; `list-style-position` (inherited) and the
+`list-style` shorthand's position are parsed; a list's UA `padding-inline-start` moves to the
+right in a `dir=rtl` list (`LayoutStyle.UaListPadding`; author logical padding still maps to
+the left, as before); `<ol start>` and `<li value>` number the items. Measured by the ink of the
+markers in `render-repros/list-markers.html` at 16 and 32px: every marker within 1px of
+Chromium (outside disc 11px right and 5px down before, inside markers drawn outside, a
+right-to-left marker 40px outside the list), and the inside items' text at Chromium's x
+(`ListMarkerTests`). Open:
+
+- [ ] string markers (`list-style-type: '- '`), `::marker` styles, `list-style-image` and the
+      other counter styles still draw a disc or nothing
+- [ ] an inside marker indents only the item's own first line; when the item starts with a
+      block, Chromium puts the marker in that block's first line
+
 ### Range rects come from the line fragments
 
 DEVIATION from `crates/obscura-js/js/bootstrap.js`, whose `Range.getClientRects()` is the common

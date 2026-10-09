@@ -124,11 +124,13 @@ public static partial class ComputedStyle
             {
                 style.ListStyle = PocketCalculator.Render.ListStyle.Disc;
                 style.Padding = style.Padding with { Left = 40.0f };
+                style.UaListPadding = true;
             }
             else if (tag == "ol")
             {
                 style.ListStyle = PocketCalculator.Render.ListStyle.Decimal;
                 style.Padding = style.Padding with { Left = 40.0f };
+                style.UaListPadding = true;
             }
         }
         else if (tag is "b" or "strong")
@@ -817,6 +819,11 @@ public static partial class ComputedStyle
     /// <summary>Rust <c>set_padding_side</c>.</summary>
     internal static void SetPaddingSide(LayoutStyle style, int index, string value)
     {
+        if (index is 1 or 3)
+        {
+            style.UaListPadding = false;
+        }
+
         string trimmed = value.Trim();
         if (DeferredLengthExpression(trimmed) is { } expression)
         {
@@ -2674,13 +2681,36 @@ public static partial class ComputedStyle
                 return true;
 
             case "list-style":
-                // Shorthand: type | position | image in any order.
+                // Shorthand: type | position | image in any order; an omitted position is reset.
+                style.ListStyleInside = false;
                 foreach (string token in SplitWhitespace(value))
                 {
                     if (ListStyleKeyword(token) is { } listStyle)
                     {
                         style.ListStyle = listStyle;
                     }
+                    else if (CssText.EqualsAscii(token, "inside"))
+                    {
+                        style.ListStyleInside = true;
+                    }
+                }
+
+                return true;
+
+            case "list-style-position":
+                switch (CssText.AsciiLower(value.Trim()))
+                {
+                    case "inside":
+                        style.ListStyleInside = true;
+                        break;
+                    case "outside":
+                    case "initial":
+                        style.ListStyleInside = false;
+                        break;
+                    case "inherit":
+                    case "unset":
+                        style.ListStyleInside = null;
+                        break;
                 }
 
                 return true;

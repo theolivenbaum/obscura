@@ -109,6 +109,13 @@ public sealed class InlineItem
     internal Dimension TextIndent { get; init; }
 
     /// <summary>
+    /// The inline advance of an inside list marker at the start of the first line (its box and
+    /// margins), which the first line is indented by like <see cref="TextIndent"/>; 0 for none.
+    /// Set by the box build for a list item's own context (<c>ListMarkers</c>).
+    /// </summary>
+    internal float MarkerIndent { get; set; }
+
+    /// <summary>
     /// The buffer as built, before a float layout split its lines; captured by the first
     /// layout around floats so a later layout without them starts from the original paragraphs.
     /// Null for an IFC never laid out beside a float.

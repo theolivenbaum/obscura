@@ -1346,11 +1346,15 @@ public static partial class ComputedStyle
                 return ParseCounterDirectives(value, 0) is not null;
             case "list-style-type":
                 return ListStyleKeyword(value.Trim()) is not null;
+            case "list-style-position":
+                return lower is "inside" or "outside";
             case "list-style":
             {
                 foreach (string token in SplitWhitespace(value))
                 {
-                    if (ListStyleKeyword(token) is not null)
+                    if (ListStyleKeyword(token) is not null
+                        || CssText.EqualsAscii(token, "inside")
+                        || CssText.EqualsAscii(token, "outside"))
                     {
                         return true;
                     }
