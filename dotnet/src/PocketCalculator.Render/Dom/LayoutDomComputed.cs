@@ -175,6 +175,11 @@ public static partial class RenderDom
                         inh.ListStyle = listStyle;
                     }
 
+                    if (retainedStyle.ListStyleInside is { } listStyleInside)
+                    {
+                        inh.ListStyleInside = listStyleInside;
+                    }
+
                     if (retainedStyle.LineHeight is { } lineHeight)
                     {
                         inh.LineHeight = lineHeight;
@@ -560,6 +565,14 @@ public static partial class RenderDom
         else
         {
             style.Direction = inh.Direction;
+        }
+
+        // DEVIATION from crates/obscura-render, whose UA sheet gives a list 40px of left
+        // padding whatever its direction: Chromium's is padding-inline-start, on the right of
+        // a dir=rtl list (its markers hang outside it there).
+        if (style.UaListPadding && style.Direction == Layout.Direction.Rtl && style.Padding.Right == 0f)
+        {
+            style.Padding = style.Padding with { Left = 0f, Right = 40f };
         }
 
         ComputedStyle.ResolveLogicalBorders(style);
@@ -1157,6 +1170,15 @@ public static partial class RenderDom
         else
         {
             style.ListStyle = inh.ListStyle;
+        }
+
+        if (style.ListStyleInside is { } listStyleInside)
+        {
+            inh.ListStyleInside = listStyleInside;
+        }
+        else
+        {
+            style.ListStyleInside = inh.ListStyleInside;
         }
 
         if (style.LineHeight is { } lineHeight)

@@ -181,6 +181,14 @@ public sealed class OverflowClip
 
     internal (float X, float Y) RoundedOffset() => _roundedOffset;
 
+    /// <summary>
+    /// Whether a point is inside the clip on both axes (an unbounded axis holds every value).
+    /// Rounded corners are not applied: hit testing clips to the padding box's rectangle.
+    /// </summary>
+    internal bool ContainsPoint(float x, float y) =>
+        (_x is not { } xs || (x >= xs.Start && x < xs.End))
+        && (_y is not { } ys || (y >= ys.Start && y < ys.End));
+
     internal Rect ViewportRect((float Width, float Height) viewport)
     {
         (float left, float right) = _x ?? (0f, viewport.Width);

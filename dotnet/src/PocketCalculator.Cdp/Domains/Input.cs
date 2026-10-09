@@ -410,6 +410,11 @@ public static class Input
         }
     }
 
+    // DEVIATION from crates/obscura-cdp/src/domains/input.rs: the target is the deepest element
+    // at the point, inside shadow trees (__obscura_host.dom.elementFromPoint hit-tests through
+    // them), and the mouse and wheel events are composed, as Chromium's are, so a listener on
+    // the document sees a click on shadow content retargeted to its host. The Rust engine's
+    // hit test never entered a shadow tree and its events stopped at the shadow root.
     private static string MousePressedJs(
         double x,
         double y,
@@ -435,7 +440,7 @@ public static class Input
             + "__obscura_host.pointer.down = {__proto__:null,target:target,button:" + button
             + ",clickCount:" + detail + "};"
             + "var evt = h.event('MouseEvent', 'mousedown', "
-            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + "{__proto__:null,bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:" + button + ",buttons:" + mask + ",detail:" + detail
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
             + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}, true);"
@@ -481,7 +486,7 @@ public static class Input
             + "var down = __obscura_host.pointer.down;"
             + "__obscura_host.pointer.down = null;"
             + "var evt = h.event('MouseEvent', 'mouseup', "
-            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + "{__proto__:null,bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:" + button + ",buttons:0,detail:" + detail + modifiers + "}, true);"
             + "h.dispatch(target, evt);"
             + "if (!down || down.button !== " + button + " || " + button + " !== 0) return;"
@@ -517,7 +522,7 @@ public static class Input
             + "h.set(clickTarget, 'indeterminate', false);"
             + "}"
             + "var click = h.event('MouseEvent', 'click', "
-            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + "{__proto__:null,bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",button:0,buttons:0,detail:" + detail + modifiers + "}, true);"
             + "var cancelled = !h.dispatch(clickTarget, click);"
             + "if (cancelled) {"
@@ -596,7 +601,7 @@ public static class Input
             + "var target = h.elementFromPoint(" + sx + "," + sy + ") || body || html;"
             + "if (!target) return;"
             + "var wheel = h.event('WheelEvent', 'wheel', "
-            + "{__proto__:null,bubbles:true,cancelable:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
+            + "{__proto__:null,bubbles:true,cancelable:true,composed:true,view:globalThis,clientX:" + sx + ",clientY:" + sy
             + ",deltaX:" + dx + ",deltaY:" + dy + ",deltaMode:0"
             + ",altKey:" + Bool(altKey) + ",ctrlKey:" + Bool(ctrlKey)
             + ",metaKey:" + Bool(metaKey) + ",shiftKey:" + Bool(shiftKey) + "}, true);"

@@ -474,6 +474,35 @@ public static class Dom
                 });
             }
 
+            // The deepest element at a main-frame viewport point, inside shadow trees and child
+            // frames, from the renderer's hit test. Port addition: the Rust engine has no
+            // DOM.getNodeForLocation. Chromium reports a text hit as its parent element.
+            case "getNodeForLocation":
+            {
+                BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");
+                double x = parameters.Get("x").AsF64() ?? throw new DomainError("x required");
+                double y = parameters.Get("y").AsF64() ?? throw new DomainError("y required");
+                (uint frameId, double frameX, double frameY) = page.FrameAtPoint(x, y);
+                double? hit = page.EvaluateHostIn(
+                    frameId,
+                    "__obscura_host.nodeIdAtPoint("
+                    + frameX.ToString("R", CultureInfo.InvariantCulture) + ","
+                    + frameY.ToString("R", CultureInfo.InvariantCulture) + ")").AsF64();
+                if (hit is not { } nid || nid < 0)
+                {
+                    throw new DomainError("No node found at given location");
+                }
+
+                ulong nodeId = (ulong)nid;
+                page.WithFrameDom(frameId, dom => Pinned(dom, ctx, NodeId.New((uint)nodeId)));
+                return DomainResult.Ok(new JsonObject
+                {
+                    ["backendNodeId"] = nodeId,
+                    ["frameId"] = frameId == 0 ? page.FrameId : Page.ChildFrameId(page.FrameId, frameId),
+                    ["nodeId"] = nodeId,
+                });
+            }
+
             case "getContentQuads":
             {
                 BrowserPage page = ctx.GetSessionPageMut(sessionId) ?? throw new DomainError("No page");

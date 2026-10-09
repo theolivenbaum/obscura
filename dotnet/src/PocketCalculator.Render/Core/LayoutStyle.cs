@@ -2366,6 +2366,20 @@ public sealed class LayoutStyle
     /// </remarks>
     public ListStyle? ListStyle;
 
+    /// <summary>
+    /// <c>list-style-position: inside</c> (or the <c>list-style</c> shorthand). Inherited;
+    /// <c>null</c> means inherit, resolved during the inheritance pass like
+    /// <see cref="ListStyle"/>. Not in crates/obscura-render, which draws every marker outside.
+    /// </summary>
+    public bool? ListStyleInside;
+
+    /// <summary>
+    /// The horizontal padding is still the UA sheet's <c>padding-inline-start: 40px</c> of a
+    /// list, which the top-down pass moves to the right in a right-to-left list. Cleared by any
+    /// author padding on the left or right.
+    /// </summary>
+    internal bool UaListPadding;
+
     /// <summary><c>line-height</c>. Inherited.</summary>
     /// <remarks>
     /// <c>null</c> means "not set, inherit"; resolved to a concrete value in the inheritance

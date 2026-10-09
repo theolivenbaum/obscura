@@ -58,11 +58,23 @@ public sealed record TextAttrs
     public CssLineBreak? CssLineBreakPolicy { get; init; }
 
     /// <summary>
+    /// The atomic inline this span's one object replacement character stands for (an index into
+    /// its inline item's atomics), or -1 for text. Its <see cref="Metrics"/> carry the atomic's
+    /// margin box: <c>FontSize</c> 1, the width as the glyph's advance (see
+    /// <c>TextShaper.ShapeRun</c>), and the line-box halves its baseline gives it.
+    /// </summary>
+    public int Atomic { get; init; } = -1;
+
+    /// <summary>The width of the atomic's margin box, which its glyph advances by.</summary>
+    public float AtomicWidth { get; init; }
+
+    /// <summary>
     /// Whether two spans can shape as one run. Anything that changes glyph selection or
     /// advances must break the run; color and metadata deliberately do not.
     /// </summary>
     public bool Compatible(TextAttrs other) =>
-        string.Equals(Family, other.Family, StringComparison.Ordinal)
+        Atomic == other.Atomic
+        && string.Equals(Family, other.Family, StringComparison.Ordinal)
         && FontId == other.FontId
         && NullableEquals(FontWeightAxis, other.FontWeightAxis)
         && NullableEquals(FontOpticalSize, other.FontOpticalSize)
@@ -259,6 +271,32 @@ public sealed class AttrsList
 
         tail._spans.Reverse();
         return tail;
+    }
+
+    /// <summary>
+    /// Give every span standing for atomic inline <paramref name="atomic"/> the attributes
+    /// <paramref name="update"/> makes of its own; whether any changed.
+    /// </summary>
+    internal bool UpdateAtomic(int atomic, Func<TextAttrs, TextAttrs> update)
+    {
+        bool changed = false;
+        for (int i = 0; i < _spans.Count; i++)
+        {
+            (int start, int end, TextAttrs attrs) = _spans[i];
+            if (attrs.Atomic != atomic)
+            {
+                continue;
+            }
+
+            TextAttrs next = update(attrs);
+            if (!next.Equals(attrs))
+            {
+                _spans[i] = (start, end, next);
+                changed = true;
+            }
+        }
+
+        return changed;
     }
 
     internal void Reset(TextAttrs defaults)

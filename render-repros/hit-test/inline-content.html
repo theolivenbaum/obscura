@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hit-test inline-content</title>
+<style>
+html, body { margin: 0; }
+body { font: 16px/20px 'Liberation Sans', Arial, sans-serif; }
+p { margin: 0; }
+.c { width: 400px; background: #f1f3f5; }
+</style>
+</head>
+<body id=body>
+<div class=c id=c><p id=p1>First <span id=s1>span one</span> and <b id=b1>bold <i id=i1>italic</i> text</b> then a fairly long tail that wraps onto a second line here.</p>
+<div id=over style="margin-top:-30px;margin-left:40px;height:50px;width:200px;background:#a5d8ff"></div>
+<p id=p2 style="padding:10px"><a id=a1 href="#x" style="padding:4px;background:#ffd8a8">link with padding</a> plain <span id=s2 style="border:3px solid #333">bordered</span></p>
+<p id=p3 style="text-align:center">centered <em id=em1>emphasis</em></p>
+<p id=p4 style="text-align:right;line-height:40px">right <span id=s4 style="font-size:30px">big</span></p></div>
+</body>
+</html>

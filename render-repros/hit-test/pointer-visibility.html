@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hit-test pointer-visibility</title>
+<style>
+html, body { margin: 0; }
+body { font: 16px/20px 'Liberation Sans', Arial, sans-serif; }
+p { margin: 0; }
+.box { width: 200px; height: 60px; margin: 10px; }
+</style>
+</head>
+<body id=body>
+<div id=pe class=box style="pointer-events:none;background:#ffc9c9"><span id=pes>none text</span><div id=pea style="pointer-events:auto;width:80px;height:30px;background:#c92a2a">auto child</div></div>
+<div id=under class=box style="background:#d3f9d8;margin-top:-40px;position:relative;z-index:-1">under</div>
+<div id=vh class=box style="visibility:hidden;background:#a5d8ff"><span id=vhs>hidden</span><div id=vhv style="visibility:visible;width:80px;height:30px;background:#1864ab">visible child</div></div>
+<div id=behind class=box style="background:#fff3bf">behind</div>
+<div id=ab style="position:absolute;left:100px;top:250px;width:100px;height:50px;background:#e599f7;pointer-events:none"></div>
+<div id=dn style="display:none;width:100px;height:100px"></div>
+</body>
+</html>

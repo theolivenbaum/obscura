@@ -16959,6 +16959,27 @@ function _rngCheckOffset(n, o) {
   if (n && n.nodeType === 10) throw new DOMException("Range boundary cannot be a DocumentType", "InvalidNodeTypeError");
   if (o < 0 || o > _rngNodeLength(n)) throw new DOMException("Range offset out of bounds", "IndexSizeError");
 }
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose rects are the common ancestor
+// element's box: with layout, op_range_rects measures the range as CSSOM View defines it
+// (contained elements' border boxes, the selected part of each text node per line, a caret
+// rect for a collapsed range in text), and the bounding rect is their union.
+function _rangeLayoutRects(range) {
+  if (typeof __obscuraCore.ops.op_range_rects !== 'function') return undefined;
+  const sc = range._sc, ec = range._ec;
+  if (!sc || !ec || typeof sc._nid !== 'number' || typeof ec._nid !== 'number') return undefined;
+  let raw;
+  try { raw = __obscuraCore.ops.op_range_rects(sc._nid, range._so, ec._nid, range._eo); } catch (_e) { return undefined; }
+  if (!raw) return undefined;
+  let list;
+  try { list = _JSONparse(raw); } catch (_e) { return undefined; }
+  if (!_isArray(list)) return undefined;
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i];
+    if (_isArray(r) && r.length === 4) out[out.length] = new DOMRect(r[0], r[1], r[2], r[3]);
+  }
+  return out;
+}
 globalThis.Range = class Range {
   constructor() {
     const d = globalThis.document || null;
@@ -17089,6 +17110,20 @@ globalThis.Range = class Range {
   surroundContents(node) { this.insertNode(node); }
   detach() {}
   getBoundingClientRect() {
+    const rects = _rangeLayoutRects(this);
+    if (rects !== undefined) {
+      // CSSOM View: the union of the rects with a non-zero width or height, or the first rect
+      // when none has one.
+      let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+      for (let i = 0; i < rects.length; i++) {
+        const q = rects[i];
+        if (q.width === 0 || q.height === 0) continue;
+        l = Math.min(l, q.x); t = Math.min(t, q.y);
+        r = Math.max(r, q.x + q.width); b = Math.max(b, q.y + q.height);
+      }
+      if (l <= r && t <= b) return new DOMRect(l, t, r - l, b - t);
+      return rects.length ? new DOMRect(rects[0].x, rects[0].y, rects[0].width, rects[0].height) : new DOMRect();
+    }
     if (this.collapsed) return new DOMRect();
     let cac = this.commonAncestorContainer;
     while (cac && cac.nodeType !== 1 && cac.nodeType !== 9) cac = cac.parentNode;
@@ -17099,6 +17134,8 @@ globalThis.Range = class Range {
     return new DOMRect();
   }
   getClientRects() {
+    const rects = _rangeLayoutRects(this);
+    if (rects !== undefined) return new DOMRectList(rects);
     if (this.collapsed) return new DOMRectList([]);
     return new DOMRectList([this.getBoundingClientRect()]);
   }
@@ -21401,8 +21438,35 @@ if (typeof Element !== 'undefined' && !Element.prototype.toggleAttribute) {
 // in-viewport coords return <body> (or <html> as fallback), out-of-viewport returns null.
 // Wrong-but-non-throwing beats "undefined", which traps ad/analytics bootstraps in retry loops
 // (see issue #63).
+// DEVIATION from crates/obscura-js/js/bootstrap.js: with the render ops present, hit testing is
+// the renderer's (op_hit_test, PreparedRender.HitTest): stacking order, floats, line boxes,
+// transforms, overflow clips, pointer-events and visibility, through shadow trees, retargeted
+// against the document or shadow root asked. The heuristic below is the fallback when there is
+// no layout (a click inside a float hit the paragraph after it; 98 of 272 float conformance
+// checks differed from Chromium).
 const _documentQuerySelectorAllAtBoot = Document.prototype.querySelectorAll;
 const _elementRectAtBoot = Element.prototype.getBoundingClientRect;
+// The nodes op_hit_test reports, or undefined when there is no layout to ask. A negative scope
+// reports the deepest elements, not retargeted out of shadow trees.
+function _hitTestPoint(x, y, scope, all) {
+  if (typeof __obscuraCore.ops.op_hit_test !== 'function') return undefined;
+  let raw;
+  try { raw = __obscuraCore.ops.op_hit_test(x, y, scope, all); } catch (_e) { return undefined; }
+  if (!raw) return undefined;
+  let ids;
+  try { ids = _JSONparse(raw); } catch (_e) { return undefined; }
+  if (!Array.isArray(ids)) return undefined;
+  const out = [];
+  for (let i = 0; i < ids.length; i++) {
+    const node = _wrap(ids[i]);
+    if (node) out[out.length] = node;
+  }
+  return out;
+}
+function _hitTestScope(node) {
+  const nid = node && node._nid;
+  return typeof nid === 'number' ? (nid | 0) : -1;
+}
 if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
   // Real hit testing against the synthetic bboxes from getBoundingClientRect.
   // Flat iteration over every element, NOT a tree walk: our synthetic rects
@@ -21415,6 +21479,8 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) {
       return null;
     }
+    var hits = _hitTestPoint(x, y, _hitTestScope(this), false);
+    if (hits !== undefined) return hits.length ? hits[0] : null;
     var w = (typeof window !== 'undefined' && window.innerWidth) || 1280;
     var h = (typeof window !== 'undefined' && window.innerHeight) || 720;
     if (x < 0 || y < 0 || x > w || y > h) return null;
@@ -21473,15 +21539,27 @@ if (typeof Document !== 'undefined' && !Document.prototype.elementFromPoint) {
     return best || this.body || this.documentElement || null;
   };
   Document.prototype.elementsFromPoint = function(x, y) {
+    if (typeof x === 'number' && typeof y === 'number' && isFinite(x) && isFinite(y)) {
+      var hits = _hitTestPoint(x, y, _hitTestScope(this), true);
+      if (hits !== undefined) return hits;
+    }
     var el = this.elementFromPoint(x, y);
     return el ? [el] : [];
   };
 }
 if (typeof ShadowRoot !== 'undefined' && !ShadowRoot.prototype.elementFromPoint) {
   ShadowRoot.prototype.elementFromPoint = function(x, y) {
+    if (typeof x === 'number' && typeof y === 'number' && isFinite(x) && isFinite(y)) {
+      var hits = _hitTestPoint(x, y, _hitTestScope(this), false);
+      if (hits !== undefined) return hits.length ? hits[0] : null;
+    }
     return Document.prototype.elementFromPoint.call(globalThis.document || this, x, y);
   };
   ShadowRoot.prototype.elementsFromPoint = function(x, y) {
+    if (typeof x === 'number' && typeof y === 'number' && isFinite(x) && isFinite(y)) {
+      var hits = _hitTestPoint(x, y, _hitTestScope(this), true);
+      if (hits !== undefined) return hits;
+    }
     return Document.prototype.elementsFromPoint.call(globalThis.document || this, x, y);
   };
 }
@@ -25109,7 +25187,15 @@ const _hostDom = (function () {
     body: () => apply(body, doc(), []),
     documentElement: () => apply(documentElement, doc(), []),
     scrollingElement: () => (scrollingElement ? apply(scrollingElement, doc(), []) : null),
-    elementFromPoint: (x, y) => apply(fromPoint, doc(), [x, y]),
+    // Input dispatch targets the deepest element, inside shadow trees too, as Chromium's
+    // does; the page-facing elementFromPoint retargets to the document (_hitTestPoint).
+    elementFromPoint: (x, y) => {
+      if (typeof x === 'number' && typeof y === 'number' && isFinite(x) && isFinite(y)) {
+        const hits = _hitTestPoint(x, y, -1, false);
+        if (hits !== undefined) return hits.length ? hits[0] : null;
+      }
+      return apply(fromPoint, doc(), [x, y]);
+    },
     querySelector: (root, selector) => {
       const fn = query[typeOf(root)];
       return fn ? apply(fn, root, [selector]) : null;
@@ -25746,6 +25832,12 @@ globalThis.__obscura_host_handoff = Object.freeze({
   frameOwner: (frameId) => {
     const el = _frameElements[frameId >>> 0];
     return el && _elGet('isConnected', el) ? el._nid : -1;
+  },
+  // Port addition (DOM.getNodeForLocation): the node id of the deepest element at viewport
+  // point (x, y) in this realm's document, shadow trees included; -1 for none or no layout.
+  nodeIdAtPoint: (x, y) => {
+    const hits = _hitTestPoint(_Number(x), _Number(y), -1, false);
+    return hits && hits.length ? hits[0]._nid : -1;
   },
   // Port addition: start the parsed document's frames (srcdoc and src), for the host once
   // the document is in place. See _loadDocumentFrames.

@@ -90,9 +90,10 @@ internal static partial class DomBuild
             }
 
             hasInlineContent = true;
-            if (context.Engine.TryBuildRun(tree, owner, run, context.Styles) is { } item)
+            if (context.Engine.TryBuildRun(tree, owner, run, context.Styles, allowAtomics: true) is { } item)
             {
                 TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(RunLeafStyle(), item);
+                AttachAtomics(context, leaf, item);
                 if (!context.Ifc.Runs.TryGetValue(owner, out List<int>? items))
                 {
                     items = [];
