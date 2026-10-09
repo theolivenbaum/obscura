@@ -62,7 +62,7 @@ public static partial class ComputedStyle
             case "display":
                 return lower is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
                     or "inline-grid" or "block" or "flow-root" or "table" or "inline-table"
-                    or "-webkit-box" or "-webkit-inline-box" or "contents";
+                    or "-webkit-box" or "-webkit-inline-box" or "contents" or "list-item";
             case "direction":
                 return lower is "ltr" or "rtl";
             case "position":

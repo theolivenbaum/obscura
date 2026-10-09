@@ -302,6 +302,8 @@ internal sealed class LayoutStyleRare
 
     public ClipRect? Clip;
 
+    public string? MarkerText;
+
     /// <summary>A shallow copy; <see cref="LayoutStyle.Clone"/> deep-copies what needs it.</summary>
     public LayoutStyleRare Clone() => (LayoutStyleRare)MemberwiseClone();
 }
@@ -379,6 +381,13 @@ public sealed class LayoutStyle
     /// </para>
     /// </remarks>
     internal bool DisplayAuthored;
+
+    /// <summary>
+    /// <c>display: list-item</c>: the UA display of <c>li</c>, and an authored
+    /// <c>list-item</c>. Only such a box generates a marker; an authored <c>display:
+    /// block</c> (or any other display) on an <c>li</c> removes it, as in Chromium.
+    /// </summary>
+    internal bool ListItemDisplay;
 
     /// <summary>
     /// The authored internal-table <c>display</c>, which this engine records and reports but
@@ -979,6 +988,22 @@ public sealed class LayoutStyle
     /// <c>null</c> is the computed <c>none</c> value.
     /// </summary>
     public ClipPathPolygon? ClipPath;
+
+    /// <summary>
+    /// The text a <c>::marker { content: "..." }</c> rule gives this list item's marker, or
+    /// <c>null</c> for the list-style marker. An empty string suppresses the marker.
+    /// </summary>
+    public string? MarkerText
+    {
+        get => m_rare?.MarkerText;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.MarkerText = value;
+            }
+        }
+    }
 
     /// <summary>
     /// The CSS 2.1 <c>clip: rect(...)</c> property. <c>null</c> is <c>auto</c>; it applies only

@@ -5957,3 +5957,17 @@ shadow tree's `<style>` (adopted sheets are bridged into one) is prefetched like
 one. msn.com's logo is such a background, and a CDP capture (which only observes, see
 `PrepareCaptureResourcesIfRequestedAsync`) painted it missing. Pinned by
 `RenderResourceTransportTests.RenderResourceWarmupScansShadowTreeStylesheets`.
+
+### Only list-item boxes have markers, and `::marker { content }` is honoured
+
+`paint.rs` draws a marker for every `li`, and `style.rs` rejects `display: list-item`. The
+port gives `li` the UA display `list-item` (`LayoutStyle.ListItemDisplay`, reported as
+`list-item` in the CSSOM snapshot, as Chromium 141 does), accepts an authored `list-item`
+(laid out as a block), and drops the marker when an author display replaces it. It also
+indexes `::marker` rules (`Stylesheet.MarkerRules`) and reads only their `content`: an empty
+string removes the marker and a string replaces it (`LayoutStyle.MarkerText`); `content:
+none`, counters and the other `::marker` properties are not read, and a `display: inherit`
+child of a list item does not inherit the marker. Markers are still drawn only for `li`
+elements. grammarly.com's feature carousel (`li::marker { content: "" }` on flex-item
+slides) painted a bullet in front of every card. Pinned by `ListItemDisplayTests` and
+`render-repros/list-item-display.html`.

@@ -104,6 +104,8 @@ public static partial class ComputedStyle
             _ => Display.Block,
         };
 
+        style.ListItemDisplay = tag == "li";
+
         if (tag == "slot")
         {
             // HTML's UA sheet makes a slot transparent to box generation.
@@ -3321,8 +3323,14 @@ public static partial class ComputedStyle
 
         if (value is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
             or "inline-grid" or "block" or "flow-root" or "table" or "inline-table" or "table-cell"
-            or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset")
+            or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset"
+            or "list-item")
         {
+            // DEVIATION from crates/obscura-render/src/style.rs, which rejects `list-item` and
+            // draws a marker for every `li` whatever its display. Only a list-item box has a
+            // marker: grammarly.com's carousel slides are `li { display: block }` flex items,
+            // and Chromium 141 draws no bullet in front of its cards.
+            style.ListItemDisplay = value == "list-item";
             // Every valid authored display value replaces the complete outer/inner
             // display pair, including the UA table/control approximation and any
             // internal-table keyword an earlier declaration recorded.
@@ -3392,6 +3400,7 @@ public static partial class ComputedStyle
                 style.IsInlineBlock = true;
                 break;
             case "block":
+            case "list-item":
                 style.Display = Display.Block;
                 break;
             case "flow-root":

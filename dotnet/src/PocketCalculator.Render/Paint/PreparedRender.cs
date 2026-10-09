@@ -1259,6 +1259,7 @@ public sealed partial class PreparedRender
                 // so a block box still carrying the flag was declared `flow-root`, or
                 // inherited that declaration through `display: inherit`.
                 (Display.Block, false) when style.FlowRoot => "flow-root",
+                (Display.Block, false) when style.ListItemDisplay && !isPseudo => "list-item",
                 _ => "block",
             };
         }

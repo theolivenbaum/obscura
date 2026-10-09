@@ -356,6 +356,9 @@
     {"name": "clip rect clips an absolutely positioned descendant", "color": "#087f5b", "x": 160, "y": 60, "width": 50, "height": 20},
     {"name": "clip is ignored on a static box", "color": "#7048e8", "x": 0, "y": 120, "width": 100, "height": 40}
   ],
+  "list-item-display": [
+    {"name": "display: block li cards in a flex row", "color": "#1971c2", "x": 40, "y": 20, "width": 100, "height": 40}
+  ],
   "svg-percent-under-fixed-icon": [
     {"name": "100% svg under a fixed-width inline-flex icon keeps the icon width", "color": "#e03131", "x": 16, "y": 10, "width": 93, "height": 20},
     {"name": "100% svg under a fixed-width flex box keeps the box width", "color": "#1971c2", "x": 0, "y": 40, "width": 120, "height": 30}

@@ -1362,7 +1362,8 @@ internal static class PaintDomPainter
 
             // List-item marker, drawn in the indent to the left of the item's content box.
             if (string.Equals(localName, "li", StringComparison.Ordinal)
-                && PaintText.ListMarkerText(tree, nid, style.ListStyle) is { } marker)
+                && style.ListItemDisplay
+                && (style.MarkerText ?? PaintText.ListMarkerText(tree, nid, style.ListStyle)) is { Length: > 0 } marker)
             {
                 float markerSize = style.FontSize ?? 16f;
                 RgbaColor markerColor = style.Color ?? new RgbaColor(0, 0, 0, 255);

@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>only list-item boxes have markers</title>
+  <style>
+    html, body { margin: 0; }
+    ul { margin: 0; padding: 0 0 0 40px; font: 16px/20px sans-serif; }
+    /* grammarly.com's feature carousel: a flex ul whose li are display: block cards. */
+    .row { display: flex; gap: 10px; overflow: auto; }
+    .row li { display: block; width: 100px; height: 40px; background: #1971c2; }
+    #explicit { display: list-item; }
+    /* grammarly.com resets the marker itself. */
+    .reset li::marker { content: ""; }
+  </style>
+</head>
+<body>
+  <ul><li id="plain">one</li></ul>
+  <ul class="row"><li id="card"></li><li></li></ul>
+  <ul><li id="explicit">three</li></ul>
+  <ul class="reset"><li id="reset">four</li></ul>
+</body>
+</html>
