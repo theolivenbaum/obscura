@@ -256,7 +256,20 @@ public sealed partial class TextEngine : IDisposable
     }
 
     /// <summary>How many items this engine took over from the previous pass.</summary>
-    internal int AdoptedItemCount => _adoptTaken?.Count ?? 0;
+    internal int AdoptedItemCount { get; private set; }
+
+    /// <summary>
+    /// Ends the offer <see cref="AdoptInlineItems"/> made, once the box tree is built. Holding
+    /// on to the previous engine would chain every pass's engine to the one before it.
+    /// </summary>
+    internal void EndInlineItemAdoption()
+    {
+        AdoptedItemCount = _adoptTaken?.Count ?? 0;
+        _adoptFrom = null;
+        _adoptWhole = null;
+        _adoptDirty = null;
+        _adoptTaken = null;
+    }
 
     private int? TakeAdoptedItem(NodeId id)
     {

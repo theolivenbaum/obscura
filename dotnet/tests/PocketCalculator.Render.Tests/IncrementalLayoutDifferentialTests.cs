@@ -244,6 +244,47 @@ public class IncrementalLayoutDifferentialTests
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
     }
 
+    /// <summary>
+    /// What a retained pass carries over is bounded: one previous layout's box tree and items,
+    /// and nothing of the passes before it. A pass's engine that kept the one it took items from
+    /// would chain every engine since the page loaded.
+    /// </summary>
+    [Fact]
+    public void ARetainedPassDoesNotKeepEarlierPassesAlive()
+    {
+        DomTree tree = HtmlParsing.ParseHtml(Html(0));
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        (PreparedRender latest, WeakReference first) = Chain(tree, resources, cache);
+        for (int attempt = 0; attempt < 3 && first.IsAlive; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(first.IsAlive, "the first pass's text engine is still reachable");
+        Assert.True(latest.Layout.AdoptedInlineItems > 0);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (PreparedRender Latest, WeakReference First) Chain(DomTree tree, RenderResourceCache resources, StylesheetCache cache)
+    {
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        WeakReference first = new(previous.Layout.TextEngine);
+        NodeId target = tree.GetElementById("d1")!.Value;
+        for (int i = 0; i < 4; i++)
+        {
+            string value = i % 2 == 0 ? "b c" : "b";
+            string old = tree.GetNode(target)!.GetAttribute("class")!;
+            tree.GetNode(target)!.SetAttribute("class", value);
+            previous = RenderPaint.PrepareDomWithRetainedStyles(
+                tree, Viewport, null, resources, [], cache, previous,
+                [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", old, value))])!;
+        }
+
+        return (previous, first);
+    }
+
     private static PreparedRender Reference(DomTree tree)
     {
         using IDisposable full = RetainedTaffyLayout.ForceFullRelayout();

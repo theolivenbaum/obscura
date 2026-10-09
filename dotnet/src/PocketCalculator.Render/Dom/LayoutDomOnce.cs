@@ -600,7 +600,9 @@ public static partial class RenderDom
                 DeferredInlineWidths = deferredInlineWidths,
             };
 
-            if (DomBuild.Build(buildContext, rootId) is { } taffyRoot)
+            TaffyNodeId? builtTaffyRoot = DomBuild.Build(buildContext, rootId);
+            engine.EndInlineItemAdoption();
+            if (builtTaffyRoot is { } taffyRoot)
             {
         LayoutPhaseProfile.Mark("build");
                 // Taffy has no outer display type and only gives an auto-width Block root the
@@ -662,6 +664,7 @@ public static partial class RenderDom
                 }
 
                 builtRoot = taffyRoot;
+                LayoutPhaseProfile.Mark("reparent");
 
                 // The box tree is complete and nothing has been laid out yet: carry the previous
                 // pass's layout results onto every box whose subtree is unchanged.
