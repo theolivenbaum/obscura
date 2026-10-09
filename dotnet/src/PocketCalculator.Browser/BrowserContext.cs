@@ -66,6 +66,12 @@ public sealed class BrowserContext
 
     public CookieJar CookieJar { get; }
 
+    /// <summary>
+    /// The context's <c>localStorage</c>, kept for its lifetime like its cookies (in memory;
+    /// not written to the storage directory).
+    /// </summary>
+    public PocketCalculator.Js.Ops.WebStorage LocalStorage { get; } = new();
+
     public PocketCalculatorHttpClient HttpClient { get; }
 
     public string UserAgent { get; }
