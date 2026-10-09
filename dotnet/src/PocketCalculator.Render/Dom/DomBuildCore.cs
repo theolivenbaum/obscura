@@ -495,7 +495,12 @@ internal static partial class DomBuild
 
         // `float` has no effect on a flex or grid item.
         bool hasFloatChild = false;
-        if (style.Display == Display.Block)
+        bool isInternalTableCell = style.IsTableCellBox && style.InternalFlexContainer;
+        bool floatFlowContainer = context.HasFloats
+            && (style.Display == Display.Block
+                || isInternalTableCell
+                || (style.Display == Display.Inline && style.IsInlineBlock));
+        if (style.Display == Display.Block || floatFlowContainer)
         {
             foreach (NodeId cid in domChildren)
             {
@@ -506,6 +511,13 @@ internal static partial class DomBuild
                     break;
                 }
             }
+        }
+
+        // A block container with floated children in a document that has floats lays them
+        // out as CSS floats: see BuildMixedBlock.
+        if (floatFlowContainer && hasFloatChild && style.ColumnCount is not (> 1))
+        {
+            return BuildMixedBlock(context, id, style, taffyStyle, domChildren, floatFlow: true);
         }
 
         bool nativeFloatBand = hasFloatChild
@@ -520,8 +532,6 @@ internal static partial class DomBuild
                 break;
             }
         }
-
-        bool isInternalTableCell = style.IsTableCellBox && style.InternalFlexContainer;
 
         // `text-align` affects inline content, never the used width or placement of an in-flow
         // block child. Keep the legacy `<center>` behavior.
@@ -553,7 +563,7 @@ internal static partial class DomBuild
             && hasInlineIshContent
             && !hasFloatChild)
         {
-            return BuildMixedBlock(context, id, style, taffyStyle, domChildren);
+            return BuildMixedBlock(context, id, style, taffyStyle, domChildren, floatFlow: context.HasFloats);
         }
 
         if (stacksChildrenVertically
@@ -623,6 +633,14 @@ internal static partial class DomBuild
             if (BuildInFlowPseudo(context, id, GeneratedBoxKind.Before, style.BeforePseudo)
                 is { } before)
             {
+                if (context.HasFloats && before.BlockLevel && style.BeforePseudo is { } beforeStyle)
+                {
+                    foreach (TaffyNodeId pseudoNode in before.Nodes)
+                    {
+                        SetNativeFloatClear(context, pseudoNode, beforeStyle, true);
+                    }
+                }
+
                 List<TaffyNodeId> merged = [.. before.Nodes];
                 merged.AddRange(childIds);
                 childIds = merged;
@@ -631,6 +649,14 @@ internal static partial class DomBuild
             if (BuildInFlowPseudo(context, id, GeneratedBoxKind.After, style.AfterPseudo)
                 is { } after)
             {
+                if (context.HasFloats && after.BlockLevel && style.AfterPseudo is { } afterStyle)
+                {
+                    foreach (TaffyNodeId pseudoNode in after.Nodes)
+                    {
+                        SetNativeFloatClear(context, pseudoNode, afterStyle, true);
+                    }
+                }
+
                 childIds.AddRange(after.Nodes);
             }
         }

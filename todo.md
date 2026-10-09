@@ -303,8 +303,8 @@ Decisions:
 
 Found during the review, not from upstream:
 
-- [ ] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
-      caller, around line 796); repro in the review document
+- [x] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
+      caller, around line 796); repro in the review document. Floats are CSS floats now
 - [ ] An inline `<span>` reports width 0 from `getBoundingClientRect()`; an `inline-block`
       reports its real width (seen writing the font-directory CDP test)
 - [ ] Render loads on CDP pages other than the first produce no Network events:
@@ -358,11 +358,11 @@ Found during the review, not from upstream:
     by coordinates hit inline links), RTL and wrapped fragments match Chromium, nested
     padded spans wrap as Chromium does; `visibility` inherits; closed `<details>` and
     `dialog:not([open])` are hidden; left/right/left floats place natively
-  - [ ] layout, found on the way: a float after inline text starts a new line where
-    Chromium keeps it on the line; `dir=rtl` text does not start at the right;
+  - [ ] layout, found on the way: ~~a float after inline text starts a new line where
+    Chromium keeps it on the line~~ (fixed: anchored floats); `dir=rtl` text does not start at the right;
     `<summary>` reports `block` (Chromium `list-item`); centred and justified lines
-    count the trailing space; a block with an explicit width beside a float is
-    narrowed
+    count the trailing space; ~~a block with an explicit width beside a float is
+    narrowed~~ (fixed: it moves below the float, as in Chromium)
   - [x] HTML tree construction is the port's own (`HtmlTreeBuilder`) over AngleSharp's
     tokenizer (M11): 50k nested divs 20 s to 0.14 s, a 50k-sibling fragment 91 s to
     0.13 s; html5lib tree-construction 1756/1765
@@ -795,6 +795,69 @@ Found during the review, not from upstream:
   `std::thread::spawn`), half-closes with `Shutdown(Send)` and drains until the
   reader goes away. 10 of 10 under a 10-burner stress that previously failed about
   one run in six. The cap assertion itself is unchanged.
+
+## Float layout (CSS 2.1 9.5)
+
+Floats used to be built as flex rows (`DomBuildFloats.cs`, a port of Rust's
+`build_children_with_float_zone`): a float and the siblings after it became one row, so text
+never wrapped around a float, nothing below it reflowed, and wikipedia.org's footer wrapped.
+They are now CSS floats, laid out by the block formatting context, measured against
+Chromium 141 on the pages in `render-repros/floats/` (`scripts/float-conformance.mjs`).
+
+Design:
+
+- **Build** (`DomBuild.BuildMixedBlock`, `floatFlow`). Only when the document has a float
+  (`BuildContext.HasFloats`; a float-free document builds and lays out exactly as before). A
+  block container, table cell or inline-block with floated children is a taffy `Block`:
+  in-flow blocks and floats are its children, and each inline run is an inline formatting
+  context leaf (`Display.Block`, so it is in the same BFC). A float inside a run that folds to
+  one shaped context stays in it as an *anchor* (text offset, `IfcRegistry.FloatAnchors`) and
+  its box is a sibling after the leaf; a run that does not fold is split at its floats. After
+  the build every box that establishes a BFC (flow-root, overflow, inline-block, flex/grid,
+  abs, table, cell) or is replaced gets `Style.EstablishesBfc`, and every element its
+  `float`/`clear` (`MarkBlockFormattingContextRoots`). Logical `inline-start`/`inline-end`
+  map by direction (`ResolveLogicalFloatClear`).
+- **Block layout** (`Layout/BlockLayout.cs`, taffy's float context). Floats are shrink-to-fit
+  (`min(max(min-content, available), max-content)`), never collapse margins, and are placed by
+  the nine rules at the pending margin's edge (Chromium's `NextBorderEdge`). A same-BFC child's
+  sub-context sits at its real border-top (margins collapsed with its first descendants'),
+  `clear` gives clearance only when the hypothetical position is above the floats, a box that
+  avoids floats moves down until its margin box fits beside them (`PlaceFloatAvoidingItem`),
+  a BFC root's height includes its floats' margin boxes plus its bottom padding, and a block
+  holding only floats is empty for margin collapsing. Anchored floats are placed from the line
+  holding their offset: on it when they fit in what is left, below it otherwise, with the
+  context laid out again after each (32 times at most, then the rest from one layout).
+  Intrinsic widths add floats to the in-flow content after them, and anchored floats to their
+  line.
+- **Exclusion space** (`FloatContext.Bands`, `FloatBands`). A same-BFC inline leaf is measured
+  through `TaffyTree.ExclusionMeasure` with the floats' segments relative to its content box.
+  The cache is bypassed for same-BFC layout when the tree has floats (the float context is
+  state the key cannot see), and `MarkDirty` then walks to the root.
+- **Line breaking** (`TextEngine.ShapeAroundFloats`). Each line box takes the floats over its
+  height: it is laid out at `width - left - right`, split off into its own buffer line, aligned
+  in that width and drawn from `left` (`BufferLine.OffsetX/WidthOverride/GapBefore`,
+  `LayoutRun.X`). A line whose first word does not fit beside the floats moves down to the next
+  float edge; a line taller than the strut is re-measured over its own height. Final layout
+  records the bands on the item and `Finalize` repeats the same breaks.
+- **Paint, hit testing, geometry**: floats are ordinary boxes in the tree; paint already put
+  them after in-flow block backgrounds and before inline content (`IsEffectiveFloat`). Inline
+  fragments and line rects come from `LayoutRuns`, so they carry the line offsets.
+
+Status: 56 of 61 conformance pages match Chromium (element boxes within 1px, inline line
+fragments within 2px). Open:
+
+- [ ] `elementFromPoint` is the shim's nid-order heuristic in `bootstrap.js`, so a point inside
+      a float returns the later in-flow block instead of the float (out of scope here: the
+      shim is being edited elsewhere)
+- [ ] `Range.getClientRects()` is a stub returning the element's box; line rects are measured
+      through inline elements' `getClientRects()` instead
+- [ ] an inline box split by a float inside it reports one fragment where Chromium reports
+      two (`float-in-inline`)
+- [ ] right-to-left paragraphs still start at the left (an older, float-independent gap), and
+      centred/right-aligned lines still count their trailing space; both show on the
+      `rtl`/`text-align-*` pages
+- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line
+- [ ] floats inside multi-column containers lay out in the first column only
 
 ## 9. Validation
 
@@ -1341,6 +1404,36 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Floats are CSS floats, not flex rows
+
+DEVIATION from `crates/obscura-render/src/dom.rs` (`build_children_with_float_zone`) and
+`vendor/taffy/src/compute/{block,float}.rs`. Rust lays a float and the siblings that follow it
+out as a flex row (a float, and a flow column of the next siblings up to an estimate of the
+float's height), so text never wraps around a float and the blocks after it keep its row's
+height. C# lays floats out with the float context of the block formatting context and shortens
+each line box around them; see "Float layout (CSS 2.1 9.5)" above for the design. The taffy
+changes, each commented at the site:
+
+- a float is shrink-to-fit in its containing block and its margins do not collapse (taffy:
+  max-content, collapsible);
+- a float is placed after the pending margin (Chromium's `NextBorderEdge`), a same-BFC child's
+  sub-context sits at its collapsed border-top, and clearance applies only when the
+  hypothetical position is above the floats (taffy added the margin after clearing);
+- a float taller than every earlier one extends the segments (taffy left the part below the
+  last segment excluding nothing);
+- a float-avoiding box moves down until it fits (taffy took the first slot at any width);
+- a BFC root's float height includes its bottom padding; a block holding only floats can be
+  collapsed through; a definite-width intrinsic pass counts floats (taffy: 0);
+- same-BFC layout is uncached in a tree with floats, and `MarkDirty` walks to the root then.
+
+Parity with the Rust binary is the wrong assertion for any page with a float; the
+`render-repros/floats/` pages and `FloatLayoutTests` assert Chromium's boxes instead.
+`NestedShrinkToFitLayoutTests.NestedFloatsKeepChromiumInlineGeometry` now holds through the
+anchored float; `DomLayoutTests.ConsecutivePercentageFloatsCollectAgainstTheFullBandWidth`
+asserts Chromium's 0 height for a non-BFC container (the flex row gave it 150), and the two
+cancellation tests that used 300 nested floats as a minute-long layout use a page of floated
+paragraphs, since nested floats now lay out in milliseconds.
+
 ### V8 grows its heap limit instead of aborting when the heap cap's sample is late
 
 Rust caps the heap with a near-heap-limit callback at V8's own limit, which terminates
@@ -1393,7 +1486,7 @@ pool for a second under a 64 MB V8 limit; without the multiplier the test host a
 - **Visibility inherits:** `getComputedStyle().visibility` and `innerText` read the inherited computed value (`ComputedVisibilityHidden`); Rust reported only an element's own declaration.
 - **Closed `<details>` in innerText:** only the summary is collected (Chromium); Rust's walk read every DOM child.
 - **`dialog:not([open]) { display: none }`:** a UA rule Rust lacks; without it a closed dialog laid out, painted and appeared in innerText.
-- **Floats on both sides:** a block whose in-flow content is only left and right floats takes the native float context; Rust's float-zone row put a third float below the first (Chromium: beside it).
+- **Floats on both sides:** superseded by "Floats are CSS floats, not flex rows"; every float now takes the native float context.
 - **Table width pass:** size-only intrinsic measurements and memoized depth and cyclic-item walks, where Rust does full layouts and repeated ancestor walks. Output is identical.
 - **Allocation trims:** no shadow-scope builders outside shadow trees, no WAAPI iterator per element, lazy sort delegates, lists shared between `Inherited` clones, pre-sized per-element maps and taffy tree. Output is identical.
 - **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, one implementation for every target (see "DOM event dispatch"). Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.

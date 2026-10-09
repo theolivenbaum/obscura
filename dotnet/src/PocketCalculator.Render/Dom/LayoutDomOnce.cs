@@ -456,6 +456,11 @@ public static partial class RenderDom
             // formatting mode.
             foreach (LayoutStyle style in styles.Values)
             {
+                if (style.LogicalFloatClear != 0)
+                {
+                    DomBuild.ResolveLogicalFloatClear(style);
+                }
+
                 if (style.Position == TaffyPosition.Absolute || style.Float is not null)
                 {
                     LayoutStyleExtensions.BlockifyOuterDisplay(style);
@@ -565,10 +570,17 @@ public static partial class RenderDom
                 Ifc = ifcItems,
                 Styles = styles,
                 DeferredInlineWidths = deferredInlineWidths,
+                HasFloats = DomBuild.AnyFloat(styles),
             };
+            taffyTree.HasFloats = buildContext.HasFloats;
 
             if (DomBuild.Build(buildContext, rootId) is { } taffyRoot)
             {
+                if (buildContext.HasFloats)
+                {
+                    DomBuild.MarkBlockFormattingContextRoots(taffyTree, idMap, styles);
+                }
+
                 // Taffy has no outer display type and only gives an auto-width Block root the
                 // initial-containing-block width. CSS blockifies Flex/Grid roots too.
                 if (styles.TryGetValue(rootId, out LayoutStyle? rootStyle)
@@ -651,6 +663,25 @@ public static partial class RenderDom
                     float width = avail.Width.Kind == TaffyAvailableSpaceKind.MinContent ? 0f : content.Width;
 
                     return new Layout.Size<float>(known.Width ?? width, known.Height ?? content.Height);
+                }
+
+                if (taffyTree.HasFloats)
+                {
+                    taffyTree.ExclusionMeasure = (known, avail, node, ctx, style, bands, runMode) =>
+                        ctx is { } index
+                            ? engine.MeasureTaffyAroundFloats(index, known, avail, bands, runMode)
+                            : Measure(known, avail, node, ctx, style);
+                    taffyTree.ExclusionReset = ctx =>
+                    {
+                        if (ctx is { } index)
+                        {
+                            engine.ForgetFloatBands(index);
+                        }
+                    };
+                    taffyTree.FloatAnchors = ifcItems.FloatAnchors;
+                    taffyTree.AnchorLines = (ctx, offsets) => ctx is { } index
+                        ? engine.AnchorLines(index, offsets)
+                        : new (float Top, float Height, float Width, float Used)?[offsets.Length];
                 }
 
                 float? IntrinsicWidth(TaffyTree t, TaffyNodeId node, TaffyAvailableSpace width)

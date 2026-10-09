@@ -81,6 +81,12 @@ internal sealed class IfcRegistry
     /// <summary>Floats whose exclusion can continue through later descendant blocks.</summary>
     internal List<FloatContinuation> FloatContinuations { get; } = [];
 
+    /// <summary>
+    /// Floats anchored in an inline formatting context leaf, keyed by the leaf: each float's
+    /// taffy node (a later sibling of the leaf) and the text offset it sits at.
+    /// </summary>
+    internal Dictionary<TaffyNodeId, (TaffyNodeId Float, int Offset)[]> FloatAnchors { get; } = [];
+
     /// <summary>Ordinary blocks participating in a native float band.</summary>
     internal HashSet<NodeId> FloatAwareBlocks { get; } = [];
 
@@ -116,6 +122,13 @@ internal sealed class BuildContext
     internal required IfcRegistry Ifc { get; init; }
 
     internal required IReadOnlyDictionary<NodeId, LayoutStyle> Styles { get; init; }
+
+    /// <summary>
+    /// Whether any rendered element is floated. Only then do block containers with floated
+    /// children take the CSS float layout (<see cref="DomBuild.BuildMixedBlock"/>); a document
+    /// without floats builds exactly as before.
+    /// </summary>
+    internal bool HasFloats { get; init; }
 
     /// <summary>
     /// The authored inline sizes that <c>DeferCyclicFlexInlineSizes</c> neutralized before this
@@ -1265,6 +1278,101 @@ internal static partial class DomBuild
             TaffyDimension.Auto,
             TaffyDimension.FromLength(lineHeight));
         return style;
+    }
+
+    /// <summary>
+    /// Map <c>float</c>/<c>clear: inline-start|inline-end</c> to the physical side for the
+    /// element's own direction (CSS Logical 4.1): they were stored as their left-to-right side.
+    /// </summary>
+    internal static void ResolveLogicalFloatClear(LayoutStyle style)
+    {
+        if (style.Direction != Layout.Direction.Rtl)
+        {
+            return;
+        }
+
+        if ((style.LogicalFloatClear & 1) != 0 && style.Float is { } side)
+        {
+            style.Float = side == Float.Left ? Float.Right : Float.Left;
+        }
+
+        if ((style.LogicalFloatClear & 2) != 0 && style.Clear is { } clear and not Clear.Both)
+        {
+            style.Clear = clear == Clear.Left ? Clear.Right : Clear.Left;
+        }
+
+        style.LogicalFloatClear = 0;
+    }
+
+    /// <summary>Whether any rendered element in <paramref name="styles"/> is floated.</summary>
+    internal static bool AnyFloat(IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            if (style.Float is not null && style.Display != Display.None)
+            {
+                return true;
+            }
+
+            if ((style.BeforePseudo is { Float: not null } before && before.Display != Display.None)
+                || (style.AfterPseudo is { Float: not null } after && after.Display != Display.None))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Mark every box that establishes an independent block formatting context, or is a
+    /// replaced box, so block layout keeps it out of its parent's float context: it contains its
+    /// own floats and is placed beside (or below) its parent's (CSS 2.1 9.4.1, 9.5).
+    /// </summary>
+    internal static void MarkBlockFormattingContextRoots(
+        Layout.TaffyTree<int?> taffyTree,
+        IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+        {
+            if (!styles.TryGetValue(domId, out LayoutStyle? style))
+            {
+                continue;
+            }
+
+            TaffyStyle current = taffyTree.GetStyle(taffyId);
+            bool root = DomStyleFixups.EstablishesBlockFormattingContext(style)
+                || style.IsTableCellBox
+                || style.IsTableBox
+                || current.ItemIsReplaced
+                || style.HasReplacedSizing;
+            Layout.Float side = style.Float switch
+            {
+                Float.Left => Layout.Float.Left,
+                Float.Right => Layout.Float.Right,
+                _ => Layout.Float.None,
+            };
+            Layout.Clear clear = style.Clear switch
+            {
+                Clear.Left => Layout.Clear.Left,
+                Clear.Right => Layout.Clear.Right,
+                Clear.Both => Layout.Clear.Both,
+                _ => Layout.Clear.None,
+            };
+
+            // Only block layout reads `float` and `clear`: a flex or grid item ignores both.
+            if ((root && !current.EstablishesBfc)
+                || current.Float != side
+                || current.Clear != clear)
+            {
+                TaffyStyle marked = current.Clone();
+                marked.EstablishesBfc |= root;
+                marked.Float = side;
+                marked.Clear = clear;
+                taffyTree.SetStyle(taffyId, marked);
+            }
+        }
     }
 
     internal static void SetNativeFloatClear(

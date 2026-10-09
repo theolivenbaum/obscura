@@ -15,6 +15,7 @@ internal static partial class DomBuild
     {
         Run,
         Block,
+        Float,
     }
 
     private sealed class Seg
@@ -24,18 +25,115 @@ internal static partial class DomBuild
         internal List<NodeId> Run { get; init; } = [];
 
         internal NodeId Block { get; init; }
+
+        /// <summary>A run whose floats stay in its inline formatting context as anchors.</summary>
+        internal bool Anchored { get; init; }
+    }
+
+    /// <summary>
+    /// In a document with floats an inline-run wrapper is an anonymous block that avoids them
+    /// as a whole (its line of atomic inlines narrows beside a float), so it stretches like a
+    /// block instead of taking 100% of the containing block, which would never fit beside one.
+    /// </summary>
+    private static TaffyStyle FloatFlowWrapper(TaffyStyle style, bool floatFlow)
+    {
+        if (floatFlow)
+        {
+            style.Size = new Layout.Size<TaffyDimension>(TaffyDimension.Auto, style.Size.Height);
+        }
+
+        return style;
+    }
+
+    /// <summary>
+    /// Decide, for each inline run holding floats, whether the floats stay in the run's inline
+    /// formatting context as anchors (the run folds to one shaped context) or are split out as
+    /// block-level floats between the pieces of the run (it does not fold, or it holds nothing
+    /// but floats).
+    /// </summary>
+    private static List<Seg> AnchorOrSplitFloats(
+        BuildContext context,
+        NodeId parent,
+        List<Seg> segs,
+        bool beforePending,
+        bool afterPending)
+    {
+        DomTree tree = context.Tree;
+        bool IsFloat(NodeId cid) =>
+            context.Styles.TryGetValue(cid, out LayoutStyle? style)
+            && style.Float is not null
+            && style.Display != Display.None
+            && style.Position != TaffyPosition.Absolute;
+        bool IsWhitespace(NodeId cid) =>
+            tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).Trim().Length == 0;
+
+        List<Seg> expanded = new(segs.Count);
+        for (int index = 0; index < segs.Count; index++)
+        {
+            Seg seg = segs[index];
+            if (seg.Kind != SegKind.Run || !seg.Run.Exists(IsFloat))
+            {
+                expanded.Add(seg);
+                continue;
+            }
+
+            bool onlyFloats = seg.Run.TrueForAll(cid => IsFloat(cid) || IsWhitespace(cid));
+            bool joinsPseudo = (beforePending && index == 0) || (afterPending && index + 1 == segs.Count);
+            if (!onlyFloats && !joinsPseudo && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles))
+            {
+                expanded.Add(new Seg { Kind = SegKind.Run, Run = seg.Run, Anchored = true });
+                continue;
+            }
+
+            Seg? current = null;
+            foreach (NodeId cid in seg.Run)
+            {
+                if (IsFloat(cid))
+                {
+                    if (current is not null)
+                    {
+                        expanded.Add(current);
+                        current = null;
+                    }
+
+                    expanded.Add(new Seg { Kind = SegKind.Float, Block = cid });
+                }
+                else
+                {
+                    current ??= new Seg { Kind = SegKind.Run };
+                    current.Run.Add(cid);
+                }
+            }
+
+            if (current is not null)
+            {
+                expanded.Add(current);
+            }
+        }
+
+        return expanded;
     }
 
     /// <summary>
     /// Build a block container whose children mix inline-level and block-level content,
     /// preserving real block layout for the block children.
     /// </summary>
+    /// <remarks>
+    /// With <paramref name="floatFlow"/> this is also the block container of a document with
+    /// floats (CSS 2.1 9.5): floated children become native taffy floats placed by the block
+    /// formatting context, `clear` reaches the block children, and each inline run is an
+    /// inline formatting context leaf in the same BFC, whose line boxes the text engine shortens
+    /// around the floats. DEVIATION from crates/obscura-render/src/dom.rs
+    /// (<c>build_children_with_float_zone</c>), which laid a float and the siblings after it out
+    /// as a flex row, so text never wrapped around a float and nothing below it reflowed.
+    /// </remarks>
     internal static TaffyNodeId? BuildMixedBlock(
         BuildContext context,
         NodeId id,
         LayoutStyle style,
         TaffyStyle taffyStyle,
-        IReadOnlyList<NodeId> domChildren)
+        IReadOnlyList<NodeId> domChildren,
+        bool floatFlow = false)
     {
         DomTree tree = context.Tree;
 
@@ -85,7 +183,12 @@ internal static partial class DomBuild
 
                 bool isForcedBreak = node.AsElement() is { } element
                     && string.Equals(element.Name.Local, "br", StringComparison.Ordinal);
-                inlineLevel = isForcedBreak || LayoutStyleExtensions.IsInlineLevelBox(childStyle);
+
+                // A float joins the inline run around it: anchored to its line when the run
+                // folds to one inline formatting context, a block-level float otherwise.
+                inlineLevel = isForcedBreak
+                    || LayoutStyleExtensions.IsInlineLevelBox(childStyle)
+                    || (floatFlow && childStyle.Float is not null);
             }
             else
             {
@@ -120,19 +223,56 @@ internal static partial class DomBuild
         bool beforePending = !beforeBlock && beforeLeaves.Count != 0;
         bool afterPending = !afterBlock && afterLeaves.Count != 0;
 
+        if (floatFlow)
+        {
+            segs = AnchorOrSplitFloats(context, id, segs, beforePending, afterPending);
+        }
+
         int segCount = segs.Count;
         List<TaffyNodeId> childIds = [];
         if (beforeBlock)
         {
+            if (floatFlow && style.BeforePseudo is { } beforeStyle)
+            {
+                foreach (TaffyNodeId node in beforeLeaves)
+                {
+                    SetNativeFloatClear(context, node, beforeStyle, true);
+                }
+            }
+
             childIds.AddRange(beforeLeaves);
         }
 
         for (int i = 0; i < segs.Count; i++)
         {
             Seg seg = segs[i];
+            if (seg.Kind == SegKind.Float)
+            {
+                if (context.Styles.TryGetValue(seg.Block, out LayoutStyle? floatStyle))
+                {
+                    foreach (TaffyNodeId node in BuildAny(context, seg.Block))
+                    {
+                        SetNativeFloatClear(context, node, floatStyle, false);
+                        childIds.Add(node);
+                    }
+                }
+
+                continue;
+            }
+
             if (seg.Kind == SegKind.Block)
             {
                 List<TaffyNodeId> built = BuildAny(context, seg.Block);
+                if (floatFlow
+                    && context.Styles.TryGetValue(seg.Block, out LayoutStyle? clearStyle)
+                    && clearStyle.Clear is not null)
+                {
+                    foreach (TaffyNodeId node in built)
+                    {
+                        SetNativeFloatClear(context, node, clearStyle, false);
+                    }
+                }
+
                 if (style.LegacyCenter)
                 {
                     bool hasDefaultHorizontalMargins =
@@ -202,9 +342,16 @@ internal static partial class DomBuild
 
             // Fast path: the whole run folds to one shaped leaf.
             if (!joinBefore && !joinAfter
-                && context.Engine.TryBuildRun(tree, id, run, context.Styles) is { } item)
+                && context.Engine.TryBuildRun(tree, id, run, context.Styles, seg.Anchored) is { } item)
             {
-                TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(RunLeafStyle(), item);
+                TaffyStyle leafStyle = RunLeafStyle();
+                if (floatFlow)
+                {
+                    // An anonymous block box in the same BFC, so its line boxes see the floats.
+                    leafStyle.Display = TaffyDisplay.Block;
+                }
+
+                TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(leafStyle, item);
                 if (!context.Ifc.Runs.TryGetValue(id, out List<int>? items))
                 {
                     items = [];
@@ -213,6 +360,32 @@ internal static partial class DomBuild
 
                 items.Add(item);
                 childIds.Add(leaf);
+                if (seg.Anchored && context.Engine.FloatAnchorsOf(item) is { Count: > 0 } anchors)
+                {
+                    // The floats follow their inline formatting context, which block layout
+                    // places them from (BlockLayout's anchored floats).
+                    List<(TaffyNodeId Float, int Offset)> anchored = [];
+                    foreach ((NodeId floatDom, int offset) in anchors)
+                    {
+                        if (!context.Styles.TryGetValue(floatDom, out LayoutStyle? floatStyle))
+                        {
+                            continue;
+                        }
+
+                        foreach (TaffyNodeId node in BuildAny(context, floatDom))
+                        {
+                            SetNativeFloatClear(context, node, floatStyle, false);
+                            childIds.Add(node);
+                            anchored.Add((node, offset));
+                        }
+                    }
+
+                    if (anchored.Count != 0)
+                    {
+                        context.Ifc.FloatAnchors[leaf] = [.. anchored];
+                    }
+                }
+
                 continue;
             }
 
@@ -259,7 +432,7 @@ internal static partial class DomBuild
             }
 
             TaffyNodeId wrapper = context.TaffyTree.NewWithChildren(
-                RunWrapperStyle(style, hasTextStrut), [.. atoms]);
+                FloatFlowWrapper(RunWrapperStyle(style, hasTextStrut), floatFlow), [.. atoms]);
             childIds.Add(wrapper);
         }
 
@@ -267,19 +440,27 @@ internal static partial class DomBuild
         if (beforePending)
         {
             TaffyNodeId wrapper = context.TaffyTree.NewWithChildren(
-                RunWrapperStyle(style, true), [.. beforeLeaves]);
+                FloatFlowWrapper(RunWrapperStyle(style, true), floatFlow), [.. beforeLeaves]);
             childIds.Insert(0, wrapper);
         }
 
         if (afterPending)
         {
             TaffyNodeId wrapper = context.TaffyTree.NewWithChildren(
-                RunWrapperStyle(style, true), [.. afterLeaves]);
+                FloatFlowWrapper(RunWrapperStyle(style, true), floatFlow), [.. afterLeaves]);
             childIds.Add(wrapper);
         }
 
         if (afterBlock)
         {
+            if (floatFlow && style.AfterPseudo is { } afterStyle)
+            {
+                foreach (TaffyNodeId node in afterLeaves)
+                {
+                    SetNativeFloatClear(context, node, afterStyle, true);
+                }
+            }
+
             childIds.AddRange(afterLeaves);
         }
 

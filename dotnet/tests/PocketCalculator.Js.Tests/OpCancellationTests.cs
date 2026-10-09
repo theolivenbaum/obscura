@@ -12,13 +12,18 @@ namespace PocketCalculator.Js.Tests;
 
 public sealed class OpCancellationTests
 {
-    /// <summary>Nested floats: one layout of these takes well over a minute uncancelled.</summary>
-    private static string NestedFloats(int depth)
+    /// <summary>
+    /// A long page of paragraphs, each wrapping around a float of its own: one layout takes
+    /// seconds uncancelled. This used to be 300 nested floats, which took well over a minute
+    /// with floats laid out as flex rows and take milliseconds with real float layout.
+    /// </summary>
+    private static string FloatedParagraphs(int count)
     {
         var html = new StringBuilder("<!doctype html><html><body>");
-        for (int i = 0; i < depth; i++)
+        for (int i = 0; i < count; i++)
         {
-            html.Append(i == depth - 1 ? "<div id=deep " : "<div ").Append("style=\"float:left;padding:1px\">x");
+            html.Append(i == count - 1 ? "<p id=deep>" : "<p>")
+                .Append("text <span style=\"float:left;width:20px;height:30px\"></span>more words here</p>");
         }
 
         html.Append("</body></html>");
@@ -28,7 +33,7 @@ public sealed class OpCancellationTests
     [Fact]
     public void AWatchdogStopsALayoutOpInsideCSharp()
     {
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         var watchdog = rt.ArmWatchdog(TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();
@@ -55,7 +60,7 @@ public sealed class OpCancellationTests
     {
         // The watchdog's own interrupt is spent while the op is in C#, and the page catches
         // whatever the op does; the loop that follows must still be stopped.
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         var watchdog = rt.ArmWatchdog(TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();
@@ -115,7 +120,7 @@ public sealed class OpCancellationTests
     [Fact]
     public void TheCdpCommandWatchdogStopsACaptureOutsideAnyOp()
     {
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         var armed = CdpWatchdog.Arm(rt.IsolateHandleForWatchdog, TimeSpan.FromMilliseconds(300));
         var clock = Stopwatch.StartNew();

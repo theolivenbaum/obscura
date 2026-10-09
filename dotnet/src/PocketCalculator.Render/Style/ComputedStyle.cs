@@ -2301,12 +2301,23 @@ public static partial class ComputedStyle
                 {
                     case "left":
                         style.Float = PocketCalculator.Render.Float.Left;
+                        style.LogicalFloatClear &= unchecked((byte)~1);
                         break;
                     case "right":
                         style.Float = PocketCalculator.Render.Float.Right;
+                        style.LogicalFloatClear &= unchecked((byte)~1);
+                        break;
+                    case "inline-start":
+                        style.Float = PocketCalculator.Render.Float.Left;
+                        style.LogicalFloatClear |= 1;
+                        break;
+                    case "inline-end":
+                        style.Float = PocketCalculator.Render.Float.Right;
+                        style.LogicalFloatClear |= 1;
                         break;
                     case "none":
                         style.Float = null;
+                        style.LogicalFloatClear &= unchecked((byte)~1);
                         break;
                 }
 
@@ -2616,14 +2627,20 @@ public static partial class ComputedStyle
                 return true;
 
             case "clear":
-                style.Clear = CssText.AsciiLower(value.Trim()) switch
+            {
+                string clearValue = CssText.AsciiLower(value.Trim());
+                style.Clear = clearValue switch
                 {
                     "left" or "inline-start" => PocketCalculator.Render.Clear.Left,
                     "right" or "inline-end" => PocketCalculator.Render.Clear.Right,
                     "both" => PocketCalculator.Render.Clear.Both,
                     _ => null,
                 };
+                style.LogicalFloatClear = clearValue is "inline-start" or "inline-end"
+                    ? (byte)(style.LogicalFloatClear | 2)
+                    : (byte)(style.LogicalFloatClear & ~2);
                 return true;
+            }
 
             case "vertical-align":
                 style.VerticalAlign = CssText.AsciiLower(value.Trim()) switch
