@@ -5653,6 +5653,43 @@ public sealed partial class RuntimeTests
     }
 
     [Fact]
+    public void WaapiStartTimeIsTheFirstFrameAfterAnimateNotTheCallTime()
+    {
+        // Chromium 141 leaves a new animation pending and resolves its startTime to the timeline
+        // time of the first frame rendered after animate(), not to the moment of the call: a
+        // 300 ms busy wait after animate() still gave startTime == that frame's time and
+        // currentTime 0 in it. Rust takes the wall clock at the call (deviation in todo.md).
+        using var fixture = RuntimeFixture.Setup(
+            """
+            <html style="margin:0"><body style="margin:0">
+                <div id="box" style="width:40px;height:40px;background:#1769aa"></div>
+            </body></html>
+            """);
+        var rt = fixture.Runtime;
+        rt.SetViewport(120.0, 40.0);
+        Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(0.0f)));
+        Assert.NotNull(rt.ScreenshotPrepared((120.0f, 40.0f), "http://example.com/test"));
+        // The wall clock is 400 ms into the timeline when script calls animate(), while the host
+        // has pinned the next frame at 0.
+        rt.State.SetAnimationTimelineElapsed(TimeSpan.FromMilliseconds(400));
+        rt.ExecuteScript(
+            "waapi-pending-start",
+            """
+            document.getElementById('box').animate(
+                [{opacity:0},{opacity:1}],
+                {duration:1000,fill:'both',easing:'linear'})
+            """);
+        var boxNode = rt.State.Dom!.GetElementById("box")!.Value;
+        Assert.NotNull(rt.ScreenshotPrepared((120.0f, 40.0f), "http://example.com/test"));
+        Assert.Equal(0f, rt.State.PreparedRender!.Layout.Styles[boxNode].Opacity!.Value);
+
+        Assert.True(rt.SetAnimationSample(PocketCalculator.Render.AnimationSample.Document(500.0f)));
+        Assert.NotNull(rt.ScreenshotPrepared((120.0f, 40.0f), "http://example.com/test"));
+        float opacity = rt.State.PreparedRender!.Layout.Styles[boxNode].Opacity!.Value;
+        Assert.True(MathF.Abs(opacity - 0.5f) < 0.01f, $"WAAPI opacity at frame 500 = {opacity}");
+    }
+
+    [Fact]
     public void WaapiCancelRetainsStaticStyleGraphAndRestoresAuthoredStyle()
     {
         using var fixture = RuntimeFixture.Setup(
