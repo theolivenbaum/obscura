@@ -20,6 +20,32 @@ public static partial class ComputedStyle
         return style;
     }
 
+    /// <summary>
+    /// Every HTML element name the port's UA defaults know, current and obsolete. A name
+    /// outside it (an autonomous custom element, or an unknown tag) has no UA display rule.
+    /// </summary>
+    private static readonly HashSet<string> KnownHtmlTags = new(StringComparer.Ordinal)
+    {
+        "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base", "bdi", "bdo",
+        "blockquote", "body", "br", "button", "canvas", "caption", "cite", "code", "col",
+        "colgroup", "data", "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
+        "em", "embed", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+        "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input",
+        "ins", "kbd", "label", "legend", "li", "link", "main", "map", "mark", "menu", "meta",
+        "meter", "nav", "noscript", "object", "ol", "optgroup", "option", "output", "p", "param",
+        "picture", "pre", "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "search",
+        "section", "select", "slot", "small", "source", "span", "strong", "style", "sub",
+        "summary", "sup", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead",
+        "time", "title", "tr", "track", "u", "ul", "var", "video", "wbr", "math", "svg",
+        "acronym", "applet", "basefont", "bgsound", "big", "blink", "center", "dir", "font",
+        "frame", "frameset", "image", "isindex", "keygen", "listing", "marquee", "menuitem",
+        "multicol", "nextid", "nobr", "noembed", "noframes", "plaintext", "rb", "rtc", "spacer",
+        "strike", "tt", "xmp", "selectedcontent",
+    };
+
+    private static bool IsUnknownHtmlTag(string tag) =>
+        tag.Length != 0 && !KnownHtmlTags.Contains(tag);
+
     /// <summary>Rust <c>ua_style</c>: the built-in UA defaults for an HTML-namespace tag.</summary>
     public static LayoutStyle UaStyle(string tag) => UaStyle(tag, null);
 
@@ -64,6 +90,17 @@ public static partial class ComputedStyle
                 or "time" or "s" or "u" or "del" or "ins" or "tt" or "big" or "bdi" or "bdo" or "br"
                 or "wbr" or "data" or "output" or "label" or "ruby" or "rt" or "rp" => Display.Inline,
             "tr" => Display.Flex,
+
+            // DEVIATION from crates/obscura-render/src/style.rs, which makes every other tag a
+            // block. `display` initially is `inline`, and Chromium's UA sheet names no
+            // autonomous custom element or unknown tag, nor these phrasing elements, so they
+            // are inline (Chromium 141 reports `inline` for all of them). A block custom
+            // element (msn.com's `cs-common-settings-dialog`) widened msn's header until its
+            // overflow logic hid the Sign in button.
+            "picture" or "map" or "nobr" or "acronym" or "strike" or "blink" or "rb" or "rtc"
+                or "spacer" => Display.Inline,
+            _ when ns is null or PocketCalculator.Dom.Namespaces.Html && IsUnknownHtmlTag(tag) =>
+                Display.Inline,
             _ => Display.Block,
         };
 

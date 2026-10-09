@@ -5936,3 +5936,15 @@ subtree's (`OverflowClip.WithClipProperty`, applied in `DomTransforms.ResolveCli
 visually-hidden idiom `position: fixed; clip: rect(0 0 0 0)` (msn.com's "Skip to footer")
 painted in full. The element-capture clip-scope path and scrolling-overflow extents do not
 read it. Pinned by `ClipPropertyTests` and `render-repros/clip-rect-visually-hidden.html`.
+
+### Custom elements and unknown tags are `display: inline`
+
+`ua_style` falls back to `block` for every tag it does not list. `display` initially is
+`inline`, and Chromium's UA sheet has no rule for an autonomous custom element, an unknown
+HTML tag, or `picture`, `map`, `nobr`, `acronym`, `strike`, `blink`, `rb`, `rtc`, `spacer`,
+so Chromium 141 reports `inline` for all of them; the port now does too
+(`ComputedStyle.KnownHtmlTags`). Known HTML tags the old fallback made `block` are unchanged
+(canvas, video, iframe, embed, object, svg, math, audio and the like still compute `block`
+in the port, where Chromium reports `inline`; that is the replaced-element path and is left
+to it). A block `cs-common-settings-dialog` was one of the boxes that widened msn.com's
+header. Pinned by `UaDisplayTests`.
