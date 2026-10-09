@@ -2840,6 +2840,22 @@ descriptors, in order. Adoption also requires the same emoji-face choice: the em
 between the directory faces and the web fonts, so loading it renumbers every web font's `FontId`,
 which keys a shaped paragraph. Pinned by `ShapeCacheAdoptionTests` (Render).
 
+### The font work of a pass is memoized by the text it reads
+
+DEVIATION from `crates/obscura-render`, which on every pass parses the `@font-face` rules out of
+every sheet's text (`collect_web_fonts`) and scans every text node of the document for code
+points the optional emoji and CJK faces exist for. Both read text that rarely changes between
+passes, and on nvidia.com that was 2 MB of CSS lower-cased and searched, and the same 2 MB
+scanned again as the `<style>` element's text node, on every forced read. `PaintFonts.FontFacesOf`
+keeps the usable rules of each sheet text and `FontAssets.TextMayNeedOptionalFaces` the answer
+for each text of 256 characters or more, both in a `ConditionalWeakTable` keyed by the string
+instance: an unchanged `<style>`, fetched sheet or text node hands every pass the same string,
+an edit makes a new one, and the answer is a function of the text alone (the base URL is
+applied to the memoized sources per pass). The preload `<link>` walk shares the sheets' walk,
+and the two scans test for ASCII first (no code point below U+00A9 asks for either face).
+Measured on the nvidia.com snapshot (median retained pass): `@font-face` collection 7.4 ->
+0.8ms, the optional-face scan 7 -> under 0.5ms. Pinned by `PassFontWorkTests` (Render).
+
 ### Line layouts are kept with the shaped paragraph
 
 DEVIATION from `crates/obscura-render`, which lays every paragraph out again on every pass, as the

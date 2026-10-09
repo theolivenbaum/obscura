@@ -253,8 +253,9 @@ public static partial class RenderDom
         };
         DomCascade.CascadeWalk(
             cascadeContext, tree.Document, sheet, matcher, rootProps, evaluator, null, false);
-        DomCascade.ResolveCssCounters(tree, styles);
         LayoutPhaseProfile.Mark("cascade");
+        DomCascade.ResolveCssCounters(tree, styles);
+        LayoutPhaseProfile.Mark("counters");
 
         ContainerDecisionSignature? signature = null;
         ContainerQueryStats queryStats = default;
@@ -273,8 +274,9 @@ public static partial class RenderDom
         {
             if (tree.GetNode(id)?.TextContentOfTextNode is { } contents)
             {
-                needsEmojiFont = needsEmojiFont || FontAssets.TextMayNeedEmojiFont(contents);
-                needsCjkFont = needsCjkFont || FontAssets.TextMayNeedCjkFont(contents);
+                (bool emoji, bool cjk) = FontAssets.TextMayNeedOptionalFaces(contents);
+                needsEmojiFont |= emoji;
+                needsCjkFont |= cjk;
                 if (needsEmojiFont && needsCjkFont)
                 {
                     break;
@@ -316,11 +318,12 @@ public static partial class RenderDom
             }
         }
 
+        LayoutPhaseProfile.Mark("fontscan");
         TaffyTree taffyTree = TaffyStyleMapping.NewTaffyTree<int?>(tree.SlotCount + 16);
         Dictionary<TaffyNodeId, NodeId> idMap = new(styles.Count);
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
         TextEngine engine = new(fonts, needsEmojiFont, needsCjkFont);
-        LayoutPhaseProfile.Mark("fontscan+engine");
+        LayoutPhaseProfile.Mark("engine");
 
         // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
         // layout: it is a pure function of the text, its attributes and the tab width. Carry the
