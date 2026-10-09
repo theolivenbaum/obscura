@@ -424,9 +424,12 @@ public class IncrementalLayoutDifferentialTests
                 // drops the previous render when a prepare throws, so the next step starts over
                 // from a full prepare; nothing the cancelled pass touched may leak into it.
                 bool cancelled = false;
+                // CancelAfter, not a Timer calling Cancel: disposing a Timer does not wait for a
+                // callback already queued, which then cancels a disposed source and throws on a
+                // thread-pool thread, taking the test host down.
                 using (CancellationTokenSource source = new())
-                using (Timer timer = new(_ => source.Cancel(), null, 1 + rng.Next(4), Timeout.Infinite))
                 {
+                    source.CancelAfter(1 + rng.Next(4));
                     try
                     {
                         using (WorkCancellation.Enter(source.Token))

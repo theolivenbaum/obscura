@@ -10,6 +10,9 @@ using NodeId = PocketCalculator.Dom.NodeId;
 
 namespace PocketCalculator.Render.Tests;
 
+// Run alone: the bounds time whole layouts, and with the float and incremental-layout suites
+// running beside them on a four-core host the deep chain took 37 s against 13 s on its own.
+[Collection(nameof(LargeTreeLayoutCollection))]
 public class LargeTreeLayoutTests
 {
     private static string NestedTables(int depth)
@@ -201,3 +204,6 @@ public class LargeTreeLayoutTests
         Assert.DoesNotContain(expected, id => DomTraversal.TextContentOfTextNode(tree, id) == "hidden");
     }
 }
+
+[CollectionDefinition(nameof(LargeTreeLayoutCollection), DisableParallelization = true)]
+public sealed class LargeTreeLayoutCollection;
