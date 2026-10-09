@@ -84,9 +84,9 @@ internal sealed class RetainedTaffyLayout
     internal required TextEngine Engine { get; init; }
 
     /// <summary>
-    /// Whether the pass had a float. Nothing is carried over from or into such a pass: a float's
-    /// exclusions reach every box and inline item of its block formatting context, and taffy
-    /// computes same-BFC layout uncached there.
+    /// Whether the pass had a float. Inline items are not taken over from or into such a pass
+    /// (a float's exclusions reach every inline item of its block formatting context), and only
+    /// float-free subtrees carry their layout over; see <see cref="Transplant"/>.
     /// </summary>
     internal required bool HadFloats { get; init; }
 
@@ -273,6 +273,7 @@ internal sealed class RetainedTaffyLayout
 
         previous.Consumed = true;
         TaffyTree old = previous.Tree;
+        bool floats = tree.HasFloats || previous.HadFloats;
 
         // A DOM node that generated more than one box on either side pairs ambiguously.
         Dictionary<NodeId, TaffyNodeId> oldByDom = new(previous.IdMap.Count);
@@ -415,10 +416,24 @@ internal sealed class RetainedTaffyLayout
                 return false;
             }
 
+            // With floats, carry over only a subtree that holds none: its layout is then a
+            // function of the subtree alone wherever it sits, since a box that establishes a
+            // formatting context keeps outside floats out of it.
+            if (floats && style.Float != Layout.Float.None)
+            {
+                return false;
+            }
+
             // An empty previous cache would break taffy's dirty-propagation invariant (an empty
             // node under a non-empty ancestor) - except under display:none, which is never
-            // cached and always laid out hidden.
-            if (!old.HasCachedLayout(oldNode) && style.Display != Layout.Display.None)
+            // cached and always laid out hidden, and for a box a tree with floats laid out in its
+            // parent's formatting context, which it never caches (TaffyTree.HasFloats). That box
+            // is only reached through its formatting context's root, which re-lays it out, or
+            // answers from its own cache and leaves the carried layouts in place; and MarkDirty
+            // walks to the root once anything is carried over.
+            if (!old.HasCachedLayout(oldNode)
+                && style.Display != Layout.Display.None
+                && !(floats && old.OnlyInSharedBlockContext(oldNode)))
             {
                 return false;
             }

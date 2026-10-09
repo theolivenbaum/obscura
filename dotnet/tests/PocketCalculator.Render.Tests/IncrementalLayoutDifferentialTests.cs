@@ -342,6 +342,37 @@ public class IncrementalLayoutDifferentialTests
         return (previous, first);
     }
 
+    /// <summary>
+    /// A page with floats still carries over a float-free subtree that establishes its own
+    /// formatting context (here an <c>overflow: hidden</c> block), whose layout outside floats
+    /// cannot reach.
+    /// </summary>
+    [Fact]
+    public void AFloatPageCarriesOverAFloatFreeFormattingContext()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + "</style></head><body><div class=flt id=f>float</div><div id=t class=a>toggle</div><div id=bfc style='overflow:hidden'>");
+        for (int i = 0; i < 30; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i} with some words in it</p>");
+        }
+
+        html.Append("</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        NodeId target = tree.GetElementById("t")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "a c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a c"))])!;
+
+        Assert.True(second.Layout.TransplantedBoxes > 30, $"carried {second.Layout.TransplantedBoxes}");
+        Assert.Equal(0, second.Layout.AdoptedInlineItems);
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
     private static PreparedRender Reference(DomTree tree)
     {
         using IDisposable full = RetainedTaffyLayout.ForceFullRelayout();

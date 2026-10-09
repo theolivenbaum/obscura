@@ -581,12 +581,9 @@ public static partial class RenderDom
 
             // What the previous pass built that this one may take over: decided before the
             // build, which takes over that pass's inline items for unchanged containers.
-            // Not with floats on either side: a float's exclusions reach every box and inline
-            // item in its block formatting context, and same-BFC layout is computed uncached.
             bool anyFloat = DomBuild.AnyFloat(styles);
             HashSet<NodeId>? dirtyNodes = null;
-            if (transplantSource is { Consumed: false, HadFloats: false } source
-                && !anyFloat
+            if (transplantSource is { Consumed: false } source
                 && freshStyles is not null
                 && RetainedTaffyLayout.Enabled
                 && engine.SharesShapeCacheWith(source.Engine))
@@ -594,7 +591,13 @@ public static partial class RenderDom
                 dirtyNodes = RetainedTaffyLayout.DirtyClosure(
                     tree, source, freshStyles, layoutMutations ?? [], intrinsic, styles);
                 source.Consume();
-                engine.AdoptInlineItems(source.Engine, source.Whole, dirtyNodes);
+
+                // Not with a float on either side: its exclusions reach every inline item of its
+                // block formatting context, and the item keeps what the last layout gave it.
+                if (!anyFloat && !source.HadFloats)
+                {
+                    engine.AdoptInlineItems(source.Engine, source.Whole, dirtyNodes);
+                }
             }
 
             BuildContext buildContext = new()

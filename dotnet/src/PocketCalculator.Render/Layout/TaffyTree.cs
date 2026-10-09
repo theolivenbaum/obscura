@@ -543,6 +543,13 @@ public sealed class TaffyTree<TNodeContext>
     /// <summary>Whether this pass's layout of <paramref name="node"/> may have seen floats.</summary>
     internal bool IsFloatDependent(NodeId node) => _nodes[node].FloatDependent;
 
+    /// <summary>
+    /// Whether this pass only ever laid <paramref name="node"/> out inside its parent's block
+    /// formatting context, which a tree with floats computes uncached.
+    /// </summary>
+    internal bool OnlyInSharedBlockContext(NodeId node) =>
+        _nodes[node].SawBlockContext && !_nodes[node].SawNoBlockContext;
+
     /// <summary>Whether <paramref name="node"/> holds any cached layout result.</summary>
     internal bool HasCachedLayout(NodeId node) => !_nodes[node].Cache.IsEmpty();
 
