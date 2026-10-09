@@ -154,6 +154,18 @@ public class IncrementalLayoutDifferentialTests
         <p id=q>Quote <q>inline quote</q> end.</p>
         </body></html>
         """,
+
+        // Atomic inlines laid out in their lines: inline-blocks, images and inline-flex boxes
+        // among words, aligned, wrapped, right to left and beside a float.
+        """
+        <!doctype html><html><head><style>{CSS} .ib{display:inline-block;padding:2px;border:1px solid}</style></head><body>
+        <p id=a1>Lead <span id=k1 class=ib>box one</span> words <img id=img1 src="{IMG0}" alt=""> more <span id=k2 class=ib style="width:60px;height:24px"></span> tail text that wraps.</p>
+        <p id=a2 style="text-align:center"><span id=k3 class=ib>a<br>b</span> centred <img id=img2 src="{IMG1}" style="vertical-align:middle" alt=""> line</p>
+        <div id=a3 class=b><span id=k4 class=ib style="width:120px">nav</span> <span id=k5 class=ib style="width:120px">items</span> <span id=k6 class=ib style="width:120px">in</span> <span id=k7 class=ib style="width:120px">a row</span></div>
+        <p id=a4 dir=rtl><span id=k8 class=ib>rtl</span> words <img id=img3 src="{IMG2}" style="vertical-align:top" alt=""> end</p>
+        <div id=a5><div id=af class=flt>float</div><span id=k9 class=ib style="width:150px">beside</span> <span id=k10 style="display:inline-flex;gap:3px"><b id=k11>x</b><i id=k12>y</i></span> text after the float wraps</div>
+        </body></html>
+        """,
     ];
 
     private static readonly string[] Classes =
@@ -232,10 +244,15 @@ public class IncrementalLayoutDifferentialTests
     }
 
     /// <summary>The float conformance pages (render-repros/floats), with the shared classes added.</summary>
-    public static TheoryData<string, int> FloatCases()
+    public static TheoryData<string, int> FloatCases() => PageCases("floats");
+
+    /// <summary>The atomic-inline conformance pages (render-repros/inline-atomic).</summary>
+    public static TheoryData<string, int> InlineAtomicCases() => PageCases("inline-atomic");
+
+    private static TheoryData<string, int> PageCases(string set)
     {
         TheoryData<string, int> data = [];
-        if (FloatPagesDirectory() is not { } directory)
+        if (PagesDirectory(set) is not { } directory)
         {
             return data;
         }
@@ -263,11 +280,13 @@ public class IncrementalLayoutDifferentialTests
         return data;
     }
 
-    private static string? FloatPagesDirectory()
+    private static string? FloatPagesDirectory() => PagesDirectory("floats");
+
+    private static string? PagesDirectory(string set)
     {
         for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
-            string candidate = Path.Combine(dir.FullName, "render-repros", "floats");
+            string candidate = Path.Combine(dir.FullName, "render-repros", set);
             if (Directory.Exists(candidate))
             {
                 return candidate;
@@ -287,12 +306,22 @@ public class IncrementalLayoutDifferentialTests
     }
 
     [Theory]
+    [MemberData(nameof(InlineAtomicCases))]
+    public void RandomMutationSequencesOnInlineAtomicPagesMatchAFullRelayout(string page, int seed)
+    {
+        string html = File.ReadAllText(Path.Combine(PagesDirectory("inline-atomic")!, page))
+            .Replace("</head>", "<style>" + SharedCss.Replace("html,body{margin:0}", "", StringComparison.Ordinal) + "</style></head>", StringComparison.Ordinal);
+        Run(html, page, seed * 7727 + page.Length, steps: 16, cancelAt: -2);
+    }
+
+    [Theory]
     [InlineData(0, 3)]
     [InlineData(1, 5)]
     [InlineData(2, 2)]
     [InlineData(3, 4)]
     [InlineData(4, 6)]
     [InlineData(5, 1)]
+    [InlineData(6, 2)]
     public void ACancelledPassLeavesTheNextPassExact(int fixture, int cancelAt)
     {
         Run(fixture, 4242 + fixture, steps: cancelAt + 6, cancelAt);
@@ -401,7 +430,7 @@ public class IncrementalLayoutDifferentialTests
         StylesheetCache cache = new();
         PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
         RetainedTaffyLayout boxes = first.Layout.RetainedBoxes!;
-        Assert.True(boxes.Tree.TotalNodeCount() > 20);
+        Assert.True(boxes.Tree.TotalNodeCount() > 12);
         NodeId target = tree.GetElementById("d1")!.Value;
         tree.GetNode(target)!.SetAttribute("class", "b c");
         PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
@@ -698,10 +727,26 @@ public class IncrementalLayoutDifferentialTests
             }
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
             {
-                if (Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_DUMP") is { } dumpDir)
+                if (Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_DUMP") is { } dumpRoot)
                 {
+                    string dumpDir = Path.Combine(dumpRoot, $"{fixture}-{seed}");
+                    Directory.CreateDirectory(dumpDir);
                     File.WriteAllText(Path.Combine(dumpDir, "incremental.txt"), next.Layout.RetainedBoxes?.Dump() ?? "");
                     File.WriteAllText(Path.Combine(dumpDir, "full.txt"), Reference(tree).Layout.RetainedBoxes?.Dump() ?? "");
+                    File.WriteAllText(Path.Combine(dumpDir, "snap-incremental.txt"), incremental);
+                    File.WriteAllText(Path.Combine(dumpDir, "snap-full.txt"), reference);
+                    using Pixmap? pa = RenderPaint.PaintPrepared(tree, next, new RenderResourceCache(), (0f, 0f));
+                    using Pixmap? pb = RenderPaint.PaintPrepared(tree, Reference(tree), new RenderResourceCache(), (0f, 0f));
+                    if (pa is not null && pb is not null)
+                    {
+                        byte[] da = pa.Data(), db = pb.Data();
+                        int w = (int)pa.Width, x0 = int.MaxValue, y0 = int.MaxValue, x1 = -1, y1 = -1;
+                        for (int i = 0; i < Math.Min(da.Length, db.Length); i++)
+                        {
+                            if (da[i] != db[i]) { int px = i / 4 % w, py = i / 4 / w; x0 = Math.Min(x0, px); y0 = Math.Min(y0, py); x1 = Math.Max(x1, px); y1 = Math.Max(y1, py); }
+                        }
+                        File.WriteAllText(Path.Combine(dumpDir, "pixdiff.txt"), $"{x0},{y0} - {x1},{y1}");
+                    }
                 }
 
                 Assert.Fail($"fixture {fixture} seed {seed} step {step} diverged from a full relayout\n"

@@ -61,6 +61,12 @@ public sealed record SpanAttrs
     /// <summary>How far its baseline sits above the line's, when it has one.</summary>
     public float Shift { get; init; }
 
+    /// <summary>
+    /// The atomic inline this span stands for, by index into its context's atomics; -1 for text.
+    /// See <see cref="TextAttrs.Atomic"/>.
+    /// </summary>
+    public int Atomic { get; init; } = -1;
+
     public bool WrappingEnabled => WhiteSpace is not (WhiteSpace.NoWrap or WhiteSpace.Pre);
 
     public bool HasLayoutEmergencyBreaks =>
@@ -85,6 +91,22 @@ public sealed record SpanAttrs
         if ((variation & ~InlineGeometry.MetaVariationMask) != 0)
         {
             throw new InvalidOperationException("variation index overflows its metadata field");
+        }
+
+        if (Atomic >= 0)
+        {
+            // Sized once the atomic is laid out (TextEngine.SetAtomic); until then it is empty.
+            return new TextAttrs
+            {
+                Family = Family,
+                FontId = FontId,
+                Metrics = new TextMetrics(1f, 1f, 0f, 0f),
+                Weight = Weight,
+                Color = null,
+                CssLineBreakPolicy = new CssLineBreak(WrappingEnabled, WordBreak, OverflowWrap),
+                Metadata = InlineGeometry.MetaAtomic,
+                Atomic = Atomic,
+            };
         }
 
         ShapingFeature[] features = [];
@@ -241,6 +263,12 @@ internal sealed class Collector
 
     /// <summary>Where each DOM text node's collapsed text starts, for range geometry.</summary>
     public List<TextNodeChunk> TextNodes = [];
+
+    /// <summary>
+    /// The atomic inlines met, when the caller lays them out in the context (see
+    /// <c>TextEngine.TryBuildRun</c>); null when an atomic stops the run from folding.
+    /// </summary>
+    internal List<AtomicInline>? Atomics;
     public int TextLength;
 
     /// <summary>
@@ -543,7 +571,19 @@ public static class Inline
     /// Such a container collapses cleanly to one shaped buffer; anything else keeps the general
     /// build path.
     /// </remarks>
-    public static bool IsPureTextIfc(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    public static bool IsPureTextIfc(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles) =>
+        IsPureTextIfc(tree, id, styles, allowAtomics: false);
+
+    /// <summary>
+    /// <see cref="IsPureTextIfc(DomTree, NodeId, IReadOnlyDictionary{NodeId, LayoutStyle})"/>,
+    /// counting atomic inlines (see <see cref="IsAtomicInline"/>) as content of the context when
+    /// <paramref name="allowAtomics"/>.
+    /// </summary>
+    internal static bool IsPureTextIfc(
+        DomTree tree,
+        NodeId id,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowAtomics)
     {
         if (!styles.TryGetValue(id, out LayoutStyle? style))
         {
@@ -581,7 +621,7 @@ public static class Inline
 
         foreach (NodeId child in children)
         {
-            if (!InlineChildOk(tree, child, styles, ref hasText))
+            if (!InlineChildOk(tree, child, styles, ref hasText, allowFloats: false, allowAtomics))
             {
                 return false;
             }
@@ -589,6 +629,18 @@ public static class Inline
 
         return hasText;
     }
+
+    /// <summary>
+    /// Whether an element is an atomic inline an inline formatting context lays out as one unit
+    /// of its line: an in-flow inline-block, inline-flex, inline-grid or inline-table box, or an
+    /// inline replaced element or form control.
+    /// </summary>
+    internal static bool IsAtomicInline(string local, LayoutStyle style) =>
+        style.Position != Position.Absolute
+        && style.Float is null
+        && style.Display != Display.None
+        && !style.DisplayContents
+        && (style.IsInlineBlock || (style.Display == Display.Inline && IsReplaced(local)));
 
     /// <summary>
     /// Is <paramref name="cid"/> (and its whole subtree) inline-level, in-flow content safe to
@@ -607,7 +659,8 @@ public static class Inline
         NodeId cid,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
         ref bool hasText,
-        bool allowFloats = false)
+        bool allowFloats = false,
+        bool allowAtomics = false)
     {
         if (!StackGuard.CanDescend())
         {
@@ -659,8 +712,15 @@ public static class Inline
         }
 
         // A replaced element or an atomic inline-block has its own box with non-text content.
+        // Laid out in the context, it is one unit of its line, and content like text.
         if (IsReplaced(element.Name.Local) || style.IsInlineBlock)
         {
+            if (allowAtomics && IsAtomicInline(element.Name.Local, style))
+            {
+                hasText = true;
+                return true;
+            }
+
             return false;
         }
 
@@ -682,7 +742,7 @@ public static class Inline
 
         foreach (NodeId grandchild in RenderedChildren(tree, cid))
         {
-            if (!InlineChildOk(tree, grandchild, styles, ref hasText, allowFloats))
+            if (!InlineChildOk(tree, grandchild, styles, ref hasText, allowFloats, allowAtomics))
             {
                 return false;
             }

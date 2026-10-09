@@ -296,7 +296,8 @@ public sealed partial class TextEngine : IDisposable
             && x.EllipsisOverflow == y.EllipsisOverflow
             && string.Equals(x.OwnerText, y.OwnerText, StringComparison.Ordinal)
             && x.OwnerBoxes.Count == y.OwnerBoxes.Count
-            && x.BoundaryEvents.Count == y.BoundaryEvents.Count;
+            && x.BoundaryEvents.Count == y.BoundaryEvents.Count
+            && (x.Atomics?.Count ?? 0) == (y.Atomics?.Count ?? 0);
     }
 
     private TextEngine? _adoptFrom;
@@ -519,14 +520,22 @@ public sealed partial class TextEngine : IDisposable
     /// <c>null</c> means the container is not a pure-text IFC and should build through the
     /// normal (block / flex / word-split) path.
     /// </remarks>
-    public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+    public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles) =>
+        TryBuild(tree, id, styles, allowAtomics: false);
+
+    /// <summary>
+    /// <see cref="TryBuild(DomTree, NodeId, IReadOnlyDictionary{NodeId, LayoutStyle})"/>, laying
+    /// atomic inlines out in the context when <paramref name="allowAtomics"/>: the caller then
+    /// builds their boxes as children of the context's node (see <see cref="AtomicNodes"/>).
+    /// </summary>
+    internal int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles, bool allowAtomics)
     {
         if (TakeAdoptedItem(id) is { } adopted)
         {
             return adopted;
         }
 
-        if (!Inline.IsPureTextIfc(tree, id, styles))
+        if (!Inline.IsPureTextIfc(tree, id, styles, allowAtomics))
         {
             return null;
         }
@@ -537,6 +546,11 @@ public sealed partial class TextEngine : IDisposable
         }
 
         var collector = new Collector();
+        if (allowAtomics)
+        {
+            collector.Atomics = [];
+        }
+
         ResolvedFont font = FontResolution.ResolveLoadedFont(
             style.FontFamily,
             ComputedStyle.UsedFontWeight(style),
@@ -563,13 +577,14 @@ public sealed partial class TextEngine : IDisposable
         NodeId parent,
         IReadOnlyList<NodeId> run,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        bool allowFloats = false)
+        bool allowFloats = false,
+        bool allowAtomics = false)
     {
         run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
-            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats))
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats, allowAtomics))
             {
                 return null;
             }
@@ -589,6 +604,11 @@ public sealed partial class TextEngine : IDisposable
         if (allowFloats)
         {
             collector.FloatAnchors = [];
+        }
+
+        if (allowAtomics)
+        {
+            collector.Atomics = [];
         }
 
         ResolvedFont font = FontResolution.ResolveLoadedFont(
@@ -615,13 +635,14 @@ public sealed partial class TextEngine : IDisposable
         DomTree tree,
         NodeId parent,
         IReadOnlyList<NodeId> run,
-        IReadOnlyDictionary<NodeId, LayoutStyle> styles)
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        bool allowAtomics = false)
     {
         run = LiftFlattenedWrappers(tree, parent, run, styles);
         bool hasText = false;
         foreach (NodeId cid in run)
         {
-            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats: true))
+            if (!Inline.InlineChildOk(tree, cid, styles, ref hasText, allowFloats: true, allowAtomics))
             {
                 return false;
             }
@@ -854,8 +875,9 @@ public sealed partial class TextEngine : IDisposable
             }
         }
 
+        List<AtomicInline>? atomicInlines = collector.Atomics is { Count: > 0 } collected ? collected : null;
         string? ownerText = null;
-        if (ownerBoxes.Count > 0 || floatAnchors is not null)
+        if (ownerBoxes.Count > 0 || floatAnchors is not null || atomicInlines is not null)
         {
             var builder = new StringBuilder(textLength);
             foreach ((string text, SpanAttrs _) in spans)
@@ -1025,6 +1047,7 @@ public sealed partial class TextEngine : IDisposable
             MinContentWrap = minContentWrap,
             SourceBuffer = sourceBuffer,
             TextIndent = textIndent,
+            LayoutUnitWidth = baseStyle.IsInlineBlock,
             FirstLineOffset = 0f,
             BalanceWrap = baseStyle.TextWrapStyle == TextWrapStyle.Balance,
             Align = align,
@@ -1042,6 +1065,7 @@ public sealed partial class TextEngine : IDisposable
             OwnerChunks = ownerChunks,
             OwnerChain = collector.OwnerChain,
             TextNodes = collector.TextNodes,
+            Atomics = atomicInlines,
             OwnerBoxes = ownerBoxes,
             BoundaryEvents = boundaryEvents,
             RelativeOwnerRanges = [],
@@ -1417,6 +1441,7 @@ public sealed partial class TextEngine : IDisposable
     /// </summary>
     public void Finalize(int index, (float X, float Y) contentOrigin, float contentWidth, Rect? clip)
     {
+        RestoreFinalAtomics(index);
         InlineItem item = _items[index];
         contentWidth = F32.Max(contentWidth, 0f);
         ShapeWithTextIndent(item, contentWidth, item.LayoutWrap, item.FloatBands);
@@ -2943,6 +2968,31 @@ public sealed partial class TextEngine : IDisposable
         {
             // Out of the inline flow: remember where it sits for the block formatting context.
             floatAnchors.Add((cid, collector.TextLength));
+            return;
+        }
+
+        if (collector.Atomics is { } atomics
+            && style is not null
+            && Inline.IsAtomicInline(element.Name.Local, style))
+        {
+            // An atomic inline is one object replacement character whose glyph takes its margin
+            // box (sized once it is laid out, see SetAtomic): it breaks like an ideograph, is a
+            // neutral to bidi, and is not white space to collapsing.
+            atomics.Add(new AtomicInline
+            {
+                Node = cid,
+                Offset = collector.TextLength,
+                VerticalAlign = style.InlineVerticalAlign,
+                ParentFontSize = context.FontSize,
+                ParentMetrics = context.FontMetrics,
+                ParentShift = context.BaselineShift,
+                ParentAlign = context.Align,
+                LineHeight = FontResolution.UsedLineHeight(style),
+            });
+            collector.FlushLastSpan(output);
+            output.Add((ObjectReplacement, context.ToSpanAttrs() with { Atomic = atomics.Count - 1 }));
+            collector.RecordText(1);
+            collector.LastWasSpace = false;
             return;
         }
 

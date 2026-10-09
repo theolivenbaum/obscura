@@ -373,7 +373,7 @@ internal static partial class DomBuild
             && node.GetAttribute("open") is null;
         if (!isClosedHtmlDetails)
         {
-            if (context.Engine.TryBuild(tree, id, context.Styles) is { } item)
+            if (context.Engine.TryBuild(tree, id, context.Styles, allowAtomics: true) is { } item)
             {
                 if (style.Display == Display.Block && style.Width.IsAuto)
                 {
@@ -384,6 +384,7 @@ internal static partial class DomBuild
 
                 ListMarkers.ApplyInsideMarker(context.Engine, tree, id, style, item);
                 TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(taffyStyle, item);
+                AttachAtomics(context, leaf, item);
                 context.IdMap[leaf] = id;
                 context.Ifc.Whole[id] = item;
                 return leaf;

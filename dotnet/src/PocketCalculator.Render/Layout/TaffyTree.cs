@@ -167,7 +167,7 @@ internal sealed class NodeData(Style style)
 }
 
 /// <summary>An entire tree of UI nodes. The entry point to taffy's high-level API.</summary>
-public sealed class TaffyTree<TNodeContext>
+public sealed partial class TaffyTree<TNodeContext>
 {
     private readonly SlotMap<NodeData> _nodes;
     private readonly SlotMap<List<NodeId>> _children;
@@ -651,7 +651,7 @@ public sealed class TaffyTree<TNodeContext>
     /// A view over the tree that holds the measure function, so its lifetime is independent of the
     /// tree's.
     /// </summary>
-    internal sealed class TaffyView(TaffyTree<TNodeContext> taffy, TreeMeasureFunction<TNodeContext> measureFunction)
+    internal sealed partial class TaffyView(TaffyTree<TNodeContext> taffy, TreeMeasureFunction<TNodeContext> measureFunction)
         : ILayoutPartialTree, ITraverseTree, ICacheTree, IRoundTree, IPrintTree,
           ILayoutFlexboxContainer, ILayoutBlockContainer, ILayoutGridContainer
     {
@@ -840,6 +840,12 @@ public sealed class TaffyTree<TNodeContext>
             if (displayMode == Display.None)
             {
                 return Compute.ComputeHiddenLayout(tree, node);
+            }
+
+            // An inline formatting context with atomic inline children (see TaffyTreeInline).
+            if (hasChildren && tree._taffy._nodes[node].HasContext && tree._taffy.InlineAtomics is { } inlineHost)
+            {
+                return ComputeInlineAtomicLayout(tree, node, layoutInputs, blockCtx, inlineHost);
             }
 
             if (hasChildren)

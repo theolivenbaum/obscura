@@ -107,7 +107,7 @@ internal static partial class DomBuild
                 if (seg.Kind == SegKind.Run
                     && seg.Run.Exists(cid => HasNestedFloat(cid, 0))
                     && !((beforePending && index == 0) || (afterPending && index + 1 == segs.Count))
-                    && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles))
+                    && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles, allowAtomics: true))
                 {
                     expanded.Add(new Seg { Kind = SegKind.Run, Run = seg.Run, Anchored = true });
                     continue;
@@ -119,7 +119,7 @@ internal static partial class DomBuild
 
             bool onlyFloats = seg.Run.TrueForAll(cid => IsFloat(cid) || IsWhitespace(cid));
             bool joinsPseudo = (beforePending && index == 0) || (afterPending && index + 1 == segs.Count);
-            if (!onlyFloats && !joinsPseudo && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles))
+            if (!onlyFloats && !joinsPseudo && TextEngine.CanFoldRun(tree, parent, seg.Run, context.Styles, allowAtomics: true))
             {
                 expanded.Add(new Seg { Kind = SegKind.Run, Run = seg.Run, Anchored = true });
                 continue;
@@ -401,7 +401,7 @@ internal static partial class DomBuild
 
             // Fast path: the whole run folds to one shaped leaf.
             if (!joinBefore && !joinAfter
-                && context.Engine.TryBuildRun(tree, id, run, context.Styles, seg.Anchored) is { } item)
+                && context.Engine.TryBuildRun(tree, id, run, context.Styles, seg.Anchored, allowAtomics: true) is { } item)
             {
                 TaffyStyle leafStyle = RunLeafStyle();
                 if (floatFlow)
@@ -411,6 +411,7 @@ internal static partial class DomBuild
                 }
 
                 TaffyNodeId leaf = context.TaffyTree.NewLeafWithContext(leafStyle, item);
+                AttachAtomics(context, leaf, item);
                 if (!context.Ifc.Runs.TryGetValue(id, out List<int>? items))
                 {
                     items = [];
