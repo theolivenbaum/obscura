@@ -587,6 +587,12 @@ public sealed class TaffyTree<TNodeContext>
     /// <summary>The children of <paramref name="parent"/>, without copying them.</summary>
     internal IReadOnlyList<NodeId> ChildrenView(NodeId parent) => _children[parent];
 
+    /// <summary>
+    /// <see cref="ChildrenView"/> as the list itself, for a hot loop that indexes it (no
+    /// interface dispatch per child). The caller must not change it.
+    /// </summary>
+    internal List<NodeId> ChildrenList(NodeId parent) => _children[parent];
+
     /// <summary>Number of nodes that received a cache carried over from the previous pass.</summary>
     internal int TransplantCount { get; private set; }
 

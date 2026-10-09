@@ -1048,7 +1048,7 @@ internal static class DomStyleFixups
                 && style.Display != Display.None;
             if (transparent)
             {
-                foreach (LayoutStyle? pseudo in new[] { style!.BeforePseudo, style.AfterPseudo })
+                foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style!.BeforePseudo, style.AfterPseudo])
                 {
                     if (pseudo is not null)
                     {
@@ -1075,7 +1075,7 @@ internal static class DomStyleFixups
         {
             bool hostIsItemContainer = host.Display is Display.Flex or Display.Grid
                 && !host.InternalFlexContainer;
-            foreach (LayoutStyle? pseudo in new[] { host.BeforePseudo, host.AfterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[host.BeforePseudo, host.AfterPseudo])
             {
                 if (pseudo is null)
                 {

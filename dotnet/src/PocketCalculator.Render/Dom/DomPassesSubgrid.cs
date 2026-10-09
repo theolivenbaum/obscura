@@ -467,7 +467,7 @@ internal static class DomSubgridPasses
                 continue;
             }
 
-            foreach (int slot in new[] { 0, 2, 4 })
+            foreach (int slot in (ReadOnlySpan<int>)[0, 2, 4])
             {
                 string? functional = style.SizeExpressions[slot];
                 if (functional is not null

@@ -1153,7 +1153,7 @@ internal static class PaintDomPainter
 
                 OverflowClip? positionedPseudoOverflowClip =
                     scrollState.DescendantOverflowClipFor(laid, nid);
-                foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+                foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
                 {
                     if (pseudo is null)
                     {

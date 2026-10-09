@@ -310,7 +310,7 @@ internal static class DomTraversal
     internal static bool IsLocal(DomTree tree, NodeId id, string local) =>
         string.Equals(ElementLocalName(tree, id), local, StringComparison.Ordinal);
 
-    internal static bool IsAnyLocal(DomTree tree, NodeId id, params string[] locals)
+    internal static bool IsAnyLocal(DomTree tree, NodeId id, params ReadOnlySpan<string> locals)
     {
         string? local = ElementLocalName(tree, id);
         if (local is null)

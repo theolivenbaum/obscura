@@ -22,6 +22,10 @@ internal static class LayoutPhaseProfile
     [ThreadStatic]
     private static List<(string Name, long Value)>? t_notes;
 
+    // Collections and pause time when the prepare began, for the gc notes End prints.
+    [ThreadStatic]
+    private static (int Gen0, int Gen1, int Gen2, TimeSpan Pause, long Allocated) t_gc;
+
     internal static void Begin()
     {
         if (!Enabled)
@@ -31,6 +35,8 @@ internal static class LayoutPhaseProfile
 
         t_phases = [];
         t_notes = [];
+        t_gc = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2), GC.GetTotalPauseDuration(),
+            GC.GetAllocatedBytesForCurrentThread());
         t_last = Stopwatch.GetTimestamp();
     }
 
@@ -63,6 +69,11 @@ internal static class LayoutPhaseProfile
         }
 
         Mark("tail");
+        Note("gc0", GC.CollectionCount(0) - t_gc.Gen0);
+        Note("gc1", GC.CollectionCount(1) - t_gc.Gen1);
+        Note("gc2", GC.CollectionCount(2) - t_gc.Gen2);
+        Note("gcPauseMs", (long)(GC.GetTotalPauseDuration() - t_gc.Pause).TotalMilliseconds);
+        Note("allocKB", (GC.GetAllocatedBytesForCurrentThread() - t_gc.Allocated) / 1024);
         StringBuilder text = new();
         long total = 0;
         Dictionary<string, long> merged = [];

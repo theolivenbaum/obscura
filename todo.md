@@ -2914,6 +2914,29 @@ passes in 45s before, 611 after; allocation ~25 -> ~19 MB a pass; median retaine
 nodes and sticky under 0.8ms). Results are unchanged by construction; the Render, Dom and Js
 suites pin them.
 
+### A layout pass allocates less
+
+DEVIATION from `crates/obscura-render` (and vendor/taffy), whose equivalents allocate as they
+go. A forced read after a small mutation on nvidia.com spends a fifth to a third of its time in
+garbage collection (non-concurrent workstation GC, a ~1 GB heap): every pass builds a new box
+tree and new whole-document maps that survive to the next pass. What no longer allocates:
+
+- a taffy `Style` allocates its seven grid lists on first read, and equality, cloning, the grid
+  container view and `RetainedTaffyLayout.HasCalc` read an absent one as empty (the empty lists
+  were a third of a box tree's allocation);
+- `RetainedTaffyLayout.Transplant` pairs boxes with arrays indexed by taffy and DOM slot,
+  rented from the shared pools, instead of five dictionaries and sets over every box;
+- `DomPasses.ReparentInsetPositionedNodes` and the connected-node test of the retained-style
+  plan use slot-indexed pooled arrays instead of maps over every node;
+- `DomTraversal.IsAnyLocal` takes a `params ReadOnlySpan`, and the per-style loops over a
+  style's two pseudos iterate a stack span instead of a new array per style.
+
+`POCKETCALCULATOR_LAYOUT_PROFILE=1` now also prints, per pass, the collections and GC pause it
+saw, what it allocated, why a retained restyle fell back to a full one, and the table passes.
+Measured on the nvidia.com snapshot (20s loop of a `margin-left` write and a read, interleaved
+with the previous commit): 250 -> 273-291 passes, allocation 17.5 -> 14.0 MB a pass, median
+pass 49.6 -> 42-45ms. Results are unchanged by construction.
+
 ### The font work of a pass is memoized by the text it reads
 
 DEVIATION from `crates/obscura-render`, which on every pass parses the `@font-face` rules out of

@@ -777,7 +777,7 @@ internal static class DomCascade
                 LayoutStyle? sliderThumbPseudo,
                 LayoutStyle? scrollbarPseudo) =
                 sheet.AllPseudoStyles(tree, matcher, id, thisProps, style, containerEvaluator);
-            foreach (LayoutStyle? pseudo in new[] { beforePseudo, afterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[beforePseudo, afterPseudo])
             {
                 if (pseudo is null)
                 {

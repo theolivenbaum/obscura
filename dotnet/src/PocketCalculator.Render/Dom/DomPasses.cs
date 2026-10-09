@@ -205,7 +205,7 @@ internal static class DomPasses
         bool hasPositionedPercentagePadding = false;
         foreach (LayoutStyle style in styles.Values)
         {
-            foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
             {
                 if (pseudo is not null
                     && pseudo.Position == TaffyPosition.Absolute
@@ -236,7 +236,7 @@ internal static class DomPasses
 
             float containingBlockWidth =
                 F32.Max(rect.Width - style.Border.Left - style.Border.Right, 0f);
-            foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
             {
                 if (pseudo is null || pseudo.Position != TaffyPosition.Absolute)
                 {
@@ -464,85 +464,110 @@ internal static class DomPasses
         IReadOnlyDictionary<TaffyNodeId, NodeId> idMap,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
-        Dictionary<NodeId, TaffyNodeId> reverse = new(idMap.Count);
-        foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
+        // Indexed by DOM slot, holding a taffy key (0 for none; a live key never is 0): three
+        // maps over every node of the document were most of this pass's time and allocation.
+        int slots = Math.Max(tree.SlotCount, 1);
+        ulong[] reverse = System.Buffers.ArrayPool<ulong>.Shared.Rent(slots);
+        ulong[] nearestAbsCbForChildren = System.Buffers.ArrayPool<ulong>.Shared.Rent(slots);
+        ulong[] nearestFixedCbForChildren = System.Buffers.ArrayPool<ulong>.Shared.Rent(slots);
+        try
         {
-            reverse[domId] = taffyId;
+            Array.Clear(reverse, 0, slots);
+            Array.Clear(nearestAbsCbForChildren, 0, slots);
+            Array.Clear(nearestFixedCbForChildren, 0, slots);
+            return Reparent(reverse, nearestAbsCbForChildren, nearestFixedCbForChildren);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<ulong>.Shared.Return(reverse);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(nearestAbsCbForChildren);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(nearestFixedCbForChildren);
         }
 
-        Dictionary<NodeId, TaffyNodeId> nearestAbsCbForChildren = new(styles.Count);
-        Dictionary<NodeId, TaffyNodeId> nearestFixedCbForChildren = new(styles.Count);
-        List<StaticPositionCandidate> staticCandidates = [];
-
-        foreach (NodeId domId in DomTraversal.RenderedDescendants(tree, tree.Document))
+        List<StaticPositionCandidate> Reparent(
+            ulong[] reverse,
+            ulong[] nearestAbsCbForChildren,
+            ulong[] nearestFixedCbForChildren)
         {
-            if (!styles.TryGetValue(domId, out LayoutStyle? style))
+            foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
             {
-                continue;
-            }
-
-            NodeId? parent = DomTraversal.RenderedParent(tree, domId);
-            TaffyNodeId inheritedAbsCb = taffyRoot;
-            TaffyNodeId inheritedFixedCb = taffyRoot;
-            if (parent is { } parentId)
-            {
-                if (nearestAbsCbForChildren.TryGetValue(parentId, out TaffyNodeId abs))
+                if (domId.Index < slots)
                 {
-                    inheritedAbsCb = abs;
-                }
-
-                if (nearestFixedCbForChildren.TryGetValue(parentId, out TaffyNodeId fix))
-                {
-                    inheritedFixedCb = fix;
+                    reverse[domId.Index] = taffyId.Value;
                 }
             }
 
-            // Record this before any candidate early-exit so all descendants get O(1)
-            // nearest-containing-block lookups.
-            TaffyNodeId? ownBox = reverse.TryGetValue(domId, out TaffyNodeId own) ? own : null;
-            bool establishesCb = style.EstablishesPositioningContainingBlock();
-            TaffyNodeId absChildCb = style.Position is not null || establishesCb
-                ? ownBox ?? inheritedAbsCb
-                : inheritedAbsCb;
-            TaffyNodeId fixedChildCb = establishesCb ? ownBox ?? inheritedFixedCb : inheritedFixedCb;
-            nearestAbsCbForChildren[domId] = absChildCb;
-            nearestFixedCbForChildren[domId] = fixedChildCb;
-
-            if (style.Position != TaffyPosition.Absolute)
+            List<StaticPositionCandidate> staticCandidates = [];
+            foreach (NodeId domId in DomTraversal.RenderedDescendants(tree, tree.Document))
             {
-                continue;
+                if (!styles.TryGetValue(domId, out LayoutStyle? style))
+                {
+                    continue;
+                }
+
+                NodeId? parent = DomTraversal.RenderedParent(tree, domId);
+                TaffyNodeId inheritedAbsCb = taffyRoot;
+                TaffyNodeId inheritedFixedCb = taffyRoot;
+                if (parent is { } parentId && parentId.Index < slots)
+                {
+                    if (nearestAbsCbForChildren[parentId.Index] is not 0 and ulong abs)
+                    {
+                        inheritedAbsCb = new TaffyNodeId(abs);
+                    }
+
+                    if (nearestFixedCbForChildren[parentId.Index] is not 0 and ulong fix)
+                    {
+                        inheritedFixedCb = new TaffyNodeId(fix);
+                    }
+                }
+
+                // Record this before any candidate early-exit so all descendants get O(1)
+                // nearest-containing-block lookups.
+                TaffyNodeId? ownBox = reverse[domId.Index] is not 0 and ulong own ? new TaffyNodeId(own) : null;
+                bool establishesCb = style.EstablishesPositioningContainingBlock();
+                TaffyNodeId absChildCb = style.Position is not null || establishesCb
+                    ? ownBox ?? inheritedAbsCb
+                    : inheritedAbsCb;
+                TaffyNodeId fixedChildCb = establishesCb ? ownBox ?? inheritedFixedCb : inheritedFixedCb;
+                nearestAbsCbForChildren[domId.Index] = absChildCb.Value;
+                nearestFixedCbForChildren[domId.Index] = fixedChildCb.Value;
+
+                if (style.Position != TaffyPosition.Absolute)
+                {
+                    continue;
+                }
+
+                bool hasBlockInset = style.Inset[0] is not null || style.Inset[2] is not null;
+                bool hasInlineInset = style.Inset[1] is not null || style.Inset[3] is not null;
+                if (ownBox is not { } child)
+                {
+                    continue;
+                }
+
+                TaffyNodeId target = style.PositionFixed ? inheritedFixedCb : inheritedAbsCb;
+                if (taffyTree.Parent(child) is not { } current)
+                {
+                    continue;
+                }
+
+                if (current == target)
+                {
+                    continue;
+                }
+
+                if (!hasBlockInset || !hasInlineInset)
+                {
+                    staticCandidates.Add(new StaticPositionCandidate(
+                        child, target, !hasInlineInset, !hasBlockInset));
+                    continue;
+                }
+
+                taffyTree.RemoveChild(current, child);
+                taffyTree.AddChild(target, child);
             }
 
-            bool hasBlockInset = style.Inset[0] is not null || style.Inset[2] is not null;
-            bool hasInlineInset = style.Inset[1] is not null || style.Inset[3] is not null;
-            if (!reverse.TryGetValue(domId, out TaffyNodeId child))
-            {
-                continue;
-            }
-
-            TaffyNodeId target = style.PositionFixed ? inheritedFixedCb : inheritedAbsCb;
-            if (taffyTree.Parent(child) is not { } current)
-            {
-                continue;
-            }
-
-            if (current == target)
-            {
-                continue;
-            }
-
-            if (!hasBlockInset || !hasInlineInset)
-            {
-                staticCandidates.Add(new StaticPositionCandidate(
-                    child, target, !hasInlineInset, !hasBlockInset));
-                continue;
-            }
-
-            taffyTree.RemoveChild(current, child);
-            taffyTree.AddChild(target, child);
+            return staticCandidates;
         }
-
-        return staticCandidates;
     }
 
     internal static (float X, float Y)? TaffyGlobalOrigin(TaffyTree taffyTree, TaffyNodeId node)
