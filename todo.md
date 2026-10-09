@@ -856,7 +856,9 @@ fragments within 2px). Open:
 - [ ] right-to-left paragraphs still start at the left (an older, float-independent gap), and
       centred/right-aligned lines still count their trailing space; both show on the
       `rtl`/`text-align-*` pages
-- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line
+- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line;
+      its items' percentages resolve against the block, not the narrowed run
+      (`PercentBasisFromContainingBlock`), which is what wikipedia.org's footer needs
 - [ ] floats inside multi-column containers lay out in the first column only
 
 ## 9. Validation
@@ -1424,7 +1426,10 @@ changes, each commented at the site:
 - a float-avoiding box moves down until it fits (taffy took the first slot at any width);
 - a BFC root's float height includes its bottom padding; a block holding only floats can be
   collapsed through; a definite-width intrinsic pass counts floats (taffy: 0);
-- same-BFC layout is uncached in a tree with floats, and `MarkDirty` walks to the root then.
+- same-BFC layout is uncached in a tree with floats, and `MarkDirty` walks to the root then;
+- an anonymous inline-run flex wrapper resolves its items' percentages against its own
+  percentage basis, not its float-narrowed width (`PercentBasisFromContainingBlock`; taffy's
+  flexbox has no such notion).
 
 Parity with the Rust binary is the wrong assertion for any page with a float; the
 `render-repros/floats/` pages and `FloatLayoutTests` assert Chromium's boxes instead.
@@ -5055,10 +5060,10 @@ only at paint: the bounding rect is fractional, the `offset*` and `client*` valu
 
 Not done: border widths are not snapped to whole pixels (Chromium draws `4.1px` as 4px, so the
 box is 0.1px narrower there); an atomic inline shorter than the strut's ascent still sits at the
-line's top instead of on the baseline; a percentage width inside the float-zone flow column
-resolves against the column, not the containing block, and a run of `clear`ing same-side floats
-is laid out side by side. The last two, not rounding, are why wikipedia.org's footer drops
-`.other-projects` below its sidebar. Pinned by `SubpixelGeometryScriptTests`.
+line's top instead of on the baseline. (A percentage width beside a float resolved against the
+float-zone flow column, and a run of `clear`ing same-side floats was laid out side by side,
+which is why wikipedia.org's footer dropped `.other-projects` below its sidebar; both went with
+the float-zone rows, see "Float layout (CSS 2.1 9.5)".) Pinned by `SubpixelGeometryScriptTests`.
 
 ### A redirected navigation is reported hop by hop under the loader id
 

@@ -40,6 +40,10 @@ internal static partial class DomBuild
         if (floatFlow)
         {
             style.Size = new Layout.Size<TaffyDimension>(TaffyDimension.Auto, style.Size.Height);
+
+            // Narrowed beside a float it is still only a line box: an inline-block's
+            // `width: 65%` is of the block, as in Chromium (wikipedia.org's footer).
+            style.PercentBasisFromContainingBlock = true;
         }
 
         return style;

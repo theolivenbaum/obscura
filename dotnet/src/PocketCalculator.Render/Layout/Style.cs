@@ -144,6 +144,13 @@ public interface IFlexboxContainerStyle : ICoreStyle
 
     /// <summary>How should this node's children be aligned in the main axis.</summary>
     EAlignContent? JustifyContent => null;
+
+    /// <summary>
+    /// The container is an anonymous stand-in for a run of inline-level boxes (a line box), so
+    /// its items' percentages resolve against the block that contains the line, which is the
+    /// container's own percentage basis, not its (float-narrowed) width. Not in vendor/taffy.
+    /// </summary>
+    bool PercentBasisFromContainingBlock => false;
 }
 
 /// <summary>The set of styles required for a Flexbox item.</summary>
@@ -287,6 +294,9 @@ public sealed class Style
 
     /// <summary>See <see cref="IBlockItemStyle.EstablishesBfc"/>.</summary>
     public bool EstablishesBfc { get; set; }
+
+    /// <summary>See <see cref="IFlexboxContainerStyle.PercentBasisFromContainingBlock"/>.</summary>
+    public bool PercentBasisFromContainingBlock { get; set; }
 
     /// <summary>What should the <c>position</c> value of this struct use as a base offset?</summary>
     public EPosition Position { get; set; } = EPosition.Relative;
@@ -437,6 +447,7 @@ public sealed class Style
         Float = Float,
         Clear = Clear,
         EstablishesBfc = EstablishesBfc,
+        PercentBasisFromContainingBlock = PercentBasisFromContainingBlock,
         Position = Position,
         Inset = Inset,
         Size = Size,
@@ -496,6 +507,7 @@ public sealed class Style
             && Float == other.Float
             && Clear == other.Clear
             && EstablishesBfc == other.EstablishesBfc
+            && PercentBasisFromContainingBlock == other.PercentBasisFromContainingBlock
             && Position == other.Position
             && Inset == other.Inset
             && Size == other.Size
