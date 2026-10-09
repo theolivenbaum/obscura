@@ -83,13 +83,19 @@ internal sealed class RetainedTaffyLayout
 
     internal required TextEngine Engine { get; init; }
 
+    /// <summary>The whole-container inline item each element got, by item index in <see cref="Engine"/>.</summary>
+    internal required IReadOnlyDictionary<NodeId, int> Whole { get; init; }
+
     internal required Dictionary<NodeId, ReplacedIntrinsic> Intrinsic { get; init; }
 
     /// <summary>Generated text (counters included) per element, as the pass used it.</summary>
     internal required Dictionary<NodeId, GeneratedText> Generated { get; init; }
 
-    /// <summary>Set once a later pass has taken this tree's caches; it cannot be reused.</summary>
+    /// <summary>Set once a later pass has taken this tree's caches or items; it cannot be reused.</summary>
     internal bool Consumed { get; private set; }
+
+    /// <summary>Marks this tree as taken by a later pass.</summary>
+    internal void Consume() => Consumed = true;
 
     internal readonly record struct GeneratedText(string? Before, string? After, string? BeforePseudo, string? AfterPseudo)
     {
@@ -253,7 +259,7 @@ internal sealed class RetainedTaffyLayout
         TextEngine engine,
         HashSet<NodeId> dirty)
     {
-        if (previous.Consumed || !previous.Tree.Contains(previous.Root))
+        if (!previous.Tree.Contains(previous.Root))
         {
             return 0;
         }

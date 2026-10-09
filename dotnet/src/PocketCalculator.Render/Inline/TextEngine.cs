@@ -223,6 +223,64 @@ public sealed partial class TextEngine : IDisposable
             && x.BoundaryEvents.Count == y.BoundaryEvents.Count;
     }
 
+    private TextEngine? _adoptFrom;
+    private IReadOnlyDictionary<NodeId, int>? _adoptWhole;
+    private HashSet<NodeId>? _adoptDirty;
+    private HashSet<int>? _adoptTaken;
+
+    /// <summary>
+    /// Offers this pass the whole-container inline items <paramref name="previous"/> built, for
+    /// <see cref="TryBuild"/> to take over instead of collecting and shaping them again.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which builds every item on every pass. An item is a pure
+    /// function of its container's DOM subtree, the computed styles in it and the font set, so
+    /// one built for an element outside <paramref name="dirty"/> (the closure of everything the
+    /// retained pass changed, see <c>RetainedTaffyLayout.DirtyClosure</c>) is the item this pass
+    /// would build, provided the font set is the same - which sharing the shape cache proves.
+    /// What an item accumulates during a pass (its laid-out buffer, origin, clip, marker and
+    /// relative owner ranges) is reset to the state a new item starts in. The previous engine
+    /// must not be used again; its render has been superseded.
+    /// </remarks>
+    internal void AdoptInlineItems(TextEngine previous, IReadOnlyDictionary<NodeId, int> previousWhole, HashSet<NodeId> dirty)
+    {
+        if (!SharesShapeCacheWith(previous))
+        {
+            return;
+        }
+
+        _adoptFrom = previous;
+        _adoptWhole = previousWhole;
+        _adoptDirty = dirty;
+        _adoptTaken = [];
+    }
+
+    /// <summary>How many items this engine took over from the previous pass.</summary>
+    internal int AdoptedItemCount => _adoptTaken?.Count ?? 0;
+
+    private int? TakeAdoptedItem(NodeId id)
+    {
+        if (_adoptWhole is not { } whole
+            || !whole.TryGetValue(id, out int previousIndex)
+            || _adoptDirty!.Contains(id)
+            || previousIndex < 0
+            || previousIndex >= _adoptFrom!._items.Count
+            || !_adoptTaken!.Add(previousIndex))
+        {
+            return null;
+        }
+
+        InlineItem item = _adoptFrom._items[previousIndex];
+        item.FirstLineOffset = 0f;
+        item.Origin = (0f, 0f);
+        item.Clip = null;
+        item.Marker = null;
+        item.RelativeOwnerRanges = [];
+        int index = _items.Count;
+        _items.Add(item);
+        return index;
+    }
+
     /// <summary>The shaped-paragraph cache this engine shapes through, for tests.</summary>
     internal ShapeCache? CurrentShapeCache => _shaper.Cache;
 
@@ -369,6 +427,11 @@ public sealed partial class TextEngine : IDisposable
     /// </remarks>
     public int? TryBuild(DomTree tree, NodeId id, IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
+        if (TakeAdoptedItem(id) is { } adopted)
+        {
+            return adopted;
+        }
+
         if (!Inline.IsPureTextIfc(tree, id, styles))
         {
             return null;

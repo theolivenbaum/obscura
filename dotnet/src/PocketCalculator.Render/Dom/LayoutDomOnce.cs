@@ -574,6 +574,20 @@ public static partial class RenderDom
                 }
             }
 
+            // What the previous pass built that this one may take over: decided before the
+            // build, which takes over that pass's inline items for unchanged containers.
+            HashSet<NodeId>? dirtyNodes = null;
+            if (transplantSource is { Consumed: false } source
+                && freshStyles is not null
+                && RetainedTaffyLayout.Enabled
+                && engine.SharesShapeCacheWith(source.Engine))
+            {
+                dirtyNodes = RetainedTaffyLayout.DirtyClosure(
+                    tree, source, freshStyles, layoutMutations ?? [], intrinsic, styles);
+                source.Consume();
+                engine.AdoptInlineItems(source.Engine, source.Whole, dirtyNodes);
+            }
+
             BuildContext buildContext = new()
             {
                 Tree = tree,
@@ -651,15 +665,10 @@ public static partial class RenderDom
 
                 // The box tree is complete and nothing has been laid out yet: carry the previous
                 // pass's layout results onto every box whose subtree is unchanged.
-                if (transplantSource is { } source
-                    && freshStyles is not null
-                    && RetainedTaffyLayout.Enabled
-                    && engine.SharesShapeCacheWith(source.Engine))
+                if (transplantSource is { } carriedSource && dirtyNodes is not null)
                 {
-                    HashSet<NodeId> dirtyNodes = RetainedTaffyLayout.DirtyClosure(
-                        tree, source, freshStyles, layoutMutations ?? [], intrinsic, styles);
                     transplanted = RetainedTaffyLayout.Transplant(
-                        source,
+                        carriedSource,
                         taffyTree,
                         taffyRoot,
                         idMap,
@@ -671,6 +680,7 @@ public static partial class RenderDom
 
                 LayoutPhaseProfile.Mark("transplant");
                 LayoutPhaseProfile.Note("carried", transplanted);
+                LayoutPhaseProfile.Note("items", engine.AdoptedItemCount);
                 LayoutPhaseProfile.Note("boxes", taffyTree.TotalNodeCount());
 
                 Layout.Size<float> Measure(
@@ -970,9 +980,10 @@ public static partial class RenderDom
                 viewport);
         }
 
+        LayoutPhaseProfile.Mark("clips");
         FinalizeShapedItems(
             engine, ifcItems, rects, styles, clipRects, translates, anonRects, viewport);
-        LayoutPhaseProfile.Mark("clips+finalize");
+        LayoutPhaseProfile.Mark("finalize");
 
         // Pure-text IFC descendants do not own Taffy nodes. Once their shared buffer has its
         // final line breaks, derive their real continuations from shaping provenance.
@@ -980,6 +991,7 @@ public static partial class RenderDom
         {
             Dictionary<NodeId, List<Rect>> canonical =
                 SynthesizeShapedInlineFragments(tree, rects, styles, engine);
+            LayoutPhaseProfile.Mark("synth");
             if (canonical.Count != 0)
             {
                 Dictionary<NodeId, (float X, float Y)> relativeOffsets = [];
@@ -994,6 +1006,7 @@ public static partial class RenderDom
                 }
 
                 engine.SetInlineOwnerOffsets(relativeOffsets);
+                LayoutPhaseProfile.Mark("ownerOffsets");
                 foreach ((NodeId owner, List<Rect> fragments) in canonical)
                 {
                     inlineFragments[owner] = fragments;
@@ -1023,6 +1036,7 @@ public static partial class RenderDom
                         viewport);
                 }
 
+                LayoutPhaseProfile.Mark("reclip");
                 foreach ((NodeId nid, int idx) in ifcItems.Whole)
                 {
                     engine.SetClip(
@@ -1081,6 +1095,7 @@ public static partial class RenderDom
             GeneratedBoxes = generatedBoxes,
             GridTracks = gridTracks,
             TransplantedBoxes = transplanted,
+            AdoptedInlineItems = engine.AdoptedItemCount,
             RetainedBoxes = builtRoot is { } keptRoot
                 ? new RetainedTaffyLayout
                 {
@@ -1090,6 +1105,7 @@ public static partial class RenderDom
                     Words = words,
                     NativeControlContent = ifcItems.NativeControlContent,
                     Engine = engine,
+                    Whole = ifcItems.Whole,
                     Intrinsic = new Dictionary<NodeId, ReplacedIntrinsic>(intrinsic),
                     Generated = RetainedTaffyLayout.SnapshotGenerated(styles),
                 }

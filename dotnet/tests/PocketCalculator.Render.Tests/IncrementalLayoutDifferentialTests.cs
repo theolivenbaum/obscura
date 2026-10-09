@@ -240,6 +240,7 @@ public class IncrementalLayoutDifferentialTests
             [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a c"))])!;
 
         Assert.True(second.Layout.TransplantedBoxes > 50, $"carried {second.Layout.TransplantedBoxes}");
+        Assert.True(second.Layout.AdoptedInlineItems > 50, $"adopted {second.Layout.AdoptedInlineItems}");
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
     }
 
@@ -271,6 +272,7 @@ public class IncrementalLayoutDifferentialTests
         Assert.NotNull(previous);
         StringBuilder log = new();
         int carriedTotal = 0;
+        int adoptedTotal = 0;
         for (int step = 0; step < steps; step++)
         {
             List<RetainedStyleMutation> mutations = [];
@@ -326,6 +328,7 @@ public class IncrementalLayoutDifferentialTests
 
             Assert.NotNull(next);
             carriedTotal += next!.Layout.TransplantedBoxes;
+            adoptedTotal += next.Layout.AdoptedInlineItems;
             string incremental = Snapshot(tree, next);
             string reference = Snapshot(tree, Reference(tree));
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
@@ -346,6 +349,7 @@ public class IncrementalLayoutDifferentialTests
         if (cancelAt < 0)
         {
             Assert.True(carriedTotal > 0, "no step carried any box over; the test exercises nothing");
+            Assert.True(adoptedTotal > 0, "no step took over any inline item; the test exercises nothing");
         }
     }
 

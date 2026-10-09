@@ -132,6 +132,9 @@ public sealed class DomLayout
     /// <summary>How many boxes this pass carried over from the previous one.</summary>
     internal int TransplantedBoxes { get; init; }
 
+    /// <summary>How many inline items this pass took over from the previous one.</summary>
+    internal int AdoptedInlineItems { get; init; }
+
     /// <summary>Border boxes keyed by DOM node.</summary>
     public Dictionary<NodeId, Rect> Rects { get; internal set; } = [];
 
