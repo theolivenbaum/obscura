@@ -304,6 +304,24 @@ public class FloatLayoutTests
     }
 
     [Fact]
+    public void RightFloatsAmongInlineBlocksStayOnTheirLine()
+    {
+        // render-repros/right-float-navigation.html: a run of inline-blocks does not fold into a
+        // shaped context, so its floats go before it rather than splitting it into lines.
+        var (tree, laid) = Layout(
+            "<nav id=bar style='width:400px;height:30px;overflow:hidden'>"
+            + "<span id=a style='display:inline-block;width:60px;height:30px'></span>"
+            + " <div class=r id=r1 style='width:40px;height:30px'></div>"
+            + " <span id=b style='display:inline-block;width:80px;height:30px'></span>"
+            + " <div class=r id=r2 style='width:50px;height:30px'></div>"
+            + " <div class=r id=r3 style='width:30px;height:30px'></div> </nav>");
+        AssertBox(tree, laid, "r1", 360, 0, 40, 30);
+        AssertBox(tree, laid, "r2", 310, 0, 50, 30);
+        AssertBox(tree, laid, "r3", 280, 0, 30, 30);
+        AssertBox(tree, laid, "b", 64, 0, 80, 30);
+    }
+
+    [Fact]
     public void AClearfixPseudoElementContainsTheFloats()
     {
         DomTree tree = HtmlParsing.ParseHtml(

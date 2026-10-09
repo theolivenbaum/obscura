@@ -89,11 +89,21 @@ internal static partial class DomBuild
                 continue;
             }
 
+            // A run that does not fold is one block of atomic inlines. A float met before any
+            // text in it is on its first line in Chromium (a navigation bar of inline-blocks and
+            // right floats), so it goes before the run; a float after text splits the run there.
             Seg? current = null;
+            bool sawText = false;
             foreach (NodeId cid in seg.Run)
             {
                 if (IsFloat(cid))
                 {
+                    if (!sawText)
+                    {
+                        expanded.Add(new Seg { Kind = SegKind.Float, Block = cid });
+                        continue;
+                    }
+
                     if (current is not null)
                     {
                         expanded.Add(current);
@@ -101,9 +111,18 @@ internal static partial class DomBuild
                     }
 
                     expanded.Add(new Seg { Kind = SegKind.Float, Block = cid });
+                    sawText = false;
                 }
                 else
                 {
+                    // The white space on both sides of a float taken out of the run is one
+                    // collapsible space.
+                    if (IsWhitespace(cid) && current is { Run.Count: > 0 } open && IsWhitespace(open.Run[^1]))
+                    {
+                        continue;
+                    }
+
+                    sawText |= tree.GetNode(cid) is { IsText: true } && !IsWhitespace(cid);
                     current ??= new Seg { Kind = SegKind.Run };
                     current.Run.Add(cid);
                 }
