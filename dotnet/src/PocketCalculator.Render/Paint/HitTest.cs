@@ -303,7 +303,13 @@ internal sealed class HitTester
             Classify(unit, unitStyle, foreground, ownBackground ? backgrounds : [], isUnitRoot: true);
         }
 
-        if (DomTraversal.ElementLocalName(_tree, unit) is not { } unitLocal || !IsOpaqueLeaf(unitLocal))
+        string? rootLocal = DomTraversal.ElementLocalName(_tree, unit);
+        if (string.Equals(rootLocal, "svg", StringComparison.Ordinal))
+        {
+            // An inline <svg> is an atomic unit of its line; its shapes are hit inside it.
+            foreground.Add(new Foreground(unit, SvgContent));
+        }
+        else if (rootLocal is null || !IsOpaqueLeaf(rootLocal))
         {
             Stack<NodeId> pending = new();
             PushChildrenReversed(unit, pending);
@@ -445,14 +451,30 @@ internal sealed class HitTester
             return;
         }
 
+        bool text = HasTextChild(id);
         foreach (Rect fragment in fragments)
         {
-            if (Contains(id, fragment))
+            // The box's text is hit on its pixel-snapped rect too (see PixelSnapped); the
+            // fragment's font box stands for the text's.
+            if (Contains(id, fragment) || (text && Contains(id, PixelSnapped(fragment))))
             {
                 Add(id);
                 return;
             }
         }
+    }
+
+    private bool HasTextChild(NodeId id)
+    {
+        foreach (NodeId child in DomTraversal.RenderedChildren(_tree, id))
+        {
+            if (_tree.GetNode(child) is { IsText: true })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -509,12 +531,26 @@ internal sealed class HitTester
 
         foreach ((Rect rect, _) in runs)
         {
-            if (Contains(id, rect))
+            if (Contains(id, PixelSnapped(rect)))
             {
                 Add(OwnerElement(id));
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Blink hit-tests a text item against its pixel-snapped rect (<c>HitTestTextItem</c>,
+    /// <c>ToPixelSnappedRect</c>): edges rounded half up, so a run whose font box starts at
+    /// y 2.23 is hit at y 2.
+    /// </summary>
+    private static Rect PixelSnapped(in Rect rect)
+    {
+        float left = MathF.Floor(rect.X + 0.5f);
+        float top = MathF.Floor(rect.Y + 0.5f);
+        float right = MathF.Floor(rect.X + rect.Width + 0.5f);
+        float bottom = MathF.Floor(rect.Y + rect.Height + 0.5f);
+        return new Rect(left, top, right - left, bottom - top);
     }
 
     private void HitSvg(NodeId svg)
