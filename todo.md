@@ -844,7 +844,9 @@ Design:
   fragments and line rects come from `LayoutRuns`, so they carry the line offsets.
 
 Status: 56 of 61 conformance pages match Chromium (element boxes within 1px, inline line
-fragments within 2px). Open:
+fragments within 2px), and 7 of the 8 older float pages at the top of `render-repros/` (the
+eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
+where Chromium gives an empty box after it, as before). Open:
 
 - [ ] `elementFromPoint` is the shim's nid-order heuristic in `bootstrap.js`, so a point inside
       a float returns the later in-flow block instead of the float (out of scope here: the
@@ -856,7 +858,8 @@ fragments within 2px). Open:
 - [ ] right-to-left paragraphs still start at the left (an older, float-independent gap), and
       centred/right-aligned lines still count their trailing space; both show on the
       `rtl`/`text-align-*` pages
-- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line;
+- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line
+      (a float before any text in it is placed before it, one after text splits it);
       its items' percentages resolve against the block, not the narrowed run
       (`PercentBasisFromContainingBlock`), which is what wikipedia.org's footer needs
 - [ ] floats inside multi-column containers lay out in the first column only
