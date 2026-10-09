@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using SkiaSharp;
@@ -162,8 +163,45 @@ public static class FontAssets
     /// loading it for every page would spend RSS and startup time even when no emoji can be
     /// shaped.
     /// </remarks>
+    /// <summary>
+    /// <see cref="TextMayNeedEmojiFont"/> and <see cref="TextMayNeedCjkFont"/> of one text, by
+    /// the identity of the string for a long one.
+    /// </summary>
+    /// <remarks>
+    /// Every layout pass scans every text node of the document for the two optional faces,
+    /// including the text of every <c>&lt;style&gt;</c> and <c>&lt;script&gt;</c> (nvidia.com:
+    /// 2 MB of CSS, 7ms a pass). An unchanged text node hands every pass the same string, whose
+    /// answer is a function of its contents.
+    /// </remarks>
+    internal static (bool Emoji, bool Cjk) TextMayNeedOptionalFaces(string text)
+    {
+        if (text.Length < 256)
+        {
+            return (TextMayNeedEmojiFont(text), TextMayNeedCjkFont(text));
+        }
+
+        if (OptionalFaceMemo.TryGetValue(text, out StrongBox<byte>? memo))
+        {
+            return ((memo.Value & 1) != 0, (memo.Value & 2) != 0);
+        }
+
+        bool emoji = TextMayNeedEmojiFont(text);
+        bool cjk = TextMayNeedCjkFont(text);
+        OptionalFaceMemo.AddOrUpdate(text, new StrongBox<byte>((byte)((emoji ? 1 : 0) | (cjk ? 2 : 0))));
+        return (emoji, cjk);
+    }
+
+    private static readonly ConditionalWeakTable<string, StrongBox<byte>> OptionalFaceMemo = new();
+
     public static bool TextMayNeedEmojiFont(string text)
     {
+        // No code point below U+00A9 requests the emoji face, and every pass scans every text
+        // node of the document: let the vectorized ASCII test answer most of them.
+        if (System.Text.Ascii.IsValid(text))
+        {
+            return false;
+        }
+
         foreach (Rune rune in text.EnumerateRunes())
         {
             if (MayRequestEmoji(rune.Value))
@@ -186,6 +224,11 @@ public static class FontAssets
     /// </remarks>
     public static bool TextMayNeedCjkFont(string text)
     {
+        if (System.Text.Ascii.IsValid(text))
+        {
+            return false;
+        }
+
         foreach (char ch in text)
         {
             // Supplementary ideographs (Extension B and on) arrive as a surrogate pair; the

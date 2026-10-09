@@ -172,9 +172,9 @@ public static partial class ComputedStyle
                     List<string> parts = SplitTopLevel(arguments, ',');
                     valid = parts.Count is >= 1 and <= 2
                         && parts[0].Trim().StartsWith("--", StringComparison.Ordinal)
-                        && parts[0].Trim().Length > 2
+                        && parts[0].AsSpan().Trim().Length > 2
                         && (parts.Count < 2
-                            || (parts[1].Trim().Length != 0 && ParseTransformLength(parts[1]) is not null));
+                            || (parts[1].AsSpan().Trim().Length != 0 && ParseTransformLength(parts[1]) is not null));
                     break;
                 default:
                     valid = false;

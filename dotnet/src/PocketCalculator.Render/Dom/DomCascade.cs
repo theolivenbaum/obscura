@@ -301,13 +301,13 @@ internal static class DomCascade
                 continue;
             }
 
-            if (source.GetAttribute("srcset") is not { } srcset || srcset.Trim().Length == 0)
+            if (source.GetAttribute("srcset") is not { } srcset || srcset.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
 
             if (source.GetAttribute("media") is { } media
-                && media.Trim().Length != 0
+                && media.AsSpan().Trim().Length != 0
                 && !CssMediaQuery.AppliesForViewport(media, viewport))
             {
                 continue;
@@ -393,6 +393,52 @@ internal static class DomCascade
         internal required AnimationTimelineState AnimationTimeline { get; init; }
 
         internal HashSet<NodeId>? FreshStyles { get; init; }
+
+        /// <summary>
+        /// With <see cref="FreshStyles"/>, the nodes on a path to a fresh one
+        /// (<see cref="StylePaths"/>); the walk does not descend anywhere else. Not in
+        /// crates/obscura-render, which walks the whole document and reuses each retained
+        /// style it meets on the way.
+        /// </summary>
+        internal HashSet<NodeId>? VisitOnly { get; init; }
+    }
+
+    /// <summary>
+    /// The nodes the retained cascade has to visit: every fresh node and every node above one,
+    /// in the DOM and in the flat tree (a shadow root's host, an assigned node's slot), plus the
+    /// document. Every other node keeps its retained style and inherits nothing new: a style
+    /// change that reaches descendants or siblings is in the fresh set already
+    /// (<see cref="RetainedStylePlanner.Plan"/>).
+    /// </summary>
+    internal static HashSet<NodeId> StylePaths(DomTree tree, HashSet<NodeId> fresh)
+    {
+        HashSet<NodeId> paths = new(fresh.Count * 2) { tree.Document };
+        Stack<NodeId> pending = new(fresh);
+        while (pending.Count != 0)
+        {
+            NodeId id = pending.Pop();
+            if (!paths.Add(id) || tree.GetNode(id) is not { } node)
+            {
+                continue;
+            }
+
+            if (node.Parent is { } parent)
+            {
+                pending.Push(parent);
+            }
+
+            if (DomTraversal.RenderedParent(tree, id) is { } rendered)
+            {
+                pending.Push(rendered);
+            }
+
+            if (tree.ShadowRootInfo(id) is { } shadow)
+            {
+                pending.Push(shadow.Host);
+            }
+        }
+
+        return paths;
     }
 
     /// <summary>
@@ -731,7 +777,7 @@ internal static class DomCascade
                 LayoutStyle? sliderThumbPseudo,
                 LayoutStyle? scrollbarPseudo) =
                 sheet.AllPseudoStyles(tree, matcher, id, thisProps, style, containerEvaluator);
-            foreach (LayoutStyle? pseudo in new[] { beforePseudo, afterPseudo })
+            foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[beforePseudo, afterPseudo])
             {
                 if (pseudo is null)
                 {
@@ -887,6 +933,11 @@ internal static class DomCascade
                 List<NodeId> shadowChildren = tree.Children(shadowRoot);
                 for (int index = shadowChildren.Count - 1; index >= 0; index--)
                 {
+                    if (context.VisitOnly is { } shadowOnly && !shadowOnly.Contains(shadowChildren[index]))
+                    {
+                        continue;
+                    }
+
                     work.Add((new Visit(
                         shadowChildren[index],
                         shadowSheet,
@@ -903,6 +954,11 @@ internal static class DomCascade
                 for (int index = assignedNodes.Count - 1; index >= 0; index--)
                 {
                     NodeId cid = assignedNodes[index];
+                    if (context.VisitOnly is { } assignedOnly && !assignedOnly.Contains(cid))
+                    {
+                        continue;
+                    }
+
                     Stylesheet assignedSheet = context.DocumentSheet;
                     if (tree.ContainingShadowRoot(cid) is { } root
                         && context.ShadowSheets.TryGetValue(root, out Stylesheet? found))
@@ -930,6 +986,12 @@ internal static class DomCascade
 
                 // Assigned light children are cascaded from their flattened slot above.
                 if (isShadowHost && tree.AssignedSlot(cid) is not null)
+                {
+                    continue;
+                }
+
+                // A retained pass descends only towards fresh styles; see StylePaths.
+                if (context.VisitOnly is { } only && !only.Contains(cid))
                 {
                     continue;
                 }
@@ -1083,9 +1145,49 @@ internal static class DomCascade
     /// </summary>
     internal static void ResolveCssCounters(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
     {
+        // Not in crates/obscura-render, which walks the document for counters on every pass.
+        // The walk only renders the generated content of ::before/::after: with no counter()
+        // or counters() in any of it, what it would render is the zero-counter text the
+        // cascade already gave each pseudo, so nothing it could write differs.
+        if (!AnyCounterContent(styles))
+        {
+            return;
+        }
+
         CssCounterState counters = new();
         List<string> rootScopes = CounterWalk(tree, tree.Document, styles, counters);
         counters.PopCreated(rootScopes);
+    }
+
+    private static bool AnyCounterContent(Dictionary<NodeId, LayoutStyle> styles)
+    {
+        foreach (LayoutStyle style in styles.Values)
+        {
+            if (HasCounterItem(style.BeforePseudo) || HasCounterItem(style.AfterPseudo))
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        static bool HasCounterItem(LayoutStyle? pseudo)
+        {
+            if (pseudo?.GeneratedContent is not { } items)
+            {
+                return false;
+            }
+
+            foreach (GeneratedContentItem item in items)
+            {
+                if (item is not GeneratedContentItem.Text)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     private static List<string> CounterWalk(
@@ -1164,6 +1266,13 @@ internal static class DomCascade
         CssMediaType mediaType,
         StylesheetCache? cache = null)
     {
+        // A document with no shadow root has nothing to collect; walking every node of it to
+        // find out cost a whole-document walk on every pass.
+        if (!tree.HasShadowRoots)
+        {
+            return [];
+        }
+
         List<NodeId> roots = [];
         List<NodeId> stack = [tree.Document];
         HashSet<NodeId> visited = [];
@@ -1225,7 +1334,7 @@ internal static class DomCascade
 
                 string? media = node.GetAttribute("media");
                 if (media is not null
-                    && media.Trim().Length != 0
+                    && media.AsSpan().Trim().Length != 0
                     && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
                 {
                     continue;

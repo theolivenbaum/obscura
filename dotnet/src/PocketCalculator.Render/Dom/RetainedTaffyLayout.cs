@@ -33,10 +33,17 @@ namespace PocketCalculator.Render;
 /// in the same position under a carried parent), no DOM node it was built from is in the pass's
 /// dirty set or above a node that is, its taffy style is equal and holds no <c>calc()</c> handle
 /// (whose resolution context lives outside the style), its measure context is equivalent, its
-/// children pair one for one, and the previous pass neither left its cache empty nor computed it
-/// in a block formatting context that had floats. A carried cache asked for in a context with
-/// floats, or in a different block-context mode, is dropped on the spot
-/// (<c>TaffyTree.TaffyView.ComputeChildLayoutInner</c>).
+/// children pair one for one, and the previous pass neither left its cache empty nor laid it out
+/// reading the floats of its formatting context. A carried cache asked for in a different
+/// block-context mode is dropped on the spot (<c>TaffyTree.TaffyView.ComputeChildLayoutInner</c>).
+/// </para>
+/// <para>
+/// A page with floats carries its layouts over the same way. A box laid out in its parent's
+/// block formatting context is cached only when that layout read nothing of the floats, with
+/// what it asked recorded beside the entry, and the entry answers only where the floats placed
+/// so far give the same answers (<c>FloatDependencies</c>); a box beside a float is laid out
+/// again on every pass, as before. Nothing is carried across a pass that gained or lost its
+/// floats, which builds its block containers differently.
 /// </para>
 /// <para>
 /// <c>POCKETCALCULATOR_FULL_RELAYOUT=1</c> turns this off.
@@ -84,9 +91,8 @@ internal sealed class RetainedTaffyLayout
     internal required TextEngine Engine { get; init; }
 
     /// <summary>
-    /// Whether the pass had a float. Inline items are not taken over from or into such a pass
-    /// (a float's exclusions reach every inline item of its block formatting context), and only
-    /// float-free subtrees carry their layout over; see <see cref="Transplant"/>.
+    /// Whether the pass had a float. Neither layouts nor inline items are carried across a pass
+    /// that gained or lost its floats; see <see cref="Transplant"/>.
     /// </summary>
     internal required bool HadFloats { get; init; }
 
@@ -272,33 +278,184 @@ internal sealed class RetainedTaffyLayout
         }
 
         previous.Consumed = true;
+
+        // A tree with a float builds and lays out its block containers through the float
+        // paths (DomBuild.BuildMixedBlock, BlockLayout), so nothing one tree computed answers
+        // for the other.
+        if (tree.HasFloats != previous.HadFloats)
+        {
+            return 0;
+        }
+
+        TransplantScratch scratch = TransplantScratch.Rent(
+            tree.NodesCapacity,
+            previous.Tree.NodesCapacity,
+            DomSlots(idMap, previous.IdMap));
+        try
+        {
+            return TransplantInto(previous, tree, root, idMap, words, nativeControlContent, engine, dirty, scratch);
+        }
+        finally
+        {
+            scratch.Return();
+        }
+    }
+
+    /// <summary>One more than the highest DOM slot index either map names.</summary>
+    private static int DomSlots(Dictionary<TaffyNodeId, NodeId> current, Dictionary<TaffyNodeId, NodeId> before)
+    {
+        int slots = 0;
+        foreach (NodeId dom in current.Values)
+        {
+            slots = Math.Max(slots, dom.Index + 1);
+        }
+
+        foreach (NodeId dom in before.Values)
+        {
+            slots = Math.Max(slots, dom.Index + 1);
+        }
+
+        return slots;
+    }
+
+    /// <summary>The slot index of a taffy node (the key packs it into its low 32 bits).</summary>
+    private static int Slot(TaffyNodeId node) => (int)(node.Value & 0xFFFF_FFFF);
+
+    /// <summary>
+    /// The per-pass bookkeeping of <see cref="Transplant"/>, indexed by taffy slot (new and old
+    /// tree) and DOM slot, rented from the shared pools: dictionaries keyed by box were most of
+    /// the pairing's time and, at the size of a real document, large-object allocations every
+    /// pass.
+    /// </summary>
+    private sealed class TransplantScratch
+    {
+        internal const ulong Ambiguous = ulong.MaxValue;
+
+        // Per new-tree slot: the paired old box (0 when none; a live key never is 0), the DOM
+        // owner of an anonymous box plus one (0 when none), the decision (0 undecided, 1 clean,
+        // 2 not), and whether the box is a word leaf or a native control.
+        internal ulong[] Partner = [];
+        internal uint[] AnonymousOwner = [];
+        internal byte[] State = [];
+        internal bool[] NewWord = [];
+        internal bool[] NewControl = [];
+
+        // Per old-tree slot.
+        internal bool[] OldMapped = [];
+        internal bool[] OldWord = [];
+        internal bool[] OldControl = [];
+
+        // Per DOM slot: the old box generated for it (0 when none, Ambiguous when several), and
+        // how many boxes the new tree generated for it (saturating at 2).
+        internal ulong[] OldBoxOfDom = [];
+        internal byte[] NewBoxesOfDom = [];
+
+        internal int OldSlots;
+
+        internal static TransplantScratch Rent(int newSlots, int oldSlots, int domSlots) => new()
+        {
+            OldSlots = oldSlots,
+            Partner = RentCleared<ulong>(newSlots),
+            AnonymousOwner = RentCleared<uint>(newSlots),
+            State = RentCleared<byte>(newSlots),
+            NewWord = RentCleared<bool>(newSlots),
+            NewControl = RentCleared<bool>(newSlots),
+            OldMapped = RentCleared<bool>(oldSlots),
+            OldWord = RentCleared<bool>(oldSlots),
+            OldControl = RentCleared<bool>(oldSlots),
+            OldBoxOfDom = RentCleared<ulong>(domSlots),
+            NewBoxesOfDom = RentCleared<byte>(domSlots),
+        };
+
+        private static T[] RentCleared<T>(int length)
+        {
+            T[] array = System.Buffers.ArrayPool<T>.Shared.Rent(Math.Max(length, 1));
+            Array.Clear(array, 0, Math.Max(length, 1));
+            return array;
+        }
+
+        internal void Return()
+        {
+            System.Buffers.ArrayPool<ulong>.Shared.Return(Partner);
+            System.Buffers.ArrayPool<uint>.Shared.Return(AnonymousOwner);
+            System.Buffers.ArrayPool<byte>.Shared.Return(State);
+            System.Buffers.ArrayPool<bool>.Shared.Return(NewWord);
+            System.Buffers.ArrayPool<bool>.Shared.Return(NewControl);
+            System.Buffers.ArrayPool<bool>.Shared.Return(OldMapped);
+            System.Buffers.ArrayPool<bool>.Shared.Return(OldWord);
+            System.Buffers.ArrayPool<bool>.Shared.Return(OldControl);
+            System.Buffers.ArrayPool<ulong>.Shared.Return(OldBoxOfDom);
+            System.Buffers.ArrayPool<byte>.Shared.Return(NewBoxesOfDom);
+        }
+    }
+
+    private static int TransplantInto(
+        RetainedTaffyLayout previous,
+        TaffyTree tree,
+        TaffyNodeId root,
+        Dictionary<TaffyNodeId, NodeId> idMap,
+        Dictionary<TaffyNodeId, (NodeId Source, string Word)> words,
+        Dictionary<TaffyNodeId, Size<float>> nativeControlContent,
+        TextEngine engine,
+        HashSet<NodeId> dirty,
+        TransplantScratch scratch)
+    {
         TaffyTree old = previous.Tree;
-        bool floats = tree.HasFloats || previous.HadFloats;
+        bool floats = tree.HasFloats;
+        ulong[] partnerOf = scratch.Partner;
+        uint[] anonymousOwner = scratch.AnonymousOwner;
+        byte[] state = scratch.State;
 
         // A DOM node that generated more than one box on either side pairs ambiguously.
-        Dictionary<NodeId, TaffyNodeId> oldByDom = new(previous.IdMap.Count);
-        HashSet<NodeId> ambiguous = [];
+        ulong[] oldBoxOfDom = scratch.OldBoxOfDom;
         foreach ((TaffyNodeId box, NodeId dom) in previous.IdMap)
         {
-            if (!oldByDom.TryAdd(dom, box))
+            ref ulong slotBox = ref oldBoxOfDom[dom.Index];
+            slotBox = slotBox == 0 ? box.Value : TransplantScratch.Ambiguous;
+            if (Slot(box) < scratch.OldSlots)
             {
-                ambiguous.Add(dom);
+                scratch.OldMapped[Slot(box)] = true;
             }
         }
 
-        HashSet<NodeId> seenNew = new(idMap.Count);
+        byte[] newBoxesOfDom = scratch.NewBoxesOfDom;
         foreach (NodeId dom in idMap.Values)
         {
-            if (!seenNew.Add(dom))
+            ref byte count = ref newBoxesOfDom[dom.Index];
+            if (count < 2)
             {
-                ambiguous.Add(dom);
+                count++;
+            }
+        }
+
+        foreach (TaffyNodeId box in words.Keys)
+        {
+            scratch.NewWord[Slot(box)] = true;
+        }
+
+        foreach (TaffyNodeId box in previous.Words.Keys)
+        {
+            if (Slot(box) < scratch.OldSlots)
+            {
+                scratch.OldWord[Slot(box)] = true;
+            }
+        }
+
+        foreach (TaffyNodeId box in nativeControlContent.Keys)
+        {
+            scratch.NewControl[Slot(box)] = true;
+        }
+
+        foreach (TaffyNodeId box in previous.NativeControlContent.Keys)
+        {
+            if (Slot(box) < scratch.OldSlots)
+            {
+                scratch.OldControl[Slot(box)] = true;
             }
         }
 
         // Pair top-down. A mapped box pairs through its DOM node wherever it sits; an anonymous
         // box pairs with the anonymous box at the same index under its parent's partner.
-        Dictionary<TaffyNodeId, TaffyNodeId> partner = new(idMap.Count + 16);
-        Dictionary<TaffyNodeId, NodeId> anonymousOwners = [];
         List<TaffyNodeId> order = new(idMap.Count + 16);
         Stack<(TaffyNodeId Node, TaffyNodeId? Partner, NodeId? Owner)> walk = new();
         walk.Push((root, PartnerOf(root, null, 0), null));
@@ -306,43 +463,44 @@ internal sealed class RetainedTaffyLayout
         {
             WorkCancellation.ThrowIfCancellationRequested();
             (TaffyNodeId node, TaffyNodeId? paired, NodeId? owner) = walk.Pop();
-            NodeId? domOwner = idMap.TryGetValue(node, out NodeId mapped) ? mapped : owner;
+            bool mapped = idMap.TryGetValue(node, out NodeId mappedDom);
+            NodeId? domOwner = mapped ? mappedDom : owner;
+            int slot = Slot(node);
             if (paired is { } p)
             {
-                partner[node] = p;
+                partnerOf[slot] = p.Value;
             }
 
             order.Add(node);
-            IReadOnlyList<TaffyNodeId> children = tree.ChildrenView(node);
+            List<TaffyNodeId> children = tree.ChildrenList(node);
             for (int index = 0; index < children.Count; index++)
             {
                 walk.Push((children[index], PartnerOf(children[index], paired, index), domOwner));
             }
 
             // The owner is only needed for anonymous boxes; remember it per box.
-            if (!idMap.ContainsKey(node) && owner is { } anonymousOwner)
+            if (!mapped && owner is { } ownerId)
             {
-                anonymousOwners[node] = anonymousOwner;
+                anonymousOwner[slot] = ownerId.Value + 1;
             }
         }
 
         // Decide bottom-up: children are always decided before their parent because `order` is
         // a pre-order walk.
-        Dictionary<TaffyNodeId, bool> clean = new(order.Count);
-        int carried = 0;
         for (int position = order.Count - 1; position >= 0; position--)
         {
             TaffyNodeId node = order[position];
-            bool isClean = IsClean(node);
-            clean[node] = isClean;
+            state[Slot(node)] = IsClean(node) ? (byte)1 : (byte)2;
         }
 
         // Transplant top-down so a carried box's descendants are all carried with it.
+        int carried = 0;
         foreach (TaffyNodeId node in order)
         {
-            if (clean.TryGetValue(node, out bool isClean) && isClean)
+            int slot = Slot(node);
+            if (state[slot] == 1)
             {
-                tree.TransplantFrom(node, old, partner[node]);
+                tree.TransplantFrom(node, old, new TaffyNodeId(partnerOf[slot]));
                 carried++;
             }
         }
@@ -353,15 +511,17 @@ internal sealed class RetainedTaffyLayout
         {
             if (idMap.TryGetValue(node, out NodeId dom))
             {
-                return !ambiguous.Contains(dom) && oldByDom.TryGetValue(dom, out TaffyNodeId found)
-                    ? found
+                ulong box = oldBoxOfDom[dom.Index];
+                return newBoxesOfDom[dom.Index] == 1 && box != 0 && box != TransplantScratch.Ambiguous
+                    ? new TaffyNodeId(box)
                     : null;
             }
 
             if (parentPartner is { } parentOld)
             {
-                IReadOnlyList<TaffyNodeId> oldChildren = old.ChildrenView(parentOld);
-                if (index < oldChildren.Count && !previous.IdMap.ContainsKey(oldChildren[index]))
+                List<TaffyNodeId> oldChildren = old.ChildrenList(parentOld);
+                if (index < oldChildren.Count
+                    && !(Slot(oldChildren[index]) < scratch.OldSlots && scratch.OldMapped[Slot(oldChildren[index])]))
                 {
                     return oldChildren[index];
                 }
@@ -372,10 +532,19 @@ internal sealed class RetainedTaffyLayout
 
         bool IsClean(TaffyNodeId node)
         {
-            if (!partner.TryGetValue(node, out TaffyNodeId oldNode) || !old.Contains(oldNode))
+            int slot = Slot(node);
+            if (partnerOf[slot] == 0)
             {
                 return false;
             }
+
+            TaffyNodeId oldNode = new(partnerOf[slot]);
+            if (!old.Contains(oldNode))
+            {
+                return false;
+            }
+
+            int oldSlot = Slot(oldNode);
 
             // The DOM content this box was built from.
             if (idMap.TryGetValue(node, out NodeId dom))
@@ -385,26 +554,33 @@ internal sealed class RetainedTaffyLayout
                     return false;
                 }
             }
-            else if (!anonymousOwners.TryGetValue(node, out NodeId owner) || dirty.Contains(owner))
+            else if (anonymousOwner[slot] == 0 || dirty.Contains(new NodeId(anonymousOwner[slot] - 1)))
             {
                 return false;
             }
 
-            if (words.TryGetValue(node, out (NodeId Source, string Word) word))
+            bool oldWord = oldSlot < scratch.OldSlots && scratch.OldWord[oldSlot];
+            if (scratch.NewWord[slot])
             {
-                if (dirty.Contains(word.Source)
-                    || !previous.Words.TryGetValue(oldNode, out (NodeId Source, string Word) oldWord)
-                    || oldWord.Source != word.Source
-                    || !string.Equals(oldWord.Word, word.Word, StringComparison.Ordinal))
+                (NodeId Source, string Word) word = words[node];
+                if (!oldWord
+                    || dirty.Contains(word.Source)
+                    || !previous.Words.TryGetValue(oldNode, out (NodeId Source, string Word) previousWord)
+                    || previousWord.Source != word.Source
+                    || !string.Equals(previousWord.Word, word.Word, StringComparison.Ordinal))
                 {
                     return false;
                 }
             }
-            else if (previous.Words.ContainsKey(oldNode))
+            else if (oldWord)
             {
                 return false;
             }
 
+            // A box whose layout read the floats of its formatting context (a line box beside
+            // one, a float it placed): what that layout left in its inline item (the exclusions
+            // Finalize lays the lines out around again) is not carried with the cache, and a hit
+            // on an ancestor would skip the layout that sets it.
             if (old.IsFloatDependent(oldNode))
             {
                 return false;
@@ -416,18 +592,10 @@ internal sealed class RetainedTaffyLayout
                 return false;
             }
 
-            // With floats, carry over only a subtree that holds none: its layout is then a
-            // function of the subtree alone wherever it sits, since a box that establishes a
-            // formatting context keeps outside floats out of it.
-            if (floats && style.Float != Layout.Float.None)
-            {
-                return false;
-            }
-
             // An empty previous cache would break taffy's dirty-propagation invariant (an empty
             // node under a non-empty ancestor) - except under display:none, which is never
             // cached and always laid out hidden, and for a box a tree with floats laid out in its
-            // parent's formatting context, which it never caches (TaffyTree.HasFloats). That box
+            // parent's formatting context, which it caches only when float-blind. That box
             // is only reached through its formatting context's root, which re-lays it out, or
             // answers from its own cache and leaves the carried layouts in place; and MarkDirty
             // walks to the root once anything is carried over.
@@ -454,18 +622,26 @@ internal sealed class RetainedTaffyLayout
                 }
             }
 
-            bool hasControl = nativeControlContent.TryGetValue(node, out Size<float> control);
-            bool hadControl = previous.NativeControlContent.TryGetValue(oldNode, out Size<float> oldControl);
-            if (hasControl != hadControl
-                || (hasControl
-                    && (BitConverter.SingleToInt32Bits(control.Width) != BitConverter.SingleToInt32Bits(oldControl.Width)
-                        || BitConverter.SingleToInt32Bits(control.Height) != BitConverter.SingleToInt32Bits(oldControl.Height))))
+            bool hasControl = scratch.NewControl[slot];
+            bool hadControl = oldSlot < scratch.OldSlots && scratch.OldControl[oldSlot];
+            if (hasControl != hadControl)
             {
                 return false;
             }
 
-            IReadOnlyList<TaffyNodeId> children = tree.ChildrenView(node);
-            IReadOnlyList<TaffyNodeId> oldChildren = old.ChildrenView(oldNode);
+            if (hasControl)
+            {
+                Size<float> control = nativeControlContent[node];
+                Size<float> oldControl = previous.NativeControlContent[oldNode];
+                if (BitConverter.SingleToInt32Bits(control.Width) != BitConverter.SingleToInt32Bits(oldControl.Width)
+                    || BitConverter.SingleToInt32Bits(control.Height) != BitConverter.SingleToInt32Bits(oldControl.Height))
+                {
+                    return false;
+                }
+            }
+
+            List<TaffyNodeId> children = tree.ChildrenList(node);
+            List<TaffyNodeId> oldChildren = old.ChildrenList(oldNode);
             if (children.Count != oldChildren.Count)
             {
                 return false;
@@ -473,10 +649,8 @@ internal sealed class RetainedTaffyLayout
 
             for (int index = 0; index < children.Count; index++)
             {
-                TaffyNodeId child = children[index];
-                if (!clean.TryGetValue(child, out bool childClean)
-                    || !childClean
-                    || partner[child] != oldChildren[index])
+                int childSlot = Slot(children[index]);
+                if (state[childSlot] != 1 || partnerOf[childSlot] != oldChildren[index].Value)
                 {
                     return false;
                 }
@@ -536,19 +710,47 @@ internal sealed class RetainedTaffyLayout
             return true;
         }
 
-        foreach (List<GridTemplateComponent> list in (List<GridTemplateComponent>[])[style.GridTemplateRows, style.GridTemplateColumns])
+        return AnyCalcTemplate(style.GridTemplateRowsIfAny)
+            || AnyCalcTemplate(style.GridTemplateColumnsIfAny)
+            || AnyCalcTrack(style.GridAutoRowsIfAny)
+            || AnyCalcTrack(style.GridAutoColumnsIfAny);
+
+        static bool AnyCalcTemplate(List<GridTemplateComponent>? list)
         {
+            if (list is null)
+            {
+                return false;
+            }
+
             foreach (GridTemplateComponent component in list)
             {
                 if (component.Kind == GridTemplateComponentKind.Single
                     ? Track(component.Single)
-                    : component.Repetition is { } repetition && repetition.Tracks.Exists(Track))
+                    : component.Repetition is { } repetition && AnyCalcTrack(repetition.Tracks))
                 {
                     return true;
                 }
             }
+
+            return false;
         }
 
-        return style.GridAutoRows.Exists(Track) || style.GridAutoColumns.Exists(Track);
+        static bool AnyCalcTrack(List<TrackSizingFunction>? tracks)
+        {
+            if (tracks is null)
+            {
+                return false;
+            }
+
+            foreach (TrackSizingFunction track in tracks)
+            {
+                if (Track(track))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 }

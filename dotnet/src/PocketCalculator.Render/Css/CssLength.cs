@@ -319,7 +319,7 @@ public static class CssLength
                     continue;
                 }
 
-                if (current.ToString().Trim().Length != 0)
+                if (current.ToString().AsSpan().Trim().Length != 0)
                 {
                     terms.Add((sign, current.ToString()));
                     current.Clear();
@@ -332,7 +332,7 @@ public static class CssLength
             current.Append(character);
         }
 
-        if (current.ToString().Trim().Length != 0)
+        if (current.ToString().AsSpan().Trim().Length != 0)
         {
             terms.Add((sign, current.ToString()));
         }
@@ -398,7 +398,7 @@ public static class CssLength
                         break;
                     }
 
-                    if (current.ToString().Trim().Length == 0)
+                    if (current.ToString().AsSpan().Trim().Length == 0)
                     {
                         return null;
                     }
@@ -413,7 +413,7 @@ public static class CssLength
             }
         }
 
-        if (current.ToString().Trim().Length == 0)
+        if (current.ToString().AsSpan().Trim().Length == 0)
         {
             return null;
         }

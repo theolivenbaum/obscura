@@ -72,7 +72,7 @@ internal static partial class DomBuild
         {
             // Collapsible source formatting at the edges of an inline run creates no line width.
             bool IsWhitespaceText(NodeId cid) =>
-                tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).Trim().Length == 0;
+                tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).AsSpan().Trim().Length == 0;
 
             while (run.Count != 0 && IsWhitespaceText(run[0]))
             {
@@ -286,7 +286,7 @@ internal static partial class DomBuild
         // Every table-internal child except a column generates the anonymous table: a column
         // has nothing to size on its own, and a table holding only columns has no cells, so
         // BuildTable would answer null and the fallback would render the columns' contents.
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
         {
             if (!styles.TryGetValue(child, out LayoutStyle? childStyle)
                 || childStyle.Display == Display.None)
@@ -628,7 +628,7 @@ internal static partial class DomBuild
             // Source formatting between two table-internal boxes does not break the run.
             if (run.Count != 0
                 && tree.GetNode(child) is { IsElement: false }
-                && tree.TextContent(child).Trim().Length == 0)
+                && tree.TextContent(child).AsSpan().Trim().Length == 0)
             {
                 continue;
             }

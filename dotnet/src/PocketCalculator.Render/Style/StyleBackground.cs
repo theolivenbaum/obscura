@@ -159,7 +159,7 @@ public static partial class ComputedStyle
             }
         }
 
-        if (current.ToString().Trim().Length != 0)
+        if (current.ToString().AsSpan().Trim().Length != 0)
         {
             parts.Add(current.ToString());
         }

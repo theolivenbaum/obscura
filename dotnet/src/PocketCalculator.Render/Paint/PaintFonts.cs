@@ -33,11 +33,27 @@ internal static class PaintFonts
         List<WebFont> fonts = [];
         List<FontRule> rules = [];
 
+        // Critical web fonts are normally preloaded from the document with a URL already
+        // resolved relative to the HTML; collected in the same walk as the sheets.
+        List<string> preloads = [];
         foreach (NodeId nid in DomTraversal.RenderedDescendants(tree, tree.Document))
         {
-            if (tree.GetNode(nid)?.AsElement() is not { } element)
+            if (tree.GetNode(nid) is not { } node || node.AsElement() is not { } element)
             {
                 continue;
+            }
+
+            if (string.Equals(element.Name.Local, "link", StringComparison.Ordinal))
+            {
+                string rel = node.GetAttribute("rel") ?? string.Empty;
+                string asValue = node.GetAttribute("as") ?? string.Empty;
+                bool isPreload = rel.Split((char[])[' ', '\t', '\n', '\r', '\f'], StringSplitOptions.RemoveEmptyEntries)
+                    .Any(token => token.Equals("preload", StringComparison.OrdinalIgnoreCase));
+                if (isPreload && asValue.Equals("font", StringComparison.OrdinalIgnoreCase)
+                    && node.GetAttribute("href") is { } href)
+                {
+                    preloads.Add(href);
+                }
             }
 
             // A @font-face reaches here from a <style>'s own text, or from the CSS an element
@@ -60,30 +76,14 @@ internal static class PaintFonts
                 css = css.Length == 0 ? own : css + "\n" + own;
             }
 
-            foreach (string face in FontFaceBlocks(css))
+            foreach (FontFaceDescriptors face in FontFacesOf(css))
             {
-                if (!FontFaceCoversAscii(face))
-                {
-                    continue;
-                }
-
-                List<(string Key, string Source)> sources =
-                [
-                    .. FontFaceUrls(face)
-                        .Where(FontSourceMayBeSupported)
-                        .Select(src => (FontResourceKey(src, baseUrl), src)),
-                ];
-                if (sources.Count == 0)
-                {
-                    continue;
-                }
-
                 rules.Add(new FontRule
                 {
-                    Sources = sources,
-                    Family = FontFaceFamily(face),
-                    Weight = FontFaceWeight(face),
-                    Italic = FontFaceItalic(face),
+                    Sources = [.. face.Sources.Select(src => (FontResourceKey(src, baseUrl), src))],
+                    Family = face.Family,
+                    Weight = face.Weight,
+                    Italic = face.Italic,
                 });
             }
         }
@@ -116,29 +116,6 @@ internal static class PaintFonts
                 Weight = FontFaceWeight(descriptorBlock),
                 Italic = FontFaceItalic(descriptorBlock),
             });
-        }
-
-        // Critical web fonts are normally preloaded from the document with a URL already
-        // resolved relative to the HTML.
-        List<string> preloads = [];
-        foreach (NodeId nid in DomTraversal.RenderedDescendants(tree, tree.Document))
-        {
-            Node? node = tree.GetNode(nid);
-            if (node?.AsElement() is not { } element
-                || !string.Equals(element.Name.Local, "link", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            string rel = node.GetAttribute("rel") ?? string.Empty;
-            string asValue = node.GetAttribute("as") ?? string.Empty;
-            bool isPreload = rel.Split((char[])[' ', '\t', '\n', '\r', '\f'], StringSplitOptions.RemoveEmptyEntries)
-                .Any(token => token.Equals("preload", StringComparison.OrdinalIgnoreCase));
-            if (isPreload && asValue.Equals("font", StringComparison.OrdinalIgnoreCase)
-                && node.GetAttribute("href") is { } href)
-            {
-                preloads.Add(href);
-            }
         }
 
         foreach (string src in preloads.Take(16))
@@ -196,6 +173,57 @@ internal static class PaintFonts
         }
 
         return fonts;
+    }
+
+    /// <summary>The descriptors of one <c>@font-face</c> rule that covers ASCII and has a usable source.</summary>
+    private sealed record FontFaceDescriptors(
+        List<string> Sources,
+        string? Family,
+        (ushort Min, ushort Max)? Weight,
+        bool? Italic);
+
+    /// <summary>
+    /// The usable <c>@font-face</c> rules of each style sheet text, by the identity of the
+    /// string: an unchanged <c>&lt;style&gt;</c> or fetched sheet hands every pass the same
+    /// instance, and its rules are a function of its text alone.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which scans every sheet's text again on every pass. On
+    /// nvidia.com that was a lower-cased copy of 2 MB of CSS per forced read.
+    /// </remarks>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<string, List<FontFaceDescriptors>> FontFaceMemo = new();
+
+    private static List<FontFaceDescriptors> FontFacesOf(string css)
+    {
+        if (css.Length == 0)
+        {
+            return [];
+        }
+
+        if (FontFaceMemo.TryGetValue(css, out List<FontFaceDescriptors>? memoized))
+        {
+            return memoized;
+        }
+
+        List<FontFaceDescriptors> faces = [];
+        foreach (string face in FontFaceBlocks(css))
+        {
+            if (!FontFaceCoversAscii(face))
+            {
+                continue;
+            }
+
+            List<string> sources = [.. FontFaceUrls(face).Where(FontSourceMayBeSupported)];
+            if (sources.Count == 0)
+            {
+                continue;
+            }
+
+            faces.Add(new FontFaceDescriptors(sources, FontFaceFamily(face), FontFaceWeight(face), FontFaceItalic(face)));
+        }
+
+        FontFaceMemo.AddOrUpdate(css, faces);
+        return faces;
     }
 
     /// <summary>Exclude source formats the font database cannot consume before requesting.</summary>

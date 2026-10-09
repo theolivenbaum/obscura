@@ -69,7 +69,7 @@ internal static partial class DomBuild
             && style.Display != Display.None
             && style.Position != TaffyPosition.Absolute;
         bool IsWhitespace(NodeId cid) =>
-            tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).Trim().Length == 0;
+            tree.GetNode(cid) is { IsText: true } && tree.TextContent(cid).AsSpan().Trim().Length == 0;
 
         List<Seg> expanded = new(segs.Count);
         for (int index = 0; index < segs.Count; index++)
@@ -337,7 +337,7 @@ internal static partial class DomBuild
             bool IsWhitespaceText(NodeId cid) =>
                 tree.GetNode(cid) is { } node
                 && node.IsText
-                && tree.TextContent(cid).Trim().Length == 0;
+                && tree.TextContent(cid).AsSpan().Trim().Length == 0;
 
             int start = seg.Run.Count;
             for (int index = 0; index < seg.Run.Count; index++)

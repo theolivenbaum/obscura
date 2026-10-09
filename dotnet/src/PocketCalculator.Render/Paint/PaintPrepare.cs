@@ -64,6 +64,7 @@ internal static class PaintApi
         }
 
         LayoutPhaseProfile.Begin();
+        using DomTraversal.DocumentWalkScope walk = DomTraversal.ShareDocumentWalk(tree);
         // Fetch <img> bytes up front to learn intrinsic sizes for layout. This seeds the same
         // cache the paint pass reads, so each URL is still fetched at most once.
         (Dictionary<NodeId, ReplacedIntrinsic> intrinsic, Dictionary<NodeId, SelectedImage> selectedImages) =
@@ -160,7 +161,7 @@ internal static class PaintApi
             : laid.DerivedLayoutState(tree, viewport);
         LayoutPhaseProfile.Mark("derived");
         float rootFontSize = 16f;
-        if (tree.QuerySelector("html") is { } root
+        if (DomTraversal.HtmlElement(tree) is { } root
             && laid.Styles.TryGetValue(root, out LayoutStyle? rootStyle)
             && rootStyle.FontSize is { } size)
         {

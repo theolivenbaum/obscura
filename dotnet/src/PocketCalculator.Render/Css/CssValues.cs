@@ -446,7 +446,7 @@ public static class CssValues
                         return null;
                     }
 
-                    if (separatorToken.Remainder.Trim().Length != 0)
+                    if (separatorToken.Remainder.AsSpan().Trim().Length != 0)
                     {
                         return null;
                     }

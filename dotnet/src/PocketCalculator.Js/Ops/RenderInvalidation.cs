@@ -375,7 +375,14 @@ internal static class RenderInvalidation
                     return null;
                 }
 
-                return RetainedStyleMutation.From(new TreeStyleMutation.Remove(node, oldParent));
+                // Captured now, while the subtree is still in the document: what it held decides
+                // which :has() rules its removal can reach (RemovedSubtreeFeatures).
+                return RetainedStyleMutation.From(new TreeStyleMutation.Remove(node, oldParent)
+                {
+                    Features = RemovedSubtreeFeatures.Capture(dom, node),
+                    NextSiblingRecorded = true,
+                    OldNextSibling = dom.GetNode(node)?.NextSibling,
+                });
             }
 
             case "insert_before":

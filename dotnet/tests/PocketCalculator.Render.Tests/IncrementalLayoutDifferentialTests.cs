@@ -49,6 +49,23 @@ public class IncrementalLayoutDifferentialTests
         .aft::after{content:" [" attr(data-x) "]"}
         .tbl{display:table;border-spacing:3px}
         .cell{display:table-cell;padding:2px;border:1px solid}
+        .sib + *{margin-left:9px}
+        .sib ~ p{font-size:17px}
+        div:has(> .hl){padding:4px}
+        p:has(b.hl){letter-spacing:2px}
+        body:has(.sib){word-spacing:1px}
+        ul:has(li .hl){padding-left:3px}
+        li:nth-child(2n){padding-left:5px}
+        :nth-child(3) ~ * .a{margin-right:4px}
+        :is(li:last-child + *, ul > :first-of-type) b{font-style:italic}
+        ul > :first-child{border-top:3px solid}
+        :empty{min-height:3px}
+        [data-x=v1]{font-weight:bold}
+        [title]{border-left:2px solid}
+        body{counter-reset:sec}
+        .sec::before{counter-increment:sec;content:counters(sec, ".") " ";display:block}
+        .bfr::before{content:"* "}
+        .bfr::after{content:" end";display:inline-block;width:30px}
         """;
 
     private static readonly string[] Fixtures =
@@ -140,7 +157,8 @@ public class IncrementalLayoutDifferentialTests
     ];
 
     private static readonly string[] Classes =
-        ["a", "b", "c", "hide", "wide", "pad", "flt", "fltr", "abs", "rel", "flex", "grid", "big", "inl", "clr", "ovf", "pre", "nw", "grow", "cnt", "aft"];
+        ["a", "b", "c", "hide", "wide", "pad", "flt", "fltr", "abs", "rel", "flex", "grid", "big", "inl", "clr", "ovf", "pre", "nw", "grow", "cnt", "aft",
+         "sib", "hl", "sec", "bfr"];
 
     private static readonly string[] Declarations =
     [
@@ -151,6 +169,8 @@ public class IncrementalLayoutDifferentialTests
         "box-sizing:border-box;width:100px;padding:10px", "transform:translateX(10px)", "visibility:hidden",
         "text-align:center", "text-align:right", "text-align:justify", "text-align:end;text-align-last:center",
         "direction:rtl", "white-space:pre-wrap",
+        "display:inline-block", "display:contents", "display:table", "float:right;width:30%", "clear:left",
+        "display:list-item", "counter-increment:sec 2",
     ];
 
     private static readonly string[] Words =
@@ -304,6 +324,48 @@ public class IncrementalLayoutDifferentialTests
     }
 
     /// <summary>
+    /// A retained restyle of one element runs the top-down style pass only along the path to it
+    /// (and, the pass after, the elements the previous one cascaded afresh): the rest of the
+    /// document receives the context it received before and keeps what that pass computed.
+    /// </summary>
+    [Fact]
+    public void ARetainedRestyleVisitsOnlyThePathToTheChange()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss + "</style></head><body><div class=grid>");
+        for (int i = 0; i < 60; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<div id=g{i} class=a>item <b>{i}</b> text</div>");
+        }
+
+        html.Append("</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        int fullVisits = previous.Layout.TopDownVisits;
+        Assert.True(fullVisits > 120, $"full pass visited {fullVisits}");
+        string[] targets = ["g7", "g8", "g30", "g7", "g59"];
+        for (int step = 0; step < targets.Length; step++)
+        {
+            NodeId target = tree.GetElementById(targets[step])!.Value;
+            string old = tree.GetNode(target)!.GetAttribute("class")!;
+            string value = old == "a" ? "a c" : "a";
+            tree.GetNode(target)!.SetAttribute("class", value);
+            previous = RenderPaint.PrepareDomWithRetainedStyles(
+                tree, Viewport, null, resources, [], cache, previous,
+                [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", old, value))])!;
+
+            // The first retained pass follows a full one, whose fresh styles it visits again.
+            if (step > 0)
+            {
+                Assert.True(previous.Layout.TopDownVisits < 20, $"step {step} visited {previous.Layout.TopDownVisits}");
+            }
+
+            Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, previous));
+        }
+    }
+
+    /// <summary>
     /// What a retained pass carries over is bounded: one previous layout's box tree and items,
     /// and nothing of the passes before it. A pass's engine that kept the one it took items from
     /// would chain every engine since the page loaded.
@@ -323,6 +385,119 @@ public class IncrementalLayoutDifferentialTests
 
         Assert.False(first.IsAlive, "the first pass's text engine is still reachable");
         Assert.True(latest.Layout.AdoptedInlineItems > 0);
+    }
+
+    /// <summary>
+    /// The box tree a retained pass carried its layouts over from is emptied once they are
+    /// carried: its slot arrays are large objects, which a young-generation collection treats as
+    /// live, so a tree left holding its boxes kept every box tree built since the last full
+    /// collection from being collected young.
+    /// </summary>
+    [Fact]
+    public void AConsumedBoxTreeLetsGoOfItsBoxes()
+    {
+        DomTree tree = HtmlParsing.ParseHtml(Html(0));
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        RetainedTaffyLayout boxes = first.Layout.RetainedBoxes!;
+        Assert.True(boxes.Tree.TotalNodeCount() > 20);
+        NodeId target = tree.GetElementById("d1")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "b c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "b", "b c"))])!;
+
+        Assert.True(second.Layout.TransplantedBoxes > 0);
+        Assert.True(boxes.Consumed);
+        Assert.Equal(0, boxes.Tree.TotalNodeCount());
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
+    /// <summary>
+    /// With a <c>body:has(...)</c> rule in the sheet, removing an element its relative selector
+    /// cannot match restyles only around the removal, and removing one it can match restyles
+    /// the whole body (nvidia.com removed a scrollbar probe from <c>&lt;body&gt;</c> before
+    /// every forced read, and each removal re-cascaded the document).
+    /// </summary>
+    [Fact]
+    public void ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " body:has(.modal-open){overflow:hidden;padding-right:15px}</style></head><body><div id=modal class=box><span class=modal-open>m</span></div>");
+        for (int i = 0; i < 40; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i}</p>");
+        }
+
+        // Last, so the sheet's sibling combinators reach nothing after it.
+        html.Append("<div id=probe class=probe>x</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+
+        // A first retained pass revisits what the full one cascaded; the next is the steady state.
+        NodeId para = tree.GetElementById("p3")!.Value;
+        tree.GetNode(para)!.SetAttribute("class", "c");
+        previous = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, previous,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(para, "class", null, "c"))])!;
+
+        NodeId probe = tree.GetElementById("probe")!.Value;
+        NodeId body = tree.GetNode(probe)!.Parent!.Value;
+        TreeStyleMutation.Remove unrelated = new(probe, body)
+        {
+            Features = RemovedSubtreeFeatures.Capture(tree, probe),
+            NextSiblingRecorded = true,
+            OldNextSibling = tree.GetNode(probe)!.NextSibling,
+        };
+        tree.RemoveChild(probe);
+        PreparedRender afterProbe = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, previous, [RetainedStyleMutation.From(unrelated)])!;
+        Assert.True(afterProbe.Layout.TopDownVisits < 20, $"visited {afterProbe.Layout.TopDownVisits}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, afterProbe));
+
+        NodeId modal = tree.GetElementById("modal")!.Value;
+        TreeStyleMutation.Remove related = new(modal, body) { Features = RemovedSubtreeFeatures.Capture(tree, modal) };
+        tree.RemoveChild(modal);
+        PreparedRender afterModal = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, afterProbe, [RetainedStyleMutation.From(related)])!;
+        Assert.True(afterModal.Layout.TopDownVisits > 40, $"visited {afterModal.Layout.TopDownVisits}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, afterModal));
+    }
+
+    /// <summary>
+    /// An inline item taken over by a retained pass is not laid out again when its box's final
+    /// layout asks for the width the previous pass finalized it at: its buffer is the one that
+    /// pass left (an item with a text indent used to copy its whole source buffer for it).
+    /// </summary>
+    [Fact]
+    public void ATakenOverItemKeepsTheLayoutItWasFinalizedAt()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " p{text-indent:12px}</style></head><body><div id=t class=a>toggle</div>");
+        for (int i = 0; i < 12; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i} with <b class=a>inline box</b> words that wrap onto a second line of text</p>");
+        }
+
+        html.Append("</body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        NodeId paragraph = tree.GetElementById("p5")!.Value;
+        TextBuffer before = first.Layout.TextEngine.Items[first.Layout.IfcItems[paragraph]].Buffer;
+        NodeId target = tree.GetElementById("t")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "a c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a c"))])!;
+
+        Assert.True(second.Layout.AdoptedInlineItems >= 12, $"adopted {second.Layout.AdoptedInlineItems}");
+        Assert.Same(before, second.Layout.TextEngine.Items[second.Layout.IfcItems[paragraph]].Buffer);
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
@@ -345,9 +520,9 @@ public class IncrementalLayoutDifferentialTests
     }
 
     /// <summary>
-    /// A page with floats still carries over a float-free subtree that establishes its own
-    /// formatting context (here an <c>overflow: hidden</c> block), whose layout outside floats
-    /// cannot reach.
+    /// A page with floats carries over a float-free subtree that establishes its own formatting
+    /// context (here an <c>overflow: hidden</c> block), whose layout outside floats cannot reach,
+    /// and takes over its inline items.
     /// </summary>
     [Fact]
     public void AFloatPageCarriesOverAFloatFreeFormattingContext()
@@ -371,8 +546,50 @@ public class IncrementalLayoutDifferentialTests
             [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a c"))])!;
 
         Assert.True(second.Layout.TransplantedBoxes > 30, $"carried {second.Layout.TransplantedBoxes}");
-        Assert.Equal(0, second.Layout.AdoptedInlineItems);
+        Assert.True(second.Layout.AdoptedInlineItems >= 30, $"adopted {second.Layout.AdoptedInlineItems}");
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
+    /// <summary>
+    /// With a float at the top of the page, the paragraphs below it share its block formatting
+    /// context; their layouts read nothing of the float (it ends above them), so they are
+    /// carried over, their inline items taken over, and a mutation that moves them answers
+    /// them from the float-blind cache.
+    /// </summary>
+    [Fact]
+    public void AFloatPageCarriesOverBlocksBelowItsFloats()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + "</style></head><body><div class=flt id=f>float</div><p id=t class=a>toggle text beside the float</p><div class=clr id=below>");
+        for (int i = 0; i < 30; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i} with some words in it</p>");
+        }
+
+        html.Append("</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+
+        // A mutation below the float: everything else is carried over.
+        NodeId last = tree.GetElementById("p29")!.Value;
+        tree.GetNode(last)!.SetAttribute("class", "c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(last, "class", null, "c"))])!;
+        Assert.True(second.Layout.TransplantedBoxes > 25, $"carried {second.Layout.TransplantedBoxes}");
+        Assert.True(second.Layout.AdoptedInlineItems > 25, $"adopted {second.Layout.AdoptedInlineItems}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+
+        // A mutation beside the float that moves everything below it.
+        NodeId target = tree.GetElementById("t")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "a big");
+        PreparedRender third = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, second,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a big"))])!;
+        Assert.True(third.Layout.AdoptedInlineItems > 25, $"adopted {third.Layout.AdoptedInlineItems}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, third));
     }
 
     private static PreparedRender Reference(DomTree tree)
@@ -458,12 +675,27 @@ public class IncrementalLayoutDifferentialTests
             }
             else
             {
-                next = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations);
+                try
+                {
+                    next = RenderPaint.PrepareDomWithRetainedStyles(tree, Viewport, null, resources, [], cache, previous, mutations);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    throw new InvalidOperationException($"fixture {fixture} seed {seed} step {step}: the incremental pass failed\nmutations:\n{log}", exception);
+                }
             }
 
             Assert.NotNull(next);
             string incremental = Snapshot(tree, next);
-            string reference = Snapshot(tree, Reference(tree));
+            string reference;
+            try
+            {
+                reference = Snapshot(tree, Reference(tree));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                throw new InvalidOperationException($"fixture {fixture} seed {seed} step {step}: the reference failed\nmutations:\n{log}", exception);
+            }
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
             {
                 if (Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_DUMP") is { } dumpDir)
@@ -680,7 +912,16 @@ public class IncrementalLayoutDifferentialTests
                     return null;
                 }
 
-                mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Remove(target, parent)));
+                // As the ops record it: what the subtree held is captured before it leaves, and
+                // decides which :has() rules the removal reaches. Sometimes left out, the
+                // conservative path every rule reaches. The old next sibling likewise.
+                bool recordNext = rng.Next(4) != 0;
+                mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Remove(target, parent)
+                {
+                    Features = rng.Next(4) == 0 ? null : RemovedSubtreeFeatures.Capture(tree, target),
+                    NextSiblingRecorded = recordNext,
+                    OldNextSibling = recordNext ? tree.GetNode(target)?.NextSibling : null,
+                }));
                 tree.RemoveChild(target);
                 return $"remove #{target}";
             }

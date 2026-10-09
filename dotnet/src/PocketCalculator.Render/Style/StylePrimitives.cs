@@ -883,7 +883,7 @@ public static partial class ComputedStyle
                 }
                 else
                 {
-                    if (current.ToString().Trim().Length != 0)
+                    if (current.ToString().AsSpan().Trim().Length != 0)
                     {
                         terms.Add((sign, current.ToString()));
                         current.Clear();
@@ -898,7 +898,7 @@ public static partial class ComputedStyle
             }
         }
 
-        if (current.ToString().Trim().Length != 0)
+        if (current.ToString().AsSpan().Trim().Length != 0)
         {
             terms.Add((sign, current.ToString()));
         }
@@ -960,7 +960,7 @@ public static partial class ComputedStyle
             }
             else if ((character == '*' || character == '/') && depth == 0)
             {
-                if (current.ToString().Trim().Length == 0)
+                if (current.ToString().AsSpan().Trim().Length == 0)
                 {
                     return null;
                 }
@@ -975,7 +975,7 @@ public static partial class ComputedStyle
             }
         }
 
-        if (current.ToString().Trim().Length == 0)
+        if (current.ToString().AsSpan().Trim().Length == 0)
         {
             return null;
         }

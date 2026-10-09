@@ -267,7 +267,7 @@ internal static class PaintImages
             }
 
             string? srcset = child.GetAttribute("srcset");
-            if (srcset is null || srcset.Trim().Length == 0)
+            if (srcset is null || srcset.AsSpan().Trim().Length == 0)
             {
                 continue;
             }
@@ -278,7 +278,7 @@ internal static class PaintImages
             }
 
             if (child.GetAttribute("media") is { } media
-                && media.Trim().Length > 0
+                && media.AsSpan().Trim().Length > 0
                 && !Css.CssMediaQuery.AppliesForViewport(media, viewport))
             {
                 continue;

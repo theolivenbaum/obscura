@@ -498,6 +498,34 @@ Found during the review, not from upstream:
   walks skipped for clean subtrees. `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints
   the per-phase split of every prepare.
 
+  Phase 2 (October 2026): float-heavy formatting contexts carry over, the cascade
+  and top-down pass walk only the paths to fresh styles, the whole-document
+  walks around a pass are shared or memoized, a pass allocates about a quarter
+  less, a consumed box tree is emptied so the GC stops promoting it, and a
+  removal restyles only what it can reach (see the matching Known deviations
+  sections). Interleaved against 1001c70, same build settings, three runs each:
+  nvidia.com (live, CDP) goto 30.2-30.4s -> 20.2-30.2s (the cap is hit in the
+  page variant whose removals restyle the document), forced reads 21.1-22.0s
+  for ~117 -> 12.4-14.4s for ~175, 75 `offsetParent` reads 4.2-4.8s (base
+  reached only 30-31 of them in 10.1-10.4s), `clientWidth` 31-33 reads in
+  3.7-3.8s -> 41-55 in 3.8-4.4s, 20 `offsetHeight` 2.6-3.0s -> 1.4-2.6s,
+  `getBoundingClientRect` 3.3-3.6s -> 1.8-2.4s, peak RSS 1.30-1.85GB ->
+  0.90-1.21GB; reddit.com goto 16.5-30.3s -> 15.4-17.4s, peak RSS 0.76-1.03GB
+  -> 0.82-1.23GB. 2,000 grid items: 50 toggles 8.0-9.1s -> 4.1-4.4s; 2,000
+  list items 6.6-7.3s -> 3.1-3.7s; float article, top paragraph growing
+  134-172ms -> 51-68ms. Render layout performance classes: LargeTree 19-20s ->
+  14.5-15.7s, the others within noise.
+
+  Not done: patching the retained box tree in place (step 3). `LayoutStyle`s
+  are written in place by the top-down pass, the fixups and the repairs, so
+  "this subtree's inputs did not change" has no sound signal short of
+  comparing outputs, which is what `RetainedTaffyLayout.Transplant` already
+  does; the build was made cheaper instead. Scoped layout (step 5) is not
+  started. The early passes of a page are dominated by JIT warmup (bin builds
+  run tier-0 code): `DOTNET_TC_CallCountingDelayMs=0` cut the first 30 passes
+  on the nvidia.com snapshot 5.4s -> 3.1s with no cold-start regression, and a
+  ReadyToRun publish removes most of it; neither is applied by the engine.
+
 - **`#/view/Masonry` on the Tesserae sample app still never lays out**, and F39
   attributes it to the wrong cost. Instrumented per prepare (`PREP #n`), the
   route runs ~33 prepares totalling 13.4s, of which #7-#31 are twenty-five
@@ -1499,6 +1527,11 @@ changes, each commented at the site:
 - a float is placed after the pending margin (Chromium's `NextBorderEdge`), a same-BFC child's
   sub-context sits at its collapsed border-top, and clearance applies only when the
   hypothetical position is above the floats (taffy added the margin after clearing);
+- a float whose bottom lands exactly on a segment boundary by rounding is placed in the segment
+  that holds its bottom (taffy subdivided the next segment at its start and threw, failing the
+  whole layout: the fitter sums the free height in double, the bottom is one float sum);
+  pinned by `FloatContextTests.AFloatWhoseBottomLandsOnASegmentBoundaryByRoundingIsPlaced`,
+  found by the incremental-layout differential test on `wiki-footer`;
 - a float taller than every earlier one extends the segments (taffy left the part below the
   last segment excluding nothing);
 - a float-avoiding box moves down until it fits (taffy took the first slot at any width);
@@ -2835,6 +2868,189 @@ descriptors, in order. Adoption also requires the same emoji-face choice: the em
 between the directory faces and the web fonts, so loading it renumbers every web font's `FontId`,
 which keys a shaped paragraph. Pinned by `ShapeCacheAdoptionTests` (Render).
 
+### A retained restyle walks only the paths to its fresh styles
+
+DEVIATION from `crates/obscura-render`, which reuses retained styles but still walks the whole
+document on every pass: the cascade visits every node (pushing each onto the selector
+matcher's ancestor filter), the counter walk renders every pseudo's generated content, the
+top-down pass recomputes every element's inherited context, and a few fixups walk the document
+to find tables, rows and grids. Each is now proportional to the change:
+
+- the cascade descends only into nodes on a path to a fresh style (`DomCascade.StylePaths`:
+  each fresh node and everything above it in the DOM and the flat tree). A fresh set already
+  holds every style a mutation reaches (descendants, following siblings, `:has()` anchors,
+  structural pseudo-classes; `RetainedStylePlanner.Plan`), and `PrepareRetainedStyles` adds
+  any connected element that has no retained style;
+- the counter walk is skipped when no `::before`/`::after` content holds `counter()` or
+  `counters()`: it would render each pseudo's text as the zero-counter text the cascade gave it;
+- the top-down pass skips an element, and everything below it, when nothing below it is fresh
+  and it receives the very inherited context it received the last time it was visited
+  (`TopDownMemo`, compared field by field, `Inherited.SameAs`). That visit's writes onto the
+  retained styles below are what this one would write, given the same viewport, root font size
+  and fonts, which the memo also requires; the definite heights it found are carried. Styles
+  that were fresh in the previous pass are visited again, since the passes after the top-down
+  one write onto a fresh style before the next pass reads it retained; after a full pass every
+  element is. The memo is taken by the next layout, so a pass that throws leaves none;
+- table spacing, trailing-cell growth and grid-area resolution find their tables, rows and
+  grids among the styles instead of walking the document (each writes only its own boxes, so
+  order does not matter), and the quirks-mode doctype check reads the document's children.
+
+Measured on the nvidia.com snapshot (median retained pass, same build settings): cascade 3.7 ->
+0.8ms, counters 1.7 -> under 0.5ms, top-down 4.9 -> under 0.5ms (31 elements visited of
+4,060 boxes), fixups 3.5 -> under 0.8ms; a pass ~91 -> ~80ms. Pinned by
+`ARetainedRestyleVisitsOnlyThePathToTheChange` (Render); the differential test now also mutates
+under sibling-combinator, `:has()`, `:nth-child`, `:empty`, attribute selectors, nested
+`counters()` and `::before`/`::after` content, and display/float toggles, at 12 seeds per
+fixture and 4 per float page without a divergence. `POCKETCALCULATOR_FULL_RELAYOUT=1` turns the
+cascade and top-down skipping off.
+
+### A removal restyles only what the removed subtree and its old position can reach
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, whose removal records keep no sibling
+pointer and no picture of what left. On nvidia.com (one of the page's variants) a scrollbar
+probe added to and removed from `<body>` before forced reads, and each removal re-cascaded the
+whole document (12,760 fresh styles a pass) through three conservative scopes:
+
+- every `:has()` rule whose anchor may match an ancestor (`body:has(.modal-open)`) was reached
+  by any removal. `remove_child` now captures `RemovedSubtreeFeatures` while the subtree is
+  still attached (element keys and whether it held text, at most 512 elements, else nothing
+  is recorded and the old path applies), and a removal reaches a rule only when that subtree
+  holds an element its relative keys may match, or the rule has an unkeyed subject or a
+  sibling, structural or text side effect: the test an insertion already makes of what it
+  inserts;
+- a structural pseudo with a Conservative reach (`:nth-child(3) ~ * .a`, a structural pseudo
+  under `:is()` with another combinator) re-cascaded the whole parent subtree. It now takes the
+  candidate's subtree and its following siblings' subtrees: every combinator from the
+  candidate leads down or to later siblings, `:has()` is excluded and handled as a relational
+  rule, and the parent chain is re-cascaded through the style context chain anyway;
+- with sibling combinators in the sheet, every child of the old parent was re-cascaded, and
+  every sibling was a candidate for `:nth-child`, `:nth-last-child` and their `-of-type`
+  forms. `remove_child` now also records the old next sibling (`OldNextSibling`; a recorded
+  null means the node was last). While that node is still a child of the old parent, sibling
+  combinators re-cascade from it onward, `nth-child`/`nth-of-type` candidates are the siblings
+  from it onward and `nth-last-*` candidates the ones before it; otherwise the old scopes
+  apply.
+
+Pinned by `ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch` (Render). The differential test
+records the features and the next sibling three removals in four, and its sheet gained
+`body:has()`, `ul:has(li .hl)`, `:nth-child(3) ~ * .a` and
+`:is(li:last-child + *, ul > :first-of-type) b`; 24 seeds per fixture and 6 per float page ran
+without a divergence.
+
+### The whole-document work around a layout pass is shared, skipped or memoized
+
+DEVIATION from `crates/obscura-render`, which repeats all of it on every pass. Measured with an
+allocation trace and a sampled CPU trace of 400 forced reads on the nvidia.com snapshot, a pass
+allocated about 25 MB and spent a fifth of its time in garbage collection; most of the
+whole-document walks around the layout were allocation, not work:
+
+- the document's flat tree is walked once per prepare and the list shared by every walk that
+  reads it (images, fonts, the retained-style plan, fixed and sticky boxes, the scroll tree):
+  `DomTraversal.ShareDocumentWalk` (the DOM does not change while a prepare runs);
+- the walks that recurse per node (scroll owners, scrolling overflow, the clip walk) read a
+  node's children off the sibling chain (`DomTraversal.EachRenderedChild`) instead of
+  allocating a list per node; the clip walk shares one `OverflowClip` between the boxes under
+  it instead of copying it twice per node (nothing moves a stored clip in place: painters
+  clone first), and sizes its map to the tree;
+- shadow stylesheets are not looked for in a document without a shadow root, fixed-position
+  and sticky geometry are not walked without a fixed or sticky element, sticky geometry keeps
+  its per-node state in slot-indexed arrays, and `html` is found among the document's children
+  rather than by matching a selector against every element;
+- the font database and the families resolved from it are taken over from the previous pass's
+  engine when the font set is the same (`TextEngine.ForPass`; the same test that already lets a
+  pass take over shaped paragraphs; each engine keeps its own shaper and glyph caches), and a
+  `DomLayout` no longer builds a throwaway engine (and so a font database) in its initializer;
+- the per-word fallback's Skia advances are memoized by face and word (`DomTextMeasure`, bounded
+  at 65,536 words; the width is the same function of the memoized sum), and a word leaf is
+  shaped with `white-space: pre` handed to `TextEngine.PushGeneratedText` on its own rather
+  than in a copy of its style (first a copy per word, then one per text node: shaping only
+  reads the style, and the copies were a fifth of a retained build);
+- a carried box no longer gets a fresh empty cache left behind in the consumed tree;
+- selector matching no longer allocates a closure on every simple-selector test (the C#
+  compiler hoisted the lambdas of the nested cases to the method's entry).
+
+Measured on the nvidia.com snapshot, the same loop of a `margin-left` write and a read: 424
+passes in 45s before, 611 after; allocation ~25 -> ~19 MB a pass; median retained pass ~80 ->
+~70ms (the scroll tree 4.7 -> 3.1ms, clips 3.9 -> 2.8ms, engine 4.4 -> under 0.8ms, fixed
+nodes and sticky under 0.8ms). Results are unchanged by construction; the Render, Dom and Js
+suites pin them.
+
+### Work a retained pass repeats for unchanged text is skipped
+
+DEVIATION from `crates/obscura-render`, which lays every paragraph out again at its final width
+and resolves a span's font family list from its text on every use:
+
+- an inline item remembers the width and wrap its buffer was last laid out at without floats
+  (`InlineItem.ShapedFor`), and `TextEngine.ShapeWithTextIndent` asked for that same layout
+  again keeps it. Only that method and `ShapeAroundFloats` lay a buffer out, and the layout is
+  a function of the item (fixed once built), the width and the wrap; a layout beside floats
+  clears the record. A taken-over item whose box was carried over is finalized at the width the
+  previous pass left it at, so its final layout is now free, where an item with a text indent
+  or inline box edges copied its whole source buffer for it. 2,000-item grid: the `finalize`
+  phase 13 -> under 1ms a pass. Pinned by `ATakenOverItemKeepsTheLayoutItWasFinalizedAt`;
+- `FontResolution.ResolveLoadedFont` memoizes its answer per loaded-family dictionary (a text
+  engine fills it in its constructor and never changes it; engines sharing a font database
+  share it), bounded at 4,096 requests: the shaping of every span, every inline box fragment
+  and every font-relative unit split, trimmed and lower-cased the family list again.
+
+### A layout pass allocates less
+
+DEVIATION from `crates/obscura-render` (and vendor/taffy), whose equivalents allocate as they
+go. A forced read after a small mutation on nvidia.com spends a fifth to a third of its time in
+garbage collection (non-concurrent workstation GC, a ~1 GB heap): every pass builds a new box
+tree and new whole-document maps that survive to the next pass. What no longer allocates:
+
+- a taffy `Style` allocates its seven grid lists on first read, and equality, cloning, the grid
+  container view and `RetainedTaffyLayout.HasCalc` read an absent one as empty (the empty lists
+  were a third of a box tree's allocation);
+- `RetainedTaffyLayout.Transplant` pairs boxes with arrays indexed by taffy and DOM slot,
+  rented from the shared pools, instead of five dictionaries and sets over every box;
+- `DomPasses.ReparentInsetPositionedNodes` and the connected-node test of the retained-style
+  plan use slot-indexed pooled arrays instead of maps over every node;
+- `DomTraversal.IsAnyLocal` takes a `params ReadOnlySpan`, and the per-style loops over a
+  style's two pseudos iterate a stack span instead of a new array per style.
+- the box-tree build reads children off the sibling chain (`DomTraversal.EachRenderedChild`)
+  where it only looks at them, tests text for white space on a span (`AsSpan().Trim()`, here
+  and throughout the render library, instead of a trimmed copy), and sorts flex and grid items
+  by `order` only when some item has one (`DomBuild.StableOrderBy`, the same stable order the
+  LINQ sort gave);
+- the table pass's floor of definite content widths (`DomTableSupport.DefiniteContentWidthIndex`)
+  walks only the subtrees of the tables it is asked about, memoized per node, instead of the
+  whole document on the first question (nvidia.com asks about 16 small anonymous tables on
+  every pass; its `tables` phase went 12.4 -> 9.0ms a pass, live). Pinned by
+  `DefiniteContentWidthIndexTests`.
+
+The consumed box tree is emptied as soon as its layouts are carried over (`TaffyTree.Clear` in
+`LayoutDomOnce`, after `RetainedTaffyLayout.Transplant`). Its slot arrays are large objects,
+which a young-generation collection treats as live, so every box tree built since the last
+full collection kept its boxes, styles and child lists alive through every young collection
+until the next full one: on the nvidia.com snapshot each gen0 collection promoted ~50 MB (a
+dozen trees) and paused ~170ms. Emptied, it promotes ~5 MB and pauses ~55ms; GC pause over a
+20s write/read loop 2.5 -> 1.4s, 90th-percentile pass 170 -> 110ms. Pinned by
+`AConsumedBoxTreeLetsGoOfItsBoxes`.
+
+`POCKETCALCULATOR_LAYOUT_PROFILE=1` now also prints, per pass, the collections and GC pause it
+saw, what it allocated, why a retained restyle fell back to a full one, and the table passes.
+Measured on the nvidia.com snapshot (20s loop of a `margin-left` write and a read, interleaved
+with the previous commit): 250 -> 273-291 passes, allocation 17.5 -> 14.0 MB a pass, median
+pass 49.6 -> 42-45ms. Results are unchanged by construction.
+
+### The font work of a pass is memoized by the text it reads
+
+DEVIATION from `crates/obscura-render`, which on every pass parses the `@font-face` rules out of
+every sheet's text (`collect_web_fonts`) and scans every text node of the document for code
+points the optional emoji and CJK faces exist for. Both read text that rarely changes between
+passes, and on nvidia.com that was 2 MB of CSS lower-cased and searched, and the same 2 MB
+scanned again as the `<style>` element's text node, on every forced read. `PaintFonts.FontFacesOf`
+keeps the usable rules of each sheet text and `FontAssets.TextMayNeedOptionalFaces` the answer
+for each text of 256 characters or more, both in a `ConditionalWeakTable` keyed by the string
+instance: an unchanged `<style>`, fetched sheet or text node hands every pass the same string,
+an edit makes a new one, and the answer is a function of the text alone (the base URL is
+applied to the memoized sources per pass). The preload `<link>` walk shares the sheets' walk,
+and the two scans test for ASCII first (no code point below U+00A9 asks for either face).
+Measured on the nvidia.com snapshot (median retained pass): `@font-face` collection 7.4 ->
+0.8ms, the optional-face scan 7 -> under 0.5ms. Pinned by `PassFontWorkTests` (Render).
+
 ### Line layouts are kept with the shaped paragraph
 
 DEVIATION from `crates/obscura-render`, which lays every paragraph out again on every pass, as the
@@ -2878,18 +3094,52 @@ was built from is in the pass's dirty closure (restyled nodes, tree/text/attribu
 targets and parents, changed image intrinsics, changed generated/counter text, closed upward),
 its taffy style is equal and holds no `calc()` handle, its measure context matches (replaced
 sizing bit for bit), its children pair one for one, and the previous pass did not lay it out
-beside floats. Two departures from vendor/taffy back it: a carried cache asked for in a context
-with floats or a different block-context mode is dropped (`ComputeChildLayoutInner`), and a
-cache entry keeps the block-context float contribution its computation left behind
+reading the floats of its formatting context. Two departures from vendor/taffy back it: a
+carried cache asked for in a different block-context mode is dropped (`ComputeChildLayoutInner`),
+and a cache entry keeps the block-context float contribution its computation left behind
 (`Cache.GetCarried`), handed back the first time a carried entry answers, since taffy's cache
-otherwise drops that side channel and the root's height came out differently. With a float in
-the tree only float-free subtrees that establish their own formatting context are carried
-(the float rewrite computes same-BFC layout uncached there).
+otherwise drops that side channel and the root's height came out differently. Nothing is
+carried across a pass that gained or lost its floats (the box tree is built differently).
+
+**Float-blind layouts are cached in a block formatting context with floats** (October 2026).
+The float rewrite computed every box laid out in its parent's BFC uncached as soon as the tree
+had one float anywhere, so nvidia.com's single float in its navigation (`navglobicon`) made the
+whole document's block flow and its line breaking run on every pass, and its inline items were
+never taken over. Now every such layout records what it asked the BFC's float context
+(`FloatDependencies`, through the `BlockContext` methods): the lowest block offset it asked
+about, the sides a `clear` in it asked about, and whether any answer was one only a float
+gives (a float placed, a slot or line band beside one, a cleared float bottom). A layout that
+saw no float is *float-blind*: its result depends on its `LayoutInput` alone wherever the
+floats give it the same answers, which holds when the lowest float edge is above the lowest
+offset it asked about (with a margin of 1px + 1e-5 of the offset for the rounding of sub-context
+offsets) and the sides it cleared have no float. Such layouts go to a second cache per node
+(`NodeData.BlockCache`; the same node probed as its own formatting context answers the same
+inputs differently), recorded relative to the box's border-top, so a box below every float
+keeps its cached layout when a mutation above moves it, and its float contribution is handed
+back on every hit (the uncached path always contributed it). A layout that saw a float is
+computed as before and drops its final-layout entry, and any final layout drops the other
+cache's final entry, so a final-layout hit always describes the stored layouts below it. A leaf
+holding anchored floats is never answered from the cache (its caller reads that layout's lines).
+This is the part of Chromium's `MaySkipLayoutWithinBlockFormattingContext` that needs no exact
+match of the exclusion space; a box beside a float is laid out again on every pass, as before.
+`POCKETCALCULATOR_FULL_RELAYOUT=1` turns it off (`TaffyTree.FloatBlindCache`), so the
+differential test's reference is the uncached float path.
 
 Unchanged whole-container inline items are taken over by the next pass's engine
-(`TextEngine.AdoptInlineItems`) instead of being collected and shaped again; not on a page with
-floats, whose exclusions live in the items. The previous engine is released once the box tree
-is built (a fact pins that the first pass's engine is collectable).
+(`TextEngine.AdoptInlineItems`) instead of being collected and shaped again, on float pages too
+(the exclusions of an item's last final layout are reset on adoption: a carried final layout of
+its box exists only for a float-blind layout, and any other sets them before `Finalize` reads
+them). The previous engine is released once the box tree is built (a fact pins that the first
+pass's engine is collectable).
+
+Measured on a local snapshot of nvidia.com (Chromium-serialized DOM and CSS, 4,060 boxes, one
+float), CLI `fetch --eval`, a one-element `margin-left` write and a read of another element,
+median of the last 30 retained passes, against 1001c70: a pass 158ms -> 100ms (taffy 11.4 ->
+2.5ms, the repair relayouts 14.9 -> 3.4ms, box-tree build 19.4 -> 11.1ms with 1,029 inline items
+taken over, boxes carried 1,815 -> 3,613). On a 40-section float article (thumbnails, a
+sidebar and float columns in one BFC) 93-116ms -> 81-86ms (build 19-24 -> 4-5ms, taffy 15 ->
+6-7ms). Soaked at 10 seeds per fixture and 8 per float page (558 runs, none diverging); pinned
+by `AFloatPageCarriesOverBlocksBelowItsFloats`.
 
 `POCKETCALCULATOR_FULL_RELAYOUT=1` turns both off (`RetainedTaffyLayout.ForceFullRelayout` per
 execution context, for tests). `POCKETCALCULATOR_LAYOUT_PROFILE=1` prints per-phase timings of

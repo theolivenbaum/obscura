@@ -102,6 +102,14 @@ public sealed class InlineItem
     internal TextBuffer? PristineBuffer { get; set; }
 
     /// <summary>
+    /// The width (its bits, or <c>-1</c> for none) and wrap the buffer was last laid out at
+    /// without floats, or <c>null</c> when it was last laid out beside floats or not at all.
+    /// A layout asked for again at the same width finds the buffer already in that state; see
+    /// <c>TextEngine.ShapeWithTextIndent</c>. Not in crates/obscura-render.
+    /// </summary>
+    internal (long WidthBits, Wrap Wrap)? ShapedFor { get; set; }
+
+    /// <summary>
     /// The float exclusions of the last final layout of this IFC, relative to its content box,
     /// which <see cref="TextEngine.Finalize"/> lays the lines out around again. Null when no
     /// float shortens its line boxes.

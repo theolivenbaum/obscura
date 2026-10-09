@@ -22,8 +22,11 @@ public sealed partial class TextEngine : IDisposable
     /// <summary>Marks a measure context as a replaced box rather than an inline item.</summary>
     private const int ReplacedContextBit = unchecked((int)0x8000_0000);
 
-    private readonly FontDatabase _database = new();
-    private readonly Dictionary<string, LoadedFamily> _loadedFamilies = new(StringComparer.Ordinal);
+    private readonly FontDatabase _database;
+    private readonly Dictionary<string, LoadedFamily> _loadedFamilies;
+
+    /// <summary>Whether <see cref="_database"/> is another engine's; see <see cref="ForPass"/>.</summary>
+    private readonly bool _sharesDatabase;
     private readonly List<InlineItem> _items = [];
     private readonly List<ReplacedItem> _replaced = [];
     private readonly TextShaper _shaper;
@@ -49,12 +52,84 @@ public sealed partial class TextEngine : IDisposable
     {
     }
 
+    /// <summary>
+    /// An engine for one layout pass that takes over <paramref name="previous"/>'s font database
+    /// and loaded families when both are built from the same fonts.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which builds the font database on every pass. Loading the
+    /// bundled faces and the page's web fonts parses every face's tables again (nvidia.com: a
+    /// tenth of a forced read). The database and the families resolved from it are a function
+    /// of the face list - the bundled faces, the font directories, the emoji and CJK faces and
+    /// the web fonts, in order - and nothing adds to either after the constructor; the same test
+    /// that lets a pass take over the previous pass's shaped paragraphs
+    /// (<see cref="AdoptShapeCache"/>) decides it. Each engine keeps its own shaper and glyph
+    /// caches, so what a pass leaves behind is bounded as before.
+    /// </remarks>
+    internal static TextEngine ForPass(
+        IReadOnlyList<WebFont> fonts,
+        bool loadEmoji,
+        bool loadCjk,
+        TextEngine? previous)
+    {
+        FontDirectorySet directoryFonts = FontDirectories.Current;
+        return previous is not null
+            && !ShapeCache.Disabled
+            && ReferenceEquals(previous._directoryFonts, directoryFonts)
+            && previous._loadsEmoji == loadEmoji
+            && previous._loadsCjk == loadCjk
+            && SameFonts(previous._fonts, fonts)
+                ? new TextEngine(previous, fonts)
+                : new TextEngine(fonts, loadEmoji, directoryFonts, loadCjk);
+
+        static bool SameFonts(WebFont[] mine, IReadOnlyList<WebFont> theirs)
+        {
+            if (mine.Length != theirs.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < mine.Length; index++)
+            {
+                WebFont a = mine[index];
+                WebFont b = theirs[index];
+                if (!ReferenceEquals(a, b)
+                    && !(ReferenceEquals(a.Data, b.Data)
+                        && string.Equals(a.Family, b.Family, StringComparison.Ordinal)
+                        && a.Weight == b.Weight
+                        && a.Italic == b.Italic))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    private TextEngine(TextEngine fontsOf, IReadOnlyList<WebFont> fonts)
+    {
+        _database = fontsOf._database;
+        _loadedFamilies = fontsOf._loadedFamilies;
+        _sharesDatabase = true;
+        _directoryFonts = fontsOf._directoryFonts;
+        _loadsEmoji = fontsOf._loadsEmoji;
+        _loadsCjk = fontsOf._loadsCjk;
+        _shaper = new TextShaper(_database);
+        _rasterizer = new GlyphRasterizer(_database);
+        _variableCache = new VariableGlyphCache(_database);
+        _fonts = [.. fonts];
+    }
+
     internal TextEngine(
         IReadOnlyList<WebFont> fonts,
         bool loadEmoji,
         FontDirectorySet directoryFonts,
         bool loadCjk = false)
     {
+        _database = new FontDatabase();
+        _loadedFamilies = new(StringComparer.Ordinal);
+
         // Build a database from embedded and page-provided faces. The host's font set is never
         // consulted implicitly: it would make layout differ machine to machine and add a
         // multi-millisecond startup scan. The one exception is a font directory the operator
@@ -289,6 +364,11 @@ public sealed partial class TextEngine : IDisposable
         item.Clip = null;
         item.Marker = null;
         item.RelativeOwnerRanges = [];
+
+        // The exclusions of the last final layout beside floats: a carried final layout of
+        // this item's box exists only for a layout that read no float (TaffyTree's float-blind
+        // cache), and any other layout records its own before Finalize reads them.
+        item.FloatBands = null;
         int index = _items.Count;
         _items.Add(item);
         return index;
@@ -638,7 +718,14 @@ public sealed partial class TextEngine : IDisposable
     /// but their text still uses the same authored webfonts, variable weight selection,
     /// transformations, and glyph rasterizer as an ordinary inline formatting context.
     /// </remarks>
-    public int? PushGeneratedText(string text, LayoutStyle style)
+    /// <param name="text">The text to shape.</param>
+    /// <param name="style">The style it is shaped in; only read.</param>
+    /// <param name="whiteSpace">
+    /// The <c>white-space</c> to shape it with instead of <paramref name="style"/>'s, so a caller
+    /// that needs another value (a word leaf is shaped as <c>pre</c>) does not have to copy the
+    /// whole style for it.
+    /// </param>
+    public int? PushGeneratedText(string text, LayoutStyle style, WhiteSpace? whiteSpace = null)
     {
         var collector = new Collector();
         ResolvedFont font = FontResolution.ResolveLoadedFont(
@@ -646,12 +733,12 @@ public sealed partial class TextEngine : IDisposable
             ComputedStyle.UsedFontWeight(style),
             style.FontStyleItalic ?? false,
             _loadedFamilies);
-        SpanCtx context = BaseSpanCtx(style, font, collector);
+        SpanCtx context = BaseSpanCtx(style, font, collector, whiteSpace);
         SpanAttrs attrs = context.ToSpanAttrs();
         List<(string Text, SpanAttrs Attrs)> spans = [];
 
         Inline.PushText(text, context.Transform, context.WhiteSpace, attrs, spans, collector);
-        return PushShapedItem(style, context, spans, collector);
+        return PushShapedItem(style, context, spans, collector, whiteSpace);
     }
 
     /// <summary>
@@ -662,7 +749,8 @@ public sealed partial class TextEngine : IDisposable
         LayoutStyle baseStyle,
         SpanCtx strut,
         List<(string Text, SpanAttrs Attrs)> spans,
-        Collector collector)
+        Collector collector,
+        WhiteSpace? whiteSpaceOverride = null)
     {
         collector.FlushLastSpan(spans);
         float lineHeight = strut.LineHeight;
@@ -671,7 +759,7 @@ public sealed partial class TextEngine : IDisposable
         List<InlineOwnerBox> ownerBoxes = collector.OwnerBoxes;
         List<InlineBoundaryEvent> boundaryEvents = collector.BoundaryEvents;
 
-        WhiteSpace whiteSpace = baseStyle.WhiteSpace ?? WhiteSpace.Normal;
+        WhiteSpace whiteSpace = whiteSpaceOverride ?? baseStyle.WhiteSpace ?? WhiteSpace.Normal;
         Wrap layoutWrap = Wrap.Word;
         Wrap minContentWrap = Wrap.Word;
         foreach ((string _, SpanAttrs attrs) in spans)
@@ -701,7 +789,7 @@ public sealed partial class TextEngine : IDisposable
             foreach ((string text, SpanAttrs _) in spans)
             {
                 bool empty = text.Length == 0
-                    || (collapsible && text.Trim().Length == 0 && !text.Contains('\n', StringComparison.Ordinal));
+                    || (collapsible && text.AsSpan().Trim().Length == 0 && !text.Contains('\n', StringComparison.Ordinal));
                 if (!empty)
                 {
                     allEmpty = false;
@@ -2045,6 +2133,19 @@ public sealed partial class TextEngine : IDisposable
             _ => item.Rtl ? 0f : 1f,
         };
 
+        // DEVIATION from crates/obscura-render/src/inline.rs, which lays the paragraph out
+        // again at every call. The layout is a function of the item (fixed once built), the
+        // width and the wrap, and only this method and ShapeAroundFloats lay the buffer out: an
+        // item whose buffer is already laid out at this width keeps it. A carried-over box's
+        // final layout asks again for the width the previous pass finalized its item at, and
+        // an item with a text indent or inline box edges copied its whole source buffer to do it.
+        (long WidthBits, Wrap Wrap) request = (width is { } asked ? BitConverter.SingleToInt32Bits(asked) : -1L, wrap);
+        if (bands is null && item.ShapedFor == request)
+        {
+            return;
+        }
+
+        item.ShapedFor = null;
         if (bands is not null && width is { } floatWidth)
         {
             ShapeAroundFloats(item, floatWidth, indent, wrap, bands);
@@ -2062,6 +2163,7 @@ public sealed partial class TextEngine : IDisposable
             item.Buffer.SetWrap(wrap);
             item.Buffer.SetSize(width is { } value ? F32.Max(value, 0f) : null, null);
             item.Buffer.ShapeUntilScroll(_shaper);
+            item.ShapedFor = request;
             return;
         }
 
@@ -2214,6 +2316,7 @@ public sealed partial class TextEngine : IDisposable
         }
 
         item.Buffer.ShapeUntilScroll(_shaper);
+        item.ShapedFor = request;
     }
 
     /// <summary>
@@ -2650,7 +2753,11 @@ public sealed partial class TextEngine : IDisposable
         return visualTop < surfaceBottom && visualBottom > 0f;
     }
 
-    private SpanCtx BaseSpanCtx(LayoutStyle baseStyle, ResolvedFont font, Collector collector)
+    private SpanCtx BaseSpanCtx(
+        LayoutStyle baseStyle,
+        ResolvedFont font,
+        Collector collector,
+        WhiteSpace? whiteSpace = null)
     {
         int? clipFill = null;
         if (Inline.ClipTextFillFor(baseStyle) is { } fill)
@@ -2686,7 +2793,7 @@ public sealed partial class TextEngine : IDisposable
             SyntheticItalic = font.SyntheticItalic,
             Underline = baseStyle.Underline ?? false,
             Transform = baseStyle.TextTransform ?? TextTransform.None,
-            WhiteSpace = baseStyle.WhiteSpace ?? WhiteSpace.Normal,
+            WhiteSpace = whiteSpace ?? baseStyle.WhiteSpace ?? WhiteSpace.Normal,
             OverflowWrap = baseStyle.OverflowWrap ?? OverflowWrap.Normal,
             WordBreak = baseStyle.WordBreak ?? WordBreak.Normal,
             Family = font.Family,
@@ -2702,7 +2809,7 @@ public sealed partial class TextEngine : IDisposable
         List<(string Text, SpanAttrs Attrs)> output,
         Collector collector)
     {
-        foreach (NodeId cid in Inline.RenderedChildren(tree, id))
+        foreach (NodeId cid in DomTraversal.EachRenderedChild(tree, id))
         {
             CollectNodeSpans(tree, cid, styles, context, output, collector);
         }
@@ -2871,6 +2978,11 @@ public sealed partial class TextEngine : IDisposable
     public void Dispose()
     {
         _rasterizer.Dispose();
-        _database.Dispose();
+
+        // A shared database belongs to the engine that built it (ForPass).
+        if (!_sharesDatabase)
+        {
+            _database.Dispose();
+        }
     }
 }

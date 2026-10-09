@@ -44,14 +44,14 @@ public static class CssColor
         {
             var innerAndClose = raw["light-dark(".Length..];
             var close = FindMatchingParen(innerAndClose);
-            if (close is null || innerAndClose[(close.Value + 1)..].Trim().Length != 0)
+            if (close is null || innerAndClose[(close.Value + 1)..].AsSpan().Trim().Length != 0)
             {
                 return null;
             }
 
             var arguments = SplitTopCommas(innerAndClose[..close.Value]);
             if (arguments.Count != 2
-                || arguments.Any(argument => argument.Trim().Length == 0 || !IsCompleteColorToken(argument)))
+                || arguments.Any(argument => argument.AsSpan().Trim().Length == 0 || !IsCompleteColorToken(argument)))
             {
                 return null;
             }
@@ -168,13 +168,13 @@ public static class CssColor
         // the alpha component came through as the unparseable "0.12)" and was silently
         // dropped. ParseBackgroundLayerColor handles that shape now.
         if (FindMatchingParen(rest) is not { } close
-            || rest[(close + 1)..].Trim().Length != 0)
+            || rest[(close + 1)..].AsSpan().Trim().Length != 0)
         {
             return null;
         }
 
         var parts = rest[..close].Split([',', '/', ' '], StringSplitOptions.None)
-            .Where(part => part.Trim().Length != 0)
+            .Where(part => part.AsSpan().Trim().Length != 0)
             .ToList();
         if (parts.Count is < 3 or > 4)
         {
@@ -217,13 +217,13 @@ public static class CssColor
     private static RgbaColor? ParseHslFunction(string rest)
     {
         if (FindMatchingParen(rest) is not { } close
-            || rest[(close + 1)..].Trim().Length != 0)
+            || rest[(close + 1)..].AsSpan().Trim().Length != 0)
         {
             return null;
         }
 
         var parts = rest[..close].Split([',', '/', ' '], StringSplitOptions.None)
-            .Where(part => part.Trim().Length != 0)
+            .Where(part => part.AsSpan().Trim().Length != 0)
             .ToList();
         if (parts.Count is < 3 or > 4)
         {
@@ -275,7 +275,7 @@ public static class CssColor
         }
 
         var components = main.Split([',', ' '], StringSplitOptions.None)
-            .Where(part => part.Trim().Length != 0)
+            .Where(part => part.AsSpan().Trim().Length != 0)
             .ToList();
         if (components.Count < 3)
         {
@@ -341,7 +341,7 @@ public static class CssColor
     {
         var rest = lower["color(".Length..];
         if (FindMatchingParen(rest) is not { } close
-            || rest[(close + 1)..].Trim().Length != 0)
+            || rest[(close + 1)..].AsSpan().Trim().Length != 0)
         {
             return null;
         }

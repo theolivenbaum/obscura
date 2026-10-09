@@ -1153,7 +1153,7 @@ internal static class PaintDomPainter
 
                 OverflowClip? positionedPseudoOverflowClip =
                     scrollState.DescendantOverflowClipFor(laid, nid);
-                foreach (LayoutStyle? pseudo in new[] { style.BeforePseudo, style.AfterPseudo })
+                foreach (LayoutStyle? pseudo in (ReadOnlySpan<LayoutStyle?>)[style.BeforePseudo, style.AfterPseudo])
                 {
                     if (pseudo is null)
                     {
@@ -1240,7 +1240,7 @@ internal static class PaintDomPainter
                 if (!painted && string.Equals(localName, "img", StringComparison.Ordinal))
                 {
                     string? alt = node.GetAttribute("alt");
-                    if (alt is not null && alt.Trim().Length > 0)
+                    if (alt is not null && alt.AsSpan().Trim().Length > 0)
                     {
                         PaintText.DrawText(
                             pixmap,

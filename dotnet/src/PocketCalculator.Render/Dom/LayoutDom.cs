@@ -289,7 +289,7 @@ public static partial class RenderDom
 
             string? media = node.GetAttribute("media");
             if (media is not null
-                && media.Trim().Length != 0
+                && media.AsSpan().Trim().Length != 0
                 && !CssMediaQuery.AppliesForViewportAndType(media, viewport, mediaType))
             {
                 continue;
@@ -689,11 +689,13 @@ public static partial class RenderDom
 
         if (shadowSheets.Count != 0 && !resourceOnly)
         {
+            LayoutPhaseProfile.Note("restyleShadowSheets", shadowSheets.Count);
             return null;
         }
 
         if (!stylesheetCacheHit)
         {
+            LayoutPhaseProfile.Note("restyleSheetMiss", 1);
             return null;
         }
 
@@ -706,46 +708,75 @@ public static partial class RenderDom
             }
         }
 
-        HashSet<NodeId> connected = [tree.Document];
-        foreach (NodeId node in DomTraversal.RenderedDescendants(tree, tree.Document))
-        {
-            connected.Add(node);
-        }
-
+        // An element without a retained style is cascaded whatever the plan says: the retained
+        // cascade only descends towards fresh styles (DomCascade.StylePaths), so one it was
+        // never told about would otherwise go without.
+        List<NodeId> unstyled = [];
         List<NodeId> stale = [];
-        foreach (NodeId node in retained.Styles.Keys)
+        // Which nodes are connected, by slot (the id stored plus one, so a stale id from an
+        // earlier occupant of the slot does not match): a set of every rendered node was the
+        // largest allocation of a retained pass.
+        uint[] connected = System.Buffers.ArrayPool<uint>.Shared.Rent(Math.Max(tree.SlotCount, 1));
+        try
         {
-            if (!connected.Contains(node))
+            Array.Clear(connected, 0, Math.Max(tree.SlotCount, 1));
+            bool IsConnected(NodeId node) =>
+                node.Index < tree.SlotCount && connected[node.Index] == node.Value + 1;
+
+            connected[tree.Document.Index] = tree.Document.Value + 1;
+            foreach (NodeId node in DomTraversal.RenderedDescendants(tree, tree.Document))
             {
-                stale.Add(node);
+                connected[node.Index] = node.Value + 1;
+                if (!retained.Styles.ContainsKey(node) && tree.GetNode(node)?.IsElement == true)
+                {
+                    unstyled.Add(node);
+                }
+            }
+
+            foreach (NodeId node in retained.Styles.Keys)
+            {
+                if (!IsConnected(node))
+                {
+                    stale.Add(node);
+                }
+            }
+
+            foreach (NodeId node in stale)
+            {
+                retained.Styles.Remove(node);
+            }
+
+            stale.Clear();
+            foreach (NodeId node in retained.CustomProperties.Keys)
+            {
+                if (!IsConnected(node))
+                {
+                    stale.Add(node);
+                }
+            }
+
+            foreach (NodeId node in stale)
+            {
+                retained.CustomProperties.Remove(node);
             }
         }
-
-        foreach (NodeId node in stale)
+        finally
         {
-            retained.Styles.Remove(node);
-        }
-
-        stale.Clear();
-        foreach (NodeId node in retained.CustomProperties.Keys)
-        {
-            if (!connected.Contains(node))
-            {
-                stale.Add(node);
-            }
-        }
-
-        foreach (NodeId node in stale)
-        {
-            retained.CustomProperties.Remove(node);
+            System.Buffers.ArrayPool<uint>.Shared.Return(connected);
         }
 
         if (RetainedStylePlanner.Plan(tree, sheet, mutations) is not RetainedStylePlan.Reuse plan)
         {
+            LayoutPhaseProfile.Note("restyleFullPlan", mutations.Count);
             return null;
         }
 
         HashSet<NodeId> dirty = plan.Dirty;
+        foreach (NodeId node in unstyled)
+        {
+            RetainedStylePlanner.AddStyleSubtree(tree, node, dirty);
+        }
+
         if (activeContainers.Count != 0 && sheet.HasContainerQueries())
         {
             Matcher matcher = tree.CreateMatcher();
@@ -757,9 +788,11 @@ public static partial class RenderDom
         // reuse no longer offsets dirty-set bookkeeping and branch checks.
         if (plan.HasAnimationDamage && dirty.Count * 2 >= retained.Styles.Count)
         {
+            LayoutPhaseProfile.Note("restyleAnimationWide", dirty.Count);
             return null;
         }
 
+        LayoutPhaseProfile.Note("fresh", dirty.Count);
         return (retained, dirty);
     }
 }

@@ -129,8 +129,17 @@ public sealed class DomLayout
     /// </summary>
     internal RetainedTaffyLayout? RetainedBoxes { get; set; }
 
+    /// <summary>
+    /// What this layout's top-down style pass left for the next retained pass; see
+    /// <see cref="RenderDom.TopDownMemo"/>. Taken by that pass.
+    /// </summary>
+    internal RenderDom.TopDownMemo? TopDown { get; set; }
+
     /// <summary>How many boxes this pass carried over from the previous one.</summary>
     internal int TransplantedBoxes { get; init; }
+
+    /// <summary>How many elements this layout's top-down style pass visited (diagnostics, tests).</summary>
+    internal int TopDownVisits { get; init; }
 
     /// <summary>How many inline items this pass took over from the previous one.</summary>
     internal int AdoptedInlineItems { get; init; }
@@ -213,7 +222,17 @@ public sealed class DomLayout
     /// Inline formatting contexts shaped by the text engine: a single leaf per container, its
     /// glyphs held in <see cref="TextEngine"/>.
     /// </summary>
-    public TextEngine TextEngine { get; internal set; } = new();
+    /// <remarks>
+    /// Created on first read only when no engine was set: an initializer built a whole font
+    /// database for every layout, which the layout pass then replaced with its own engine.
+    /// </remarks>
+    public TextEngine TextEngine
+    {
+        get => _textEngine ??= new TextEngine();
+        internal set => _textEngine = value;
+    }
+
+    private TextEngine? _textEngine;
 
     /// <summary>Container node to shaped item index.</summary>
     public Dictionary<NodeId, int> IfcItems { get; internal set; } = [];
@@ -406,6 +425,24 @@ public sealed class DomLayout
     public HashSet<NodeId> ViewportFixedNodes(DomTree tree)
     {
         HashSet<NodeId> fixedNodes = [];
+
+        // Only a fixed-position element starts a viewport-fixed subtree; without one the walk
+        // below finds nothing.
+        bool anyFixed = false;
+        foreach (LayoutStyle candidate in Styles.Values)
+        {
+            if (candidate.PositionFixed)
+            {
+                anyFixed = true;
+                break;
+            }
+        }
+
+        if (!anyFixed)
+        {
+            return fixedNodes;
+        }
+
         Dictionary<NodeId, bool> hasFixedCb = [];
 
         foreach (NodeId id in DomTraversal.RenderedDescendants(tree, tree.Document))
@@ -518,7 +555,7 @@ public sealed class DomLayout
                 ? ownTransform.MapRect(paddingRect)
                 : paddingRect;
             Rect local = visualPadding;
-            foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+            foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
             {
                 if (child.Index >= nodeCapacity || overflowBounds[child.Index] is not { } childOverflow)
                 {
@@ -668,7 +705,7 @@ public sealed class DomLayout
             childOwner = sid;
         }
 
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
         {
             AssignScrollOwners(
                 tree,
@@ -699,8 +736,9 @@ public sealed class DomLayout
         float right = F32.Max(viewport.Width, 0f);
         float bottom = F32.Max(viewport.Height, 0f);
 
+        // The first element in document order is the document's first element child.
         NodeId? root = null;
-        foreach (NodeId id in tree.Descendants(tree.Document))
+        foreach (NodeId id in tree.Children(tree.Document))
         {
             if (tree.GetNode(id)?.IsElement == true)
             {
@@ -761,7 +799,7 @@ public sealed class DomLayout
             childClip = inheritedClip is null ? own : inheritedClip.Intersect(own);
         }
 
-        foreach (NodeId child in DomTraversal.RenderedChildren(tree, id))
+        foreach (NodeId child in DomTraversal.EachRenderedChild(tree, id))
         {
             AccumulateScrollingOverflow(tree, child, childClip, fixedNodes, ref right, ref bottom);
         }
@@ -790,8 +828,28 @@ public sealed class DomLayout
     {
         Rect rootContaining = new(0f, 0f, content.Width, content.Height);
         StickyLayout layout = new();
-        Dictionary<NodeId, NodeId?> nearestSticky = [];
-        Dictionary<NodeId, NodeId?> inheritedClipSticky = [];
+
+        // Every frame, owner and clip owner below hangs off a sticky element; without one the
+        // walk records nothing.
+        bool anySticky = false;
+        foreach (LayoutStyle candidate in Styles.Values)
+        {
+            if (candidate.PositionSticky)
+            {
+                anySticky = true;
+                break;
+            }
+        }
+
+        if (!anySticky)
+        {
+            return layout;
+        }
+
+        // Indexed by arena slot (a live node owns its slot), as nearestScrollport below: two
+        // dictionaries over every node of the document were most of this pass's allocation.
+        NodeId?[] nearestSticky = new NodeId?[tree.SlotCount];
+        NodeId?[] inheritedClipSticky = new NodeId?[tree.SlotCount];
 
         // Propagate the nearest authored scroll container once in rendered preorder. The
         // boolean distinguishes a supported ScrollTree owner from a real but affine/otherwise
@@ -799,7 +857,7 @@ public sealed class DomLayout
         (NodeId Node, bool Supported)?[] nearestScrollport =
             new (NodeId, bool)?[scrollTree.MovementOwner.Length];
         float rootFontSize = 16f;
-        if (tree.QuerySelector("html") is { } htmlRoot
+        if (DomTraversal.HtmlElement(tree) is { } htmlRoot
             && Styles.TryGetValue(htmlRoot, out LayoutStyle? htmlStyle)
             && htmlStyle.FontSize is { } htmlFontSize)
         {
@@ -831,7 +889,8 @@ public sealed class DomLayout
             }
 
             NodeId? parentSticky = parent is { } stickyParent
-                && nearestSticky.TryGetValue(stickyParent, out NodeId? found)
+                && stickyParent.Index < nearestSticky.Length
+                && nearestSticky[stickyParent.Index] is { } found
                     ? found
                     : null;
             NodeId? inheritedClip = null;
@@ -839,8 +898,8 @@ public sealed class DomLayout
             {
                 bool parentClips = Styles.TryGetValue(clipParent, out LayoutStyle? parentStyle)
                     && parentStyle.OverflowHidden;
-                Dictionary<NodeId, NodeId?> source = parentClips ? nearestSticky : inheritedClipSticky;
-                inheritedClip = source.TryGetValue(clipParent, out NodeId? owner) ? owner : null;
+                NodeId?[] source = parentClips ? nearestSticky : inheritedClipSticky;
+                inheritedClip = clipParent.Index < source.Length ? source[clipParent.Index] : null;
             }
 
             if (inheritedClip is { } clipOwner)
@@ -848,14 +907,14 @@ public sealed class DomLayout
                 layout.ClipOwners[id] = clipOwner;
             }
 
-            inheritedClipSticky[id] = inheritedClip;
+            SetSlot(inheritedClipSticky, id, inheritedClip);
 
             ScrollId? scrollOwnerSlot = id.Index < scrollTree.MovementOwner.Length
                 ? scrollTree.MovementOwner[id.Index]
                 : null;
             if (scrollOwnerSlot is not { } scrollOwner)
             {
-                nearestSticky[id] = null;
+                SetSlot(nearestSticky, id, null);
                 continue;
             }
 
@@ -898,7 +957,7 @@ public sealed class DomLayout
                 && supportedCoordinateSpace;
             if (!isSticky)
             {
-                nearestSticky[id] = parentSticky;
+                SetSlot(nearestSticky, id, parentSticky);
                 if (parentSticky is { } inheritedOwner)
                 {
                     layout.Owners[id] = inheritedOwner;
@@ -909,7 +968,7 @@ public sealed class DomLayout
 
             if (style is null || !Rects.TryGetValue(id, out Rect rect))
             {
-                nearestSticky[id] = parentSticky;
+                SetSlot(nearestSticky, id, parentSticky);
                 continue;
             }
 
@@ -1002,10 +1061,18 @@ public sealed class DomLayout
                 RtlInline = style.Direction == Layout.Direction.Rtl,
             });
             layout.Owners[id] = id;
-            nearestSticky[id] = id;
+            SetSlot(nearestSticky, id, id);
         }
 
         return layout;
+
+        static void SetSlot(NodeId?[] slots, NodeId id, NodeId? value)
+        {
+            if (id.Index < slots.Length)
+            {
+                slots[id.Index] = value;
+            }
+        }
     }
 }
 

@@ -567,7 +567,7 @@ internal static class DomTableSupport
 
         // Source formatting between table-internal boxes is not content; CSS 2.1 17.2.1 drops
         // it rather than wrapping it in an anonymous cell.
-        return tree.GetNode(id) is { IsElement: false } && tree.TextContent(id).Trim().Length == 0;
+        return tree.GetNode(id) is { IsElement: false } && tree.TextContent(id).AsSpan().Trim().Length == 0;
     }
 
     /// <summary>The same, for a node.</summary>
@@ -1512,49 +1512,71 @@ internal static class DomTableSupport
     }
 
     /// <summary>
-    /// <see cref="MaxDefiniteTableContentWidth"/> for every node of the document at once.
+    /// <see cref="MaxDefiniteTableContentWidth"/> per node, memoized across the tables one pass
+    /// asks about.
     /// </summary>
     /// <remarks>
     /// The per-table walk visits the table's whole subtree, so a page of nested tables walked
-    /// every descendant once per table above it. This computes the same subtree maxima in one
-    /// post-order pass over the light tree; a node the pass did not reach (one in a shadow
-    /// tree) falls back to the walk.
+    /// every descendant once per table above it. This computes the same subtree maxima in a
+    /// post-order pass over the light tree, once per node; a node outside the document's light
+    /// tree (one in a shadow tree) falls back to the walk. Only the subtrees of the tables asked
+    /// about are walked: walking the whole document up front cost nvidia.com a whole-document
+    /// walk on every layout for the 16 small anonymous tables it has.
     /// </remarks>
     internal sealed class DefiniteContentWidthIndex(
         DomTree tree,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles)
     {
-        private Dictionary<NodeId, float>? _subtreeMax;
-        private HashSet<NodeId>? _visited;
+        // Every node whose subtree maximum is known; the maximum itself only where there is one.
+        private readonly Dictionary<NodeId, float> _subtreeMax = [];
+        private readonly HashSet<NodeId> _visited = [];
 
         internal float? Get(NodeId id)
         {
-            if (_visited is null)
+            if (!_visited.Contains(id))
             {
-                Build();
+                if (!InDocumentLightTree(id))
+                {
+                    return MaxDefiniteTableContentWidth(tree, id, styles);
+                }
+
+                Build(id);
             }
 
-            if (!_visited!.Contains(id))
-            {
-                return MaxDefiniteTableContentWidth(tree, id, styles);
-            }
-
-            return _subtreeMax!.TryGetValue(id, out float best) ? best : null;
+            return _subtreeMax.TryGetValue(id, out float best) ? best : null;
         }
 
-        private void Build()
+        private bool InDocumentLightTree(NodeId id)
         {
-            _subtreeMax = [];
-            _visited = [];
+            int steps = 0;
+            for (NodeId? current = id; current is { } node; current = tree.GetNode(node)?.Parent)
+            {
+                if (node == tree.Document)
+                {
+                    return true;
+                }
+
+                if (++steps > tree.SlotCount)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private void Build(NodeId root)
+        {
             var stack = new Stack<(NodeId Node, bool Exit)>();
-            stack.Push((tree.Document, false));
+            stack.Push((root, false));
             while (stack.Count > 0)
             {
                 WorkCancellation.ThrowIfCancellationRequested();
                 (NodeId node, bool exit) = stack.Pop();
                 if (!exit)
                 {
-                    // The same cycle guard as `DomTree.Descendants`: a node is entered once.
+                    // The same cycle guard as `DomTree.Descendants`: a node is entered once. A
+                    // node an earlier query already entered has its maximum.
                     if (!_visited.Add(node))
                     {
                         continue;

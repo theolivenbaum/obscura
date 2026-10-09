@@ -289,7 +289,7 @@ internal static class SvgBoxes
         System.Text.StringBuilder buffer = new();
         AppendTextContent(tree, id, buffer, 0);
         string content = buffer.ToString();
-        if (content.Trim().Length == 0)
+        if (content.AsSpan().Trim().Length == 0)
         {
             return null;
         }

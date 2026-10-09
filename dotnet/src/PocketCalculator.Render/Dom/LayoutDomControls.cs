@@ -487,6 +487,7 @@ public static partial class RenderDom
             tableNodes.Add(taffyId);
         }
 
+        LayoutPhaseProfile.Note("tableBoxes", tables.Count);
         if (tables.Count == 0)
         {
             return;
@@ -547,6 +548,7 @@ public static partial class RenderDom
                 // the whole tree is laid out (and rounded) again after it, so the rounding walk
                 // was pure cost. It walked the subtree of every measured node, which made a page
                 // of nested tables quadratic in its depth.
+                LayoutPhaseProfile.Note("tableSnapshotLayouts", 1);
                 taffyTree.ComputeUnroundedLayoutWithMeasure(taffyRoot, available, measure);
                 foreach ((TaffyNodeId tnode, NodeId dom, _) in group)
                 {

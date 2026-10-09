@@ -414,7 +414,31 @@ public sealed class FloatContext
         {
             resolvedEndIdx = end.Value;
             float endY = startY + floatedBox.Height;
-            if (endY != _segments[resolvedEndIdx].YEnd)
+
+            // DEVIATION from vendor/taffy/src/compute/float.rs, which subdivides the segment the
+            // fitter stopped in at the float's bottom. The fitter measures the free height as
+            // float differences summed in double, and the bottom is one float sum, so the two
+            // can disagree by an ulp: the bottom then lands exactly on the start of the segment
+            // the fitter reached (or just past the end of it), and subdividing there threw
+            // ("cannot subdivide segment"), failing the whole layout. Use the segment that
+            // really holds the bottom.
+            while (resolvedEndIdx > resolvedStartIdx && endY <= _segments[resolvedEndIdx].YStart)
+            {
+                resolvedEndIdx--;
+            }
+
+            while (resolvedEndIdx + 1 < _segments.Count && endY > _segments[resolvedEndIdx].YEnd)
+            {
+                resolvedEndIdx++;
+            }
+
+            Segment last = _segments[resolvedEndIdx];
+            if (endY > last.YEnd)
+            {
+                _segments.Add(new Segment { YStart = last.YEnd, YEnd = endY, Inset0 = 0.0f, Inset1 = 0.0f });
+                resolvedEndIdx++;
+            }
+            else if (endY != last.YEnd && endY > last.YStart)
             {
                 SubdivideSegment(resolvedEndIdx, endY);
             }
