@@ -5299,3 +5299,68 @@ reported before a message posted earlier in the same task (Chromium: after).
 content inside a shadow root is dispatched at the host, since the hit test does not enter
 shadow trees (Playwright's `#host >> #inner` click never reaches the inner button). Pinned by
 `EventDispatchConformanceTests` (Js), which runs the Chromium probe's sections.
+
+### WebIDL property shapes: prototype getters, enumerable members, array-like collections
+
+Found on grammarly.com and mozilla.org, where Transcend's consent manager (`airgap.js`) reads
+some sixty members through their descriptors at load
+(`Object.getOwnPropertyDescriptor(HTMLCollection.prototype, "length").get`, `window.closed`,
+`Request.prototype.url`, ...) and threw "Cannot read properties of undefined (reading 'get')".
+All DEVIATIONS from `crates/obscura-js/js/bootstrap.js`, measured against Chromium 141 with a
+descriptor dump of every global interface (prototype and interface object) and of sample
+instances.
+
+- **Collections**: HTMLCollection was an Array subclass (`Array.isArray(document.children)`
+  true, map/forEach present, own `length`), NodeList, DOMRectList and the text track lists
+  carried an own `length`. Now HTMLCollection is its own class; all of them have
+  `length` as an enumerable prototype getter over a private count (`_listLength`) and
+  Array.prototype's `values` as @@iterator; NodeList's forEach/entries/keys/values are
+  Array.prototype's, as in Chromium.
+- **Enumerability and constants** (`_webidlMemberAttributes`): class-defined methods and
+  accessors of every interface the shim puts on the global are enumerable; all-caps numeric
+  members are `{writable: false, enumerable: true, configurable: false}` constants on both the
+  interface and its prototype (Range's and HTMLMediaElement's were static getters, Node's and
+  XHR's writable). Kind mismatches on members both sides have went from 760 to 7 (the seven
+  are `Error.prototype.name` being non-configurable, which Rust does on purpose and is not an
+  interface the shim defines).
+- **Instance fields to prototype getters** (`_defineFieldGetters`): XMLHttpRequest's state
+  (readyState, status, response, ...; responseType/timeout/withCredentials and the on*
+  handlers settable), Request's and Response's attributes, Attr's name/localName/
+  namespaceURI/prefix/ownerElement/specified, ValidityState's flags. The shim writes the
+  `_name` field. DOMException's name/message/code are brand-checked prototype getters and an
+  instance has no own property, `stack` included. XHR's constants left the instances.
+- **Window attributes** (`_shapeWindowAttributes`): window/document/top are unforgeable
+  getters, navigator/history/localStorage/... read-only getters, self/parent/innerWidth/screen/
+  performance/... [Replaceable] get+set (the setter stores what the getter returns, where
+  Chromium replaces the accessor with a data property). `window.closed` added (false). The
+  shim's own writes of read-only ones go through `_setWindowSlot`. Location's members are
+  non-configurable and its operations non-writable; `valueOf` added.
+- **Members on the wrong interface or with the wrong shape**: SVGElement.prototype.className
+  (getter-only SVGAnimatedString; Element's is the string reflection for every element),
+  ShadowRoot.prototype.innerHTML (off DocumentFragment), VTTCue.getCueAsHTML (off
+  TextTrackCue), HTMLSelectElement.remove(index), own toJSON on the timing entries,
+  Document.body setter, [PutForwards] style/media setters on the CSS rules, Navigator.onLine
+  getter-only (the `on` prefix made `_ifaceAttr` treat it as an event handler),
+  Notification.permission and PerformanceObserver.supportedEntryTypes static getters,
+  adoptedStyleSheets enumerable/configurable, read-only Image/Storage prototypes.
+  `Node.lookupNamespaceURI(null)` answered null for HTML elements (it compared the missing
+  `prefix` member with `=== null`).
+- **SecurityPolicyViolationEvent** added (constructible, Chromium's fields and defaults; the
+  shim fires none): airgap.js constructs one at load.
+- **Parsed documents**: DOMParser's and createHTMLDocument's documents are still plain
+  objects, and Document.prototype's members ignored `this`, so
+  `Document.prototype.write.call(sandboxDoc, html)` (airgap's sanitizer, once it got that far)
+  rewrote grammarly.com's page. Document.prototype's members, and the Node.prototype members
+  such a document defines itself, now use the document's own member when `this` is one
+  (`_detachedDocuments`), and throw Illegal invocation when it has none; the parsed document
+  gained open/write/writeln/close.
+
+Not done (counts from the same dump against Chromium 141 on a data: page): 3393 members
+Chromium has that the shim lacks (1349 on WebGL2RenderingContext, 739 on WebGLRenderingContext,
+73 on CanvasRenderingContext2D, 52 on Document, ...; `Element.prototype.prefix` among them);
+255 own prototype members Chromium does not have there (mostly the shim's `_` helpers, and
+per-interface overrides such as HTMLImageElement's own setAttribute/addEventListener);
+about 380 instance-own members on the sampled objects that Chromium keeps on prototypes (every
+Event's state, Blob/File, FileReader, the stream objects, CanvasRenderingContext2D's
+attributes, Animation, PerformanceEntry); OfflineAudioContext still inherits AudioContext
+(resume/suspend not its own). Pinned by `WebIdlDescriptorTests` (Js).
