@@ -303,9 +303,10 @@ when C# layout drifts from Rust:
   LB21-LB28, LB30a/b. Missing: the LB25 numeric-regex expansion, LB20a, and
   Southeast-Asian dictionary breaking for Thai/Khmer/Lao. Symptom: a wrap one
   word early or late in non-Latin or numeric-heavy text.
-- **Bidi is reduced.** No explicit embedding controls (RLE/LRE/PDF), no isolates
-  (LRI/RLI/FSI/PDI), no N1/N2 neutral resolution. Pure-LTR text takes an exact
-  fast path; mixed-direction paragraphs can reorder differently.
+- **Bidi is reduced.** No explicit embedding controls (RLE/LRE/PDF) and no isolates
+  (LRI/RLI/FSI/PDI). N1/N2 neutral resolution is in, and the paragraph direction
+  comes from `direction`/`dir`, not the first strong character. Pure-LTR text takes
+  an exact fast path; mixed-direction paragraphs can still reorder differently.
 - **Glyph positions match; per-pixel coverage does not.** swash and Skia
   anti-alias differently by a few counts. Treat ink sums as tripwires, never as
   equality assertions.

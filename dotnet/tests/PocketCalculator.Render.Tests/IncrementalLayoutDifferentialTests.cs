@@ -149,6 +149,8 @@ public class IncrementalLayoutDifferentialTests
         "border:3px solid red", "max-width:100px", "min-height:25px", "position:relative;top:4px",
         "float:left;width:40px", "line-height:30px", "white-space:nowrap", "flex:2", "text-indent:10px",
         "box-sizing:border-box;width:100px;padding:10px", "transform:translateX(10px)", "visibility:hidden",
+        "text-align:center", "text-align:right", "text-align:justify", "text-align:end;text-align-last:center",
+        "direction:rtl", "white-space:pre-wrap",
     ];
 
     private static readonly string[] Words =
