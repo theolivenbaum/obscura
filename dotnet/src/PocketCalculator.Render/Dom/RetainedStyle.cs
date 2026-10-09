@@ -654,8 +654,27 @@ public static class RetainedStylePlanner
         return true;
     }
 
+    /// <summary>The subtree roots each dirty set already holds whole (<see cref="AddStyleSubtree"/>).</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<HashSet<NodeId>, HashSet<NodeId>> s_wholeSubtrees = [];
+
     internal static void AddStyleSubtree(DomTree tree, NodeId root, HashSet<NodeId> dirty)
     {
+        // DEVIATION from crates/obscura-render/src/dom.rs, which walks the subtree (and its
+        // ancestors) again on every call. A `:has()` rule anchored high (`body:has(...)`) sends
+        // every child-list mutation to the same anchor, and each walked the whole document:
+        // steamcommunity.com's app hub planned 38 mutations in 1.5-2.6s, allocating 336MB. A
+        // subtree already added whole, or lying inside one, adds nothing new.
+        HashSet<NodeId> whole = s_wholeSubtrees.GetValue(dirty, static _ => []);
+        int steps = 0;
+        for (NodeId? at = root; at is { } current && ++steps <= tree.SlotCount; at = tree.GetNode(current)?.Parent)
+        {
+            if (whole.Contains(current))
+            {
+                return;
+            }
+        }
+
+        whole.Add(root);
         dirty.Add(root);
         foreach (NodeId descendant in tree.Descendants(root))
         {

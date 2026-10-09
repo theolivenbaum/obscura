@@ -3312,6 +3312,22 @@ write + `getBoundingClientRect` 187ms -> 139ms; peak RSS unchanged. Pinned by
 `LineLayoutMemoTests` (Render). `POCKETCALCULATOR_DISABLE_SHAPE_CACHE=1` turns this off with the
 shape cache.
 
+### The retained planner adds a subtree to a dirty set once
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, which walks a subtree and its ancestors on every
+`AddStyleSubtree`. A `:has()` rule anchored high sends every child-list mutation to the same anchor,
+and each call walked the whole document again: steamcommunity.com's app hub (`/app/730`) planned 38
+mutations in 1.0-2.6s and 336MB. `RetainedStylePlanner.AddStyleSubtree` remembers, per dirty set,
+the roots it added whole, and a root inside one adds nothing. Same plans, now 40-53ms for that
+batch; `fetch --eval` element count 568 -> 985 (Chromium 1302). Correctness is the differential
+suite's (unchanged plans).
+
+Open: weather.com's ~28 passes are not planner-bound. Most retained passes fall back to a whole-
+document restyle on `restyleAnimationWide` (animation damage reaching half the style graph) and
+re-run container-query iterations, 100-440ms of cascade and ~250ms of taffy each, many forced by
+`getComputedStyle` (`op_computed_style` always prepares the whole render). A style-only prepare for
+`getComputedStyle` of non-layout properties is not done.
+
 ### A document with shadow roots keeps its retained styles
 
 DEVIATION from `crates/obscura-render/src/dom.rs`, which restyles the whole document on any
