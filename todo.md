@@ -2064,6 +2064,25 @@ Values measured in Chromium 141 (headless, Playwright); facts in
   with the other document ops (`FrameShadowRootTests`).
 - **IDBIndex getKey/getAllKeys/openKeyCursor** answer empty like the rest of the in-memory
   IndexedDB shim; mail.ru's api-cache GC called `index(...).getAllKeys`.
+- **Web Storage outlives the document.** DEVIATION from crates/obscura-js/js/bootstrap.js,
+  whose areas lived in the realm, so every navigation (a reload included) started
+  localStorage and sessionStorage empty. The areas are now host-held (`WebStorage`, through
+  the new `op_storage`): localStorage per browser context, sessionStorage per page, keyed by
+  origin, and for a frame with a cross-site ancestor also by the top-level origin (Chromium
+  partitions by top-level site). Chromium's 5 MiB-of-UTF-16 quota throws QuotaExceededError.
+  An opaque origin keeps the realm-local map. Neither area is written to `--storage-dir`, and
+  no `storage` event reaches other documents yet. Key order is insertion order; Chromium's is
+  unspecified (neither insertion nor sorted). `WebStorageTests`.
+- **reportError reports the exception.** DEVIATION: the shim's `reportError` only logged;
+  it now dispatches the cancelable, trusted ErrorEvent (window.onerror, `error` listeners)
+  that `_reportException` builds for uncaught errors.
+- **XMLHttpRequest uses the shim's fetch.** DEVIATION: XHR called the page-replaceable global
+  `fetch`, so a page's fetch wrapper saw every XHR (weather.com's and our own probes did).
+- **fetch and XHR answer data: and blob: URLs.** DEVIATION: both went to the network op and
+  failed with net::ERR_FAILED. They now follow Fetch's scheme fetch: the data: URL processor
+  (percent-decoding, forgiving base64, MIME serialization, `text/plain;charset=US-ASCII`
+  default) and the blob URL store (`URL.createObjectURL` keeps the Blob), with Chromium's 200
+  `OK` basic response and "Failed to fetch" for a bad or revoked URL.
 
 ### A linked stylesheet leaves no element in the DOM
 

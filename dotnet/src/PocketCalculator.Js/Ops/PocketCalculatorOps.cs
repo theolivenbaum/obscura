@@ -452,6 +452,8 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     {
         var engine = ops.Engine;
         BindFetch(ops, document);
+        Bind(ops, "op_storage", (Func<object?, object?, object?, object?, string>)(
+            (kind, cmd, key, value) => CoreOps.OpStorage(document, S(kind), S(cmd), S(key), S(value))));
         // Port fix: the shadow ops act on the calling realm's document. They were bound to the
         // page's state, so a child frame's attachShadow resolved the frame's node id in the
         // page's arena: it failed for a node the page did not have (vkvideo.ru's player inside

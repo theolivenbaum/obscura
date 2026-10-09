@@ -9943,6 +9943,84 @@ function _noCorsMethodAllowed(method) {
   return upper === 'GET' || upper === 'HEAD' || upper === 'POST';
 }
 
+// Fetch's scheme fetch for the two schemes a document answers itself: a data: URL from its
+// own bytes (the "data: URL processor"), a blob: URL from the blob URL store. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, which sent both to the network op and failed them with
+// net::ERR_FAILED (fetch and XHR alike); Chromium answers both with a 200 basic response.
+// Null for any other scheme.
+const _blobUrlObjects = _private(new Map());
+function _fetchFailed() { return new TypeError('Failed to fetch'); }
+function _percentDecodeToBytes(text) {
+  const enc = new TextEncoder().encode(text);
+  const out = new Uint8Array(enc.length);
+  let n = 0;
+  const hex = (b) => (b >= 48 && b <= 57) ? b - 48 : (b >= 65 && b <= 70) ? b - 55 : (b >= 97 && b <= 102) ? b - 87 : -1;
+  for (let i = 0; i < enc.length; i++) {
+    const b = enc[i];
+    if (b === 37 && i + 2 < enc.length && hex(enc[i + 1]) >= 0 && hex(enc[i + 2]) >= 0) {
+      out[n++] = hex(enc[i + 1]) * 16 + hex(enc[i + 2]);
+      i += 2;
+    } else {
+      out[n++] = b;
+    }
+  }
+  return out.subarray(0, n);
+}
+// MIME type parsing and serialization, as far as a data: URL needs it: the essence
+// lowercased, parameter names lowercased, the first of a repeated name kept.
+function _parseMimeType(text) {
+  const parts = _String(text).split(';');
+  const essence = parts[0].replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '').toLowerCase();
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/.test(essence)) return null;
+  let out = essence;
+  const seen = new Set();
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i].replace(/^[\t\n\f\r ]+/, '');
+    const eq = p.indexOf('=');
+    if (eq <= 0) continue;
+    const name = p.slice(0, eq).toLowerCase();
+    let value = p.slice(eq + 1).replace(/[\t\n\f\r ]+$/, '');
+    if (value === '' || seen.has(name) || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) continue;
+    seen.add(name);
+    out += ';' + name + '=' + value;
+  }
+  return out;
+}
+function _fetchLocalScheme(url, method) {
+  const lower = _stringToLowerCase(_stringSlice(url, 0, 5));
+  if (lower === 'blob:') {
+    const blob = _blobUrlObjects.get(url.split('#')[0]);
+    if (blob === undefined || method !== 'GET') return Promise.reject(_fetchFailed());
+    const headers = { 'content-type': blob.type || '', 'content-length': _String(blob.size) };
+    return Promise.resolve(new Response(blob, { status: 200, statusText: 'OK', headers, type: 'basic', url }));
+  }
+  if (lower !== 'data:') return null;
+  // The data: URL processor (Fetch 4.2): everything after "data:" up to the fragment.
+  let rest = url.slice(5);
+  const hash = rest.indexOf('#');
+  if (hash >= 0) rest = rest.slice(0, hash);
+  const comma = rest.indexOf(',');
+  if (comma < 0) return Promise.reject(_fetchFailed());
+  let mime = rest.slice(0, comma).replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
+  let bytes = _percentDecodeToBytes(rest.slice(comma + 1));
+  const b64 = /;[\t\n\f\r ]*base64$/i.exec(mime);
+  if (b64) {
+    let text = '';
+    for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+    text = text.replace(/[\t\n\f\r ]/g, '');
+    if (text.length % 4 === 0) text = text.replace(/==?$/, '');
+    if (text.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(text)) return Promise.reject(_fetchFailed());
+    let binary;
+    try { binary = atob(text); } catch (_) { return Promise.reject(_fetchFailed()); }
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    mime = mime.slice(0, b64.index).replace(/[\t\n\f\r ]+$/, '');
+  }
+  if (mime.charAt(0) === ';') mime = 'text/plain' + mime;
+  const type = _parseMimeType(mime) || 'text/plain;charset=US-ASCII';
+  return Promise.resolve(new Response(bytes, { status: 200, statusText: 'OK', headers: { 'content-type': type }, type: 'basic', url }));
+}
+
 globalThis.fetch = async (input, init = {}) => {
   init = init || {};
   const request = input instanceof Request ? input : null;
@@ -9991,6 +10069,8 @@ globalThis.fetch = async (input, init = {}) => {
   // with the page's own URL global: op_fetch_url derives the requesting origin from the
   // calling realm's document host-side and ignores this argument (SECURITY.md C1). The
   // slot carries the referrer settings instead (FetchReferrer.cs).
+  const local = _fetchLocalScheme(url, method);
+  if (local !== null) return local;
   const raw = await __obscuraCore.ops.op_fetch_url(
     url, method, hdrs, body, _referrerArg(fetchReferrerPolicy, fetchReferrer), fetchMode, fetchCredentials, false);
   const parsed = _JSONparse(raw);
@@ -10220,6 +10300,11 @@ if (typeof Headers === "undefined") {
 // XMLHttpRequestEventTarget — spec-required ancestor for XHR EventTarget methods.
 // zone.js prefers to walk XMLHttpRequestEventTarget.prototype for addEventListener/
 // removeEventListener/dispatchEvent descriptors before falling back to XHR.prototype.
+// XMLHttpRequest sends through the shim's own fetch. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, which called the page-replaceable global `fetch`: a page
+// (or an analytics wrapper) that patches window.fetch saw every XHR as a fetch call too, which
+// Chromium never does.
+const _fetchAtBoot = globalThis.fetch;
 class XMLHttpRequestEventTarget {
   addEventListener(type, handler) {
     if (!this._listeners) this._listeners = {};
@@ -10372,7 +10457,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     // Same rule as fetch: always resolve through the URL parser.
     let url = _resolveUrl(this._url);
 
-    fetch(url, {
+    _fetchAtBoot(url, {
       method: this._method,
       headers: this._headers,
       body: body || undefined,
@@ -15219,41 +15304,99 @@ function _structuredClone(value, seen) {
   return out;
 }
 globalThis.structuredClone = globalThis.structuredClone || ((v) => _structuredClone(v, new Map()));
-globalThis.reportError = globalThis.reportError || ((e) => console.error(e));
+// HTML reportError(e): "report the exception" - an ErrorEvent at the window (window.onerror
+// and error listeners see it, and can cancel the console report). DEVIATION from
+// crates/obscura-js/js/bootstrap.js, whose reportError only logged: React 19 reports
+// recoverable errors this way, and error trackers listening for `error` never saw them.
+globalThis.reportError = globalThis.reportError || _markNative({ reportError(e) {
+  if (arguments.length < 1) throw new TypeError("Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.");
+  _reportException(e);
+} }.reportError);
 
 // WHATWG Storage as a legacy platform object: a Proxy routes property access
 // (localStorage.foo, localStorage["foo"], delete, `in`, Object.keys) through
 // the named getter/setter so length/key()/iteration stay in sync with the
 // backing map. Plain prototype methods alone could not intercept direct
 // property access, so `localStorage.foo = x` never updated length before.
+//
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose areas lived in the realm, so every
+// navigation (a reload included) started them empty: an area is the host's (op_storage), the
+// browser context's for localStorage and the page's for sessionStorage, keyed by the
+// document's origin, as Chromium keeps them. A document with an opaque origin, or a runtime
+// with no host store, keeps the realm-local map (`_data`).
 globalThis.Storage = function Storage() {};
-Storage.prototype.getItem = function(k) { k = String(k); return _objectHasOwn(this._data, k) ? this._data[k] : null; };
-Storage.prototype.setItem = function(k, v) { this._data[String(k)] = String(v); };
-Storage.prototype.removeItem = function(k) { delete this._data[String(k)]; };
-Storage.prototype.clear = function() { const d = this._data; for (const k in d) delete d[k]; };
-Storage.prototype.key = function(i) { const ks = Object.keys(this._data); i = i >>> 0; return i < ks.length ? ks[i] : null; };
-Object.defineProperty(Storage.prototype, 'length', { get: function() { return Object.keys(this._data).length; }, configurable: true });
+const _storageOp = (t, cmd, key, value) => {
+  if (t._host === false) return 'none';
+  let r = 'none';
+  try { r = _String(__obscuraCore.ops.op_storage(t._kind, cmd, key === undefined ? '' : key, value === undefined ? '' : value)); } catch (_) {}
+  if (r === 'none') t._host = false;
+  return r;
+};
+// The area's keys, in order.
+const _storageKeys = (t) => {
+  const r = _storageOp(t, 'load');
+  if (r === 'none') return _objectKeys(t._data);
+  const pairs = _JSONparse(r);
+  const keys = [];
+  for (let i = 0; i < pairs.length; i++) keys.push(pairs[i][0]);
+  return keys;
+};
+const _storageGet = (t, k) => {
+  const r = _storageOp(t, 'get', k);
+  if (r === 'none') return _objectHasOwn(t._data, k) ? t._data[k] : null;
+  return _JSONparse(r);
+};
+Storage.prototype.getItem = function(k) { return _storageGet(this, String(k)); };
+Storage.prototype.setItem = function(k, v) {
+  k = String(k); v = String(v);
+  const r = _storageOp(this, 'set', k, v);
+  if (r === 'quota') throw new DOMException("Failed to execute 'setItem' on 'Storage': Setting the value of '" + k + "' exceeded the quota.", 'QuotaExceededError');
+  if (r === 'none') this._data[k] = v;
+};
+Storage.prototype.removeItem = function(k) {
+  k = String(k);
+  if (_storageOp(this, 'remove', k) === 'none') delete this._data[k];
+};
+Storage.prototype.clear = function() {
+  if (_storageOp(this, 'clear') !== 'none') return;
+  const d = this._data; for (const k in d) delete d[k];
+};
+Storage.prototype.key = function(i) {
+  i = i >>> 0;
+  const r = _storageOp(this, 'key', _String(i));
+  if (r !== 'none') return _JSONparse(r);
+  const ks = Object.keys(this._data); return i < ks.length ? ks[i] : null;
+};
+Object.defineProperty(Storage.prototype, 'length', { get: function() {
+  const r = _storageOp(this, 'length');
+  return r === 'none' ? Object.keys(this._data).length : +r;
+}, configurable: true });
 _defineProperty(Storage, 'prototype', { writable: false });
 
-const _mkStore = () => {
+const _mkStore = (kind) => {
   const target = Object.create(Storage.prototype);
   Object.defineProperty(target, '_data', { value: Object.create(null), writable: true, enumerable: false, configurable: true });
-  const isReal = (p) => p === '_data' || p === 'constructor' || (p in Storage.prototype);
+  Object.defineProperty(target, '_kind', { value: kind, writable: false, enumerable: false, configurable: true });
+  // undefined until the first call answers whether the host keeps this document's area.
+  Object.defineProperty(target, '_host', { value: undefined, writable: true, enumerable: false, configurable: true });
+  const isReal = (p) => p === '_data' || p === '_kind' || p === '_host' || p === 'constructor' || (p in Storage.prototype);
   return new Proxy(target, {
-    get(t, p, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.get(t, p, recv); const v = t.getItem(p); return v === null ? undefined : v; },
+    get(t, p, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.get(t, p, recv); const v = _storageGet(t, p); return v === null ? undefined : v; },
     set(t, p, v, recv) { if (typeof p === 'symbol' || isReal(p)) return Reflect.set(t, p, v, recv); t.setItem(p, v); return true; },
-    has(t, p) { if (typeof p === 'symbol' || isReal(p)) return true; return _objectHasOwn(t._data, p); },
+    has(t, p) { if (typeof p === 'symbol' || isReal(p)) return true; return _storageGet(t, p) !== null; },
     deleteProperty(t, p) { if (typeof p === 'symbol' || isReal(p)) return Reflect.deleteProperty(t, p); t.removeItem(p); return true; },
-    ownKeys(t) { return Object.keys(t._data); },
+    ownKeys(t) { return _storageKeys(t); },
     getOwnPropertyDescriptor(t, p) {
-      if (typeof p !== 'symbol' && _objectHasOwn(t._data, p))
-        return { value: t._data[p], writable: true, enumerable: true, configurable: true };
+      if (typeof p !== 'symbol' && !isReal(p)) {
+        const v = _storageGet(t, p);
+        if (v !== null) return { value: v, writable: true, enumerable: true, configurable: true };
+      }
       return Reflect.getOwnPropertyDescriptor(t, p);
     },
   });
 };
-globalThis.localStorage = _mkStore();
-globalThis.sessionStorage = _mkStore();
+globalThis.localStorage = _mkStore('local');
+globalThis.sessionStorage = _mkStore('session');
 
 globalThis.btoa = globalThis.btoa || ((s) => { const b = new TextEncoder().encode(s); const c="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; let r=""; for(let i=0;i<b.length;i+=3){const a=b[i],bb=b[i+1]??0,cc=b[i+2]??0; r+=c[a>>2]+c[((a&3)<<4)|(bb>>4)]+(i+1<b.length?c[((bb&15)<<2)|(cc>>6)]:"=")+(i+2<b.length?c[cc&63]:"=");} return r; });
 globalThis.atob = globalThis.atob || ((s) => {
@@ -19896,6 +20039,7 @@ URL.createObjectURL = function(blob) {
           return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
         });
     const id = 'blob:' + origin + '/' + uuid;
+    _blobUrlObjects.set(id, blob);
     // Store synchronously so a Worker built from the blob URL in the same
     // tick sees its source. Blob-URL Worker construction is synchronous in
     // real browsers; the previous async blob.text().then() store raced the
@@ -19925,6 +20069,7 @@ URL.createObjectURL = function(blob) {
 };
 URL.revokeObjectURL = function(url) {
   delete _hostVars.__blobStore[url];
+  _blobUrlObjects.delete(_String(url));
   try { __obscuraCore.ops.op_blob_script_revoke(_String(url)); } catch (e) {}
 };
 

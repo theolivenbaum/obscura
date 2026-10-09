@@ -159,6 +159,12 @@ public sealed class PocketCalculatorState
 
     public CookieJar? CookieJar { get; set; }
 
+    /// <summary>The browser context's <c>localStorage</c> areas; null keeps them realm-local.</summary>
+    public WebStorage? LocalStorage { get; set; }
+
+    /// <summary>The page's <c>sessionStorage</c> areas; null keeps them realm-local.</summary>
+    public WebStorage? SessionStorage { get; set; }
+
     public PocketCalculatorHttpClient? HttpClient { get; set; }
 
     /// <summary>

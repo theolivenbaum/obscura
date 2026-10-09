@@ -168,6 +168,52 @@ public static class CoreOps
         () => state.RuntimeEventsEnabled,
         false);
 
+    /// <summary>
+    /// <c>op_storage</c>. Port addition: one Web Storage call on the host-held area of the
+    /// calling document (see <see cref="WebStorage"/>). <paramref name="kind"/> is
+    /// <c>local</c> or <c>session</c>; <paramref name="cmd"/> is <c>load</c> (answers the
+    /// area as a JSON array of pairs), <c>get</c> and <c>key</c> (a JSON string or
+    /// <c>null</c>), <c>length</c>, <c>set</c> (answers <c>quota</c> when refused),
+    /// <c>remove</c> or <c>clear</c>.
+    /// </summary>
+    /// <returns><c>none</c> when the document has no host-held area (no store, or an opaque origin).</returns>
+    public static string OpStorage(PocketCalculatorState state, string kind, string cmd, string key, string value) =>
+        OpGuard.Run("op_storage", () =>
+        {
+            ArgumentNullException.ThrowIfNull(state);
+            var store = kind == "session" ? state.SessionStorage : kind == "local" ? state.LocalStorage : null;
+            var storageKey = StateHelpers.StorageKey(state);
+            if (store is null || storageKey is null)
+            {
+                return "none";
+            }
+
+            switch (cmd)
+            {
+                case "load":
+                    return store.SnapshotJson(storageKey);
+                case "get":
+                    return store.Get(storageKey, key) is { } item ? JsonSerializer.Serialize(item) : "null";
+                case "length":
+                    return store.Count(storageKey).ToString(CultureInfo.InvariantCulture);
+                case "key":
+                    return int.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var index)
+                        && store.KeyAt(storageKey, index) is { } name
+                        ? JsonSerializer.Serialize(name)
+                        : "null";
+                case "set":
+                    return store.Set(storageKey, key, value) ? string.Empty : "quota";
+                case "remove":
+                    store.Remove(storageKey, key);
+                    return string.Empty;
+                case "clear":
+                    store.Clear(storageKey);
+                    return string.Empty;
+                default:
+                    return "none";
+            }
+        }, "none");
+
     /// <summary><c>op_console_msg</c>. Records one console call for the CDP Runtime domain.</summary>
     /// <param name="page">The page state whose runtime events carry the call.</param>
     /// <param name="level">The console method's CDP type.</param>

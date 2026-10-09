@@ -140,6 +140,16 @@ public sealed partial class PocketCalculatorJsRuntime
 
     public void SetCookieJar(CookieJar jar) => State.CookieJar = jar;
 
+    /// <summary>
+    /// Gives the page's documents host-held Web Storage: the context's <c>localStorage</c>
+    /// and the page's <c>sessionStorage</c>, which outlive a navigation.
+    /// </summary>
+    public void SetWebStorage(WebStorage local, WebStorage session)
+    {
+        State.LocalStorage = local;
+        State.SessionStorage = session;
+    }
+
     public void SetHttpClient(PocketCalculatorHttpClient client)
     {
         State.HttpClient = client;
@@ -660,6 +670,8 @@ public sealed partial class PocketCalculatorJsRuntime
     {
         ArgumentNullException.ThrowIfNull(frame);
         frame.CookieJar = State.CookieJar;
+        frame.LocalStorage = State.LocalStorage;
+        frame.SessionStorage = State.SessionStorage;
         frame.HttpClient = State.HttpClient;
         frame.Callbacks = State.Callbacks;
         frame.Encoding = State.Encoding;

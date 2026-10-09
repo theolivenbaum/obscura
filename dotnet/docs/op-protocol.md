@@ -341,6 +341,7 @@ so these are called unguarded:
 | `op_frame_document_from_load` | fast | `body_token: f64, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_frame_document_srcdoc` | fast | `iframe_nid: u32, viewport_width: u64, viewport_height: u64, sandboxed: bool` | `u32` frame id, 0 when refused |
 | `op_load_stylesheet` | async | `owner_nid: u32, url: String` | `String`: `{"ok":true,"responseUrl":...}` or `{"ok":false}` |
+| `op_storage` | fast | `kind: "local"\|"session", cmd: "load"\|"get"\|"key"\|"length"\|"set"\|"remove"\|"clear", key: String, value: String` | `String`: `"none"` when the calling document has no host-held area (opaque origin, no store), else `load` a JSON array of `[key, value]`, `get`/`key` a JSON string or `null`, `length` a number, `set` `"quota"` when refused, `""` |
 | `op_frame_same_origin` | fast | `frame_id: u32` | `f64`: 1 same-origin, 0 cross-origin, -1 unknown |
 | `op_history_url` | fast | `url: String, frame_id: u32` | `bool`: false, and nothing kept, when the document may not be rewritten to `url`; `""` clears it |
 | `op_wasm_memory_admit` | fast | `held_bytes: f64, delta_bytes: f64` | `bool`: whether the isolate's WebAssembly memory budget allows `delta_bytes` more |

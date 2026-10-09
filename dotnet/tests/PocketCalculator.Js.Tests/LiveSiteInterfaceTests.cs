@@ -102,6 +102,77 @@ public sealed class LiveSiteInterfaceTests
                 """));
     }
 
+    /// <summary>
+    /// reportError is HTML's "report the exception": window.onerror and error listeners see an
+    /// ErrorEvent (React 19 reports recoverable errors this way). The shim only logged.
+    /// </summary>
+    [Fact]
+    public void ReportErrorDispatchesAnErrorEvent()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><head></head><body></body></html>");
+        Assert.Equal(
+            "onerror:Uncaught Error: boom:true|listener:ErrorEvent:Uncaught Error: boom:true:true:true|after|1:false"
+            + "|TypeError: Failed to execute 'reportError' on 'Window': 1 argument required, but only 0 present.",
+            Eval(fixture.Runtime, """
+                (() => {
+                  const out = [];
+                  const err = new Error('boom');
+                  window.onerror = (m, s, l, c, e) => { out.push('onerror:' + m + ':' + (e === err)); return true; };
+                  window.addEventListener('error', (e) => out.push('listener:' + e.constructor.name + ':' + e.message + ':'
+                    + (e.error === err) + ':' + e.cancelable + ':' + e.isTrusted));
+                  reportError(err);
+                  out.push('after');
+                  out.push(String(reportError.length) + ':' + ('prototype' in reportError));
+                  try { reportError(); } catch (e) { out.push(e.constructor.name + ': ' + e.message); }
+                  window.onerror = null;
+                  return out.join('|');
+                })()
+                """));
+    }
+
+    /// <summary>
+    /// fetch and XHR answer data: and blob: URLs themselves, and XHR never goes through the
+    /// page's window.fetch. The port failed both schemes with net::ERR_FAILED, and an analytics
+    /// wrapper around window.fetch saw every XHR.
+    /// </summary>
+    [Fact]
+    public async Task FetchAndXhrAnswerDataAndBlobUrls()
+    {
+        using var fixture = RuntimeFixture.Setup("<html><head></head><body></body></html>");
+        fixture.Runtime.Evaluate("""
+            (async () => {
+              const u = URL.createObjectURL(new Blob(['blobtext'], { type: 'text/x-foo' }));
+              const a = await fetch(u).then(async r => r.status + ':' + r.headers.get('content-type') + ':' + r.headers.get('content-length') + ':' + (await r.text()) + ':' + r.url.slice(0, 5) + ':' + r.type, e => 'ERR ' + e);
+              const b = await fetch('data:text/plain;charset=utf-8;base64,aGVsbG8=').then(async r => r.status + ':' + r.statusText + ':' + r.headers.get('content-type') + ':' + (await r.text()) + ':' + r.url + ':' + r.type + ':' + [...r.headers.keys()].join(','), e => 'ERR ' + e);
+              const c = await fetch('data:,a%20b').then(async r => r.headers.get('content-type') + ':' + (await r.text()), e => 'ERR ' + e);
+              const d = await fetch('data:text/plain,x', { method: 'POST', body: 'y' }).then(async r => r.status + ':' + (await r.text()), e => 'ERR ' + e.name + ' ' + e.message);
+              const e = await fetch('data:bad').then(async r => r.status, e => 'ERR ' + e.name + ' ' + e.message);
+              URL.revokeObjectURL(u);
+              const f = await fetch(u).then(r => r.status, e => 'ERR ' + e.name + ' ' + e.message);
+              let calls = 0;
+              const original = window.fetch;
+              window.fetch = function () { calls++; return original.apply(this, arguments); };
+              const x = await new Promise((resolve) => {
+                const r = new XMLHttpRequest();
+                const ev = [];
+                for (const t of ['load', 'error', 'abort']) r.addEventListener(t, () => ev.push(t));
+                r.addEventListener('loadend', () => resolve(r.status + ':' + r.responseText + ':' + ev.join(',')));
+                r.open('GET', 'data:text/plain,hi');
+                r.send();
+              });
+              window.fetch = original;
+              globalThis.result = [a, b, c, d, e, f, x + ':fetchCalls=' + calls].join(' || ');
+            })();
+            """);
+        await fixture.Runtime.RunEventLoopBoundedAsync(1000);
+        Assert.Equal(
+            "200:text/x-foo:8:blobtext:blob::basic"
+            + " || 200:OK:text/plain;charset=utf-8:hello:data:text/plain;charset=utf-8;base64,aGVsbG8=:basic:content-type"
+            + " || text/plain;charset=US-ASCII:a b || 200:x || ERR TypeError Failed to fetch || ERR TypeError Failed to fetch"
+            + " || 200:hi:load:fetchCalls=0",
+            Eval(fixture.Runtime, "String(globalThis.result)"));
+    }
+
     [Fact]
     public void ReflectedAttributesLiveOnTheirInterfaces()
     {
