@@ -111,7 +111,7 @@ public sealed class OpCancellationTests
         // watchdog is disarmed, so the bookkeeping after the timeout was interrupted too, and
         // its ScriptInterruptedException (an OperationCanceledException) escaped: the page
         // read it as its own navigation being cancelled and failed to load.
-        using var fixture = RuntimeFixture.Setup(NestedFloats(300));
+        using var fixture = RuntimeFixture.Setup(FloatedParagraphs(8_000));
         var rt = fixture.Runtime;
         rt.Evaluate(
             "(() => { setTimeout(() => { document.getElementById('deep').getBoundingClientRect(); }, 0);"
