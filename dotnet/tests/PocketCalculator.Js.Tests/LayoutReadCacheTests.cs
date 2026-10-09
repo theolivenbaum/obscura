@@ -206,4 +206,80 @@ public sealed class LayoutReadCacheTests
         Assert.Contains("\"width\":300", RenderOps.OpLayoutOffset(state, nid));
         Assert.NotNull(state.PreparedRender);
     }
+    /// <summary>
+    /// A class write followed by a geometry read lays out again only what the write reached:
+    /// the other grid items answer from the layout results the previous pass left them, so a
+    /// write+read pair costs a fraction of a full layout of the same page, and reads exactly
+    /// what a full layout of the final document reads.
+    /// </summary>
+    [Fact]
+    public void AWriteThenReadReLaysOutOnlyWhatTheWriteReached()
+    {
+        var html = new System.Text.StringBuilder(
+            "<!doctype html><html><head><style>body{margin:0}.g{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}"
+            + ".c{border:1px solid;padding:2px}.c.big{padding:9px;font-size:20px}</style></head><body><div class=g>");
+        for (int i = 0; i < 400; i++)
+        {
+            html.Append("<div class=c id=c").Append(i).Append(">item ").Append(i).Append(" with a few words of text</div>");
+        }
+
+        html.Append("</div></body></html>");
+        using var fixture = RuntimeFixture.Blank();
+        var rt = fixture.Runtime;
+        rt.SetDom(HtmlParsing.ParseHtml(html.ToString()));
+        rt.SetViewport(1280, 800);
+        rt.RunPageInit();
+        const string Toggle = """
+            (() => {
+              const t = performance.now(), heights = [];
+              for (let i = 0; i < 10; i++) {
+                const e = document.getElementById('c' + (i * 37));
+                e.classList.toggle('big');
+                heights.push(e.offsetHeight, document.getElementById('c' + (i * 37 + 1)).offsetWidth);
+              }
+              return [performance.now() - t, heights];
+            })()
+            """;
+
+        // Warm both paths up, so neither side of the comparison pays the JIT.
+        rt.Evaluate(Toggle);
+        rt.Evaluate(Toggle);
+        var incremental = rt.Evaluate(Toggle)!.AsArray();
+        double incrementalMs = incremental[0]!.GetValue<double>();
+
+        // The last read's layout carried every grid item but the toggled one over.
+        Assert.True(
+            rt.State.PreparedRender!.Layout.TransplantedBoxes > 390,
+            $"carried {rt.State.PreparedRender.Layout.TransplantedBoxes} boxes");
+
+        // The same number of full layouts: a viewport change cannot reuse anything.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 10; i++)
+        {
+            rt.SetViewport(1280 + ((i % 2) * 2), 800);
+            rt.Evaluate("document.getElementById('c0').offsetHeight");
+        }
+
+        double fullMs = clock.Elapsed.TotalMilliseconds;
+
+        // What the incremental reads saw is what a full layout of the final document reads.
+        rt.SetViewport(1280, 800);
+        var heights = incremental[1]!.AsArray();
+        var expected = rt.Evaluate("""
+            (() => {
+              const out = [];
+              for (let i = 0; i < 10; i++) out.push(document.getElementById('c' + (i * 37)).offsetHeight, document.getElementById('c' + (i * 37 + 1)).offsetWidth);
+              return out;
+            })()
+            """)!.AsArray();
+        Assert.True(
+            System.Text.Json.Nodes.JsonNode.DeepEquals(expected, heights),
+            $"incremental {heights.ToJsonString()}\n       full {expected.ToJsonString()}");
+
+        // Generous: carrying the clean items over is several times cheaper on this page, so
+        // this only fails if every pair is a whole-document layout again.
+        Assert.True(
+            incrementalMs < fullMs,
+            $"10 write+read pairs took {incrementalMs:F0}ms, 10 full layouts {fullMs:F0}ms");
+    }
 }
