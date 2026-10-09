@@ -849,8 +849,9 @@ thumbnails, a sidebar and float columns 406.9 -> 347.3 ms; screenshots of the 57
 `render-repros/` and bench pages are byte-identical except the two whose animation makes the
 base build differ from itself. A paragraph of 2,000 anchored floats lays out in about a second.
 
-Status: 56 of 61 conformance pages match Chromium (element boxes within 1px, inline line
-fragments within 2px), and 7 of the 8 older float pages at the top of `render-repros/` (the
+Status: 60 of 61 conformance pages match Chromium (element boxes within 1px, inline line
+fragments within 2px; 56 before line alignment was fixed, see "Line alignment follows
+text-align, white-space and direction" under Known deviations), and 7 of the 8 older float pages at the top of `render-repros/` (the
 eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
 where Chromium gives an empty box after it, as before). Open:
 
@@ -861,9 +862,9 @@ where Chromium gives an empty box after it, as before). Open:
       through inline elements' `getClientRects()` instead
 - [ ] an inline box split by a float inside it reports one fragment where Chromium reports
       two (`float-in-inline`)
-- [ ] right-to-left paragraphs still start at the left (an older, float-independent gap), and
-      centred/right-aligned lines still count their trailing space; both show on the
-      `rtl`/`text-align-*` pages
+- [x] right-to-left paragraphs started at the left, and centred/right-aligned lines counted
+      their trailing space (the `rtl`/`text-align-*`/`control-no-float` pages); fixed with line
+      alignment
 - [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line
       (a float before any text in it is placed before it, one after text splits it);
       its items' percentages resolve against the block, not the narrowed run
@@ -1412,6 +1413,51 @@ DEVIATION comment at the C# code that differs.
   to avoid.
 
 ## Known deviations
+
+### Line alignment follows text-align, white-space and direction
+
+Rust (cosmic-text's `layout_to_buffer`, `inline.rs`) aligns only `center` and `right`/`end`, to
+the right whatever the direction; `justify`, `text-align-last` and `direction` are ignored; a
+line is aligned with all of its advance, trailing white space included; and a paragraph takes
+its direction from its first strong character. Measured against Chromium 141 on the pages in
+`render-repros/text-align/` (`scripts/text-align-conformance`, 23 pages scored at 0.5px, all
+passing), the port now:
+
+- keeps the `text-align` keyword (`TextAlignKeyword`, inherited) and resolves start/end against
+  each block's own direction; `left`/`right` are physical. The flex stand-ins (inline-run rows,
+  aligned-block columns) read `LayoutStyle.TextAlign`, now resolved against the box's
+  direction, so `text-align: left` in a `dir=rtl` block is flex-end. `getComputedStyle` reports
+  the keyword (`left`, `right`, `justify`), and `text-align-last` (Rust: neither).
+- leaves a line's trailing white space out of its alignment (CSS Text 3 4.1.3): removed for
+  normal/nowrap/pre-line (at a soft wrap and before a `<br>`), hanging at a soft wrap for
+  pre-wrap (reported as a fragment of its own past the content, as Chromium does), counted for
+  pre/break-spaces (`TextLayout`, `LineAlignOptions`). A span whose only text on a line is a
+  removed space has no fragment there, and fragments end at the content.
+- justifies (`text-align: justify`): inner spaces widen, trailing ones do not, the last line and
+  a line before `<br>` take `text-align-last` (start by default), a justified line is laid out
+  in the width its indent and its inline boxes' margins, borders and padding leave.
+- takes the paragraph direction from `direction`/`dir` (`BufferLine.BaseRtl`, part of the
+  shaping cache key) and adds UAX#9 N1/N2 to the reduced bidi resolver, so Latin text in a
+  `dir=rtl` paragraph keeps its word order and Hebrew in an LTR one reads right to left; a
+  bidi run's first word that does not fit wraps where cosmic-text let the line overflow.
+- lays a right-to-left line from the right: text-indent is on the right, inline-box edges sit
+  where their text is (`InlineGeometry.VisualEdgeShifts`), a span gets one fragment per bidi
+  run, and list markers are drawn right of the content box.
+- lays a first line with a negative text-indent out in the width the indent gives it (it
+  wrapped again in the box's width).
+
+Left-aligned left-to-right text is laid out as before (screenshots of the render-repros pages
+are byte-identical; see the commit). Still open:
+
+- [ ] a row of atomic inlines (a run holding an inline-block or image) in a `dir=rtl` block is
+      ordered right to left item by item; Chromium keeps Latin text and the inline-blocks
+      between its words in left-to-right order (UAX#9 N1 over the atomic inlines)
+- [ ] in such rows a space between a text item and an atomic inline is dropped
+      (`alpha <ib>` centred: the box is 2.2px right of Chromium), a removed space after an
+      atomic at a line end still takes room (4.45px), and a centred right-to-left row is about
+      0.6px off
+- [ ] bidi stays reduced: no explicit embeddings or isolates, so an inline `dir` attribute
+      does not isolate its text; an ordered list's marker is not reordered right to left
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 

@@ -226,7 +226,10 @@ public class InlineNestingPerformanceTests
     /// reassociation of the f32 edge sums shows) in a narrow centred block: enough events for
     /// the cached sums, and several wrapped lines. The expected values were taken from the scan
     /// the cache replaced, before the change, and re-taken when a continuing fragment stopped
-    /// covering the white space that hangs at a soft wrap (Chromium ends it at the last glyph).
+    /// covering the white space that hangs at a soft wrap (Chromium ends it at the last glyph),
+    /// and again when centred lines stopped counting the space they end with and a continuing
+    /// fragment of an aligned line stopped running to the line box's width past its content
+    /// (CSS Text 3 4.1.3; the line breaks this page takes still differ from Chromium's).
     /// </summary>
     [Fact]
     public void NestedEdgeGeometryAndPixelsAreUnchanged()
@@ -239,15 +242,17 @@ public class InlineNestingPerformanceTests
             i => $"w{i} ",
             Host + ";width:300px;text-align:center");
         DomLayout laid = RenderDom.LayoutDom(tree, (400f, 400f));
-        Assert.Equal((132, 998606822u), Fingerprint(laid, spans));
-        Assert.Equal(3552515651u, PixelHash(RenderPaint.PaintDom(tree, (400f, 400f), null)!));
+        Assert.Equal((132, 273561533u), Fingerprint(laid, spans));
+        Assert.Equal(335585619u, PixelHash(RenderPaint.PaintDom(tree, (400f, 400f), null)!));
     }
 
     /// <summary>
     /// A 7000-character paragraph of sibling spans with em-sized edges, negative margins and
     /// relative offsets: it takes the windowed first-line probe, the cached edge sums and the
     /// per-run relative ranges. Expected values from the engine before the change, re-taken
-    /// when a continuing fragment stopped covering the white space that hangs at a soft wrap.
+    /// when a continuing fragment stopped covering the white space that hangs at a soft wrap,
+    /// and again when <c>text-align: justify</c> started justifying: every one of the 400
+    /// spans' fragments is now within 0.5px of Chromium 141 (3 were before).
     /// </summary>
     [Fact]
     public void SiblingParagraphGeometryAndPixelsAreUnchanged()
@@ -266,7 +271,7 @@ public class InlineNestingPerformanceTests
             i => $"lorem{i} ipsum ",
             Host + ";width:500px;text-align:justify");
         DomLayout laid = RenderDom.LayoutDom(tree, (600f, 800f));
-        Assert.Equal((424, 2247376737u), Fingerprint(laid, spans));
-        Assert.Equal(1196706098u, PixelHash(RenderPaint.PaintDom(tree, (600f, 800f), null)!));
+        Assert.Equal((424, 1503323488u), Fingerprint(laid, spans));
+        Assert.Equal(1036016077u, PixelHash(RenderPaint.PaintDom(tree, (600f, 800f), null)!));
     }
 }

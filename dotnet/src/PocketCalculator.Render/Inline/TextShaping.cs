@@ -231,28 +231,32 @@ public sealed class TextShaper(FontDatabase database)
     private readonly record struct WordShapeKey(string Text, TextAttrs Attrs, bool Rtl);
 
     /// <summary>Shape one paragraph into spans and words.</summary>
-    public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth)
+    /// <param name="baseRtl">
+    /// The paragraph direction from CSS <c>direction</c>, or <c>null</c> for the first strong
+    /// character's (UAX#9 P2/P3).
+    /// </param>
+    public ShapeLine ShapeParagraph(string line, AttrsList attrsList, int tabWidth, bool? baseRtl = null)
     {
         if (Cache is { } cache)
         {
-            ShapeCacheKey key = new(line, attrsList, tabWidth);
+            ShapeCacheKey key = new(line, attrsList, tabWidth, baseRtl);
             if (cache.TryGet(key, out ShapeLine cached))
             {
                 return cached;
             }
 
-            ShapeLine fresh = ShapeParagraphUncached(line, attrsList, tabWidth);
+            ShapeLine fresh = ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
             cache.Add(key, fresh);
             return fresh;
         }
 
-        return ShapeParagraphUncached(line, attrsList, tabWidth);
+        return ShapeParagraphUncached(line, attrsList, tabWidth, baseRtl);
     }
 
-    private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth)
+    private ShapeLine ShapeParagraphUncached(string line, AttrsList attrsList, int tabWidth, bool? baseRtl)
     {
         var result = new ShapeLine();
-        List<(int Start, int End, byte Level)> runs = Bidi.LevelRuns(line, out bool rtl);
+        List<(int Start, int End, byte Level)> runs = Bidi.LevelRuns(line, out bool rtl, baseRtl);
         result.Rtl = rtl;
         foreach ((int start, int end, byte level) in runs)
         {

@@ -140,7 +140,8 @@ public sealed partial class PreparedRender
         style.WordBreak = host.WordBreak;
         style.TextWrapStyle = host.TextWrapStyle;
         style.TextTransform = host.TextTransform;
-        style.TextAlign = host.TextAlign;
+        style.TextAlignKeyword = host.TextAlignKeyword;
+        style.TextAlignLast = host.TextAlignLast;
         style.TextIndent = host.TextIndent;
         style.EffectivelyInvisible = host.EffectivelyInvisible;
         return style;

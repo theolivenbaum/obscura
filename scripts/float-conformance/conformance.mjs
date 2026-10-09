@@ -2,9 +2,11 @@
 // element, in Chromium and in the port, for the pages in render-repros/floats/.
 //
 // usage: node conformance.mjs [pagesDir] [portBin] [filter] [--save chromium.json] [--verbose]
+//                             [--tol px]
 //   pagesDir defaults to render-repros/floats, portBin to the Release CLI build.
 // Element boxes must agree within 1px, line fragments within 2px (4px in width); hit tests
-// are reported, not scored, because elementFromPoint is the shim's heuristic.
+// are reported, not scored, because elementFromPoint is the shim's heuristic. --tol sets one
+// tolerance for every coordinate of both (render-repros/text-align is scored at 0.5).
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -17,7 +19,10 @@ const args = process.argv.slice(2);
 const saveIdx = args.indexOf('--save');
 const save = saveIdx >= 0 ? args[saveIdx + 1] : null;
 const verbose = args.includes('--verbose');
-const positional = args.filter((a, i) => !a.startsWith('--') && (saveIdx < 0 || i !== saveIdx + 1));
+const tolIdx = args.indexOf('--tol');
+const tol = tolIdx >= 0 ? Number(args[tolIdx + 1]) : null;
+const positional = args.filter((a, i) => !a.startsWith('--')
+  && (saveIdx < 0 || i !== saveIdx + 1) && (tolIdx < 0 || i !== tolIdx + 1));
 const dir = positional[0] || `${REPO}render-repros/floats`;
 const bin = positional[1] || process.env.POCKETCALCULATOR_PORT_BIN
   || `${REPO}dotnet/src/PocketCalculator.Cli/bin/Release/net10.0/pocket-calculator`;
@@ -96,13 +101,13 @@ for (const f of files) {
   else {
     for (const [id, b] of Object.entries(c.el)) {
       totalEl++;
-      if (boxOk(b, p.el[id], [1, 1, 1, 1])) okEl++;
+      if (boxOk(b, p.el[id], tol !== null ? [tol, tol, tol, tol] : [1, 1, 1, 1])) okEl++;
       else issues.push(`el ${id}: chrome ${JSON.stringify(b)} port ${JSON.stringify(p.el[id])}`);
     }
     for (const [k, lines] of Object.entries(c.text)) {
       totalTx++;
       const pl = p.text[k] || [];
-      const ok = lines.length === pl.length && lines.every((b, i) => boxOk(b, pl[i], [2, 2, 4, 3]));
+      const ok = lines.length === pl.length && lines.every((b, i) => boxOk(b, pl[i], tol !== null ? [tol, tol, tol, tol] : [2, 2, 4, 3]));
       if (ok) okTx++;
       else issues.push(`text ${k}: chrome ${JSON.stringify(lines)} port ${JSON.stringify(pl)}`);
     }

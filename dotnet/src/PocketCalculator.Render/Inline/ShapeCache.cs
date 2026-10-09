@@ -14,20 +14,23 @@ internal readonly struct ShapeCacheKey : IEquatable<ShapeCacheKey>
 {
     private readonly string _text;
     private readonly int _tabWidth;
+    private readonly bool? _baseRtl;
     private readonly TextAttrs _defaults;
     private readonly (int Start, int End, TextAttrs Attrs)[] _spans;
     private readonly int _hash;
 
-    internal ShapeCacheKey(string text, AttrsList attrs, int tabWidth)
+    internal ShapeCacheKey(string text, AttrsList attrs, int tabWidth, bool? baseRtl = null)
     {
         _text = text;
         _tabWidth = tabWidth;
+        _baseRtl = baseRtl;
         _defaults = attrs.Defaults;
         _spans = [.. attrs.Spans];
 
         var hash = new HashCode();
         hash.Add(text, StringComparer.Ordinal);
         hash.Add(tabWidth);
+        hash.Add(baseRtl);
         hash.Add(_defaults);
         foreach ((int start, int end, TextAttrs one) in _spans)
         {
@@ -43,6 +46,7 @@ internal readonly struct ShapeCacheKey : IEquatable<ShapeCacheKey>
     {
         if (_hash != other._hash
             || _tabWidth != other._tabWidth
+            || _baseRtl != other._baseRtl
             || _spans.Length != other._spans.Length
             || !string.Equals(_text, other._text, StringComparison.Ordinal)
             || !_defaults.Equals(other._defaults))
@@ -213,14 +217,16 @@ internal sealed class ShapeCache
         float? width,
         Wrap wrap,
         Align? align,
-        float? matchMonoWidth)
+        float? matchMonoWidth,
+        LineAlignOptions options = default)
     {
         LayoutMemoKey key = new(
             BitConverter.SingleToInt32Bits(fontSize),
             width is { } w ? BitConverter.SingleToUInt32Bits(w) : long.MinValue,
             wrap,
             align,
-            matchMonoWidth is { } m ? BitConverter.SingleToUInt32Bits(m) : long.MinValue);
+            matchMonoWidth is { } m ? BitConverter.SingleToUInt32Bits(m) : long.MinValue,
+            options);
         LayoutMemo? memo = shape.LayoutMemo is { } existing && existing.Generation == _memoGeneration
             ? existing
             : null;
@@ -237,7 +243,7 @@ internal sealed class ShapeCache
         }
 
         LayoutMisses++;
-        List<LayoutLine> layout = TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, align, matchMonoWidth);
+        List<LayoutLine> layout = TextLayout.LayoutToBuffer(shape, fontSize, width, wrap, align, matchMonoWidth, options);
         int glyphs = 0;
         foreach (LayoutLine line in layout)
         {
@@ -270,7 +276,13 @@ internal sealed class ShapeCache
 }
 
 /// <summary>The arguments of one <see cref="TextLayout.LayoutToBuffer"/> call, floats as bits.</summary>
-internal readonly record struct LayoutMemoKey(int FontSize, long Width, Wrap Wrap, Align? Align, long Mono);
+internal readonly record struct LayoutMemoKey(
+    int FontSize,
+    long Width,
+    Wrap Wrap,
+    Align? Align,
+    long Mono,
+    LineAlignOptions Options = default);
 
 /// <summary>
 /// The line layouts <see cref="ShapeCache.Layout"/> keeps for one shaped paragraph. A memo from
