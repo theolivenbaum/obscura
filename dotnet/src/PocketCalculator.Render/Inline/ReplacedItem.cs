@@ -43,6 +43,26 @@ internal readonly struct ReplacedItem
     /// </summary>
     public bool ZeroInlineMinContent { get; init; }
 
+    /// <summary>Whether <paramref name="other"/> sizes exactly as this does, bit for bit.</summary>
+    internal bool SameSizing(in ReplacedItem other) =>
+        Same(IntrinsicWidth, other.IntrinsicWidth)
+        && Same(IntrinsicHeight, other.IntrinsicHeight)
+        && Same(PreferredWidth, other.PreferredWidth)
+        && Same(PreferredHeight, other.PreferredHeight)
+        && BitConverter.SingleToInt32Bits(PreferredRatio) == BitConverter.SingleToInt32Bits(other.PreferredRatio)
+        && Same(MinWidth, other.MinWidth)
+        && Same(MinHeight, other.MinHeight)
+        && Same(MaxWidth, other.MaxWidth)
+        && Same(MaxHeight, other.MaxHeight)
+        && RatioOnly == other.RatioOnly
+        && Same(RatioOnlyAvailableWidth, other.RatioOnlyAvailableWidth)
+        && ZeroInlineMinContent == other.ZeroInlineMinContent;
+
+    private static bool Same(float? a, float? b) =>
+        a is { } x
+            ? b is { } y && BitConverter.SingleToInt32Bits(x) == BitConverter.SingleToInt32Bits(y)
+            : b is null;
+
     public static ReplacedItem FromStyle(float width, float height, LayoutStyle style) =>
         FromIntrinsic(ReplacedIntrinsic.FromDimensions(width, height), style);
 

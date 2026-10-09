@@ -173,6 +173,56 @@ public sealed partial class TextEngine : IDisposable
             : new ShapeCache(_fonts);
     }
 
+    /// <summary>
+    /// Whether this engine shapes through the very cache <paramref name="previous"/> did, which
+    /// <see cref="AdoptShapeCache"/> grants only for the same font set. Measure contexts of the
+    /// two engines can then be compared by their inputs.
+    /// </summary>
+    internal bool SharesShapeCacheWith(TextEngine? previous) =>
+        previous is not null && _shaper.Cache is { } cache && ReferenceEquals(cache, previous._shaper.Cache);
+
+    /// <summary>
+    /// Whether measure context <paramref name="first"/> of this engine and context
+    /// <paramref name="second"/> of <paramref name="other"/> are the same kind and, for a
+    /// replaced box, size identically. Text contexts compare only the layout parameters held
+    /// beside the shaped text; their content is the caller's to prove unchanged.
+    /// </summary>
+    internal bool MeasureContextMatches(int first, TextEngine other, int second)
+    {
+        bool replaced = (first & ReplacedContextBit) != 0;
+        if (replaced != ((second & ReplacedContextBit) != 0))
+        {
+            return false;
+        }
+
+        if (replaced)
+        {
+            int a = first & ~ReplacedContextBit;
+            int b = second & ~ReplacedContextBit;
+            return a < _replaced.Count && b < other._replaced.Count
+                && _replaced[a].SameSizing(other._replaced[b]);
+        }
+
+        if (first < 0 || first >= _items.Count || second < 0 || second >= other._items.Count)
+        {
+            return false;
+        }
+
+        InlineItem x = _items[first];
+        InlineItem y = other._items[second];
+        return x.LayoutWrap == y.LayoutWrap
+            && x.MinContentWrap == y.MinContentWrap
+            && x.TextIndent == y.TextIndent
+            && x.BalanceWrap == y.BalanceWrap
+            && x.Align == y.Align
+            && x.ForcedMinHeight.Equals(y.ForcedMinHeight)
+            && x.LineClamp == y.LineClamp
+            && x.EllipsisOverflow == y.EllipsisOverflow
+            && string.Equals(x.OwnerText, y.OwnerText, StringComparison.Ordinal)
+            && x.OwnerBoxes.Count == y.OwnerBoxes.Count
+            && x.BoundaryEvents.Count == y.BoundaryEvents.Count;
+    }
+
     /// <summary>The shaped-paragraph cache this engine shapes through, for tests.</summary>
     internal ShapeCache? CurrentShapeCache => _shaper.Cache;
 

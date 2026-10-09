@@ -123,6 +123,15 @@ internal sealed class RetainedStyleMaps
 /// <summary>Per-element border boxes after layout, in viewport coordinates.</summary>
 public sealed class DomLayout
 {
+    /// <summary>
+    /// The box tree this layout was computed on, with its layout caches, for the next retained
+    /// pass to carry unchanged subtrees over from. See <see cref="RetainedTaffyLayout"/>.
+    /// </summary>
+    internal RetainedTaffyLayout? RetainedBoxes { get; set; }
+
+    /// <summary>How many boxes this pass carried over from the previous one.</summary>
+    internal int TransplantedBoxes { get; init; }
+
     /// <summary>Border boxes keyed by DOM node.</summary>
     public Dictionary<NodeId, Rect> Rects { get; internal set; } = [];
 

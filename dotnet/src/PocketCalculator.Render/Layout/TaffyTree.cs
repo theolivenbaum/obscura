@@ -102,6 +102,37 @@ internal sealed class NodeData(Style style)
 
     /// <summary>Marks a node as requiring relayout.</summary>
     public ClearState MarkDirty() => Cache.Clear();
+
+    // Not in vendor/taffy: cross-pass layout reuse (RetainedTaffyLayout). Every flag below
+    // describes this pass only; a new tree starts with all of them clear.
+
+    /// <summary>Whether <see cref="Cache"/> was carried over from the previous pass's tree.</summary>
+    public bool Transplanted;
+
+    /// <summary>Whether <see cref="Cache"/> was carried over at the start of this pass (diagnostics).</summary>
+    public bool CarriedOver;
+
+    /// <summary>
+    /// Whether the previous pass computed this node inside a block formatting context it
+    /// shared with its parent (a non-null block context), and whether it computed it outside
+    /// one. Carried over with a transplanted cache, see <see cref="TaffyTree{T}.TransplantFrom"/>.
+    /// </summary>
+    public bool PreviousSawBlockContext;
+
+    /// <summary>See <see cref="PreviousSawBlockContext"/>.</summary>
+    public bool PreviousSawNoBlockContext;
+
+    /// <summary>This pass asked for this node's layout with a shared block context.</summary>
+    public bool SawBlockContext;
+
+    /// <summary>This pass asked for this node's layout without a shared block context.</summary>
+    public bool SawNoBlockContext;
+
+    /// <summary>
+    /// This pass asked for this node's layout in a block formatting context that had floats
+    /// before or after the call, so its results may depend on boxes outside its subtree.
+    /// </summary>
+    public bool FloatDependent;
 }
 
 /// <summary>An entire tree of UI nodes. The entry point to taffy's high-level API.</summary>
@@ -112,6 +143,13 @@ public sealed class TaffyTree<TNodeContext>
     private readonly SlotMap<NodeId?> _parents;
     private readonly Dictionary<NodeId, TNodeContext> _nodeContextData = [];
     private bool _useRounding = true;
+
+    /// <summary>
+    /// Set once any node holds a cache carried over from a previous pass. From then on an
+    /// empty cache no longer implies empty ancestors, so <see cref="MarkDirty"/> walks to the
+    /// root.
+    /// </summary>
+    private bool _hasTransplants;
     private CalcResolver _calcResolver = static (_, _) => 0.0f;
 
     /// <summary>Creates a new tree with the default capacity of 16 nodes.</summary>
@@ -411,11 +449,15 @@ public sealed class TaffyTree<TNodeContext>
         var current = node;
         while (true)
         {
-            if (_nodes[current].MarkDirty() == ClearState.AlreadyEmpty)
+            if (_nodes[current].MarkDirty() == ClearState.AlreadyEmpty && !_hasTransplants)
             {
-                // Node was already marked as dirty; its ancestors are dirty too.
+                // Node was already marked as dirty; its ancestors are dirty too. Not so once a
+                // previous pass's caches were carried over: a display:none node's cache is
+                // always empty while its transplanted ancestors' are not.
                 return;
             }
+
+            _nodes[current].Transplanted = false;
 
             if (!_parents.TryGetValue(current, out var parentSlot) || parentSlot is not { } parent)
             {
@@ -428,6 +470,53 @@ public sealed class TaffyTree<TNodeContext>
 
     /// <summary>Indicates whether the layout of this node needs to be recomputed.</summary>
     public bool IsDirty(NodeId node) => _nodes[node].Cache.IsEmpty();
+
+    /// <summary>
+    /// Not in vendor/taffy. Carries <paramref name="sourceNode"/>'s layout cache and stored
+    /// layouts over from a previous pass's tree onto <paramref name="node"/>, whose subtree the
+    /// caller has proven lays out identically. The source node keeps an empty cache.
+    /// </summary>
+    internal void TransplantFrom(NodeId node, TaffyTree<TNodeContext> source, NodeId sourceNode)
+    {
+        NodeData to = _nodes[node];
+        NodeData from = source._nodes[sourceNode];
+        to.Cache = from.Cache;
+        to.Cache.MarkCarried();
+        from.Cache = new Cache();
+        to.UnroundedLayout = from.UnroundedLayout;
+        to.FinalLayout = from.FinalLayout;
+        to.DetailedLayoutInfo = from.DetailedLayoutInfo;
+        to.Transplanted = true;
+        to.CarriedOver = true;
+        to.PreviousSawBlockContext = from.SawBlockContext;
+        to.PreviousSawNoBlockContext = from.SawNoBlockContext;
+        _hasTransplants = true;
+        TransplantCount++;
+    }
+
+    /// <summary>Whether <paramref name="node"/> still holds a cache carried over from the previous pass.</summary>
+    internal bool IsTransplanted(NodeId node) => _nodes[node].Transplanted;
+
+    /// <summary>Whether <paramref name="node"/> received a carried-over cache at the start of this pass.</summary>
+    internal bool WasCarriedOver(NodeId node) => _nodes[node].CarriedOver;
+
+    /// <summary>Whether this pass's layout of <paramref name="node"/> may have seen floats.</summary>
+    internal bool IsFloatDependent(NodeId node) => _nodes[node].FloatDependent;
+
+    /// <summary>Whether <paramref name="node"/> holds any cached layout result.</summary>
+    internal bool HasCachedLayout(NodeId node) => !_nodes[node].Cache.IsEmpty();
+
+    /// <summary>Whether <paramref name="node"/> still exists in this tree.</summary>
+    internal bool Contains(NodeId node) => _nodes.ContainsKey(node);
+
+    /// <summary>Whether <paramref name="node"/> has a measure context.</summary>
+    internal bool HasNodeContext(NodeId node) => _nodes[node].HasContext;
+
+    /// <summary>The children of <paramref name="parent"/>, without copying them.</summary>
+    internal IReadOnlyList<NodeId> ChildrenView(NodeId parent) => _children[parent];
+
+    /// <summary>Number of nodes that received a cache carried over from the previous pass.</summary>
+    internal int TransplantCount { get; private set; }
 
     /// <summary>Updates the stored layout of the provided node and its children.</summary>
     public void ComputeLayoutWithMeasure(
@@ -525,10 +614,67 @@ public sealed class TaffyTree<TNodeContext>
                 return Compute.ComputeHiddenLayout(this, nodeId);
             }
 
-            return Compute.ComputeCachedLayout(
-                this,
-                nodeId,
-                inputs,
+            // Not in vendor/taffy: a cache carried over from the previous pass (see
+            // TaffyTree.TransplantFrom) holds results computed without any float in the node's
+            // block formatting context and in the same block-context mode. taffy's cache key
+            // knows neither, so a request that differs in either drops the carried results
+            // and computes afresh, as a pass with no carried cache would.
+            NodeData data = _taffy._nodes[nodeId];
+            bool sharedContext = blockCtx is not null;
+            bool floatsBefore = blockCtx is { HasFloats: true };
+            if (data.Transplanted
+                && (floatsBefore
+                    || (sharedContext ? data.PreviousSawNoBlockContext : data.PreviousSawBlockContext)))
+            {
+                data.Transplanted = false;
+                data.Cache.Clear();
+            }
+
+            if (sharedContext)
+            {
+                data.SawBlockContext = true;
+            }
+            else
+            {
+                data.SawNoBlockContext = true;
+            }
+
+            LayoutOutput output = ComputeCachedLayoutForNode(nodeId, inputs, blockCtx);
+            if (floatsBefore || blockCtx is { HasFloats: true })
+            {
+                data.FloatDependent = true;
+            }
+
+            return output;
+        }
+
+        private LayoutOutput ComputeCachedLayoutForNode(NodeId nodeId, LayoutInput inputs, BlockContext? blockCtx)
+        {
+            // Compute.ComputeCachedLayout, inlined so a hit on a carried-over entry can hand
+            // the shared block context the float contribution its computation left behind, and
+            // a computed entry can keep it (see Cache.GetCarried). Not in vendor/taffy.
+            Cache cache = _taffy._nodes[nodeId].Cache;
+            if (cache.GetCarried(in inputs, out float? carried) is { } hit)
+            {
+                if (carried is { } contribution && blockCtx is not null)
+                {
+                    blockCtx.AddChildFloatedContentHeightContribution(contribution);
+                }
+
+                return hit;
+            }
+
+            LayoutOutput computed = ComputeUncachedLayoutForNode(nodeId, inputs, blockCtx);
+            _taffy._nodes[nodeId].Cache.Store(
+                in inputs,
+                in computed,
+                blockCtx?.FloatedContentHeightContribution() ?? 0f);
+            return computed;
+        }
+
+        private LayoutOutput ComputeUncachedLayoutForNode(NodeId nodeId, LayoutInput inputs, BlockContext? blockCtx)
+        {
+            return ((Func<TaffyView, NodeId, LayoutInput, LayoutOutput>)(
                 (tree, node, layoutInputs) =>
                 {
                     var displayMode = tree._taffy._nodes[node].Style.Display;
@@ -572,7 +718,7 @@ public sealed class TaffyTree<TNodeContext>
                         static (_, _) => 0.0f,
                         (knownDimensions, availableSpace) =>
                             tree._measureFunction(knownDimensions, availableSpace, node, nodeContext, style));
-                });
+                }))(this, nodeId, inputs);
         }
 
         public LayoutOutput? CacheGet(NodeId nodeId, in LayoutInput input) =>

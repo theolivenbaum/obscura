@@ -203,7 +203,9 @@ public static partial class RenderDom
         AnimationSample animationSample,
         AnimationTimelineState animationTimeline,
         RetainedLayoutReuseCandidate? reuseCandidate = null,
-        DomLayout? previousLayout = null)
+        DomLayout? previousLayout = null,
+        RetainedTaffyLayout? transplantSource = null,
+        IReadOnlyList<RetainedStyleMutation>? layoutMutations = null)
     {
         Matcher matcher = tree.CreateMatcher();
         // Per-element maps are sized up front: growing them by doubling on a 50k-element page
@@ -250,6 +252,7 @@ public static partial class RenderDom
         DomCascade.CascadeWalk(
             cascadeContext, tree.Document, sheet, matcher, rootProps, evaluator, null, false);
         DomCascade.ResolveCssCounters(tree, styles);
+        LayoutPhaseProfile.Mark("cascade");
 
         ContainerDecisionSignature? signature = null;
         ContainerQueryStats queryStats = default;
@@ -259,6 +262,7 @@ public static partial class RenderDom
         }
 
         DomStyleFixups.GrowTrailingAutoCells(tree, styles);
+        LayoutPhaseProfile.Mark("growcells");
 
         List<NodeId> descendants = tree.Descendants(tree.Document);
         bool needsEmojiFont = false;
@@ -314,12 +318,15 @@ public static partial class RenderDom
         Dictionary<TaffyNodeId, NodeId> idMap = new(styles.Count);
         Dictionary<TaffyNodeId, (NodeId Source, string Word)> words = [];
         TextEngine engine = new(fonts, needsEmojiFont, needsCjkFont);
+        LayoutPhaseProfile.Mark("fontscan+engine");
 
         // A layout-affecting restyle cannot keep its layout, but shaping does not depend on
         // layout: it is a pure function of the text, its attributes and the tab width. Carry the
         // previous pass's shaped paragraphs over when the font set is unchanged.
         engine.AdoptShapeCache(previousLayout?.TextEngine);
         IfcRegistry ifcItems = new();
+        TaffyNodeId? builtRoot = null;
+        int transplanted = 0;
 
         // The document node itself is not an element; lay out from the first element
         // descendant (the <html> root).
@@ -390,6 +397,7 @@ public static partial class RenderDom
                 viewport,
                 initialCbWidth);
 
+        LayoutPhaseProfile.Mark("topdown");
             // Root/body overflow propagated to the viewport leaves the source element itself
             // overflow-visible for Taffy and BFC decisions.
             DomTransforms.MarkViewportOverflowSource(tree, rootId, styles);
@@ -467,6 +475,7 @@ public static partial class RenderDom
             }
 
             DomStyleFixups.BlockifyGeneratedPseudos(styles);
+        LayoutPhaseProfile.Mark("fixups");
 
             // Capture the definite containing width for ratio-only auto/auto replaced boxes
             // before installing their metadata.
@@ -579,6 +588,7 @@ public static partial class RenderDom
 
             if (DomBuild.Build(buildContext, rootId) is { } taffyRoot)
             {
+        LayoutPhaseProfile.Mark("build");
                 // Taffy has no outer display type and only gives an auto-width Block root the
                 // initial-containing-block width. CSS blockifies Flex/Grid roots too.
                 if (styles.TryGetValue(rootId, out LayoutStyle? rootStyle)
@@ -636,6 +646,32 @@ public static partial class RenderDom
                             new Layout.Size<float>(controlContent.Width, controlContent.Height);
                     }
                 }
+
+                builtRoot = taffyRoot;
+
+                // The box tree is complete and nothing has been laid out yet: carry the previous
+                // pass's layout results onto every box whose subtree is unchanged.
+                if (transplantSource is { } source
+                    && freshStyles is not null
+                    && RetainedTaffyLayout.Enabled
+                    && engine.SharesShapeCacheWith(source.Engine))
+                {
+                    HashSet<NodeId> dirtyNodes = RetainedTaffyLayout.DirtyClosure(
+                        tree, source, freshStyles, layoutMutations ?? [], intrinsic, styles);
+                    transplanted = RetainedTaffyLayout.Transplant(
+                        source,
+                        taffyTree,
+                        taffyRoot,
+                        idMap,
+                        words,
+                        ifcItems.NativeControlContent,
+                        engine,
+                        dirtyNodes);
+                }
+
+                LayoutPhaseProfile.Mark("transplant");
+                LayoutPhaseProfile.Note("carried", transplanted);
+                LayoutPhaseProfile.Note("boxes", taffyTree.TotalNodeCount());
 
                 Layout.Size<float> Measure(
                     Layout.Size<float?> known,
@@ -695,6 +731,7 @@ public static partial class RenderDom
                     deferredCyclicInlineSizes,
                     Measure);
 
+        LayoutPhaseProfile.Mark("tables");
                 // The cyclic-percentage neutralization above collapses the very content a flex
                 // item's automatic minimum size is measured from, so that floor is re-derived
                 // from the typed percentages before the first layout reads it.
@@ -702,6 +739,7 @@ public static partial class RenderDom
                     taffyTree, idMap, styles, deferredCyclicInlineSizes, IntrinsicWidth);
 
                 taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
+        LayoutPhaseProfile.Mark("taffy1");
                 if (deferredCyclicInlineSizes.Count == 0
                     && DomPasses.ApplyIntrinsicInlineSizes(
                         taffyTree, idMap, styles, initialCbWidth, IntrinsicWidth))
@@ -866,6 +904,7 @@ public static partial class RenderDom
 
                 DomPasses.SyncResolvedPercentagePadding(
                     taffyTree, taffyRoot, initialCbWidth, idMap, ifcItems.Generated, styles);
+        LayoutPhaseProfile.Mark("repairs");
                 Dictionary<TaffyNodeId, int> generatedNodes = [];
                 for (int index = 0; index < ifcItems.Generated.Count; index++)
                 {
@@ -889,6 +928,7 @@ public static partial class RenderDom
                     0f,
                     subpixelRects);
 
+        LayoutPhaseProfile.Mark("absrects");
                 // The used track sizes getComputedStyle() reports for a grid container.
                 foreach ((TaffyNodeId taffyId, NodeId domId) in idMap)
                 {
@@ -900,6 +940,7 @@ public static partial class RenderDom
 
                 inlineFragments = SynthesizeOrdinaryInlineFragments(rects, styles, engine);
                 DomTableSupport.SynthesizeRowRects(tree, rects);
+        LayoutPhaseProfile.Mark("frags");
             }
         }
 
@@ -931,6 +972,7 @@ public static partial class RenderDom
 
         FinalizeShapedItems(
             engine, ifcItems, rects, styles, clipRects, translates, anonRects, viewport);
+        LayoutPhaseProfile.Mark("clips+finalize");
 
         // Pure-text IFC descendants do not own Taffy nodes. Once their shared buffer has its
         // final line breaks, derive their real continuations from shaping provenance.
@@ -1018,6 +1060,7 @@ public static partial class RenderDom
 
         Dictionary<NodeId, Rect> svgRects = [];
         SvgBoxes.Measure(tree, styles, rects, svgRects);
+        LayoutPhaseProfile.Mark("inlinesynth+svg");
 
         DomLayout layout = new()
         {
@@ -1037,6 +1080,20 @@ public static partial class RenderDom
             WordIfcItems = ifcItems.WordItems,
             GeneratedBoxes = generatedBoxes,
             GridTracks = gridTracks,
+            TransplantedBoxes = transplanted,
+            RetainedBoxes = builtRoot is { } keptRoot
+                ? new RetainedTaffyLayout
+                {
+                    Tree = taffyTree,
+                    Root = keptRoot,
+                    IdMap = idMap,
+                    Words = words,
+                    NativeControlContent = ifcItems.NativeControlContent,
+                    Engine = engine,
+                    Intrinsic = new Dictionary<NodeId, ReplacedIntrinsic>(intrinsic),
+                    Generated = RetainedTaffyLayout.SnapshotGenerated(styles),
+                }
+                : null,
         };
 
         return (layout, signature, queryStats);

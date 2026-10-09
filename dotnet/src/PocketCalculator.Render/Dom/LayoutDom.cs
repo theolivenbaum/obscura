@@ -322,6 +322,7 @@ public static partial class RenderDom
 
         Dictionary<NodeId, Stylesheet> shadowSheets =
             DomCascade.CollectShadowStylesheets(tree, viewport, mediaType);
+        LayoutPhaseProfile.Mark("sheets");
 
         int retainedRequested = retained?.Styles.Count ?? 0;
         (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? reuse = null;
@@ -331,6 +332,7 @@ public static partial class RenderDom
                 tree, sheet, shadowSheets, retained, mutations, stylesheetCacheHit);
         }
 
+        LayoutPhaseProfile.Mark("plan");
         RetainedLayoutReuseCandidate? reuseCandidate =
             BuildReuseCandidate(tree, reusableLayout, sheet, reuse, mutations);
 
@@ -376,7 +378,9 @@ public static partial class RenderDom
             animationSample,
             animationTimeline,
             reuseCandidate,
-            reusableLayout);
+            reusableLayout,
+            reuse is not null && !sheet.HasContainerQueries() ? reusableLayout?.RetainedBoxes : null,
+            mutations);
         DomLayout laid = first.Layout;
         ContainerQueryStats query = first.QueryStats;
 

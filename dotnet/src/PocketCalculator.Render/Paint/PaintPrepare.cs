@@ -63,6 +63,7 @@ internal static class PaintApi
             return null;
         }
 
+        LayoutPhaseProfile.Begin();
         // Fetch <img> bytes up front to learn intrinsic sizes for layout. This seeds the same
         // cache the paint pass reads, so each URL is still fetched at most once.
         (Dictionary<NodeId, ReplacedIntrinsic> intrinsic, Dictionary<NodeId, SelectedImage> selectedImages) =
@@ -87,7 +88,9 @@ internal static class PaintApi
 
         HashSet<NodeId> seededContentImages =
             resources.SeedContentImageIntrinsics(tree, intrinsic, selectedImages);
+        LayoutPhaseProfile.Mark("images");
         List<WebFont> fonts = PaintFonts.CollectWebFonts(tree, baseUrl, resources, dynamicFonts);
+        LayoutPhaseProfile.Mark("webfonts");
 
         // Only SVG text needs the page font faces; avoid cloning the database for icons.
         SvgFontDatabase svgFonts = PaintSvg.HasInlineSvgText(tree)
@@ -116,6 +119,7 @@ internal static class PaintApi
                 animationSample,
                 animationTimeline);
 
+        LayoutPhaseProfile.Mark("layout-tail");
         // `content:url(...)` is computed by the author cascade. Pay for a second layout only on
         // pages that actually use a CSS image as replaced content.
         if (PaintImages.CollectContentImageIntrinsics(
@@ -154,6 +158,7 @@ internal static class PaintApi
                 ScrollTree = reusable.ScrollTree,
             }
             : laid.DerivedLayoutState(tree, viewport);
+        LayoutPhaseProfile.Mark("derived");
         float rootFontSize = 16f;
         if (tree.QuerySelector("html") is { } root
             && laid.Styles.TryGetValue(root, out LayoutStyle? rootStyle)
@@ -171,6 +176,7 @@ internal static class PaintApi
             }
         }
 
+        LayoutPhaseProfile.End(retained is not null ? $"retained mut={mutations?.Count ?? 0}" : "full");
         return new PreparedRender
         {
             ViewportSize = viewport,
