@@ -5948,3 +5948,12 @@ so Chromium 141 reports `inline` for all of them; the port now does too
 in the port, where Chromium reports `inline`; that is the replaced-element path and is left
 to it). A block `cs-common-settings-dialog` was one of the boxes that widened msn.com's
 header. Pinned by `UaDisplayTests`.
+
+### The render-resource warmup scans shadow trees
+
+`render_resource_candidates` walks the document's descendants, which stops at shadow hosts.
+`Page.RenderResourceCandidates` also walks every connected shadow root, so a `url()` in a
+shadow tree's `<style>` (adopted sheets are bridged into one) is prefetched like a document
+one. msn.com's logo is such a background, and a CDP capture (which only observes, see
+`PrepareCaptureResourcesIfRequestedAsync`) painted it missing. Pinned by
+`RenderResourceTransportTests.RenderResourceWarmupScansShadowTreeStylesheets`.
