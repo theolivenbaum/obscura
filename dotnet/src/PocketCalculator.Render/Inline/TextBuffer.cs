@@ -437,6 +437,22 @@ public sealed class BufferLine
     {
         _shape = null;
         _layout = null;
+        _sliceOf = null;
+    }
+
+    private (ShapeLine Whole, int Shift)? _sliceOf;
+
+    /// <summary>
+    /// This line's text is the run of whole words of <paramref name="whole"/> (one
+    /// left-to-right span without tabs) starting at <paramref name="shift"/>: shape it by
+    /// copying those words. See <see cref="TextShaper.ShapeParagraphSlice"/>.
+    /// </summary>
+    internal void ShapeAsSliceOf(ShapeLine whole, int shift)
+    {
+        if (_shape is null)
+        {
+            _sliceOf = (whole, shift);
+        }
     }
 
     public void ResetLayout() => _layout = null;
@@ -449,7 +465,10 @@ public sealed class BufferLine
     {
         if (_shape is null)
         {
-            _shape = shaper.ShapeParagraph(Text, AttrsList, tabWidth, _baseRtl);
+            _shape = _sliceOf is { } slice
+                ? shaper.ShapeParagraphSlice(Text, AttrsList, tabWidth, _baseRtl, slice.Whole, slice.Shift)
+                : shaper.ShapeParagraph(Text, AttrsList, tabWidth, _baseRtl);
+            _sliceOf = null;
             _layout = null;
         }
 

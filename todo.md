@@ -3069,6 +3069,32 @@ write + `getBoundingClientRect` 187ms -> 139ms; peak RSS unchanged. Pinned by
 `LineLayoutMemoTests` (Render). `POCKETCALCULATOR_DISABLE_SHAPE_CACHE=1` turns this off with the
 shape cache.
 
+### A split paragraph's lines are taken from the line they were cut from
+
+DEVIATION from `crates/obscura-render/src/inline.rs` (`shape_with_text_indent`), which shapes and
+wraps every split-off tail afresh to find its first visual line, and shapes every line the
+paragraph ends up split into again. A paragraph of n lines was shaped n times, and a min-content
+measurement (width 0, one word a line) was quadratic in its word count: a 2,000-item grid spent
+1.9s of a 3.9s cold layout re-shaping remainders. Two exact shortcuts in
+`TextEngine.ShapeWithTextIndent`, for left-to-right lines without tabs short enough to be laid out
+whole (`ProbeWindowMinLine`):
+
+- `LineCarry`: a tail's first visual line is the whole line's next one when the tail starts
+  where that line starts, at a word boundary, and is asked for at the same available width
+  (wrapping is greedy and shaping is per word). Any retry for inline box edges, an emergency
+  break inside a word, or a different width lays the tail out as before.
+- `TextShaper.ShapeParagraphSlice`: a line cut at word boundaries out of a shaped paragraph is
+  shaped by copying those words, moved to the line's offsets (each word is shaped from its own
+  text and attributes and keeps its break opportunities as glyph indices). It still goes
+  through the shape cache.
+
+Interleaved on one binary (`POCKETCALCULATOR_NO_LINE_CARRY=1` restores the old path), 2,000
+grid items, cold layout, four runs: taffy 1.50-1.68s -> 1.18-1.25s, the pass 2.40-2.66s ->
+2.08-2.19s, allocation 385MB -> 271MB. Retained passes unchanged (19MB each either way).
+`POCKETCALCULATOR_VERIFY_LINE_CARRY=1` shapes every slice as well and reports any difference;
+none on the render repros, the snapshots or six live sites. Pinned by `LineCarryTests` (Render),
+which lays ten pages out both ways and compares the whole render.
+
 ### An `<img>` source swap restyles the image, not the document
 
 DEVIATION from `crates/obscura-render/src/dom.rs` (`retained_attribute_mutation_kind`), which

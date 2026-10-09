@@ -2178,6 +2178,7 @@ public sealed partial class TextEngine : IDisposable
             bool windowable = !item.Rtl && !Bidi.AnyRightToLeft(sourceText);
             int probeChars = ProbeInitialWindow;
             int lineIndex = 0;
+            LineCarry? carry = null;
 
             // SourceLineStarts, kept incrementally: lines before lineIndex no longer change.
             int sourceOffset = 0;
@@ -2202,37 +2203,66 @@ public sealed partial class TextEngine : IDisposable
                 float available = F32.Max(baseAvailable - negativeEdges, 0f);
                 int? split = null;
                 BufferLine? probe = null;
+                bool settledFirstTry = false;
 
                 for (int attempt = 0; attempt <= item.BoundaryEvents.Count; attempt++)
                 {
                     BufferLine line = item.Buffer.Lines[lineIndex];
-                    List<LayoutLine> layouts = windowable
-                        ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
-                        : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
-                    if (layouts.Count == 0)
+                    LayoutLine layout;
+                    int shift = 0;
+                    if (attempt == 0
+                        && carry is { } carried
+                        && BitConverter.SingleToInt32Bits(carried.Available) == BitConverter.SingleToInt32Bits(available))
                     {
-                        break;
+                        // This line is the tail of one already laid out whole at this width.
+                        layout = carried.Layouts[carried.Index];
+                        shift = carried.Shift;
+                    }
+                    else
+                    {
+                        carry = null;
+                        List<LayoutLine> layouts = windowable
+                            ? ProbeFirstLine(line, ref probe, ref probeChars, metrics.FontSize, available, wrap, mono, tabWidth)
+                            : line.Layout(_shaper, metrics.FontSize, available, wrap, mono, tabWidth);
+                        if (layouts.Count == 0)
+                        {
+                            break;
+                        }
+
+                        layout = layouts[0];
+                        if (attempt == 0
+                            && windowable
+                            && !LineCarryDisabled
+                            && layouts.Count > 1
+                            && line.Text.Length <= ProbeWindowMinLine
+                            && line.Text.IndexOf('\t') < 0
+                            && line.ShapeOpt is { } wholeShape)
+                        {
+                            carry = new LineCarry(layouts, 0, 0, available, wholeShape);
+                        }
                     }
 
-                    LayoutLine layout = layouts[0];
                     int? candidate = null;
                     foreach (LayoutGlyph glyph in layout.Glyphs)
                     {
                         candidate = candidate is { } current ? Math.Max(current, glyph.End) : glyph.End;
                     }
 
-                    if (candidate is not { } candidateEndLocal)
+                    if (candidate is not { } candidateEndShifted)
                     {
+                        carry = null;
                         break;
                     }
 
+                    int candidateEndLocal = candidateEndShifted - shift;
                     float lineWidth = layout.W;
                     int candidateEnd = globalStart + candidateEndLocal;
                     float edges = InlineGeometry.LineEdgeAdvance(item, globalStart, candidateEnd);
                     float requiredAvailable = F32.Max(baseAvailable - edges, 0f);
                     split = candidateEndLocal;
+                    settledFirstTry = attempt == 0;
                     if (lineWidth + edges > baseAvailable + 0.01f
-                        && LastWordStartX(line.Text, layout) is { } lastWordCut
+                        && LastWordStartX(line.Text, layout, shift) is { } lastWordCut
                         && lastWordCut > requiredAvailable)
                     {
                         // DEVIATION from crates/obscura-render/src/inline.rs, which retries at
@@ -2252,22 +2282,37 @@ public sealed partial class TextEngine : IDisposable
                     }
 
                     available = requiredAvailable;
+                    settledFirstTry = false;
+                    carry = null;
                     item.Buffer.Lines[lineIndex].ResetLayout();
                     probe?.ResetLayout();
                 }
 
                 if (split is not { } splitAt)
                 {
+                    carry = null;
                     lineIndex++;
                     continue;
                 }
 
                 string text = item.Buffer.Lines[lineIndex].Text;
                 splitAt = SkipTrailingWhitespace(text, splitAt);
+                LineCarry? used = settledFirstTry ? carry : null;
+                carry = used?.Advance(used.Shift + splitAt);
                 if (splitAt > 0 && splitAt < text.Length)
                 {
-                    BufferLine tail = item.Buffer.Lines[lineIndex].SplitOff(splitAt);
+                    BufferLine head = item.Buffer.Lines[lineIndex];
+                    BufferLine tail = head.SplitOff(splitAt);
                     item.Buffer.Lines.Insert(lineIndex + 1, tail);
+                    if (used is not null)
+                    {
+                        // Both halves are runs of whole words of a paragraph already shaped.
+                        head.ShapeAsSliceOf(used.Shape, used.Shift);
+                        if (carry is not null)
+                        {
+                            tail.ShapeAsSliceOf(carry.Shape, carry.Shift);
+                        }
+                    }
 
                     // The next line's start follows this line's new text.
                     sourceOffset = lineOffset;
@@ -2580,19 +2625,20 @@ public sealed partial class TextEngine : IDisposable
     /// of the last space that has a non-space glyph after it. <c>null</c> when the line is one
     /// word, or is not a plain left-to-right line.
     /// </summary>
-    private static float? LastWordStartX(string text, LayoutLine layout)
+    private static float? LastWordStartX(string text, LayoutLine layout, int shift = 0)
     {
         List<LayoutGlyph> glyphs = layout.Glyphs;
         bool sawWord = false;
         for (int index = glyphs.Count - 1; index >= 0; index--)
         {
             LayoutGlyph glyph = glyphs[index];
-            if ((glyph.Level & 1) != 0 || glyph.Start < 0 || glyph.Start >= text.Length)
+            int start = glyph.Start - shift;
+            if ((glyph.Level & 1) != 0 || start < 0 || start >= text.Length)
             {
                 return null;
             }
 
-            if (text[glyph.Start] == ' ')
+            if (text[start] == ' ')
             {
                 if (sawWord)
                 {
@@ -2606,6 +2652,92 @@ public sealed partial class TextEngine : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The visual lines of a line laid out whole, kept so that its tails, once split off, can
+    /// take their first visual line from it instead of being shaped and laid out again.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs <c>shape_with_text_indent</c>, which
+    /// shapes and wraps each split-off tail afresh to find its first visual line. A paragraph of
+    /// n lines was shaped n times, and a min-content measurement (width 0, one word a line) was
+    /// quadratic in its word count: 2,000 short grid items spent 1.9s of a 3.9s cold layout
+    /// re-shaping remainders. The result is the same. Wrapping is greedy, so the tail's first
+    /// line is the whole line's next one when the tail starts where that line starts, at a word
+    /// boundary (shaping is per word, and a tail cut inside a word, at an emergency break,
+    /// shapes that word's rest differently), at the same available width, and the whole line
+    /// was left to right, without tabs (whose advances run from the paragraph start) and short
+    /// enough to be laid out whole (<see cref="ProbeWindowMinLine"/>). Anything else, and any
+    /// retry for inline box edges, lays the tail out as before.
+    /// </remarks>
+    /// <summary>A diagnostic: <c>POCKETCALCULATOR_NO_LINE_CARRY=1</c> lays every tail out afresh.</summary>
+    internal static bool LineCarryDisabled { get; set; } =
+        Environment.GetEnvironmentVariable("POCKETCALCULATOR_NO_LINE_CARRY") == "1";
+
+    private sealed class LineCarry(List<LayoutLine> layouts, int index, int shift, float available, ShapeLine shape)
+    {
+        public List<LayoutLine> Layouts { get; } = layouts;
+
+        /// <summary>The visual line the current tail starts with.</summary>
+        public int Index { get; } = index;
+
+        /// <summary>Where the current tail starts in the whole line's text.</summary>
+        public int Shift { get; } = shift;
+
+        public float Available { get; } = available;
+
+        /// <summary>The whole line's shaping.</summary>
+        public ShapeLine Shape { get; } = shape;
+
+        /// <summary>The carry for the tail starting at <paramref name="start"/>, or null.</summary>
+        public LineCarry? Advance(int start)
+        {
+            int next = Index + 1;
+            if (next >= Layouts.Count || Layouts[next].Glyphs.Count == 0)
+            {
+                return null;
+            }
+
+            int first = int.MaxValue;
+            foreach (LayoutGlyph glyph in Layouts[next].Glyphs)
+            {
+                first = Math.Min(first, glyph.Start);
+            }
+
+            return first == start && StartsWord(start)
+                ? new LineCarry(Layouts, next, start, Available, Shape)
+                : null;
+        }
+
+        private bool StartsWord(int offset)
+        {
+            if (Shape.Rtl || Shape.Spans.Count != 1 || Shape.Spans[0].IsRtl)
+            {
+                return false;
+            }
+
+            foreach (ShapeWord word in Shape.Spans[0].Words)
+            {
+                if (word.Glyphs.Count == 0)
+                {
+                    continue;
+                }
+
+                int start = word.Glyphs[0].Start;
+                if (start == offset)
+                {
+                    return true;
+                }
+
+                if (start > offset)
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
     }
 
     private static int SkipTrailingWhitespace(string text, int split)
