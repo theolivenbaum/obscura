@@ -989,8 +989,9 @@ public static partial class RenderDom
         // final line breaks, derive their real continuations from shaping provenance.
         if (engine.HasInlineOwners())
         {
+            Dictionary<NodeId, Rect?> replacedRects = [];
             Dictionary<NodeId, List<Rect>> canonical =
-                SynthesizeShapedInlineFragments(tree, rects, styles, engine);
+                SynthesizeShapedInlineFragments(tree, rects, styles, engine, replacedRects);
             LayoutPhaseProfile.Mark("synth");
             if (canonical.Count != 0)
             {
@@ -1012,11 +1013,12 @@ public static partial class RenderDom
                     inlineFragments[owner] = fragments;
                 }
 
-                clipRects.Clear();
-                translates.Clear();
-                transforms.Clear();
-                if (root is { } reclipRootId)
+                if (root is { } reclipRootId
+                    && ClipWalkReadsReplacedRects(replacedRects, rects, styles, reclipRootId, viewport))
                 {
+                    clipRects.Clear();
+                    translates.Clear();
+                    transforms.Clear();
                     float rootFontSize = styles.TryGetValue(reclipRootId, out LayoutStyle? style)
                         ? style.FontSize ?? 16f
                         : 16f;
@@ -1151,6 +1153,62 @@ public static partial class RenderDom
     }
 
     /// <summary>
+    /// Whether the clip/transform walk can come out differently now that
+    /// <c>SynthesizeShapedInlineFragments</c> replaced the rects in <paramref name="replaced"/>.
+    /// </summary>
+    /// <remarks>
+    /// <c>ResolveClipRects</c> reads a node's rect for exactly three things: its own translate
+    /// and transform (percentages and the transform origin resolve against it) and, when it
+    /// clips, its overflow clip. An inline owner that does none of these, or whose new rect
+    /// resolves them to the same bits, leaves the walk's output unchanged, so running it a
+    /// second time over a large page (it visits every node) bought nothing. Not in
+    /// crates/obscura-render, which always walks twice.
+    /// </remarks>
+    private static bool ClipWalkReadsReplacedRects(
+        Dictionary<NodeId, Rect?> replaced,
+        Dictionary<NodeId, Rect> rects,
+        IReadOnlyDictionary<NodeId, LayoutStyle> styles,
+        NodeId root,
+        (float Width, float Height) viewport)
+    {
+        float rootFontSize = styles.TryGetValue(root, out LayoutStyle? rootStyle) ? rootStyle.FontSize ?? 16f : 16f;
+        foreach ((NodeId owner, Rect? before) in replaced)
+        {
+            if (!styles.TryGetValue(owner, out LayoutStyle? style)
+                || !rects.TryGetValue(owner, out Rect after))
+            {
+                return true;
+            }
+
+            if (style.OverflowHidden)
+            {
+                return true;
+            }
+
+            Rect old = before ?? default;
+            (float X, float Y) oldTranslate = DomTransforms.ResolvedOwnTranslate(style, old, rootFontSize, viewport);
+            (float X, float Y) newTranslate = DomTransforms.ResolvedOwnTranslate(style, after, rootFontSize, viewport);
+            Affine2 oldMatrix = DomTransforms.ResolvedTransformMatrix(style, old, rootFontSize, viewport);
+            Affine2 newMatrix = DomTransforms.ResolvedTransformMatrix(style, after, rootFontSize, viewport);
+            if (!SameBits(oldTranslate.X, newTranslate.X)
+                || !SameBits(oldTranslate.Y, newTranslate.Y)
+                || !SameBits(oldMatrix.A, newMatrix.A)
+                || !SameBits(oldMatrix.B, newMatrix.B)
+                || !SameBits(oldMatrix.C, newMatrix.C)
+                || !SameBits(oldMatrix.D, newMatrix.D)
+                || !SameBits(oldMatrix.E, newMatrix.E)
+                || !SameBits(oldMatrix.F, newMatrix.F))
+            {
+                return true;
+            }
+        }
+
+        return false;
+
+        static bool SameBits(float a, float b) => BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b);
+    }
+
+    /// <summary>
     /// Convert Taffy's ordinary-inline line surrogate into the element's actual visual
     /// fragment box.
     /// </summary>
@@ -1274,7 +1332,8 @@ public static partial class RenderDom
         DomTree tree,
         Dictionary<NodeId, Rect> rects,
         IReadOnlyDictionary<NodeId, LayoutStyle> styles,
-        TextEngine engine)
+        TextEngine engine,
+        Dictionary<NodeId, Rect?>? replacedRects = null)
     {
         Dictionary<NodeId, List<((int Item, int Line) Order, Rect Rect)>> fragments = [];
         Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
@@ -1352,6 +1411,7 @@ public static partial class RenderDom
                 union = new Rect(left, top, F32.Max(right - left, 0f), F32.Max(bottom - top, 0f));
             }
 
+            replacedRects?.TryAdd(owner, rects.TryGetValue(owner, out Rect before) ? before : null);
             rects[owner] = union;
             canonical[owner] = ordered;
         }
