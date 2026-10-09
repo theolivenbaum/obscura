@@ -464,6 +464,9 @@ public sealed class PageDomainTests
     /// exercising the mechanism it is about (a live CSS timeline damaging the stream). The
     /// document timeline origin is set when the document is installed, so there is no way
     /// to warm the paint path after the clock starts.
+    /// The page's animation clock is a manual one, advanced by exactly the two sleeps: on the
+    /// wall clock a loaded host took longer than the whole 600ms between the navigation and
+    /// the first pump, saw the animation already finished, and got no frame after it.
     /// </remarks>
     [Fact]
     public async Task CssAnimationDrivesAutonomousScreencastFramesUntilCompletion()
@@ -474,6 +477,8 @@ public sealed class PageDomainTests
         string session = $"{pageId}-session";
         ctx.Sessions[session] = pageId;
         ctx.GetSessionPageMut(session)!.SetViewport((80.0f, 60.0f));
+        var clock = new ManualAnimationClock();
+        ctx.GetSessionPageMut(session)!.AnimationClock = clock;
         CdpDomainFixtures.Unwrap(await PageDomain.HandleAsync(
             "navigate",
             new JsonObject
@@ -496,6 +501,7 @@ public sealed class PageDomainTests
 
         ctx.PendingEvents.Clear();
         await Task.Delay(150, TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromMilliseconds(150));
         await PageDomain.PumpScreencastFramesAsync(ctx);
         CdpEvent animatedEvent = ctx.PendingEvents.First(e => e.Method == "Page.screencastFrame");
         string animated = animatedEvent.Params!["data"].AsString()!;
@@ -516,6 +522,7 @@ public sealed class PageDomainTests
 
         ctx.PendingEvents.Clear();
         await Task.Delay(700, TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromMilliseconds(700));
         await PageDomain.PumpScreencastFramesAsync(ctx);
         Assert.Contains(ctx.PendingEvents, e => e.Method == "Page.screencastFrame");
         Assert.False(ctx.GetSessionPageMut(session)!.PreparedHasActiveCssAnimations);
@@ -1131,4 +1138,16 @@ public sealed class PageDomainTests
         Assert.StartsWith("data:", info["url"].AsStringOr(string.Empty), StringComparison.Ordinal);
         Assert.False(info["canAccessOpener"].AsBool());
     }
+}
+
+/// <summary>A document-timeline clock that moves only when a test advances it.</summary>
+internal sealed class ManualAnimationClock : TimeProvider
+{
+    private long _ticks;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public override long GetTimestamp() => Interlocked.Read(ref _ticks);
+
+    public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
 }

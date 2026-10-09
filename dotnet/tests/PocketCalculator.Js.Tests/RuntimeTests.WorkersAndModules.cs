@@ -271,7 +271,7 @@ public sealed partial class RuntimeTests
               w.postMessage('x');
             }
             """);
-        await rt.RunEventLoopBoundedAsync(200);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""["var:x"]""", rt.Evaluate("__replies"));
     }
 
@@ -304,7 +304,7 @@ public sealed partial class RuntimeTests
             slow.postMessage('first');
             slow.postMessage('second');
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         AssertJson("""[[1,"first",true],[2,"second",true]]""", rt.Evaluate("__slowReplies"));
     }
 

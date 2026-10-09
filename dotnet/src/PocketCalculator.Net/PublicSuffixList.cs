@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Reflection;
 
@@ -47,6 +48,11 @@ public static class PublicSuffixList
     }
 
     private static readonly Lazy<Dictionary<string, RuleKind>> Rules = new(Load, isThreadSafe: true);
+
+    // Not ContainsAnyInRange('A', 'Z'): the framework's ReadyToRun body of that method
+    // allocates 96 bytes a call until tiered compilation replaces it, so a lookup allocated for
+    // as long as the background compiler took to get there, which is longer the busier the host.
+    private static readonly SearchValues<char> AsciiUpper = SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
 
     /// <summary>Number of distinct rule keys loaded. Test hook.</summary>
     internal static int RuleCount => Rules.Value.Count;
@@ -115,7 +121,7 @@ public static class PublicSuffixList
         // Rules are stored lower case and matched ordinally, which hashes several times
         // faster than a case-insensitive comparer. Hosts nearly always arrive lower case
         // already; the rare one that does not is folded into a stack buffer.
-        if (trimmed.ContainsAnyInRange('A', 'Z'))
+        if (trimmed.ContainsAny(AsciiUpper))
         {
             Span<char> folded = trimmed.Length <= 256 ? stackalloc char[trimmed.Length] : new char[trimmed.Length];
             trimmed.ToLowerInvariant(folded);

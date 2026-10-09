@@ -53,7 +53,9 @@ public sealed class ChildFrameContexts
             new JsonObject { ["source"] = string.Empty, ["worldName"] = "utility" }, session);
         await CoreCdp.CdpAsync(ctx, 904, "Page.navigate", new JsonObject { ["url"] = url }, session);
 
-        for (int attempt = 0; attempt < 20; attempt++)
+        // Polls until a deadline, not a number of attempts: a loaded host can take longer than
+        // a fixed count of 50 ms sleeps to load a frame, and the deadline still fails a hang.
+        for (var clock = System.Diagnostics.Stopwatch.StartNew(); clock.ElapsedMilliseconds < 20_000;)
         {
             await CoreCdp.CdpAsync(ctx, 905, "Runtime.evaluate", new JsonObject { ["expression"] = "1" }, session);
             JsonNode tree = await CoreCdp.CdpAsync(ctx, 906, "Page.getFrameTree", new JsonObject(), session);

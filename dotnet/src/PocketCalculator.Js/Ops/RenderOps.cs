@@ -671,6 +671,9 @@ public static class RenderOps
                 Easing = parsed.EasingBezier,
                 LinearEasing = parsed.LinearEasing,
                 StartTimeMs = startTimeMs,
+                // Resolved at the next document-time style flush, as Chromium resolves it at
+                // the next frame (see WaapiAnimation.StartPending).
+                StartPending = true,
                 HoldTimeMs = null,
                 PlayState = WaapiPlayState.Running,
             });

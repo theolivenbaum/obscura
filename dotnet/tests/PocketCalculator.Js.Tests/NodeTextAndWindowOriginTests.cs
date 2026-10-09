@@ -45,7 +45,7 @@ public sealed class NodeTextAndWindowOriginTests
             el.nodeValue = 'x'; r.push(el.nodeValue + '/' + el.childNodes.length);
             globalThis.result = r.join('|');
             """);
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal("/true/0||||undefined|7|ccc|pp|qq/qq/qq|null|true/2|null|html|null|1/3/ff|0|0|null/0", Eval(rt, "result"));
         Assert.Equal(
             "characterData:abc:#text,characterData::#text,characterData:q:#text,characterData::#text,"

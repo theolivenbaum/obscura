@@ -608,7 +608,7 @@ section('window', function (L) {
             setTimeout(() => { throw new Error('late'); }, 0);
             """);
         rt.RunLifecycle("DOMContentLoaded", "load");
-        await rt.RunEventLoopBoundedAsync(100);
+        await EventLoopWait.UntilIdleAsync(rt);
         Assert.Equal(
             "DCL win cap phase=1|DCL doc phase=2 bubbles=true trusted=true|DCL win phase=3 t=D|"
             + "win load L1 t=D phase=2 trusted=true|window.onload|win load L2|win load cap|werr:Uncaught Error: late:late:true",

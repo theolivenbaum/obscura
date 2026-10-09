@@ -44,7 +44,9 @@ public sealed class ChildFrameTree
         int depth)
     {
         JsonNode tree = new JsonObject();
-        for (int attempt = 0; attempt < 10; attempt++)
+        // Polls until a deadline, not a number of attempts: a loaded host can take longer than
+        // a fixed count of 50 ms sleeps to load a frame, and the deadline still fails a hang.
+        for (var clock = System.Diagnostics.Stopwatch.StartNew(); clock.ElapsedMilliseconds < 20_000;)
         {
             tree = await CoreCdp.CdpAsync(ctx, 3, "Page.getFrameTree", new JsonObject(), session);
             JsonNode? node = tree["frameTree"];

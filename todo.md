@@ -2275,6 +2275,80 @@ because that window is between `PageInFlight.Decrement()` and ClearScript resolv
 and reaching it would need a widening hook in production code; `fetch()` and XHR are covered by
 the same binding.
 
+### A Web Animation's start time is the first frame after `animate()`, not the call
+
+`op_waapi_create` in Rust takes the document timeline's wall clock at the moment of the call as
+the effect's start time. Chromium 141 leaves a new animation pending (`startTime` null,
+`currentTime` 0) and resolves its start time to the timeline time of the first frame rendered
+after it: with a 300 ms busy wait after `animate()`, `startTime` was that later frame's time,
+not the call's. The port marks a new effect `StartPending` (`WaapiAnimation`, Render/Core/Animation.cs)
+and `RenderState.EnsurePreparedRender` resolves it to the document-time sample of the next style
+flush; until then its local time is 0. A `play()` of a pending effect leaves it pending.
+
+Under the Rust rule `ForwardWaapiSampleUpdatesRetainedStyleAndPaint` measured however long the
+first capture took (0 to 0.45 opacity where 0.5 was expected); it fails on every run before the
+change. `WaapiStartTimeIsTheFirstFrameAfterAnimateNotTheCallTime` pins Chromium's rule with the
+wall clock 400 ms ahead of the host's frame. CSS animations still start at their mutation's
+wall-clock time (the scoped "birth epochs" in `DomOps`), as in Rust.
+
+### A navigation waits for frame documents still loading when it builds the frames
+
+`build_document_frames` in `page.rs` pumps 50 ms rounds and stops at the first round in which
+no frame moved. A frame document that took longer than one round to answer (any server slower
+than 50 ms, or a loaded host) then never got its realm during the navigation, and its scripts
+were not requested until something else pumped the page:
+`FrameDocumentReferrerPolicyHeaderGovernsItsRequests` timed out under load that way. Chromium's
+load event waits for the frame. The port counts frame document loads in flight
+(`PocketCalculatorState.FrameDocumentLoadsInFlight`, kept by `FetchOps.OpFetchUrlAsync` for
+internal `navigate` loads) and `Page.BuildDocumentFramesAsync` keeps pumping while one is in
+flight, plus one round after the last answers; those rounds do not count against the eight, and
+a 5 s grace bounds the wait so a hanging frame server cannot hold the navigation.
+`AFrameDocumentSlowerThanOneRoundStillLoadsDuringNavigation` (Browser) serves the frame 400 ms
+late.
+
+### A bounded event-loop wait pumps once after a park, even past its deadline
+
+`run_event_loop_bounded` in Rust is `tokio::time::timeout(budget, run_event_loop())`; tokio polls
+the inner future before the timer, so work that came due while the loop was parked still runs on
+the wake that finds the budget spent. `RunEventLoopBoundedAsync` checked the deadline first, and
+when a park overshot it (a loaded host) returned without running that work: a 40 ms wait over a
+0 ms interval ran no tick (`FixedDurationEventLoopYieldsFromContinuouslyReadyTasks`). One pump now
+follows every park. The difference from Rust is the loop's shape, not its result.
+
+### The document timeline reads a replaceable clock
+
+`PocketCalculatorState.AnimationClock` (a `TimeProvider`, the system clock by default) is what
+`AnimationTimelineElapsedMilliseconds` reads, and `Page.AnimationClock` hands one to every new
+document's runtime. Rust reads `Instant::now()` directly. Nothing in the engine sets it; tests
+install a manual clock (`RenderCaptureSupport.FreezeAnimationTimeline`, `ManualAnimationClock`)
+so CSS animation births and screencast frames land at exact times on a loaded host.
+
+### Timing-sensitive tests wait on the engine, not the wall clock
+
+Not a behavioural deviation; recorded so the next port of a Rust test does not reintroduce the
+pattern. Many Rust tests pump the loop for a fixed 40-300 ms and then assert what happened, or
+resolve a promise from a `setTimeout` racing the work. The port's first layout in a process
+takes a few hundred ms (JIT, font setup), and a host shared with other builds stretches every
+step, so those failed intermittently under load and some (`IntersectionObserverCanBeReusedAfterDisconnect`)
+deterministically when run alone. The C# tests now:
+
+- drive the loop until it is idle (`EventLoopWait.UntilIdleAsync`, a 20 s deadline that returns
+  as soon as nothing is pending) or until a page condition holds (`EventLoopWait.UntilAsync`);
+- in page script, take the next step (a scroll, the resolve) from the previous observation
+  rather than from a timer, and keep a short tail after the last expected record so a spurious
+  extra one still shows;
+- measure complexity bounds in the test thread's CPU time (`ThreadCpuTime`), not wall time;
+- keep the settle-policy bounds (`QuiescentEventLoop*`) but widen the gap between "bounded" and
+  "consumed the budget" (larger budgets and intervals) instead of tightening on wall time;
+- poll CDP frame state against a 20 s deadline rather than a count of 50 ms sleeps.
+
+With IntersectionObserver checkpoints disabled and the rAF cadence removed, the 15 converted
+IntersectionObserver and animation-frame tests fail rather than hang; the new WAAPI and frame
+tests fail with their fixes taken out.
+`PublicSuffixList.TryGetRegistrableDomain` no longer calls `ContainsAnyInRange('A', 'Z')`,
+whose ReadyToRun body allocates 96 bytes a call until tiered compilation replaces it:
+`LookupDoesNotAllocate` failed every time alone and whenever the background compiler was slow.
+
 ### Collapsing table borders are resolved per edge and split between the two boxes
 
 `crates/obscura-render` has no collapsing model: it gives the table its whole border and each

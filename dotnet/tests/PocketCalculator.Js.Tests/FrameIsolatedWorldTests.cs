@@ -122,7 +122,7 @@ public sealed class FrameIsolatedWorldTests
         runtime.ExecuteScript("page-observe", "globalThis.pageRecords = []; new MutationObserver(l => { for (const r of l) pageRecords.push(r.type); }).observe(document, {childList: true, subtree: true, attributes: true});");
         await In(runtime, world, "document.getElementById('root').appendChild(document.createElement('b')).id = 'fromworld'; 1");
         Assert.Equal("B", frame.Evaluate("document.getElementById('fromworld').tagName")?.GetValue<string>());
-        await runtime.RunEventLoopBoundedAsync(20);
+        await EventLoopWait.UntilIdleAsync(runtime);
         Assert.Equal(string.Empty, runtime.Evaluate("pageRecords.join('|')")?.GetValue<string>());
     }
 
