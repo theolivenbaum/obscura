@@ -2840,6 +2840,42 @@ descriptors, in order. Adoption also requires the same emoji-face choice: the em
 between the directory faces and the web fonts, so loading it renumbers every web font's `FontId`,
 which keys a shaped paragraph. Pinned by `ShapeCacheAdoptionTests` (Render).
 
+### A retained restyle walks only the paths to its fresh styles
+
+DEVIATION from `crates/obscura-render`, which reuses retained styles but still walks the whole
+document on every pass: the cascade visits every node (pushing each onto the selector
+matcher's ancestor filter), the counter walk renders every pseudo's generated content, the
+top-down pass recomputes every element's inherited context, and a few fixups walk the document
+to find tables, rows and grids. Each is now proportional to the change:
+
+- the cascade descends only into nodes on a path to a fresh style (`DomCascade.StylePaths`:
+  each fresh node and everything above it in the DOM and the flat tree). A fresh set already
+  holds every style a mutation reaches (descendants, following siblings, `:has()` anchors,
+  structural pseudo-classes; `RetainedStylePlanner.Plan`), and `PrepareRetainedStyles` adds
+  any connected element that has no retained style;
+- the counter walk is skipped when no `::before`/`::after` content holds `counter()` or
+  `counters()`: it would render each pseudo's text as the zero-counter text the cascade gave it;
+- the top-down pass skips an element, and everything below it, when nothing below it is fresh
+  and it receives the very inherited context it received the last time it was visited
+  (`TopDownMemo`, compared field by field, `Inherited.SameAs`). That visit's writes onto the
+  retained styles below are what this one would write, given the same viewport, root font size
+  and fonts, which the memo also requires; the definite heights it found are carried. Styles
+  that were fresh in the previous pass are visited again, since the passes after the top-down
+  one write onto a fresh style before the next pass reads it retained; after a full pass every
+  element is. The memo is taken by the next layout, so a pass that throws leaves none;
+- table spacing, trailing-cell growth and grid-area resolution find their tables, rows and
+  grids among the styles instead of walking the document (each writes only its own boxes, so
+  order does not matter), and the quirks-mode doctype check reads the document's children.
+
+Measured on the nvidia.com snapshot (median retained pass, same build settings): cascade 3.7 ->
+0.8ms, counters 1.7 -> under 0.5ms, top-down 4.9 -> under 0.5ms (31 elements visited of
+4,060 boxes), fixups 3.5 -> under 0.8ms; a pass ~91 -> ~80ms. Pinned by
+`ARetainedRestyleVisitsOnlyThePathToTheChange` (Render); the differential test now also mutates
+under sibling-combinator, `:has()`, `:nth-child`, `:empty`, attribute selectors, nested
+`counters()` and `::before`/`::after` content, and display/float toggles, at 12 seeds per
+fixture and 4 per float page without a divergence. `POCKETCALCULATOR_FULL_RELAYOUT=1` turns the
+cascade and top-down skipping off.
+
 ### The font work of a pass is memoized by the text it reads
 
 DEVIATION from `crates/obscura-render`, which on every pass parses the `@font-face` rules out of

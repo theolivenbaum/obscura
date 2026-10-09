@@ -13,15 +13,54 @@ namespace PocketCalculator.Render;
 public static partial class RenderDom
 {
     /// <summary>
+    /// What the top-down pass of one layout left behind for the next retained pass: the
+    /// inherited context every element it visited received, and the elements whose height it
+    /// found definite.
+    /// </summary>
+    /// <remarks>
+    /// Not in crates/obscura-render, which runs the top-down pass over the whole document on
+    /// every layout. For an element whose style the pass reuses, the pass is a function of the
+    /// element's retained style, the context it receives, the font set and the viewport. A
+    /// retained pass therefore skips an element, and everything below it, when nothing below it
+    /// is fresh and it receives the very context it received the last time it was visited:
+    /// what that visit wrote onto the retained styles below is what this one would write, and
+    /// its definite heights are carried in <see cref="DefiniteHeight"/>. The memo is handed from
+    /// one layout to the next; a pass that throws leaves the next one without it, which then
+    /// visits every element again.
+    /// <para>
+    /// A fresh style reaches the top-down pass straight from the cascade, and the passes after
+    /// it (blockification, image sizes, used-value repairs) then write onto it; the next pass
+    /// reads it retained, with those writes. So what an element received below a fresh one is
+    /// not what it receives in the pass after, and the elements fresh in the previous pass are
+    /// visited again (<see cref="PreviousFresh"/>); after a full pass, every element is.
+    /// </para>
+    /// </remarks>
+    internal sealed class TopDownMemo
+    {
+        internal Dictionary<NodeId, Inherited> Received { get; } = [];
+
+        internal HashSet<NodeId> DefiniteHeight { get; } = [];
+
+        internal (float RootFs, float Vw, float Vh, float Width, float Height, float InitialCbWidth) Context { get; set; }
+
+        /// <summary>Whether this memo describes the pass before the current one; see <see cref="ResolveComputedValues"/>.</summary>
+        internal bool Carried { get; set; }
+
+        /// <summary>The styles the pass that filled this memo cascaded afresh; null after a full pass.</summary>
+        internal HashSet<NodeId>? PreviousFresh { get; set; }
+    }
+
+    /// <summary>
     /// Top-down inheritance of the properties CSS inherits by default, plus resolution of
     /// every font/viewport-relative length now that its reference sizes are known.
     /// </summary>
-    private static void ResolveComputedValues(
+    private static int ResolveComputedValues(
         DomTree tree,
         NodeId rootId,
         Dictionary<NodeId, LayoutStyle> styles,
         HashSet<NodeId>? freshStyles,
-        HashSet<NodeId> definiteHeightNodes,
+        HashSet<NodeId>? stylePaths,
+        TopDownMemo memo,
         Inherited rootInherited,
         FontUnitResolver fontUnits,
         float rootFs,
@@ -30,11 +69,32 @@ public static partial class RenderDom
         (float Width, float Height) viewport,
         float initialCbWidth)
     {
+        HashSet<NodeId> definiteHeightNodes = memo.DefiniteHeight;
+        bool skipClean = memo.Carried
+            && freshStyles is not null
+            && stylePaths is not null
+            && memo.PreviousFresh is not null;
+        if (skipClean && memo.PreviousFresh!.Count != 0)
+        {
+            HashSet<NodeId> both = [.. freshStyles!];
+            both.UnionWith(memo.PreviousFresh);
+            stylePaths = DomCascade.StylePaths(tree, both);
+        }
+
+        memo.PreviousFresh = freshStyles;
+        int visits = 0;
         List<(NodeId Id, Inherited Inherited)> queue = [(rootId, rootInherited)];
         while (queue.Count > 0)
         {
-            (NodeId id, Inherited inh) = queue[^1];
+            visits++;
+            WorkCancellation.ThrowIfCancellationRequested();
+            (NodeId id, Inherited received) = queue[^1];
             queue.RemoveAt(queue.Count - 1);
+
+            // The context as received is kept for the next pass; this one works on a copy.
+            memo.Received[id] = received;
+            Inherited inh = received.Clone();
+            definiteHeightNodes.Remove(id);
 
             // Default the child containing-block width to this element's own.
             float childCbWidth = inh.CbWidth;
@@ -224,12 +284,7 @@ public static partial class RenderDom
                 inh.CbHeightDefinite = childCbHeightDefinite;
                 inh.CbHeight = childCbHeight;
                 inh.CbHeightKnown = childCbHeightKnown;
-                List<NodeId> retainedChildren = DomTraversal.StyleChildren(tree, id);
-                for (int index = retainedChildren.Count - 1; index >= 0; index--)
-                {
-                    queue.Add((retainedChildren[index], inh.Clone()));
-                }
-
+                PushChildren(id, inh);
                 continue;
             }
 
@@ -286,10 +341,34 @@ public static partial class RenderDom
             inh.CbHeightDefinite = childCbHeightDefinite;
             inh.CbHeight = childCbHeight;
             inh.CbHeightKnown = childCbHeightKnown;
+            PushChildren(id, inh);
+        }
+
+        return visits;
+
+        // Only elements carry a style; a text node's visit did nothing. A clean element that
+        // receives what it received last time keeps what that visit computed (TopDownMemo).
+        void PushChildren(NodeId id, Inherited inh)
+        {
             List<NodeId> children = DomTraversal.StyleChildren(tree, id);
             for (int index = children.Count - 1; index >= 0; index--)
             {
-                queue.Add((children[index], inh.Clone()));
+                NodeId child = children[index];
+                if (tree.GetNode(child)?.IsElement != true)
+                {
+                    continue;
+                }
+
+                Inherited passed = inh.Clone();
+                if (skipClean
+                    && !stylePaths!.Contains(child)
+                    && memo.Received.TryGetValue(child, out Inherited? before)
+                    && before.SameAs(passed))
+                {
+                    continue;
+                }
+
+                queue.Add((child, passed));
             }
         }
     }

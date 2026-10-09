@@ -29,7 +29,7 @@ public static partial class RenderDom
     /// </summary>
     private const float ClassicScrollbarGutter = 15f;
 
-    private sealed class Inherited
+    internal sealed class Inherited
     {
         // The two lists below are only ever replaced, never changed in place, so a clone
         // shares them. Copying both per element, on top of the field initializers' own two,
@@ -126,6 +126,64 @@ public static partial class RenderDom
         /// not anchored to the initial containing block.
         /// </summary>
         internal bool InsideFixedCb;
+
+        /// <summary>
+        /// Whether <paramref name="other"/> holds the same values in every field, so the
+        /// top-down pass of a subtree that receives either computes the same thing
+        /// (<see cref="TopDownMemo"/>).
+        /// </summary>
+        internal bool SameAs(Inherited other) =>
+            Display == other.Display
+            && Direction == other.Direction
+            && DisplayContents == other.DisplayContents
+            && IsInlineBlock == other.IsInlineBlock
+            && FlowRoot == other.FlowRoot
+            && IsTableBox == other.IsTableBox
+            && IsTableCellBox == other.IsTableCellBox
+            && AuthoredTableDisplay == other.AuthoredTableDisplay
+            && Nullable.Equals(BorderSpacing, other.BorderSpacing)
+            && Nullable.Equals(Color, other.Color)
+            && Nullable.Equals(FontSize, other.FontSize)
+            && FontWeight == other.FontWeight
+            && string.Equals(FontFamily, other.FontFamily, StringComparison.Ordinal)
+            && string.Equals(FontFamilySpecified, other.FontFamilySpecified, StringComparison.Ordinal)
+            && string.Equals(Cursor, other.Cursor, StringComparison.Ordinal)
+            && string.Equals(PointerEvents, other.PointerEvents, StringComparison.Ordinal)
+            && FontOpticalSizing == other.FontOpticalSizing
+            && (ReferenceEquals(FontVariationSettings, other.FontVariationSettings)
+                || FontVariationSettings.SequenceEqual(other.FontVariationSettings))
+            && LetterSpacing.Equals(other.LetterSpacing)
+            && LetterSpacingNonNormal == other.LetterSpacingNonNormal
+            && ContainerType == other.ContainerType
+            && (ReferenceEquals(ContainerNames, other.ContainerNames)
+                || ContainerNames.SequenceEqual(other.ContainerNames, StringComparer.Ordinal))
+            && Nullable.Equals(TextAlign, other.TextAlign)
+            && Nullable.Equals(TextAlignLast, other.TextAlignLast)
+            && TextIndent.Equals(other.TextIndent)
+            && LegacyCenter == other.LegacyCenter
+            && VisibilityHidden == other.VisibilityHidden
+            && HasZeroOpacity == other.HasZeroOpacity
+            && Equals(Svg, other.Svg)
+            && ListStyle == other.ListStyle
+            && LineHeight.Equals(other.LineHeight)
+            && WhiteSpace == other.WhiteSpace
+            && OverflowWrap == other.OverflowWrap
+            && WordBreak == other.WordBreak
+            && TextWrapStyle == other.TextWrapStyle
+            && TextTransform == other.TextTransform
+            && Italic == other.Italic
+            && string.Equals(FontVariantCaps, other.FontVariantCaps, StringComparison.Ordinal)
+            && FontStretch.Equals(other.FontStretch)
+            && BoxSizing == other.BoxSizing
+            && BorderCollapse == other.BorderCollapse
+            && Nullable.Equals(TableVerticalAlign, other.TableVerticalAlign)
+            && OverflowX == other.OverflowX
+            && OverflowY == other.OverflowY
+            && CbWidth.Equals(other.CbWidth)
+            && CbHeightDefinite == other.CbHeightDefinite
+            && CbHeight.Equals(other.CbHeight)
+            && CbHeightKnown == other.CbHeightKnown
+            && InsideFixedCb == other.InsideFixedCb;
 
         internal Inherited Clone() => new()
         {
@@ -228,8 +286,10 @@ public static partial class RenderDom
             ? new ContainerQueryEvaluator(tree, snapshot)
             : null;
 
+        // A doctype can only be a child of the document; listing every node of the document to
+        // find it cost a whole-document walk per pass.
         bool quirksMode = true;
-        foreach (NodeId id in tree.Descendants(tree.Document))
+        foreach (NodeId id in tree.Children(tree.Document))
         {
             if (tree.GetNode(id)?.Data is DoctypeData)
             {
@@ -250,6 +310,9 @@ public static partial class RenderDom
             AnimationSample = animationSample,
             AnimationTimeline = animationTimeline,
             FreshStyles = freshStyles,
+            VisitOnly = freshStyles is not null && RetainedTaffyLayout.Enabled
+                ? DomCascade.StylePaths(tree, freshStyles)
+                : null,
         };
         DomCascade.CascadeWalk(
             cascadeContext, tree.Document, sheet, matcher, rootProps, evaluator, null, false);
@@ -353,6 +416,8 @@ public static partial class RenderDom
         Rect?[] generatedRects = [];
         Dictionary<NodeId, GridTrackSizes> gridTracks = [];
 
+        TopDownMemo? currentTopDown = null;
+        int topDownVisits = 0;
         if (root is { } rootId)
         {
             int rootGutters = styles.TryGetValue(rootId, out LayoutStyle? gutterStyle)
@@ -383,17 +448,39 @@ public static partial class RenderDom
             };
 
             // Computed definiteness after walking the real containing-block chain.
-            HashSet<NodeId> definiteHeightNodes = [];
+            // The top-down memo of the layout this one follows, when that layout's top-down pass
+            // ran in the same context: same viewport and root font size, and a text engine with
+            // the same fonts (the font units it stored on retained styles come from them).
+            TopDownMemo? carriedTopDown = previousLayout?.TopDown;
+            if (previousLayout is not null)
+            {
+                previousLayout.TopDown = null;
+            }
+
+            var topDownContext = (rootFs, vw, vh, viewport.Width, viewport.Height, initialCbWidth);
+            TopDownMemo topDown = carriedTopDown is { } memo
+                && freshStyles is not null
+                && RetainedTaffyLayout.Enabled
+                && memo.Context == topDownContext
+                && engine.SharesShapeCacheWith(previousLayout!.TextEngine)
+                && memo.Received.Count <= (2 * styles.Count) + 64
+                    ? memo
+                    : new TopDownMemo();
+            topDown.Carried = ReferenceEquals(topDown, carriedTopDown);
+            topDown.Context = topDownContext;
+            HashSet<NodeId> definiteHeightNodes = topDown.DefiniteHeight;
+            currentTopDown = topDown;
             // `ch` and `ex` are measured on the face the text engine selects, so the resolver
             // reads the same font database layout will shape with. One per pass: it memoizes the
             // face decision, which every element asks for.
             FontUnitResolver fontUnits = new(engine);
-            ResolveComputedValues(
+            topDownVisits = ResolveComputedValues(
                 tree,
                 rootId,
                 styles,
                 freshStyles,
-                definiteHeightNodes,
+                cascadeContext.VisitOnly,
+                topDown,
                 rootInherited,
                 fontUnits,
                 rootFs,
@@ -403,6 +490,7 @@ public static partial class RenderDom
                 initialCbWidth);
 
         LayoutPhaseProfile.Mark("topdown");
+            LayoutPhaseProfile.Note("topdownVisits", topDownVisits);
             // Root/body overflow propagated to the viewport leaves the source element itself
             // overflow-visible for Taffy and BFC decisions.
             DomTransforms.MarkViewportOverflowSource(tree, rootId, styles);
@@ -553,6 +641,7 @@ public static partial class RenderDom
                 DomPasses.ReapplyPaddingUsedByPreviousLayout(styles);
                 candidate.Previous.Styles = styles;
                 candidate.Previous.CustomProperties = customProperties;
+                candidate.Previous.TopDown = topDown;
                 return (candidate.Previous, signature, queryStats);
             }
 
@@ -1141,6 +1230,8 @@ public static partial class RenderDom
             GeneratedBoxes = generatedBoxes,
             GridTracks = gridTracks,
             TransplantedBoxes = transplanted,
+            TopDown = currentTopDown,
+            TopDownVisits = topDownVisits,
             AdoptedInlineItems = engine.AdoptedItemCount,
             RetainedBoxes = builtRoot is { } keptRoot
                 ? new RetainedTaffyLayout

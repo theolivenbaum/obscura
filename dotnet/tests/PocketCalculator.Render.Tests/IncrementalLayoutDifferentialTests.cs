@@ -49,6 +49,19 @@ public class IncrementalLayoutDifferentialTests
         .aft::after{content:" [" attr(data-x) "]"}
         .tbl{display:table;border-spacing:3px}
         .cell{display:table-cell;padding:2px;border:1px solid}
+        .sib + *{margin-left:9px}
+        .sib ~ p{font-size:17px}
+        div:has(> .hl){padding:4px}
+        p:has(b.hl){letter-spacing:2px}
+        li:nth-child(2n){padding-left:5px}
+        ul > :first-child{border-top:3px solid}
+        :empty{min-height:3px}
+        [data-x=v1]{font-weight:bold}
+        [title]{border-left:2px solid}
+        body{counter-reset:sec}
+        .sec::before{counter-increment:sec;content:counters(sec, ".") " ";display:block}
+        .bfr::before{content:"* "}
+        .bfr::after{content:" end";display:inline-block;width:30px}
         """;
 
     private static readonly string[] Fixtures =
@@ -140,7 +153,8 @@ public class IncrementalLayoutDifferentialTests
     ];
 
     private static readonly string[] Classes =
-        ["a", "b", "c", "hide", "wide", "pad", "flt", "fltr", "abs", "rel", "flex", "grid", "big", "inl", "clr", "ovf", "pre", "nw", "grow", "cnt", "aft"];
+        ["a", "b", "c", "hide", "wide", "pad", "flt", "fltr", "abs", "rel", "flex", "grid", "big", "inl", "clr", "ovf", "pre", "nw", "grow", "cnt", "aft",
+         "sib", "hl", "sec", "bfr"];
 
     private static readonly string[] Declarations =
     [
@@ -151,6 +165,8 @@ public class IncrementalLayoutDifferentialTests
         "box-sizing:border-box;width:100px;padding:10px", "transform:translateX(10px)", "visibility:hidden",
         "text-align:center", "text-align:right", "text-align:justify", "text-align:end;text-align-last:center",
         "direction:rtl", "white-space:pre-wrap",
+        "display:inline-block", "display:contents", "display:table", "float:right;width:30%", "clear:left",
+        "display:list-item", "counter-increment:sec 2",
     ];
 
     private static readonly string[] Words =
@@ -301,6 +317,48 @@ public class IncrementalLayoutDifferentialTests
         Assert.True(second.Layout.TransplantedBoxes > 50, $"carried {second.Layout.TransplantedBoxes}");
         Assert.True(second.Layout.AdoptedInlineItems > 50, $"adopted {second.Layout.AdoptedInlineItems}");
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
+    /// <summary>
+    /// A retained restyle of one element runs the top-down style pass only along the path to it
+    /// (and, the pass after, the elements the previous one cascaded afresh): the rest of the
+    /// document receives the context it received before and keeps what that pass computed.
+    /// </summary>
+    [Fact]
+    public void ARetainedRestyleVisitsOnlyThePathToTheChange()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss + "</style></head><body><div class=grid>");
+        for (int i = 0; i < 60; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<div id=g{i} class=a>item <b>{i}</b> text</div>");
+        }
+
+        html.Append("</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        int fullVisits = previous.Layout.TopDownVisits;
+        Assert.True(fullVisits > 120, $"full pass visited {fullVisits}");
+        string[] targets = ["g7", "g8", "g30", "g7", "g59"];
+        for (int step = 0; step < targets.Length; step++)
+        {
+            NodeId target = tree.GetElementById(targets[step])!.Value;
+            string old = tree.GetNode(target)!.GetAttribute("class")!;
+            string value = old == "a" ? "a c" : "a";
+            tree.GetNode(target)!.SetAttribute("class", value);
+            previous = RenderPaint.PrepareDomWithRetainedStyles(
+                tree, Viewport, null, resources, [], cache, previous,
+                [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", old, value))])!;
+
+            // The first retained pass follows a full one, whose fresh styles it visits again.
+            if (step > 0)
+            {
+                Assert.True(previous.Layout.TopDownVisits < 20, $"step {step} visited {previous.Layout.TopDownVisits}");
+            }
+
+            Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, previous));
+        }
     }
 
     /// <summary>

@@ -394,12 +394,19 @@ internal static class DomStyleFixups
     /// </summary>
     internal static void GrowTrailingAutoCells(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
     {
-        foreach (NodeId tr in DomTraversal.RenderedDescendants(tree, tree.Document))
+        // Each row writes only its own cells, so the rows can be met in any order: find them
+        // among the styles (every rendered element has one) rather than walking the document.
+        List<NodeId> rows = [];
+        foreach (NodeId candidate in styles.Keys)
         {
-            if (!DomTraversal.IsLocal(tree, tr, "tr"))
+            if (DomTraversal.IsLocal(tree, candidate, "tr"))
             {
-                continue;
+                rows.Add(candidate);
             }
+        }
+
+        foreach (NodeId tr in rows)
+        {
 
             List<NodeId> children = tree.Children(tr);
 
@@ -443,14 +450,12 @@ internal static class DomStyleFixups
     /// </summary>
     internal static void PropagateBorderSpacing(DomTree tree, Dictionary<NodeId, LayoutStyle> styles)
     {
-        foreach (NodeId id in DomTraversal.RenderedDescendants(tree, tree.Document))
+        // Every rendered element has a style, and each table's rows are its own (the row walk
+        // stops at a nested table), so the order the tables are met in does not matter: walk
+        // the styles rather than the whole document.
+        foreach ((NodeId id, LayoutStyle tableStyle) in styles)
         {
             if (!DomTraversal.IsLocal(tree, id, "table"))
-            {
-                continue;
-            }
-
-            if (!styles.TryGetValue(id, out LayoutStyle? tableStyle))
             {
                 continue;
             }
@@ -491,6 +496,19 @@ internal static class DomStyleFixups
 
             ApplySpacingToRows(tree, cid, horizontal, vertical, styles);
         }
+    }
+
+    private static bool IsDomDescendantOrSelf(DomTree tree, NodeId node, NodeId root)
+    {
+        for (NodeId? current = node; current is { } id; current = tree.GetNode(id)?.Parent)
+        {
+            if (id == root)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static void CollectEffectiveGridChildren(
@@ -557,20 +575,21 @@ internal static class DomStyleFixups
         NodeId root,
         Dictionary<NodeId, LayoutStyle> styles)
     {
-        List<NodeId> stack = [root];
-        while (stack.Count > 0)
+        // Each grid container places only its own (effective) children, so the containers can
+        // be met in any order: find them among the styles rather than walking every node of
+        // the document, and keep only those under the root in the DOM, as the walk did.
+        List<NodeId> grids = [];
+        foreach ((NodeId candidate, LayoutStyle candidateStyle) in styles)
         {
-            NodeId id = stack[^1];
-            stack.RemoveAt(stack.Count - 1);
-            foreach (NodeId cid in tree.Children(id))
+            if (candidateStyle.Display == Display.Grid && IsDomDescendantOrSelf(tree, candidate, root))
             {
-                stack.Add(cid);
+                grids.Add(candidate);
             }
+        }
 
-            if (!styles.TryGetValue(id, out LayoutStyle? style) || style.Display != Display.Grid)
-            {
-                continue;
-            }
+        foreach (NodeId id in grids)
+        {
+            LayoutStyle style = styles[id];
 
             List<List<string>>? areas = style.GridAreas is { Count: > 0 } gridAreas ? gridAreas : null;
             List<EffectiveGridChild> gridChildren = [];

@@ -706,10 +706,18 @@ public static partial class RenderDom
             }
         }
 
+        // An element without a retained style is cascaded whatever the plan says: the retained
+        // cascade only descends towards fresh styles (DomCascade.StylePaths), so one it was
+        // never told about would otherwise go without.
         HashSet<NodeId> connected = [tree.Document];
+        List<NodeId> unstyled = [];
         foreach (NodeId node in DomTraversal.RenderedDescendants(tree, tree.Document))
         {
             connected.Add(node);
+            if (!retained.Styles.ContainsKey(node) && tree.GetNode(node)?.IsElement == true)
+            {
+                unstyled.Add(node);
+            }
         }
 
         List<NodeId> stale = [];
@@ -746,6 +754,11 @@ public static partial class RenderDom
         }
 
         HashSet<NodeId> dirty = plan.Dirty;
+        foreach (NodeId node in unstyled)
+        {
+            RetainedStylePlanner.AddStyleSubtree(tree, node, dirty);
+        }
+
         if (activeContainers.Count != 0 && sheet.HasContainerQueries())
         {
             Matcher matcher = tree.CreateMatcher();

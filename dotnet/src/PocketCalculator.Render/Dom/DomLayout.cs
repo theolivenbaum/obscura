@@ -129,8 +129,17 @@ public sealed class DomLayout
     /// </summary>
     internal RetainedTaffyLayout? RetainedBoxes { get; set; }
 
+    /// <summary>
+    /// What this layout's top-down style pass left for the next retained pass; see
+    /// <see cref="RenderDom.TopDownMemo"/>. Taken by that pass.
+    /// </summary>
+    internal RenderDom.TopDownMemo? TopDown { get; set; }
+
     /// <summary>How many boxes this pass carried over from the previous one.</summary>
     internal int TransplantedBoxes { get; init; }
+
+    /// <summary>How many elements this layout's top-down style pass visited (diagnostics, tests).</summary>
+    internal int TopDownVisits { get; init; }
 
     /// <summary>How many inline items this pass took over from the previous one.</summary>
     internal int AdoptedInlineItems { get; init; }
