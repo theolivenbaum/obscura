@@ -2876,6 +2876,39 @@ under sibling-combinator, `:has()`, `:nth-child`, `:empty`, attribute selectors,
 fixture and 4 per float page without a divergence. `POCKETCALCULATOR_FULL_RELAYOUT=1` turns the
 cascade and top-down skipping off.
 
+### A removal restyles only what the removed subtree and its old position can reach
+
+DEVIATION from `crates/obscura-render/src/dom.rs`, whose removal records keep no sibling
+pointer and no picture of what left. On nvidia.com (one of the page's variants) a scrollbar
+probe added to and removed from `<body>` before forced reads, and each removal re-cascaded the
+whole document (12,760 fresh styles a pass) through three conservative scopes:
+
+- every `:has()` rule whose anchor may match an ancestor (`body:has(.modal-open)`) was reached
+  by any removal. `remove_child` now captures `RemovedSubtreeFeatures` while the subtree is
+  still attached (element keys and whether it held text, at most 512 elements, else nothing
+  is recorded and the old path applies), and a removal reaches a rule only when that subtree
+  holds an element its relative keys may match, or the rule has an unkeyed subject or a
+  sibling, structural or text side effect: the test an insertion already makes of what it
+  inserts;
+- a structural pseudo with a Conservative reach (`:nth-child(3) ~ * .a`, a structural pseudo
+  under `:is()` with another combinator) re-cascaded the whole parent subtree. It now takes the
+  candidate's subtree and its following siblings' subtrees: every combinator from the
+  candidate leads down or to later siblings, `:has()` is excluded and handled as a relational
+  rule, and the parent chain is re-cascaded through the style context chain anyway;
+- with sibling combinators in the sheet, every child of the old parent was re-cascaded, and
+  every sibling was a candidate for `:nth-child`, `:nth-last-child` and their `-of-type`
+  forms. `remove_child` now also records the old next sibling (`OldNextSibling`; a recorded
+  null means the node was last). While that node is still a child of the old parent, sibling
+  combinators re-cascade from it onward, `nth-child`/`nth-of-type` candidates are the siblings
+  from it onward and `nth-last-*` candidates the ones before it; otherwise the old scopes
+  apply.
+
+Pinned by `ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch` (Render). The differential test
+records the features and the next sibling three removals in four, and its sheet gained
+`body:has()`, `ul:has(li .hl)`, `:nth-child(3) ~ * .a` and
+`:is(li:last-child + *, ul > :first-of-type) b`; 24 seeds per fixture and 6 per float page ran
+without a divergence.
+
 ### The whole-document work around a layout pass is shared, skipped or memoized
 
 DEVIATION from `crates/obscura-render`, which repeats all of it on every pass. Measured with an

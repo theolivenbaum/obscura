@@ -51,9 +51,142 @@ public abstract record TreeStyleMutation
 
     public sealed record Insert(NodeId Node, NodeId? OldParent, NodeId NewParent) : TreeStyleMutation;
 
-    public sealed record Remove(NodeId Node, NodeId OldParent) : TreeStyleMutation;
+    public sealed record Remove(NodeId Node, NodeId OldParent) : TreeStyleMutation
+    {
+        /// <summary>
+        /// What the removed subtree looked like to <c>:has()</c> invalidation when it left, or
+        /// <c>null</c> when that was not recorded; see <see cref="RemovedSubtreeFeatures"/>.
+        /// </summary>
+        public RemovedSubtreeFeatures? Features { get; init; }
+
+        /// <summary>
+        /// Whether <see cref="OldNextSibling"/> was recorded. Without it a removal re-cascades
+        /// every child of the old parent when the sheet has sibling combinators.
+        /// </summary>
+        public bool NextSiblingRecorded { get; init; }
+
+        /// <summary>The node that followed the removed one, or <c>null</c> when it was last.</summary>
+        public NodeId? OldNextSibling { get; init; }
+    }
 
     public sealed record Text(NodeId Node, NodeId? Parent) : TreeStyleMutation;
+}
+
+/// <summary>
+/// The element keys of a subtree as it was when a removal took it out of the document: what
+/// a <c>:has()</c> relative selector key can match in it, and whether it held text.
+/// </summary>
+/// <remarks>
+/// DEVIATION from crates/obscura-render/src/dom.rs, which treats every removal as reaching
+/// every <c>:has()</c> rule whose anchor may match an ancestor of the removed node. A rule like
+/// <c>body:has(.modal-open)</c> then re-cascades the whole document whenever anything is
+/// removed anywhere (nvidia.com: a scrollbar probe added to and removed from <c>&lt;body&gt;</c>,
+/// and a <c>&lt;noscript&gt;</c> replaced by an image, on every forced read). A removal now
+/// reaches a rule only when the removed subtree held an element its relative keys may match,
+/// or the rule has a side effect a removal can trigger on its own, which is the test an
+/// insertion already makes of the subtree it inserts. The subtree is captured when the
+/// mutation is recorded, before the node leaves the tree: a detached node can change without
+/// a mutation being recorded.
+/// </remarks>
+public sealed class RemovedSubtreeFeatures
+{
+    /// <summary>A removed subtree with more elements than this records nothing (every rule reached).</summary>
+    internal const int MaxElements = 512;
+
+    private readonly List<ElementKeys> _elements;
+
+    private RemovedSubtreeFeatures(List<ElementKeys> elements, bool hasText)
+    {
+        _elements = elements;
+        HasText = hasText;
+    }
+
+    /// <summary>Whether the subtree held a text node.</summary>
+    internal bool HasText { get; }
+
+    /// <summary>
+    /// The keys of <paramref name="root"/>'s subtree, or <c>null</c> when it is too large to
+    /// record (or not there).
+    /// </summary>
+    public static RemovedSubtreeFeatures? Capture(DomTree tree, NodeId root)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        if (tree.GetNode(root) is null)
+        {
+            return null;
+        }
+
+        List<ElementKeys> elements = [];
+        bool hasText = false;
+        Stack<NodeId> pending = new();
+        pending.Push(root);
+        int visited = 0;
+        while (pending.Count != 0)
+        {
+            NodeId id = pending.Pop();
+            if (++visited > tree.SlotCount || tree.GetNode(id) is not { } node)
+            {
+                return null;
+            }
+
+            if (node.IsText)
+            {
+                hasText = true;
+            }
+            else if (node.IsElement)
+            {
+                if (elements.Count == MaxElements)
+                {
+                    return null;
+                }
+
+                elements.Add(new ElementKeys(new DomElementView(tree, id)));
+            }
+
+            for (NodeId? child = node.FirstChild; child is { } next; child = tree.GetNode(next)?.NextSibling)
+            {
+                pending.Push(next);
+            }
+        }
+
+        return new RemovedSubtreeFeatures(elements, hasText);
+    }
+
+    /// <summary>Whether a relative key of <paramref name="invalidation"/> may match an element of the subtree.</summary>
+    internal bool MayMatch(RelationalInvalidation invalidation)
+    {
+        foreach (ElementKeys element in _elements)
+        {
+            if (invalidation.RelativePathMayMatch(element))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The parts of one element the relative keys read, copied out of the tree.</summary>
+    private sealed class ElementKeys(DomElementView live) : ICssElementView
+    {
+        private readonly string? _id = live.GetAttribute("id");
+        private readonly string? _class = live.GetAttribute("class");
+
+        public bool IsElement => true;
+
+        public string LocalName { get; } = live.LocalName;
+
+        public string? GetAttribute(string name) => name switch
+        {
+            "id" => _id,
+            "class" => _class,
+            _ => null,
+        };
+
+        public IReadOnlyList<string> AttributeNames { get; } = live.AttributeNames;
+
+        public bool IsQuirks { get; } = live.IsQuirks;
+    }
 }
 
 /// <summary>Damage input for a retained-style rebuild.</summary>
@@ -453,7 +586,13 @@ public static class RetainedStylePlanner
         {
             bool triggered = mutation switch
             {
-                TreeStyleMutation.Remove => true,
+                TreeStyleMutation.Remove remove =>
+                    remove.Features is not { } removed
+                    || removed.MayMatch(invalidation)
+                    || invalidation.UnkeyedSubject
+                    || invalidation.SiblingSideEffect
+                    || invalidation.StructuralSideEffect
+                    || (removed.HasText && invalidation.TextSideEffect),
                 TreeStyleMutation.Insert insert =>
                     SubtreeMayMatchRelationalPath(tree, invalidation, insert.Node)
                     || invalidation.UnkeyedSubject
@@ -535,16 +674,24 @@ public static class RetainedStylePlanner
             return;
         }
 
+        AddStyleSubtree(tree, candidate, dirty);
         foreach (StructuralInvalidation invalidation in invalidations)
         {
+            // DEVIATION from crates/obscura-render/src/dom.rs, which re-cascades the whole
+            // parent subtree for a Conservative reach: under <body> that is the document, on
+            // every insertion or removal there. A structural pseudo is matched against the
+            // candidate as the subject or as a compound left of it, and every combinator from
+            // there leads down or to later siblings, so the subject sits in the candidate's
+            // subtree or a following sibling's. :has() is excluded above and invalidated as a
+            // relational rule, and the parent and its ancestors are re-cascaded through the
+            // style context chain.
             if (invalidation.Reaches.Contains(InvalidationReaches.Conservative))
             {
-                AddStyleSubtree(tree, parent, dirty);
+                AddFollowingSiblingSubtrees(tree, candidate, dirty);
                 return;
             }
         }
 
-        AddStyleSubtree(tree, candidate, dirty);
         foreach (StructuralInvalidation invalidation in invalidations)
         {
             if (invalidation.Reaches.Contains(InvalidationReaches.Siblings))
@@ -666,9 +813,40 @@ public static class RetainedStylePlanner
         InvalidationMap map,
         NodeId removed,
         NodeId parent,
-        HashSet<NodeId> dirty)
+        HashSet<NodeId> dirty,
+        TreeStyleMutation.Remove? remove = null)
     {
         List<NodeId> siblings = DomTraversal.ElementChildren(tree, parent);
+
+        // Where the removed node sat among the remaining element siblings, when the removal
+        // recorded its old next sibling and that node is still here: a removal shifts the
+        // forward index only of the siblings after it, and the backward index only of those
+        // before it. Unknown, every sibling is a candidate for both.
+        // DEVIATION from crates/obscura-render/src/dom.rs, which keeps no old sibling pointer.
+        int split = -1;
+        if (remove is { NextSiblingRecorded: true })
+        {
+            if (remove.OldNextSibling is not { } next)
+            {
+                split = siblings.Count;
+            }
+            else if (tree.GetNode(next)?.Parent == parent)
+            {
+                split = siblings.Count;
+                NodeId? cursor = next;
+                while (cursor is { } id)
+                {
+                    int index = tree.GetNode(id)?.IsElement == true ? siblings.IndexOf(id) : -1;
+                    if (index >= 0)
+                    {
+                        split = index;
+                        break;
+                    }
+
+                    cursor = tree.GetNode(id)?.NextSibling;
+                }
+            }
+        }
         if (siblings.Count > 0)
         {
             AddStructuralCandidateScope(tree, map, "first-child", siblings[0], parent, dirty);
@@ -683,12 +861,14 @@ public static class RetainedStylePlanner
             }
         }
 
-        foreach (string state in new[] { "nth-child", "nth-last-child" })
+        for (int index = split < 0 ? 0 : split; index < siblings.Count; index++)
         {
-            foreach (NodeId candidate in siblings)
-            {
-                AddStructuralCandidateScope(tree, map, state, candidate, parent, dirty);
-            }
+            AddStructuralCandidateScope(tree, map, "nth-child", siblings[index], parent, dirty);
+        }
+
+        for (int index = 0; index < (split < 0 ? siblings.Count : split); index++)
+        {
+            AddStructuralCandidateScope(tree, map, "nth-last-child", siblings[index], parent, dirty);
         }
 
         if (DomTraversal.ElementLocalName(tree, removed) is not { } local)
@@ -697,11 +877,17 @@ public static class RetainedStylePlanner
         }
 
         List<NodeId> sameType = [];
-        foreach (NodeId candidate in siblings)
+        int typeSplit = split < 0 ? -1 : 0;
+        for (int index = 0; index < siblings.Count; index++)
         {
+            NodeId candidate = siblings[index];
             if (string.Equals(DomTraversal.ElementLocalName(tree, candidate), local, StringComparison.Ordinal))
             {
                 sameType.Add(candidate);
+                if (index < split)
+                {
+                    typeSplit++;
+                }
             }
         }
 
@@ -719,12 +905,14 @@ public static class RetainedStylePlanner
             }
         }
 
-        foreach (string state in new[] { "nth-of-type", "nth-last-of-type" })
+        for (int index = typeSplit < 0 ? 0 : typeSplit; index < sameType.Count; index++)
         {
-            foreach (NodeId candidate in sameType)
-            {
-                AddStructuralCandidateScope(tree, map, state, candidate, parent, dirty);
-            }
+            AddStructuralCandidateScope(tree, map, "nth-of-type", sameType[index], parent, dirty);
+        }
+
+        for (int index = 0; index < (typeSplit < 0 ? sameType.Count : typeSplit); index++)
+        {
+            AddStructuralCandidateScope(tree, map, "nth-last-of-type", sameType[index], parent, dirty);
         }
     }
 
@@ -763,14 +951,40 @@ public static class RetainedStylePlanner
         DomTree tree,
         InvalidationMap map,
         NodeId parent,
-        HashSet<NodeId> dirty)
+        HashSet<NodeId> dirty,
+        TreeStyleMutation.Remove? remove = null)
     {
         if (!map.HasAdjacentSiblingSelectors && !map.HasGeneralSiblingSelectors)
         {
             return;
         }
 
-        // Removal records intentionally do not retain old sibling pointers.
+        // DEVIATION from crates/obscura-render/src/dom.rs, which keeps no old sibling pointer
+        // and re-cascades every child of the old parent. Without :has() (invalidated as a
+        // relational rule) a sibling combinator only looks back, so only the siblings that
+        // followed the removed node can change. When the removal recorded its old next
+        // sibling and that node is still a child of the old parent, the scope starts there;
+        // a recorded null means the removed node was last and nothing followed it.
+        if (remove is { NextSiblingRecorded: true })
+        {
+            if (remove.OldNextSibling is not { } next)
+            {
+                return;
+            }
+
+            if (tree.GetNode(next)?.Parent == parent)
+            {
+                NodeId? sibling = next;
+                while (sibling is { } id)
+                {
+                    AddStyleSubtree(tree, id, dirty);
+                    sibling = tree.GetNode(id)?.NextSibling;
+                }
+
+                return;
+            }
+        }
+
         foreach (NodeId sibling in DomTraversal.ElementChildren(tree, parent))
         {
             AddStyleSubtree(tree, sibling, dirty);
@@ -941,8 +1155,8 @@ public static class RetainedStylePlanner
 
                             AddStyleContextChain(tree, remove.OldParent, dirty);
                             AddTableRowChildScope(tree, remove.OldParent, dirty);
-                            AddRemovedStructuralScopes(tree, map, remove.Node, remove.OldParent, dirty);
-                            AddRemovedSiblingScopes(tree, map, remove.OldParent, dirty);
+                            AddRemovedStructuralScopes(tree, map, remove.Node, remove.OldParent, dirty, remove);
+                            AddRemovedSiblingScopes(tree, map, remove.OldParent, dirty, remove);
                             AddEmptyParentScope(tree, map, remove.OldParent, mutations, dirty);
                             break;
                         }

@@ -53,7 +53,11 @@ public class IncrementalLayoutDifferentialTests
         .sib ~ p{font-size:17px}
         div:has(> .hl){padding:4px}
         p:has(b.hl){letter-spacing:2px}
+        body:has(.sib){word-spacing:1px}
+        ul:has(li .hl){padding-left:3px}
         li:nth-child(2n){padding-left:5px}
+        :nth-child(3) ~ * .a{margin-right:4px}
+        :is(li:last-child + *, ul > :first-of-type) b{font-style:italic}
         ul > :first-child{border-top:3px solid}
         :empty{min-height:3px}
         [data-x=v1]{font-weight:bold}
@@ -408,6 +412,59 @@ public class IncrementalLayoutDifferentialTests
         Assert.True(boxes.Consumed);
         Assert.Equal(0, boxes.Tree.TotalNodeCount());
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
+    /// <summary>
+    /// With a <c>body:has(...)</c> rule in the sheet, removing an element its relative selector
+    /// cannot match restyles only around the removal, and removing one it can match restyles
+    /// the whole body (nvidia.com removed a scrollbar probe from <c>&lt;body&gt;</c> before
+    /// every forced read, and each removal re-cascaded the document).
+    /// </summary>
+    [Fact]
+    public void ARemovalReachesOnlyTheHasRulesItsSubtreeCanMatch()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " body:has(.modal-open){overflow:hidden;padding-right:15px}</style></head><body><div id=modal class=box><span class=modal-open>m</span></div>");
+        for (int i = 0; i < 40; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i}</p>");
+        }
+
+        // Last, so the sheet's sibling combinators reach nothing after it.
+        html.Append("<div id=probe class=probe>x</div></body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+
+        // A first retained pass revisits what the full one cascaded; the next is the steady state.
+        NodeId para = tree.GetElementById("p3")!.Value;
+        tree.GetNode(para)!.SetAttribute("class", "c");
+        previous = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, previous,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(para, "class", null, "c"))])!;
+
+        NodeId probe = tree.GetElementById("probe")!.Value;
+        NodeId body = tree.GetNode(probe)!.Parent!.Value;
+        TreeStyleMutation.Remove unrelated = new(probe, body)
+        {
+            Features = RemovedSubtreeFeatures.Capture(tree, probe),
+            NextSiblingRecorded = true,
+            OldNextSibling = tree.GetNode(probe)!.NextSibling,
+        };
+        tree.RemoveChild(probe);
+        PreparedRender afterProbe = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, previous, [RetainedStyleMutation.From(unrelated)])!;
+        Assert.True(afterProbe.Layout.TopDownVisits < 20, $"visited {afterProbe.Layout.TopDownVisits}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, afterProbe));
+
+        NodeId modal = tree.GetElementById("modal")!.Value;
+        TreeStyleMutation.Remove related = new(modal, body) { Features = RemovedSubtreeFeatures.Capture(tree, modal) };
+        tree.RemoveChild(modal);
+        PreparedRender afterModal = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, afterProbe, [RetainedStyleMutation.From(related)])!;
+        Assert.True(afterModal.Layout.TopDownVisits > 40, $"visited {afterModal.Layout.TopDownVisits}");
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, afterModal));
     }
 
     /// <summary>
@@ -855,7 +912,16 @@ public class IncrementalLayoutDifferentialTests
                     return null;
                 }
 
-                mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Remove(target, parent)));
+                // As the ops record it: what the subtree held is captured before it leaves, and
+                // decides which :has() rules the removal reaches. Sometimes left out, the
+                // conservative path every rule reaches. The old next sibling likewise.
+                bool recordNext = rng.Next(4) != 0;
+                mutations.Add(RetainedStyleMutation.From(new TreeStyleMutation.Remove(target, parent)
+                {
+                    Features = rng.Next(4) == 0 ? null : RemovedSubtreeFeatures.Capture(tree, target),
+                    NextSiblingRecorded = recordNext,
+                    OldNextSibling = recordNext ? tree.GetNode(target)?.NextSibling : null,
+                }));
                 tree.RemoveChild(target);
                 return $"remove #{target}";
             }
