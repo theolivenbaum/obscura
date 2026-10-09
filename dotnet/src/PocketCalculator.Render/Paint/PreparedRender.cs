@@ -1886,6 +1886,18 @@ public sealed partial class PreparedRender
             ? new Dictionary<string, string>(properties, StringComparer.Ordinal)
             : null;
 
+    /// <summary>
+    /// The elements under viewport point (<paramref name="x"/>, <paramref name="y"/>), topmost
+    /// first and not retargeted out of shadow trees (see <see cref="HitTester"/>); only the
+    /// topmost unless <paramref name="all"/>. Empty outside the viewport.
+    /// </summary>
+    public List<NodeId> HitTest(DomTree tree, ResolvedScrollState scroll, float x, float y, bool all)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+        ArgumentNullException.ThrowIfNull(scroll);
+        return HitTester.Run(tree, Layout, scroll, ViewportSize, x, y, all);
+    }
+
     /// <summary>Border box in the current root viewport.</summary>
     public Rect? ViewportRect(NodeId id, (float X, float Y) requestedScroll)
     {

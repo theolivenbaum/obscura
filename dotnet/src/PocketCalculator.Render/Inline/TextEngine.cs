@@ -1040,6 +1040,7 @@ public sealed partial class TextEngine : IDisposable
             OwnerText = ownerText,
             OwnerChunks = ownerChunks,
             OwnerChain = collector.OwnerChain,
+            TextNodes = collector.TextNodes,
             OwnerBoxes = ownerBoxes,
             BoundaryEvents = boundaryEvents,
             RelativeOwnerRanges = [],
@@ -2835,7 +2836,16 @@ public sealed partial class TextEngine : IDisposable
 
         if (node.Data is TextData text)
         {
+            int start = collector.TextLength;
+            bool lastWasSpace = collector.LastWasSpace;
             Inline.PushText(text.Contents, context.Transform, context.WhiteSpace, context.ToSpanAttrs(), output, collector);
+            collector.TextNodes.Add(new TextNodeChunk(
+                cid,
+                start,
+                collector.TextLength,
+                lastWasSpace,
+                context.WhiteSpace,
+                context.Transform));
             return;
         }
 

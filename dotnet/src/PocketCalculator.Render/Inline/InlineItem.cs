@@ -13,6 +13,20 @@ public readonly record struct ClipTextFill(float Angle, List<(RgbaColor Color, f
 /// </summary>
 internal readonly record struct OwnerTextChunk(int Start, int End, int Node);
 
+/// <summary>
+/// One DOM text node's place in an inline formatting context's collected text: the collected
+/// offset its text starts at, and the white-space state and transform it was collapsed with,
+/// which is enough to map a DOM offset in it to a collected offset again (see
+/// <c>TextEngine.CollectedOffset</c>). Kept for <c>Range.getClientRects()</c>.
+/// </summary>
+internal readonly record struct TextNodeChunk(
+    NodeId Node,
+    int Start,
+    int End,
+    bool LastWasSpace,
+    WhiteSpace WhiteSpace,
+    TextTransform Transform);
+
 /// <summary>An inline owner and the owner open around it (an index, -1 for none).</summary>
 internal readonly record struct OwnerChainNode(NodeId Owner, int Parent);
 
@@ -199,6 +213,9 @@ public sealed class InlineItem
     internal List<OwnerTextChunk> OwnerChunks { get; init; } = [];
 
     internal List<OwnerChainNode> OwnerChain { get; init; } = [];
+
+    /// <summary>The DOM text nodes collected into this context, in order.</summary>
+    internal List<TextNodeChunk> TextNodes { get; init; } = [];
 
     internal List<InlineOwnerBox> OwnerBoxes { get; init; } = [];
 

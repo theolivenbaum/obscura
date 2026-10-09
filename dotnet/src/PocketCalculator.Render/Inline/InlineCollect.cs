@@ -238,6 +238,9 @@ internal sealed class Collector
     public List<OwnerChainNode> OwnerChain = [];
     public List<InlineOwnerBox> OwnerBoxes = [];
     public List<InlineBoundaryEvent> BoundaryEvents = [];
+
+    /// <summary>Where each DOM text node's collapsed text starts, for range geometry.</summary>
+    public List<TextNodeChunk> TextNodes = [];
     public int TextLength;
 
     /// <summary>
@@ -913,6 +916,75 @@ public static class Inline
 
         collector.FlushLastSpan(output);
         output.Add((buffer.ToString(), attrs));
+    }
+
+    /// <summary>
+    /// The collected offset that DOM offset <paramref name="domOffset"/> (UTF-16) of a text
+    /// node maps to, replaying <see cref="PushText"/> from the state <paramref name="chunk"/>
+    /// recorded: collapsed white space maps to where its one space (or nothing) went, and a
+    /// transformed character to the start of its expansion.
+    /// </summary>
+    internal static int CollectedOffset(string raw, in TextNodeChunk chunk, int domOffset)
+    {
+        int position = chunk.Start;
+        bool lastWasSpace = chunk.LastWasSpace;
+        bool atWordStart = lastWasSpace;
+        bool lastAppendedSpace = false;
+        int index = 0;
+        foreach (Rune rune in raw.EnumerateRunes())
+        {
+            if (index >= domOffset)
+            {
+                break;
+            }
+
+            index += rune.Utf16SequenceLength;
+            if (IsCollapsibleWhiteSpace(rune))
+            {
+                switch (chunk.WhiteSpace)
+                {
+                    case WhiteSpace.Pre or WhiteSpace.PreWrap or WhiteSpace.BreakSpaces:
+                        position += rune.Utf16SequenceLength;
+                        lastAppendedSpace = rune.Value == ' ';
+                        break;
+                    case WhiteSpace.PreLine when rune.Value == '\n':
+                        if (lastAppendedSpace)
+                        {
+                            position--;
+                        }
+
+                        position++;
+                        lastAppendedSpace = false;
+                        break;
+                    default:
+                        if (!lastWasSpace)
+                        {
+                            position++;
+                            lastAppendedSpace = true;
+                        }
+
+                        break;
+                }
+
+                lastWasSpace = true;
+                atWordStart = true;
+            }
+            else
+            {
+                position += chunk.Transform switch
+                {
+                    TextTransform.Uppercase => ToUpper(rune).Length,
+                    TextTransform.Lowercase => ToLower(rune).Length,
+                    TextTransform.Capitalize when atWordStart => ToUpper(rune).Length,
+                    _ => rune.Utf16SequenceLength,
+                };
+                lastWasSpace = false;
+                atWordStart = false;
+                lastAppendedSpace = false;
+            }
+        }
+
+        return Math.Clamp(position, chunk.Start, Math.Max(chunk.End, chunk.Start));
     }
 
     /// <summary>

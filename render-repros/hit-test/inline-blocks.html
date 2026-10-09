@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hit-test inline-blocks</title>
+<style>
+html, body { margin: 0; }
+body { font: 16px/20px 'Liberation Sans', Arial, sans-serif; }
+p { margin: 0; }
+.c { width: 400px; background: #f1f3f5; } .ib { display: inline-block; background: #ced4da; }
+</style>
+</head>
+<body id=body>
+<div class=c id=c><p id=p1>text <span id=ib1 class=ib style="width:60px;height:30px"></span> more <span id=ib2 class=ib style="padding:4px">inside <b id=ibb>bold</b></span> end</p>
+<p id=p2>image <img id=im src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22%3E%3Crect width=%2240%22 height=%2240%22 fill=%22red%22/%3E%3C/svg%3E" width=40 height=40> after <button id=btn><span id=btns>btn</span></button> <input id=inp value="input"></p></div>
+</body>
+</html>

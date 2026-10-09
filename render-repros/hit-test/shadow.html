@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hit-test shadow</title>
+<style>
+html, body { margin: 0; }
+body { font: 16px/20px 'Liberation Sans', Arial, sans-serif; }
+p { margin: 0; }
+
+</style>
+</head>
+<body id=body>
+<div id=host style="width:300px;height:100px;background:#e9ecef"></div>
+<div id=host2 style="width:300px;height:60px;background:#dee2e6"><span id=light>light child</span></div>
+<script>
+const r = document.getElementById('host').attachShadow({ mode: 'open' });
+r.innerHTML = '<div id=in1 style="width:150px;height:40px;background:#ffc9c9">inner one</div><div id=in2 style="width:200px;height:40px;background:#a5d8ff"><span id=in2s>inner span</span></div>';
+const r2 = document.getElementById('host2').attachShadow({ mode: 'open' });
+r2.innerHTML = '<div id=wrap style="padding:10px;background:#b2f2bb"><slot id=slot></slot></div>';
+</script>
+</body>
+</html>

@@ -16587,9 +16587,16 @@ public sealed partial class RuntimeTests
                 assert_eq!(tag, serde_json::json!("BODY"));
             }
         */
-        using var fixture = RuntimeFixture.Setup("<html><body><h1>Hi</h1></body></html>");
+        // DEVIATION: the Rust shim's elementFromPoint is a stub answering <body> for any point in
+        // the viewport. This build hit-tests the laid-out boxes (op_hit_test), and Chromium 141
+        // answers the heading under the point: (10, 30) is inside the h1 whether or not quirks
+        // mode drops its top margin, and (10, 10) is above the body in standards mode.
+        using var fixture = RuntimeFixture.Setup("<!doctype html><html><body><h1>Hi</h1></body></html>");
         Assert.Equal(
-            "BODY",
+            "H1",
+            fixture.Runtime.Evaluate("document.elementFromPoint(10, 30)?.tagName")!.GetValue<string>());
+        Assert.Equal(
+            "HTML",
             fixture.Runtime.Evaluate("document.elementFromPoint(10, 10)?.tagName")!.GetValue<string>());
     }
 
