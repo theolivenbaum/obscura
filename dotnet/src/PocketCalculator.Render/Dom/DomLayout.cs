@@ -257,6 +257,7 @@ public sealed class DomLayout
     internal DerivedLayoutState DerivedLayoutState(DomTree tree, (float Width, float Height) viewport)
     {
         HashSet<NodeId> viewportFixed = ViewportFixedNodes(tree);
+        LayoutPhaseProfile.Mark("fixedNodes");
         DerivedGeometryState geometry = DerivedGeometryWithFixed(tree, viewport, viewportFixed);
         return new DerivedLayoutState
         {
@@ -274,8 +275,11 @@ public sealed class DomLayout
     {
         (float Width, float Height) contentSize =
             ScrollingContentSizeWithFixed(tree, viewport, viewportFixed);
+        LayoutPhaseProfile.Mark("contentSize");
         ScrollTree scrollTree = BuildScrollTree(tree, viewport, contentSize, viewportFixed);
+        LayoutPhaseProfile.Mark("scrollTree");
         StickyLayout sticky = StickyLayoutWithGeometry(tree, viewport, contentSize, scrollTree);
+        LayoutPhaseProfile.Mark("sticky");
         return new DerivedGeometryState
         {
             ContentSize = contentSize,

@@ -1402,6 +1402,16 @@ public sealed partial class DomTree
                 return pi.Data;
         }
 
+        // An element whose only child is one text node - every <style> as parsed - has that
+        // node's text as its text content: hand back the string itself rather than a copy, so
+        // a caller that asks on every render pass gets the same string while it is unchanged.
+        if (Slot(nodeId)?.FirstChild is { } only
+            && Slot(only) is { Data: TextData single } onlyNode
+            && onlyNode.NextSibling is null)
+        {
+            return single.Contents;
+        }
+
         var buf = new System.Text.StringBuilder();
         CollectText(nodeId, buf);
         return buf.ToString();
