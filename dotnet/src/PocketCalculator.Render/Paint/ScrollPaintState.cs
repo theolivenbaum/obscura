@@ -148,6 +148,23 @@ internal sealed class ScrollPaintState
             OverflowClip? inherited,
             Dictionary<NodeId, OverflowClip?> output)
         {
+            // `clip: rect(...)` clips the box itself too (DomTransforms.ResolveClipRects).
+            if (laid.Styles.TryGetValue(id, out LayoutStyle? clipStyle)
+                && clipStyle.Clip is not null
+                && laid.Rects.TryGetValue(id, out Rect clipBox))
+            {
+                (float X, float Y) authoredClip =
+                    laid.Translates.TryGetValue(id, out (float X, float Y) at) ? at : (0f, 0f);
+                (float X, float Y) movedClip =
+                    sticky.TryGetValue(id, out (float X, float Y) ms) ? ms : (0f, 0f);
+                inherited = OverflowClip.WithClipProperty(
+                    inherited,
+                    clipStyle,
+                    clipBox,
+                    authoredClip.X + movedClip.X,
+                    authoredClip.Y + movedClip.Y);
+            }
+
             output[id] = inherited?.Clone();
             OverflowClip? next = inherited;
             if (laid.Styles.TryGetValue(id, out LayoutStyle? style)

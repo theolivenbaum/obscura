@@ -182,4 +182,29 @@ public class FormControlDisplayTests
         Assert.Equal(350f, laid.Rects[Id(tree, "ib")].X, 0.5f);
         Assert.Equal(0f, laid.Rects[Id(tree, "left")].X, 0.5f);
     }
+
+    /// <summary>
+    /// A descendant's definite <c>max-width</c> caps what it adds to a button's intrinsic
+    /// width. msn.com's settings button hides its label in a <c>max-width: 0</c> span next to a
+    /// 24px icon; Chromium 141 sizes the button 44px (10px padding each side), the port 129px.
+    /// </summary>
+    [Fact]
+    public void ButtonIntrinsicWidthHonoursADescendantMaxWidth()
+    {
+        DomTree tree = HtmlParsing.ParseHtml(
+            """
+            <style>
+              body { margin:0; font:14px sans-serif }
+              .row { display:flex }
+              .control { display:flex; flex-grow:1; padding:0 10px; border:0; white-space:nowrap; font:inherit }
+              .bc { display:flex; white-space:nowrap }
+              .ht { display:block; max-width:0; overflow:hidden }
+              .ic { display:flex; width:24px; height:24px }
+            </style>
+            <div class="row"><div><button class="control" id="b"><span><div class="bc"><span class="ht">Page settings</span><span class="ic"></span></div></span></button></div></div>
+            """);
+        DomLayout laid = RenderDom.LayoutDom(tree, (1280f, 720f));
+
+        Assert.Equal(44f, laid.Rects[Id(tree, "b")].Width, 0.5f);
+    }
 }

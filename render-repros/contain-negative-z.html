@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>negative z-index inside contain and z-index stacking contexts</title>
+  <style>
+    html, body { margin: 0; background: #ffffff; }
+    /* msn.com's hero card: cs-responsive-card (#333 background) > div.root (contain: content)
+       > img.media (position: absolute; z-index: -1). */
+    .card { position: relative; width: 100px; height: 60px; background: #333333; margin-bottom: 10px; }
+    .root { contain: content; height: 100%; }
+    .media { position: absolute; z-index: -1; left: 0; top: 0; width: 100px; height: 60px; background: #2f9e44; }
+    .ctx { position: relative; z-index: 0; width: 100px; height: 60px; background: #1971c2; }
+  </style>
+</head>
+<body>
+  <div class="card"><div class="root"><div class="media"></div></div></div>
+  <div class="card"><div><div class="media"></div></div></div>
+  <div class="ctx"><div class="media"></div></div>
+</body>
+</html>

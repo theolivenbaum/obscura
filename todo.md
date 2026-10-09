@@ -5984,3 +5984,106 @@ about 380 instance-own members on the sampled objects that Chromium keeps on pro
 Event's state, Blob/File, FileReader, the stream objects, CanvasRenderingContext2D's
 attributes, Animation, PerformanceEntry); OfflineAudioContext still inherits AudioContext
 (resume/suspend not its own). Pinned by `WebIdlDescriptorTests` (Js).
+
+### A fixed-width box ends the cyclic-percentage walk
+
+`DeferCyclicFlexInlineSizes` (`Dom/DomPassesSubgrid.cs`) walks up from a percentage inline
+size to the content-sized flex item that makes it cyclic. `dom.rs` climbs past every box on
+the way; the port stops at a box whose `width` is a fixed `px` length (not a table part, not
+a flexible row flex item, which the walk still reports first), because that box is the
+percentage's basis and nothing above it can make the percentage cyclic (CSS Sizing 3 5.2.1).
+youtube.com's logo is `ytd-logo > yt-icon (inline-flex, 93x20) > span (flex, 100%) > div
+(100%) > svg (100%, viewBox only)` inside a content-sized flex item: the 100% was
+neutralized, the span's automatic minimum was re-derived from the SVG's 300px default object
+size, and the logo drew 300x65 where Chromium 141 draws 93x20. Pinned by
+`AtomicInlineSizingTests.PercentageUnderFixedWidthBoxIsNotCyclicThroughContentSizedFlexItem`
+and `render-repros/svg-percent-under-fixed-icon.html`.
+
+### `clip: rect()` is implemented
+
+`style.rs` has no `clip` property. The port parses `clip: rect(top, right, bottom, left)`
+(commas optional, lengths or `auto`) into `LayoutStyle.Clip`, reports it in the CSSOM snapshot
+(`auto` or `rect(0px, auto, 10px, 0px)`, whatever the position, as Chromium 141 does), and
+for an absolutely or fixed positioned box intersects it into the box's own clip and its
+subtree's (`OverflowClip.WithClipProperty`, applied in `DomTransforms.ResolveClipRects`,
+`PreparedRender.ResolveClips` and `ScrollPaintState.ViewportFixedClipMap`). The
+visually-hidden idiom `position: fixed; clip: rect(0 0 0 0)` (msn.com's "Skip to footer")
+painted in full. The element-capture clip-scope path and scrolling-overflow extents do not
+read it. Pinned by `ClipPropertyTests` and `render-repros/clip-rect-visually-hidden.html`.
+
+### Custom elements and unknown tags are `display: inline`
+
+`ua_style` falls back to `block` for every tag it does not list. `display` initially is
+`inline`, and Chromium's UA sheet has no rule for an autonomous custom element, an unknown
+HTML tag, or `picture`, `map`, `nobr`, `acronym`, `strike`, `blink`, `rb`, `rtc`, `spacer`,
+so Chromium 141 reports `inline` for all of them; the port now does too
+(`ComputedStyle.KnownHtmlTags`). Known HTML tags the old fallback made `block` are unchanged
+(canvas, video, iframe, embed, object, svg, math, audio and the like still compute `block`
+in the port, where Chromium reports `inline`; that is the replaced-element path and is left
+to it). A block `cs-common-settings-dialog` was one of the boxes that widened msn.com's
+header. Pinned by `UaDisplayTests`.
+
+### The render-resource warmup scans shadow trees
+
+`render_resource_candidates` walks the document's descendants, which stops at shadow hosts.
+`Page.RenderResourceCandidates` also walks every connected shadow root, so a `url()` in a
+shadow tree's `<style>` (adopted sheets are bridged into one) is prefetched like a document
+one. msn.com's logo is such a background, and a CDP capture (which only observes, see
+`PrepareCaptureResourcesIfRequestedAsync`) painted it missing. Pinned by
+`RenderResourceTransportTests.RenderResourceWarmupScansShadowTreeStylesheets`.
+
+### Only list-item boxes have markers, and `::marker { content }` is honoured
+
+`paint.rs` draws a marker for every `li`, and `style.rs` rejects `display: list-item`. The
+port gives `li` the UA display `list-item` (`LayoutStyle.ListItemDisplay`, reported as
+`list-item` in the CSSOM snapshot, as Chromium 141 does), accepts an authored `list-item`
+(laid out as a block), and drops the marker when an author display replaces it. It also
+indexes `::marker` rules (`Stylesheet.MarkerRules`) and reads only their `content`: an empty
+string removes the marker and a string replaces it (`LayoutStyle.MarkerText`); `content:
+none`, counters and the other `::marker` properties are not read, and a `display: inherit`
+child of a list item does not inherit the marker. Markers are still drawn only for `li`
+elements. grammarly.com's feature carousel (`li::marker { content: "" }` on flex-item
+slides) painted a bullet in front of every card. Pinned by `ListItemDisplayTests` and
+`render-repros/list-item-display.html`.
+
+### A shadow root keeps its adopted sheets when its children are replaced, and `:host(...) x` matches
+
+Two shadow-styling gaps msn.com's cards fell into (both visible as the hero card's missing
+text overlay):
+
+- `bootstrap.js` materializes an adopted sheet as a `<style data-obscura-adopted>` child of
+  the shadow root, so `root.innerHTML = ...`, `root.textContent = ...` and
+  `root.replaceChildren(...)` removed it, and with it every rule of a component that set
+  `adoptedStyleSheets` before rendering. `_restoreAdoptedStyles` re-syncs after each of those
+  three. Removing the bridge node with `removeChild` still loses it.
+- `Matcher.Matches` matched every rule without a shadow scope, so `:host(...)` could only
+  match the host itself (`HostRules`), never as the left-hand compound of a rule styling a
+  shadow-tree element (`:host([immersive]) .media { position: absolute; z-index: -1 }`). A
+  selector with `:host` whose subject is inside a shadow tree is now matched with that tree's
+  host as the scope, as `MatchesInShadowScope` already did for `::slotted()`.
+  `shadowRoot.querySelector(':host .x')` still answers null (Chromium matches).
+
+Pinned by `ShadowAdoptedStylesTests` (Js).
+
+### `contain` and `will-change` boxes are stacking contexts, and a sub-pass paints its root first
+
+`paint.rs` isolates only z-index, opacity and transform roots. `PaintDom.IsolatesPaint` also
+treats a box with `contain: layout | paint | content | strict` or a stacking `will-change`
+as a stacking context, painted as an atomic unit in its normal-flow slot, so a `z-index: -1`
+descendant stays inside it. And a sub-pass (a stacking context, float, opacity or transform
+root) now paints its root's own box before the negative z-index layers, per CSS 2.1 Appendix
+E; it used to paint the root after them, so a `z-index: -1` child vanished under its own
+stacking context's background. msn.com's hero image (`position: absolute; z-index: -1` in a
+`contain: content` card) was painted under the card's #333 background. Filter and
+backdrop-filter, which also make stacking contexts, are not included. Pinned by
+`ContainStackingTests` and `render-repros/contain-negative-z.html`.
+
+### A descendant's `max-width` caps a button's intrinsic label width
+
+`native_button_intrinsic_content` sums a button's descendant text and atomic widths whatever
+their own sizing. `DomStyleFixups.NativeButtonWalk` now caps a descendant with a definite
+`max-width` at that width (less its edges under `border-box`). msn.com's settings button hides
+its "Page settings" label in a `max-width: 0; overflow: hidden` span beside a 24px icon:
+Chromium 141 sizes it 40px, the port 132px, which widened the header until its overflow
+logic hid the Sign in button. Percentage max-widths are not applied. Pinned by
+`FormControlDisplayTests.ButtonIntrinsicWidthHonoursADescendantMaxWidth`.

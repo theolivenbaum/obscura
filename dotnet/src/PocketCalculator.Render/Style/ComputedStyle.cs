@@ -20,6 +20,32 @@ public static partial class ComputedStyle
         return style;
     }
 
+    /// <summary>
+    /// Every HTML element name the port's UA defaults know, current and obsolete. A name
+    /// outside it (an autonomous custom element, or an unknown tag) has no UA display rule.
+    /// </summary>
+    private static readonly HashSet<string> KnownHtmlTags = new(StringComparer.Ordinal)
+    {
+        "a", "abbr", "address", "area", "article", "aside", "audio", "b", "base", "bdi", "bdo",
+        "blockquote", "body", "br", "button", "canvas", "caption", "cite", "code", "col",
+        "colgroup", "data", "datalist", "dd", "del", "details", "dfn", "dialog", "div", "dl", "dt",
+        "em", "embed", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3",
+        "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "i", "iframe", "img", "input",
+        "ins", "kbd", "label", "legend", "li", "link", "main", "map", "mark", "menu", "meta",
+        "meter", "nav", "noscript", "object", "ol", "optgroup", "option", "output", "p", "param",
+        "picture", "pre", "progress", "q", "rp", "rt", "ruby", "s", "samp", "script", "search",
+        "section", "select", "slot", "small", "source", "span", "strong", "style", "sub",
+        "summary", "sup", "table", "tbody", "td", "template", "textarea", "tfoot", "th", "thead",
+        "time", "title", "tr", "track", "u", "ul", "var", "video", "wbr", "math", "svg",
+        "acronym", "applet", "basefont", "bgsound", "big", "blink", "center", "dir", "font",
+        "frame", "frameset", "image", "isindex", "keygen", "listing", "marquee", "menuitem",
+        "multicol", "nextid", "nobr", "noembed", "noframes", "plaintext", "rb", "rtc", "spacer",
+        "strike", "tt", "xmp", "selectedcontent",
+    };
+
+    private static bool IsUnknownHtmlTag(string tag) =>
+        tag.Length != 0 && !KnownHtmlTags.Contains(tag);
+
     /// <summary>Rust <c>ua_style</c>: the built-in UA defaults for an HTML-namespace tag.</summary>
     public static LayoutStyle UaStyle(string tag) => UaStyle(tag, null);
 
@@ -64,8 +90,21 @@ public static partial class ComputedStyle
                 or "time" or "s" or "u" or "del" or "ins" or "tt" or "big" or "bdi" or "bdo" or "br"
                 or "wbr" or "data" or "output" or "label" or "ruby" or "rt" or "rp" => Display.Inline,
             "tr" => Display.Flex,
+
+            // DEVIATION from crates/obscura-render/src/style.rs, which makes every other tag a
+            // block. `display` initially is `inline`, and Chromium's UA sheet names no
+            // autonomous custom element or unknown tag, nor these phrasing elements, so they
+            // are inline (Chromium 141 reports `inline` for all of them). A block custom
+            // element (msn.com's `cs-common-settings-dialog`) widened msn's header until its
+            // overflow logic hid the Sign in button.
+            "picture" or "map" or "nobr" or "acronym" or "strike" or "blink" or "rb" or "rtc"
+                or "spacer" => Display.Inline,
+            _ when ns is null or PocketCalculator.Dom.Namespaces.Html && IsUnknownHtmlTag(tag) =>
+                Display.Inline,
             _ => Display.Block,
         };
+
+        style.ListItemDisplay = tag == "li";
 
         if (tag == "slot")
         {
@@ -1675,6 +1714,21 @@ public static partial class ComputedStyle
 
                 return true;
 
+            case "clip":
+                // DEVIATION from crates/obscura-render/src/style.rs, which ignores `clip`. The
+                // visually-hidden idiom `position: absolute; clip: rect(0 0 0 0)` (msn.com's
+                // "Skip to footer" link) painted in full.
+                if (CssText.AsciiLower(value.Trim()) is "auto" or "initial" or "unset" or "revert" or "revert-layer")
+                {
+                    style.Clip = null;
+                }
+                else if (ParseClipRect(value) is { } clipRect)
+                {
+                    style.Clip = clipRect;
+                }
+
+                return true;
+
             case "border":
                 ApplyBorderShorthand(style, null, value);
                 return true;
@@ -3269,8 +3323,14 @@ public static partial class ComputedStyle
 
         if (value is "none" or "flex" or "inline-flex" or "inline" or "inline-block" or "grid"
             or "inline-grid" or "block" or "flow-root" or "table" or "inline-table" or "table-cell"
-            or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset")
+            or "-webkit-box" or "-webkit-inline-box" or "contents" or "inherit" or "initial" or "unset"
+            or "list-item")
         {
+            // DEVIATION from crates/obscura-render/src/style.rs, which rejects `list-item` and
+            // draws a marker for every `li` whatever its display. Only a list-item box has a
+            // marker: grammarly.com's carousel slides are `li { display: block }` flex items,
+            // and Chromium 141 draws no bullet in front of its cards.
+            style.ListItemDisplay = value == "list-item";
             // Every valid authored display value replaces the complete outer/inner
             // display pair, including the UA table/control approximation and any
             // internal-table keyword an earlier declaration recorded.
@@ -3340,6 +3400,7 @@ public static partial class ComputedStyle
                 style.IsInlineBlock = true;
                 break;
             case "block":
+            case "list-item":
                 style.Display = Display.Block;
                 break;
             case "flow-root":

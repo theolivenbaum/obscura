@@ -234,6 +234,12 @@ public readonly record struct FilterFunction(
 /// <see cref="LayoutStyle"/>, with the same value it had before, and a write of the default
 /// value does not allocate this object. See "Known deviations" in todo.md.
 /// </remarks>
+/// <summary>
+/// <c>clip: rect(top, right, bottom, left)</c> in px offsets from the border box's top-left
+/// corner; a <c>null</c> side is <c>auto</c> (that border edge).
+/// </summary>
+public readonly record struct ClipRect(float? Top, float? Right, float? Bottom, float? Left);
+
 internal sealed class LayoutStyleRare
 {
     public BorderModel? BorderCascadeBase;
@@ -293,6 +299,10 @@ internal sealed class LayoutStyleRare
     public Dimension? FontSizeRaw;
 
     public Dimension? LetterSpacingRaw;
+
+    public ClipRect? Clip;
+
+    public string? MarkerText;
 
     /// <summary>A shallow copy; <see cref="LayoutStyle.Clone"/> deep-copies what needs it.</summary>
     public LayoutStyleRare Clone() => (LayoutStyleRare)MemberwiseClone();
@@ -371,6 +381,13 @@ public sealed class LayoutStyle
     /// </para>
     /// </remarks>
     internal bool DisplayAuthored;
+
+    /// <summary>
+    /// <c>display: list-item</c>: the UA display of <c>li</c>, and an authored
+    /// <c>list-item</c>. Only such a box generates a marker; an authored <c>display:
+    /// block</c> (or any other display) on an <c>li</c> removes it, as in Chromium.
+    /// </summary>
+    internal bool ListItemDisplay;
 
     /// <summary>
     /// The authored internal-table <c>display</c>, which this engine records and reports but
@@ -971,6 +988,38 @@ public sealed class LayoutStyle
     /// <c>null</c> is the computed <c>none</c> value.
     /// </summary>
     public ClipPathPolygon? ClipPath;
+
+    /// <summary>
+    /// The text a <c>::marker { content: "..." }</c> rule gives this list item's marker, or
+    /// <c>null</c> for the list-style marker. An empty string suppresses the marker.
+    /// </summary>
+    public string? MarkerText
+    {
+        get => m_rare?.MarkerText;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.MarkerText = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The CSS 2.1 <c>clip: rect(...)</c> property. <c>null</c> is <c>auto</c>; it applies only
+    /// to an absolutely positioned box (CSS Masking 1 section 9.1).
+    /// </summary>
+    public ClipRect? Clip
+    {
+        get => m_rare?.Clip;
+        set
+        {
+            if (m_rare is not null || value is not null)
+            {
+                Rare.Clip = value;
+            }
+        }
+    }
 
     /// <summary>RGBA for the paint step. Parsed always (cheap), used only with paint.</summary>
     public RgbaColor? BackgroundColor;

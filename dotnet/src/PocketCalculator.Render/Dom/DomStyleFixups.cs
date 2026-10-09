@@ -380,7 +380,24 @@ internal static class DomStyleFixups
             }
         }
 
-        NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, content);
+        // A definite max-width caps the child's contribution the way it caps its box: msn.com's
+        // settings button hides its "Page settings" label in a `max-width: 0` span, and counting
+        // the label made the button (and so the header) 85px wider than Chromium 141's 40px.
+        if (style is not null && DefiniteInlineSize(style.MaxWidth, fontSize) is { } maxWidth)
+        {
+            float cap = style.BoxSizing == BoxSizing.ContentBox
+                ? maxWidth
+                : F32.Max(maxWidth - (style.Padding.Left + style.Padding.Right + style.Border.Left + style.Border.Right), 0f);
+            NativeButtonIntrinsicContent inner = new();
+            NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, inner);
+            content.AtomicWidth += F32.Min(LineWidth(inner, buttonStyle, engine), cap);
+            content.Text.Append(AtomicPlaceholder);
+        }
+        else
+        {
+            NativeButtonWalkChildren(tree, id, style, styles, fontSize, buttonStyle, engine, content);
+        }
+
         if (atomicInline)
         {
             content.Text.Append(AtomicPlaceholder);

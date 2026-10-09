@@ -796,6 +796,13 @@ internal static class DomCascade
                 : null;
             style.BeforePseudo = beforePseudo;
             style.AfterPseudo = afterPseudo;
+            style.MarkerText = style.ListItemDisplay
+                && string.Equals(local, "li", StringComparison.Ordinal)
+                && sheet.MarkerStyle(tree, matcher, id, thisProps, style, containerEvaluator) is
+                    { GeneratedContent: { } markerContent }
+                && markerContent.TrueForAll(static item => item is GeneratedContentItem.Text)
+                    ? string.Concat(markerContent.Select(static item => ((GeneratedContentItem.Text)item).Value))
+                    : null;
             style.PlaceholderPseudo = placeholderPseudo;
             style.SliderThumbPseudo = sliderThumbPseudo;
             if (scrollbarPseudo is not null)

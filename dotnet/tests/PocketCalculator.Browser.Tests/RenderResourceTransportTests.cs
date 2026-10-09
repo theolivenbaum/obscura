@@ -78,6 +78,38 @@ public sealed class RenderResourceTransportTests
         Assert.Equal(PageHelpers.MaxStylesheetResources, loadable.Count + rejected.Count);
     }
 
+    /// <summary>
+    /// A url() in a shadow tree's stylesheet (adopted sheets are bridged into a shadow
+    /// <c>style</c>) is a render resource like one in the document's (msn.com's logo).
+    /// </summary>
+    [Fact]
+    public void RenderResourceWarmupScansShadowTreeStylesheets()
+    {
+        using Page page = PageFixtures.NewPage("warmup-shadow");
+        page.Js = PageFixtures.RuntimeFor(
+            "https://example.test/page",
+            "<html><body><div id=\"host\"></div></body></html>");
+        page.Url = UrlRecord.Parse("https://example.test/page")!;
+        page.Js.Evaluate(
+            """
+            (() => {
+              const root = document.getElementById('host').attachShadow({ mode: 'open' });
+              const sheet = new CSSStyleSheet();
+              sheet.replaceSync('.logo { background: url(https://assets.test/logo.svg) center no-repeat; }');
+              root.adoptedStyleSheets = [sheet];
+              const inner = document.createElement('div');
+              root.appendChild(inner);
+              inner.attachShadow({ mode: 'open' }).innerHTML =
+                '<style>.mark { background-image: url(/nested.png); }</style><span class="mark"></span>';
+            })()
+            """);
+
+        (List<RenderResourceMiss> loadable, List<RenderResourceMiss> rejected) = page.RenderResourceCandidates();
+        List<string> urls = [.. loadable.Concat(rejected).Select(miss => miss.Url)];
+        Assert.Contains("https://assets.test/logo.svg", urls);
+        Assert.Contains("https://example.test/nested.png", urls);
+    }
+
     [Fact]
     public async Task CacheOnlyLayoutNeverBlocksOnASlowAssetAndLateBytesUpdateGeometry()
     {

@@ -51,6 +51,9 @@ internal enum PseudoOrigin
 
     /// <summary><c>::-webkit-scrollbar</c>.</summary>
     Scrollbar,
+
+    /// <summary><c>::marker</c>.</summary>
+    Marker,
 }
 
 /// <summary>The declarations one shadow encapsulation scope contributes.</summary>
@@ -265,7 +268,8 @@ public sealed class StylesheetCache
             + sheet.BeforeRules.Rules.Count
             + sheet.AfterRules.Rules.Count
             + sheet.PlaceholderRules.Rules.Count
-            + sheet.SliderThumbRules.Rules.Count;
+            + sheet.SliderThumbRules.Rules.Count
+            + sheet.MarkerRules.Rules.Count;
         if (sourceBytes <= MaxSourceBytes && compiledRules <= MaxRules)
         {
             _entry = new CachedStylesheet
@@ -456,6 +460,12 @@ public sealed class Stylesheet
     internal PseudoRuleMap PlaceholderRules { get; } = new();
 
     /// <summary>
+    /// Author rules for <c>::marker</c>. Only <c>content</c> is read from them (see
+    /// <see cref="MarkerStyle"/>).
+    /// </summary>
+    internal PseudoRuleMap MarkerRules { get; } = new();
+
+    /// <summary>
     /// Author rules for <c>::-webkit-slider-thumb</c>, the box a range input's knob is drawn
     /// from. Chromium honours only that spelling, so <c>::-moz-range-thumb</c> is indexed
     /// nowhere and the Gecko half of a stylesheet that writes both is ignored, exactly as it
@@ -625,6 +635,16 @@ public sealed class Stylesheet
                         order,
                         "-webkit-slider-thumb",
                         sheet.SliderThumbRules)
+                    || TryPushPseudo(
+                        sheet,
+                        tree,
+                        trimmed,
+                        declarations,
+                        rule,
+                        order,
+                        "marker",
+                        sheet.MarkerRules,
+                        universalWhenBare: true)
                     || TryPushPseudo(
                         sheet,
                         tree,
@@ -862,7 +882,8 @@ public sealed class Stylesheet
         return AnyConditional(BeforeRules)
             || AnyConditional(AfterRules)
             || AnyConditional(PlaceholderRules)
-            || AnyConditional(SliderThumbRules);
+            || AnyConditional(SliderThumbRules)
+            || AnyConditional(MarkerRules);
 
         static bool AnyConditional(PseudoRuleMap map)
         {
@@ -938,7 +959,8 @@ public sealed class Stylesheet
             || BeforeRules.NodeMatchesContainerQueryRule(tree, matcher, nid)
             || AfterRules.NodeMatchesContainerQueryRule(tree, matcher, nid)
             || (supportsPlaceholder && PlaceholderRules.NodeMatchesContainerQueryRule(tree, matcher, nid))
-            || SliderThumbRules.NodeMatchesContainerQueryRule(tree, matcher, nid);
+            || SliderThumbRules.NodeMatchesContainerQueryRule(tree, matcher, nid)
+            || MarkerRules.NodeMatchesContainerQueryRule(tree, matcher, nid);
 
         bool AnyClassMatches(string classes)
         {
@@ -1035,235 +1057,262 @@ public sealed class Stylesheet
             && control.GetAttribute("type") is { } rangeType
             && rangeType.Trim().Equals("range", StringComparison.OrdinalIgnoreCase);
         return (
-            BuildPseudo(BeforeRules, PseudoOrigin.Generated),
-            BuildPseudo(AfterRules, PseudoOrigin.Generated),
-            supportsPlaceholder ? BuildPseudo(PlaceholderRules, PseudoOrigin.Placeholder) : null,
-            supportsSliderThumb ? BuildPseudo(SliderThumbRules, PseudoOrigin.SliderThumb) : null,
+            BuildPseudo(BeforeRules, PseudoOrigin.Generated, tree, matcher, nid, props, hostStyle, evaluator),
+            BuildPseudo(AfterRules, PseudoOrigin.Generated, tree, matcher, nid, props, hostStyle, evaluator),
+            supportsPlaceholder ? BuildPseudo(PlaceholderRules, PseudoOrigin.Placeholder, tree, matcher, nid, props, hostStyle, evaluator) : null,
+            supportsSliderThumb ? BuildPseudo(SliderThumbRules, PseudoOrigin.SliderThumb, tree, matcher, nid, props, hostStyle, evaluator) : null,
 
             // Only a scroll container can show a scrollbar, and a page-wide
             // `::-webkit-scrollbar` rule matches every element, so the gate keeps this off the
             // hot path for the overwhelming majority of the tree.
             hostStyle.OverflowScrollContainer && !ScrollbarRules.IsEmpty
-                ? BuildPseudo(ScrollbarRules, PseudoOrigin.Scrollbar)
+                ? BuildPseudo(ScrollbarRules, PseudoOrigin.Scrollbar, tree, matcher, nid, props, hostStyle, evaluator)
                 : null);
+    }
 
-        LayoutStyle? BuildPseudo(PseudoRuleMap rules, PseudoOrigin origin)
+    /// <summary>
+    /// The cascaded <c>::marker</c> style of a list item, or <c>null</c> when no rule matches.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render, which has no <c>::marker</c>. Only the generated
+    /// content is used: <c>::marker { content: "" }</c> (grammarly.com's carousel) removes the
+    /// bullet, a string replaces it.
+    /// </remarks>
+    public LayoutStyle? MarkerStyle(
+        DomTree tree,
+        Matcher matcher,
+        NodeId nid,
+        IReadOnlyDictionary<string, string> props,
+        LayoutStyle hostStyle,
+        ContainerQueryEvaluator? evaluator) =>
+        MarkerRules.IsEmpty
+            ? null
+            : BuildPseudo(MarkerRules, PseudoOrigin.Marker, tree, matcher, nid, props, hostStyle, evaluator);
+
+    private LayoutStyle? BuildPseudo(
+        PseudoRuleMap rules,
+        PseudoOrigin origin,
+        DomTree tree,
+        Matcher matcher,
+        NodeId nid,
+        IReadOnlyDictionary<string, string> props,
+        LayoutStyle hostStyle,
+        ContainerQueryEvaluator? evaluator)
+    {
+        string? AttributeLookup(string name) => tree.GetNode(nid)?.GetAttribute(name);
+
+        var normalMatched = new List<(uint Specificity, int Order, int Index)>();
+        var importantMatched = new List<(uint Specificity, int Order, int Index)>();
+        if (rules.CandidateSlotCount != 0)
         {
-            var normalMatched = new List<(uint Specificity, int Order, int Index)>();
-            var importantMatched = new List<(uint Specificity, int Order, int Index)>();
-            if (rules.CandidateSlotCount != 0)
-            {
-                matcher.BeginCandidateCollection(rules.CandidateSlotCount);
-            }
-
-            void Consider(List<int>? bucket)
-            {
-                if (bucket is null)
-                {
-                    return;
-                }
-
-                foreach (var index in bucket)
-                {
-                    var rule = rules.Rules[index];
-                    if (rule.CandidateSlot != NoCandidateSlot && !matcher.MarkCandidate((int)rule.CandidateSlot))
-                    {
-                        continue;
-                    }
-
-                    // Candidate buckets only reject impossible originating
-                    // elements; full selector matching remains authoritative.
-                    // Container lookup is an ancestor walk, so keep it behind
-                    // the selector match as well.
-                    if (matcher.Matches(tree, nid, rule.Selector)
-                        && ContainerConditionIsActive(
-                            rule.ContainerConditionId,
-                            nid,
-                            ContainerQuerySubjectKind.OriginatingPseudo,
-                            evaluator))
-                    {
-                        var matched = (rule.Specificity, rule.Order, index);
-                        if (rule.NormalDecls.Length != 0)
-                        {
-                            normalMatched.Add(matched);
-                        }
-
-                        if (rule.ImportantDecls.Length != 0)
-                        {
-                            importantMatched.Add(matched);
-                        }
-                    }
-                }
-            }
-
-            var node = tree.GetNode(nid);
-            if (node is not null)
-            {
-                if (node.AsElement() is { } subject)
-                {
-                    Consider(PseudoRuleMap.Lookup(rules.ByLocal, subject.Name.Local));
-                }
-
-                if (node.GetAttribute("id") is { } id)
-                {
-                    Consider(PseudoRuleMap.Lookup(rules.ById, id));
-                }
-
-                if (node.GetAttribute("class") is { } classes)
-                {
-                    foreach (var className in classes.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        Consider(PseudoRuleMap.Lookup(rules.ByClass, className));
-                    }
-                }
-
-                if (rules.ByAttribute.Count != 0 && node.Attrs is { } attributes)
-                {
-                    foreach (var attribute in attributes)
-                    {
-                        Consider(PseudoRuleMap.Lookup(rules.ByAttribute, attribute.Name.Local));
-                    }
-                }
-            }
-
-            if (IsRootElement(tree, nid) && rules.ByRoot.Count != 0)
-            {
-                Consider(rules.ByRoot);
-            }
-
-            if (rules.Universal.Count != 0)
-            {
-                Consider(rules.Universal);
-            }
-
-            if (normalMatched.Count == 0 && importantMatched.Count == 0)
-            {
-                return null;
-            }
-
-            if (normalMatched.Count > 1)
-            {
-                SortCascade(normalMatched, index => rules.Rules[index].Layer, important: false);
-            }
-
-            if (importantMatched.Count > 1)
-            {
-                SortCascade(importantMatched, index => rules.Rules[index].Layer, important: true);
-            }
-
-            // Generated ::before/::after boxes have an inline outer display by
-            // default. LayoutStyle's general default is block because it
-            // primarily represents ordinary DOM boxes, so set the pseudo
-            // initial value explicitly before applying author declarations.
-            var style = new LayoutStyle { Display = Display.Inline };
-            style.ColorSchemeDark = hostStyle.ColorSchemeDark;
-            if (origin == PseudoOrigin.Placeholder)
-            {
-                // Chromium's light native-control placeholder color. Author
-                // declarations cascade over this UA-origin initial value.
-                style.Color = new RgbaColor(117, 117, 117, 255);
-            }
-            else if (origin == PseudoOrigin.SliderThumb)
-            {
-                // Chromium's UA sheet sizes the slider thumb as a border box, so the 16px
-                // width an author writes is the whole knob and not 16px inside its border.
-                style.BoxSizing = BoxSizing.BorderBox;
-            }
-
-            var inheritedColorSchemeDark = hostStyle.ColorSchemeDark;
-            List<GeneratedContentItem>? generatedContent = null;
-            foreach (var (_, _, index) in normalMatched)
-            {
-                var rule = rules.Rules[index];
-                if (!rule.NormalFlags.HasColorScheme)
-                {
-                    continue;
-                }
-
-                var expanded = CssVariables.SubstituteDeclarations(
-                    rule.NormalDecls,
-                    props,
-                    rule.NormalFlags.HasVar);
-                ComputedStyle.ApplyColorSchemeDeclarationsFrom(style, expanded, inheritedColorSchemeDark);
-            }
-
-            foreach (var (_, _, index) in importantMatched)
-            {
-                var rule = rules.Rules[index];
-                if (!rule.ImportantFlags.HasColorScheme)
-                {
-                    continue;
-                }
-
-                var expanded = CssVariables.SubstituteDeclarations(
-                    rule.ImportantDecls,
-                    props,
-                    rule.ImportantFlags.HasVar);
-                ComputedStyle.ApplyColorSchemeDeclarationsFrom(style, expanded, inheritedColorSchemeDark);
-            }
-
-            foreach (var (_, _, index) in normalMatched)
-            {
-                var rule = rules.Rules[index];
-                var expanded = CssVariables.SubstituteDeclarations(
-                    rule.NormalDecls,
-                    props,
-                    rule.NormalFlags.HasVar);
-                ComputedStyle.ApplyDeclarationsWithLockedColorScheme(style, expanded);
-                var content = CssValues.ExtractContent(expanded, AttributeLookup);
-                if (content.Found)
-                {
-                    generatedContent = content.Items;
-                }
-            }
-
-            foreach (var (_, _, index) in importantMatched)
-            {
-                var rule = rules.Rules[index];
-                var expanded = CssVariables.SubstituteDeclarations(
-                    rule.ImportantDecls,
-                    props,
-                    rule.ImportantFlags.HasVar);
-                ComputedStyle.ApplyDeclarationsWithLockedColorScheme(style, expanded);
-                var content = CssValues.ExtractContent(expanded, AttributeLookup);
-                if (content.Found)
-                {
-                    generatedContent = content.Items;
-                }
-            }
-
-            style.BeforeContent = generatedContent is null
-                ? null
-                : CssValues.GeneratedContentWithZeroCounters(generatedContent);
-            style.GeneratedContent = generatedContent;
-            if (origin == PseudoOrigin.Placeholder)
-            {
-                // `color` is inherited on the pseudo. The declaration parser
-                // represents `inherit` as null, so resolve it against the
-                // originating control after the author cascade.
-                style.Color ??= hostStyle.Color;
-                return style;
-            }
-
-            if (origin == PseudoOrigin.SliderThumb)
-            {
-                // The thumb is a native box, not a generated one: it exists because the
-                // control does, so it is returned whatever the author declared on it.
-                style.Color ??= hostStyle.Color;
-                return style;
-            }
-
-            if (origin == PseudoOrigin.Scrollbar)
-            {
-                // Same: the scrollbar box exists because the scroll container does, and only its
-                // declared thickness is read back off it.
-                return style;
-            }
-
-            return style.GeneratedContent is not null || style.ContentImage is not null ? style : null;
+            matcher.BeginCandidateCollection(rules.CandidateSlotCount);
         }
 
-        string? AttributeLookup(string name) => tree.GetNode(nid)?.GetAttribute(name);
+        void Consider(List<int>? bucket)
+        {
+            if (bucket is null)
+            {
+                return;
+            }
+
+            foreach (var index in bucket)
+            {
+                var rule = rules.Rules[index];
+                if (rule.CandidateSlot != NoCandidateSlot && !matcher.MarkCandidate((int)rule.CandidateSlot))
+                {
+                    continue;
+                }
+
+                // Candidate buckets only reject impossible originating
+                // elements; full selector matching remains authoritative.
+                // Container lookup is an ancestor walk, so keep it behind
+                // the selector match as well.
+                if (matcher.Matches(tree, nid, rule.Selector)
+                    && ContainerConditionIsActive(
+                        rule.ContainerConditionId,
+                        nid,
+                        ContainerQuerySubjectKind.OriginatingPseudo,
+                        evaluator))
+                {
+                    var matched = (rule.Specificity, rule.Order, index);
+                    if (rule.NormalDecls.Length != 0)
+                    {
+                        normalMatched.Add(matched);
+                    }
+
+                    if (rule.ImportantDecls.Length != 0)
+                    {
+                        importantMatched.Add(matched);
+                    }
+                }
+            }
+        }
+
+        var node = tree.GetNode(nid);
+        if (node is not null)
+        {
+            if (node.AsElement() is { } subject)
+            {
+                Consider(PseudoRuleMap.Lookup(rules.ByLocal, subject.Name.Local));
+            }
+
+            if (node.GetAttribute("id") is { } id)
+            {
+                Consider(PseudoRuleMap.Lookup(rules.ById, id));
+            }
+
+            if (node.GetAttribute("class") is { } classes)
+            {
+                foreach (var className in classes.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    Consider(PseudoRuleMap.Lookup(rules.ByClass, className));
+                }
+            }
+
+            if (rules.ByAttribute.Count != 0 && node.Attrs is { } attributes)
+            {
+                foreach (var attribute in attributes)
+                {
+                    Consider(PseudoRuleMap.Lookup(rules.ByAttribute, attribute.Name.Local));
+                }
+            }
+        }
+
+        if (IsRootElement(tree, nid) && rules.ByRoot.Count != 0)
+        {
+            Consider(rules.ByRoot);
+        }
+
+        if (rules.Universal.Count != 0)
+        {
+            Consider(rules.Universal);
+        }
+
+        if (normalMatched.Count == 0 && importantMatched.Count == 0)
+        {
+            return null;
+        }
+
+        if (normalMatched.Count > 1)
+        {
+            SortCascade(normalMatched, index => rules.Rules[index].Layer, important: false);
+        }
+
+        if (importantMatched.Count > 1)
+        {
+            SortCascade(importantMatched, index => rules.Rules[index].Layer, important: true);
+        }
+
+        // Generated ::before/::after boxes have an inline outer display by
+        // default. LayoutStyle's general default is block because it
+        // primarily represents ordinary DOM boxes, so set the pseudo
+        // initial value explicitly before applying author declarations.
+        var style = new LayoutStyle { Display = Display.Inline };
+        style.ColorSchemeDark = hostStyle.ColorSchemeDark;
+        if (origin == PseudoOrigin.Placeholder)
+        {
+            // Chromium's light native-control placeholder color. Author
+            // declarations cascade over this UA-origin initial value.
+            style.Color = new RgbaColor(117, 117, 117, 255);
+        }
+        else if (origin == PseudoOrigin.SliderThumb)
+        {
+            // Chromium's UA sheet sizes the slider thumb as a border box, so the 16px
+            // width an author writes is the whole knob and not 16px inside its border.
+            style.BoxSizing = BoxSizing.BorderBox;
+        }
+
+        var inheritedColorSchemeDark = hostStyle.ColorSchemeDark;
+        List<GeneratedContentItem>? generatedContent = null;
+        foreach (var (_, _, index) in normalMatched)
+        {
+            var rule = rules.Rules[index];
+            if (!rule.NormalFlags.HasColorScheme)
+            {
+                continue;
+            }
+
+            var expanded = CssVariables.SubstituteDeclarations(
+                rule.NormalDecls,
+                props,
+                rule.NormalFlags.HasVar);
+            ComputedStyle.ApplyColorSchemeDeclarationsFrom(style, expanded, inheritedColorSchemeDark);
+        }
+
+        foreach (var (_, _, index) in importantMatched)
+        {
+            var rule = rules.Rules[index];
+            if (!rule.ImportantFlags.HasColorScheme)
+            {
+                continue;
+            }
+
+            var expanded = CssVariables.SubstituteDeclarations(
+                rule.ImportantDecls,
+                props,
+                rule.ImportantFlags.HasVar);
+            ComputedStyle.ApplyColorSchemeDeclarationsFrom(style, expanded, inheritedColorSchemeDark);
+        }
+
+        foreach (var (_, _, index) in normalMatched)
+        {
+            var rule = rules.Rules[index];
+            var expanded = CssVariables.SubstituteDeclarations(
+                rule.NormalDecls,
+                props,
+                rule.NormalFlags.HasVar);
+            ComputedStyle.ApplyDeclarationsWithLockedColorScheme(style, expanded);
+            var content = CssValues.ExtractContent(expanded, AttributeLookup);
+            if (content.Found)
+            {
+                generatedContent = content.Items;
+            }
+        }
+
+        foreach (var (_, _, index) in importantMatched)
+        {
+            var rule = rules.Rules[index];
+            var expanded = CssVariables.SubstituteDeclarations(
+                rule.ImportantDecls,
+                props,
+                rule.ImportantFlags.HasVar);
+            ComputedStyle.ApplyDeclarationsWithLockedColorScheme(style, expanded);
+            var content = CssValues.ExtractContent(expanded, AttributeLookup);
+            if (content.Found)
+            {
+                generatedContent = content.Items;
+            }
+        }
+
+        style.BeforeContent = generatedContent is null
+            ? null
+            : CssValues.GeneratedContentWithZeroCounters(generatedContent);
+        style.GeneratedContent = generatedContent;
+        if (origin == PseudoOrigin.Placeholder)
+        {
+            // `color` is inherited on the pseudo. The declaration parser
+            // represents `inherit` as null, so resolve it against the
+            // originating control after the author cascade.
+            style.Color ??= hostStyle.Color;
+            return style;
+        }
+
+        if (origin == PseudoOrigin.SliderThumb)
+        {
+            // The thumb is a native box, not a generated one: it exists because the
+            // control does, so it is returned whatever the author declared on it.
+            style.Color ??= hostStyle.Color;
+            return style;
+        }
+
+        if (origin is PseudoOrigin.Scrollbar or PseudoOrigin.Marker)
+        {
+            // Same: the scrollbar box exists because the scroll container does, and only its
+            // declared thickness is read back off it.
+            return style;
+        }
+
+        return style.GeneratedContent is not null || style.ContentImage is not null ? style : null;
     }
 
     // ------------------------------------------------------------ shadow DOM
