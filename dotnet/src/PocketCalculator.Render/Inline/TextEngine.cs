@@ -718,7 +718,14 @@ public sealed partial class TextEngine : IDisposable
     /// but their text still uses the same authored webfonts, variable weight selection,
     /// transformations, and glyph rasterizer as an ordinary inline formatting context.
     /// </remarks>
-    public int? PushGeneratedText(string text, LayoutStyle style)
+    /// <param name="text">The text to shape.</param>
+    /// <param name="style">The style it is shaped in; only read.</param>
+    /// <param name="whiteSpace">
+    /// The <c>white-space</c> to shape it with instead of <paramref name="style"/>'s, so a caller
+    /// that needs another value (a word leaf is shaped as <c>pre</c>) does not have to copy the
+    /// whole style for it.
+    /// </param>
+    public int? PushGeneratedText(string text, LayoutStyle style, WhiteSpace? whiteSpace = null)
     {
         var collector = new Collector();
         ResolvedFont font = FontResolution.ResolveLoadedFont(
@@ -726,12 +733,12 @@ public sealed partial class TextEngine : IDisposable
             ComputedStyle.UsedFontWeight(style),
             style.FontStyleItalic ?? false,
             _loadedFamilies);
-        SpanCtx context = BaseSpanCtx(style, font, collector);
+        SpanCtx context = BaseSpanCtx(style, font, collector, whiteSpace);
         SpanAttrs attrs = context.ToSpanAttrs();
         List<(string Text, SpanAttrs Attrs)> spans = [];
 
         Inline.PushText(text, context.Transform, context.WhiteSpace, attrs, spans, collector);
-        return PushShapedItem(style, context, spans, collector);
+        return PushShapedItem(style, context, spans, collector, whiteSpace);
     }
 
     /// <summary>
@@ -742,7 +749,8 @@ public sealed partial class TextEngine : IDisposable
         LayoutStyle baseStyle,
         SpanCtx strut,
         List<(string Text, SpanAttrs Attrs)> spans,
-        Collector collector)
+        Collector collector,
+        WhiteSpace? whiteSpaceOverride = null)
     {
         collector.FlushLastSpan(spans);
         float lineHeight = strut.LineHeight;
@@ -751,7 +759,7 @@ public sealed partial class TextEngine : IDisposable
         List<InlineOwnerBox> ownerBoxes = collector.OwnerBoxes;
         List<InlineBoundaryEvent> boundaryEvents = collector.BoundaryEvents;
 
-        WhiteSpace whiteSpace = baseStyle.WhiteSpace ?? WhiteSpace.Normal;
+        WhiteSpace whiteSpace = whiteSpaceOverride ?? baseStyle.WhiteSpace ?? WhiteSpace.Normal;
         Wrap layoutWrap = Wrap.Word;
         Wrap minContentWrap = Wrap.Word;
         foreach ((string _, SpanAttrs attrs) in spans)
@@ -2730,7 +2738,11 @@ public sealed partial class TextEngine : IDisposable
         return visualTop < surfaceBottom && visualBottom > 0f;
     }
 
-    private SpanCtx BaseSpanCtx(LayoutStyle baseStyle, ResolvedFont font, Collector collector)
+    private SpanCtx BaseSpanCtx(
+        LayoutStyle baseStyle,
+        ResolvedFont font,
+        Collector collector,
+        WhiteSpace? whiteSpace = null)
     {
         int? clipFill = null;
         if (Inline.ClipTextFillFor(baseStyle) is { } fill)
@@ -2766,7 +2778,7 @@ public sealed partial class TextEngine : IDisposable
             SyntheticItalic = font.SyntheticItalic,
             Underline = baseStyle.Underline ?? false,
             Transform = baseStyle.TextTransform ?? TextTransform.None,
-            WhiteSpace = baseStyle.WhiteSpace ?? WhiteSpace.Normal,
+            WhiteSpace = whiteSpace ?? baseStyle.WhiteSpace ?? WhiteSpace.Normal,
             OverflowWrap = baseStyle.OverflowWrap ?? OverflowWrap.Normal,
             WordBreak = baseStyle.WordBreak ?? WordBreak.Normal,
             Family = font.Family,

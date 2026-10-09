@@ -756,9 +756,9 @@ internal static partial class DomBuild
         List<TaffyNodeId> leaves = [];
 
         // A token normally retains one trailing collapsed space. Shape it as preformatted
-        // content so the item keeps that advance. One copy of the style serves every token of
-        // the node (shaping only reads it): a copy per word was a fifth of a retained build.
-        LayoutStyle? tokenStyle = null;
+        // content so the item keeps that advance. Shaping only reads the style, so the
+        // white-space is handed over on its own rather than in a copy of the style: a copy per
+        // text node was a fifth of a retained build, most of it the copy.
         foreach (string token in TokenizeWithSpaces(text))
         {
             if (token.Trim().Length == 0)
@@ -766,13 +766,7 @@ internal static partial class DomBuild
                 continue;
             }
 
-            if (tokenStyle is null)
-            {
-                tokenStyle = style.Clone();
-                tokenStyle.WhiteSpace = Render.WhiteSpace.Pre;
-            }
-
-            if (context.Engine.PushGeneratedText(token, tokenStyle) is not { } item)
+            if (context.Engine.PushGeneratedText(token, style, Render.WhiteSpace.Pre) is not { } item)
             {
                 // Returning no leaves makes the caller use the deterministic static-font
                 // fallback for the whole text node.

@@ -2900,8 +2900,10 @@ whole-document walks around the layout were allocation, not work:
   pass take over shaped paragraphs; each engine keeps its own shaper and glyph caches), and a
   `DomLayout` no longer builds a throwaway engine (and so a font database) in its initializer;
 - the per-word fallback's Skia advances are memoized by face and word (`DomTextMeasure`, bounded
-  at 65,536 words; the width is the same function of the memoized sum), and a word leaf's style
-  is copied once per text node instead of once per word;
+  at 65,536 words; the width is the same function of the memoized sum), and a word leaf is
+  shaped with `white-space: pre` handed to `TextEngine.PushGeneratedText` on its own rather
+  than in a copy of its style (first a copy per word, then one per text node: shaping only
+  reads the style, and the copies were a fifth of a retained build);
 - a carried box no longer gets a fresh empty cache left behind in the consumed tree;
 - selector matching no longer allocates a closure on every simple-selector test (the C#
   compiler hoisted the lambdas of the nested cases to the method's entry).
