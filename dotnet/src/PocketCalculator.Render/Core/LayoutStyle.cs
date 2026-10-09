@@ -860,6 +860,18 @@ public sealed class LayoutStyle
     public Edges Padding;
 
     /// <summary>
+    /// <see cref="Padding"/> as it was before a post-layout pass wrote the used percentage
+    /// padding into it; see <c>DomPasses.RestorePaddingBeforeUsedSync</c>.
+    /// </summary>
+    internal Edges? PaddingBeforeUsedSync;
+
+    /// <summary>
+    /// The used padding the previous layout wrote, set aside while a retained pass decides
+    /// whether to keep that layout; see <c>DomPasses.ReapplyPaddingUsedByPreviousLayout</c>.
+    /// </summary>
+    internal Edges? PaddingUsedByPreviousLayout;
+
+    /// <summary>
     /// Percentage padding per side (top, right, bottom, left) as a 0..1 fraction, <c>null</c>
     /// when the side is a fixed length.
     /// </summary>
@@ -1401,6 +1413,13 @@ public sealed class LayoutStyle
     public Layout.AlignContent? JustifyContent;
 
     public float? FlexGrow;
+
+    /// <summary>
+    /// <see cref="FlexGrow"/> was written by <c>GrowTrailingAutoCells</c>, not by the cascade.
+    /// A retained style comes back into that pass with the value still set, and the pass must
+    /// recognise its own write rather than move on to the previous cell.
+    /// </summary>
+    internal bool FlexGrowFromTrailingCell;
 
     public float? FlexShrink;
 

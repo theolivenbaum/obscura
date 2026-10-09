@@ -215,6 +215,10 @@ public static partial class RenderDom
         Dictionary<NodeId, IReadOnlyDictionary<string, string>> customProperties =
             retained?.Maps.CustomProperties ?? new(elementEstimate);
         HashSet<NodeId>? freshStyles = retained?.Fresh;
+        if (retained is not null)
+        {
+            DomPasses.RestorePaddingBeforeUsedSync(styles);
+        }
         Dictionary<string, string> rootProps = new(StringComparer.Ordinal);
         ContainerQueryEvaluator? evaluator = snapshot is not null
             ? new ContainerQueryEvaluator(tree, snapshot)
@@ -527,9 +531,15 @@ public static partial class RenderDom
                 // The throwaway TextEngine this pass built is left to the GC, exactly as the
                 // engine of every superseded layout already is; nothing in the engine disposes
                 // one, and the faces it loaded are its own.
+                DomPasses.ReapplyPaddingUsedByPreviousLayout(styles);
                 candidate.Previous.Styles = styles;
                 candidate.Previous.CustomProperties = customProperties;
                 return (candidate.Previous, signature, queryStats);
+            }
+
+            if (retained is not null)
+            {
+                DomPasses.ForgetPaddingUsedByPreviousLayout(styles);
             }
 
             // A retained style survives into the next layout, and whether its box still shows a

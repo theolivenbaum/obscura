@@ -402,6 +402,21 @@ internal static class DomStyleFixups
             }
 
             List<NodeId> children = tree.Children(tr);
+
+            // DEVIATION from crates/obscura-render/src/dom.rs, which writes into styles it
+            // computed this pass. The port reuses computed styles across passes, and a retained
+            // cell still carries the 1 this pass wrote last time: the walk below took it for an
+            // authored flex-grow and grew the cell before it as well. Undo the previous pass's
+            // writes first, so the outcome is the one a fresh cascade gets.
+            foreach (NodeId cid in children)
+            {
+                if (styles.TryGetValue(cid, out LayoutStyle? previous) && previous.FlexGrowFromTrailingCell)
+                {
+                    previous.FlexGrow = null;
+                    previous.FlexGrowFromTrailingCell = false;
+                }
+            }
+
             for (int index = children.Count - 1; index >= 0; index--)
             {
                 NodeId cid = children[index];
@@ -415,6 +430,7 @@ internal static class DomStyleFixups
                     && style.FlexGrow is null)
                 {
                     style.FlexGrow = 1f;
+                    style.FlexGrowFromTrailingCell = true;
                     break;
                 }
             }

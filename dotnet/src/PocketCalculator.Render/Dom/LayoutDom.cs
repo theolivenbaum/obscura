@@ -598,7 +598,8 @@ public static partial class RenderDom
 
         foreach (RetainedStyleMutation mutation in mutations)
         {
-            if (mutation is not RetainedStyleMutation.Attribute)
+            if (mutation is not RetainedStyleMutation.Attribute attribute
+                || !ReachesLayoutOnlyThroughStyle(attribute.Mutation.Name))
             {
                 return null;
             }
@@ -640,6 +641,26 @@ public static partial class RenderDom
             ? null
             : new RetainedLayoutReuseCandidate(reusableLayout, before, NothingRecomputed: false);
     }
+
+    /// <summary>
+    /// Whether an attribute can change layout only by changing some element's computed style,
+    /// which is all the reuse gate compares. The box build reads others directly
+    /// (<c>colspan</c>, <c>size</c>, <c>rows</c>, <c>src</c>, ...), so those fail closed.
+    /// </summary>
+    /// <remarks>
+    /// Found by the incremental-layout differential test: <c>colspan=3</c> on a cell left every
+    /// computed style unchanged, so the gate kept the previous table layout.
+    /// </remarks>
+    private static bool ReachesLayoutOnlyThroughStyle(string name) =>
+        name.Equals("class", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("style", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("id", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("title", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("role", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("tabindex", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("hidden", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("aria-", StringComparison.OrdinalIgnoreCase);
 
     private static (RetainedStyleMaps Maps, HashSet<NodeId> Fresh)? PrepareRetainedStyles(
         DomTree tree,
