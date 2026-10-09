@@ -166,36 +166,120 @@ public sealed partial class Page
     /// deadline still bounds how long the navigation holds the page.
     /// </para>
     /// <para>
+    /// The deadline is unconditional. Whatever the navigation awaits, the caller gets the
+    /// page back <see cref="NavigationBackstopGrace"/> after it: a wait that never observes
+    /// the token (a lost completion, an await on something nothing will finish) is left
+    /// behind with its token cancelled and the page reported as at the deadline. And an
+    /// <see cref="OperationCanceledException"/> that is not the caller's own (a script
+    /// watchdog's interrupt surfacing as ClearScript's <c>ScriptInterruptedException</c>)
+    /// is read the same way as the deadline instead of escaping: it used to reach the CDP
+    /// connection processor, which took it for its own shutdown and stopped serving the
+    /// connection, so <c>Page.navigate</c> and everything after it went unanswered.
+    /// </para>
+    /// <para>
     /// Deviation from crates/obscura-browser/src/page.rs, which fails the navigation
     /// whenever its deadline expires. A caller's own cancellation still propagates.
     /// </para>
     /// </remarks>
-    private async Task RunWithNavigationDeadlineAsync(
+    internal async Task RunWithNavigationDeadlineAsync(
         Func<CancellationToken, Task> navigate,
         CancellationToken cancellationToken)
     {
         TimeSpan navTimeout = NavigationTimeout;
         ulong navTimeoutMs = (ulong)Math.Max(0.0, navTimeout.TotalMilliseconds);
+        string deadlineMessage =
+            $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline";
 
-        using var deadline = new CancellationTokenSource(navTimeout);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            deadline.Token, cancellationToken);
+        var deadline = new CancellationTokenSource(navTimeout);
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token, cancellationToken);
         LoadAbandoned = false;
+        Task navigation;
         try
         {
-            await navigate(linked.Token).ConfigureAwait(false);
+            navigation = navigate(linked.Token);
+        }
+        catch
+        {
+            linked.Dispose();
+            deadline.Dispose();
+            throw;
+        }
+
+        try
+        {
+            await navigation.WaitAsync(BackstopAfter(navTimeout)).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!navigation.IsCompleted)
+        {
+            // The navigation is stuck on something that ignores its token. Leave it behind
+            // (its token is cancelled, so whatever it awaits next throws) and keep the
+            // sources alive for it rather than disposing them under it.
+            _ = navigation.ContinueWith(
+                static task => _ = task.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            await linked.CancelAsync().ConfigureAwait(false);
+            EndAtDeadline(cancellationToken, deadlineMessage);
+            return;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The deadline, or an interrupt from inside the page that surfaced as a
+            // cancellation: either way the navigation stopped where it stood.
+            bool atDeadline = deadline.IsCancellationRequested;
+            linked.Dispose();
+            deadline.Dispose();
+            EndAtDeadline(cancellationToken, atDeadline ? deadlineMessage : "navigation was interrupted");
+            return;
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
-            if (cancellationToken.IsCancellationRequested || Readiness < DocumentReadiness.Committed)
-            {
-                Lifecycle = LifecycleState.Failed;
-                throw PageException.Network(
-                    $"navigation exceeded {navTimeoutMs.ToString(CultureInfo.InvariantCulture)}ms deadline");
-            }
-
-            LoadAbandoned = true;
+            linked.Dispose();
+            deadline.Dispose();
+            Lifecycle = LifecycleState.Failed;
+            throw PageException.Network(deadlineMessage);
         }
+        catch
+        {
+            linked.Dispose();
+            deadline.Dispose();
+            throw;
+        }
+
+        linked.Dispose();
+        deadline.Dispose();
+    }
+
+    /// <summary>
+    /// How long past its deadline a navigation that has not stopped is waited for before
+    /// the caller gets the page back regardless (<see cref="RunWithNavigationDeadlineAsync"/>).
+    /// Long enough for a cooperative stop (a script interrupted mid-op, a layout pass
+    /// checking its token), short enough that a lost completion cannot hold a CDP
+    /// connection or the CLI.
+    /// </summary>
+    internal TimeSpan NavigationBackstopGrace { get; set; } = TimeSpan.FromSeconds(5);
+
+    private TimeSpan BackstopAfter(TimeSpan navTimeout)
+    {
+        // Task.WaitAsync takes at most uint.MaxValue - 1 ms.
+        double ms = navTimeout.TotalMilliseconds + NavigationBackstopGrace.TotalMilliseconds;
+        return ms >= uint.MaxValue - 1.0 ? Timeout.InfiniteTimeSpan : TimeSpan.FromMilliseconds(ms);
+    }
+
+    /// <summary>
+    /// A navigation stopped by its deadline (or an interrupt) before it finished: a page
+    /// that committed is kept as it stood, one that did not fails.
+    /// </summary>
+    private void EndAtDeadline(CancellationToken cancellationToken, string message)
+    {
+        if (cancellationToken.IsCancellationRequested || Readiness < DocumentReadiness.Committed)
+        {
+            Lifecycle = LifecycleState.Failed;
+            throw PageException.Network(message);
+        }
+
+        LoadAbandoned = true;
     }
 
     private async Task NavigateWithWaitPostInnerAsync(

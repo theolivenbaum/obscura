@@ -1541,10 +1541,6 @@ internal static class DomStyleFixups
         || style.Float is not null
         || style.Position == TaffyPosition.Absolute;
 
-    internal static bool ClearMatchesFloatSides(Clear clear, bool hasLeft, bool hasRight) =>
-        (!hasLeft || clear is Clear.Left or Clear.Both)
-        && (!hasRight || clear is Clear.Right or Clear.Both);
-
     internal static bool HasDeferredOrAutoMargin(LayoutStyle style)
     {
         foreach (bool value in style.MarginAuto)

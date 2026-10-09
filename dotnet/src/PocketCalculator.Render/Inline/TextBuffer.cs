@@ -279,6 +279,16 @@ public sealed class LayoutRun
     public required float LineW { get; init; }
 
     /// <summary>
+    /// How far the line box starts in from the content box's left edge because floats shorten
+    /// it (CSS 2.1 9.5); already added to every glyph's <see cref="LayoutGlyph.X"/>. Zero
+    /// unless the inline formatting context flows around floats.
+    /// </summary>
+    public float X { get; init; }
+
+    /// <summary>The width the line was laid out (and aligned) in.</summary>
+    public float LineWidth { get; init; }
+
+    /// <summary>
     /// The x extent of the character range <paramref name="start"/>..<paramref name="end"/>,
     /// the way cosmic-text's <c>LayoutRun::highlight</c> computes it.
     /// </summary>
@@ -332,6 +342,21 @@ public sealed class BufferLine
     public AttrsList AttrsList { get; private set; }
 
     public Align? Align { get; set; }
+
+    /// <summary>
+    /// Float layout only: the line box's own width when floats shorten it, used instead of the
+    /// buffer width to lay this (pre-split, single visual) line out and align it.
+    /// </summary>
+    public float? WidthOverride { get; set; }
+
+    /// <summary>Float layout only: the line box's left edge, added to every glyph.</summary>
+    public float OffsetX { get; set; }
+
+    /// <summary>
+    /// Float layout only: the space above this line box left by moving it below floats it did
+    /// not fit beside (CSS 2.1 9.5).
+    /// </summary>
+    public float GapBefore { get; set; }
 
     public void SetAlign(Align? align)
     {
@@ -472,7 +497,7 @@ public sealed class TextBuffer
     {
         foreach (BufferLine line in Lines)
         {
-            line.Layout(shaper, Metrics.FontSize, WidthOpt, Wrap, MonospaceWidth, TabWidth);
+            line.Layout(shaper, Metrics.FontSize, line.WidthOverride ?? WidthOpt, Wrap, MonospaceWidth, TabWidth);
         }
     }
 
@@ -547,24 +572,10 @@ public sealed class TextBuffer
                 yield break;
             }
 
+            lineTop += line.GapBefore;
             foreach (LayoutLine layoutLine in layout)
             {
-                // CSS 2.1 10.8.1: the line box is max(above) + max(below) over every inline
-                // box on it plus the block's strut, and the baseline sits at max(above).
-                // `Metrics` is the strut, which participates in every line box.
-                float above = F32.Max(Metrics.Above, layoutLine.MaxAbove);
-                float below = F32.Max(Metrics.Below, layoutLine.MaxBelow);
-                float lineHeight = above + below;
-                float relative = layoutLine.LineRelativeAbove + layoutLine.LineRelativeBelow;
-                if (float.IsFinite(relative) && relative > lineHeight)
-                {
-                    // A `vertical-align: top`/`bottom` box is out of the baseline set, so it
-                    // only ever grows the line - and when it does, Chromium puts the baseline
-                    // where that box's own ascent asks for it.
-                    above = F32.Max(above, layoutLine.LineRelativeAbove);
-                    lineHeight = relative;
-                }
-
+                (float above, float lineHeight) = LineBox(layoutLine);
                 float lineY = lineTop + above;
                 if (HeightOpt is { } height && lineY > height)
                 {
@@ -573,19 +584,58 @@ public sealed class TextBuffer
 
                 float currentTop = lineTop;
                 lineTop += lineHeight;
+                List<LayoutGlyph> glyphs = layoutLine.Glyphs;
+                float offsetX = line.OffsetX;
+                if (offsetX != 0f)
+                {
+                    glyphs = new List<LayoutGlyph>(layoutLine.Glyphs.Count);
+                    foreach (LayoutGlyph glyph in layoutLine.Glyphs)
+                    {
+                        LayoutGlyph shifted = glyph;
+                        shifted.X += offsetX;
+                        glyphs.Add(shifted);
+                    }
+                }
+
                 yield return new LayoutRun
                 {
                     LineIndex = lineIndex,
                     Text = line.Text,
                     Rtl = line.ShapeOpt?.Rtl ?? false,
-                    Glyphs = layoutLine.Glyphs,
+                    Glyphs = glyphs,
                     LineY = lineY,
                     LineTop = currentTop,
                     LineHeight = lineHeight,
                     LineW = layoutLine.W,
+                    X = offsetX,
+                    LineWidth = line.WidthOverride ?? WidthOpt ?? layoutLine.W,
                 };
             }
         }
+    }
+
+    /// <summary>
+    /// CSS 2.1 10.8.1: the line box is max(above) + max(below) over every inline box on it plus
+    /// the block's strut, and the baseline sits at max(above). <see cref="Metrics"/> is the
+    /// strut, which participates in every line box. Returns the baseline's distance from the
+    /// line top and the line box height.
+    /// </summary>
+    public (float Above, float Height) LineBox(LayoutLine layoutLine)
+    {
+        float above = F32.Max(Metrics.Above, layoutLine.MaxAbove);
+        float below = F32.Max(Metrics.Below, layoutLine.MaxBelow);
+        float lineHeight = above + below;
+        float relative = layoutLine.LineRelativeAbove + layoutLine.LineRelativeBelow;
+        if (float.IsFinite(relative) && relative > lineHeight)
+        {
+            // A `vertical-align: top`/`bottom` box is out of the baseline set, so it only ever
+            // grows the line - and when it does, Chromium puts the baseline where that box's
+            // own ascent asks for it.
+            above = F32.Max(above, layoutLine.LineRelativeAbove);
+            lineHeight = relative;
+        }
+
+        return (above, lineHeight);
     }
 
     public TextBuffer Clone()

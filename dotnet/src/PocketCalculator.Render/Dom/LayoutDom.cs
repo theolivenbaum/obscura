@@ -321,7 +321,7 @@ public static partial class RenderDom
         }
 
         Dictionary<NodeId, Stylesheet> shadowSheets =
-            DomCascade.CollectShadowStylesheets(tree, viewport, mediaType);
+            DomCascade.CollectShadowStylesheets(tree, viewport, mediaType, stylesheetCache);
         LayoutPhaseProfile.Mark("sheets");
 
         int retainedRequested = retained?.Styles.Count ?? 0;

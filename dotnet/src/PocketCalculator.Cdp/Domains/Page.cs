@@ -1002,6 +1002,15 @@ public static partial class Page
         {
             throw new DomainError(exception.Message);
         }
+        catch (OperationCanceledException)
+        {
+            // The navigation is given no cancellation token, so this is the page's own (a
+            // script interrupt surfacing as ClearScript's ScriptInterruptedException): a
+            // failed navigation, not the connection shutting down, which is what the
+            // dispatcher takes an escaping cancellation for.
+            throw new DomainError(
+                $"navigation exceeded {((ulong)Math.Max(0.0, page.NavigationTimeout.TotalMilliseconds)).ToString(System.Globalization.CultureInfo.InvariantCulture)}ms deadline");
+        }
 
         bool reachedNetworkIdle = page.Lifecycle.IsNetworkIdle();
         if (page.LoadAbandoned)

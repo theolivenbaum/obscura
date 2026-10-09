@@ -70,6 +70,42 @@ public static partial class CdpServer
         {
             while (true)
             {
+                try
+                {
+                    await ProcessorLoopAsync().ConfigureAwait(false);
+                    break;
+                }
+                catch (OperationCanceledException error) when (!loopStop.IsCancellationRequested)
+                {
+                    // Only this connection stopping ends the processor. A cancellation from
+                    // anywhere else (a page's script interrupt surfacing as ClearScript's
+                    // ScriptInterruptedException) used to land in the handler below and
+                    // stop the processor silently: the connection stayed open and nothing
+                    // on it was ever answered again. Keep serving.
+                    CdpLog.Warn($"connection processor: a command was cancelled from inside the page: {error.Message}");
+                    await Task.Yield();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            // The connection merges this context's cookie delta into the
+            // persistence template after the processor stops.
+            foreach (var page in ctx.Pages)
+            {
+                page.Dispose();
+            }
+
+            ctx.Pages.Clear();
+        }
+
+        async Task ProcessorLoopAsync()
+        {
+            while (true)
+            {
                 if (ctx.ParkedCommands.Count != 0)
                 {
                     await ResumeParkedCommandsAsync(ctx).ConfigureAwait(false);
@@ -119,8 +155,11 @@ public static partial class CdpServer
                         runtimePumpErrorStreak = 0;
                         runtimePumpArmed = !reachedIdle;
                     }
-                    catch (Exception error) when (error is not OperationCanceledException)
+                    catch (Exception error) when (
+                        error is not OperationCanceledException || !loopStop.IsCancellationRequested)
                     {
+                        // A cancellation that is not this connection stopping (a page's
+                        // script interrupt) is a failed turn like any other.
                         if (runtimePumpErrorStreak < int.MaxValue)
                         {
                             runtimePumpErrorStreak++;
@@ -249,20 +288,6 @@ public static partial class CdpServer
                 runtimePumpArmed = AnyPageHasJs(ctx);
                 runtimePumpErrorStreak = 0;
             }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        finally
-        {
-            // The connection merges this context's cookie delta into the
-            // persistence template after the processor stops.
-            foreach (var page in ctx.Pages)
-            {
-                page.Dispose();
-            }
-
-            ctx.Pages.Clear();
         }
     }
 

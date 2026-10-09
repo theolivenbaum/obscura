@@ -79,6 +79,21 @@ public delegate Size<float> TreeMeasureFunction<TNodeContext>(
     TNodeContext? nodeContext,
     Style style);
 
+/// <summary>
+/// Measures an inline formatting context leaf whose line boxes flow around floats.
+/// <paramref name="bands"/> are the float exclusions relative to the leaf's content box, or
+/// <c>null</c> when none reaches it; <paramref name="runMode"/> tells a final layout (whose line
+/// breaks paint) from a sizing pass. Not in vendor/taffy, which has no inline layout.
+/// </summary>
+public delegate Size<float> ExclusionMeasureFunction<TNodeContext>(
+    Size<float?> knownDimensions,
+    Size<AvailableSpace> availableSpace,
+    NodeId nodeId,
+    TNodeContext? nodeContext,
+    Style style,
+    FloatBands? bands,
+    RunMode runMode);
+
 /// <summary>Layout information for a given node, stored in a <see cref="TaffyTree{TNodeContext}"/>.</summary>
 internal sealed class NodeData(Style style)
 {
@@ -150,6 +165,29 @@ public sealed class TaffyTree<TNodeContext>
     /// root.
     /// </summary>
     private bool _hasTransplants;
+
+    /// <summary>
+    /// Whether any node in the tree is floated. Same-BFC layout then depends on the floats placed
+    /// so far, which a cache key cannot see, so it is computed uncached; with no float the cache
+    /// and every code path are exactly vendor/taffy's.
+    /// </summary>
+    public bool HasFloats { get; set; }
+
+    /// <summary>
+    /// Measures leaves in a block formatting context with floats; see
+    /// <see cref="ExclusionMeasureFunction{TNodeContext}"/>. <c>null</c> leaves every leaf to
+    /// the ordinary measure function.
+    /// </summary>
+    public ExclusionMeasureFunction<TNodeContext>? ExclusionMeasure { get; set; }
+
+    /// <summary>Forgets the exclusions a leaf's last final layout recorded.</summary>
+    public Action<TNodeContext>? ExclusionReset { get; set; }
+
+    /// <summary>Floats anchored in inline formatting context leaves; see <c>InlineFloatAnchors</c>.</summary>
+    public IReadOnlyDictionary<NodeId, (NodeId Float, int Offset)[]>? FloatAnchors { get; set; }
+
+    /// <summary>Answers <c>InlineAnchorLines</c> for a leaf's node context.</summary>
+    public Func<TNodeContext, int[], (float Top, float Height, float Width, float Used)?[]>? AnchorLines { get; set; }
     private CalcResolver _calcResolver = static (_, _) => 0.0f;
 
     /// <summary>Creates a new tree with the default capacity of 16 nodes.</summary>
@@ -449,11 +487,13 @@ public sealed class TaffyTree<TNodeContext>
         var current = node;
         while (true)
         {
-            if (_nodes[current].MarkDirty() == ClearState.AlreadyEmpty && !_hasTransplants)
+            if (_nodes[current].MarkDirty() == ClearState.AlreadyEmpty && !_hasTransplants && !HasFloats)
             {
-                // Node was already marked as dirty; its ancestors are dirty too. Not so once a
-                // previous pass's caches were carried over: a display:none node's cache is
-                // always empty while its transplanted ancestors' are not.
+                // Node was already marked as dirty; its ancestors are dirty too. Not so with
+                // floats: a same-BFC node never stores a cache entry (ComputeChildLayoutInner),
+                // so an empty cache says nothing about the BFC root above it. Nor once a previous
+                // pass's caches were carried over: a display:none node's cache is always empty
+                // while its transplanted ancestors' are not.
                 return;
             }
 
@@ -639,7 +679,13 @@ public sealed class TaffyTree<TNodeContext>
                 data.SawNoBlockContext = true;
             }
 
-            LayoutOutput output = ComputeCachedLayoutForNode(nodeId, inputs, blockCtx);
+            // DEVIATION from vendor/taffy/src/tree/taffy_tree.rs, which caches a same-BFC child
+            // like any other. Its layout reads, and its floats write, the BFC's shared float
+            // context, so the same inputs can give a different answer: compute it afresh when
+            // the tree has floats. The BFC root is still cached.
+            LayoutOutput output = blockCtx is not null && _taffy.HasFloats
+                ? ComputeUncachedInner(this, nodeId, inputs, blockCtx)
+                : ComputeCachedLayoutForNode(nodeId, inputs, blockCtx);
             if (floatsBefore || blockCtx is { HasFloats: true })
             {
                 data.FloatDependent = true;
@@ -664,7 +710,7 @@ public sealed class TaffyTree<TNodeContext>
                 return hit;
             }
 
-            LayoutOutput computed = ComputeUncachedLayoutForNode(nodeId, inputs, blockCtx);
+            LayoutOutput computed = ComputeUncachedInner(this, nodeId, inputs, blockCtx);
             _taffy._nodes[nodeId].Cache.Store(
                 in inputs,
                 in computed,
@@ -672,53 +718,86 @@ public sealed class TaffyTree<TNodeContext>
             return computed;
         }
 
-        private LayoutOutput ComputeUncachedLayoutForNode(NodeId nodeId, LayoutInput inputs, BlockContext? blockCtx)
+        private static LayoutOutput ComputeUncachedInner(
+            TaffyView tree,
+            NodeId node,
+            LayoutInput layoutInputs,
+            BlockContext? blockCtx)
         {
-            return ((Func<TaffyView, NodeId, LayoutInput, LayoutOutput>)(
-                (tree, node, layoutInputs) =>
+            var displayMode = tree._taffy._nodes[node].Style.Display;
+            bool hasChildren = tree.ChildCount(node) > 0;
+
+            if (displayMode == Display.None)
+            {
+                return Compute.ComputeHiddenLayout(tree, node);
+            }
+
+            if (hasChildren)
+            {
+                switch (displayMode)
                 {
-                    var displayMode = tree._taffy._nodes[node].Style.Display;
-                    bool hasChildren = tree.ChildCount(node) > 0;
+                    case Display.Block:
+                        return BlockLayout.ComputeBlockLayout(tree, node, layoutInputs, blockCtx);
+                    case Display.Flex:
+                        return FlexboxLayout.ComputeFlexboxLayout(tree, node, layoutInputs);
+                    case Display.Grid:
+                        return GridLayoutDispatch.Compute is { } computeGrid
+                            ? computeGrid(tree, node, layoutInputs)
+                            : throw new NotSupportedException(
+                                "CSS Grid layout has not been registered; "
+                                + "see GridLayoutDispatch.Compute");
+                    default:
+                        break;
+                }
+            }
 
-                    if (displayMode == Display.None)
-                    {
-                        return Compute.ComputeHiddenLayout(tree, node);
-                    }
+            var nodeData = tree._taffy._nodes[node];
+            var style = nodeData.Style;
+            TNodeContext? nodeContext = default;
+            if (nodeData.HasContext)
+            {
+                _ = tree._taffy._nodeContextData.TryGetValue(node, out nodeContext);
+            }
 
-                    if (hasChildren)
-                    {
-                        switch (displayMode)
-                        {
-                            case Display.Block:
-                                return BlockLayout.ComputeBlockLayout(tree, node, layoutInputs, blockCtx);
-                            case Display.Flex:
-                                return FlexboxLayout.ComputeFlexboxLayout(tree, node, layoutInputs);
-                            case Display.Grid:
-                                return GridLayoutDispatch.Compute is { } computeGrid
-                                    ? computeGrid(tree, node, layoutInputs)
-                                    : throw new NotSupportedException(
-                                        "CSS Grid layout has not been registered; "
-                                        + "see GridLayoutDispatch.Compute");
-                            default:
-                                break;
-                        }
-                    }
-
-                    var nodeData = tree._taffy._nodes[node];
-                    var style = nodeData.Style;
-                    TNodeContext? nodeContext = default;
-                    if (nodeData.HasContext)
-                    {
-                        _ = tree._taffy._nodeContextData.TryGetValue(node, out nodeContext);
-                    }
-
+            if (blockCtx is not null
+                && nodeData.HasContext
+                && tree._taffy.ExclusionMeasure is { } exclusionMeasure)
+            {
+                // An inline formatting context in a BFC with floats: hand the line
+                // breaker the exclusions relative to the leaf's content box.
+                var calc = tree.CalcResolver();
+                float basis = layoutInputs.ParentSize.Width ?? 0.0f;
+                var padding = style.Padding.ResolveOrZero((float?)basis, calc);
+                var border = style.Border.ResolveOrZero((float?)basis, calc);
+                FloatBands? bands = blockCtx.FloatBandsFor(
+                    padding.Top + border.Top,
+                    padding.Left + border.Left,
+                    padding.Right + border.Right);
+                RunMode runMode = layoutInputs.RunMode;
+                if (bands is not null)
+                {
                     return Leaf.ComputeLeafLayout(
                         layoutInputs,
                         style,
                         static (_, _) => 0.0f,
-                        (knownDimensions, availableSpace) =>
-                            tree._measureFunction(knownDimensions, availableSpace, node, nodeContext, style));
-                }))(this, nodeId, inputs);
+                        (knownDimensions, availableSpace) => exclusionMeasure(
+                            knownDimensions, availableSpace, node, nodeContext, style, bands, runMode));
+                }
+
+                // No float reaches it: the ordinary measure function (whichever this view was
+                // given), after forgetting the exclusions of an earlier final layout.
+                if (runMode == RunMode.PerformLayout && nodeContext is not null)
+                {
+                    tree._taffy.ExclusionReset?.Invoke(nodeContext);
+                }
+            }
+
+            return Leaf.ComputeLeafLayout(
+                layoutInputs,
+                style,
+                static (_, _) => 0.0f,
+                (knownDimensions, availableSpace) =>
+                    tree._measureFunction(knownDimensions, availableSpace, node, nodeContext, style));
         }
 
         public LayoutOutput? CacheGet(NodeId nodeId, in LayoutInput input) =>
@@ -768,6 +847,19 @@ public sealed class TaffyTree<TNodeContext>
         public IFlexboxItemStyle GetFlexboxChildStyle(NodeId childNodeId) => _taffy._nodes[childNodeId].Style;
 
         public IBlockContainerStyle GetBlockContainerStyle(NodeId nodeId) => _taffy._nodes[nodeId].Style;
+
+        public bool HasFloats => _taffy.HasFloats;
+
+        public (NodeId Float, int Offset)[]? InlineFloatAnchors(NodeId leaf) =>
+            _taffy.FloatAnchors is { } anchors && anchors.TryGetValue(leaf, out var list) ? list : null;
+
+        public (float Top, float Height, float Width, float Used)?[] InlineAnchorLines(NodeId leaf, int[] offsets) =>
+            _taffy.AnchorLines is { } query
+                && _taffy._nodes[leaf].HasContext
+                && _taffy._nodeContextData.TryGetValue(leaf, out TNodeContext? context)
+                && context is not null
+                    ? query(context, offsets)
+                    : new (float Top, float Height, float Width, float Used)?[offsets.Length];
 
         public IBlockItemStyle GetBlockChildStyle(NodeId childNodeId) => _taffy._nodes[childNodeId].Style;
 

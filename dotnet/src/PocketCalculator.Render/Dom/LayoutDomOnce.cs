@@ -468,6 +468,11 @@ public static partial class RenderDom
             // formatting mode.
             foreach (LayoutStyle style in styles.Values)
             {
+                if (style.LogicalFloatClear != 0)
+                {
+                    DomBuild.ResolveLogicalFloatClear(style);
+                }
+
                 if (style.Position == TaffyPosition.Absolute || style.Float is not null)
                 {
                     LayoutStyleExtensions.BlockifyOuterDisplay(style);
@@ -576,8 +581,12 @@ public static partial class RenderDom
 
             // What the previous pass built that this one may take over: decided before the
             // build, which takes over that pass's inline items for unchanged containers.
+            // Not with floats on either side: a float's exclusions reach every box and inline
+            // item in its block formatting context, and same-BFC layout is computed uncached.
+            bool anyFloat = DomBuild.AnyFloat(styles);
             HashSet<NodeId>? dirtyNodes = null;
-            if (transplantSource is { Consumed: false } source
+            if (transplantSource is { Consumed: false, HadFloats: false } source
+                && !anyFloat
                 && freshStyles is not null
                 && RetainedTaffyLayout.Enabled
                 && engine.SharesShapeCacheWith(source.Engine))
@@ -598,13 +607,20 @@ public static partial class RenderDom
                 Ifc = ifcItems,
                 Styles = styles,
                 DeferredInlineWidths = deferredInlineWidths,
+                HasFloats = anyFloat,
             };
+            taffyTree.HasFloats = buildContext.HasFloats;
 
             TaffyNodeId? builtTaffyRoot = DomBuild.Build(buildContext, rootId);
             engine.EndInlineItemAdoption();
             if (builtTaffyRoot is { } taffyRoot)
             {
-        LayoutPhaseProfile.Mark("build");
+                LayoutPhaseProfile.Mark("build");
+                if (buildContext.HasFloats)
+                {
+                    DomBuild.MarkBlockFormattingContextRoots(taffyTree, idMap, styles);
+                }
+
                 // Taffy has no outer display type and only gives an auto-width Block root the
                 // initial-containing-block width. CSS blockifies Flex/Grid roots too.
                 if (styles.TryGetValue(rootId, out LayoutStyle? rootStyle)
@@ -712,6 +728,25 @@ public static partial class RenderDom
                     return new Layout.Size<float>(known.Width ?? width, known.Height ?? content.Height);
                 }
 
+                if (taffyTree.HasFloats)
+                {
+                    taffyTree.ExclusionMeasure = (known, avail, node, ctx, style, bands, runMode) =>
+                        ctx is { } index
+                            ? engine.MeasureTaffyAroundFloats(index, known, avail, bands, runMode)
+                            : Measure(known, avail, node, ctx, style);
+                    taffyTree.ExclusionReset = ctx =>
+                    {
+                        if (ctx is { } index)
+                        {
+                            engine.ForgetFloatBands(index);
+                        }
+                    };
+                    taffyTree.FloatAnchors = ifcItems.FloatAnchors;
+                    taffyTree.AnchorLines = (ctx, offsets) => ctx is { } index
+                        ? engine.AnchorLines(index, offsets)
+                        : new (float Top, float Height, float Width, float Used)?[offsets.Length];
+                }
+
                 float? IntrinsicWidth(TaffyTree t, TaffyNodeId node, TaffyAvailableSpace width)
                 {
                     t.ComputeLayoutWithMeasure(
@@ -812,11 +847,6 @@ public static partial class RenderDom
                 }
 
                 if (DomPasses.ApplyMulticolBalance(taffyTree, ifcItems.Multicol))
-                {
-                    taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
-                }
-
-                if (DomPasses.ApplyFloatContinuations(tree, taffyTree, idMap, styles, ifcItems))
                 {
                     taffyTree.ComputeLayoutWithMeasure(taffyRoot, available, Measure);
                 }
@@ -1111,6 +1141,7 @@ public static partial class RenderDom
                     NativeControlContent = ifcItems.NativeControlContent,
                     Engine = engine,
                     Whole = ifcItems.Whole,
+                    HadFloats = taffyTree.HasFloats,
                     Intrinsic = new Dictionary<NodeId, ReplacedIntrinsic>(intrinsic),
                     Generated = RetainedTaffyLayout.SnapshotGenerated(styles),
                 }

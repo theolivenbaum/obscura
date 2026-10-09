@@ -303,8 +303,8 @@ Decisions:
 
 Found during the review, not from upstream:
 
-- [ ] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
-      caller, around line 796); repro in the review document
+- [x] Left, right, left floats: the third float lands below the first (`BlockLayout.cs`
+      caller, around line 796); repro in the review document. Floats are CSS floats now
 - [ ] An inline `<span>` reports width 0 from `getBoundingClientRect()`; an `inline-block`
       reports its real width (seen writing the font-directory CDP test)
 - [ ] Render loads on CDP pages other than the first produce no Network events:
@@ -358,11 +358,11 @@ Found during the review, not from upstream:
     by coordinates hit inline links), RTL and wrapped fragments match Chromium, nested
     padded spans wrap as Chromium does; `visibility` inherits; closed `<details>` and
     `dialog:not([open])` are hidden; left/right/left floats place natively
-  - [ ] layout, found on the way: a float after inline text starts a new line where
-    Chromium keeps it on the line; `dir=rtl` text does not start at the right;
+  - [ ] layout, found on the way: ~~a float after inline text starts a new line where
+    Chromium keeps it on the line~~ (fixed: anchored floats); `dir=rtl` text does not start at the right;
     `<summary>` reports `block` (Chromium `list-item`); centred and justified lines
-    count the trailing space; a block with an explicit width beside a float is
-    narrowed
+    count the trailing space; ~~a block with an explicit width beside a float is
+    narrowed~~ (fixed: it moves below the float, as in Chromium)
   - [x] HTML tree construction is the port's own (`HtmlTreeBuilder`) over AngleSharp's
     tokenizer (M11): 50k nested divs 20 s to 0.14 s, a 50k-sibling fragment 91 s to
     0.13 s; html5lib tree-construction 1756/1765
@@ -795,6 +795,80 @@ Found during the review, not from upstream:
   `std::thread::spawn`), half-closes with `Shutdown(Send)` and drains until the
   reader goes away. 10 of 10 under a 10-burner stress that previously failed about
   one run in six. The cap assertion itself is unchanged.
+
+## Float layout (CSS 2.1 9.5)
+
+Floats used to be built as flex rows (`DomBuildFloats.cs`, a port of Rust's
+`build_children_with_float_zone`): a float and the siblings after it became one row, so text
+never wrapped around a float, nothing below it reflowed, and wikipedia.org's footer wrapped.
+They are now CSS floats, laid out by the block formatting context, measured against
+Chromium 141 on the pages in `render-repros/floats/` (`scripts/float-conformance.mjs`).
+
+Design:
+
+- **Build** (`DomBuild.BuildMixedBlock`, `floatFlow`). Only when the document has a float
+  (`BuildContext.HasFloats`; a float-free document builds and lays out exactly as before). A
+  block container, table cell or inline-block with floated children is a taffy `Block`:
+  in-flow blocks and floats are its children, and each inline run is an inline formatting
+  context leaf (`Display.Block`, so it is in the same BFC). A float inside a run that folds to
+  one shaped context stays in it as an *anchor* (text offset, `IfcRegistry.FloatAnchors`) and
+  its box is a sibling after the leaf; a run that does not fold is split at its floats. After
+  the build every box that establishes a BFC (flow-root, overflow, inline-block, flex/grid,
+  abs, table, cell) or is replaced gets `Style.EstablishesBfc`, and every element its
+  `float`/`clear` (`MarkBlockFormattingContextRoots`). Logical `inline-start`/`inline-end`
+  map by direction (`ResolveLogicalFloatClear`).
+- **Block layout** (`Layout/BlockLayout.cs`, taffy's float context). Floats are shrink-to-fit
+  (`min(max(min-content, available), max-content)`), never collapse margins, and are placed by
+  the nine rules at the pending margin's edge (Chromium's `NextBorderEdge`). A same-BFC child's
+  sub-context sits at its real border-top (margins collapsed with its first descendants'),
+  `clear` gives clearance only when the hypothetical position is above the floats, a box that
+  avoids floats moves down until its margin box fits beside them (`PlaceFloatAvoidingItem`),
+  a BFC root's height includes its floats' margin boxes plus its bottom padding, and a block
+  holding only floats is empty for margin collapsing. Anchored floats are placed from the line
+  holding their offset: on it when they fit in what is left, below it otherwise, with the
+  context laid out again after each (32 times at most, then the rest from one layout).
+  Intrinsic widths add floats to the in-flow content after them, and anchored floats to their
+  line.
+- **Exclusion space** (`FloatContext.Bands`, `FloatBands`). A same-BFC inline leaf is measured
+  through `TaffyTree.ExclusionMeasure` with the floats' segments relative to its content box.
+  The cache is bypassed for same-BFC layout when the tree has floats (the float context is
+  state the key cannot see), and `MarkDirty` then walks to the root.
+- **Line breaking** (`TextEngine.ShapeAroundFloats`). Each line box takes the floats over its
+  height: it is laid out at `width - left - right`, split off into its own buffer line, aligned
+  in that width and drawn from `left` (`BufferLine.OffsetX/WidthOverride/GapBefore`,
+  `LayoutRun.X`). A line whose first word does not fit beside the floats moves down to the next
+  float edge; a line taller than the strut is re-measured over its own height. Final layout
+  records the bands on the item and `Finalize` repeats the same breaks.
+- **Paint, hit testing, geometry**: floats are ordinary boxes in the tree; paint already put
+  them after in-flow block backgrounds and before inline content (`IsEffectiveFloat`). Inline
+  fragments and line rects come from `LayoutRuns`, so they carry the line offsets.
+
+Performance (interleaved base/new, same Release build mode, 6 rounds, median of 9 layouts):
+a float-free 40-section article 289.9 -> 285.6 ms layout (noise), the same article with float
+thumbnails, a sidebar and float columns 406.9 -> 347.3 ms; screenshots of the 57 float-free
+`render-repros/` and bench pages are byte-identical except the two whose animation makes the
+base build differ from itself. A paragraph of 2,000 anchored floats lays out in about a second.
+
+Status: 56 of 61 conformance pages match Chromium (element boxes within 1px, inline line
+fragments within 2px), and 7 of the 8 older float pages at the top of `render-repros/` (the
+eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
+where Chromium gives an empty box after it, as before). Open:
+
+- [ ] `elementFromPoint` is the shim's nid-order heuristic in `bootstrap.js`, so a point inside
+      a float returns the later in-flow block instead of the float (out of scope here: the
+      shim is being edited elsewhere)
+- [ ] `Range.getClientRects()` is a stub returning the element's box; line rects are measured
+      through inline elements' `getClientRects()` instead
+- [ ] an inline box split by a float inside it reports one fragment where Chromium reports
+      two (`float-in-inline`)
+- [ ] right-to-left paragraphs still start at the left (an older, float-independent gap), and
+      centred/right-aligned lines still count their trailing space; both show on the
+      `rtl`/`text-align-*` pages
+- [ ] a run that does not fold (atomic inlines) is one float-avoiding block, not line by line
+      (a float before any text in it is placed before it, one after text splits it);
+      its items' percentages resolve against the block, not the narrowed run
+      (`PercentBasisFromContainingBlock`), which is what wikipedia.org's footer needs
+- [ ] floats inside multi-column containers lay out in the first column only
 
 ## 9. Validation
 
@@ -1341,6 +1415,39 @@ DEVIATION comment at the C# code that differs.
 
 Recorded as they are decided. Each entry needs a reason and a tracking note.
 
+### Floats are CSS floats, not flex rows
+
+DEVIATION from `crates/obscura-render/src/dom.rs` (`build_children_with_float_zone`) and
+`vendor/taffy/src/compute/{block,float}.rs`. Rust lays a float and the siblings that follow it
+out as a flex row (a float, and a flow column of the next siblings up to an estimate of the
+float's height), so text never wraps around a float and the blocks after it keep its row's
+height. C# lays floats out with the float context of the block formatting context and shortens
+each line box around them; see "Float layout (CSS 2.1 9.5)" above for the design. The taffy
+changes, each commented at the site:
+
+- a float is shrink-to-fit in its containing block and its margins do not collapse (taffy:
+  max-content, collapsible);
+- a float is placed after the pending margin (Chromium's `NextBorderEdge`), a same-BFC child's
+  sub-context sits at its collapsed border-top, and clearance applies only when the
+  hypothetical position is above the floats (taffy added the margin after clearing);
+- a float taller than every earlier one extends the segments (taffy left the part below the
+  last segment excluding nothing);
+- a float-avoiding box moves down until it fits (taffy took the first slot at any width);
+- a BFC root's float height includes its bottom padding; a block holding only floats can be
+  collapsed through; a definite-width intrinsic pass counts floats (taffy: 0);
+- same-BFC layout is uncached in a tree with floats, and `MarkDirty` walks to the root then;
+- an anonymous inline-run flex wrapper resolves its items' percentages against its own
+  percentage basis, not its float-narrowed width (`PercentBasisFromContainingBlock`; taffy's
+  flexbox has no such notion).
+
+Parity with the Rust binary is the wrong assertion for any page with a float; the
+`render-repros/floats/` pages and `FloatLayoutTests` assert Chromium's boxes instead.
+`NestedShrinkToFitLayoutTests.NestedFloatsKeepChromiumInlineGeometry` now holds through the
+anchored float; `DomLayoutTests.ConsecutivePercentageFloatsCollectAgainstTheFullBandWidth`
+asserts Chromium's 0 height for a non-BFC container (the flex row gave it 150), and the two
+cancellation tests that used 300 nested floats as a minute-long layout use a page of floated
+paragraphs, since nested floats now lay out in milliseconds.
+
 ### V8 grows its heap limit instead of aborting when the heap cap's sample is late
 
 Rust caps the heap with a near-heap-limit callback at V8's own limit, which terminates
@@ -1393,7 +1500,7 @@ pool for a second under a 64 MB V8 limit; without the multiplier the test host a
 - **Visibility inherits:** `getComputedStyle().visibility` and `innerText` read the inherited computed value (`ComputedVisibilityHidden`); Rust reported only an element's own declaration.
 - **Closed `<details>` in innerText:** only the summary is collected (Chromium); Rust's walk read every DOM child.
 - **`dialog:not([open]) { display: none }`:** a UA rule Rust lacks; without it a closed dialog laid out, painted and appeared in innerText.
-- **Floats on both sides:** a block whose in-flow content is only left and right floats takes the native float context; Rust's float-zone row put a third float below the first (Chromium: beside it).
+- **Floats on both sides:** superseded by "Floats are CSS floats, not flex rows"; every float now takes the native float context.
 - **Table width pass:** size-only intrinsic measurements and memoized depth and cyclic-item walks, where Rust does full layouts and repeated ancestor walks. Output is identical.
 - **Allocation trims:** no shadow-scope builders outside shadow trees, no WAAPI iterator per element, lazy sort delegates, lists shared between `Inherited` clones, pre-sized per-element maps and taffy tree. Output is identical.
 - **Global prototype chain (I10):** `window -> Window.prototype -> WindowProperties -> EventTarget.prototype`, as in Chromium; EventTarget is Node's parent, not Node, and addEventListener/removeEventListener/dispatchEvent exist only on `EventTarget.prototype`, one implementation for every target (see "DOM event dispatch"). Window throws Illegal constructor; `Window.prototype` has TEMPORARY and PERSISTENT. Rust: an Object.prototype-based global, an own `constructor`, a `Symbol.hasInstance` override and `EventTarget = Node`. V8 still lets the global's prototype be replaced, where Chromium's is immutable.
@@ -4962,10 +5069,10 @@ only at paint: the bounding rect is fractional, the `offset*` and `client*` valu
 
 Not done: border widths are not snapped to whole pixels (Chromium draws `4.1px` as 4px, so the
 box is 0.1px narrower there); an atomic inline shorter than the strut's ascent still sits at the
-line's top instead of on the baseline; a percentage width inside the float-zone flow column
-resolves against the column, not the containing block, and a run of `clear`ing same-side floats
-is laid out side by side. The last two, not rounding, are why wikipedia.org's footer drops
-`.other-projects` below its sidebar. Pinned by `SubpixelGeometryScriptTests`.
+line's top instead of on the baseline. (A percentage width beside a float resolved against the
+float-zone flow column, and a run of `clear`ing same-side floats was laid out side by side,
+which is why wikipedia.org's footer dropped `.other-projects` below its sidebar; both went with
+the float-zone rows, see "Float layout (CSS 2.1 9.5)".) Pinned by `SubpixelGeometryScriptTests`.
 
 ### A redirected navigation is reported hop by hop under the loader id
 
@@ -5299,3 +5406,135 @@ reported before a message posted earlier in the same task (Chromium: after).
 content inside a shadow root is dispatched at the host, since the hit test does not enter
 shadow trees (Playwright's `#host >> #inner` click never reaches the inner button). Pinned by
 `EventDispatchConformanceTests` (Js), which runs the Chromium probe's sections.
+
+### The navigation deadline is unconditional, and an interrupted task does not lose its batch
+
+Found by the after-fix live survey: reddit.com and cloudflare.com no longer loaded. Over
+CDP `Page.navigate` was never answered, no network event reached the client and every later
+command went unanswered, with the server idle; the CLI printed "Timed out navigating ...
+after 30s" after ~17s. Five port defects, none of them in the reference's shape (deno_core
+drives one thread and resolves ops inside its own loop):
+
+- **A script interrupt escaped as a cancellation.** ClearScript's `ScriptInterruptedException`
+  is an `OperationCanceledException`. A module's top-level await drove the loop, the loop ran
+  reddit's animation frame, whose `innerText` forced a 5s layout and overran the module budget
+  (3s + 5s grace); an op that sees the watchdog's cancellation keeps the isolate interrupted
+  until the watchdog is disarmed, so the bookkeeping after the timeout
+  (`ClearSettledMarker`) was interrupted too and the exception left
+  `EvaluatePreparedModuleAsync`. `Page.EvaluateModuleAsync` and the module-prepare catches let
+  every `OperationCanceledException` through, and the navigation failed as "timed out" (the
+  CLI) or reached `CdpProcessorAsync`'s `catch (OperationCanceledException)`, which ended the
+  connection's processor silently. Now the marker catches the interrupt, the script phase
+  treats anything but the navigation's own token as that script's failure,
+  `RunWithNavigationDeadlineAsync` reads a stray cancellation like the deadline (committed:
+  the page as it stood; not: `navigation was interrupted`), the CDP navigate paths turn one
+  into a protocol error, and the processor keeps serving unless its own connection stopped.
+  e01eeae (before custom elements) also failed cloudflare.com this way, 1 run in 2.
+- **The deadline was not unconditional.** `RunWithNavigationDeadlineAsync` waited for the
+  navigation however long it took once the token was cancelled; it now returns
+  `NavigationBackstopGrace` (5s) after the deadline whatever the navigation awaits, leaving
+  it behind with its token cancelled. `NavigateTaskAsync` waits for the connection's V8 lock
+  for at most one deadline.
+- **An interrupted turn dropped the rest of its batch.** `PumpTick` takes all due timers (and
+  posted tasks) before running them; a watchdog interrupt in one ended the turn and lost the
+  others. On reddit those were the executions of load-delaying dynamic scripts (core-js,
+  recaptcha, doubleclick), so `load` waited out the whole 30s script deadline. The ones not
+  yet run go back (`TimerQueue.Restore`, keeping their ids and order unless cleared meanwhile;
+  `RequeuePostedTasks`); the interrupted one is not run again.
+- **The timer and posted-task queues were not thread-safe.** ClearScript resolves an async
+  op's promise on the thread that completed the op's `Task`, and the page's continuation runs
+  there while the pump thread is between scripts: `TakeDue` threw "Collection was modified"
+  out of reddit's module drain. Both queues are locked.
+- **A finished module was charged for the page's queued tasks.** The drain pumped before
+  checking the settled marker, so a module without top-level await (reddit's
+  `STICKY_CANARY` data: module) ran the page's timers and animation frames on its budget and
+  was reported as timed out. The marker is checked first.
+
+The cost behind the 5s layouts is the custom elements change working: reddit's posts are
+`shreddit-*` elements hidden by `:not(:defined)` until upgraded, and now render. Two cheap
+parts of it are fixed: shadow-root sheets were parsed per root on every pass (~170 Lit roots
+sharing a handful of sheets, 0.5-2.3s a pass), now one compiled sheet per distinct source set,
+kept across passes in the document's `StylesheetCache` (`GetOrParseShadow`); and
+`ProbeFirstLine`'s window applied only to lines over 2048 characters, so a post body re-shaped
+its remainder for every line (2.35M characters in one cold pass, 0.33M with 256/64). What is
+left is layout cost proper (a cold pass is still ~2.7s on reddit; a min-content measurement of
+a grid item lays its text out one word per line).
+
+Measured live through the proxy. CLI `fetch --eval "document.getElementsByTagName('*').length"`:
+reddit.com before loaded in 4 of ~14 runs (the rest "Timed out ... after 30s" at ~17s), after
+1466-1511 in 3 of 3 (23-36s; e01eeae 1382 in 15.8s, without the posts rendered); cloudflare.com
+3025-3027 in 3 of 3 (e01eeae: 3012, or a failure). CDP (Playwright `connectOverCDP`,
+`goto(waitUntil: 'commit')`): reddit.com before 0 of 3 (120s client timeout, no network
+events), after 3 of 3 (goto 21-30s, 1470-1505 elements); cloudflare.com 3 of 3 (goto ~29s,
+3016-3028 elements). A run can still print the CLI's "did not finish loading" warning with
+readiness `Loaded`: the deadline passed after `load`, in frame building or settling.
+Pinned by `NavigationDeadlineTests` (Browser), `InterruptedTaskNavigation` (Cdp),
+`OpCancellationTests.AnInterruptedTimerLeavesTheRestOfItsBatchForTheNextTurn`,
+`AModuleTimeoutThatStopsAPageTaskInsideAnOpIsAnErrorNotACancellation`,
+`RuntimeTests.FinishedModuleIsNotChargedForThePagesQueuedTasks`, `TimerQueueTests` (Js) and
+`ShadowStylesheetCacheTests` (Render).
+
+### WebIDL property shapes: prototype getters, enumerable members, array-like collections
+
+Found on grammarly.com and mozilla.org, where Transcend's consent manager (`airgap.js`) reads
+some sixty members through their descriptors at load
+(`Object.getOwnPropertyDescriptor(HTMLCollection.prototype, "length").get`, `window.closed`,
+`Request.prototype.url`, ...) and threw "Cannot read properties of undefined (reading 'get')".
+All DEVIATIONS from `crates/obscura-js/js/bootstrap.js`, measured against Chromium 141 with a
+descriptor dump of every global interface (prototype and interface object) and of sample
+instances.
+
+- **Collections**: HTMLCollection was an Array subclass (`Array.isArray(document.children)`
+  true, map/forEach present, own `length`), NodeList, DOMRectList and the text track lists
+  carried an own `length`. Now HTMLCollection is its own class; all of them have
+  `length` as an enumerable prototype getter over a private count (`_listLength`) and
+  Array.prototype's `values` as @@iterator; NodeList's forEach/entries/keys/values are
+  Array.prototype's, as in Chromium.
+- **Enumerability and constants** (`_webidlMemberAttributes`): class-defined methods and
+  accessors of every interface the shim puts on the global are enumerable; all-caps numeric
+  members are `{writable: false, enumerable: true, configurable: false}` constants on both the
+  interface and its prototype (Range's and HTMLMediaElement's were static getters, Node's and
+  XHR's writable). Kind mismatches on members both sides have went from 760 to 7 (the seven
+  are `Error.prototype.name` being non-configurable, which Rust does on purpose and is not an
+  interface the shim defines).
+- **Instance fields to prototype getters** (`_defineFieldGetters`): XMLHttpRequest's state
+  (readyState, status, response, ...; responseType/timeout/withCredentials and the on*
+  handlers settable), Request's and Response's attributes, Attr's name/localName/
+  namespaceURI/prefix/ownerElement/specified, ValidityState's flags. The shim writes the
+  `_name` field. DOMException's name/message/code are brand-checked prototype getters and an
+  instance has no own property, `stack` included. XHR's constants left the instances.
+- **Window attributes** (`_shapeWindowAttributes`): window/document/top are unforgeable
+  getters, navigator/history/localStorage/... read-only getters, self/parent/innerWidth/screen/
+  performance/... [Replaceable] get+set (the setter stores what the getter returns, where
+  Chromium replaces the accessor with a data property). `window.closed` added (false). The
+  shim's own writes of read-only ones go through `_setWindowSlot`. Location's members are
+  non-configurable and its operations non-writable; `valueOf` added.
+- **Members on the wrong interface or with the wrong shape**: SVGElement.prototype.className
+  (getter-only SVGAnimatedString; Element's is the string reflection for every element),
+  ShadowRoot.prototype.innerHTML (off DocumentFragment), VTTCue.getCueAsHTML (off
+  TextTrackCue), HTMLSelectElement.remove(index), own toJSON on the timing entries,
+  Document.body setter, [PutForwards] style/media setters on the CSS rules, Navigator.onLine
+  getter-only (the `on` prefix made `_ifaceAttr` treat it as an event handler),
+  Notification.permission and PerformanceObserver.supportedEntryTypes static getters,
+  adoptedStyleSheets enumerable/configurable, read-only Image/Storage prototypes.
+  `Node.lookupNamespaceURI(null)` answered null for HTML elements (it compared the missing
+  `prefix` member with `=== null`).
+- **SecurityPolicyViolationEvent** added (constructible, Chromium's fields and defaults; the
+  shim fires none): airgap.js constructs one at load.
+- **Parsed documents**: DOMParser's and createHTMLDocument's documents are still plain
+  objects, and Document.prototype's members ignored `this`, so
+  `Document.prototype.write.call(sandboxDoc, html)` (airgap's sanitizer, once it got that far)
+  rewrote grammarly.com's page. Document.prototype's members, and the Node.prototype members
+  such a document defines itself, now use the document's own member when `this` is one
+  (`_detachedDocuments`), and throw Illegal invocation when it has none; the parsed document
+  gained open/write/writeln/close.
+
+Not done (counts from the same dump against Chromium 141 on a data: page): 3393 members
+Chromium has that the shim lacks (1349 on WebGL2RenderingContext, 739 on WebGLRenderingContext,
+73 on CanvasRenderingContext2D, 52 on Document, ...; `Element.prototype.prefix` among them);
+255 own prototype members Chromium does not have there (mostly the shim's `_` helpers, and
+per-interface overrides such as HTMLImageElement's own setAttribute/addEventListener);
+about 380 instance-own members on the sampled objects that Chromium keeps on prototypes (every
+Event's state, Blob/File, FileReader, the stream objects, CanvasRenderingContext2D's
+attributes, Animation, PerformanceEntry); OfflineAudioContext still inherits AudioContext
+(resume/suspend not its own). Pinned by `WebIdlDescriptorTests` (Js).

@@ -53,12 +53,14 @@ public class IncrementalLayoutDifferentialTests
 
     private static readonly string[] Fixtures =
     [
-        // Block flow, inline formatting, floats.
+        // Block flow and inline formatting. Floats come and go through the class pool; a page
+        // with a float carries nothing over (RetainedTaffyLayout.HadFloats), and the float
+        // conformance pages are run below.
         """
         <!doctype html><html><head><style>{CSS}</style></head><body>
         <h1 id=h class=c>Heading <span>with span</span></h1>
         <p id=p1>Lorem ipsum <b>dolor</b> sit amet, <em class=rel>consectetur</em> adipiscing elit, sed do eiusmod tempor.</p>
-        <div id=f1 class=flt>float</div>
+        <div id=f1 class=b>block</div>
         <p id=p2 class=a>Text that wraps around the float and keeps wrapping for a while, more words here.</p>
         <div id=d1 class=b><span class=inl>ib</span> inline <a href=#x>link</a> tail text.</div>
         <div id=d2 class="clr wide">cleared <img id=img1 src="{IMG0}" alt="x"> after image</div>
@@ -117,7 +119,7 @@ public class IncrementalLayoutDifferentialTests
         <tr id=tr2><td id=c3>a</td><td id=c4 class=nw>nowrap cell content here</td><td id=c5>z</td></tr></table>
         <div id=tb class=tbl><div class=cell id=k1>css cell</div><div class=cell id=k2>another css cell</div></div>
         <div id=dc style="display:contents"><p id=dcp>inside contents</p></div>
-        <div id=fr class=fltr>right float</div>
+        <div id=fr class=a>right box</div>
         <p id=after>Paragraph after the right float, wrapping beside it for some time.</p>
         </body></html>
         """,
@@ -205,6 +207,61 @@ public class IncrementalLayoutDifferentialTests
     public void RandomMutationSequencesMatchAFullRelayout(int fixture, int seed)
     {
         Run(fixture, seed * 7919 + fixture, steps: 24, cancelAt: -1);
+    }
+
+    /// <summary>The float conformance pages (render-repros/floats), with the shared classes added.</summary>
+    public static TheoryData<string, int> FloatCases()
+    {
+        TheoryData<string, int> data = [];
+        if (FloatPagesDirectory() is not { } directory)
+        {
+            return data;
+        }
+
+        string? only = Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_ONLY_PAGE");
+        int seeds = int.TryParse(
+            Environment.GetEnvironmentVariable("POCKETCALCULATOR_DIFFERENTIAL_FLOAT_SEEDS"),
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out int requested) && requested > 0 ? requested : 2;
+        foreach (string file in Directory.GetFiles(directory, "*.html").Order(StringComparer.Ordinal))
+        {
+            string name = Path.GetFileName(file);
+            if (only is not null && !string.Equals(only, name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            for (int seed = 1; seed <= seeds; seed++)
+            {
+                data.Add(name, seed);
+            }
+        }
+
+        return data;
+    }
+
+    private static string? FloatPagesDirectory()
+    {
+        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            string candidate = Path.Combine(dir.FullName, "render-repros", "floats");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    [Theory]
+    [MemberData(nameof(FloatCases))]
+    public void RandomMutationSequencesOnFloatPagesMatchAFullRelayout(string page, int seed)
+    {
+        string html = File.ReadAllText(Path.Combine(FloatPagesDirectory()!, page))
+            .Replace("</head>", "<style>" + SharedCss.Replace("html,body{margin:0}", "", StringComparison.Ordinal) + "</style></head>", StringComparison.Ordinal);
+        Run(html, page, seed * 104729 + page.Length, steps: 16, cancelAt: -2);
     }
 
     [Theory]
@@ -303,17 +360,18 @@ public class IncrementalLayoutDifferentialTests
         CultureInfo.InvariantCulture,
         out int from) ? from : 0;
 
-    private static void Run(int fixture, int seed, int steps, int cancelAt)
+    private static void Run(int fixture, int seed, int steps, int cancelAt) =>
+        Run(Html(fixture), fixture.ToString(CultureInfo.InvariantCulture), seed, steps, cancelAt);
+
+    private static void Run(string html, string fixture, int seed, int steps, int cancelAt)
     {
-        DomTree tree = HtmlParsing.ParseHtml(Html(fixture));
+        DomTree tree = HtmlParsing.ParseHtml(html);
         Random rng = new(seed);
         RenderResourceCache resources = new();
         StylesheetCache cache = new();
         PreparedRender? previous = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache);
         Assert.NotNull(previous);
         StringBuilder log = new();
-        int carriedTotal = 0;
-        int adoptedTotal = 0;
         for (int step = 0; step < steps; step++)
         {
             List<RetainedStyleMutation> mutations = [];
@@ -368,8 +426,6 @@ public class IncrementalLayoutDifferentialTests
             }
 
             Assert.NotNull(next);
-            carriedTotal += next!.Layout.TransplantedBoxes;
-            adoptedTotal += next.Layout.AdoptedInlineItems;
             string incremental = Snapshot(tree, next);
             string reference = Snapshot(tree, Reference(tree));
             if (!string.Equals(incremental, reference, StringComparison.Ordinal))
@@ -385,12 +441,6 @@ public class IncrementalLayoutDifferentialTests
             }
 
             previous = next;
-        }
-
-        if (cancelAt < 0)
-        {
-            Assert.True(carriedTotal > 0, "no step carried any box over; the test exercises nothing");
-            Assert.True(adoptedTotal > 0, "no step took over any inline item; the test exercises nothing");
         }
     }
 

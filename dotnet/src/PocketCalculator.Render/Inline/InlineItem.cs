@@ -95,6 +95,27 @@ public sealed class InlineItem
     internal Dimension TextIndent { get; init; }
 
     /// <summary>
+    /// The buffer as built, before a float layout split its lines; captured by the first
+    /// layout around floats so a later layout without them starts from the original paragraphs.
+    /// Null for an IFC never laid out beside a float.
+    /// </summary>
+    internal TextBuffer? PristineBuffer { get; set; }
+
+    /// <summary>
+    /// The float exclusions of the last final layout of this IFC, relative to its content box,
+    /// which <see cref="TextEngine.Finalize"/> lays the lines out around again. Null when no
+    /// float shortens its line boxes.
+    /// </summary>
+    internal Layout.FloatBands? FloatBands { get; set; }
+
+    /// <summary>
+    /// Floats in the inline content and the text offset each sits at, in order; the block
+    /// formatting context places each on (or below) the line holding its offset. Null when the
+    /// IFC holds none.
+    /// </summary>
+    internal List<(NodeId Float, int Offset)>? FloatAnchors { get; set; }
+
+    /// <summary>
     /// Used LTR paint offset for the first formatted line at the most recently shaped width.
     /// Later lines retain the ordinary content-box origin.
     /// </summary>
@@ -248,7 +269,7 @@ internal static class InlineGeometry
             int lineStart = run.LineIndex < lineStarts.Count ? lineStarts[run.LineIndex] : 0;
             int lineEnd = lineStart + run.Text.Length;
             float edges = LineEdgeAdvance(item, lineStart, lineEnd);
-            w = F32.Max(w, F32.Max(run.LineW + offset + edges, 0f));
+            w = F32.Max(w, F32.Max(run.LineW + run.X + offset + edges, 0f));
             h = F32.Max(h, run.LineTop + run.LineHeight);
             if (run.Glyphs.Count != 0)
             {
@@ -330,12 +351,12 @@ internal static class InlineGeometry
 
         if (index == 0)
         {
-            return run.Glyphs.Count > 0 ? run.Glyphs[0].X : 0f;
+            return run.Glyphs.Count > 0 ? run.Glyphs[0].X : run.X;
         }
 
         return run.Glyphs.Count > 0
             ? run.Glyphs[^1].X + run.Glyphs[^1].W
-            : run.LineW;
+            : run.X + run.LineW;
     }
 
     public static (float X, float Y) GlyphRelativeOffset(

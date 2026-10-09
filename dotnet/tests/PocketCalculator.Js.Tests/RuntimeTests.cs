@@ -17451,6 +17451,20 @@ public sealed partial class RuntimeTests
     }
 
     [Fact]
+    public async Task FinishedModuleIsNotChargedForThePagesQueuedTasks()
+    {
+        // A module without a top-level await has run when its body returns. Driving the
+        // loop first ran the page's queued timers on the module's budget and reported a
+        // module that had finished as timed out.
+        using var rt = PocketCalculatorJsRuntime.WithBaseUrl("https://example.com/");
+        rt.Evaluate("(() => { setTimeout(() => { const until = Date.now() + 1000; while (Date.now() < until) {} }, 0); return 0; })()");
+
+        await rt.LoadInlineModuleAsync("globalThis.__finished = true;", "https://example.com/", 200);
+
+        Assert.True(rt.Evaluate("globalThis.__finished")!.GetValue<bool>());
+    }
+
+    [Fact]
     public async Task SuccessfulInlineModuleDoesNotWaitForIntervalIdle()
     {
         // Ported from crates/obscura-js/src/runtime.rs. The Rust body is kept verbatim so the test

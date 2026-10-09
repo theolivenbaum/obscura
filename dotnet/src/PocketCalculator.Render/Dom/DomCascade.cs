@@ -1153,10 +1153,16 @@ internal static class DomCascade
     /// <summary>
     /// Compile one author stylesheet per native ShadowRoot.
     /// </summary>
+    /// <remarks>
+    /// Roots whose ordered sources are identical share one compiled sheet, and with a
+    /// <paramref name="cache"/> the sheets outlive the pass (<see cref="StylesheetCache.GetOrParseShadow"/>).
+    /// DEVIATION from crates/obscura-render, which parses each root's sheet on every pass.
+    /// </remarks>
     internal static Dictionary<NodeId, Stylesheet> CollectShadowStylesheets(
         DomTree tree,
         (float Width, float Height) viewport,
-        CssMediaType mediaType)
+        CssMediaType mediaType,
+        StylesheetCache? cache = null)
     {
         List<NodeId> roots = [];
         List<NodeId> stack = [tree.Document];
@@ -1188,6 +1194,13 @@ internal static class DomCascade
         }
 
         Dictionary<NodeId, Stylesheet> sheets = [];
+        if (roots.Count == 0)
+        {
+            return sheets;
+        }
+
+        cache ??= new StylesheetCache();
+        cache.BeginShadowPass(viewport, mediaType);
         foreach (NodeId root in roots)
         {
             List<string> sources = [];
@@ -1229,9 +1242,10 @@ internal static class DomCascade
                 }
             }
 
-            sheets[root] = Stylesheet.ParseForViewportAndMedia(tree, sources, viewport, mediaType);
+            sheets[root] = cache.GetOrParseShadow(tree, sources);
         }
 
+        cache.EndShadowPass();
         return sheets;
     }
 }

@@ -2012,13 +2012,19 @@ public sealed class LayoutStyle
     /// <summary>`scrollbar-width: thin` gutter width, matching Chromium on this platform.</summary>
     internal const float ThinScrollbarGutter = 10f;
 
-    /// <summary><c>float: left|right</c>.</summary>
+    /// <summary><c>float: left|right</c>, physical (logical values are mapped by direction).</summary>
     /// <remarks>
-    /// True CSS float needs per-line reflow around the float's shape, which taffy's
-    /// block/flex/grid modes do not do; see the DOM float-zone grouping for the bounded
-    /// approximation this drives.
+    /// Laid out as a CSS float by the block formatting context (taffy's float context plus
+    /// the text engine's line boxes around it); see <c>DomBuild.BuildMixedBlock</c>.
     /// </remarks>
     public Float? Float;
+
+    /// <summary>
+    /// Bit 1: <see cref="Float"/> came from <c>inline-start</c>/<c>inline-end</c>; bit 2: so did
+    /// <see cref="Clear"/>. Both are stored as their left-to-right side and swapped for a
+    /// right-to-left element once its direction is known.
+    /// </summary>
+    public byte LogicalFloatClear;
 
     /// <summary><c>visibility: hidden|visible</c>, own value.</summary>
     /// <remarks>
@@ -2142,8 +2148,8 @@ public sealed class LayoutStyle
     public int? ZIndex;
 
     /// <summary>
-    /// <c>clear</c>, when set: this element moves below preceding floats on the given side(s),
-    /// ending their float zone.
+    /// <c>clear</c>, when set: this element moves below preceding floats on the given side(s)
+    /// (CSS 2.1 9.5.2 clearance).
     /// </summary>
     public Clear? Clear;
 

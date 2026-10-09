@@ -1617,10 +1617,13 @@ public class DomLayoutTests
             Assert.True(MathF.Abs(rect.X - (index * 195f)) < 0.01f, $"{ids[index]}: {rect}");
         }
 
+        // Chromium 141: 780 x 0. The container is not a block formatting context root, so its
+        // floats do not give it height (CSS 2.1 10.6.3); the float-zone row this used to assert
+        // 150 for wrapped them in a flex row that did.
         Rect container = laid.Rects[Id(tree, "container")];
         Assert.True(
-            MathF.Abs(container.Height - 150f) < 0.01f,
-            $"one float band must be as tall as its tallest float: {container}");
+            MathF.Abs(container.Height) < 0.01f,
+            $"floats in a non-BFC block must not give it height: {container}");
     }
 
     [Fact]

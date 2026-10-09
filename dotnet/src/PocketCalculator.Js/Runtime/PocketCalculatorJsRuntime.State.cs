@@ -111,7 +111,10 @@ public sealed partial class PocketCalculatorJsRuntime
     void IPostedTaskSpawner.Spawn(Action<double> deliver)
     {
         ArgumentNullException.ThrowIfNull(deliver);
-        _postedTasks.Enqueue(deliver);
+        lock (_postedTasks)
+        {
+            _postedTasks.Enqueue(deliver);
+        }
     }
 
     partial void BeginAnimationTask() => RenderState.BeginAnimationTask(State);

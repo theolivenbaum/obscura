@@ -83,6 +83,13 @@ internal sealed class RetainedTaffyLayout
 
     internal required TextEngine Engine { get; init; }
 
+    /// <summary>
+    /// Whether the pass had a float. Nothing is carried over from or into such a pass: a float's
+    /// exclusions reach every box and inline item of its block formatting context, and taffy
+    /// computes same-BFC layout uncached there.
+    /// </summary>
+    internal required bool HadFloats { get; init; }
+
     /// <summary>The whole-container inline item each element got, by item index in <see cref="Engine"/>.</summary>
     internal required IReadOnlyDictionary<NodeId, int> Whole { get; init; }
 
