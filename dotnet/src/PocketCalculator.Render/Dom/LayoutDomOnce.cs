@@ -1488,7 +1488,15 @@ public static partial class RenderDom
         Dictionary<NodeId, List<((int Item, int Line) Order, Rect Rect)>> fragments = [];
         Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
         Dictionary<NodeId, (float Ascent, float Descent)> fontBoxes = [];
-        List<InlineOwnerLineFragment> lineFragments = engine.InlineOwnerLineFragments();
+        // A culled inline box (no box fragment of its own) is split where a float sits in it.
+        bool Culled(NodeId owner) =>
+            styles.TryGetValue(owner, out LayoutStyle? ownerStyle)
+            && ownerStyle.Position is null
+            && !ownerStyle.PositionSticky
+            && ownerStyle.BackgroundColor is not { A: > 0 }
+            && ownerStyle.BackgroundGradient is null
+            && ownerStyle.BackgroundImage is null;
+        List<InlineOwnerLineFragment> lineFragments = engine.InlineOwnerLineFragments(Culled);
         LayoutPhaseProfile.Mark("ownerLines");
         foreach (InlineOwnerLineFragment shaped in lineFragments)
         {

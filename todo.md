@@ -904,7 +904,7 @@ thumbnails, a sidebar and float columns 406.9 -> 347.3 ms; screenshots of the 57
 `render-repros/` and bench pages are byte-identical except the two whose animation makes the
 base build differ from itself. A paragraph of 2,000 anchored floats lays out in about a second.
 
-Status: 60 of 61 conformance pages match Chromium (element boxes within 1px, inline line
+Status: 61 of 61 conformance pages match Chromium (60 before floats split inline fragments; element boxes within 1px, inline line
 fragments within 2px; 56 before line alignment was fixed, see "Line alignment follows
 text-align, white-space and direction" under Known deviations), and 7 of the 8 older float pages at the top of `render-repros/` (the
 eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
@@ -917,8 +917,14 @@ where Chromium gives an empty box after it, as before). Open:
 - [x] `Range.getClientRects()` was a stub returning the element's box; it is measured from the
       line fragments now (see "Range rects come from the line fragments" under Known
       deviations)
-- [ ] an inline box split by a float inside it reports one fragment where Chromium reports
-      two (`float-in-inline`)
+- [x] an inline box split by a float inside it reported one fragment where Chromium reports
+      two (`float-in-inline`): a culled inline box (no inline border, padding or margin, no
+      background, not positioned) is split where a float is anchored strictly inside it on a
+      line, a decorated one keeps one fragment (`InlineOwnerLineFragments(culled)`); a float
+      inside an inline box the run keeps (one with a border or padding) is anchored too, where
+      the run used to become a flex row holding the float; and a float after the space a line
+      wraps at is on that line, which the space does not count against (Chromium 141 keeps a
+      20px float beside "Before long words " in 150px). `FloatInInlineTests`; 61 of 61 pages
 - [x] right-to-left paragraphs started at the left, and centred/right-aligned lines counted
       their trailing space (the `rtl`/`text-align-*`/`control-no-float` pages); fixed with line
       alignment

@@ -1314,9 +1314,22 @@ public sealed partial class TextEngine : IDisposable
                 next++;
             }
 
+            // A float after the space a line wraps at is met before the line breaks, so it is on
+            // that line (Chromium 141), not at the start of the next.
+            int endWithSpace = end;
+            while (endWithSpace >= 0 && endWithSpace < run.Text.Length && run.Text[endWithSpace] == ' ')
+            {
+                endWithSpace++;
+            }
+
             while (next < offsets.Length
                 && offsets[next] >= lineStart
-                && (run.Glyphs.Count == 0 || offsets[next] - lineStart < end))
+                && (run.Glyphs.Count == 0
+                    || offsets[next] - lineStart < end
+                    || (endWithSpace > 0
+                        && endWithSpace <= run.Text.Length
+                        && run.Text[endWithSpace - 1] == ' '
+                        && offsets[next] - lineStart <= endWithSpace)))
             {
                 result[next] = AnchorOn(run, offsets[next] - lineStart);
                 next++;
@@ -1337,8 +1350,20 @@ public sealed partial class TextEngine : IDisposable
 
         return result;
 
-        static (float Top, float Height, float Width, float Used) AnchorOn(LayoutRun line, int local)
+        (float Top, float Height, float Width, float Used) AnchorOn(LayoutRun line, int local)
         {
+            // DEVIATION from vendor/taffy's float context, which has no anchored floats: white
+            // space the line would remove if it ended at the float does not count against it.
+            // Chromium 141 keeps a 20px float on a 150px line holding "Before long words "
+            // (128.97 without the space, 133.42 with it).
+            if (item.Buffer.Lines[line.LineIndex].AlignOptions.Trailing == TrailingSpace.Removed)
+            {
+                while (local > 0 && local <= line.Text.Length && line.Text[local - 1] == ' ')
+                {
+                    local--;
+                }
+            }
+
             float lineStartX = line.Glyphs.Count > 0 ? F32.Min(line.Glyphs[0].X, line.X) : line.X;
             float used = F32.Max(InlineGeometry.RunCursorX(line, Math.Max(local, 0)) - lineStartX, 0f);
             return (line.LineTop, line.LineHeight, line.LineWidth, used);
@@ -1588,7 +1613,21 @@ public sealed partial class TextEngine : IDisposable
     /// Provenance is a sidecar rather than glyph metadata, so changing DOM owners never creates
     /// a font-shaping boundary or disables ligatures.
     /// </remarks>
-    public List<InlineOwnerLineFragment> InlineOwnerLineFragments()
+    public List<InlineOwnerLineFragment> InlineOwnerLineFragments() => InlineOwnerLineFragments(null);
+
+    /// <summary>
+    /// <see cref="InlineOwnerLineFragments()"/>, with the fragments of every owner
+    /// <paramref name="culled"/> accepts split where a float is anchored inside it.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from crates/obscura-render/src/inline.rs, which has no anchored floats. Blink
+    /// reports the client rects of a culled inline box (one with no box fragment of its own: no
+    /// inline border, padding or margin, no background, not positioned) from its pieces of
+    /// text, and a float anchored inside it separates them: Chromium 141 gives
+    /// <c>&lt;em&gt;emph &lt;float/&gt;after&lt;/em&gt;</c> two rects on one line, meeting where
+    /// the float sits in the text, and a decorated one a single rect.
+    /// </remarks>
+    internal List<InlineOwnerLineFragment> InlineOwnerLineFragments(Func<NodeId, bool>? culled)
     {
         List<InlineOwnerLineFragment> output = [];
         Dictionary<(NodeId Owner, int Line), int> existingByOwner = [];
@@ -1776,6 +1815,43 @@ public sealed partial class TextEngine : IDisposable
                     float x = item.Origin.X + firstLineOffset + alignmentShift + rawLeft;
                     float width = F32.Max(rawRight - rawLeft, 0f);
                     float baselineY = item.Origin.Y + OwnerBaselineY(run, owner.Extent);
+
+                    if (culled is not null
+                        && !lineHasRtl
+                        && !empty
+                        && item.FloatAnchors is { Count: > 0 } floats
+                        && owner.StartEdge.Advance == 0f
+                        && owner.EndEdge.Advance == 0f
+                        && culled(owner.Owner))
+                    {
+                        float pieceLeft = x;
+                        bool split = false;
+                        foreach ((NodeId _, int anchor) in floats)
+                        {
+                            if (anchor <= owner.Start || anchor >= owner.End || anchor <= lineStart || anchor >= lineEnd)
+                            {
+                                continue;
+                            }
+
+                            float at = item.Origin.X + firstLineOffset + alignmentShift
+                                + CursorX(anchor - lineStart)
+                                + InlineGeometry.LineAdvanceBeforeText(item, anchor, lineStart, lineEnd);
+                            if (at <= pieceLeft || at >= x + width)
+                            {
+                                continue;
+                            }
+
+                            output.Add(new InlineOwnerLineFragment(owner.Owner, itemIndex, lineIndex, pieceLeft, baselineY, at - pieceLeft));
+                            pieceLeft = at;
+                            split = true;
+                        }
+
+                        if (split)
+                        {
+                            output.Add(new InlineOwnerLineFragment(owner.Owner, itemIndex, lineIndex, pieceLeft, baselineY, x + width - pieceLeft));
+                            continue;
+                        }
+                    }
 
                     // Keyed lookup: a linear search of the output made nested inline boxes,
                     // which put every open owner on every line, quadratic in fragments.
