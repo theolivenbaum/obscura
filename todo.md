@@ -5910,3 +5910,17 @@ about 380 instance-own members on the sampled objects that Chromium keeps on pro
 Event's state, Blob/File, FileReader, the stream objects, CanvasRenderingContext2D's
 attributes, Animation, PerformanceEntry); OfflineAudioContext still inherits AudioContext
 (resume/suspend not its own). Pinned by `WebIdlDescriptorTests` (Js).
+
+### A fixed-width box ends the cyclic-percentage walk
+
+`DeferCyclicFlexInlineSizes` (`Dom/DomPassesSubgrid.cs`) walks up from a percentage inline
+size to the content-sized flex item that makes it cyclic. `dom.rs` climbs past every box on
+the way; the port stops at a box whose `width` is a fixed `px` length (not a table part, not
+a flexible row flex item, which the walk still reports first), because that box is the
+percentage's basis and nothing above it can make the percentage cyclic (CSS Sizing 3 5.2.1).
+youtube.com's logo is `ytd-logo > yt-icon (inline-flex, 93x20) > span (flex, 100%) > div
+(100%) > svg (100%, viewBox only)` inside a content-sized flex item: the 100% was
+neutralized, the span's automatic minimum was re-derived from the SVG's 300px default object
+size, and the logo drew 300x65 where Chromium 141 draws 93x20. Pinned by
+`AtomicInlineSizingTests.PercentageUnderFixedWidthBoxIsNotCyclicThroughContentSizedFlexItem`
+and `render-repros/svg-percent-under-fixed-icon.html`.

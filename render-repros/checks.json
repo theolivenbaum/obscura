@@ -351,6 +351,10 @@
     {"name": "text alignment does not shrink a flex item", "color": "#087f5b", "x": 20, "y": 20, "width": 360, "height": 80},
     {"name": "inherited text alignment centers inline content", "color": "#c2255c", "x": 150, "y": 100, "width": 100, "height": 20}
   ],
+  "svg-percent-under-fixed-icon": [
+    {"name": "100% svg under a fixed-width inline-flex icon keeps the icon width", "color": "#e03131", "x": 16, "y": 10, "width": 93, "height": 20},
+    {"name": "100% svg under a fixed-width flex box keeps the box width", "color": "#1971c2", "x": 0, "y": 40, "width": 120, "height": 30}
+  ],
   "supports-var-feature-query": [
     {"name": "variable feature query enables implemented grid support", "color": "#2f9e44", "x": 0, "y": 0, "width": 240, "height": 40}
   ],
