@@ -43,6 +43,15 @@ const _hostVars = { __proto__: null };
 // The globals V8 and ClearScript defined before this file ran: the language's own
 // built-ins, which _shapeGlobalObject leaves as V8 made them.
 const _engineGlobalNames = new Set(Object.getOwnPropertyNames(globalThis));
+// The values behind the window's attribute accessors (see _shapeWindowAttributes). Until
+// that pass runs at the end of bootstrap they are plain data properties of the global.
+const _winSlots = { __proto__: null };
+let _winShaped = false;
+// The shim's own write of a window attribute that is read-only to page script.
+function _setWindowSlot(name, value) {
+  if (_winShaped) _winSlots[name] = value;
+  else globalThis[name] = value;
+}
 // DEVIATION from crates/obscura-js/js/bootstrap.js: the privileged paths that read an op's
 // JSON (internal loads, frames) use JSON.parse as it was before any page script ran, not
 // whatever the page has put on the global since (SECURITY.md C3).
@@ -418,6 +427,57 @@ function _markNative(fn) { if (typeof fn === 'function') _nativeFns.add(fn); ret
 // Mark a function with an exact native-code toString (used for accessors).
 function _markNativeAs(fn, str) { if (typeof fn === 'function') _nativeStr.set(fn, str); return fn; }
 _nativeFns.add(_functionToString);
+
+// The length of the shim's array-like interface objects (HTMLCollection, NodeList,
+// DOMRectList, the text track lists), keyed by the object (and by the Proxy that
+// fronts an HTMLCollection). Chromium keeps `length` as an enumerable getter on each
+// interface's prototype, with no own `length` on the instance, and scripts read it
+// through the descriptor: Transcend's airgap.js runs
+// `Object.getOwnPropertyDescriptor(HTMLCollection.prototype, "length").get` at load
+// (grammarly.com, mozilla.org). DEVIATION from crates/obscura-js/js/bootstrap.js, where
+// HTMLCollection extends Array and NodeList/DOMRectList carry an own `length`.
+const _listLength = _private(new WeakMap());
+const _listLengthGetter = _markNative(Object.getOwnPropertyDescriptor({
+  get length() {
+    const n = (this !== null && typeof this === 'object') ? _listLength.get(this) : undefined;
+    if (n === undefined) throw new TypeError('Illegal invocation');
+    return n;
+  },
+}, 'length').get);
+function _defineListLength(C) {
+  _defineProperty(C.prototype, 'length', { get: _listLengthGetter, set: undefined, enumerable: true, configurable: true });
+}
+// Read-only attributes the shim keeps in an own `_name` field: Chromium has them as
+// enumerable getters on the interface's prototype (brand-checked, "Illegal invocation" off
+// an instance), where the shim (and Rust) assigned them as own data properties of each
+// instance, so `Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'status')` was
+// undefined. Transcend's airgap.js reads Request's, XMLHttpRequest's, Attr's and
+// ValidityState's at load (grammarly.com, mozilla.org). The shim's own code writes the
+// `_name` field. DEVIATION from crates/obscura-js/js/bootstrap.js.
+function _defineFieldGetters(C, names) {
+  const P = C.prototype;
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const field = '_' + name;
+    const get = _getOwnPropertyDescriptor({ get [name]() {
+      if (this === null || typeof this !== 'object' || !_objectIsPrototypeOfAtBoot(P, this)) throw new TypeError('Illegal invocation');
+      return this[field];
+    } }, name).get;
+    _defineProperty(P, name, { get: _markNative(get), set: undefined, enumerable: true, configurable: true });
+  }
+}
+// The same for read/write attributes: a setter that stores the value in the field.
+function _defineFieldAccessors(C, names) {
+  const P = C.prototype;
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const field = '_' + name;
+    const check = (o) => { if (o === null || typeof o !== 'object' || !_objectIsPrototypeOfAtBoot(P, o)) throw new TypeError('Illegal invocation'); };
+    const get = _getOwnPropertyDescriptor({ get [name]() { check(this); return this[field]; } }, name).get;
+    const set = _getOwnPropertyDescriptor({ set [name](v) { check(this); this[field] = v; } }, name).set;
+    _defineProperty(P, name, { get: _markNative(get), set: _markNative(set), enumerable: true, configurable: true });
+  }
+}
 
 // unusualWindowProperties: fingerprinting scripts enumerate the global object with
 // Object.getOwnPropertyNames and Reflect.ownKeys (pixelscan's unusualWindowProperties
@@ -4504,7 +4564,7 @@ class NamedNodeMap {
     const value = this._element.getAttribute(name);
     if (value === null) return null;
     const attr = new Attr(name, value, null, null);
-    attr.ownerElement = this._element;
+    attr._ownerElement = this._element;
     return attr;
   }
   get length() { return this._names().length; }
@@ -4904,15 +4964,11 @@ class Element extends Node {
   }
   get id() { return this.getAttribute("id") || ""; }
   set id(v) { this.setAttribute("id", v); }
-  get className() {
-    // SVG elements reflect class as an SVGAnimatedString (.baseVal/.animVal),
-    // not a plain string. Anti-fraud sensors read el.className.animVal.
-    if (this.namespaceURI === "http://www.w3.org/2000/svg") {
-      if (!this._svgClassName) this._svgClassName = new SVGAnimatedString(this, "class");
-      return this._svgClassName;
-    }
-    return this.getAttribute("class") || "";
-  }
+  // Element's className is the string reflection for every element, SVG ones included
+  // when called through Element.prototype's descriptor; SVGElement.prototype has its own
+  // getter-only className (an SVGAnimatedString), as in Chromium. The shim had the SVG
+  // branch here, so SVGElement.prototype had no className of its own.
+  get className() { return this.getAttribute("class") || ""; }
   set className(v) { this.setAttribute("class", v); }
   get namespaceURI() {
     // createElementNS records the requested namespace on _ns; an empty string
@@ -4937,7 +4993,7 @@ class Element extends Node {
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
   set innerHTML(v) {
     if (this.localName === 'template') {
-      this.content.innerHTML = v;
+      _reflectApply(_fragmentInnerHTML.set, this.content, [v]);
       return;
     }
     // Capture the children that are about to be replaced so we can deliver
@@ -7193,6 +7249,21 @@ class Document extends Node {
   // from script-visible methods. DEVIATION from crates/obscura-js/js/bootstrap.js.
   get head() { return _documentQuery(this, "head"); }
   get body() { return _documentQuery(this, "body"); }
+  // The body setter (HTML "The body element"), which Chromium has and the shim lacked:
+  // replace the current body, or append to the document element.
+  set body(v) {
+    const tag = v && v.nodeType === 1 && v.namespaceURI === "http://www.w3.org/1999/xhtml" ? v.localName : null;
+    if (tag !== "body" && tag !== "frameset") {
+      throw new DOMException("Failed to set the 'body' property on 'Document': The new body element is of type '"
+        + (v && v.tagName ? v.tagName : String(v === null ? "null" : typeof v)) + "'. It must be either a 'BODY' or 'FRAMESET' element.", "HierarchyRequestError");
+    }
+    const current = this.body;
+    if (current === v) return;
+    if (current && current.parentNode) { current.parentNode.replaceChild(v, current); return; }
+    const root = this.documentElement;
+    if (!root) throw new DOMException("Failed to set the 'body' property on 'Document': No document element exists.", "HierarchyRequestError");
+    root.appendChild(v);
+  }
   get doctype() {
     if (this._doctype !== undefined) return this._doctype;
     const info = _domParse("document_doctype");
@@ -7940,19 +8011,33 @@ class TextTrackCue {
     this.onenter = null;
     this.onexit = null;
   }
+}
+// getCueAsHTML is VTTCue's, not TextTrackCue's, as in Chromium.
+class VTTCue extends TextTrackCue {
   getCueAsHTML() {
     const fragment = document.createDocumentFragment();
     fragment.appendChild(document.createTextNode(this.text));
     return fragment;
   }
 }
-class VTTCue extends TextTrackCue {}
-class TextTrackCueList extends Array {
+// The text track lists are array-likes with a prototype `length` getter, not Array
+// subclasses (DEVIATION from crates/obscura-js/js/bootstrap.js; see _listLength).
+// `item` stays as the shim's addition (Chromium has none).
+class TextTrackCueList {
+  constructor(items) {
+    const n = items ? items.length : 0;
+    for (let i = 0; i < n; i++) this[i] = items[i];
+    _listLength.set(this, n);
+  }
   getCueById(id) {
-    return this.find((cue) => cue && cue.id === String(id)) || null;
+    id = String(id);
+    for (let i = 0; i < this.length; i++) if (this[i] && this[i].id === id) return this[i];
+    return null;
   }
   item(index) { return this[index] || null; }
 }
+_defineListLength(TextTrackCueList);
+_defineProperty(TextTrackCueList.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, enumerable: false, configurable: true });
 class TextTrack extends Node {
   constructor(element, kind, label, language) {
     super();
@@ -7977,12 +8062,21 @@ class TextTrack extends Node {
     return this._cues;
   }
 }
-class TextTrackList extends Array {
+class TextTrackList {
+  constructor(items) {
+    const n = items ? items.length : 0;
+    for (let i = 0; i < n; i++) this[i] = items[i];
+    _listLength.set(this, n);
+  }
   item(index) { return this[index] || null; }
   getTrackById(id) {
-    return this.find((track) => track && track.id === String(id)) || null;
+    id = String(id);
+    for (let i = 0; i < this.length; i++) if (this[i] && this[i].id === id) return this[i];
+    return null;
   }
 }
+_defineListLength(TextTrackList);
+_defineProperty(TextTrackList.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, enumerable: false, configurable: true });
 function _vttTime(value) {
   const parts = String(value).trim().split(":").map(Number);
   if (parts.some((part) => !Number.isFinite(part))) return 0;
@@ -7991,8 +8085,8 @@ function _vttTime(value) {
   return parts[0] || 0;
 }
 function _parseWebVttCues(src) {
-  const cues = new TextTrackCueList();
-  if (!src || !src.startsWith("data:text/vtt")) return cues;
+  const cues = [];
+  if (!src || !src.startsWith("data:text/vtt")) return new TextTrackCueList(cues);
   let text = "";
   try {
     const comma = src.indexOf(",");
@@ -8001,7 +8095,7 @@ function _parseWebVttCues(src) {
     const body = src.slice(comma + 1);
     text = /;base64(?:;|$)/i.test(meta) ? atob(body) : decodeURIComponent(body);
   } catch (_error) {
-    return cues;
+    return new TextTrackCueList(cues);
   }
   const blocks = text.replace(/\r\n?/g, "\n").split(/\n{2,}/);
   for (const block of blocks) {
@@ -8015,7 +8109,7 @@ function _parseWebVttCues(src) {
     if (timingIndex > 0) cue.id = lines[timingIndex - 1].trim();
     cues.push(cue);
   }
-  return cues;
+  return new TextTrackCueList(cues);
 }
 
 function _imageEncodingError() {
@@ -8399,7 +8493,7 @@ class HTMLMediaElement extends HTMLElement {
   set src(v) { this.setAttribute('src', v); }
   get currentSrc() { return ""; }
   get textTracks() {
-    return TextTrackList.from(
+    return new TextTrackList(
       Array.from(_qsa(this, "track")).map((element) => element.track)
     );
   }
@@ -9409,8 +9503,10 @@ globalThis.chrome = {
   },
 };
 
+// `permission` is a static getter in Chromium, not a data property.
+let _notificationPermission = "default";
 globalThis.Notification = class Notification {
-  static permission = "default";
+  static get permission() { return _notificationPermission; }
   static requestPermission() { return Promise.resolve(Notification.permission); }
   constructor() {}
 };
@@ -10162,22 +10258,21 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   static HEADERS_RECEIVED = 2;
   static LOADING = 3;
   static DONE = 4;
-  UNSENT = 0; OPENED = 1; HEADERS_RECEIVED = 2; LOADING = 3; DONE = 4;
 
   constructor() {
     super();
-    this.readyState = 0;
-    this.status = 0;
-    this.statusText = "";
-    this.responseText = "";
-    this.responseXML = null;
-    this.responseURL = "";
+    this._readyState = 0;
+    this._status = 0;
+    this._statusText = "";
+    this._responseText = "";
+    this._responseXML = null;
+    this._responseURL = "";
     this.responseType = "";
-    this.response = null;
+    this._response = null;
     this.timeout = 0;
     this.withCredentials = false;
     // An XMLHttpRequestUpload (see the global interfaces at the end of this file).
-    this.upload = _objectCreate(_xhrUploadProto);
+    this._upload = _objectCreate(_xhrUploadProto);
     this._method = "GET";
     this._url = "";
     this._headers = {};
@@ -10208,10 +10303,10 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     this._headers = {};
     this._responseHeaders = {};
     this._aborted = false;
-    this.status = 0;
-    this.statusText = "";
-    this.responseText = "";
-    this.response = null;
+    this._status = 0;
+    this._statusText = "";
+    this._responseText = "";
+    this._response = null;
     this._setReadyState(1);
   }
 
@@ -10286,9 +10381,9 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     }).then(async (resp) => {
       if (xhr._aborted) return;
 
-      xhr.status = resp.status;
-      xhr.statusText = resp.statusText || '';
-      xhr.responseURL = resp.url || url;
+      xhr._status = resp.status;
+      xhr._statusText = resp.statusText || '';
+      xhr._responseURL = resp.url || url;
 
       if (resp.headers) {
         resp.headers.forEach((v, k) => { xhr._responseHeaders[k] = v; });
@@ -10312,28 +10407,28 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       // pure waste, and responseText is not defined for the binary types.
       const text = wantsText ? new TextDecoder().decode(buffer) : '';
 
-      xhr.responseText = text;
+      xhr._responseText = text;
       xhr._setReadyState(3); // LOADING
 
       switch (xhr.responseType) {
         case 'json':
-          try { xhr.response = _JSONparse(text); } catch(e) { xhr.response = null; }
+          try { xhr._response = _JSONparse(text); } catch(e) { xhr._response = null; }
           break;
         case 'text':
         case '':
-          xhr.response = text;
+          xhr._response = text;
           break;
         case 'arraybuffer':
-          xhr.response = buffer;
+          xhr._response = buffer;
           break;
         case 'blob':
-          xhr.response = new Blob([buffer]);
+          xhr._response = new Blob([buffer]);
           break;
         case 'document':
-          xhr.response = text; // simplified
+          xhr._response = text; // simplified
           break;
         default:
-          xhr.response = text;
+          xhr._response = text;
       }
 
       xhr._setReadyState(4); // DONE
@@ -10341,8 +10436,8 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       xhr._fireEvent('loadend');
     }).catch((err) => {
       if (xhr._aborted) return;
-      xhr.status = 0;
-      xhr.readyState = 4;
+      xhr._status = 0;
+      xhr._readyState = 4;
       xhr._fireEvent('readystatechange');
       if (err && err.__aborted) {
         xhr._aborted = true;
@@ -10364,7 +10459,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
       this._fireEvent('abort');
       this._fireEvent('loadend');
     }
-    this.readyState = 0;
+    this._readyState = 0;
   }
 
   addEventListener(type, handler) {
@@ -10396,7 +10491,7 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
   }
 
   _setReadyState(state) {
-    this.readyState = state;
+    this._readyState = state;
     this._fireEvent('readystatechange');
     if (this.onreadystatechange) {
       try { this.onreadystatechange(); } catch(e) {}
@@ -10413,6 +10508,14 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
     }
   }
 };
+// XMLHttpRequest's state attributes are prototype accessors (see _defineFieldGetters), and
+// its constants live on the interface and its prototype, not on each instance.
+_defineFieldGetters(XMLHttpRequest, ['readyState', 'status', 'statusText', 'response', 'responseText', 'responseURL', 'responseXML', 'upload']);
+_defineFieldAccessors(XMLHttpRequest, ['responseType', 'timeout', 'withCredentials', 'onreadystatechange']);
+_defineFieldAccessors(XMLHttpRequestEventTarget, ['onabort', 'onerror', 'onload', 'onloadend', 'onloadstart', 'onprogress', 'ontimeout']);
+for (const [name, value] of [['UNSENT', 0], ['OPENED', 1], ['HEADERS_RECEIVED', 2], ['LOADING', 3], ['DONE', 4]]) {
+  _defineProperty(XMLHttpRequest.prototype, name, { value, writable: false, enumerable: true, configurable: false });
+}
 _markNative(XMLHttpRequest);
 _markNative(XMLHttpRequest.prototype.open);
 _markNative(XMLHttpRequest.prototype.send);
@@ -10519,34 +10622,38 @@ if (typeof Request === 'undefined') {
   globalThis.Request = class Request {
     constructor(input, init = {}) {
       const inputRequest = input instanceof Request ? input : null;
-      if (typeof input === 'string') { this.url = input; }
-      else if (inputRequest) { this.url = inputRequest.url; init = { ...inputRequest, ...init }; }
-      else if (typeof URL === 'function' && input instanceof URL) { this.url = input.href; }
-      else { this.url = input?.url || input?.href || String(input); }
-      this.method = _normalizeMethod(init.method !== undefined ? init.method : 'GET', "Failed to construct 'Request'");
-      this.mode = _requestMode(init.mode, 'cors', 'Request');
+      if (typeof input === 'string') { this._url = input; }
+      else if (inputRequest) { this._url = inputRequest.url; init = {
+        method: inputRequest.method, headers: inputRequest.headers, body: inputRequest.body, mode: inputRequest.mode,
+        credentials: inputRequest.credentials, redirect: inputRequest.redirect, referrer: inputRequest.referrer,
+        referrerPolicy: inputRequest.referrerPolicy, signal: inputRequest.signal, cache: inputRequest.cache, ...init,
+      }; }
+      else if (typeof URL === 'function' && input instanceof URL) { this._url = input.href; }
+      else { this._url = input?.url || input?.href || String(input); }
+      this._method = _normalizeMethod(init.method !== undefined ? init.method : 'GET', "Failed to construct 'Request'");
+      this._mode = _requestMode(init.mode, 'cors', 'Request');
       // A no-cors Request refuses a non-safelisted method and guards its headers
       // (see _headersGuards); Rust accepted both.
       if (this.mode === 'no-cors' && !_noCorsMethodAllowed(this.method)) {
         throw new TypeError("Failed to construct 'Request': '" + this.method + "' is unsupported in no-cors mode.");
       }
-      this.headers = _makeGuardedHeaders(init.headers, this.mode === 'no-cors' ? 'request-no-cors' : 'request');
-      this.body = init.body || null;
-      this.credentials = init.credentials !== undefined
+      this._headers = _makeGuardedHeaders(init.headers, this.mode === 'no-cors' ? 'request-no-cors' : 'request');
+      this._body = init.body || null;
+      this._credentials = init.credentials !== undefined
         ? String(init.credentials)
         : (inputRequest ? inputRequest.credentials : 'same-origin');
       if (this.credentials !== 'omit' && this.credentials !== 'same-origin' && this.credentials !== 'include') {
         throw new TypeError("Failed to construct 'Request': '" + this.credentials + "' is not a valid RequestCredentials value");
       }
-      this.redirect = init.redirect || 'follow';
+      this._redirect = init.redirect || 'follow';
       // Request.referrer is "about:client" by default and a resolved URL otherwise, and
       // referrerPolicy is "" or a valid token (Chromium). Rust defaulted referrer to "".
-      this.referrer = init.referrer !== undefined ? _requestReferrer(init.referrer) : 'about:client';
-      this.referrerPolicy = init.referrerPolicy !== undefined
+      this._referrer = init.referrer !== undefined ? _requestReferrer(init.referrer) : 'about:client';
+      this._referrerPolicy = init.referrerPolicy !== undefined
         ? _requestReferrerPolicy(init.referrerPolicy, "Failed to construct 'Request'")
         : '';
-      this.signal = init.signal || { aborted: false, addEventListener(){}, removeEventListener(){} };
-      this.cache = init.cache || 'default';
+      this._signal = init.signal || { aborted: false, addEventListener(){}, removeEventListener(){} };
+      this._cache = init.cache || 'default';
     }
     clone() {
       return new Request(this.url, {
@@ -10570,6 +10677,7 @@ if (typeof Request === 'undefined') {
       return new Blob(this.body != null ? [this.body] : [], { type: ct });
     }
   };
+  _defineFieldGetters(Request, ["url", "method", "mode", "headers", "body", "credentials", "redirect", "referrer", "referrerPolicy", "signal", "cache"]);
 }
 
 // Decode a response body honoring the Content-Type charset, so fetch()/XHR
@@ -10592,10 +10700,10 @@ function _decodeBodyWithCharset(bytes, headers) {
 if (typeof Response === 'undefined') {
   globalThis.Response = class Response {
     constructor(body, init = {}) {
-      this._bodyBytes = _bodyToUint8Array(body); this.status = init.status === undefined ? 200 : Number(init.status); this.statusText = init.statusText || '';
-      this.ok = this.status >= 200 && this.status < 300;
-      this.headers = new Headers(init.headers);
-      this.type = init.type || 'basic'; this.url = init.url || ''; this.redirected = !!init.redirected;
+      this._bodyBytes = _bodyToUint8Array(body); this._status = init.status === undefined ? 200 : Number(init.status); this._statusText = init.statusText || '';
+      this._ok = this._status >= 200 && this._status < 300;
+      this._headers = new Headers(init.headers);
+      this._type = init.type || 'basic'; this._url = init.url || ''; this._redirected = !!init.redirected;
       // #818: body/bodyUsed. A null-body response (null or no body passed)
       // has body === null; every other body is a one-chunk stream, created
       // lazily so merely touching .body does not copy the bytes.
@@ -10651,6 +10759,7 @@ if (typeof Response === 'undefined') {
     static redirect(url, status) { const r = new Response(null, { status: status || 302, headers: { Location: url } }); _headersGuards.set(r.headers, 'immutable'); return r; }
     static json(data, init) { return new Response(_JSONstringify(data), { ...init, headers: { 'content-type': 'application/json', ...(init?.headers || {}) } }); }
   };
+  _defineFieldGetters(Response, ["ok", "status", "statusText", "headers", "type", "url", "redirected"]);
 }
 
 if (!Element.prototype.replaceWith) {
@@ -11537,7 +11646,8 @@ for (const name of [
   "PAGE_RULE", "KEYFRAMES_RULE", "KEYFRAME_RULE", "NAMESPACE_RULE",
   "COUNTER_STYLE_RULE", "SUPPORTS_RULE",
 ]) {
-  Object.defineProperty(CSSRule.prototype, name, { value: CSSRule[name] });
+  // WebIDL constants: enumerable, read-only, non-configurable (Chromium 141).
+  Object.defineProperty(CSSRule.prototype, name, { value: CSSRule[name], writable: false, enumerable: true, configurable: false });
 }
 
 class CSSStyleRule extends CSSRule {
@@ -11556,7 +11666,9 @@ class CSSStyleRule extends CSSRule {
     this._selectorText = selector;
     this._changed();
   }
+  // [PutForwards=cssText], as Chromium has it (the shim had a getter only).
   get style() { return this._style; }
+  set style(v) { this._style.cssText = v; }
   get cssText() {
     const declarations = this._style.cssText;
     return `${this._selectorText} {${declarations ? " " + declarations : ""} }`;
@@ -11675,7 +11787,9 @@ class CSSMediaRule extends CSSConditionRule {
     super(CSSRule.MEDIA_RULE, body);
     this._media = _makeMediaList(prelude, () => this._changed());
   }
+  // [PutForwards=mediaText], as Chromium has it (the shim had a getter only).
   get media() { return this._media; }
+  set media(v) { this._media.mediaText = v; }
   get conditionText() { return this._media.mediaText; }
   get cssText() { const t = this._media.mediaText; return "@media" + (t ? " " + t : "") + this._block(); }
   set cssText(_value) {}
@@ -11750,7 +11864,9 @@ class CSSPageRule extends CSSGroupingRule {
   }
   get selectorText() { return this._selectorText; }
   set selectorText(value) { this._selectorText = _cssCollapse(value); this._changed(); }
+  // [PutForwards=cssText], as Chromium has it (the shim had a getter only).
   get style() { return this._style; }
+  set style(v) { this._style.cssText = v; }
   get cssText() {
     const d = this._style.cssText;
     return "@page " + (this._selectorText ? this._selectorText + " " : "") + "{" + (d ? " " + d : "") + " }";
@@ -11791,7 +11907,9 @@ class CSSKeyframeRule extends CSSRule {
     this._keyText = key;
     this._changed();
   }
+  // [PutForwards=cssText], as Chromium has it (the shim had a getter only).
   get style() { return this._style; }
+  set style(v) { this._style.cssText = v; }
   get cssText() { const d = this._style.cssText; return this._keyText + " {" + (d ? " " + d : "") + " }"; }
   set cssText(_value) {}
   _changed() { if (this._parentStyleSheet) this._parentStyleSheet._ruleChanged(); }
@@ -11866,7 +11984,9 @@ class CSSImportRule extends CSSRule {
     this._media = _makeMediaList(text, () => this._changed());
   }
   get href() { return this._href; }
+  // [PutForwards=mediaText], as Chromium has it (the shim had a getter only).
   get media() { return this._media; }
+  set media(v) { this._media.mediaText = v; }
   get styleSheet() { return null; }
   get layerName() { return this._layer; }
   get supportsText() { return this._supports; }
@@ -12442,11 +12562,14 @@ function _replaceAdoptedStyleSheets(root, sheets) {
   return list;
 }
 
+// Enumerable and configurable like every WebIDL attribute (the shim left both false).
 Object.defineProperty(Document.prototype, 'adoptedStyleSheets', {
   get() { return _adoptedStyleSheetsFor(this); },
   set(sheets) {
     _replaceAdoptedStyleSheets(this, sheets);
   },
+  enumerable: true,
+  configurable: true,
 });
 
 _hostVars.__mutationObservers = [];
@@ -12702,6 +12825,15 @@ globalThis.ShadowRoot = class ShadowRoot extends DocumentFragment {
   getHTML() { return this.innerHTML; }
 };
 _ShadowRootClass = globalThis.ShadowRoot;
+// innerHTML is ShadowRoot's, not DocumentFragment's (Chromium has none on a plain
+// fragment). The shim's template parsing still sets a template's contents through it.
+const _fragmentInnerHTML = _getOwnPropertyDescriptor(DocumentFragment.prototype, 'innerHTML');
+if (!_objectHasOwn(_ShadowRootClass.prototype, 'innerHTML')) {
+  _defineProperty(_ShadowRootClass.prototype, 'innerHTML', {
+    get: _fragmentInnerHTML.get, set: _fragmentInnerHTML.set, enumerable: true, configurable: true,
+  });
+}
+delete DocumentFragment.prototype.innerHTML;
 
 // slotchange (port addition; Rust has no slot events). DOM's "signal a slot change": a
 // mutation that can change a slot's assigned nodes queues the mutation-observer microtask,
@@ -13394,7 +13526,12 @@ globalThis.PerformanceObserver = class { constructor(){} observe(){} disconnect(
 // Feature detection reads this static before deciding to observe anything;
 // absent it, supportedEntryTypes.includes(...) throws and instrumentation
 // bails. Report only types the engine can actually emit records for.
-PerformanceObserver.supportedEntryTypes = ["mark", "measure", "navigation", "resource", "paint"];
+// A static getter returning a frozen array, as in Chromium (the shim assigned a data property).
+const _supportedEntryTypes = Object.freeze(["mark", "measure", "navigation", "resource", "paint"]);
+Object.defineProperty(PerformanceObserver, 'supportedEntryTypes', {
+  get: _markNative(Object.getOwnPropertyDescriptor({ get supportedEntryTypes() { return _supportedEntryTypes; } }, 'supportedEntryTypes').get),
+  enumerable: true, configurable: true,
+});
 _markNative(PerformanceObserver);
 
 globalThis.DOMException = (function () {
@@ -13408,13 +13545,25 @@ globalThis.DOMException = (function () {
     QuotaExceededError: 22, TimeoutError: 23, InvalidNodeTypeError: 24,
     DataCloneError: 25,
   };
+  // name, message and code are prototype getters over private state, and an instance
+  // has no own properties (not even `stack`), as Chromium's platform object has. The
+  // shim's (and Rust's) DOMException set own `name`/`message` data properties, so
+  // `Object.getOwnPropertyDescriptor(DOMException.prototype, 'name')` was undefined.
+  const state = _private(new WeakMap());
+  const record = (e) => {
+    const r = (e !== null && typeof e === 'object') ? state.get(e) : undefined;
+    if (r === undefined) throw new TypeError('Illegal invocation');
+    return r;
+  };
   class DOMException extends Error {
     constructor(message = "", name = "Error") {
-      super(message);
-      this.name = name;
-      this.message = String(message);
+      super();
+      delete this.stack;
+      state.set(this, { name: String(name), message: String(message) });
     }
-    get code() { return NAME_TO_CODE[this.name] || 0; }
+    get name() { return record(this).name; }
+    get message() { return record(this).message; }
+    get code() { return NAME_TO_CODE[record(this).name] || 0; }
   }
   const CONSTS = {
     INDEX_SIZE_ERR: 1, DOMSTRING_SIZE_ERR: 2, HIERARCHY_REQUEST_ERR: 3,
@@ -14201,6 +14350,9 @@ function _xmlWellFormed(src) {
   return stack.length === 0 && rootsClosed === 1;
 }
 
+// The plain objects DOMParser and createHTMLDocument hand out for a parsed document (see
+// parseFromString). Document.prototype's members check for them (_shapeDetachedDocuments).
+const _detachedDocuments = _private(new WeakSet());
 globalThis.DOMParser = class DOMParser {
   parseFromString(source, mimeType) {
     const html = String(source ?? "");
@@ -14354,7 +14506,26 @@ globalThis.DOMParser = class DOMParser {
       },
       contains(n) { return root.contains ? root.contains(n) : false; },
       addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
+      // document.open/write/close on a document without a browsing context: the written
+      // markup replaces the document's contents when the parser closes. Port addition:
+      // without these, Document.prototype.open/write/close called on this object (as
+      // Transcend's airgap.js does on a createHTMLDocument sandbox) reached the page's
+      // own document and rewrote it.
+      open() { _writeBuffer = ""; _writeOpen = true; return docNode; },
+      write(...args) { if (!_writeOpen) docNode.open(); _writeBuffer += args.join(""); },
+      writeln(...args) { docNode.write(args.join("") + "\n"); },
+      close() {
+        if (!_writeOpen) return;
+        _writeOpen = false;
+        const markup = _writeBuffer;
+        _writeBuffer = "";
+        _ceInert++;
+        try { root.innerHTML = markup; } catch (e) { /* leave empty on parse error */ }
+        finally { _ceInert--; }
+      },
     };
+    let _writeBuffer = "", _writeOpen = false;
+    _detachedDocuments.add(docNode);
     return docNode;
   }
 };
@@ -14410,7 +14581,9 @@ class PerformanceEntry {
   }
   toJSON() {
     const out = {};
-    for (const key in this) out[key] = this[key];
+    // Attributes only: the interface's operations are enumerable too (WebIDL), and toJSON
+    // is not part of the result.
+    for (const key in this) { const v = this[key]; if (typeof v !== "function" && key[0] !== "_") out[key] = v; }
     return out;
   }
 }
@@ -14453,6 +14626,8 @@ class PerformanceResourceTiming extends PerformanceEntry {
     this.contentType = timing.contentType || "";
     this.serverTiming = [];
   }
+  // Each timing interface has its own toJSON in Chromium.
+  toJSON() { return super.toJSON(); }
 }
 class PerformanceNavigationTiming extends PerformanceResourceTiming {
   constructor(name, timing) {
@@ -14471,6 +14646,7 @@ class PerformanceNavigationTiming extends PerformanceResourceTiming {
     this.activationStart = 0;
     this.criticalCHRestart = 0;
   }
+  toJSON() { return super.toJSON(); }
 }
 globalThis.PerformanceEntry = PerformanceEntry;
 globalThis.PerformanceMark = PerformanceMark;
@@ -15041,6 +15217,7 @@ Storage.prototype.removeItem = function(k) { delete this._data[String(k)]; };
 Storage.prototype.clear = function() { const d = this._data; for (const k in d) delete d[k]; };
 Storage.prototype.key = function(i) { const ks = Object.keys(this._data); i = i >>> 0; return i < ks.length ? ks[i] : null; };
 Object.defineProperty(Storage.prototype, 'length', { get: function() { return Object.keys(this._data).length; }, configurable: true });
+_defineProperty(Storage, 'prototype', { writable: false });
 
 const _mkStore = () => {
   const target = Object.create(Storage.prototype);
@@ -16006,6 +16183,23 @@ globalThis.HTMLFormElement = class HTMLFormElement extends HTMLElement {
   }
 };
 globalThis.HTMLSelectElement = class HTMLSelectElement extends HTMLElement {};
+// HTMLSelectElement's own remove(): with no argument it is ChildNode's remove(), with an
+// index it removes that option (Chromium 141). The shim had only Element's remove(), so
+// `select.remove(0)` removed the select itself.
+(function () {
+  const elementRemove = Element.prototype.remove;
+  _defineProperty(HTMLSelectElement.prototype, 'remove', {
+    value: _markNative({ remove(index) {
+      if (arguments.length === 0) return _reflectApply(elementRemove, this, []);
+      const i = index | 0;
+      const options = this.options;
+      if (i < 0 || i >= options.length) return undefined;
+      _reflectApply(elementRemove, options[i], []);
+      return undefined;
+    } }.remove),
+    writable: true, enumerable: true, configurable: true,
+  });
+})();
 globalThis.HTMLTextAreaElement = class HTMLTextAreaElement extends HTMLElement {
   // `rows`/`cols` reflect the content attributes and drive the control's
   // intrinsic box (the renderer sizes a textarea from them). The attributes
@@ -16268,6 +16462,16 @@ Object.defineProperty(SVGAnimatedString.prototype, Symbol.toStringTag, { value: 
 _markNative(SVGAnimatedString);
 
 class SVGElement extends Element {}
+// SVG elements reflect class as an SVGAnimatedString (.baseVal/.animVal), getter only.
+// Anti-fraud sensors read el.className.animVal.
+_defineProperty(SVGElement.prototype, 'className', {
+  get: _markNative(_getOwnPropertyDescriptor({ get className() {
+    if (!(this instanceof SVGElement)) throw new TypeError('Illegal invocation');
+    if (!this._svgClassName) this._svgClassName = new SVGAnimatedString(this, "class");
+    return this._svgClassName;
+  } }, 'className').get),
+  set: undefined, enumerable: true, configurable: true,
+});
 class SVGGraphicsElement extends SVGElement {}
 class SVGGeometryElement extends SVGGraphicsElement {}
 class SVGPathElement extends SVGGeometryElement {}
@@ -16440,7 +16644,25 @@ for (const _proto of [Document.prototype, DocumentFragment.prototype]) {
 Object.setPrototypeOf(Node, EventTarget);
 Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
 globalThis.EventTarget = EventTarget;
-globalThis.HTMLCollection = class HTMLCollection extends Array {
+// HTMLCollection is its own type, not an Array subclass (DEVIATION from
+// crates/obscura-js/js/bootstrap.js, `class HTMLCollection extends Array`): in Chromium
+// Array.isArray(document.children) is false, the prototype is Object.prototype's child
+// with item/namedItem/length only, and iteration is Array.prototype.values.
+// The count is a private field (the hot path: `for (i < c.length)` reads it through the
+// Proxy's get trap without a getter call); _listLength maps the Proxy to its target for a
+// getter called explicitly on the Proxy.
+let _htmlCollectionLength = null;
+globalThis.HTMLCollection = class HTMLCollection {
+  #n = 0;
+  static { _htmlCollectionLength = (c) => c.#n; }
+  get length() {
+    if (this !== null && typeof this === 'object') {
+      if (#n in this) return this.#n;
+      const target = _listLength.get(this);
+      if (target !== undefined) return target.#n;
+    }
+    throw new TypeError('Illegal invocation');
+  }
   item(i) {
     i = i >>> 0;
     return this[i] != null ? this[i] : null;
@@ -16464,10 +16686,18 @@ globalThis.HTMLCollection = class HTMLCollection extends Array {
   // resolves a name when an unknown string key is actually read.
   static _from(arr) {
     const c = new HTMLCollection();
-    if (arr) for (let i = 0; i < arr.length; i++) { if (arr[i]) c[c.length] = arr[i]; }
-    return new Proxy(c, _htmlCollectionProxy);
+    let n = 0;
+    if (arr) for (let i = 0; i < arr.length; i++) { if (arr[i]) c[n++] = arr[i]; }
+    c.#n = n;
+    const p = new Proxy(c, _htmlCollectionProxy);
+    _listLength.set(p, c);
+    return p;
   }
 };
+_markNative(_getOwnPropertyDescriptor(HTMLCollection.prototype, 'length').get);
+_defineProperty(HTMLCollection.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, enumerable: false, configurable: true });
+_defineProperty(HTMLCollection.prototype, Symbol.toStringTag, { value: 'HTMLCollection', writable: false, enumerable: false, configurable: true });
+_markNative(HTMLCollection);
 _markNative(HTMLCollection.prototype.item);
 _markNative(HTMLCollection.prototype.namedItem);
 // Shared (allocated once) Proxy traps for HTMLCollection named access. Indices,
@@ -16476,6 +16706,7 @@ _markNative(HTMLCollection.prototype.namedItem);
 // Array methods are never shadowed and id="namedItem" cannot recurse.
 const _htmlCollectionProxy = {
   get(t, k, r) {
+    if (k === 'length') return _htmlCollectionLength(t);
     const v = Reflect.get(t, k, r);
     if (v !== undefined || typeof k !== "string") return v;
     return t.namedItem ? (t.namedItem(k) || undefined) : undefined;
@@ -16495,7 +16726,7 @@ function _isHTMLEl(el) {
 function _nodeList(els) {
   const nl = new NodeList();
   for (let i = 0; i < els.length; i++) nl[i] = els[i];
-  nl.length = els.length;
+  _nodeListSetLength(nl, els.length);
   return nl;
 }
 
@@ -16649,21 +16880,27 @@ globalThis.DOMTokenList = DOMTokenList;
 // It keeps the array-like surface scripts actually use: indexed access, length,
 // item(), forEach(), entries/keys/values, and iteration (so spread and for..of
 // work).
+// `length` is a prototype getter (see _listLength), and forEach/entries/keys/values and
+// @@iterator are Array.prototype's own functions, as Chromium's NodeList has them.
+let _nodeListSetLength = null;
 globalThis.NodeList = class NodeList {
-  constructor() { this.length = 0; }
-  item(i) { i = i >>> 0; return this[i] != null ? this[i] : null; }
-  forEach(cb, thisArg) {
-    for (let i = 0; i < this.length; i++) cb.call(thisArg, this[i], i, this);
+  // A private field rather than _listLength: NodeList.length is the hottest read there is.
+  #n = 0;
+  static { _nodeListSetLength = (nl, n) => { nl.#n = n; }; }
+  get length() {
+    if (this === null || typeof this !== 'object' || !(#n in this)) throw new TypeError('Illegal invocation');
+    return this.#n;
   }
-  *[Symbol.iterator]() { for (let i = 0; i < this.length; i++) yield this[i]; }
-  *entries() { for (let i = 0; i < this.length; i++) yield [i, this[i]]; }
-  *keys() { for (let i = 0; i < this.length; i++) yield i; }
-  *values() { for (let i = 0; i < this.length; i++) yield this[i]; }
-  get [Symbol.toStringTag]() { return 'NodeList'; }
+  item(i) { i = i >>> 0; return this[i] != null ? this[i] : null; }
 };
+_markNative(_getOwnPropertyDescriptor(NodeList.prototype, 'length').get);
+for (const k of ['entries', 'forEach', 'keys', 'values']) {
+  _defineProperty(NodeList.prototype, k, { value: Array.prototype[k], writable: true, enumerable: true, configurable: true });
+}
+_defineProperty(NodeList.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, enumerable: false, configurable: true });
+_defineProperty(NodeList.prototype, Symbol.toStringTag, { value: 'NodeList', writable: false, enumerable: false, configurable: true });
 _markNative(NodeList);
 _markNative(NodeList.prototype.item);
-_markNative(NodeList.prototype.forEach);
 // Live Range over the real DOM tree. dom/ranges/* tests are pure boundary-point
 // algorithms (no layout, no editing engine), so a property-storing Range with
 // correct tree-order comparison passes them. Mutating ops (extract/delete/
@@ -17602,19 +17839,10 @@ function _remoteWindow(frameId) {
 // that branch wrongly is enough to change everything after it.
 function _installFramingRelationships() {
   if (!_hostVars.__obscura_frameId) return; // the page really is the top
-  for (const [name, frameId] of [
-    ['parent', _hostVars.__obscura_parentFrameId],
-    ['top', 0], // the top browsing context is always the page's realm
-  ]) {
-    try {
-      Object.defineProperty(globalThis, name, {
-        value: _remoteWindow(frameId),
-        writable: false,
-        enumerable: true,
-        configurable: true,
-      });
-    } catch (_) {}
-  }
+  // `top` is an unforgeable getter and `parent` a replaceable one (see
+  // _shapeWindowAttributes), so the frame's values go in their slots.
+  _setWindowSlot('parent', _remoteWindow(_hostVars.__obscura_parentFrameId));
+  _setWindowSlot('top', _remoteWindow(0)); // the top browsing context is always the page's realm
 }
 
 class _IframeWindow {
@@ -20334,15 +20562,14 @@ if (typeof DOMRect === 'undefined') {
 if (typeof DOMRectList === 'undefined') {
   globalThis.DOMRectList = class DOMRectList {
     constructor(arr=[]) {
-      this.length = arr.length;
       for (let i = 0; i < arr.length; i++) this[i] = arr[i];
+      _listLength.set(this, arr.length);
     }
     item(i) { return this[i] || null; }
-    [Symbol.iterator]() {
-      let i = 0, self = this;
-      return { next() { const done = i >= self.length; return { value: done ? undefined : self[i++], done }; } };
-    }
   };
+  // `length` is a prototype getter (see _listLength); @@iterator is Array.prototype.values.
+  _defineListLength(DOMRectList);
+  _defineProperty(DOMRectList.prototype, Symbol.iterator, { value: Array.prototype.values, writable: true, enumerable: false, configurable: true });
 }
 if (typeof DOMPoint === 'undefined') {
   globalThis.DOMPoint = class DOMPoint {
@@ -20378,6 +20605,8 @@ if (typeof Image === 'undefined') {
     return img;
   };
   globalThis.Image.prototype = globalThis.HTMLImageElement.prototype;
+  // A legacy factory function's prototype is read-only, as on every interface object.
+  _defineProperty(globalThis.Image, 'prototype', { writable: false });
 }
 
 if (typeof Audio === 'undefined') {
@@ -21263,7 +21492,7 @@ function _pageInit() {
   _installWasmStreamingFallback();
 
   const documentNid = +_dom("document_node_id");
-  globalThis.document = new Document(documentNid);
+  _setWindowSlot('document', new Document(documentNid));
   // An HTMLDocument (an XMLDocument for an XML page), as Chromium's document is.
   _adoptDocumentInterface(globalThis.document);
   _realmDocument = globalThis.document;
@@ -21325,7 +21554,7 @@ function _pageInit() {
     totalJSHeapSize: _totalHeap,
     usedJSHeapSize: Math.floor(_totalHeap * (0.3 + _fpRand(621) * 0.5)),
   });
-  globalThis.Notification.permission = "default";
+  _notificationPermission = "default";
 
   // userAgentData brands and getHighEntropyValues now derive the Chrome
   // version from navigator.userAgent and read the platform from the page
@@ -21388,7 +21617,9 @@ Node.prototype.lookupNamespaceURI = function(prefix) {
     } else {
       const defaultNs = node.getAttribute('xmlns');
       if (defaultNs !== null) return defaultNs || null;
-      if (node.prefix === null && node.namespaceURI) return node.namespaceURI;
+      // The shim's elements have no `prefix` member (undefined), which is no prefix: with
+      // `=== null` an HTML element answered null where Chromium answers the XHTML namespace.
+      if (node.prefix == null && node.namespaceURI) return node.namespaceURI;
     }
     node = node.parentElement;
   }
@@ -21448,9 +21679,7 @@ if (!Element.prototype.getElementsByTagNameNS) {
       const tagOk = tagMatch || (elTag === localName);
       if (nsOk && tagOk) filtered.push(el);
     }
-    const result = new HTMLCollection(...filtered);
-    result.item = (i) => result[i] != null ? result[i] : null;
-    return result;
+    return HTMLCollection._from(filtered);
   };
   _markNative(Element.prototype.getElementsByTagNameNS);
 }
@@ -21469,9 +21698,7 @@ if (!Document.prototype.getElementsByTagNameNS) {
       const tagOk = tagMatch || (elTag === localName);
       if (nsOk && tagOk) filtered.push(el);
     }
-    const result = new HTMLCollection(...filtered);
-    result.item = (i) => result[i] != null ? result[i] : null;
-    return result;
+    return HTMLCollection._from(filtered);
   };
   _markNative(Document.prototype.getElementsByTagNameNS);
 }
@@ -21481,13 +21708,13 @@ if (!Document.prototype.getElementsByTagNameNS) {
 if (!globalThis.Attr) {
   globalThis.Attr = class Attr {
     constructor(name, value = '', namespaceURI = null, prefix = null) {
-      this.name = name;
-      this.localName = name;
+      this._name = name;
+      this._localName = name;
       this._value = String(value);
-      this.namespaceURI = namespaceURI;
-      this.prefix = prefix;
-      this.ownerElement = null;
-      this.specified = true;
+      this._namespaceURI = namespaceURI;
+      this._prefix = prefix;
+      this._ownerElement = null;
+      this._specified = true;
     }
     // Port addition: an owned Attr is a view of its element's attribute, so setting its value
     // changes the element (and reaches attributeChangedCallback), as in Chromium. The shim's
@@ -21514,6 +21741,7 @@ if (!globalThis.Attr) {
     set nodeValue(v) { this.value = v; }
     get nodeType() { return 2; }
   };
+  _defineFieldGetters(Attr, ["name", "localName", "namespaceURI", "prefix", "ownerElement", "specified"]);
 }
 
 // XML Name validation helper for attribute/processing instruction names
@@ -21583,7 +21811,7 @@ if (!Element.prototype.getAttributeNode) {
     const val = this.getAttribute(name);
     if (val === null) return null;
     const attr = new Attr(name, val, null, null);
-    attr.ownerElement = this;
+    attr._ownerElement = this;
     return attr;
   };
   _markNative(Element.prototype.getAttributeNode);
@@ -21596,7 +21824,7 @@ if (!Element.prototype.getAttributeNodeNS) {
     if (val === null) return null;
     const name = String(localName || '');
     const attr = new Attr(name, val, namespaceURI ? String(namespaceURI) : null, null);
-    attr.ownerElement = this;
+    attr._ownerElement = this;
     return attr;
   };
   _markNative(Element.prototype.getAttributeNodeNS);
@@ -21608,9 +21836,9 @@ if (!Element.prototype.setAttributeNode) {
     if (!attr || typeof attr.name !== 'string') return null;
     const prevVal = this.getAttribute(attr.name);
     const prevAttr = prevVal !== null ? new Attr(attr.name, prevVal, null, null) : null;
-    if (prevAttr) prevAttr.ownerElement = this;
+    if (prevAttr) prevAttr._ownerElement = this;
     this.setAttribute(attr.name, attr.value);
-    attr.ownerElement = this;
+    attr._ownerElement = this;
     return prevAttr;
   };
   _markNative(Element.prototype.setAttributeNode);
@@ -21624,9 +21852,9 @@ if (!Element.prototype.setAttributeNodeNS) {
     const prevAttr = prevVal !== null 
       ? new Attr(attr.name, prevVal, attr.namespaceURI || null, attr.prefix || null) 
       : null;
-    if (prevAttr) prevAttr.ownerElement = this;
+    if (prevAttr) prevAttr._ownerElement = this;
     this.setAttributeNS(attr.namespaceURI || null, attr.name, attr.value);
-    attr.ownerElement = this;
+    attr._ownerElement = this;
     return prevAttr;
   };
   _markNative(Element.prototype.setAttributeNodeNS);
@@ -21652,19 +21880,20 @@ if (!Element.prototype.removeAttributeNode) {
 if (typeof ValidityState === 'undefined') {
   globalThis.ValidityState = class ValidityState {
     constructor() {
-      this.badInput = false;
-      this.customError = false;
-      this.patternMismatch = false;
-      this.rangeOverflow = false;
-      this.rangeUnderflow = false;
-      this.stepMismatch = false;
-      this.tooLong = false;
-      this.tooShort = false;
-      this.typeMismatch = false;
-      this.valueMissing = false;
-      this.valid = true;
+      this._badInput = false;
+      this._customError = false;
+      this._patternMismatch = false;
+      this._rangeOverflow = false;
+      this._rangeUnderflow = false;
+      this._stepMismatch = false;
+      this._tooLong = false;
+      this._tooShort = false;
+      this._typeMismatch = false;
+      this._valueMissing = false;
+      this._valid = true;
     }
-  };
+  };  _defineFieldGetters(ValidityState, ["badInput", "customError", "patternMismatch", "rangeOverflow", "rangeUnderflow", "stepMismatch", "tooLong", "tooShort", "typeMismatch", "valueMissing", "valid"]);
+
 }
 
 // Validity and validation message storage on elements
@@ -21729,12 +21958,12 @@ if (!Element.prototype.setCustomValidity) {
     const validity = this.validity;
     if (msg && msg.length > 0) {
       _ns_customValidityMsg.set(this, msg);
-      validity.customError = true;
-      validity.valid = false;
+      validity._customError = true;
+      validity._valid = false;
     } else {
       _ns_customValidityMsg.delete(this);
-      validity.customError = false;
-      validity.valid = true;
+      validity._customError = false;
+      validity._valid = true;
     }
   };
   _markNative(Element.prototype.setCustomValidity);
@@ -22945,6 +23174,11 @@ const _reflectGetAtBoot = Reflect.get;
 const _reflectOwnKeysAtBoot = Reflect.ownKeys;
 const _objectSetPrototypeOf = Object.setPrototypeOf;
 function _ifaceIllegalInvocation() { throw new TypeError('Illegal invocation'); }
+// An event handler IDL attribute: `on` and a lowercase name (`onclick`). `onLine` is a
+// read-only attribute, which the `on` prefix alone made settable.
+function _ifaceIsHandlerName(key) {
+  return typeof key === 'string' && _stringSlice(key, 0, 2) === 'on' && key.length > 2 && key === _stringToLowerCase(key);
+}
 // The state record of `obj` when it is a C (or a subclass); throws Illegal invocation
 // otherwise. `inner` holds the members; `self` makes them run with `inner` as `this` (an
 // object of the shim's own that assigns to its fields).
@@ -23008,7 +23242,7 @@ function _ifaceAttr(C, key, settable) {
   }, key).get;
   let setter;
   if (settable) {
-    const handler = typeof key === 'string' && _stringSlice(key, 0, 2) === 'on';
+    const handler = typeof key === 'string' && _ifaceIsHandlerName(key);
     setter = _getOwnPropertyDescriptor({
       set [key](v) {
         const r = _ifaceRecord(this, C);
@@ -23062,7 +23296,7 @@ function _ifaceMembersFrom(C, inner, settable) {
     if (typeof key !== 'string' || _stringCharAt(key, 0) === '_' || key === 'constructor') continue;
     const d = _getOwnPropertyDescriptor(inner, key);
     if ('value' in d && typeof d.value === 'function') _ifaceMethod(C, key, d.value.length);
-    else _ifaceAttr(C, key, !!d.set || _stringSlice(key, 0, 2) === 'on' || (!!settable && _arrayIndexOf(settable, key) >= 0));
+    else _ifaceAttr(C, key, !!d.set || _ifaceIsHandlerName(key) || (!!settable && _arrayIndexOf(settable, key) >= 0));
   }
 }
 // A new instance of C whose state is `inner`.
@@ -23109,7 +23343,7 @@ function _ifaceSet(obj, key, value) {
   const r = _weakMapGet(_ifaceState, obj);
   if (r === undefined) { obj[key] = value; return; }
   _defineProperty(r.inner, key, { value, writable: true, enumerable: true, configurable: true });
-  _ifaceAttr(r.C, key, _stringSlice(key, 0, 2) === 'on');
+  _ifaceAttr(r.C, key, _ifaceIsHandlerName(key));
 }
 // Attributes (`settable` names writable) and operations (name: length) of C.
 function _ifaceAttrs(C, attrs, settable) {
@@ -23559,6 +23793,19 @@ for (const name of ['locationbar', 'menubar', 'personalbar', 'scrollbars', 'stat
     enumerable: true,
     configurable: true,
   });
+  // window.closed: an own enumerable, configurable getter in Chromium 141. Transcend's
+  // airgap.js (grammarly.com, mozilla.org) reads `Object.getOwnPropertyDescriptor(window,
+  // "closed").get` at load and threw here, where Rust has no `closed` at all. A realm that
+  // runs script has not been closed, so it reads false (Chromium: true once a
+  // script-opened window is closed or a frame's browsing context is discarded).
+  if (!_objectHasOwn(globalThis, 'closed')) {
+    _defineProperty(globalThis, 'closed', {
+      get: _markNative(_getOwnPropertyDescriptor({ get closed() { check(this); return false; } }, 'closed').get),
+      set: undefined,
+      enumerable: true,
+      configurable: true,
+    });
+  }
 })();
 
 // AbstractRange: Range's and StaticRange's parent, which carries their boundary points.
@@ -24415,6 +24662,26 @@ _ifaceEventClass('IDBVersionChangeEvent', Event, 1, [
 ]);
 _ifaceEventClass('FormDataEvent', Event, 2, [['formData', _evRequired('FormDataEvent', 'FormDataEventInit', 'formData')]]);
 _ifaceEventClass('DragEvent', MouseEvent, 1, [['dataTransfer', _evNullable]]);
+// SecurityPolicyViolationEvent: the shim enforces no CSP, so none is ever fired, but
+// Transcend's airgap.js constructs one at load to take its isTrusted getter (grammarly.com)
+// and threw "e is not a constructor" without it. Fields and defaults as Chromium 141's.
+const _evUnsignedShort = (v) => (v === undefined ? 0 : (_Number(v) >>> 0) & 0xFFFF);
+const _evLong = (v) => (v === undefined ? 0 : _Number(v) | 0);
+_ifaceEventClass('SecurityPolicyViolationEvent', Event, 1, [
+  ['documentURI', _evString], ['referrer', _evString], ['blockedURI', _evString],
+  ['violatedDirective', _evString], ['effectiveDirective', _evString], ['originalPolicy', _evString],
+  ['disposition', (v) => {
+    if (v === undefined) return 'enforce';
+    const s = _String(v);
+    if (s !== 'enforce' && s !== 'report') {
+      throw new TypeError("Failed to construct 'SecurityPolicyViolationEvent': Failed to read the 'disposition' property from 'SecurityPolicyViolationEventInit': The provided value '"
+        + s + "' is not a valid enum value of type SecurityPolicyViolationEventDisposition.");
+    }
+    return s;
+  }],
+  ['sourceFile', _evString], ['statusCode', _evUnsignedShort], ['lineNumber', _evLong], ['columnNumber', _evLong],
+  ['sample', _evString],
+]);
 // BeforeUnloadEvent and TextEvent: no constructor in Chromium; createEvent makes them.
 _ifaceIllegal('BeforeUnloadEvent', Event);
 _ifaceGetter(_ifaces.BeforeUnloadEvent, 'returnValue', (inner) => inner.returnValue, (inner, v) => { inner.returnValue = _String(v); });
@@ -25168,6 +25435,190 @@ const _cdpHost = _objectFreeze({
     // An alias (Image, Audio, Option) shares its interface's prototype and does not name it.
     if (!_objectHasOwn(proto, 'constructor') || proto.constructor !== C) continue;
     _defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true });
+  }
+})();
+
+// WebIDL property attributes for the members the shim's interfaces define (port
+// addition, measured against Chromium 141). DEVIATION from crates/obscura-js/js/bootstrap.js,
+// whose interfaces are JS classes: their methods and accessors are non-enumerable, and
+// their constants writable and configurable (or static getters). In Chromium every
+// attribute and operation of an interface is enumerable (`for (k in el)` lists them,
+// and scripts compare descriptors to tell a native member from a patched one), and a
+// constant is `{ writable: false, enumerable: true, configurable: false }` on both the
+// interface object and its prototype. So, for every interface object the shim put on
+// the global (not the engine's own built-ins): string-keyed methods and accessors on the
+// prototype and the interface object become enumerable, keeping their other attributes,
+// and an all-caps member holding (or getting) a number becomes a constant. `constructor`,
+// symbols, a function's own length/name/prototype and the shim's `_` helpers are left
+// as they are.
+(function _webidlMemberAttributes() {
+  const constName = /^[A-Z][A-Z0-9_]*$/;
+  const done = new Set();
+  const shape = (obj, isInterfaceObject) => {
+    const keys = _reflectOwnKeysAtBoot(obj);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (typeof key !== 'string' || key === 'constructor' || _stringCharAt(key, 0) === '_') continue;
+      if (isInterfaceObject && (key === 'length' || key === 'name' || key === 'prototype' || key === 'arguments' || key === 'caller')) continue;
+      const d = _getOwnPropertyDescriptor(obj, key);
+      if (!d || !d.configurable) continue;
+      if (constName.test(key)) {
+        let value = d.value;
+        if (d.get) { try { value = _reflectApply(d.get, obj, []); } catch (_e) { continue; } }
+        if (typeof value === 'number') {
+          _defineProperty(obj, key, { value, writable: false, enumerable: true, configurable: false });
+          continue;
+        }
+      }
+      if (d.enumerable) continue;
+      if (d.get || d.set || typeof d.value === 'function') _defineProperty(obj, key, { enumerable: true });
+    }
+  };
+  const names = Object.getOwnPropertyNames(globalThis);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const first = _stringCharCodeAt(name, 0);
+    if (first < 65 || first > 90 || _setHas(_engineGlobalNames, name)) continue;
+    const d = _getOwnPropertyDescriptor(globalThis, name);
+    const C = d && d.value;
+    if (typeof C !== 'function' || done.has(C)) continue;
+    done.add(C);
+    const proto = C.prototype;
+    if (proto !== null && typeof proto === 'object' && !done.has(proto)) { done.add(proto); shape(proto, false); }
+    shape(C, true);
+  }
+})();
+
+// DOMParser's and createHTMLDocument's documents are plain objects (see parseFromString),
+// and Document.prototype's members act on the page's document whatever `this` is. A script
+// that calls them through the prototype on such a document
+// (`Object.getOwnPropertyDescriptor(Document.prototype, 'documentElement').get.call(doc)`,
+// `Document.prototype.write.call(doc, html)`, as Transcend's airgap.js does when it
+// sanitizes an innerHTML write: grammarly.com) read and rewrote the page itself. Port
+// addition: those members, and Node.prototype's that such a document carries itself, use
+// the document's own member when `this` is one, and throw "Illegal invocation" when it has
+// none. A node (anything with a node id) takes the original path at the cost of one
+// property read.
+(function _shapeDetachedDocuments() {
+  const isDetached = (o) => o !== null && typeof o === 'object' && o._nid === undefined && _detachedDocuments.has(o);
+  const own = (o, key) => {
+    const d = _getOwnPropertyDescriptor(o, key);
+    if (!d) throw new TypeError('Illegal invocation');
+    return d;
+  };
+  const wrap = (proto, key) => {
+    const d = _getOwnPropertyDescriptor(proto, key);
+    if (!d || !d.configurable) return;
+    if (typeof d.value === 'function') {
+      const f = d.value;
+      const w = ({ [key](...args) {
+        if (isDetached(this)) {
+          const od = own(this, key);
+          if (typeof od.value !== 'function') throw new TypeError('Illegal invocation');
+          return _reflectApply(od.value, this, args);
+        }
+        return _reflectApply(f, this, args);
+      } })[key];
+      if (f.length !== w.length) _defineProperty(w, 'length', { value: f.length, configurable: true });
+      _defineProperty(proto, key, { value: _markNative(w) });
+      return;
+    }
+    const g = d.get, st = d.set;
+    const ng = g ? _getOwnPropertyDescriptor({ get [key]() {
+      if (isDetached(this)) {
+        const od = own(this, key);
+        if (od.get) return _reflectApply(od.get, this, []);
+        if ('value' in od) return od.value;
+        throw new TypeError('Illegal invocation');
+      }
+      return _reflectApply(g, this, []);
+    } }, key).get : undefined;
+    const ns = st ? _getOwnPropertyDescriptor({ set [key](v) {
+      if (isDetached(this)) {
+        const od = own(this, key);
+        if (od.set) { _reflectApply(od.set, this, [v]); return; }
+        throw new TypeError('Illegal invocation');
+      }
+      _reflectApply(st, this, [v]);
+    } }, key).set : undefined;
+    _defineProperty(proto, key, { get: ng ? _markNative(ng) : undefined, set: ns ? _markNative(ns) : undefined });
+  };
+  for (const proto of [Document.prototype]) {
+    const keys = _reflectOwnKeysAtBoot(proto);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (typeof key !== 'string' || key === 'constructor' || _stringCharAt(key, 0) === '_') continue;
+      wrap(proto, key);
+    }
+  }
+  // Node.prototype's members a parsed document defines for itself.
+  for (const key of ['appendChild', 'removeChild', 'insertBefore', 'contains', 'cloneNode', 'firstChild',
+    'lastChild', 'childNodes', 'nodeName', 'nodeType', 'ownerDocument', 'baseURI']) {
+    if (_objectHasOwn(Node.prototype, key)) wrap(Node.prototype, key);
+  }
+})();
+
+// The window's own attributes as Chromium 141 has them: accessors, not data properties.
+// DEVIATION from crates/obscura-js/js/bootstrap.js, which assigns `window.document =`,
+// `window.navigator =`, `window.innerWidth =` and the rest as plain data properties, so
+// `Object.getOwnPropertyDescriptor(window, 'document').get` was undefined (Transcend's
+// airgap.js calls it at load: grammarly.com, mozilla.org).
+// - window, document, top: [LegacyUnforgeable] getters, enumerable, not configurable;
+// - navigator, history, localStorage, ...: read-only getters, enumerable, configurable;
+// - self, parent, innerWidth, screen, performance, ...: [Replaceable] getter and setter,
+//   enumerable, configurable. The setter stores the value the getter then returns (Chromium
+//   replaces the accessor with a data property; the value read back is the same), which is
+//   also how the host's viewport and device-scale updates still land.
+// The getters throw "Illegal invocation" off another receiver, as Chromium's do. The values
+// live in _winSlots; the shim's later writes of read-only ones go through _setWindowSlot.
+(function _shapeWindowAttributes() {
+  const check = (receiver) => {
+    if (receiver !== undefined && receiver !== null && receiver !== globalThis) throw new TypeError('Illegal invocation');
+  };
+  const getterFor = (name, original) => _markNative(_getOwnPropertyDescriptor({ get [name]() {
+    check(this);
+    if (original && !(name in _winSlots)) return _reflectApply(original, globalThis, []);
+    return _winSlots[name];
+  } }, name).get);
+  const setterFor = (name) => _markNative(_getOwnPropertyDescriptor({ set [name](v) {
+    check(this);
+    _winSlots[name] = v;
+  } }, name).set);
+  const shape = (name, settable, configurable) => {
+    const d = _getOwnPropertyDescriptor(globalThis, name);
+    if (!d || !d.configurable) return;
+    let original = null;
+    if ('value' in d) _winSlots[name] = d.value;
+    else if (d.get) original = d.get;
+    else return;
+    _defineProperty(globalThis, name, {
+      get: getterFor(name, original),
+      set: settable ? setterFor(name) : undefined,
+      enumerable: true,
+      configurable,
+    });
+  };
+  for (const name of ['window', 'document', 'top']) shape(name, false, false);
+  for (const name of ['customElements', 'history', 'frameElement', 'navigator', 'crypto', 'indexedDB',
+    'sessionStorage', 'localStorage', 'speechSynthesis']) shape(name, false, true);
+  for (const name of ['self', 'frames', 'length', 'opener', 'parent', 'navigation', 'screen', 'innerWidth',
+    'innerHeight', 'scrollX', 'pageXOffset', 'scrollY', 'pageYOffset', 'visualViewport', 'screenX', 'screenY',
+    'outerWidth', 'outerHeight', 'devicePixelRatio', 'screenLeft', 'screenTop', 'performance']) shape(name, true, true);
+  _winShaped = true;
+  // Location is [LegacyUnforgeable]: its members are own properties of the location object
+  // and none is configurable (its operations are not writable either), as in Chromium 141.
+  // valueOf is Object.prototype.valueOf, as an own unforgeable operation.
+  if (!_objectHasOwn(_locationObj, 'valueOf')) {
+    _defineProperty(_locationObj, 'valueOf', { value: Object.prototype.valueOf, writable: true, enumerable: false, configurable: true });
+  }
+  const locKeys = _reflectOwnKeysAtBoot(_locationObj);
+  for (let i = 0; i < locKeys.length; i++) {
+    const key = locKeys[i];
+    if (typeof key !== 'string' || _stringCharAt(key, 0) === '_') continue;
+    const d = _getOwnPropertyDescriptor(_locationObj, key);
+    if (!d || !d.configurable) continue;
+    if ('value' in d) _defineProperty(_locationObj, key, { writable: false, configurable: false });
+    else _defineProperty(_locationObj, key, { configurable: false });
   }
 })();
 
