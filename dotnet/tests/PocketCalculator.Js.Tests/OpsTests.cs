@@ -893,11 +893,17 @@ public sealed class OpsTests
 
         Assert.True(StateHelpers.NodeIsConnected(dom, child));
         Assert.Contains(child, StateHelpers.ShadowIncludingConnectedNodes(dom));
-        Assert.Null(RenderInvalidation.RetainedMutation(
+
+        // DEVIATION from crates/obscura-js/src/ops.rs, which expects no retained mutation here
+        // (a shadow-tree mutation drops the prepared render): the retained planner plans shadow
+        // stylesheets too (RetainedStylePlanner.AddShadowDamage), so it is recorded like any
+        // other. See "A document with shadow roots keeps its retained styles" in todo.md.
+        var mutation = Assert.IsType<RetainedStyleMutation.Attribute>(RenderInvalidation.RetainedMutation(
             dom,
             "set_attribute",
             child.Index.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "class\0changed"));
+        Assert.Equal(child, mutation.Mutation.Node);
 
         dom.AppendChild(source, host);
         Assert.True(StateHelpers.NodeIsConnected(dom, child));

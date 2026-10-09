@@ -3086,7 +3086,12 @@ cascaded with, root for root (`RetainedStyleMaps.ShadowSheets`); any other shado
 restyles the document as before. The retained pass's set of styled nodes is now every
 shadow-including descendant when there are shadow roots, as the full cascade styles them (a
 slot's fallback content and a host's unassigned children are not in the flat tree; the walk over
-the flat tree dropped their styles). Interleaved on one binary
+the flat tree dropped their styles). Each shadow sheet is planned only against the mutations that
+touch its tree, its host or the host's light children, since its rules match nothing else. The
+JS ops now record a mutation inside a shadow tree as a retained mutation (crates/obscura-js
+drops the prepared render for it; `OpsTests.Connected_shadow_nodes_invalidate_without_entering_light_tree_retention`
+says so at the deviation): on reddit.com that turned 7 of 16 passes from full into retained.
+Interleaved on one binary
 (`POCKETCALCULATOR_NO_SHADOW_RETAINED=1` restores the old path), 400 web components each with a
 shadow stylesheet, 30 class toggles each followed by a read, three runs: allocation 1377MB ->
 340MB, layout CPU 7.0-7.4s -> 4.7-4.9s, same answers. Pinned by the shadow fixture of

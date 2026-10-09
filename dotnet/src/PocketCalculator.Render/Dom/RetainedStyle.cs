@@ -387,17 +387,86 @@ public static class RetainedStylePlanner
         IReadOnlyList<RetainedStyleMutation> mutations,
         HashSet<NodeId> dirty)
     {
-        HashSet<Stylesheet> sheets = new(ReferenceEqualityComparer.Instance) { documentSheet };
         foreach (Stylesheet sheet in shadowSheets.Values)
         {
-            sheets.Add(sheet);
+            if (sheet.InvalidationMap.StateDependencies("host-context").Count != 0)
+            {
+                return false;
+            }
+        }
+
+        // A shadow sheet's rules match only in its own tree, its host (`:host`) and the host's
+        // light children (`::slotted`), so each sheet is planned against the mutations that
+        // touch one of those; a page with a hundred components does not plan every mutation a
+        // hundred times.
+        Dictionary<Stylesheet, List<RetainedStyleMutation>> scoped = new(ReferenceEqualityComparer.Instance)
+        {
+            [documentSheet] = [.. mutations],
+        };
+        void Scope(NodeId? node, RetainedStyleMutation mutation)
+        {
+            if (node is not { } id)
+            {
+                return;
+            }
+
+            void Add(NodeId? root)
+            {
+                if (root is { } found
+                    && shadowSheets.TryGetValue(found, out Stylesheet? sheet)
+                    && !ReferenceEquals(sheet, documentSheet))
+                {
+                    if (!scoped.TryGetValue(sheet, out List<RetainedStyleMutation>? list))
+                    {
+                        scoped[sheet] = list = [];
+                    }
+
+                    if (list.Count == 0 || !ReferenceEquals(list[^1], mutation))
+                    {
+                        list.Add(mutation);
+                    }
+                }
+            }
+
+            Add(tree.IsShadowRoot(id) ? id : tree.ContainingShadowRoot(id));
+            Add(tree.ShadowRootOf(id));
+            if (tree.GetNode(id)?.Parent is { } parent)
+            {
+                Add(tree.ShadowRootOf(parent));
+            }
+        }
+
+        foreach (RetainedStyleMutation mutation in mutations)
+        {
+            switch (mutation)
+            {
+                case RetainedStyleMutation.Attribute { Mutation: var attribute }:
+                    Scope(attribute.Node, mutation);
+                    break;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Insert insert }:
+                    Scope(insert.Node, mutation);
+                    Scope(insert.NewParent, mutation);
+                    Scope(insert.OldParent, mutation);
+                    break;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Remove remove }:
+                    Scope(remove.OldParent, mutation);
+                    break;
+                case RetainedStyleMutation.Tree { Mutation: TreeStyleMutation.Text text }:
+                    Scope(text.Parent, mutation);
+                    break;
+                case RetainedStyleMutation.Animation animation:
+                    Scope(animation.Node, mutation);
+                    break;
+                case RetainedStyleMutation.WaapiAnimation waapi:
+                    Scope(waapi.Node, mutation);
+                    break;
+            }
         }
 
         HashSet<NodeId> own = [];
-        foreach (Stylesheet sheet in sheets)
+        foreach ((Stylesheet sheet, List<RetainedStyleMutation> relevant) in scoped)
         {
-            if (sheet.InvalidationMap.StateDependencies("host-context").Count != 0
-                || OwnStyleDamage(tree, sheet, mutations) is not { } damaged)
+            if (OwnStyleDamage(tree, sheet, relevant) is not { } damaged)
             {
                 return false;
             }

@@ -342,7 +342,21 @@ public sealed class PocketCalculatorState
     /// Final image/font-aware layout shared by CSSOM geometry and screenshots.
     /// DOM/style/viewport changes clear this value but retain resource bytes.
     /// </summary>
-    public PreparedRender? PreparedRender { get; set; }
+    public PreparedRender? PreparedRender
+    {
+        get => _preparedRender;
+        set
+        {
+            if (value is null && _preparedRender is not null && RenderState.PrepTrace)
+            {
+                RenderState.TraceDrop();
+            }
+
+            _preparedRender = value;
+        }
+    }
+
+    private PreparedRender? _preparedRender;
 
     /// <summary>
     /// CSS media type selected for the next retained layout. Live pages use screen;

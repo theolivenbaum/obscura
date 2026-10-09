@@ -301,15 +301,10 @@ internal static class RenderInvalidation
             return null;
         }
 
-        // The retained planner and document stylesheet cache are intentionally
-        // light-tree scoped. A mutation inside a connected shadow tree must still
-        // invalidate rendering, but cannot be represented by that document-local
-        // dirty set until scoped stylesheet invalidation is retained separately.
-        if (dom.ContainingShadowRoot(node) is not null)
-        {
-            return null;
-        }
-
+        // A mutation inside a connected shadow tree is recorded like any other: the retained
+        // planner plans every shadow stylesheet as well, and restyles the document when one of
+        // them changed (RetainedStylePlanner.AddShadowDamage). It used to drop the prepared
+        // render, which on a web-component page was most mutations.
         switch (cmd)
         {
             case "set_attribute":
@@ -393,11 +388,6 @@ internal static class RenderInvalidation
                 }
 
                 if (dom.GetNode(reference)?.Parent is not { } newParent)
-                {
-                    return null;
-                }
-
-                if (dom.ContainingShadowRoot(newParent) is not null)
                 {
                     return null;
                 }

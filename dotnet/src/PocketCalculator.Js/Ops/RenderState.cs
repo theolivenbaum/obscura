@@ -174,6 +174,18 @@ public static class RenderState
     [ThreadStatic]
     internal static NodeId? TraceQuery;
 
+    /// <summary>Who dropped the prepared render (<see cref="PrepTrace"/> only).</summary>
+    internal static void TraceDrop()
+    {
+        var frames = Environment.StackTrace.Split('\n')
+            .Where(frame => frame.Contains("PocketCalculator.", StringComparison.Ordinal)
+                && !frame.Contains("TraceDrop", StringComparison.Ordinal)
+                && !frame.Contains("set_PreparedRender", StringComparison.Ordinal))
+            .Take(3)
+            .Select(frame => frame.Trim().Split('(')[0].Replace("at PocketCalculator.", "", StringComparison.Ordinal));
+        Console.Error.WriteLine($"DROP {string.Join(" <- ", frames)}");
+    }
+
     private static void TracePrepare(DomTree dom, RetainedStyleMutation[] mutations, bool retained)
     {
         string op = "?";
