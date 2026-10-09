@@ -843,6 +843,12 @@ Design:
   them after in-flow block backgrounds and before inline content (`IsEffectiveFloat`). Inline
   fragments and line rects come from `LayoutRuns`, so they carry the line offsets.
 
+Performance (interleaved base/new, same Release build mode, 6 rounds, median of 9 layouts):
+a float-free 40-section article 289.9 -> 285.6 ms layout (noise), the same article with float
+thumbnails, a sidebar and float columns 406.9 -> 347.3 ms; screenshots of the 57 float-free
+`render-repros/` and bench pages are byte-identical except the two whose animation makes the
+base build differ from itself. A paragraph of 2,000 anchored floats lays out in about a second.
+
 Status: 56 of 61 conformance pages match Chromium (element boxes within 1px, inline line
 fragments within 2px), and 7 of the 8 older float pages at the top of `render-repros/` (the
 eighth, `opposing-header-floats`, reports an inline wrapper around a float at the float's box
