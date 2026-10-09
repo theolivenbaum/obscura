@@ -380,7 +380,17 @@ public static partial class CdpServer
         PendingNavigation? navInitiator,
         List<string> preloadScripts)
     {
-        await ctx.V8Lock.WaitAsync().ConfigureAwait(false);
+        // The navigation's deadline starts once it holds the lock, so waiting for the lock
+        // is bounded by one deadline of its own: a holder that never lets go must not leave
+        // Page.navigate unanswered.
+        TimeSpan lockWait = page.NavigationTimeout.TotalMilliseconds >= int.MaxValue
+            ? Timeout.InfiniteTimeSpan
+            : page.NavigationTimeout;
+        if (!await ctx.V8Lock.WaitAsync(lockWait).ConfigureAwait(false))
+        {
+            return NavigationDeadlineMessage(page);
+        }
+
         try
         {
             // Preloads (addBinding shims, addScriptToEvaluateOnNewDocument
@@ -401,7 +411,16 @@ public static partial class CdpServer
 
             return null;
         }
-        catch (Exception e) when (e is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            // Nothing cancels this task from outside, so a cancellation is the page's own
+            // (a script interrupt surfacing as ClearScript's ScriptInterruptedException).
+            // It is a failed navigation. Letting it escape reached the connection
+            // processor's shutdown handler, which stopped serving the connection: this
+            // Page.navigate and every later command went unanswered.
+            return NavigationDeadlineMessage(page);
+        }
+        catch (Exception e)
         {
             return e.Message;
         }
@@ -410,6 +429,9 @@ public static partial class CdpServer
             ctx.V8Lock.Release();
         }
     }
+
+    private static string NavigationDeadlineMessage(Page page) =>
+        $"navigation exceeded {((ulong)Math.Max(0.0, page.NavigationTimeout.TotalMilliseconds)).ToString(System.Globalization.CultureInfo.InvariantCulture)}ms deadline";
 
     internal static async Task ProcessCdpMessageAsync(
         string text,
