@@ -5299,3 +5299,70 @@ reported before a message posted earlier in the same task (Chromium: after).
 content inside a shadow root is dispatched at the host, since the hit test does not enter
 shadow trees (Playwright's `#host >> #inner` click never reaches the inner button). Pinned by
 `EventDispatchConformanceTests` (Js), which runs the Chromium probe's sections.
+
+### The navigation deadline is unconditional, and an interrupted task does not lose its batch
+
+Found by the after-fix live survey: reddit.com and cloudflare.com no longer loaded. Over
+CDP `Page.navigate` was never answered, no network event reached the client and every later
+command went unanswered, with the server idle; the CLI printed "Timed out navigating ...
+after 30s" after ~17s. Five port defects, none of them in the reference's shape (deno_core
+drives one thread and resolves ops inside its own loop):
+
+- **A script interrupt escaped as a cancellation.** ClearScript's `ScriptInterruptedException`
+  is an `OperationCanceledException`. A module's top-level await drove the loop, the loop ran
+  reddit's animation frame, whose `innerText` forced a 5s layout and overran the module budget
+  (3s + 5s grace); an op that sees the watchdog's cancellation keeps the isolate interrupted
+  until the watchdog is disarmed, so the bookkeeping after the timeout
+  (`ClearSettledMarker`) was interrupted too and the exception left
+  `EvaluatePreparedModuleAsync`. `Page.EvaluateModuleAsync` and the module-prepare catches let
+  every `OperationCanceledException` through, and the navigation failed as "timed out" (the
+  CLI) or reached `CdpProcessorAsync`'s `catch (OperationCanceledException)`, which ended the
+  connection's processor silently. Now the marker catches the interrupt, the script phase
+  treats anything but the navigation's own token as that script's failure,
+  `RunWithNavigationDeadlineAsync` reads a stray cancellation like the deadline (committed:
+  the page as it stood; not: `navigation was interrupted`), the CDP navigate paths turn one
+  into a protocol error, and the processor keeps serving unless its own connection stopped.
+  e01eeae (before custom elements) also failed cloudflare.com this way, 1 run in 2.
+- **The deadline was not unconditional.** `RunWithNavigationDeadlineAsync` waited for the
+  navigation however long it took once the token was cancelled; it now returns
+  `NavigationBackstopGrace` (5s) after the deadline whatever the navigation awaits, leaving
+  it behind with its token cancelled. `NavigateTaskAsync` waits for the connection's V8 lock
+  for at most one deadline.
+- **An interrupted turn dropped the rest of its batch.** `PumpTick` takes all due timers (and
+  posted tasks) before running them; a watchdog interrupt in one ended the turn and lost the
+  others. On reddit those were the executions of load-delaying dynamic scripts (core-js,
+  recaptcha, doubleclick), so `load` waited out the whole 30s script deadline. The ones not
+  yet run go back (`TimerQueue.Restore`, keeping their ids and order unless cleared meanwhile;
+  `RequeuePostedTasks`); the interrupted one is not run again.
+- **The timer and posted-task queues were not thread-safe.** ClearScript resolves an async
+  op's promise on the thread that completed the op's `Task`, and the page's continuation runs
+  there while the pump thread is between scripts: `TakeDue` threw "Collection was modified"
+  out of reddit's module drain. Both queues are locked.
+- **A finished module was charged for the page's queued tasks.** The drain pumped before
+  checking the settled marker, so a module without top-level await (reddit's
+  `STICKY_CANARY` data: module) ran the page's timers and animation frames on its budget and
+  was reported as timed out. The marker is checked first.
+
+The cost behind the 5s layouts is the custom elements change working: reddit's posts are
+`shreddit-*` elements hidden by `:not(:defined)` until upgraded, and now render. Two cheap
+parts of it are fixed: shadow-root sheets were parsed per root on every pass (~170 Lit roots
+sharing a handful of sheets, 0.5-2.3s a pass), now one compiled sheet per distinct source set,
+kept across passes in the document's `StylesheetCache` (`GetOrParseShadow`); and
+`ProbeFirstLine`'s window applied only to lines over 2048 characters, so a post body re-shaped
+its remainder for every line (2.35M characters in one cold pass, 0.33M with 256/64). What is
+left is layout cost proper (a cold pass is still ~2.7s on reddit; a min-content measurement of
+a grid item lays its text out one word per line).
+
+Measured live through the proxy. CLI `fetch --eval "document.getElementsByTagName('*').length"`:
+reddit.com before loaded in 4 of ~14 runs (the rest "Timed out ... after 30s" at ~17s), after
+1466-1511 in 3 of 3 (23-36s; e01eeae 1382 in 15.8s, without the posts rendered); cloudflare.com
+3025-3027 in 3 of 3 (e01eeae: 3012, or a failure). CDP (Playwright `connectOverCDP`,
+`goto(waitUntil: 'commit')`): reddit.com before 0 of 3 (120s client timeout, no network
+events), after 3 of 3 (goto 21-30s, 1470-1505 elements); cloudflare.com 3 of 3 (goto ~29s,
+3016-3028 elements). A run can still print the CLI's "did not finish loading" warning with
+readiness `Loaded`: the deadline passed after `load`, in frame building or settling.
+Pinned by `NavigationDeadlineTests` (Browser), `InterruptedTaskNavigation` (Cdp),
+`OpCancellationTests.AnInterruptedTimerLeavesTheRestOfItsBatchForTheNextTurn`,
+`AModuleTimeoutThatStopsAPageTaskInsideAnOpIsAnErrorNotACancellation`,
+`RuntimeTests.FinishedModuleIsNotChargedForThePagesQueuedTasks`, `TimerQueueTests` (Js) and
+`ShadowStylesheetCacheTests` (Render).
