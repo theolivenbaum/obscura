@@ -2026,6 +2026,45 @@ members Chromium has only in secure contexts. The IndexedDB objects keep their m
 properties (the shim's request records assign to themselves). DOMParser and createHTMLDocument
 documents are still plain objects, not HTMLDocuments. Pinned by `GlobalInterfaceObjects`.
 
+### Live-site boot blockers (October 2026)
+
+Fixes from loading vk.com, duolingo.com, mail.ru, weather.com and steamcommunity.com in the
+port and in Chromium 141 and chasing the first thing that stopped each app from booting.
+Values measured in Chromium 141 (headless, Playwright); facts in
+`PocketCalculator.Js.Tests/LiveSiteInterfaceTests.cs` and the Browser tests named below.
+
+- **IntersectionObserverEntry is an interface.** DEVIATION from
+  crates/obscura-js/js/bootstrap.js, whose entries are plain objects and whose
+  `IntersectionObserverEntry` is an empty class. duolingo.com's inline browser check needs
+  `"isIntersecting" in IntersectionObserverEntry.prototype` and sent the port to
+  /errors/not-supported.html (then /errors/404.html: 19 elements against 4288). Entries are
+  now instances with Chromium's eight enumerable prototype accessors (`isVisible` is false:
+  IntersectionObserver v2 is not implemented), `new` throws "Illegal constructor", and the
+  three rectangles, like a ResizeObserverEntry's `contentRect`, are DOMRectReadOnly.
+- **Reflected content attributes.** DEVIATION from crates/obscura-js/js/bootstrap.js, which has
+  none of them: `source.srcset` was undefined and mail.ru's Svelte hydration
+  (`e.srcset.split(",")`) threw before the page rendered its content. The block
+  `_reflectContentAttributes` adds about 150 plain reflections (string, boolean, long,
+  unsigned long, non-negative long, URL, enumerated and CORS-settings kinds) on the interfaces
+  Chromium defines them on: source srcset/media/width/height, input
+  defaultValue/defaultChecked/maxLength/minLength/size/readOnly/required/multiple/pattern,
+  script/link crossOrigin/integrity/fetchPriority, link `as`, form enctype/encoding, the table
+  and legacy presentational attributes, template shadowRoot*, media autoplay/loop/controls, and
+  so on. `_addMissingMembers` adds CharacterData next/previousElementSibling,
+  DocumentFragment.childElementCount, Element.hasAttributeNS and webkitMatchesSelector,
+  HTMLSelectElement length/item/namedItem/selectedOptions, HTMLOptionElement index/label and
+  HTMLTextAreaElement defaultValue/textLength. Still missing: script `async` (its force-async
+  flag), input/button form* overrides and `list`, the HTMLTableElement row/section API,
+  `autocomplete`, meter low/high/optimum, media preload/playbackRate and friends.
+- **Shadow ops act on the calling realm.** Port fix (the reference runs frames in the page
+  realm, so it has no such binding): `op_shadow_attach` and `op_shadow_root_info` were bound to
+  the page's state, so `attachShadow` in a child frame resolved the frame's node id in the
+  page's arena. vkvideo.ru's player inside mail.ru threw NotSupportedError on a `<div>`, and
+  an id the page also had got its shadow root on the page's node. They are now bound per realm
+  with the other document ops (`FrameShadowRootTests`).
+- **IDBIndex getKey/getAllKeys/openKeyCursor** answer empty like the rest of the in-memory
+  IndexedDB shim; mail.ru's api-cache GC called `index(...).getAllKeys`.
+
 ### A linked stylesheet leaves no element in the DOM
 
 `crates/obscura-browser` materializes a fetched `<link rel=stylesheet>` as a synthetic

@@ -243,10 +243,6 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
             nid => CoreOps.OpScriptTryStart(Page, U32(nid))));
         Bind(ops, "op_run_classic_script", (Action<object?, object?>)(
             (source, url) => RunClassicScript(engine, S(source), S(url))));
-        Bind(ops, "op_shadow_attach", (Func<object?, object?, int>)(
-            (nid, mode) => CoreOps.OpShadowAttach(Page, U32(nid), S(mode))));
-        Bind(ops, "op_shadow_root_info", (Func<object?, string>)(
-            nid => CoreOps.OpShadowRootInfo(Page, U32(nid))));
         // Upstream 04418a5: host-held linked-sheet CSS and its origin-clean bit.
         Bind(ops, "op_external_stylesheet_set", (Func<object?, object?, object?, object?, object?, bool>)(
             (nid, css, responseUrl, originClean, frameId) => StylesheetOps.OpExternalStylesheetSet(
@@ -456,6 +452,15 @@ public sealed class PocketCalculatorOps(PocketCalculatorState page, RealmStates?
     {
         var engine = ops.Engine;
         BindFetch(ops, document);
+        // Port fix: the shadow ops act on the calling realm's document. They were bound to the
+        // page's state, so a child frame's attachShadow resolved the frame's node id in the
+        // page's arena: it failed for a node the page did not have (vkvideo.ru's player inside
+        // mail.ru threw NotSupportedError on a <div>) and could attach to the page's node
+        // that happened to share the id.
+        Bind(ops, "op_shadow_attach", (Func<object?, object?, int>)(
+            (nid, mode) => CoreOps.OpShadowAttach(document, U32(nid), S(mode))));
+        Bind(ops, "op_shadow_root_info", (Func<object?, string>)(
+            nid => CoreOps.OpShadowRootInfo(document, U32(nid))));
         BindPostFrameMessage(ops, document);
 
         // Port additions (SECURITY.md C2, C3): the consumers of an internal load's host-held

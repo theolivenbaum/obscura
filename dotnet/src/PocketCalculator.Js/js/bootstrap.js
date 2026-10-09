@@ -10945,7 +10945,7 @@ function _roMeasurement(target, suppliedGeometry, suppliedByBatch = false) {
   if (!geometry) {
     const zero = _roPhysicalSize(0, 0, false);
     return {
-      contentRect: _ioRect(0, 0, 0, 0),
+      contentRect: _ioDomRect(0, 0, 0, 0),
       contentBoxSize: [zero],
       borderBoxSize: [_roPhysicalSize(0, 0, false)],
       devicePixelContentBoxSize: [_roPhysicalSize(0, 0, false)],
@@ -11006,8 +11006,8 @@ function _roMeasurement(target, suppliedGeometry, suppliedByBatch = false) {
   const deviceSize = _roPhysicalSize(deviceWidth, deviceHeight, vertical);
   return {
     contentRect: emptyInline
-      ? _ioRect(0, 0, 0, 0)
-      : _ioRect(paddingLeft, paddingTop, contentWidth, contentHeight),
+      ? _ioDomRect(0, 0, 0, 0)
+      : _ioDomRect(paddingLeft, paddingTop, contentWidth, contentHeight),
     contentBoxSize: [contentSize],
     borderBoxSize: [borderSize],
     devicePixelContentBoxSize: [deviceSize],
@@ -13242,6 +13242,13 @@ function _ioRect(x, y, width, height) {
     toJSON() { return this; },
   };
 }
+// The rectangles an observer entry hands to script are DOMRectReadOnly in Chromium
+// (`entry.boundingClientRect instanceof DOMRectReadOnly`); the measurement helpers keep
+// plain records.
+function _ioDomRect(x, y, width, height) {
+  if (!_ifaceReady) return _ioRect(x, y, width, height);
+  return _ifaceInstance(_ifaces.DOMRectReadOnly, { __proto__: null, x: +x, y: +y, width: +width, height: +height });
+}
 function _ioMargins(value) {
   const parts = String(value || "0px").trim().split(/\s+/);
   if (parts.length < 1 || parts.length > 4) return null;
@@ -13417,15 +13424,25 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     const targetArea = Math.max(0, rect.width) * Math.max(0, rect.height);
     const isIntersecting = edgesTouch;
     const area = isIntersecting ? width * height : 0;
-    return {
-      target,
-      isIntersecting,
-      intersectionRatio: targetArea > 0 ? area / targetArea : (isIntersecting ? 1 : 0),
-      boundingClientRect: _ioRect(rect.x, rect.y, rect.width, rect.height),
-      intersectionRect: isIntersecting ? _ioRect(left, top, width, height) : _ioRect(0, 0, 0, 0),
-      rootBounds: root,
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, whose entries are plain objects and
+    // whose IntersectionObserverEntry is an empty class: Chromium's entries are
+    // IntersectionObserverEntry instances with the members as prototype accessors, and
+    // duolingo.com's browser check (`"isIntersecting" in IntersectionObserverEntry.prototype`)
+    // sent the port to /errors/not-supported.html.
+    const inner = {
+      __proto__: null,
       time: performance.now(),
+      rootBounds: _ioDomRect(root.x, root.y, root.width, root.height),
+      boundingClientRect: _ioDomRect(rect.x, rect.y, rect.width, rect.height),
+      intersectionRect: isIntersecting ? _ioDomRect(left, top, width, height) : _ioDomRect(0, 0, 0, 0),
+      isIntersecting,
+      // trackVisibility (IntersectionObserver v2) is not implemented; Chromium answers false
+      // for an observer that does not track visibility.
+      isVisible: false,
+      intersectionRatio: targetArea > 0 ? area / targetArea : (isIntersecting ? 1 : 0),
+      target,
     };
+    return _ifaceReady ? _ifaceInstance(_ifaces.IntersectionObserverEntry, inner) : inner;
   }
   _thresholdIndex(ratio) {
     let index = 0;
@@ -13521,7 +13538,6 @@ globalThis.IntersectionObserver = class IntersectionObserver {
   if (globalThis.document) wireUp();
   else Promise.resolve().then(wireUp);
 })();
-globalThis.IntersectionObserverEntry = class IntersectionObserverEntry {};
 globalThis.PerformanceObserver = class { constructor(){} observe(){} disconnect(){} };
 // Feature detection reads this static before deciding to observe anything;
 // absent it, supportedEntryTypes.includes(...) throws and instrumentation
@@ -19334,7 +19350,7 @@ function _idbObjectStore(name) {
     openCursor() { return _idbRequest(() => null); },
     openKeyCursor() { return _idbRequest(() => null); },
     createIndex() { return _idbBrand({ name: '', keyPath: '', unique: false, multiEntry: false, get() { return _idbRequest(() => undefined); } }, 'IDBIndex'); },
-    index() { return _idbBrand({ get() { return _idbRequest(() => undefined); }, getAll() { return _idbRequest(() => []); }, count() { return _idbRequest(() => 0); }, openCursor() { return _idbRequest(() => null); } }, 'IDBIndex'); },
+    index() { return _idbBrand({ get() { return _idbRequest(() => undefined); }, getKey() { return _idbRequest(() => undefined); }, getAll() { return _idbRequest(() => []); }, getAllKeys() { return _idbRequest(() => []); }, count() { return _idbRequest(() => 0); }, openCursor() { return _idbRequest(() => null); }, openKeyCursor() { return _idbRequest(() => null); } }, 'IDBIndex'); },
     deleteIndex() {},
   }, 'IDBObjectStore');
 }
@@ -22525,6 +22541,267 @@ const _svgMemberOwners = {
     if (C) accessor(C.prototype, 'href', hrefGet, null);
   }
 })();
+// Reflected content attributes the HTML interfaces were missing. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, which has none of these: `source.srcset` read undefined,
+// and mail.ru's Svelte hydration (`e.srcset.split(",")` on a <picture>'s <source>) threw
+// before the page rendered. Each member is plain WebIDL reflection of its content attribute
+// on the interface Chromium 141 defines it on (HTML "Reflecting content attributes in IDL
+// attributes"), so a page reading or writing one sees the attribute and nothing more.
+(function _reflectContentAttributes() {
+  const get = (el, attr) => _elCall('getAttribute', el, [attr]);
+  const set = (el, attr, v) => { _elCall('setAttribute', el, [attr, v]); };
+  const has = (el, attr) => _elCall('hasAttribute', el, [attr]);
+  const remove = (el, attr) => { _elCall('removeAttribute', el, [attr]); };
+  // HTML "rules for parsing integers": leading ASCII whitespace, an optional sign, digits.
+  const integerPattern = /^[\t\n\f\r ]*([-+]?)([0-9]+)/;
+  const parseInteger = (s) => {
+    const m = _reflectApply(RegExp.prototype.exec, integerPattern, [s]);
+    if (!m) return null;
+    const n = +m[2];
+    return m[1] === '-' ? -n : n;
+  };
+  const indexSizeError = (C, name, msg) => new DOMException(
+    "Failed to set the '" + name + "' property on '" + C.name + "': " + msg, 'IndexSizeError');
+  const kinds = {
+    s: (attr) => [function () { const v = get(this, attr); return v === null ? '' : v; },
+      function (v) { set(this, attr, _String(v)); }],
+    b: (attr) => [function () { return has(this, attr); },
+      function (v) { if (v) set(this, attr, ''); else remove(this, attr); }],
+    // long: any integer in range, else the default.
+    l: (attr, def) => [function () {
+      const v = get(this, attr);
+      const n = v === null ? null : parseInteger(v);
+      return n !== null && n >= -2147483648 && n <= 2147483647 ? n : def;
+    }, function (v) { set(this, attr, _String(+v | 0)); }],
+    // unsigned long: 0..2^31-1, else the default; `positive` excludes 0 (and throws on set).
+    u: (attr, def, positive, C, name) => [function () {
+      const v = get(this, attr);
+      const n = v === null ? null : parseInteger(v);
+      return n !== null && n >= (positive ? 1 : 0) && n <= 2147483647 ? n : def;
+    }, function (v) {
+      const n = +v >>> 0;
+      if (positive && n === 0) throw indexSizeError(C, name, 'The value provided is 0, which is an invalid size.');
+      set(this, attr, _String(n <= 2147483647 ? n : def));
+    }],
+    // long limited to only non-negative numbers (maxLength, minLength): -1 when absent.
+    n: (attr, def, _unused, C, name) => [function () {
+      const v = get(this, attr);
+      const n = v === null ? null : parseInteger(v);
+      return n !== null && n >= 0 && n <= 2147483647 ? n : def;
+    }, function (v) {
+      const n = +v | 0;
+      if (n < 0) throw indexSizeError(C, name, 'The value provided (' + n + ') is not positive or 0.');
+      set(this, attr, _String(n));
+    }],
+    // A URL: resolved against the document base, the raw value when it does not parse.
+    url: (attr) => [function () {
+      const v = get(this, attr);
+      if (v === null) return '';
+      const r = _urlResolveOp(v, _documentBase() || 'about:blank');
+      return r === null ? v : r;
+    }, function (v) { set(this, attr, _String(v)); }],
+    // An enumerated attribute: its keyword when valid, else the missing/invalid default.
+    e: (attr, values, missing, invalid) => [function () {
+      const v = get(this, attr);
+      if (v === null) return missing;
+      const k = _stringToLowerCase(v);
+      return _arrayIndexOf(values, k) >= 0 ? k : invalid;
+    }, function (v) { set(this, attr, _String(v)); }],
+    // CORS settings: null when absent, 'use-credentials' or else 'anonymous'.
+    cors: (attr) => [function () {
+      const v = get(this, attr);
+      if (v === null) return null;
+      return _stringToLowerCase(v) === 'use-credentials' ? 'use-credentials' : 'anonymous';
+    }, function (v) { if (v === null) remove(this, attr); else set(this, attr, _String(v)); }],
+  };
+  const fetchPriority = ['e', 'fetchpriority', ['high', 'low', 'auto'], 'auto', 'auto'];
+  const linkAs = ['audio', 'audioworklet', 'document', 'embed', 'fetch', 'font', 'image', 'json',
+    'manifest', 'object', 'paintworklet', 'report', 'script', 'serviceworker', 'sharedworker',
+    'style', 'track', 'video', 'webidentity', 'worker', 'xslt'];
+  const enctypes = ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'];
+  const cellHalign = { align: ['s', 'align'], ch: ['s', 'char'], chOff: ['s', 'charoff'], vAlign: ['s', 'valign'] };
+  const align = { align: ['s', 'align'] };
+  const compact = { compact: ['b', 'compact'] };
+  // interface (without HTML/Element) -> { member: [kind, attribute, ...kind arguments] }
+  const table = {
+    Anchor: { coords: ['s', 'coords'], charset: ['s', 'charset'], rev: ['s', 'rev'], shape: ['s', 'shape'] },
+    Area: { alt: ['s', 'alt'], coords: ['s', 'coords'], shape: ['s', 'shape'], noHref: ['b', 'nohref'] },
+    Body: { link: ['s', 'link'], vLink: ['s', 'vlink'], aLink: ['s', 'alink'], bgColor: ['s', 'bgcolor'],
+      background: ['s', 'background'] },
+    BR: { clear: ['s', 'clear'] },
+    DList: compact, Directory: compact, Menu: compact, UList: compact,
+    OList: { reversed: ['b', 'reversed'], start: ['l', 'start', 1], compact: ['b', 'compact'] },
+    Div: align, Heading: align, Paragraph: align, Legend: align, TableCaption: align,
+    Embed: { width: ['s', 'width'], height: ['s', 'height'], align: ['s', 'align'] },
+    Font: { color: ['s', 'color'], face: ['s', 'face'], size: ['s', 'size'] },
+    Form: { acceptCharset: ['s', 'accept-charset'], noValidate: ['b', 'novalidate'],
+      enctype: ['e', 'enctype', enctypes, enctypes[0], enctypes[0]],
+      encoding: ['e', 'enctype', enctypes, enctypes[0], enctypes[0]] },
+    HR: { align: ['s', 'align'], color: ['s', 'color'], noShade: ['b', 'noshade'], size: ['s', 'size'],
+      width: ['s', 'width'] },
+    Html: { version: ['s', 'version'] },
+    IFrame: { width: ['s', 'width'], height: ['s', 'height'], allow: ['s', 'allow'],
+      allowFullscreen: ['b', 'allowfullscreen'], align: ['s', 'align'], scrolling: ['s', 'scrolling'],
+      frameBorder: ['s', 'frameborder'], longDesc: ['url', 'longdesc'], marginHeight: ['s', 'marginheight'],
+      marginWidth: ['s', 'marginwidth'], credentialless: ['b', 'credentialless'] },
+    Image: { alt: ['s', 'alt'], useMap: ['s', 'usemap'], isMap: ['b', 'ismap'], lowsrc: ['url', 'lowsrc'],
+      align: ['s', 'align'], hspace: ['u', 'hspace', 0], vspace: ['u', 'vspace', 0],
+      longDesc: ['url', 'longdesc'], border: ['s', 'border'] },
+    Input: { alt: ['s', 'alt'], defaultChecked: ['b', 'checked'], defaultValue: ['s', 'value'],
+      dirName: ['s', 'dirname'], maxLength: ['n', 'maxlength', -1], minLength: ['n', 'minlength', -1],
+      multiple: ['b', 'multiple'], pattern: ['s', 'pattern'], readOnly: ['b', 'readonly'],
+      required: ['b', 'required'], size: ['u', 'size', 20, true], align: ['s', 'align'],
+      useMap: ['s', 'usemap'], webkitdirectory: ['b', 'webkitdirectory'], incremental: ['b', 'incremental'] },
+    Link: { crossOrigin: ['cors', 'crossorigin'], media: ['s', 'media'], as: ['e', 'as', linkAs, '', ''],
+      fetchPriority, imageSrcset: ['s', 'imagesrcset'], imageSizes: ['s', 'imagesizes'],
+      charset: ['s', 'charset'], rev: ['s', 'rev'], integrity: ['s', 'integrity'] },
+    Media: { crossOrigin: ['cors', 'crossorigin'], autoplay: ['b', 'autoplay'], loop: ['b', 'loop'],
+      controls: ['b', 'controls'], defaultMuted: ['b', 'muted'] },
+    Meta: { httpEquiv: ['s', 'http-equiv'], media: ['s', 'media'], scheme: ['s', 'scheme'] },
+    Mod: { cite: ['url', 'cite'], dateTime: ['s', 'datetime'] },
+    Quote: { cite: ['url', 'cite'] },
+    Object: { data: ['url', 'data'], useMap: ['s', 'usemap'], width: ['s', 'width'], height: ['s', 'height'],
+      align: ['s', 'align'], archive: ['s', 'archive'], code: ['s', 'code'], declare: ['b', 'declare'],
+      hspace: ['u', 'hspace', 0], vspace: ['u', 'vspace', 0], standby: ['s', 'standby'],
+      codeBase: ['url', 'codebase'], codeType: ['s', 'codetype'], border: ['s', 'border'] },
+    OptGroup: { label: ['s', 'label'] },
+    Option: { defaultSelected: ['b', 'selected'] },
+    Param: { valueType: ['s', 'valuetype'] },
+    Pre: { width: ['l', 'width', 0] },
+    Script: { noModule: ['b', 'nomodule'], charset: ['s', 'charset'], defer: ['b', 'defer'],
+      crossOrigin: ['cors', 'crossorigin'], fetchPriority, event: ['s', 'event'], integrity: ['s', 'integrity'] },
+    Select: { multiple: ['b', 'multiple'], required: ['b', 'required'], size: ['u', 'size', 0] },
+    Source: { srcset: ['s', 'srcset'], media: ['s', 'media'], width: ['u', 'width', 0], height: ['u', 'height', 0] },
+    Style: { media: ['s', 'media'] },
+    Table: { align: ['s', 'align'], border: ['s', 'border'], frame: ['s', 'frame'], rules: ['s', 'rules'],
+      summary: ['s', 'summary'], width: ['s', 'width'], bgColor: ['s', 'bgcolor'],
+      cellPadding: ['s', 'cellpadding'], cellSpacing: ['s', 'cellspacing'] },
+    TableCell: { ...cellHalign, headers: ['s', 'headers'], axis: ['s', 'axis'], height: ['s', 'height'],
+      width: ['s', 'width'], noWrap: ['b', 'nowrap'], bgColor: ['s', 'bgcolor'], abbr: ['s', 'abbr'] },
+    TableCol: { ...cellHalign, width: ['s', 'width'] },
+    TableRow: { ...cellHalign, bgColor: ['s', 'bgcolor'] },
+    TableSection: cellHalign,
+    Template: { shadowRootMode: ['e', 'shadowrootmode', ['open', 'closed'], '', ''],
+      shadowRootDelegatesFocus: ['b', 'shadowrootdelegatesfocus'],
+      shadowRootClonable: ['b', 'shadowrootclonable'], shadowRootSerializable: ['b', 'shadowrootserializable'] },
+    TextArea: { dirName: ['s', 'dirname'], maxLength: ['n', 'maxlength', -1], minLength: ['n', 'minlength', -1],
+      readOnly: ['b', 'readonly'], required: ['b', 'required'], wrap: ['s', 'wrap'] },
+    Video: { width: ['u', 'width', 0], height: ['u', 'height', 0], playsInline: ['b', 'playsinline'],
+      disablePictureInPicture: ['b', 'disablepictureinpicture'] },
+  };
+  const ifaces = _objectKeys(table);
+  for (let i = 0; i < ifaces.length; i++) {
+    const C = globalThis['HTML' + ifaces[i] + 'Element'];
+    if (typeof C !== 'function' || !C.prototype) continue;
+    const P = C.prototype;
+    const members = table[ifaces[i]];
+    const names = _objectKeys(members);
+    for (let j = 0; j < names.length; j++) {
+      const name = names[j];
+      // Only where nothing (own or inherited) answers yet.
+      if (name in P) continue;
+      const spec = members[name];
+      const pair = kinds[spec[0]](spec[1], spec[2], spec[3], C, name);
+      const getter = _getOwnPropertyDescriptor({ get [name]() { return _reflectApply(pair[0], this, []); } }, name).get;
+      const setter = _getOwnPropertyDescriptor({ set [name](v) { _reflectApply(pair[1], this, [v]); } }, name).set;
+      _defineProperty(P, name, { get: _markNative(getter), set: _markNative(setter), enumerable: true, configurable: true });
+    }
+  }
+})();
+// Members Chromium 141 has that the shim lacked, each built on what the shim already does
+// (DEVIATION from crates/obscura-js/js/bootstrap.js, which has none of them): the
+// NonDocumentTypeChildNode siblings on CharacterData, ParentNode.childElementCount on a
+// fragment, Element.hasAttributeNS and webkitMatchesSelector, the select's collection
+// members, an option's index and label, and a textarea's defaultValue and textLength.
+(function _addMissingMembers() {
+  const def = (C, name, get, set) => {
+    if (typeof C !== 'function' || !C.prototype || _objectHasOwn(C.prototype, name)) return;
+    const g = _getOwnPropertyDescriptor({ get [name]() { return _reflectApply(get, this, []); } }, name).get;
+    const s = set ? _getOwnPropertyDescriptor({ set [name](v) { _reflectApply(set, this, [v]); } }, name).set : undefined;
+    _defineProperty(C.prototype, name, { get: _markNative(g), set: s ? _markNative(s) : undefined, enumerable: true, configurable: true });
+  };
+  const method = (C, name, length, fn) => {
+    if (typeof C !== 'function' || !C.prototype || _objectHasOwn(C.prototype, name)) return;
+    const f = ({ [name](...args) { return _reflectApply(fn, this, args); } })[name];
+    _defineProperty(f, 'length', { value: length, configurable: true });
+    _defineProperty(C.prototype, name, { value: _markNative(f), writable: true, enumerable: true, configurable: true });
+  };
+  const sibling = (forward) => function () {
+    for (let n = forward ? this.nextSibling : this.previousSibling; n; n = forward ? n.nextSibling : n.previousSibling) {
+      if (n.nodeType === 1) return n;
+    }
+    return null;
+  };
+  def(globalThis.CharacterData, 'nextElementSibling', sibling(true));
+  def(globalThis.CharacterData, 'previousElementSibling', sibling(false));
+  def(globalThis.DocumentFragment, 'childElementCount', function () {
+    let count = 0;
+    for (let n = this.firstChild; n; n = n.nextSibling) if (n.nodeType === 1) count++;
+    return count;
+  });
+  method(Element, 'hasAttributeNS', 2, function (namespace, localName) {
+    if (arguments.length < 2) throw new TypeError("Failed to execute 'hasAttributeNS' on 'Element': 2 arguments required, but only " + arguments.length + ' present.');
+    return _elCall('getAttributeNodeNS', this, [namespace, localName]) !== null;
+  });
+  method(Element, 'webkitMatchesSelector', 1, function (selectors) {
+    return _elCall('matches', this, [selectors]);
+  });
+
+  const Select = globalThis.HTMLSelectElement;
+  const optionsOf = (select) => _elGet('options', select);
+  def(Select, 'length', function () { return optionsOf(this).length; }, function (v) {
+    const n = +v >>> 0;
+    const opts = optionsOf(this);
+    if (n < opts.length) {
+      for (let i = opts.length - 1; i >= n; i--) opts[i].remove();
+    } else {
+      const doc = this.ownerDocument;
+      for (let i = opts.length; i < n; i++) _elCall('appendChild', this, [doc.createElement('option')]);
+    }
+  });
+  method(Select, 'item', 1, function (index) {
+    const o = optionsOf(this)[+index >>> 0];
+    return o === undefined ? null : o;
+  });
+  method(Select, 'namedItem', 1, function (name) {
+    const key = _String(name);
+    if (key === '') return null;
+    const opts = optionsOf(this);
+    for (let i = 0; i < opts.length; i++) {
+      if (_elCall('getAttribute', opts[i], ['id']) === key || _elCall('getAttribute', opts[i], ['name']) === key) return opts[i];
+    }
+    return null;
+  });
+  def(Select, 'selectedOptions', function () {
+    const opts = optionsOf(this);
+    const out = [];
+    if (_elCall('hasAttribute', this, ['multiple'])) {
+      for (let i = 0; i < opts.length; i++) if (opts[i].selected) out.push(opts[i]);
+    } else {
+      const i = this.selectedIndex;
+      if (i >= 0 && i < opts.length) out.push(opts[i]);
+    }
+    return HTMLCollection._from(out);
+  });
+
+  const Option = globalThis.HTMLOptionElement;
+  def(Option, 'index', function () {
+    let select = this.parentNode;
+    if (select && select.localName === 'optgroup') select = select.parentNode;
+    if (!select || select.localName !== 'select') return 0;
+    const opts = optionsOf(select);
+    for (let i = 0; i < opts.length; i++) if (opts[i] === this) return i;
+    return 0;
+  });
+  def(Option, 'label', function () {
+    const v = _elCall('getAttribute', this, ['label']);
+    return v !== null ? v : this.text;
+  }, function (v) { _elCall('setAttribute', this, ['label', _String(v)]); });
+
+  const TextArea = globalThis.HTMLTextAreaElement;
+  def(TextArea, 'defaultValue', function () { return this.textContent; }, function (v) { this.textContent = _String(v); });
+  def(TextArea, 'textLength', function () { return _String(this.value).length; });
+})();
 (function _distributeInterfaceMembers() {
   const EP = Element.prototype;
   const place = (proto, name, d) => {
@@ -23469,6 +23746,11 @@ if (_navInner.permissions) {
   };
   _ifaceAdopt(perms, _ifaces.Permissions);
 }
+
+// IntersectionObserverEntry: what IntersectionObserver._entry builds once this section has
+// run. Members and order as in Chromium 141.
+_ifaceIllegal('IntersectionObserverEntry');
+for (const key of ['time', 'rootBounds', 'boundingClientRect', 'intersectionRect', 'isIntersecting', 'isVisible', 'intersectionRatio', 'target']) _ifaceAttr(_ifaces.IntersectionObserverEntry, key);
 
 _ifaceIllegal('GeolocationCoordinates');
 for (const key of ['accuracy', 'altitude', 'altitudeAccuracy', 'heading', 'latitude', 'longitude', 'speed']) _ifaceAttr(_ifaces.GeolocationCoordinates, key);
