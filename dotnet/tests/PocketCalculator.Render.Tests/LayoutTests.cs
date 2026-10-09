@@ -1161,6 +1161,35 @@ public class FloatContextTests
         Assert.Equal((float?)100.0f, context.ClearedThreshold(Clear.Both));
     }
 
+    /// <summary>
+    /// The fitter measures free height as float differences summed in double, the bottom is one
+    /// float sum: with these values the slot from 152.99115 to 179.24298 is an ulp too short for
+    /// a 26.251833 float, whose bottom still lands exactly on 179.24298. Subdividing the next
+    /// segment there threw, which failed the whole layout (wiki-footer under the differential
+    /// test).
+    /// </summary>
+    [Fact]
+    public void AFloatWhoseBottomLandsOnASegmentBoundaryByRoundingIsPlaced()
+    {
+        const float top = 152.99115f;
+        const float boundary = 179.24298f;
+        const float height = 26.251833f;
+        Assert.Equal(boundary, top + height);
+        Assert.True((double)(boundary - top) < height);
+
+        var context = new FloatContext();
+        context.SetWidth(400.0f);
+        Place(context, 10.0f, 300.0f, FloatDirection.Left);
+        Place(context, 10.0f, boundary, FloatDirection.Right);
+
+        Point<float> placed = PlaceAt(context, 10.0f, height, top, FloatDirection.Right);
+
+        Assert.Equal(top, placed.Y);
+        Assert.Equal((float?)boundary, context.ClearedThreshold(Clear.Right));
+        Assert.Equal((10.0f, 20.0f), context.InsetsOver(top, height, 0.0f, 0.0f));
+        Assert.Equal((10.0f, 0.0f), context.InsetsOver(boundary, 1.0f, 0.0f, 0.0f));
+    }
+
     [Fact]
     public void SideClearanceIsMonotonicForLeftAndRightFloats()
     {

@@ -1499,6 +1499,11 @@ changes, each commented at the site:
 - a float is placed after the pending margin (Chromium's `NextBorderEdge`), a same-BFC child's
   sub-context sits at its collapsed border-top, and clearance applies only when the
   hypothetical position is above the floats (taffy added the margin after clearing);
+- a float whose bottom lands exactly on a segment boundary by rounding is placed in the segment
+  that holds its bottom (taffy subdivided the next segment at its start and threw, failing the
+  whole layout: the fitter sums the free height in double, the bottom is one float sum);
+  pinned by `FloatContextTests.AFloatWhoseBottomLandsOnASegmentBoundaryByRoundingIsPlaced`,
+  found by the incremental-layout differential test on `wiki-footer`;
 - a float taller than every earlier one extends the segments (taffy left the part below the
   last segment excluding nothing);
 - a float-avoiding box moves down until it fits (taffy took the first slot at any width);
