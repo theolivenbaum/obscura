@@ -410,6 +410,39 @@ public class IncrementalLayoutDifferentialTests
         Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
     }
 
+    /// <summary>
+    /// An inline item taken over by a retained pass is not laid out again when its box's final
+    /// layout asks for the width the previous pass finalized it at: its buffer is the one that
+    /// pass left (an item with a text indent used to copy its whole source buffer for it).
+    /// </summary>
+    [Fact]
+    public void ATakenOverItemKeepsTheLayoutItWasFinalizedAt()
+    {
+        StringBuilder html = new("<!doctype html><html><head><style>" + SharedCss
+            + " p{text-indent:12px}</style></head><body><div id=t class=a>toggle</div>");
+        for (int i = 0; i < 12; i++)
+        {
+            html.Append(CultureInfo.InvariantCulture, $"<p id=p{i}>paragraph {i} with <b class=a>inline box</b> words that wrap onto a second line of text</p>");
+        }
+
+        html.Append("</body></html>");
+        DomTree tree = HtmlParsing.ParseHtml(html.ToString());
+        RenderResourceCache resources = new();
+        StylesheetCache cache = new();
+        PreparedRender first = RenderPaint.PrepareDomWithDynamicFontsAndStylesheetCache(tree, Viewport, null, resources, [], cache)!;
+        NodeId paragraph = tree.GetElementById("p5")!.Value;
+        TextBuffer before = first.Layout.TextEngine.Items[first.Layout.IfcItems[paragraph]].Buffer;
+        NodeId target = tree.GetElementById("t")!.Value;
+        tree.GetNode(target)!.SetAttribute("class", "a c");
+        PreparedRender second = RenderPaint.PrepareDomWithRetainedStyles(
+            tree, Viewport, null, resources, [], cache, first,
+            [RetainedStyleMutation.From(new AttributeStyleMutation(target, "class", "a", "a c"))])!;
+
+        Assert.True(second.Layout.AdoptedInlineItems >= 12, $"adopted {second.Layout.AdoptedInlineItems}");
+        Assert.Same(before, second.Layout.TextEngine.Items[second.Layout.IfcItems[paragraph]].Buffer);
+        Assert.Equal(Snapshot(tree, Reference(tree)), Snapshot(tree, second));
+    }
+
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     private static (PreparedRender Latest, WeakReference First) Chain(DomTree tree, RenderResourceCache resources, StylesheetCache cache)
     {

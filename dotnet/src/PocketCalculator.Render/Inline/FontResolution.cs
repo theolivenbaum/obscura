@@ -40,6 +40,48 @@ public static class FontResolution
         bool requestedItalic,
         IReadOnlyDictionary<string, LoadedFamily> loaded)
     {
+        // Not in crates/obscura-render, which parses the family list on every call. The answer
+        // is a function of the request and of the loaded families, which a text engine fills
+        // in its constructor and never changes after (engines that share a font database share
+        // the dictionary too, TextEngine.ForPass); the shaping of every span, every inline box
+        // fragment and every font-relative unit asks, many times per element and pass.
+        Dictionary<(string? Family, ushort Weight, bool Italic), ResolvedFont> memo =
+            ResolvedMemo.GetValue(loaded, static _ => []);
+        (string? Family, ushort Weight, bool Italic) key = (family, requestedWeight, requestedItalic);
+        lock (memo)
+        {
+            if (memo.TryGetValue(key, out ResolvedFont? known))
+            {
+                return known;
+            }
+        }
+
+        ResolvedFont resolved = ResolveLoadedFontUncached(family, requestedWeight, requestedItalic, loaded);
+        lock (memo)
+        {
+            if (memo.Count >= MaxResolvedMemo)
+            {
+                memo.Clear();
+            }
+
+            memo[key] = resolved;
+        }
+
+        return resolved;
+    }
+
+    private const int MaxResolvedMemo = 4096;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+        IReadOnlyDictionary<string, LoadedFamily>,
+        Dictionary<(string? Family, ushort Weight, bool Italic), ResolvedFont>> ResolvedMemo = new();
+
+    private static ResolvedFont ResolveLoadedFontUncached(
+        string? family,
+        ushort requestedWeight,
+        bool requestedItalic,
+        IReadOnlyDictionary<string, LoadedFamily> loaded)
+    {
         if (family is not null)
         {
             foreach (string token in family.Split(','))

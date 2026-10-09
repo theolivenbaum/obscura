@@ -2133,6 +2133,19 @@ public sealed partial class TextEngine : IDisposable
             _ => item.Rtl ? 0f : 1f,
         };
 
+        // DEVIATION from crates/obscura-render/src/inline.rs, which lays the paragraph out
+        // again at every call. The layout is a function of the item (fixed once built), the
+        // width and the wrap, and only this method and ShapeAroundFloats lay the buffer out: an
+        // item whose buffer is already laid out at this width keeps it. A carried-over box's
+        // final layout asks again for the width the previous pass finalized its item at, and
+        // an item with a text indent or inline box edges copied its whole source buffer to do it.
+        (long WidthBits, Wrap Wrap) request = (width is { } asked ? BitConverter.SingleToInt32Bits(asked) : -1L, wrap);
+        if (bands is null && item.ShapedFor == request)
+        {
+            return;
+        }
+
+        item.ShapedFor = null;
         if (bands is not null && width is { } floatWidth)
         {
             ShapeAroundFloats(item, floatWidth, indent, wrap, bands);
@@ -2150,6 +2163,7 @@ public sealed partial class TextEngine : IDisposable
             item.Buffer.SetWrap(wrap);
             item.Buffer.SetSize(width is { } value ? F32.Max(value, 0f) : null, null);
             item.Buffer.ShapeUntilScroll(_shaper);
+            item.ShapedFor = request;
             return;
         }
 
@@ -2302,6 +2316,7 @@ public sealed partial class TextEngine : IDisposable
         }
 
         item.Buffer.ShapeUntilScroll(_shaper);
+        item.ShapedFor = request;
     }
 
     /// <summary>

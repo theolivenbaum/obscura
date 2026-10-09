@@ -1485,7 +1485,9 @@ public static partial class RenderDom
         Dictionary<NodeId, List<((int Item, int Line) Order, Rect Rect)>> fragments = [];
         Dictionary<NodeId, (float X, float Y)?> relativeMemo = [];
         Dictionary<NodeId, (float Ascent, float Descent)> fontBoxes = [];
-        foreach (InlineOwnerLineFragment shaped in engine.InlineOwnerLineFragments())
+        List<InlineOwnerLineFragment> lineFragments = engine.InlineOwnerLineFragments();
+        LayoutPhaseProfile.Mark("ownerLines");
+        foreach (InlineOwnerLineFragment shaped in lineFragments)
         {
             if (!styles.TryGetValue(shaped.Owner, out LayoutStyle? style))
             {

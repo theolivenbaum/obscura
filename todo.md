@@ -2914,6 +2914,24 @@ passes in 45s before, 611 after; allocation ~25 -> ~19 MB a pass; median retaine
 nodes and sticky under 0.8ms). Results are unchanged by construction; the Render, Dom and Js
 suites pin them.
 
+### Work a retained pass repeats for unchanged text is skipped
+
+DEVIATION from `crates/obscura-render`, which lays every paragraph out again at its final width
+and resolves a span's font family list from its text on every use:
+
+- an inline item remembers the width and wrap its buffer was last laid out at without floats
+  (`InlineItem.ShapedFor`), and `TextEngine.ShapeWithTextIndent` asked for that same layout
+  again keeps it. Only that method and `ShapeAroundFloats` lay a buffer out, and the layout is
+  a function of the item (fixed once built), the width and the wrap; a layout beside floats
+  clears the record. A taken-over item whose box was carried over is finalized at the width the
+  previous pass left it at, so its final layout is now free, where an item with a text indent
+  or inline box edges copied its whole source buffer for it. 2,000-item grid: the `finalize`
+  phase 13 -> under 1ms a pass. Pinned by `ATakenOverItemKeepsTheLayoutItWasFinalizedAt`;
+- `FontResolution.ResolveLoadedFont` memoizes its answer per loaded-family dictionary (a text
+  engine fills it in its constructor and never changes it; engines sharing a font database
+  share it), bounded at 4,096 requests: the shaping of every span, every inline box fragment
+  and every font-relative unit split, trimmed and lower-cased the family list again.
+
 ### A layout pass allocates less
 
 DEVIATION from `crates/obscura-render` (and vendor/taffy), whose equivalents allocate as they
