@@ -1055,6 +1055,7 @@ internal sealed partial class HtmlTreeBuilder
             SelectedContentInserted(rec);
         }
 
+        CheckCustomElement(ns, local, attrs);
         return rec;
     }
 

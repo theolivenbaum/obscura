@@ -3347,6 +3347,21 @@ function _ceInserted(node, wasConnected, connected) {
     if (def !== null) _ceEnqueueUpgrade(el !== undefined ? el : _wrapEl(nid), def);
   }
 }
+// An element the document's parser inserted: upgraded when it is defined, as the parser's
+// "create an element for a token" would have constructed it (the port upgrades it right after
+// insertion instead, with its attributes in place). Not its subtree: the parser reports each
+// node it inserts. Callers check `_ceDefCount !== 0`.
+function _ceParserInserted(el) {
+  if (el._ceState === "custom") {
+    _ceCallback(el, "connectedCallback", []);
+    if (el._ceDef.formAssociated) _ceFormStateChanged(el);
+    return;
+  }
+  if (!_ceIsUndefinedState(el)) return;
+  const isValue = el.getAttribute('is');
+  const def = _ceLookup(el.localName, isValue === null ? '' : isValue);
+  if (def !== null) _ceEnqueueUpgrade(el, def);
+}
 // After `node` (connected before) was removed. Callers check `_ceDefCount !== 0`.
 function _ceRemoved(node) {
   if (_ceRemovalDefCount === 0) return;
@@ -3599,6 +3614,10 @@ function __prepareInsertedScript(script) {
   if (scriptType && !isModule && scriptType !== 'text/javascript' && scriptType !== 'application/javascript') {
     return;
   }
+  // HTML "prepare the script element" step 21: a classic script with nomodule does not run in
+  // a browser that supports modules. DEVIATION from crates/obscura-js/js/bootstrap.js, which ran
+  // it (Chromium 141 does not).
+  if (!isModule && script.hasAttribute('nomodule')) return;
   const src = script.getAttribute('src');
   const code = src ? "" : script.textContent;
   if (!src && !code) return;
@@ -8117,6 +8136,13 @@ class Document extends Node {
     if (_isParsedDoc(this)) { _parsedDocWrite(this, args.join('')); return; }
     var html = args.join('');
     if (!html) return;
+    // DEVIATION from crates/obscura-js/js/bootstrap.js, which parses the whole document before
+    // running a script and so always inserts written markup behind the running script by DOM
+    // insertion. While a parser-inserted script runs, the document's parser has an insertion
+    // point, and the text goes into its input there: written elements are parsed before the
+    // rest of the document, a written inline script runs inside write(), and a written external
+    // script blocks the parser (HTML "document.write()" steps 6-7, Chromium 141).
+    if (this === _realmDocument && __obscuraCore.ops.op_parser_write(html, false)) return;
     var body = this.body;
     if (!body) return;
     // The host parses into the input stream and returns [[parent, node], …], parents first. The
@@ -8162,6 +8188,8 @@ class Document extends Node {
   }
   open() {
     if (_isParsedDoc(this)) return _parsedDocOpen(this);
+    // HTML document.open() step 5: a document whose parser is running a script is left alone.
+    if (this === _realmDocument && __obscuraCore.ops.op_parser_write('', true)) return this;
     var body = this.body;
     if (body) body.innerHTML = '';
     // A new parse begins. Whatever the input stream still held is gone.
@@ -13761,6 +13789,8 @@ class CustomElementRegistry {
     _ceDefs.set(name, def);
     _ceDefsByCtor.set(constructor, def);
     _ceDefCount++;
+    // Port addition: the document's parser stops after inserting an element of this name.
+    if (!_realmIsolatedWorld) _dom("ce_define", name);
     if (callbacks.disconnectedCallback !== undefined || formAssociated) _ceRemovalDefCount++;
     if (formAssociated) _ceFormAssociatedCount++;
     _ceDepth++;
@@ -26512,6 +26542,65 @@ function _iframeNamed(doc, name) {
   }
   return null;
 }
+// What the DOM insertion steps would have done for nodes the parser inserted natively while
+// the document was being parsed with its scripts running. DEVIATION from crates/obscura-js,
+// whose document is parsed whole before any of this realm's script runs.
+function _parserInserted(records, names, custom, frames, preloads) {
+  _domMutationEpoch++;
+  _treeMutationEpoch++;
+  if (_slotWatch && !_realmIsolatedWorld) _queueSlotCheck();
+  if (typeof _hostVars.__obscura_recompute_resizes === "function") _hostVars.__obscura_recompute_resizes();
+  if (typeof _hostVars.__obscura_recompute_intersections === "function") _hostVars.__obscura_recompute_intersections();
+  const ids = (text) => {
+    const parts = _String(text).split(',');
+    const out = [];
+    for (let i = 0; i < parts.length; i++) if (parts[i] !== '') out[out.length] = +parts[i];
+    return out;
+  };
+  if (records && _hostVars.__mutationObservers?.length) {
+    const list = ids(records);
+    for (let i = 0; i + 1 < list.length; i += 2) {
+      _hostVars.__notifyMutation('childList', list[i], [list[i + 1]], []);
+    }
+  }
+  if (names) {
+    const list = _String(names).split('\0');
+    for (let i = 0; i < list.length; i++) if (list[i]) _ensureWindowNamedProperty(list[i]);
+  }
+  if (frames) {
+    _syncFrameIndices();
+    const list = ids(frames);
+    for (let i = 0; i < list.length; i++) {
+      const frame = _wrapEl(list[i]);
+      if (!frame || !_elGet('isConnected', frame)) continue;
+      if (_hostDom.getAttribute(frame, 'srcdoc') !== null) {
+        const st = _weakMapGet(_iframeStates, frame);
+        if (!st || st.loadingUrl !== 'about:srcdoc') _loadIframeSrcdoc(frame);
+        continue;
+      }
+      const src = _hostDom.getAttribute(frame, 'src');
+      if (src && src !== 'about:blank') _reflectApply(_iframeLoadAtBoot, frame, [_String(src)]);
+    }
+  }
+  if (preloads) {
+    const list = ids(preloads);
+    for (let i = 0; i < list.length; i++) {
+      const link = _wrapEl(list[i]);
+      if (!link) continue;
+      const rels = _String(_elCall('getAttribute', link, ['rel']) || '').toLowerCase().split(/[\t\n\f\r ]+/);
+      if (_arrayIndexOf(rels, 'preload') >= 0 || _arrayIndexOf(rels, 'modulepreload') >= 0) _loadPreloadLink(link, rels);
+    }
+  }
+  if (custom && _ceDefCount !== 0) {
+    const list = ids(custom);
+    for (let i = 0; i < list.length; i++) {
+      const el = _wrapEl(list[i]);
+      if (el && _elGet('isConnected', el)) _ceParserInserted(el);
+    }
+    _ceDone();
+  }
+}
+
 globalThis.__obscura_host_handoff = Object.freeze({
   __proto__: null,
   // Port additions (SECURITY.md I10): what upstream keeps as page-visible globals. The
@@ -26595,6 +26684,18 @@ globalThis.__obscura_host_handoff = Object.freeze({
   // the document is in place. See _loadDocumentFrames.
   loadDocumentFrames: () => { _loadDocumentFrames(); },
   loadDocumentPreloads: () => { _loadDocumentPreloads(); },
+  // Port addition: the document's parser inserted these nodes since script last ran
+  // (PocketCalculatorJsRuntime.ParserInserted). `records` is "parent,node," per insertion,
+  // `names` the window names they add (NUL-separated), and `custom`, `frames` and `preloads`
+  // the possible custom elements, iframes and preload links among them.
+  parserInserted: _parserInserted,
+  // Port addition: a parser-inserted external script's load or error event, which the
+  // Rust engine never fires.
+  scriptEvent: (nid, type) => {
+    const el = _wrapEl(nid >>> 0);
+    if (!el) return;
+    try { _dispatch(el, _markTrusted(new Event(_String(type)))); } catch (_) {}
+  },
   // Port addition: child frame `frameId` navigated itself (a link, location, a form's
   // GET), so its <iframe> here loads `url` in its place, as a new frame. The Rust engine
   // processes only the page's own navigation, so a click on a link inside a frame did

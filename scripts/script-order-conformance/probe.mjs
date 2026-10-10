@@ -16,7 +16,8 @@ const BIN = process.env.POCKETCALCULATOR_PORT_BIN || `${REPO}dotnet/src/PocketCa
 // Every page starts with this: a log, lifecycle listeners, and marker ids.
 const HEAD = `<script>
 window.L = [];
-window.log = function (s) { L.push(s); };
+window.T = [];
+window.log = function (s) { L.push(s); T.push(Date.now()); };
 window.marks = function () { return [...document.querySelectorAll('.m')].map(e => e.id).join(',') || '-'; };
 document.addEventListener('readystatechange', () => log('readystatechange ' + document.readyState + ' marks=' + marks()));
 document.addEventListener('DOMContentLoaded', () => log('DOMContentLoaded marks=' + marks()));
@@ -155,6 +156,27 @@ new MutationObserver(rs => {
 <div id=b class=m></div>
 </body></html>`,
 
+  // An async classic script and a later parser import map: the map is registered when the
+  // parser reaches it, before the async script has loaded.
+  importMap: `<!doctype html><html><head>${HEAD}
+<script async src="${js('async', 0, "import('too-late').then(() => log('import resolved'), () => log('import rejected'))")}"></script>
+<script type=importmap>{"imports":{"too-late":"/js?n=later&d=0"}}</script>
+</head><body></body></html>`,
+
+  // Parser-inserted external scripts fire load and error at the element.
+  scriptEvents: `<!doctype html><html><head>${HEAD}
+<script src="${js('ok', 10)}" onload="log('ok onload')" onerror="log('ok onerror')"></script>
+<script src="/missing.js" onload="log('missing onload')" onerror="log('missing onerror')"></script>
+<script src="${js('asyncOk', 10)}" async onload="log('asyncOk onload')"></script>
+</head><body></body></html>`,
+
+  // Tasks queued at the end of parsing, and from DOMContentLoaded, against DOMContentLoaded and load.
+  taskBoundaries: `<!doctype html><html><head>${HEAD}
+<script>document.addEventListener('DOMContentLoaded', () => { setTimeout(() => log('timeout0 from DOMContentLoaded'), 0); Promise.resolve().then(() => log('microtask from DOMContentLoaded')); });</script>
+</head><body><div id=a class=m></div>
+<script>setTimeout(() => log('timeout0 at end of body'), 0); Promise.resolve().then(() => log('microtask at end of body')); log('last script');</script>
+</body></html>`,
+
   // grammarly.com's shape: a parser-blocking script at the top of the app root inserts
   // a dynamic script next to itself; the dynamic script removes it; the app's defer
   // scripts later check the root (hydration).
@@ -169,6 +191,7 @@ new MutationObserver(rs => {
 </body></html>`,
 };
 
+let servedAt = 0;
 function startServer() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -185,8 +208,13 @@ function startServer() {
     if (url.pathname === '/css') return reply('text/css', 'html { color: rgb(1, 2, 3) }');
     const page = PAGES[url.pathname.slice(1)];
     if (!page) { res.writeHead(404); return res.end(); }
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(page);
+    // The document itself takes as long as a fast real server, which is also time the port
+    // uses to create the page's JavaScript runtime (Chromium's renderer is already up).
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      servedAt = Date.now();
+      res.end(page);
+    }, +(process.env.PROBE_HTML_DELAY ?? 150));
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -198,7 +226,7 @@ async function startPort() {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
-  child.stderr.on('data', (b) => { stderr += b; });
+  child.stderr.on('data', (b) => { stderr += b; if (process.env.PROBE_STDERR) process.stderr.write(b); });
   for (let i = 0; i < 100; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/json/version`);
@@ -207,6 +235,14 @@ async function startPort() {
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error('port did not start: ' + stderr);
+}
+
+async function warmUp(browser, base) {
+  // One navigation first, so neither engine's first page pays its own start-up.
+  const context = browser.contexts()[0] || await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(`${base}/basic`, { waitUntil: 'load', timeout: 20000 }).catch(() => { });
+  await page.close();
 }
 
 async function run(browser, base, name) {
@@ -218,13 +254,19 @@ async function run(browser, base, name) {
   await page.goto(`${base}/${name}`, { waitUntil: 'load', timeout: 20000 });
   const loadMs = Date.now() - t0;
   await page.waitForTimeout(1200);
-  const log = await page.evaluate(() => window.L);
+  const [log, stamps] = await page.evaluate(() => [window.L, window.T]);
+  const times = stamps.map((t) => t - servedAt);
   await page.close();
-  return { log: errors.length ? [...log, ...errors.map((e) => 'PAGEERROR ' + e)] : log, loadMs };
+  return { log: errors.length ? [...log, ...errors.map((e) => 'PAGEERROR ' + e)] : log, times, loadMs };
 }
 
 const server = await startServer();
 const base = `http://127.0.0.1:${server.address().port}`;
+if (process.env.PROBE_SERVE) {
+  // Serve the pages only (for the CLI, or a browser by hand).
+  console.log(base);
+  await new Promise(() => { });
+}
 const names = process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(PAGES);
 const runs = +(process.env.PROBE_RUNS || 1);
 const engines = (process.env.PROBE_ENGINES || 'chromium,port').split(',');
@@ -232,6 +274,7 @@ const results = {};
 
 if (engines.includes('chromium')) {
   const browser = await chromium.launch();
+  await warmUp(browser, base);
   for (const name of names) {
     results[name] ??= {};
     results[name].chromium = [];
@@ -243,6 +286,7 @@ if (engines.includes('port')) {
   const { child, endpoint } = await startPort();
   try {
     const browser = await chromium.connectOverCDP(endpoint);
+    await warmUp(browser, base);
     for (const name of names) {
       results[name] ??= {};
       results[name].port = [];
@@ -261,13 +305,17 @@ for (const name of names) {
   const r = results[name];
   const c = r.chromium?.[0]?.log || [];
   const p = r.port?.[0]?.log || [];
+  const ct = r.chromium?.[0]?.times || [];
+  const pt = r.port?.[0]?.times || [];
+  const times = !!process.env.PROBE_TIMES;
   const same = JSON.stringify(c) === JSON.stringify(p);
   if (!same) differing++;
   console.log(`\n=== ${name} ${same ? 'SAME' : 'DIFFERENT'}  (load ms chromium ${r.chromium?.map((x) => x.loadMs).join('/')} port ${r.port?.map((x) => x.loadMs).join('/')})`);
   const rows = Math.max(c.length, p.length);
   for (let i = 0; i < rows; i++) {
     const a = c[i] ?? '', b = p[i] ?? '';
-    console.log(`${a === b ? ' ' : '*'} ${a.padEnd(70).slice(0, 70)} | ${b}`);
+    const ta = times ? String(ct[i] ?? '').padStart(5) + ' ' : '', tb = times ? String(pt[i] ?? '').padStart(5) + ' ' : '';
+    console.log(`${a === b ? ' ' : '*'} ${ta}${a.padEnd(66).slice(0, 66)} | ${tb}${b}`);
   }
 }
 if (process.env.PROBE_JSON) fs.writeFileSync(process.env.PROBE_JSON, JSON.stringify(results, null, 1));

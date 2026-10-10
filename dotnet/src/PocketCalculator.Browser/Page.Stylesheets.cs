@@ -15,13 +15,22 @@ internal static partial class PageHelpers
     /// do not suppress its fetch or <c>load</c> event. The index counts all
     /// stylesheet links so the materialization script addresses the same node.
     /// </remarks>
-    internal static List<(int LinkIndex, NodeId Node, string Href)> LinkedStylesheetRequests(DomTree dom)
+    internal static List<(int LinkIndex, NodeId Node, string Href)> LinkedStylesheetRequests(DomTree dom) =>
+        LinkedStylesheetRequests(dom, null);
+
+    /// <summary>
+    /// <see cref="LinkedStylesheetRequests(DomTree)"/> among <paramref name="candidates"/> only
+    /// (the nodes the parser just inserted), or the whole document when null. A candidate's
+    /// index is -1: the load script finds the link's index when the sheet is applied.
+    /// </summary>
+    internal static List<(int LinkIndex, NodeId Node, string Href)> LinkedStylesheetRequests(
+        DomTree dom,
+        IReadOnlyList<NodeId>? candidates)
     {
         ArgumentNullException.ThrowIfNull(dom);
-        List<NodeId> linkIds = dom.TryQuerySelectorAll(
-            "link[rel~=\"stylesheet\"]",
-            out List<NodeId> found,
-            out _) ? found : [];
+        List<NodeId> linkIds = candidates is null
+            ? dom.TryQuerySelectorAll("link[rel~=\"stylesheet\"]", out List<NodeId> found, out _) ? found : []
+            : FilterCandidates(dom, candidates, "link");
         List<(int, NodeId, string)> links = [];
         for (int linkIndex = 0; linkIndex < linkIds.Count; linkIndex++)
         {
@@ -36,12 +45,49 @@ internal static partial class PageHelpers
             {
                 continue;
             }
+            if (candidates is not null && !RelIsStylesheet(node.GetAttribute("rel")))
+            {
+                continue;
+            }
             if (node.GetAttribute("href") is { } href)
             {
-                links.Add((linkIndex, linkIds[linkIndex], href));
+                links.Add((candidates is null ? linkIndex : -1, linkIds[linkIndex], href));
             }
         }
         return links;
+    }
+
+    private static bool RelIsStylesheet(string? rel)
+    {
+        if (rel is null)
+        {
+            return false;
+        }
+        foreach (string token in rel.Split([' ', '\t', '\n', '\f', '\r'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (string.Equals(token, "stylesheet", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The HTML elements named <paramref name="local"/> among <paramref name="candidates"/> that are still in the document.</summary>
+    private static List<NodeId> FilterCandidates(DomTree dom, IReadOnlyList<NodeId> candidates, string local)
+    {
+        List<NodeId> found = [];
+        foreach (NodeId id in candidates)
+        {
+            if (dom.GetNode(id)?.AsElement() is { } element
+                && string.Equals(element.Name.Local, local, StringComparison.Ordinal)
+                && string.Equals(element.Name.Ns, Namespaces.Html, StringComparison.Ordinal)
+                && dom.IsConnected(id))
+            {
+                found.Add(id);
+            }
+        }
+        return found;
     }
 
     /// <summary>
@@ -55,10 +101,17 @@ internal static partial class PageHelpers
     /// (and the filter that skipped Obscura's own synthetic sheets, which no longer exist)
     /// is gone. See "Known deviations" in todo.md.
     /// </remarks>
-    internal static List<(NodeId Node, StylesheetImport Import)> InlineStylesheetImportRequests(DomTree dom)
+    internal static List<(NodeId Node, StylesheetImport Import)> InlineStylesheetImportRequests(DomTree dom) =>
+        InlineStylesheetImportRequests(dom, null);
+
+    internal static List<(NodeId Node, StylesheetImport Import)> InlineStylesheetImportRequests(
+        DomTree dom,
+        IReadOnlyList<NodeId>? candidates)
     {
         ArgumentNullException.ThrowIfNull(dom);
-        List<NodeId> styleIds = dom.TryQuerySelectorAll("style", out List<NodeId> found, out _) ? found : [];
+        List<NodeId> styleIds = candidates is null
+            ? dom.TryQuerySelectorAll("style", out List<NodeId> found, out _) ? found : []
+            : FilterCandidates(dom, candidates, "style");
         List<(NodeId, StylesheetImport)> imports = [];
         foreach (NodeId styleId in styleIds)
         {
@@ -86,16 +139,41 @@ public sealed partial class Page
     /// document (response URLs after redirects, every <c>@import</c> included) and the root
     /// sheet's response URL, so CSSOM can refuse a cross-origin sheet's rules.
     /// </remarks>
+    internal Task<List<(AuthorStylesheetTarget Target, string Css, bool OriginClean, string ResponseUrl)>> FetchStylesheetsAsync(
+        CancellationToken cancellationToken) =>
+        FetchStylesheetsAsync(null, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="FetchStylesheetsAsync(CancellationToken)"/> for the sheets of
+    /// <paramref name="candidates"/> (null: the whole document). With
+    /// <paramref name="deferred"/>, what the fetch reports to the page (network events, resource
+    /// timing, CSS subresource referrers) is queued there instead, for the caller to run where
+    /// page script cannot be running: the fetch then runs alongside the page's script.
+    /// </summary>
     internal async Task<List<(AuthorStylesheetTarget Target, string Css, bool OriginClean, string ResponseUrl)>> FetchStylesheetsAsync(
+        IReadOnlyList<NodeId>? candidates,
+        List<Action>? deferred,
         CancellationToken cancellationToken)
     {
         if (Js is not { } js)
         {
             return [];
         }
+        void Report(Action action)
+        {
+            if (deferred is null)
+            {
+                action();
+                return;
+            }
+            lock (deferred)
+            {
+                deferred.Add(action);
+            }
+        }
         var discovered = js.WithDom(dom => (
-            Links: PageHelpers.LinkedStylesheetRequests(dom),
-            Imports: PageHelpers.InlineStylesheetImportRequests(dom)));
+            Links: PageHelpers.LinkedStylesheetRequests(dom, candidates),
+            Imports: PageHelpers.InlineStylesheetImportRequests(dom, candidates)));
         // Referrer policy (port addition), as Chromium 141 does it: a <link> is referred by
         // the document under its own referrerpolicy, else the document's; an inline
         // @import by the document under the document's; a nested @import by the sheet
@@ -182,12 +260,13 @@ public sealed partial class Page
                         // A nested @import is initiated by a stylesheet, not by the
                         // <link> element, which is what Chromium's "css" initiator
                         // type means; depth 0 is the <link> itself.
-                        RecordResourceTiming(
+                        double endedAt = PerformanceOps.UnixMilliseconds();
+                        Report(() => RecordResourceTiming(
                             NetUrl.To(response.Url).Href,
                             depth == 0 ? "link" : "css",
                             response,
                             startedAt,
-                            PerformanceOps.UnixMilliseconds());
+                            endedAt));
                         return (key, requestedUrl, depth, (Response?)response);
                     }
                     catch (Exception error) when (error is not OperationCanceledException)
@@ -208,14 +287,14 @@ public sealed partial class Page
                     continue;
                 }
                 UrlRecord responseUrl = NetUrl.To(response.Url);
-                RecordNetworkEventWithBody(
+                Report(() => RecordNetworkEventWithBody(
                     responseUrl.Href,
                     "GET",
                     "Stylesheet",
                     response.Status,
                     response.Headers,
                     response.Body,
-                    base64Encoded: false);
+                    base64Encoded: false));
 
                 (string responseKey, UrlRecord canonicalResponseUrl) = PageHelpers.CanonicalStylesheetUrl(responseUrl);
                 if (aliases.TryGetValue(responseKey, out string? existing))
@@ -283,8 +362,10 @@ public sealed partial class Page
         {
             if (recordedSheets.Add(sheet.ResponseUrl.Href))
             {
-                js.RecordCssSubresourceReferrers(
-                    NetUrl.From(sheet.ResponseUrl), sheet.ReferrerPolicyHeader ?? ReferrerPolicies.Default, urls);
+                Uri sheetUrl = NetUrl.From(sheet.ResponseUrl);
+                ReferrerPolicy sheetPolicy = sheet.ReferrerPolicyHeader ?? ReferrerPolicies.Default;
+                List<string> named = [.. urls];
+                Report(() => js.RecordCssSubresourceReferrers(sheetUrl, sheetPolicy, named));
             }
         }
 

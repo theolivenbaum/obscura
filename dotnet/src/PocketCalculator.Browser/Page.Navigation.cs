@@ -299,14 +299,22 @@ public sealed partial class Page
         int chainLimit = NavigationChainLimit;
         for (int chain = 0; chain < chainLimit; chain++)
         {
-            await NavigateSingleAsync(
-                currentUrl,
-                waitUntil,
-                currentMethod,
-                currentBody,
-                documentReferrer,
-                profile,
-                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await NavigateSingleAsync(
+                    currentUrl,
+                    waitUntil,
+                    currentMethod,
+                    currentBody,
+                    documentReferrer,
+                    profile,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                // A navigation that failed before its document started leaves its runtime unused.
+                DiscardPrewarmedRuntime();
+            }
             // Whatever the navigation waited for, the document has dispatched its load: the
             // script phase dispatches it even when the caller only waits for DOMContentLoaded.
             ReachReadiness(DocumentReadiness.Loaded);
@@ -431,6 +439,11 @@ public sealed partial class Page
             return;
         }
 
+        if (url.Scheme is "http" or "https")
+        {
+            PrewarmRuntime(url.Href);
+        }
+
         Response response;
         try
         {
@@ -516,105 +529,14 @@ public sealed partial class Page
         // Honor the response charset: HTTP Content-Type, then a <meta charset> sniff
         // in the first 1KB, then UTF-8. Without this every non-UTF-8 page came
         // through as replacement characters.
+        if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[nav] response {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}");
         (string bodyText, string encodingName) =
             ContentEncoding.DecodeResponseWithName(response.Body, response.ContentType());
         Encoding = encodingName;
-        DomTree dom = HtmlParsing.ParseHtml(bodyText);
-
-        Title = dom.TryQuerySelector("title", out NodeId? titleId, out _) && titleId is { } id
-            ? dom.TextContent(id)
-            : string.Empty;
-
-        Dom = dom;
-        InitJs();
-        // Committed: the response is in and the document exists. A deadline from here on
-        // leaves the page as it stands instead of failing it (RunWithNavigationDeadlineAsync).
-        ReachReadiness(DocumentReadiness.Committed);
-        // The document is loading from here until the script phase completes it, so a
-        // page the deadline stops before then reads as Chromium's does, not as complete.
-        Js?.SetDocumentReadyState("loading");
-        var authorStylesheets = await FetchStylesheetsAsync(cancellationToken).ConfigureAwait(false);
-
-        // Upstream 04418a5: fetched CSS goes into the DomTree store with its origin-clean bit,
-        // and nowhere page script can read it. The globalThis.__obscura_css global that used to
-        // hold every fetched sheet, cross-origin ones included, is gone.
-        if (authorStylesheets.Count != 0 && Js is { } cssJs)
-        {
-            // DEVIATION from crates/obscura-browser, which runs one script per sheet to insert
-            // a synthetic <style>. Chromium 141 inserts no element, so the bytes are recorded
-            // against the <link> (or, for an @import, against the importing <style>) and the
-            // renderer reads them from there. Several @import rules in one <style> contribute
-            // in source order, so they are appended to one entry, which stays origin-clean only
-            // if all of them are. See "Known deviations" in todo.md.
-            List<(int LinkIndex, string ResponseUrl)> linked = [];
-            cssJs.WithDom(dom =>
-            {
-                foreach ((AuthorStylesheetTarget target, string css, bool originClean, string responseUrl) in authorStylesheets)
-                {
-                    switch (target)
-                    {
-                        case AuthorStylesheetTarget.Linked link:
-                            dom.AppendExternalStylesheet(link.Node, css, originClean);
-                            linked.Add((link.LinkIndex, responseUrl));
-                            break;
-                        case AuthorStylesheetTarget.InlineImport inline:
-                            dom.AppendExternalStylesheet(inline.Node, css, originClean);
-                            break;
-                    }
-                }
-
-                return 0;
-            });
-
-            // An @import needs no script: it owns no CSSOM sheet and fires no event. A <link>
-            // does both, and its load handler may still change what applies.
-            foreach ((int linkIndex, string responseUrl) in linked)
-            {
-                TryExecuteHost(
-                    cssJs,
-                    "<fetch_stylesheets>",
-                    PageHelpers.LinkedStylesheetLoadScript(linkIndex, responseUrl));
-            }
-        }
-
-        // DEVIATION from upstream 04418a5, which deletes the page-visible
-        // __obscura_registerLinkedStylesheet bridge here. The registration is a host
-        // helper (HostScript), so there is no global to remove.
-
-        _documentTimelineOrigin = Stopwatch.GetTimestamp();
-        Js?.ResetAnimationTimeline();
-        if (Js is { } preloadJs)
-        {
-            // DEVIATION from crates/obscura-browser, which never loads <link rel=preload> or
-            // rel=modulepreload, so their load and error events never fired (the loadCSS
-            // pattern behind vk.com's stylesheets). See _loadPreloadLink in bootstrap.js.
-            TryExecuteHost(preloadJs, "<link-preload>", "__obscura_host.loadDocumentPreloads();");
-        }
-
-        if (Js is { } iframeJs)
-        {
-            // DEVIATION from crates/obscura-browser, which loads each iframe[src] through the
-            // page-visible Element.prototype._loadIframeSrc: the shim's own loader, which also
-            // gives a srcdoc frame its about:srcdoc document instead of loading src.
-            TryExecuteHost(iframeJs, "<iframe-load>", "__obscura_host.loadDocumentFrames();");
-        }
-
-        // Scripts can synchronously flush style/layout through getComputedStyle(),
-        // geometry, ResizeObserver or IntersectionObserver. Seed their image/font
-        // dependencies concurrently through the page transport first. Otherwise the
-        // first CSSOM read falls into the renderer's synchronous resource loader and
-        // serial network latency pins V8. Deliberately bounded: navigation should not
-        // wait indefinitely for decorative resources.
-        await PrepareScreenshotResourcesAsync(
-            PageHelpers.EnvUlong("POCKETCALCULATOR_RENDER_RESOURCE_WARMUP_MS", 1_000),
-            cancellationToken).ConfigureAwait(false);
-
-        // Spec: DOMContentLoaded fires AFTER parser-blocking scripts run, not before.
-        // Skipping ExecuteScripts on the DCL path silently dropped every inline
-        // <script>: form listeners never registered, frameworks never bootstrapped,
-        // click handlers were no-ops. Scripts run regardless of waitUntil and DCL
-        // means "DOM parsed AND scripts executed".
-        await ExecuteScriptsAsync(cancellationToken).ConfigureAwait(false);
+        // Parse with the scripts running as the parser reaches them, through the load event:
+        // see LoadDocumentAsync. The realm starts (InitJs) and the navigation commits once the
+        // parser reaches the first script.
+        await LoadDocumentAsync(bodyText, cancellationToken).ConfigureAwait(false);
 
         // Page scripts and their bounded post-script event-loop pass can create
         // responsive images, inline styles and @font-face rules that did not exist

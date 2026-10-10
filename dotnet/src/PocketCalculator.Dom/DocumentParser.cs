@@ -42,6 +42,18 @@ public sealed class DocumentParser : IDomGcParticipant
 
     public DomTree Tree { get; }
 
+    /// <summary>
+    /// Whether a name is a defined custom element (an autonomous one's name, or a customized
+    /// built-in's is value). When set, the parser stops with <see cref="ParserStop.CustomElement"/>
+    /// after inserting such an element, so it is upgraded before its children are parsed, as the
+    /// parser would have constructed it.
+    /// </summary>
+    public Func<string, bool>? IsDefinedCustomElement
+    {
+        get => _builder.IsDefinedCustomElement;
+        set => _builder.IsDefinedCustomElement = value;
+    }
+
     /// <summary>The end of the input has been processed, or the parse was aborted.</summary>
     public bool IsFinished => _builder.Finished;
 

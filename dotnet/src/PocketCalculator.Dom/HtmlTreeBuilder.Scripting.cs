@@ -21,6 +21,12 @@ public enum ParserStop
 
     /// <summary>The end of the input was processed.</summary>
     Finished,
+
+    /// <summary>
+    /// An element of a defined custom element was inserted: the caller lets the realm
+    /// upgrade it before its children are parsed.
+    /// </summary>
+    CustomElement,
 }
 
 /// <summary>
@@ -50,6 +56,26 @@ internal sealed partial class HtmlTreeBuilder
     private List<NodeId>? _insertLog;
 
     private bool _finished;
+
+    /// <summary>Whether a custom element name is defined, for <see cref="ParserStop.CustomElement"/>.</summary>
+    internal Func<string, bool>? IsDefinedCustomElement { get; set; }
+
+    private bool _pauseForCustomElement;
+
+    /// <summary>After inserting an HTML element: stop once the token is done if it is a defined custom element.</summary>
+    private void CheckCustomElement(string ns, string local, List<Attribute> attrs)
+    {
+        if (!_scripting || IsDefinedCustomElement is not { } defined || !string.Equals(ns, Namespaces.Html, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if ((local.Contains('-', StringComparison.Ordinal) && defined(local))
+            || (GetAttr(attrs, "is") is { Length: > 0 } isValue && defined(isValue)))
+        {
+            _pauseForCustomElement = true;
+        }
+    }
 
     internal bool Finished => _finished || _stopped;
 
@@ -203,8 +229,15 @@ internal sealed partial class HtmlTreeBuilder
                 if (_pausedScript is { } paused)
                 {
                     _pausedScript = null;
+                    _pauseForCustomElement = false;
                     script = paused;
                     return ParserStop.Script;
+                }
+
+                if (_pauseForCustomElement)
+                {
+                    _pauseForCustomElement = false;
+                    return ParserStop.CustomElement;
                 }
             }
 
