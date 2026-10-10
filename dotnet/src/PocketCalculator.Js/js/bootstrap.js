@@ -348,6 +348,8 @@ const _DOM_TREE_MUTATION_COMMANDS = _private(new Set([
   "append_child", "insert_before", "remove_child",
   "set_inner_html", "set_inner_html_context", "set_fragment_html_executable",
   "document_write",
+  // Changes a subtree's node document, which ownerDocument caches by this epoch.
+  "adopt_node",
 ]));
 // Which realm this bootstrap closure belongs to. Every wrapper's methods come
 // from its own realm's prototypes, so a DOM call names the document it belongs
@@ -995,7 +997,7 @@ async function _loadLinkedStylesheet(c) {
   const rels = rel.split(/\s+/);
   if (_arrayIndexOf(rels, 'preload') >= 0 || _arrayIndexOf(rels, 'modulepreload') >= 0) {
     if (!c.getAttribute('rel') && c.rel) c.setAttribute('rel', String(c.rel));
-    if (c.isConnected) _loadPreloadLink(c, rels);
+    if (_inPage(c)) _loadPreloadLink(c, rels);
     return;
   }
   if (!rels.includes('stylesheet')) return;
@@ -2217,6 +2219,28 @@ const _styleProxy = (decl) => new Proxy(decl, {
 // HTML parsing context is involved and every attribute (including style) is
 // preserved. Text/Comment/DocumentFragment map to their factory; anything else
 // yields null.
+// The value modes whose IDL value is the content attribute (HTML "value mode": default and
+// default/on).
+const _INPUT_DEFAULT_VALUE_MODE = { __proto__: null, hidden: true, submit: true, image: true, reset: true, button: true, checkbox: true, radio: true };
+// HTML's cloning steps for input and textarea: the copy carries the value, the dirty value
+// flag, the checkedness and the dirty checkedness flag. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, whose clone dropped a value set from script.
+function _cloneFormState(src, clone, deep) {
+  let any = false;
+  for (const k in _formValues) { any = true; break; }
+  if (!any) for (const k in _formChecked) { any = true; break; }
+  if (!any) return;
+  const copy = (a, b) => {
+    if (_formValues[a._nid] !== undefined) _formValues[b._nid] = _formValues[a._nid];
+    if (_formChecked[a._nid] !== undefined) _formChecked[b._nid] = _formChecked[a._nid];
+  };
+  copy(src, clone);
+  if (!deep) return;
+  const from = _domParse("query_selector_all_scoped", src._nid, "input, textarea") || [];
+  if (from.length === 0) return;
+  const to = _domParse("query_selector_all_scoped", clone._nid, "input, textarea") || [];
+  for (let i = 0; i < from.length && i < to.length; i++) copy({ _nid: from[i] }, { _nid: to[i] });
+}
 function _shallowCloneNode(node) {
   const nt = node.nodeType;
   if (nt === 3) return document.createTextNode(node.data != null ? node.data : (node.textContent || ""));
@@ -3306,6 +3330,9 @@ function _ceInserted(node, wasConnected, connected) {
   if (list.length === 0) return;
   if (wasConnected && _ceRemovalDefCount !== 0) _ceDisconnectList(list, -1);
   if (!connected) return;
+  // A secondary document has no custom element registry: what is already custom there is
+  // connected (connectedCallback runs, as in Chromium), nothing new is upgraded.
+  const upgrade = _parsedDocCount === 0 || _inPage(node);
   for (let i = 0; i < list.length; i += 3) {
     const nid = list[i];
     const el = _cache.get(nid);
@@ -3314,6 +3341,7 @@ function _ceInserted(node, wasConnected, connected) {
       if (el._ceDef.formAssociated) _ceFormStateChanged(el);
       continue;
     }
+    if (!upgrade) continue;
     if (el !== undefined && !_ceIsUndefinedState(el)) continue;
     const def = _ceLookup(list[i + 1], list[i + 2]);
     if (def !== null) _ceEnqueueUpgrade(el !== undefined ? el : _wrapEl(nid), def);
@@ -3331,6 +3359,7 @@ function _ceRemoved(node) {
 // Blink's fragment parser and clone do.
 function _ceCreatedUnder(root, skipRoot) {
   if (_ceInert !== 0) return;
+  if (_parsedDocCount !== 0 && _isParsedDoc(_nodeDocument(root))) return;
   const list = _ceCandidates(root);
   if (list.length !== 0) _ceTryUpgradeList(list, skipRoot ? root._nid : -1);
 }
@@ -3659,6 +3688,15 @@ function __prepareInsertedSubtree(root) {
   // unstarted.  When an ancestor is later connected, insertion steps visit
   // every script in that subtree in tree order.
   if (!root || !root.isConnected) return;
+  // A script inserted into a secondary document's tree is prepared there, which marks it
+  // already started (HTML "prepare the script element" step 8) and stops, since that document
+  // has no browsing context: moving it into the page later does not run it, as in Chromium.
+  if (_parsedDocCount !== 0 && !_inPage(root)) {
+    if (root.nodeType === 1 && root.tagName === 'SCRIPT') __obscuraCore.ops.op_script_mark_started(root._nid);
+    const inert = _domParse("query_selector_all_scoped", root._nid, "script") || [];
+    for (let i = 0; i < inert.length; i++) __obscuraCore.ops.op_script_mark_started(+inert[i]);
+    return;
+  }
   const scripts = [];
   const seen = new Set();
   if (root.nodeType === 1 && root.tagName === 'SCRIPT') {
@@ -3739,9 +3777,29 @@ class Node {
   constructor(nid) { this._nid = nid; }
   get nodeType() { return +_dom("node_type", this._nid); }
   get nodeName() { return _domParse("node_name", this._nid) || ""; }
-  get ownerDocument() { return globalThis.document; }
+  // The node document: this realm's, or a secondary document's (_parsedDocs). A document
+  // has none, also when this getter is called on one through Node.prototype (Transcend's
+  // airgap.js does: it took the page for its sanitizing sandbox's document).
+  get ownerDocument() {
+    if (this === globalThis.document) return null;
+    if (_parsedDocCount === 0) return globalThis.document;
+    // A node's document changes only with the tree (insertion adopts, adoptNode), so the
+    // answer is kept until the next tree mutation: airgap.js and React ask for it constantly.
+    if (this._ownerEpoch === _treeMutationEpoch) return this._ownerDoc;
+    const id = +_dom("owner_document", this._nid);
+    const doc = id === -2 ? null : id < 0 ? globalThis.document : _wrap(id);
+    this._ownerDoc = doc;
+    this._ownerEpoch = _treeMutationEpoch;
+    return doc;
+  }
   // https://dom.spec.whatwg.org/#dom-node-baseuri
   get baseURI() {
+    // A secondary document's nodes resolve against that document's URL (about:blank, or the
+    // creating document's for DOMParser's); its <base> is not consulted.
+    if (_parsedDocCount !== 0) {
+      const doc = _nodeDocument(this);
+      if (_isParsedDoc(doc)) return doc.URL;
+    }
     try { return _documentBase(); } catch (e) { return ""; }
   }
   // DEVIATION from crates/obscura-js/js/bootstrap.js, whose textContent setter replaces the
@@ -3843,10 +3901,12 @@ class Node {
       }
       return c;
     }
+    if (_documentProtoAtBoot !== null && _isPrototypeOf(_documentProtoAtBoot, this)) _ensureDocumentChild(this, c, null, 'appendChild');
     if (c._shadowParent) c._shadowParent.removeChild(c);
     else if (c.parentNode) _detachStyleSheetsInSubtree(c);
     const parentConnected = this.isConnected;
     const ceWasConnected = _ceDefCount !== 0 && c.isConnected;
+    const adoptedFrom = _adoptionBefore(this, c);
     const inserted = _dom("append_child", this._nid, c._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -3856,6 +3916,7 @@ class Node {
     }
     _seedUnchangedConnection(this, parentConnected);
     _seedInsertedTreeState(c, this, parentConnected);
+    if (adoptedFrom !== null) _adoptionAfter(this, c, adoptedFrom);
     _registerWindowNamedTree(c);
     if (_hostVars.__mutationObservers?.length) _hostVars.__notifyMutation('childList', this._nid, [c._nid], []);
     __prepareInsertedSubtree(c);
@@ -3918,11 +3979,13 @@ class Node {
       }
       return oldChild;
     }
+    if (_documentProtoAtBoot !== null && _isPrototypeOf(_documentProtoAtBoot, this)) _ensureDocumentChild(this, newChild, oldChild, 'replaceChild');
     if (newChild._shadowParent) newChild._shadowParent.removeChild(newChild);
     else if (newChild.parentNode) _detachStyleSheetsInSubtree(newChild);
     const parentConnected = this.isConnected;
     const ceWasConnected = _ceDefCount !== 0 && newChild.isConnected;
     const removedWindowNames = _windowNamedNamesInTree(oldChild);
+    const adoptedFrom = _adoptionBefore(this, newChild);
     const inserted = _dom("insert_before", newChild._nid, oldChild._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -3935,6 +3998,7 @@ class Node {
     _seedUnchangedConnection(this, parentConnected);
     _seedInsertedTreeState(newChild, this, parentConnected);
     _seedDetachedTreeState(oldChild);
+    if (adoptedFrom !== null) _adoptionAfter(this, newChild, adoptedFrom);
     _detachStyleSheetsInSubtree(oldChild);
     _registerWindowNamedTree(newChild);
     _reconcileWindowNamedProperties(removedWindowNames);
@@ -3975,10 +4039,12 @@ class Node {
       }
       return n;
     }
+    if (_documentProtoAtBoot !== null && _isPrototypeOf(_documentProtoAtBoot, this)) _ensureDocumentChild(this, n, null, 'insertBefore');
     if (n._shadowParent) n._shadowParent.removeChild(n);
     else if (n.parentNode) _detachStyleSheetsInSubtree(n);
     const parentConnected = this.isConnected;
     const ceWasConnected = _ceDefCount !== 0 && n.isConnected;
+    const adoptedFrom = _adoptionBefore(this, n);
     const inserted = _dom("insert_before", n._nid, ref._nid) === "true";
     if (!inserted) {
       throw new DOMException(
@@ -3988,6 +4054,7 @@ class Node {
     }
     _seedUnchangedConnection(this, parentConnected);
     _seedInsertedTreeState(n, this, parentConnected);
+    if (adoptedFrom !== null) _adoptionAfter(this, n, adoptedFrom);
     _registerWindowNamedTree(n);
     // The same steps as in appendChild. Where a node is inserted does not decide whether an
     // observer sees it and whether a <link> loads its stylesheet.
@@ -4015,6 +4082,7 @@ class Node {
     const t = this.nodeType;
     if (t === 1) {
       const clone = _wrap(+_dom("clone_node", this._nid, deep ? "true" : "false"));
+      if (clone) _cloneFormState(this, clone, deep);
       // HTML clones create each element with its upgrade queued, so the constructors run
       // when cloneNode returns, over the finished copy.
       if (_ceDefCount !== 0 && clone) {
@@ -4030,7 +4098,7 @@ class Node {
     // directly with createElement(NS) + attribute copy avoids any parsing
     // context, and an explicit stack keeps a deep subtree from overflowing the
     // JS stack (issue #490).
-    const root = _shallowCloneNode(this);
+    const root = _keepOwner(this, _shallowCloneNode(this));
     if (!deep || !root) return root;
     const stack = [[this, root]];
     while (stack.length) {
@@ -4080,7 +4148,10 @@ class Node {
   get isConnected() {
     if (this._treeDetachedExact) return false;
     if (this._treeConnectedEpoch === _treeMutationEpoch) return this._treeConnected;
-    const connected = _dom("is_connected", this._nid) === "true";
+    // A node of a secondary document is connected too (its shadow-including root is a
+    // document); _inPage tells the page's own nodes apart.
+    const connected = _dom("is_connected", this._nid) === "true"
+      || (_parsedDocCount !== 0 && _inParsedDocTree(this));
     this._treeConnected = connected;
     this._treeConnectedEpoch = _treeMutationEpoch;
     return connected;
@@ -4180,13 +4251,13 @@ class Text extends CharacterData {
     }
     return _wrap(newNid);
   }
-  cloneNode() { return document.createTextNode(this.data); }
+  cloneNode() { return _keepOwner(this, document.createTextNode(this.data)); }
 }
 
 class Comment extends CharacterData {
   get nodeName() { return "#comment"; }
   get nodeType() { return 8; }
-  cloneNode() { return document.createComment(this.data); }
+  cloneNode() { return _keepOwner(this, document.createComment(this.data)); }
 }
 
 // DOMTokenList backs class/rel/sandbox/etc. attribute reflection. It parses the
@@ -4311,7 +4382,7 @@ class CDATASection extends Text {
   get nodeType() { return 4; }
   get nodeValue() { return this.data; }
   set nodeValue(v) { this.data = v; }
-  cloneNode() { return new CDATASection(+_dom("create_text_node", this.data)); }
+  cloneNode() { return _keepOwner(this, new CDATASection(+_dom("create_text_node", this.data))); }
 }
 
 // ProcessingInstruction: nodeType 7, nodeName === target. Extends CharacterData
@@ -4324,7 +4395,7 @@ class ProcessingInstruction extends CharacterData {
   get nodeType() { return 7; }
   get nodeValue() { return this.data; }
   set nodeValue(v) { this.data = v; }
-  cloneNode() { return new ProcessingInstruction(+_dom("create_text_node", this.data), this._target); }
+  cloneNode() { return _keepOwner(this, new ProcessingInstruction(+_dom("create_text_node", this.data), this._target)); }
 }
 
 // Document character encoding (WHATWG canonical name, e.g. "UTF-8", "EUC-JP").
@@ -5101,6 +5172,13 @@ class Element extends Node {
     if (ln) this._lname = ln;
     return ln;
   }
+  // The namespace prefix of the qualified name, or null (an XML document's <s:k>). Port
+  // addition: Element.prototype had no prefix.
+  get prefix() {
+    const qualified = _domParse("tag_name", this._nid) || "";
+    const colon = qualified.indexOf(":");
+    return colon > 0 ? qualified.slice(0, colon) : null;
+  }
   get id() { return this.getAttribute("id") || ""; }
   set id(v) { this.setAttribute("id", v); }
   // Element's className is the string reflection for every element, SVG ones included
@@ -5682,6 +5760,8 @@ class Element extends Node {
   // blur() moved the focused element and fired nothing.
   // In an isolated world the page realm moves the focus (_focusBridge) and fires them.
   focus() {
+    // An element of a document without a browsing context cannot take focus.
+    if (_parsedDocCount !== 0 && !_inPage(this)) return;
     const previous = _getFocused();
     _setFocused(this); _clickTarget = this;
     if (previous !== this && _focusBridge === null) _fireFocusChange(previous, this);
@@ -5914,6 +5994,12 @@ class Element extends Node {
       }
       this._syncSelectedContent();
       return;
+    }
+    // An input whose value mode is "default" or "default/on" (hidden, the buttons, checkbox,
+    // radio) has no value of its own: setting it sets the content attribute (Chromium 141).
+    if (tag === 'input') {
+      const itype = _stringToLowerCase(_String(this.getAttribute('type') || ''));
+      if (_INPUT_DEFAULT_VALUE_MODE[itype] === true) { this.setAttribute('value', String(v)); return; }
     }
     const before = this.value;
     _formValues[this._nid] = String(v);
@@ -7104,7 +7190,7 @@ class HTMLElement extends Element {
 // element, else the nearest positioned ancestor, the nearest td/th/table when the element
 // itself is not positioned, or <body>.
 function _offsetParentOf(el) {
-  if (!el.isConnected) return undefined;
+  if (!_inPage(el)) return undefined;
   const ln = el.localName;
   const own = _innerTextStyle(el);
   if (own && own.display === "none") return undefined;
@@ -7377,6 +7463,15 @@ function _throwDocumentDomainSecurityError() {
 }
 
 class Document extends Node {
+  // `new Document()` (no node id) is the WHATWG constructor: a new, empty XML document with no
+  // browsing context (_parsedDocs). The shim passes the id of a document node it wraps.
+  constructor(nid) {
+    if (nid !== undefined) { super(nid); return; }
+    const id = +_dom("create_document", "application/xml");
+    super(id);
+    _registerParsedDoc(this, "application/xml", 'plain');
+    _cache.set(id, this);
+  }
   get timeline() {
     if (!this._timeline) {
       this._timeline = new DocumentTimeline();
@@ -7387,7 +7482,7 @@ class Document extends Node {
     return Array.from(_waapiAnimations).filter(animation => animation.playState !== 'idle'
       && (animation.playState !== 'finished' || animation.effect?._timing.fill === 'forwards' || animation.effect?._timing.fill === 'both'));
   }
-  get documentElement() { return _wrapEl(+_dom("document_element")); }
+  get documentElement() { return _wrapEl(+_dom("document_element", _docArg(this))); }
   get children() {
     const root = this.documentElement;
     return HTMLCollection._from(root ? [root] : []);
@@ -7417,16 +7512,20 @@ class Document extends Node {
     root.appendChild(v);
   }
   get doctype() {
-    if (this._doctype !== undefined) return this._doctype;
-    const info = _domParse("document_doctype");
-    if (info && info.name) {
-      this._doctype = new DocumentType(info.nodeId, info.name, info.publicId || "", info.systemId || "");
-    } else {
-      this._doctype = null;
+    if (_isParsedDoc(this)) {
+      for (let c = this.firstChild; c; c = c.nextSibling) if (c.nodeType === 10) return c;
+      return null;
     }
-    return this._doctype;
+    // The doctype node's own wrapper, so document.firstChild === document.doctype, as in
+    // Chromium. The shim used to build a second DocumentType object for it.
+    const info = _domParse("document_doctype");
+    return info && info.name ? _wrap(+info.nodeId) : null;
   }
-  get title() { return _domParse("document_title") ?? ""; }
+  get title() {
+    // An XML document's title is its SVG root's <title> or an XHTML <title>; the port looks
+    // for any <title> element.
+    return _domParse("document_title", _docArg(this)) ?? "";
+  }
   set title(v) {
     const value = String(v);
     let title = _qs(this, "title");
@@ -7443,7 +7542,12 @@ class Document extends Node {
     }
     title.textContent = value;
   }
-  get URL() { return _domParse("document_url") ?? ""; }
+  get URL() {
+    // DOMParser's documents take the creating document's URL; createHTMLDocument's,
+    // createDocument's and `new Document()`'s are about:blank (Chromium 141).
+    if (_isParsedDoc(this)) return this._docURL || "about:blank";
+    return _domParse("document_url") ?? "";
+  }
   get documentURI() { return this.URL; }
   get domain() {
     return this === globalThis.document
@@ -7467,19 +7571,22 @@ class Document extends Node {
     // grant cross-document access.
     this._effectiveDomain = candidate;
   }
-  get referrer() { return _domParse("document_referrer") ?? ""; }
-  get location() { return globalThis.location; }
-  set location(url) { __obscuraCore.ops.op_navigate(_resolveUrl(String(url)), 'GET', ''); }
-  get defaultView() { return globalThis; }
+  get referrer() { return _isParsedDoc(this) ? "" : (_domParse("document_referrer") ?? ""); }
+  get location() { return _isParsedDoc(this) ? null : globalThis.location; }
+  set location(url) {
+    if (_isParsedDoc(this)) return;
+    __obscuraCore.ops.op_navigate(_resolveUrl(String(url)), 'GET', '');
+  }
+  get defaultView() { return _isParsedDoc(this) ? null : globalThis; }
   get nodeType() { return 9; }
   get nodeName() { return "#document"; }
   get ownerDocument() { return null; } // Document has no ownerDocument
-  get compatMode() { return "CSS1Compat"; }
+  get compatMode() { return this._quirks === true ? "BackCompat" : "CSS1Compat"; }
   // The document's character encoding, detected from the response charset
   // (HTTP Content-Type -> <meta charset>). characterSet/charset/inputEncoding
   // are WHATWG aliases. A node-less document (DOMParser/createDocument) has no
   // backing encoding and reports UTF-8.
-  get characterSet() { return (this._nid === undefined || this._nid === null) ? "UTF-8" : _docEncoding(); }
+  get characterSet() { return (this._nid === undefined || this._nid === null || _isParsedDoc(this)) ? "UTF-8" : _docEncoding(); }
   get charset() { return this.characterSet; }
   get inputEncoding() { return this.characterSet; }
   get contentType() {
@@ -7502,20 +7609,31 @@ class Document extends Node {
     if (/\.(?:xml|svg)(?:[?#]|$)/i.test(url)) return "application/xml";
     return "text/html";
   }
-  get readyState() { return _hostVars.__documentReadyState__ || 'complete'; }
+  get readyState() {
+    // createHTMLDocument's document stays "loading" (it never had a parser to finish);
+    // DOMParser's and the rest are "complete" (Chromium 141).
+    if (_isParsedDoc(this)) return this._readyState || 'complete';
+    return _hostVars.__documentReadyState__ || 'complete';
+  }
   get currentScript() {
+    if (_isParsedDoc(this)) return null;
     // Next.js / Turbopack chunk loader reads document.currentScript.src to
     // derive its base path. page.rs sets __currentScriptNid before each
     // <script> body runs and clears it after, mirroring real Chrome.
     const nid = _hostVars.__currentScriptNid;
     return nid ? _wrapEl(+nid) : null;
   }
-  get hidden() { return false; }
-  get visibilityState() { return "visible"; }
-  getElementById(id) { return _wrapEl(+_dom("get_element_by_id", id)); }
-  querySelector(s) { return _wrapEl(+_dom("query_selector", s)); }
+  get hidden() { return _isParsedDoc(this); }
+  get visibilityState() { return _isParsedDoc(this) ? "hidden" : "visible"; }
+  getElementById(id) { return _wrapEl(+_dom("get_element_by_id", id, _docArg(this))); }
+  querySelector(s) {
+    if (_isParsedDoc(this)) return _wrapEl(+_dom("query_selector_scoped", this._nid, s));
+    return _wrapEl(+_dom("query_selector", s));
+  }
   querySelectorAll(s) {
-    const ids = _domParse("query_selector_all", s) || [];
+    const ids = (_isParsedDoc(this)
+      ? _domParse("query_selector_all_scoped", this._nid, s)
+      : _domParse("query_selector_all", s)) || [];
     return _nodeList(_wrapIds(ids, _wrapEl));
   }
   getElementsByTagName(t) { return HTMLCollection._from(_qsa(this, t)); }
@@ -7525,6 +7643,7 @@ class Document extends Node {
     return _makeXPathResult(type, _xpathFindNodes(expression, contextNode || this));
   }
   createElement(t, options) {
+    if (_isParsedDoc(this)) return _parsedDocCreateElement(this, t, options);
     const localName = String(t).toLowerCase();
     // ElementCreationOptions' is (or the legacy string form): a customized built-in, or an is
     // value the element keeps and serializes.
@@ -7573,6 +7692,14 @@ class Document extends Node {
     return el;
   }
   createElementNS(ns, t) {
+    if (_isParsedDoc(this)) {
+      // No registry, so no custom element constructor runs (Chromium 141).
+      _ceNoSync++;
+      let el;
+      try { el = _reflectApply(Document.prototype.createElementNS, _realmDocument || globalThis.document, [ns, t]); }
+      finally { _ceNoSync--; }
+      return _keepOwnerOf(this, el);
+    }
     const namespace = ns == null ? null : String(ns);
     const qualified = String(t);
     _ns_validateQualifiedName(namespace == null ? "" : namespace, qualified);
@@ -7604,14 +7731,14 @@ class Document extends Node {
     const n = new Text(nid);
     _seedDetachedTreeState(n);
     _cache.set(nid, n);
-    return n;
+    return _isParsedDoc(this) ? _keepOwnerOf(this, n) : n;
   }
   createComment(t) {
     const nid = +_dom("create_comment_node", String(t ?? ""));
     const n = new Comment(nid);
     _seedDetachedTreeState(n);
     _cache.set(nid, n);
-    return n;
+    return _isParsedDoc(this) ? _keepOwnerOf(this, n) : n;
   }
   createCDATASection(data) {
     // Spec: throw NotSupportedError on an HTML document, reject data
@@ -7627,7 +7754,7 @@ class Document extends Node {
     const n = new CDATASection(nid);
     _seedDetachedTreeState(n);
     _cache.set(nid, n);
-    return n;
+    return _isParsedDoc(this) ? _keepOwnerOf(this, n) : n;
   }
   createProcessingInstruction(target, data) {
     // Spec: not gated on document type. Reject targets that are not an XML
@@ -7644,14 +7771,14 @@ class Document extends Node {
     const n = new ProcessingInstruction(nid, tgt);
     _seedDetachedTreeState(n);
     _cache.set(nid, n);
-    return n;
+    return _isParsedDoc(this) ? _keepOwnerOf(this, n) : n;
   }
   createDocumentFragment() {
     const nid = +_dom("create_document_fragment");
     const frag = new DocumentFragment(nid);
     _seedDetachedTreeState(frag);
     _cache.set(nid, frag);
-    return frag;
+    return _isParsedDoc(this) ? _keepOwnerOf(this, frag) : frag;
   }
   // Legacy DOM Level 2 event factory. Spec returns an event of the requested
   // class with an empty type until init*Event() is called. We previously
@@ -7698,7 +7825,12 @@ class Document extends Node {
     if (created !== null && typeof created === 'object') _dispatchingAdd(_uninitializedEvents, created);
     return created;
   }
-  createRange() { return new Range(); }
+  createRange() {
+    const range = new Range();
+    // A new range starts at (this document, 0).
+    if (_isParsedDoc(this)) { range._sc = this; range._ec = this; }
+    return range;
+  }
   createTreeWalker(root, whatToShow, filter) {
     // whatToShow is unsigned long; default SHOW_ALL only when the arg is omitted.
     // An explicit 0 (show nothing) must stay 0, not become SHOW_ALL.
@@ -7898,79 +8030,82 @@ class Document extends Node {
     };
   }
   getSelection() { return this.defaultView ? _selectionFor(this) : null; }
-  get activeElement() { return _getFocused() || this.body; }
+  get activeElement() {
+    // Nothing in a document without a browsing context has focus: its body (Chromium 141).
+    if (_isParsedDoc(this)) return this.body;
+    return _getFocused() || this.body;
+  }
   // The element that scrolls the viewport, and where the page offset lives
   // (issue #468). Standards mode, so documentElement — quirks mode would be
   // body, but we never parse in quirks mode.
-  get scrollingElement() { return this.documentElement; }
+  get scrollingElement() { return this._quirks === true ? this.body : this.documentElement; }
   get implementation() {
     const ownerDoc = this;
     return {
-      // Spec: createHTMLDocument returns a NEW detached Document. jQuery
-      // 3.x's selector feature-detect calls `body.innerHTML = '<form>'` on
-      // the result — when we returned `globalThis.document`, the real
-      // `<body>` was wiped, taking every page on the open web that ships
-      // jQuery 3.x with it. Reuse the DOMParser path to build a detached
-      // document, then optionally set the title.
+      // DOM "createHTMLDocument": a new HTML document with no browsing context holding
+      // <!DOCTYPE html><html><head>[<title>]</head><body></body></html> (_parsedDocs).
       createHTMLDocument(title) {
-        // Build head>title and body explicitly. Parsing a full skeleton string
-        // as innerHTML of <html> collapses through the fragment parser (it
-        // dropped head/body and kept only <title>), leaving doc.body null.
-        const doc = new DOMParser().parseFromString("", "text/html");
-        const root = doc.documentElement;
-        const head = document.createElement("head");
-        const titleEl = document.createElement("title");
-        if (title != null) titleEl.textContent = String(title);
-        head.appendChild(titleEl);
-        const body = document.createElement("body");
-        root.appendChild(head);
-        root.appendChild(body);
+        const doc = _newParsedDoc("text/html", undefined, 'html');
+        // It never had a parser, so it stays "loading" (Chromium 141).
+        doc._readyState = 'loading';
+        doc.appendChild(this.createDocumentType("html", "", ""));
+        const html = doc.createElement("html");
+        const head = doc.createElement("head");
+        html.appendChild(head);
+        if (title !== undefined) {
+          const titleEl = doc.createElement("title");
+          titleEl.appendChild(doc.createTextNode(String(title)));
+          head.appendChild(titleEl);
+        }
+        html.appendChild(doc.createElement("body"));
+        doc.appendChild(html);
         return doc;
       },
-      // Real spec: createDocument(namespaceURI, qualifiedName, doctype) →
-      // an XML document with a root element of the given name. We don't
-      // have a separate XML stack, so return a minimal detached document
-      // with an element of the requested local name as documentElement.
-      createDocument(_ns, qualifiedName, _doctype) {
-        const name = (qualifiedName && String(qualifiedName)) || "root";
-        const safe = name.replace(/[^a-zA-Z0-9-]/g, "");
-        const html = qualifiedName ? `<${safe}></${safe}>` : "";
-        const doc = new DOMParser().parseFromString(html, "application/xml");
-        if (_doctype) doc._docType = _doctype;
+      // DOM "createDocument": an XMLDocument whose content type follows the namespace, with
+      // the doctype and a root element when given.
+      createDocument(namespace, qualifiedName, doctype) {
+        const ns = namespace == null || namespace === "" ? null : String(namespace);
+        const name = qualifiedName == null ? "" : String(qualifiedName);
+        const contentType = ns === "http://www.w3.org/1999/xhtml" ? "application/xhtml+xml"
+          : ns === "http://www.w3.org/2000/svg" ? "image/svg+xml" : "application/xml";
+        let element = null;
+        const doc = _newParsedDoc(contentType, undefined, 'xml');
+        if (name !== "") element = doc.createElementNS(ns, name);
+        if (doctype != null) doc.appendChild(doctype);
+        if (element !== null) doc.appendChild(element);
         return doc;
       },
-      // createDocumentType(qualifiedName, publicId, systemId): build a detached
-      // DocumentType node. Browsers validate leniently here (only a name with
-      // ASCII whitespace or ">" is rejected, matching the WPT cases); the node's
-      // owner document is the document whose implementation was used.
+      // createDocumentType(qualifiedName, publicId, systemId): a DocumentType owned by the
+      // document whose implementation was used. Browsers validate leniently here (only a name
+      // with ASCII whitespace or ">" is rejected, matching the WPT cases).
       createDocumentType(qualifiedName, publicId, systemId) {
         const name = String(qualifiedName);
         if (name === "" || /[\t\n\f\r >]/.test(name)) {
           throw new DOMException("The qualified name '" + name + "' contains an invalid character", "InvalidCharacterError");
         }
-        const dt = new DocumentType(
-          +_dom("create_comment_node", ""),
-          name,
-          publicId === undefined ? "" : String(publicId),
-          systemId === undefined ? "" : String(systemId)
-        );
-        dt._ownerDocument = ownerDoc;
-        return dt;
+        const pub = publicId === undefined ? "" : String(publicId);
+        const sys = systemId === undefined ? "" : String(systemId);
+        const nid = +_dom("create_doctype", name, pub + "\0" + sys);
+        const dt = new DocumentType(nid, name, pub, sys);
+        _seedDetachedTreeState(dt);
+        _cache.set(nid, dt);
+        return _isParsedDoc(ownerDoc) ? _keepOwnerOf(ownerDoc, dt) : dt;
       },
       hasFeature() { return true; },
     };
   }
   get styleSheets() {
-    if (!this._styleSheetList) this._styleSheetList = new StyleSheetList(this);
+    // A document without a browsing context has no style sheets (Chromium 141).
+    if (!this._styleSheetList) this._styleSheetList = new StyleSheetList(_isParsedDoc(this) ? _objectCreate(null) : this);
     return this._styleSheetList;
   }
   get forms() { return _qsa(this, "form"); }
   get images() { return _qsa(this, "img"); }
   get links() { return _qsa(this, "a[href], area[href]"); }
   get scripts() { return _qsa(this, "script"); }
-  get cookie() { return _documentCookieGet(); }
+  get cookie() { return _isParsedDoc(this) ? "" : _documentCookieGet(); }
   set cookie(v) {
-    if (!v) return;
+    if (!v || _isParsedDoc(this)) return;
     _documentCookieSet(v);
   }
   // Inserts into the document's input stream, which the host keeps alive across calls.
@@ -7979,6 +8114,7 @@ class Document extends Node {
   // one per attribute, then ">".
   // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-write
   write(...args) {
+    if (_isParsedDoc(this)) { _parsedDocWrite(this, args.join('')); return; }
     var html = args.join('');
     if (!html) return;
     var body = this.body;
@@ -8025,6 +8161,7 @@ class Document extends Node {
     this.write(args.join('') + '\n');
   }
   open() {
+    if (_isParsedDoc(this)) return _parsedDocOpen(this);
     var body = this.body;
     if (body) body.innerHTML = '';
     // A new parse begins. Whatever the input stream still held is gone.
@@ -8042,13 +8179,76 @@ class Document extends Node {
     return this;
   }
   close() {
+    if (_isParsedDoc(this)) { _parsedDocClose(this); return; }
     if (this._reopened) {
       this._reopened = false;
       _dom("document_close");
     }
     return;
   }
-  hasFocus() { return true; }
+  hasFocus() { return !_isParsedDoc(this); }
+  // DOM "clone a node" for a document: a new document of the same kind with no browsing
+  // context (also for this realm's own), its children cloned when deep.
+  cloneNode(deep) {
+    const nid = +_dom("clone_node", this._nid, deep ? "true" : "false");
+    if (!(nid >= 0)) return null;
+    const clone = _wrap(nid);
+    if (clone && this._docKind) {
+      clone._docKind = this._docKind;
+      _objectSetPrototypeOf(clone, _getPrototypeOf(this));
+    } else if (clone && this === globalThis.document) {
+      _objectSetPrototypeOf(clone, _getPrototypeOf(this));
+    }
+    if (clone) clone._quirks = this._quirks;
+    return clone;
+  }
+  // DOM "import a node": a clone of `node` in this document.
+  importNode(node, deep) {
+    if (!(node instanceof Node)) {
+      throw new TypeError("Failed to execute 'importNode' on 'Document': parameter 1 is not of type 'Node'.");
+    }
+    if (node.nodeType === 9) {
+      throw new DOMException("Failed to execute 'importNode' on 'Document': The node provided is a document, which may not be imported.", "NotSupportedError");
+    }
+    if (_ShadowRootClass !== null && node instanceof _ShadowRootClass) {
+      throw new DOMException("Failed to execute 'importNode' on 'Document': The node provided is a shadow root, which may not be imported.", "NotSupportedError");
+    }
+    const parsed = _isParsedDoc(this);
+    // Nothing is upgraded on the way: into a document without a browsing context never, into
+    // this one below, once the copy is ours.
+    _ceInert++;
+    let clone;
+    try { clone = node.cloneNode(deep === true || (deep !== undefined && deep !== false && !!deep)) || null; }
+    finally { _ceInert--; }
+    if (clone && _parsedDocCount !== 0) _dom("adopt_node", clone._nid, _docArg(this));
+    // The copy belongs to this document, so its defined elements are upgraded even when the
+    // source was inert template contents (custom elements; cloneNode skipped those).
+    if (clone && !parsed && _ceDefCount !== 0) {
+      _ceCreatedUnder(clone, false);
+      _ceDone();
+    }
+    return clone;
+  }
+  // DOM "adopt a node": remove `node` from its parent and make this its node document.
+  adoptNode(node) {
+    if (!(node instanceof Node)) {
+      throw new TypeError("Failed to execute 'adoptNode' on 'Document': parameter 1 is not of type 'Node'.");
+    }
+    if (node.nodeType === 9) {
+      throw new DOMException("Failed to execute 'adoptNode' on 'Document': The node provided is a document, which may not be adopted.", "NotSupportedError");
+    }
+    if (_ShadowRootClass !== null && node instanceof _ShadowRootClass) {
+      throw new DOMException("Failed to execute 'adoptNode' on 'Document': The node provided is a shadow root, which may not be adopted.", "HierarchyRequestError");
+    }
+    const oldDoc = _parsedDocCount === 0 ? globalThis.document : _nodeDocument(node);
+    const parent = node.parentNode;
+    if (parent) parent.removeChild(node);
+    if (oldDoc !== this) {
+      _adoptInto(node, this, oldDoc);
+      _ceDone();
+    }
+    return node;
+  }
   // The editing command family is a stub: nothing here implements rich-text
   // editing, so every query answers "unsupported" consistently with
   // execCommand() returning false. They exist because callers feature-detect
@@ -8140,10 +8340,238 @@ class DocumentType extends Node {
   get systemId() { return this._systemId; }
   get nodeValue() { return null; }
   set nodeValue(v) {}
-  get ownerDocument() { return this._ownerDocument || globalThis.document; }
 }
 
 const _cache = _private(new Map());
+
+// Documents other than this realm's own (port addition; DomTree.Documents.cs): what
+// DOMImplementation.createHTMLDocument/createDocument, DOMParser, `new Document()`,
+// Document.cloneNode and XMLHttpRequest.responseXML create. DEVIATION from
+// crates/obscura-js/js/bootstrap.js, whose DOMParser and createHTMLDocument hand out plain
+// objects over a detached <html> of the page, whose ownerDocument is always the page, and whose
+// importNode/adoptNode on them return their argument: dell.com's bot detector imported the
+// page's <html> into a createHTMLDocument document and appended it there, which took it out of
+// the page. Each one is now a native document node with no browsing context. Its tree is never
+// rendered and stays out of the page's id lookups, MutationObservers and stylesheets; its nodes
+// report it as their ownerDocument, are connected (isConnected), run no scripts and upgrade no
+// custom elements, as in Chromium 141.
+const _parsedDocs = _private(new WeakSet());
+// How many have been created in this realm. Zero keeps every hot path (ownerDocument,
+// isConnected) at what it cost before.
+let _parsedDocCount = 0;
+function _isParsedDoc(o) { return _parsedDocCount !== 0 && o !== null && typeof o === 'object' && _parsedDocs.has(o); }
+// The document argument of the document-level op_dom commands: empty for this realm's own.
+function _docArg(doc) { return _isParsedDoc(doc) ? doc._nid : ""; }
+// `kind` is 'html' (an HTMLDocument), 'xml' (an XMLDocument) or 'plain' (`new Document()`).
+function _registerParsedDoc(doc, contentType, kind) {
+  _parsedDocs.add(doc);
+  _parsedDocCount++;
+  doc._contentType = contentType;
+  doc._docKind = kind;
+  const proto = kind === 'html' ? _htmlDocumentProto : kind === 'xml' ? _xmlDocumentProto : null;
+  if (proto) _objectSetPrototypeOf(doc, proto);
+  // A document is always connected.
+  doc._treeDetachedExact = false;
+  doc._treeParent = null;
+  doc._treeParentEpoch = _treeMutationEpoch;
+  doc._treeConnected = true;
+  doc._treeConnectedEpoch = _treeMutationEpoch;
+  return doc;
+}
+function _docKindFor(contentType) {
+  return contentType === "text/html" ? 'html' : 'xml';
+}
+// A wrapper for a document node id: a secondary document's, or a plain Document for any other.
+function _wrapDocumentNid(nid) {
+  const info = _parsedDocCount !== 0 || +_dom("document_node_id") !== nid ? _domParse("document_info", nid) : null;
+  const doc = new Document(nid);
+  if (info) {
+    _registerParsedDoc(doc, info.contentType, _docKindFor(info.contentType));
+    if (info.quirks) doc._quirks = true;
+  }
+  return doc;
+}
+// Create a secondary document: empty when `markup` is undefined, else parsed from it.
+function _newParsedDoc(contentType, markup, kind) {
+  const nid = markup === undefined
+    ? +_dom("create_document", contentType)
+    : +_dom("parse_document", contentType, markup);
+  const doc = new Document(nid);
+  _registerParsedDoc(doc, contentType, kind || _docKindFor(contentType));
+  if (markup !== undefined && contentType === "text/html") {
+    const info = _domParse("document_info", nid);
+    if (info && info.quirks) doc._quirks = true;
+  }
+  _cache.set(nid, doc);
+  return doc;
+}
+// The node document of `node` (its ownerDocument; a document is its own).
+function _nodeDocument(node) {
+  if (_isParsedDoc(node)) return node;
+  if (node === globalThis.document) return node;
+  return node.ownerDocument || globalThis.document;
+}
+// Whether a node of this realm's tree is in the page itself, as opposed to merely connected
+// (which a node of a secondary document also is). What decides whether a script runs, a
+// stylesheet or preload loads, and layout answers.
+function _inPage(node) {
+  if (!node || !node.isConnected) return false;
+  return _parsedDocCount === 0 || _dom("is_connected", node._nid) === "true";
+}
+// Whether `node`'s shadow-including root is a secondary document.
+function _inParsedDocTree(node) {
+  let nid = node._nid;
+  for (let i = 0; i < 4096; i++) {
+    const root = +_dom("node_root", nid);
+    const wrapper = _cache.get(root);
+    if (wrapper !== undefined && _parsedDocs.has(wrapper)) return true;
+    const sr = wrapper === undefined ? _shadowRootFromNid(root, null) : wrapper;
+    if (sr && _ShadowRootClass !== null && sr instanceof _ShadowRootClass && sr.host) { nid = sr.host._nid; continue; }
+    if (wrapper === undefined && _dom("document_info", root) !== "null") return _parsedDocs.has(_wrap(root));
+    return false;
+  }
+  return false;
+}
+// DOM "adopt": move `node` (already removed from its parent) into `doc`, and queue
+// adoptedCallback for its custom elements.
+function _adoptInto(node, doc, oldDoc) {
+  _dom("adopt_node", node._nid, _docArg(doc));
+  if (_ceDefCount !== 0 && oldDoc !== doc && (node instanceof Element || node instanceof DocumentFragment)) {
+    const list = _ceCandidates(node);
+    for (let i = 0; i < list.length; i += 3) {
+      const el = _cache.get(list[i]);
+      if (el !== undefined && el._ceState === "custom") _ceCallback(el, "adoptedCallback", [oldDoc, doc]);
+    }
+  }
+}
+// A node a secondary document's factory made through this realm's: adopt it into `doc`.
+function _keepOwnerOf(doc, node) {
+  if (node) _dom("adopt_node", node._nid, doc._nid);
+  return node;
+}
+// Document.createElement on a secondary document. An HTML document lower-cases the name and
+// makes an HTML element; an XML one keeps the name, in the XHTML namespace for an XHTML
+// document and in none otherwise (DOM "createElement"). No custom element constructor runs:
+// such a document has no registry (Chromium 141).
+function _parsedDocCreateElement(doc, t, options) {
+  const realm = _realmDocument || globalThis.document;
+  let el;
+  _ceNoSync++;
+  try {
+    if (doc._docKind === 'html') {
+      el = _reflectApply(Document.prototype.createElement, realm, [t, options]);
+    } else {
+      const name = String(t);
+      if (!_piNameRe.test(name)) {
+        throw new DOMException("Failed to execute 'createElement' on 'Document': The tag name provided ('" + name + "') is not a valid name.", "InvalidCharacterError");
+      }
+      el = _reflectApply(Document.prototype.createElementNS, realm,
+        [doc._contentType === "application/xhtml+xml" ? "http://www.w3.org/1999/xhtml" : null, name]);
+      // An XHTML element of an XML document keeps its case: tagName comes from the tree once
+      // the element is adopted below.
+      if (el) el._tagName = undefined;
+    }
+  } finally {
+    _ceNoSync--;
+  }
+  return _keepOwnerOf(doc, el);
+}
+// document.open/write/close on a secondary document. open() empties it and starts a parser;
+// each write() is parsed at once (the document holds what the input so far parses to), and
+// close() ends the parse, after which the document is "complete" (Chromium 141). A write with
+// no open() first appends to the body while the document is still "loading"
+// (createHTMLDocument's: Chromium 141 inserts it there), and opens the document otherwise.
+function _parsedDocOpen(doc) {
+  if (doc._docKind !== 'html') {
+    throw new DOMException("Failed to execute 'open' on 'Document': Only HTML documents support open().", "InvalidStateError");
+  }
+  let c;
+  while ((c = doc.firstChild) !== null) doc.removeChild(c);
+  doc._writeBuffer = "";
+  doc._writeOpen = true;
+  doc._readyState = 'loading';
+  return doc;
+}
+function _parsedDocWrite(doc, markup) {
+  if (doc._docKind !== 'html') {
+    throw new DOMException("Failed to execute 'write' on 'Document': Only HTML documents support write().", "InvalidStateError");
+  }
+  if (!doc._writeOpen) {
+    const body = doc.body;
+    if (doc.readyState === 'loading' && body) {
+      body.insertAdjacentHTML('beforeend', markup);
+      return;
+    }
+    _parsedDocOpen(doc);
+  }
+  doc._writeBuffer += markup;
+  // Reparse the whole input: what the parser holds after this write.
+  let c;
+  while ((c = doc.firstChild) !== null) doc.removeChild(c);
+  const parsed = _newParsedDoc("text/html", doc._writeBuffer, 'html');
+  while ((c = parsed.firstChild) !== null) doc.appendChild(c);
+  doc._quirks = parsed._quirks;
+}
+function _parsedDocClose(doc) {
+  if (!doc._writeOpen) return;
+  doc._writeOpen = false;
+  doc._writeBuffer = "";
+  doc._readyState = 'complete';
+}
+// The insertion steps' adoption, for a node about to be inserted under `parent`: the old node
+// document when it changes (the native insert moves the node), else null.
+function _adoptionBefore(parent, node) {
+  if (_parsedDocCount === 0) return null;
+  const from = _nodeDocument(node), to = _nodeDocument(parent);
+  return from !== to ? from : null;
+}
+function _adoptionAfter(parent, node, oldDoc) {
+  if (oldDoc === null || _ceDefCount === 0) return;
+  const doc = _nodeDocument(parent);
+  if (!(node instanceof Element)) return;
+  const list = _ceCandidates(node);
+  for (let i = 0; i < list.length; i += 3) {
+    const el = _cache.get(list[i]);
+    if (el !== undefined && el._ceState === "custom") _ceCallback(el, "adoptedCallback", [oldDoc, doc]);
+  }
+}
+// After a clone made outside `src`'s document (the shim builds some clones through the realm
+// document's factories): give the copy `src`'s node document, as DOM's clone steps do.
+function _keepOwner(src, clone) {
+  if (_parsedDocCount !== 0 && clone && src) {
+    const doc = _nodeDocument(src);
+    if (_isParsedDoc(doc)) _dom("adopt_node", clone._nid, doc._nid);
+  }
+  return clone;
+}
+// DOM "ensure pre-insertion validity" for a document parent (the element/doctype/text rules),
+// which the native tree does not enforce. `replaced` is the child replaceChild removes.
+function _ensureDocumentChild(doc, node, replaced, method) {
+  const fail = (message) => {
+    throw new DOMException("Failed to execute '" + method + "' on 'Node': " + message, "HierarchyRequestError");
+  };
+  const t = node.nodeType;
+  if (t === 3 || t === 4) fail("Nodes of type '#text' may not be inserted inside nodes of type '#document'.");
+  let elements = 0, doctypes = 0;
+  for (let c = doc.firstChild; c; c = c.nextSibling) {
+    if (c === replaced || c === node) continue;
+    const ct = c.nodeType;
+    if (ct === 1) elements++;
+    else if (ct === 10) doctypes++;
+  }
+  if (t === 11) {
+    let fe = 0;
+    for (let c = node.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 1) fe++;
+      else if (c.nodeType === 3) fail("Nodes of type '#text' may not be inserted inside nodes of type '#document'.");
+    }
+    if (fe > 1 || (fe === 1 && elements !== 0)) fail("Only one element on document allowed.");
+  } else if (t === 1) {
+    if (elements !== 0) fail("Only one element on document allowed.");
+  } else if (t === 10) {
+    if (doctypes !== 0) fail("Only one doctype on document allowed.");
+  }
+}
 
 class TextTrackCue {
   constructor(startTime, endTime, text) {
@@ -8838,7 +9266,7 @@ function _innerTextOf(el) {
   // A node that is not being rendered -- detached, display:none, or one of the
   // never-rendered tags -- falls back to textContent, matching what Chrome
   // hands back for e.g. a <style> element's own innerText.
-  if (el.isConnected === false) return el.textContent;
+  if (!_inPage(el)) return el.textContent;
   const tag = el.tagName;
   if (tag && _innerTextSkipTags[tag]) return el.textContent;
   // DEVIATION from crates/obscura-js: render builds answer the whole subtree in one op over
@@ -8934,7 +9362,9 @@ function _wrap(nid) {
   // DEVIATION from crates/obscura-js/js/bootstrap.js, which wrapped it as a Document: a
   // declarative shadow root's children reported `parentNode` as a #document until script
   // read host.shadowRoot. It is the ShadowRoot, as in Chromium.
-  else if (t === 9) n = _shadowRootFromNid(nid, null) || new Document(nid);
+  else if (t === 9) n = _shadowRootFromNid(nid, null) || _wrapDocumentNid(nid);
+  // A doctype is a DocumentType (Chromium: document.firstChild === document.doctype).
+  else if (t === 10) n = new DocumentType(nid, _domParse("doctype_name", nid) || "", _domParse("doctype_public_id", nid) || "", _domParse("doctype_system_id", nid) || "");
   else n = new Node(nid);
   _cache.set(nid, n);
   return n;
@@ -10663,10 +11093,34 @@ globalThis.XMLHttpRequest = class XMLHttpRequest extends XMLHttpRequestEventTarg
           xhr._response = new Blob([buffer]);
           break;
         case 'document':
-          xhr._response = text; // simplified
+          xhr._response = null;
           break;
         default:
           xhr._response = text;
+      }
+      // XHR's document response (responseXML, and response for "document"): an XML MIME type
+      // parses as XML, text/html only for responseType "document"; a malformed XML body is
+      // null. DEVIATION from crates/obscura-js/js/bootstrap.js, where responseXML stayed null
+      // and response was the text.
+      if (xhr.responseType === '' || xhr.responseType === 'document') {
+        let mime = String(xhr._overrideMime || (resp.headers && resp.headers.get('content-type')) || 'text/xml');
+        mime = mime.split(';')[0].trim().toLowerCase();
+        const isHtml = mime === 'text/html';
+        const isXml = mime === 'text/xml' || mime === 'application/xml' || mime.endsWith('+xml');
+        if (isXml || (isHtml && xhr.responseType === 'document')) {
+          const type = isHtml ? 'text/html' : (_arrayIndexOf(_DOM_PARSER_TYPES, mime) >= 0 ? mime : 'application/xml');
+          let doc = _newParsedDoc(type, text, isHtml ? 'html' : 'xml');
+          try { doc._docURL = resp.url || xhr._url || "about:blank"; } catch (e) { /* about:blank */ }
+          if (!isHtml) {
+            const root = doc.documentElement;
+            const first = root && (root.localName === 'parsererror' ? root : root.firstElementChild);
+            if (first && first.localName === 'parsererror' && first.namespaceURI === _XHTML_NS) doc = null;
+            else if (root && root.localName === 'html' && root.firstElementChild && root.firstElementChild.firstElementChild
+              && root.firstElementChild.firstElementChild.localName === 'parsererror') doc = null;
+          }
+          xhr._responseXML = doc;
+          if (xhr.responseType === 'document') xhr._response = doc;
+        }
       }
 
       xhr._setReadyState(4); // DONE
@@ -12617,7 +13071,7 @@ function _styleElementIsCssomBridge(style) {
   return style.hasAttribute("data-obscura-adopted");
 }
 function _styleElementHasCssSheet(style) {
-  if (!style || style.localName !== "style" || !style.isConnected) return false;
+  if (!style || style.localName !== "style" || !_inPage(style)) return false;
   // These nodes carry renderer input for another stylesheet owner. Exposing a
   // second style-owned sheet would duplicate entries and, for remote links,
   // bypass the link sheet's origin-clean cssRules check.
@@ -12646,7 +13100,7 @@ function _detachStyleSheet(style) {
   _styleElementSheets.delete(style);
 }
 function _linkElementHasCssSheet(link) {
-  if (!link || link.localName !== "link" || !link.isConnected) return false;
+  if (!link || link.localName !== "link" || !_inPage(link)) return false;
   const rel = (link.getAttribute("rel") || link.rel || "").toLowerCase().split(/\s+/);
   const type = (link.getAttribute("type") || "").trim().toLowerCase();
   return rel.includes("stylesheet") && (!type || type === "text/css")
@@ -13665,7 +14119,7 @@ globalThis.IntersectionObserver = class IntersectionObserver {
     // because its synthetic zero rectangle happens to sit at the origin.
     const hasGeneratedBox = !measurements.has(target) ||
       measurements.get(target) !== null;
-    let inRootTree = hasGeneratedBox && target.isConnected &&
+    let inRootTree = hasGeneratedBox && _inPage(target) &&
       (!(this._root instanceof Element) || this._root.contains(target));
     let left = Math.max(rect.left, root.left);
     let top = Math.max(rect.top, root.top);
@@ -14535,295 +14989,24 @@ if (typeof URLSearchParams === "undefined") globalThis.URLSearchParams = class U
   [Symbol.iterator](){ return this.entries(); }
 };
 
-// Conservative XML well-formedness check for DOMParser. Only detects clear
-// errors (tag balance / single root); defaults to well-formed when unsure so
-// valid XML is never falsely flagged.
-const _checkXmlWellFormed = (html) => {
-  // Strip comments, CDATA sections, processing instructions, and DOCTYPE
-  // declarations — they may contain angle brackets.
-  const s = html
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
-    .replace(/<\?[\s\S]*?\?>/g, '')
-    .replace(/<!DOCTYPE\s[^>]*?>/gi, '');
-
-  const stack = [];
-  // Match open / close / self-closing tags.
-  // Group 1: tag name.  Group 2: optional '/' before '>'.
-  const tagRe = /<\/?([a-zA-Z_][\w.\-:]*)(?:\s[^>]*?)?(\/)?>/g;
-  let rootFound = false;
-  let match;
-
-  while ((match = tagRe.exec(s)) !== null) {
-    const fullTag = match[0];
-    const tagName = match[1];
-    const isClosing = fullTag.startsWith('</');
-    const isSelfClosing = match[2] === '/';
-
-    if (isClosing) {
-      if (stack.length === 0) {
-        return { wellFormed: false, error: 'error on line 1: extra closing tag </' + tagName + '>' };
-      }
-      const open = stack.pop();
-      if (open !== tagName) {
-        return { wellFormed: false, error: 'error on line 1: opening and ending tag mismatch: ' + open + ' and ' + tagName };
-      }
-      if (stack.length === 0) rootFound = true;
-    } else {
-      // Opening or self-closing tag. Check for extra content after root.
-      if (stack.length === 0 && rootFound) {
-        return { wellFormed: false, error: 'error on line 1: extra content after root element' };
-      }
-      if (isSelfClosing) {
-        // Self-closing: complete element, mark rootFound if at root level.
-        if (stack.length === 0) rootFound = true;
-      } else {
-        stack.push(tagName);
-      }
-    }
-  }
-
-  if (stack.length > 0) {
-    return { wellFormed: false, error: 'error on line 1: unclosed tag <' + stack[stack.length - 1] + '>' };
-  }
-
-  return { wellFormed: true };
-};
-
-// Real-enough DOMParser. The previous one-liner returned `globalThis.document`,
-// so anything that did `new DOMParser().parseFromString(s, 'text/html')` and
-// then read `.body.innerHTML` mutated the LIVE page (jQuery 3.x's selector
-// feature-detect writes `<form></form>` and wiped real bodies). We parse the
-// input into a detached `<html>` element and wrap it so the common Document
-// API surface (body / head / documentElement / querySelector* / getElementById /
-// getElementsByTagName / getElementsByClassName / title / cloneNode) works.
-// Conservative XML well-formedness check. obscura has no XML parser, so this
-// only decides whether to surface a <parsererror> (it does not build an XML
-// tree). It flags clear structural errors — mismatched or unclosed tags,
-// multiple/no root elements, unterminated comment/CDATA/PI — and defaults to
-// "well-formed" whenever the scan is ambiguous, so valid XML is never falsely
-// flagged. Quoted attribute regions, comments, CDATA, PIs and the doctype are
-// skipped; a literal '<' in text (invalid in XML) reads as a bad tag.
-function _xmlWellFormed(src) {
-  const s = String(src);
-  const stack = [];
-  let rootsClosed = 0; // top-level elements fully closed (or self-closed)
-  let i = 0;
-  const n = s.length;
-  while (i < n) {
-    const lt = s.indexOf('<', i);
-    if (lt === -1) break;
-    i = lt;
-    if (s.startsWith('<!--', i)) { const e = s.indexOf('-->', i + 4); if (e === -1) return false; i = e + 3; continue; }
-    if (s.startsWith('<![CDATA[', i)) { const e = s.indexOf(']]>', i + 9); if (e === -1) return false; i = e + 3; continue; }
-    if (s.startsWith('<?', i)) { const e = s.indexOf('?>', i + 2); if (e === -1) return false; i = e + 2; continue; }
-    if (s.startsWith('<!', i)) { const e = s.indexOf('>', i + 2); if (e === -1) return false; i = e + 1; continue; }
-    // A start/end/self-closing tag: find its '>' while skipping quoted regions.
-    let j = i + 1, quote = null;
-    while (j < n) {
-      const c = s[j];
-      if (quote) { if (c === quote) quote = null; }
-      else if (c === '"' || c === "'") quote = c;
-      else if (c === '>') break;
-      j++;
-    }
-    if (j >= n) return false; // unterminated tag
-    const inner = s.slice(i + 1, j).trim();
-    i = j + 1;
-    if (!inner) return false;
-    if (inner[0] === '/') {
-      const name = inner.slice(1).trim().split(/\s/)[0];
-      if (stack.length === 0 || stack[stack.length - 1] !== name) return false;
-      stack.pop();
-      if (stack.length === 0) rootsClosed++;
-    } else if (inner[inner.length - 1] === '/') {
-      if (stack.length === 0) rootsClosed++;
-    } else {
-      const name = inner.split(/\s/)[0];
-      if (!name) return false;
-      stack.push(name);
-    }
-  }
-  return stack.length === 0 && rootsClosed === 1;
-}
-
-// The plain objects DOMParser and createHTMLDocument hand out for a parsed document (see
-// parseFromString). Document.prototype's members check for them (_shapeDetachedDocuments).
-const _detachedDocuments = _private(new WeakSet());
+// DOMParser: each parse makes a new document with no browsing context (_parsedDocs), parsed
+// natively: HTML by the HTML parser (scripts already started, declarative shadow roots left as
+// templates), XML by an XML parser that reports a malformed input with Chromium's
+// <parsererror> (XmlParsing.cs). Its URL is the creating document's (Chromium 141).
+const _DOM_PARSER_TYPES = ["text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml"];
 globalThis.DOMParser = class DOMParser {
   parseFromString(source, mimeType) {
-    const html = String(source ?? "");
-    const isXml = typeof mimeType === "string" && /xml/i.test(mimeType);
-    const root = document.createElement("html");
-
-    // For XML mime types, check well-formedness first (conservative: only
-    // clear errors like tag mismatch / extra root are flagged).  If the
-    // check fires, build a <parsererror> root so callers doing
-    // doc.querySelector('parsererror') get the same signal as in Chrome.
-    const xmlError = isXml ? _checkXmlWellFormed(html) : null;
-    const isParserError = xmlError && !xmlError.wellFormed;
-    if (isParserError) {
-      root.innerHTML = '<parsererror>' + xmlError.error + '</parsererror>';
-    } else {
-      // innerHTML parses children via html5ever fragment-parsing rules. Most
-      // HTML inputs start with `<!DOCTYPE>` / `<html>` / `<head>` etc.; the
-      // fragment parser strips the outer `<html>` and emits its head+body
-      // children, which is what callers want.
-      // A parsed document has no browsing context, so nothing in it is upgraded, as in
-      // Chromium (custom elements).
-      _ceInert++;
-      try { root.innerHTML = html; } catch (e) { /* leave empty on parse error */ }
-      finally { _ceInert--; }
+    if (arguments.length < 2) {
+      throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': 2 arguments required, but only " + arguments.length + " present.");
     }
-
-    // For XML mime types, surface a <parsererror> on clearly-malformed input so
-    // error-detection code (doc.querySelector('parsererror')) works, matching
-    // Chrome. obscura has no XML parser, so the tree stays HTML-parsed.
-    if (isXml && !_xmlWellFormed(html)) {
-      try {
-        root.innerHTML = '<parsererror xmlns="http://www.w3.org/1999/xhtml">This page contains the following errors:<div>error while parsing XML</div></parsererror>';
-      } catch (e) { /* ignore */ }
+    const markup = String(source);
+    const type = String(mimeType);
+    if (_arrayIndexOf(_DOM_PARSER_TYPES, type) < 0) {
+      throw new TypeError("Failed to execute 'parseFromString' on 'DOMParser': The provided value '" + type + "' is not a valid enum value of type SupportedType.");
     }
-
-    // Helper: depth-first walk to find an element by predicate.
-    const walk = (node, pred) => {
-      if (!node) return null;
-      if (node.nodeType === 1 && pred(node)) return node;
-      const children = node.children || [];
-      for (let i = 0; i < children.length; i++) {
-        const r = walk(children[i], pred);
-        if (r) return r;
-      }
-      return null;
-    };
-
-    const findByTagName = (name) => walk(root, n => n.tagName === name);
-
-    const docNode = {
-      _root: root,
-      nodeName: "#document",
-      nodeType: 9,
-      contentType: isXml ? (mimeType || "application/xml") : "text/html",
-      get documentElement() {
-        // For XML parsererror docs, return the <parsererror> child, not the
-        // <html> wrapper — matches Chrome's behavior.
-        if (isParserError) return root.firstElementChild;
-        return root;
-      },
-      get body() { return findByTagName("BODY"); },
-      get head() { return findByTagName("HEAD"); },
-      get title() {
-        const t = findByTagName("TITLE");
-        return t ? (t.textContent || "").replace(/[\t\n\f\r ]+/g, " ").trim() : "";
-      },
-      set title(value) {
-        let t = findByTagName("TITLE");
-        if (!t) {
-          let head = findByTagName("HEAD");
-          if (!head) {
-            head = document.createElement("head");
-            root.insertBefore(head, findByTagName("BODY"));
-          }
-          t = document.createElement("title");
-          head.appendChild(t);
-        }
-        t.textContent = String(value);
-      },
-      get firstChild() { return root; },
-      get lastChild() { return root; },
-      get children() { return [root]; },
-      get childNodes() { return [root]; },
-      // Document metadata the WHATWG interface exposes; DOMParser documents have
-      // URL about:blank, are already fully parsed, and carry no stylesheets.
-      get URL() { return "about:blank"; },
-      get documentURI() { return "about:blank"; },
-      get domain() { return _incumbentDocumentDomain(); },
-      set domain(value) { String(value); _throwDocumentDomainSecurityError(); },
-      get referrer() { return ""; },
-      get baseURI() { return "about:blank"; },
-      get compatMode() { return "CSS1Compat"; },
-      get characterSet() { return "UTF-8"; },
-      get charset() { return "UTF-8"; },
-      get inputEncoding() { return "UTF-8"; },
-      get readyState() { return "complete"; },
-      get styleSheets() { return { length: 0, item() { return null; }, [Symbol.iterator]: function* () {} }; },
-      get defaultView() { return null; },
-      get ownerDocument() { return null; },
-      createTreeWalker(r, ws, f) { return document.createTreeWalker(r || root, ws, f); },
-      createNodeIterator(r, ws, f) { return document.createNodeIterator(r || root, ws, f); },
-      querySelector(s) {
-        // For XML parsererror docs, check the root element as well —
-        // the <parsererror> is the documentElement, not a descendant.
-        return _qs(root, s) || (isParserError && root.matches(s) ? root : null);
-      },
-      querySelectorAll(s) { return _qsa(root, s); },
-      getElementById(id) {
-        return walk(root, n => n.getAttribute && n.getAttribute("id") === id);
-      },
-      getElementsByTagName(t) {
-        return _qsa(root, t);
-      },
-      getElementsByClassName(c) {
-        return _getElementsByClassName(root, c);
-      },
-      getElementsByName(n) {
-        return _qsa(root, `[name="${n}"]`);
-      },
-      createElement: (t) => document.createElement(t),
-      createElementNS: (ns, t) => document.createElement(t),
-      createTextNode: (t) => document.createTextNode(t),
-      createComment: (t) => document.createComment(t),
-      createDocumentFragment: () => document.createDocumentFragment(),
-      createRange: () => new Range(),
-      createEvent: (type) => document.createEvent(type),
-      createCDATASection: (data) => {
-        if (mimeType === "text/html") throw new DOMException("createCDATASection is not supported in HTML documents", "NotSupportedError");
-        const s = String(data);
-        if (s.indexOf("]]>") !== -1) throw new DOMException("CDATA section data must not contain ']]>'", "InvalidCharacterError");
-        return new CDATASection(+_dom("create_text_node", s));
-      },
-      createProcessingInstruction: (target, data) => {
-        const t = String(target), s = String(data);
-        if (!_isValidPITarget(t)) throw new DOMException("Invalid processing instruction target", "InvalidCharacterError");
-        if (s.indexOf("?>") !== -1) throw new DOMException("Processing instruction data must not contain '?>'", "InvalidCharacterError");
-        return new ProcessingInstruction(+_dom("create_text_node", s), t);
-      },
-      adoptNode: (n) => n,
-      importNode: (n) => n,
-      // Document-level node insertion. Detached docs from createHTMLDocument /
-      // createDocument back onto the same tree, so appending lands under the
-      // documentElement; enough for dom/common.js to build its Range fixtures.
-      appendChild: function (n) { try { root.appendChild(n); } catch (e) {} return n; },
-      removeChild: function (n) { try { root.removeChild(n); } catch (e) {} return n; },
-      insertBefore: function (n, ref) { try { root.insertBefore(n, ref); } catch (e) {} return n; },
-      _docType: null,
-      get doctype() { return this._docType; },
-      cloneNode: function (deep) {
-        return new DOMParser().parseFromString(root.outerHTML, mimeType);
-      },
-      contains(n) { return root.contains ? root.contains(n) : false; },
-      addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
-      // document.open/write/close on a document without a browsing context: the written
-      // markup replaces the document's contents when the parser closes. Port addition:
-      // without these, Document.prototype.open/write/close called on this object (as
-      // Transcend's airgap.js does on a createHTMLDocument sandbox) reached the page's
-      // own document and rewrote it.
-      open() { _writeBuffer = ""; _writeOpen = true; return docNode; },
-      write(...args) { if (!_writeOpen) docNode.open(); _writeBuffer += args.join(""); },
-      writeln(...args) { docNode.write(args.join("") + "\n"); },
-      close() {
-        if (!_writeOpen) return;
-        _writeOpen = false;
-        const markup = _writeBuffer;
-        _writeBuffer = "";
-        _ceInert++;
-        try { root.innerHTML = markup; } catch (e) { /* leave empty on parse error */ }
-        finally { _ceInert--; }
-      },
-    };
-    let _writeBuffer = "", _writeOpen = false;
-    _detachedDocuments.add(docNode);
-    return docNode;
+    const doc = _newParsedDoc(type, markup, type === "text/html" ? 'html' : 'xml');
+    try { doc._docURL = (_realmDocument || globalThis.document).URL; } catch (e) { /* about:blank */ }
+    return doc;
   }
 };
 globalThis.XMLSerializer = class XMLSerializer {
@@ -14839,13 +15022,10 @@ globalThis.XMLSerializer = class XMLSerializer {
       s += ">";
       return s;
     }
-    if (node.outerHTML !== undefined) return node.outerHTML;
-    if (node.nodeType === 9) {
-      let s = "";
-      if (node.doctype) s += this.serializeToString(node.doctype);
-      if (node.documentElement) s += node.documentElement.outerHTML;
-      return s;
-    }
+    // DOM Parsing's XML serialization, natively (DomTree.SerializeXml.cs). DEVIATION from
+    // crates/obscura-js/js/bootstrap.js, which answered outerHTML: an HTML serialization
+    // without the xmlns Chromium writes, and <a/> as <a></a>.
+    if (node._nid !== undefined && node.nodeType !== 2) return _domParse("outer_xml", node._nid) ?? "";
     if (node.nodeType === 3) return node.textContent || "";
     if (node.nodeType === 8) return "<!--" + (node.textContent || "") + "-->";
     return "";
@@ -24302,8 +24482,8 @@ _ifaceMethods(_ifaces.DOMImplementation, { createDocumentType: 3, createDocument
 
 // HTMLDocument and XMLDocument: the realm's document is an HTMLDocument (an XMLDocument
 // when the page is XML), whose prototype chain runs through Document.prototype. A
-// `new Document()` stays a Document, as in Chromium. DOMParser's and createHTMLDocument's
-// documents are still the shim's plain objects (a known gap).
+// `new Document()` stays a Document, as in Chromium; createHTMLDocument's and an HTML
+// DOMParser's are HTMLDocuments, the XML ones XMLDocuments (_registerParsedDoc).
 _ifaceIllegal('HTMLDocument', Document);
 _ifaceIllegal('XMLDocument', Document, globalThis.XMLDocument && globalThis.XMLDocument.prototype);
 const _htmlDocumentProto = _ifaces.HTMLDocument.prototype;
@@ -26199,72 +26379,35 @@ const _cdpHost = _objectFreeze({
   }
 })();
 
-// DOMParser's and createHTMLDocument's documents are plain objects (see parseFromString),
-// and Document.prototype's members act on the page's document whatever `this` is. A script
-// that calls them through the prototype on such a document
-// (`Object.getOwnPropertyDescriptor(Document.prototype, 'documentElement').get.call(doc)`,
-// `Document.prototype.write.call(doc, html)`, as Transcend's airgap.js does when it
-// sanitizes an innerHTML write: grammarly.com) read and rewrote the page itself. Port
-// addition: those members, and Node.prototype's that such a document carries itself, use
-// the document's own member when `this` is one, and throw "Illegal invocation" when it has
-// none. A node (anything with a node id) takes the original path at the cost of one
-// property read.
-(function _shapeDetachedDocuments() {
-  const isDetached = (o) => o !== null && typeof o === 'object' && o._nid === undefined && _detachedDocuments.has(o);
-  const own = (o, key) => {
-    const d = _getOwnPropertyDescriptor(o, key);
-    if (!d) throw new TypeError('Illegal invocation');
-    return d;
-  };
-  const wrap = (proto, key) => {
+// Document members that answer from the browsing context: on a secondary document (no
+// browsing context; _parsedDocs) they answer as Chromium 141 does there rather than for the
+// page. Port addition.
+(function _shapeParsedDocumentMembers() {
+  const getters = { fullscreenElement: null, fullscreenEnabled: false, fullscreen: false,
+    webkitFullscreenElement: null, webkitFullscreenEnabled: false, webkitIsFullScreen: false,
+    webkitCurrentFullScreenElement: null, pointerLockElement: null, pictureInPictureElement: null,
+    pictureInPictureEnabled: false, wasDiscarded: false, prerendering: false };
+  const methods = { elementFromPoint: () => null, elementsFromPoint: () => [], caretRangeFromPoint: () => null,
+    caretPositionFromPoint: () => null };
+  const proto = Document.prototype;
+  for (const key in getters) {
     const d = _getOwnPropertyDescriptor(proto, key);
-    if (!d || !d.configurable) return;
-    if (typeof d.value === 'function') {
-      const f = d.value;
-      const w = ({ [key](...args) {
-        if (isDetached(this)) {
-          const od = own(this, key);
-          if (typeof od.value !== 'function') throw new TypeError('Illegal invocation');
-          return _reflectApply(od.value, this, args);
-        }
-        return _reflectApply(f, this, args);
-      } })[key];
-      if (f.length !== w.length) _defineProperty(w, 'length', { value: f.length, configurable: true });
-      _defineProperty(proto, key, { value: _markNative(w) });
-      return;
-    }
-    const g = d.get, st = d.set;
-    const ng = g ? _getOwnPropertyDescriptor({ get [key]() {
-      if (isDetached(this)) {
-        const od = own(this, key);
-        if (od.get) return _reflectApply(od.get, this, []);
-        if ('value' in od) return od.value;
-        throw new TypeError('Illegal invocation');
-      }
-      return _reflectApply(g, this, []);
-    } }, key).get : undefined;
-    const ns = st ? _getOwnPropertyDescriptor({ set [key](v) {
-      if (isDetached(this)) {
-        const od = own(this, key);
-        if (od.set) { _reflectApply(od.set, this, [v]); return; }
-        throw new TypeError('Illegal invocation');
-      }
-      _reflectApply(st, this, [v]);
-    } }, key).set : undefined;
-    _defineProperty(proto, key, { get: ng ? _markNative(ng) : undefined, set: ns ? _markNative(ns) : undefined });
-  };
-  for (const proto of [Document.prototype]) {
-    const keys = _reflectOwnKeysAtBoot(proto);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      if (typeof key !== 'string' || key === 'constructor' || _stringCharAt(key, 0) === '_') continue;
-      wrap(proto, key);
-    }
+    if (!d || !d.get || !d.configurable) continue;
+    const g = d.get, answer = getters[key];
+    const ng = _getOwnPropertyDescriptor({ get [key]() {
+      return _isParsedDoc(this) ? answer : _reflectApply(g, this, []);
+    } }, key).get;
+    _defineProperty(proto, key, { get: _markNative(ng) });
   }
-  // Node.prototype's members a parsed document defines for itself.
-  for (const key of ['appendChild', 'removeChild', 'insertBefore', 'contains', 'cloneNode', 'firstChild',
-    'lastChild', 'childNodes', 'nodeName', 'nodeType', 'ownerDocument', 'baseURI']) {
-    if (_objectHasOwn(Node.prototype, key)) wrap(Node.prototype, key);
+  for (const key in methods) {
+    const d = _getOwnPropertyDescriptor(proto, key);
+    if (!d || typeof d.value !== 'function' || !d.configurable) continue;
+    const f = d.value, answer = methods[key];
+    const w = ({ [key](...args) {
+      return _isParsedDoc(this) ? answer() : _reflectApply(f, this, args);
+    } })[key];
+    _defineProperty(w, 'length', { value: f.length, configurable: true });
+    _defineProperty(proto, key, { value: _markNative(w) });
   }
 })();
 

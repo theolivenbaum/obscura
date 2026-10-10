@@ -409,6 +409,7 @@ public sealed partial class DomTree
             }
         }
 
+        UnionOwnerDocuments(collection, slots);
         _pins?.MarkRoots(collection);
 
         var candidates = 0;
