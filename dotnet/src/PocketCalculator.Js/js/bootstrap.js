@@ -582,6 +582,10 @@ let __dynScriptQueue = [];
 let __dynScriptBusy = false;
 let __dynClassicPending = 0;
 let __dynLoadDelayingPending = 0;
+// Every external dynamic script task that has not finished, and the generation of the
+// in-order queue's runner. Both exist for __obscura_redriveDynamicScripts below.
+const __dynLiveTasks = new Set();
+let __dynQueueGen = 0;
 Object.defineProperty(_hostVars, '__obscura_hasPendingDynamicScripts', {
   value: function() {
     return __dynClassicPending > 0 || __dynScriptBusy || __dynScriptQueue.length > 0;
@@ -653,48 +657,83 @@ _hostVars.__markParserScripts = function(nids) {
   for (const nid of nids || []) __obscuraCore.ops.op_script_mark_started(+nid);
 };
 async function __fetchDynClassicScript(task) {
-  let body;
-  if (task.url.startsWith('data:')) {
-    body = _decodeDataScriptUrl(task.url);
-  } else {
-    // internalLoad: the engine's own script load gets the body of a no-cors
-    // cross-origin response, which page fetch() only sees as opaque (04418a5).
-    const raw = await __obscuraCore.ops.op_fetch_url(
-      task.url, "GET", "{}", new Uint8Array(0), task.referrerArg || "", "no-cors", "same-origin", true
-    );
-    const parsed = _JSONparse(raw);
-    // The HTML script-fetch algorithm treats an unsuccessful HTTP response
-    // as a network error. Evaluating its response body is both observably
-    // unlike browsers and dangerous: JSON error payloads and diagnostic HTML
-    // must never become script source.
-    if (!(parsed.status >= 200 && parsed.status <= 299)) {
-      throw new Error('HTTP ' + (parsed.status || 0));
-    }
-    // DEVIATION from crates/obscura-js/js/bootstrap.js, which evaluates parsed.body: the
-    // host keeps the source (a cross-origin one never reaches this realm at all) and runs
-    // it itself through op_run_fetched_script, named by this token (SECURITY.md C3). A
-    // response without a token (only a stubbed op produces one) keeps the old path.
-    if (typeof parsed.bodyToken === 'number') return { token: parsed.bodyToken };
-    body = parsed.body;
+  if (task.url.startsWith('data:')) return _decodeDataScriptUrl(task.url);
+  // internalLoad: the engine's own script load gets the body of a no-cors
+  // cross-origin response, which page fetch() only sees as opaque (04418a5).
+  // The op's promise is kept so a redrive can read the settled response again.
+  const op = __obscuraCore.ops.op_fetch_url(
+    task.url, "GET", "{}", new Uint8Array(0), task.referrerArg || "", "no-cors", "same-origin", true
+  );
+  task.opPromise = op;
+  task.opSettled = false;
+  const settled = () => { if (task.opPromise === op) task.opSettled = true; };
+  op.then(settled, settled);
+  return __dynClassicScriptBody(await op);
+}
+function __dynClassicScriptBody(raw) {
+  const parsed = _JSONparse(raw);
+  // The HTML script-fetch algorithm treats an unsuccessful HTTP response
+  // as a network error. Evaluating its response body is both observably
+  // unlike browsers and dangerous: JSON error payloads and diagnostic HTML
+  // must never become script source.
+  if (!(parsed.status >= 200 && parsed.status <= 299)) {
+    throw new Error('HTTP ' + (parsed.status || 0));
   }
-  return body;
+  // DEVIATION from crates/obscura-js/js/bootstrap.js, which evaluates parsed.body: the
+  // host keeps the source (a cross-origin one never reaches this realm at all) and runs
+  // it itself through op_run_fetched_script, named by this token (SECURITY.md C3). A
+  // response without a token (only a stubbed op produces one) keeps the old path.
+  if (typeof parsed.bodyToken === 'number') return { token: parsed.bodyToken };
+  return parsed.body;
 }
 function __startDynClassicFetch(task) {
   // Attach both reactions immediately. An in-order script may finish fetching
   // before an earlier queue member; retaining a settled value avoids an
   // unhandled-rejection report while its execution turn is still blocked.
-  task.fetchResult = __fetchDynClassicScript(task).then(
+  // A redrive takes whichever settles first of the op it already started and a
+  // fresh one: the first may have settled with its reactions discarded, or may
+  // never settle, because ClearScript delivers an op's result inside whatever
+  // script is running and the termination can cut that delivery short.
+  // One known to have settled is read again without a second request.
+  const previous = task.opPromise;
+  let source;
+  if (previous && task.opSettled) {
+    source = previous.then(__dynClassicScriptBody);
+  } else {
+    const fresh = __fetchDynClassicScript(task);
+    source = previous
+      ? new Promise((resolve, reject) => {
+          previous.then(raw => resolve(__dynClassicScriptBody(raw)), reject);
+          fresh.then(resolve, reject);
+        })
+      : fresh;
+  }
+  task.fetchResult = source.then(
     body => ({ body }),
     error => ({ error }),
   );
 }
-async function __runDynScriptTask(task) {
+// DEVIATION from crates/obscura-js/js/bootstrap.js, whose dynamic script tasks are
+// plain promise chains: a task carries a generation, and a runner whose generation is
+// stale gives up at its next await without firing events or releasing counters. V8
+// discards every queued microtask when a watchdog terminates a turn that ran past its
+// budget, which Chromium never does, and a task whose continuation was queued at that
+// moment never ran again: nvidia.com's otBannerSdk.js was fetched in 85 ms and then
+// held the load event until the 30 s navigation cap. The host calls
+// __obscura_redriveDynamicScripts after such a termination; it starts each unfinished
+// task again under a new generation, and the task's script still runs once (executed).
+async function __runDynScriptTask(task, gen = task.gen || 0) {
+  if (task.finished) return;
+  let abandoned = false;
+  const stale = () => (abandoned = task.finished || (task.gen || 0) !== gen);
   try {
     if (task.isModule) {
       await import(task.url);
+      if (stale()) return;
     } else {
       if (!task.fetchResult) __startDynClassicFetch(task);
       const fetched = await task.fetchResult;
+      if (stale()) return;
       if (fetched.error) throw fetched.error;
       const body = fetched.body;
       if (body && typeof body === 'object') {
@@ -702,6 +741,8 @@ async function __runDynScriptTask(task) {
         // the same reason as below.
         await new Promise(resolve => {
           const execute = () => {
+            if (task.executed) { resolve(); return; }
+            task.executed = true;
             _hostVars.__currentScriptNid = task.nid;
             try { __obscuraCore.ops.op_run_fetched_script(body.token, task.url); }
             catch(e) { console.error('Dynamic script error (' + task.url + '):', e.message); }
@@ -710,6 +751,7 @@ async function __runDynScriptTask(task) {
           };
           if (_scheduleAfter(0, execute) === undefined) execute();
         });
+        if (stale()) return;
       } else if (body) {
         // A fetched async script is executed by a ScriptRunner task, not by
         // the fetch promise's microtask continuation. Besides matching event
@@ -718,6 +760,8 @@ async function __runDynScriptTask(task) {
         // parser script happened to trigger the microtask checkpoint.
         await new Promise(resolve => {
           const execute = () => {
+            if (task.executed) { resolve(); return; }
+            task.executed = true;
             _hostVars.__currentScriptNid = task.nid;
             try { (0, eval)(body); }
             catch(e) { console.error('Dynamic script error (' + task.url + '):', e.message); }
@@ -726,6 +770,7 @@ async function __runDynScriptTask(task) {
           };
           if (_scheduleAfter(0, execute) === undefined) execute();
         });
+        if (stale()) return;
       }
     }
     // Fire load via dispatchEvent only: it invokes the element's onload
@@ -733,37 +778,76 @@ async function __runDynScriptTask(task) {
     // off the element. Calling onload separately would double-fire it.
     try { _dispatch(task, new Event('load')); } catch(e) {}
   } catch(e) {
+    if (stale()) return;
     console.error('Dynamic script fetch error:', e.message);
     try { _dispatch(task, new Event('error')); } catch(ex) {}
   } finally {
-    if (task.delaysLoad) {
-      task.delaysLoad = false;
-      __dynLoadDelayingPending = Math.max(0, __dynLoadDelayingPending - 1);
-    }
+    if (!abandoned) __finishDynScriptTask(task);
   }
 }
-async function __runAsyncClassicScript(task) {
-  __dynClassicPending++;
-  try {
-    await __runDynScriptTask(task);
-  } finally {
+function __finishDynScriptTask(task) {
+  task.finished = true;
+  __dynLiveTasks.delete(task);
+  if (task.delaysLoad) {
+    task.delaysLoad = false;
+    __dynLoadDelayingPending = Math.max(0, __dynLoadDelayingPending - 1);
+  }
+  if (task.classicCounted) {
+    task.classicCounted = false;
     __dynClassicPending--;
   }
+}
+function __runAsyncClassicScript(task) {
+  // Released by __finishDynScriptTask, so a redriven task is counted once.
+  __dynClassicPending++;
+  task.classicCounted = true;
+  __runDynScriptTask(task);
 }
 async function __processDynScriptQueue() {
   if (__dynScriptBusy) return;
   __dynScriptBusy = true;
+  const gen = ++__dynQueueGen;
   // try/finally so the busy flag is always cleared even if a task throws
   // outside its own guard; otherwise the queue would wedge and silently
   // block every later module or explicitly in-order script on the page.
+  // The running task stays at the head until it finishes, so a redrive can
+  // start it again; a runner a redrive replaced leaves the flag to its successor.
   try {
     while (__dynScriptQueue.length > 0) {
-      await __runDynScriptTask(__dynScriptQueue.shift());
+      const task = __dynScriptQueue[0];
+      await __runDynScriptTask(task);
+      if (gen !== __dynQueueGen) return;
+      if (__dynScriptQueue[0] === task) __dynScriptQueue.shift();
     }
   } finally {
-    __dynScriptBusy = false;
+    if (gen === __dynQueueGen) __dynScriptBusy = false;
   }
 }
+function __redriveDynTask(task) {
+  task.gen = (task.gen || 0) + 1;
+  if (!task.isModule && task.fetchResult) __startDynClassicFetch(task);
+}
+Object.defineProperty(_hostVars, '__obscura_redriveDynamicScripts', {
+  value: function() {
+    for (const task of __dynLiveTasks) {
+      if (task.finished || __dynScriptQueue.includes(task)) continue;
+      __redriveDynTask(task);
+      __runDynScriptTask(task);
+    }
+    // Queued tasks wait on fetches started at insertion, which can be stranded the
+    // same way; the head may have finished with only the queue's own step lost.
+    while (__dynScriptQueue.length > 0 && __dynScriptQueue[0].finished) __dynScriptQueue.shift();
+    for (const task of __dynScriptQueue) __redriveDynTask(task);
+    if (__dynScriptBusy) {
+      __dynScriptBusy = false;
+      __dynQueueGen++;
+    }
+    if (__dynScriptQueue.length > 0) __processDynScriptQueue();
+  },
+  writable: false,
+  enumerable: false,
+  configurable: false,
+});
 // Resolve a resource URL (script src / link href) against <base href> or the
 // document URL, the way the inline dynamic-script path does. Guarded so a bad
 // base or href never throws into appendChild.
@@ -3525,6 +3609,7 @@ function __prepareInsertedScript(script) {
     // not turn already-prepared work into a post-load enhancement.
     task.delaysLoad = globalThis.document?.readyState !== 'complete';
     if (task.delaysLoad) __dynLoadDelayingPending++;
+    __dynLiveTasks.add(task);
     // A non-parser-inserted classic script is force-async unless script code
     // explicitly assigned `.async = false`. Keep that opt-out in insertion
     // order; default/async=true scripts fetch concurrently and execute as soon

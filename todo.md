@@ -2473,6 +2473,31 @@ them there. Measured: 6 of 12 runs of
 `ParserImagesLoadConcurrentlyWithoutBlockingTheEventLoop` before, 13 of 14 and
 then 12 of 12 after.
 
+### A dynamic script load is restarted after a watchdog termination
+
+DEVIATION from `crates/obscura-js` and its `bootstrap.js`, which lose the load the same way and
+never recover it. When a watchdog terminates a turn that ran past its budget, V8 discards every
+queued microtask, and ClearScript delivers an async op's result inside whatever script is
+running (its call-with-lock queue is serviced from a V8 interrupt), so a termination can also
+cut the delivery itself short and leave the op's promise unsettled. A dynamic script whose next
+step was in the queue never ran again, and one that delays the load event held navigation until
+its deadline. nvidia.com: a page task of forced layout reads runs past the 5.5 s task budget
+while OneTrust's `otBannerSdk.js` arrives (fetched in 85 ms), and one goto in two to seven took
+the full 30 s cap; the loss showed up both as an op promise that never settled and as a settled
+one whose reactions were gone. Chromium never terminates a task. Now
+`PocketCalculatorJsRuntime.CancelTermination` marks the runtime, the next JavaScript task calls
+`__obscura_redriveDynamicScripts` in each realm, and bootstrap.js starts every unfinished dynamic
+script task again under a new generation: a stale runner stops at its next await without
+firing events or releasing counters, the fetch result is read again from the settled op, or
+raced against a fresh request when the op is not known to have settled, the in-order queue is
+restarted at its head, and the script still runs once (`task.executed`). nvidia.com: 18 of 18
+gotos 13.5-16.6 s (one extra `otBannerSdk.js` request when the op had not settled). Pinned by
+`ADynamicScriptLoadSurvivesATerminatedMicrotaskCheckpoint` (Browser; async and in-order, both
+stranded without the redrive). Page promise chains lost to the same termination are not
+recovered, and an op whose delivery was cut short stays counted in the async-op tracker, so a
+settle waits out its budget after one; what makes the page task run 5 s at all is the forced
+layout cost (`clientWidth` ~55 ms a read on nvidia.com), which is the open layout work.
+
 ### An idle verdict during an explicit settle is confirmed against the page
 
 `PocketCalculatorJsRuntime.RunEventLoopUntilQuiescentAsync` no longer stops the moment `PumpTick`

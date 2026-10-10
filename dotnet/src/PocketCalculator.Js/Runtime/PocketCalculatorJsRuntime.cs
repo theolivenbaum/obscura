@@ -619,6 +619,55 @@ public sealed partial class PocketCalculatorJsRuntime
         // A rejection reported while the isolate was terminating could not be
         // delivered, so the shim stopped trying. The isolate is usable again.
         _shim.ResumeDelivery();
+
+        // The termination emptied V8's microtask queue; the next task restarts the
+        // dynamic script loads whose continuations were in it.
+        Volatile.Write(ref _redriveDynamicScripts, 1);
+    }
+
+    private int _redriveDynamicScripts;
+
+    /// <summary>
+    /// Restart the dynamic script tasks a watchdog termination may have stranded.
+    /// </summary>
+    /// <remarks>
+    /// DEVIATION from <c>crates/obscura-js</c>, which has the same loss and no recovery.
+    /// Terminating a turn makes V8 discard every queued microtask, so a script load whose
+    /// promise continuation was queued behind the long task never runs again, and one that
+    /// delays the load event holds navigation until its deadline (nvidia.com: a 30 s
+    /// goto behind an 85 ms fetch). Chromium never terminates a task, so nothing is lost
+    /// there. <c>__obscura_redriveDynamicScripts</c> in bootstrap.js starts each
+    /// unfinished task again from its settled fetch; each script still runs once.
+    /// Page promise chains lost the same way are not recovered.
+    /// </remarks>
+    private void RedriveDynamicScripts()
+    {
+        if (Interlocked.Exchange(ref _redriveDynamicScripts, 0) == 0 || _disposed)
+        {
+            return;
+        }
+
+        const string Redrive = "__obscura_host.vars.__obscura_redriveDynamicScripts?.();";
+        try
+        {
+            InvokeHostScript("<redrive-dynamic-scripts>", HostScript.WrapStatements(Redrive));
+        }
+        catch (JsRuntimeException)
+        {
+            // Nothing to restart, or the realm is going away.
+        }
+
+        foreach (var realm in _realms.ToArray())
+        {
+            try
+            {
+                realm.ExecuteHostScript(Redrive);
+            }
+            catch (Exception error) when (error is JsRuntimeException or ObjectDisposedException or InvalidOperationException)
+            {
+                // A frame realm torn down or failing here only skips its own restart.
+            }
+        }
     }
 
     // ------------------------------------------------------- script execution
@@ -630,6 +679,7 @@ public sealed partial class PocketCalculatorJsRuntime
     /// </summary>
     private void BeginJavaScriptTask()
     {
+        RedriveDynamicScripts();
         BeginAnimationTask();
         // Script observes the resources that landed since the last task, and misses the
         // last task created start loading (upstream 97ff86d). Two field reads when idle.
