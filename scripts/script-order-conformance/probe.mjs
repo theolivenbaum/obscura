@@ -177,6 +177,14 @@ new MutationObserver(rs => {
 <script>setTimeout(() => log('timeout0 at end of body'), 0); Promise.resolve().then(() => log('microtask at end of body')); log('last script');</script>
 </body></html>`,
 
+  // A heavy page for timing: 3000 sections, 60 inline scripts, 20 external scripts.
+  heavy: `<!doctype html><html><head>${HEAD}
+${Array.from({ length: 10 }, (_, i) => `<script src="${js('head' + i, 30)}"></script>`).join('')}
+</head><body>
+${Array.from({ length: 3000 }, (_, i) => `<section id=s${i}><h2>Section ${i}</h2><p>Lorem <b>ipsum</b> dolor <a href=#s${i}>sit</a> amet.</p>${i % 50 === 0 ? `<script>window.n=(window.n||0)+document.getElementsByTagName('section').length;</script>` : ''}${i % 300 === 0 ? `<script src="${js('body' + i, 20)}" defer></script>` : ''}</section>`).join('\n')}
+<script>log('end n=' + window.n)</script>
+</body></html>`,
+
   // grammarly.com's shape: a parser-blocking script at the top of the app root inserts
   // a dynamic script next to itself; the dynamic script removes it; the app's defer
   // scripts later check the root (hydration).
@@ -196,6 +204,7 @@ function startServer() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     const d = +(url.searchParams.get('d') || 0);
+    if (process.env.PROBE_REQLOG) console.error(`[req] ${Date.now() - servedAt} ${url.pathname}${url.searchParams.get('n') ? ' ' + url.searchParams.get('n') : ''}`);
     const reply = (type, body) => setTimeout(() => {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' });
       res.end(body);

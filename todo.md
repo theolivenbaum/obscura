@@ -6226,10 +6226,10 @@ definition has `disconnectedCallback`) make one `ce_candidates` crossing that wa
 natively. Pinned by `CustomElementReactionsTests` (Js) and `CustomElementStateTests` (Dom), whose
 expectations are Chromium 141's.
 
-Known differences: the port parses the whole document before running scripts, so an element
-that follows a defining `<script>` in the markup is upgraded by `define()` (its constructor sees
-its children and attributes) rather than constructed by the parser, and `document.write`'s
-elements are upgraded on insertion; `connectedMoveCallback` is read but `moveBefore` does not exist;
+Known differences: the parser does not construct a defined custom element itself; it stops
+right after inserting one and the realm upgrades it there (see "Scripts run while the document
+is parsed"), so its constructor sees no children, as in Chromium, but already sees its
+attributes and is connected; `connectedMoveCallback` is read but `moveBefore` does not exist;
 reactions are per realm, so an isolated world's DOM writes do not reach the main world's callbacks.
 
 ### Documents without a browsing context (dell.com)
@@ -6282,11 +6282,9 @@ imported template's content its own inert document); a CDATA section in parsed X
 (the tree has no CDATA node kind); DOMParser parses with scripting enabled, so `<noscript>`
 content is raw text; Range.cloneContents is still a stub; getComputedStyle on an element of
 such a document answers its inline style where Chromium answers ""; an `<img>` there reports
-complete false. grammarly.com: with airgap.js no longer pathological, its consent UI (ui.js)
-now finishes after Next.js hydration in the port, which leaves an extra dynamically inserted
-`<script>` in `#__next` and React reports #418 and renders on the client (Chromium runs ui.js
-during parsing, before hydration). The page renders the same; the script scheduling race is
-separate from this work. Pinned by `ParsedDocumentTests` (Js), `SecondaryDocumentTests` (Dom)
+complete false. grammarly.com's consent UI (ui.js) finishing after Next.js hydration (React
+#418/#423) was the script scheduling model, fixed by "Scripts run while the document is
+parsed". Pinned by `ParsedDocumentTests` (Js), `SecondaryDocumentTests` (Dom)
 and `ParsedDocumentPageTests` (Browser).
 
 ### Interface members off Element.prototype, CharacterData textContent, slots, window.origin

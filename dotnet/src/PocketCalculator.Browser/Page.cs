@@ -502,9 +502,7 @@ public sealed partial class Page : IDisposable
         // Thread the BrowserContext's proxy through to the ES-module loader and
         // op_fetch_url so dynamic imports and JS fetch() honour the configured
         // upstream proxy. A null proxy is a direct connection.
-        var initClock = System.Diagnostics.Stopwatch.StartNew();
         var rt = TakePrewarmedRuntime() ?? PocketCalculatorJsRuntime.WithBaseUrlAndProxy(UrlString(), Context.ProxyUrl);
-        if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[init] ctor {initClock.Elapsed.TotalMilliseconds:F1}");
         rt.State.AnimationClock = AnimationClock;
         rt.SetUrl(UrlString());
         rt.SetEncoding(Encoding);
@@ -548,9 +546,7 @@ public sealed partial class Page : IDisposable
             rt.SetDom(dom);
         }
 
-        if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[init] setters {initClock.Elapsed.TotalMilliseconds:F1}");
         rt.RunPageInit();
-        if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[init] pageinit {initClock.Elapsed.TotalMilliseconds:F1}");
         TryExecute(rt, "<device-metrics>", DevicePixelRatioScript());
 
         Js = rt;

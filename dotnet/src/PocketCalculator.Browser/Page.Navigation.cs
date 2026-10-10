@@ -529,7 +529,6 @@ public sealed partial class Page
         // Honor the response charset: HTTP Content-Type, then a <meta charset> sniff
         // in the first 1KB, then UTF-8. Without this every non-UTF-8 page came
         // through as replacement characters.
-        if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[nav] response {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}");
         (string bodyText, string encodingName) =
             ContentEncoding.DecodeResponseWithName(response.Body, response.ContentType());
         Encoding = encodingName;

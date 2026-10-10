@@ -70,8 +70,6 @@ public sealed partial class Page
         _scriptFetches.Clear();
         _scriptFetchSlots = new SemaphoreSlim(MaxConcurrentScriptFetches);
 
-        var traceClock = Stopwatch.StartNew();
-        void Trace(string what) { if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[load] {traceClock.Elapsed.TotalMilliseconds:F1} {what}"); }
         var dom = new DomTree();
         var parser = DocumentParser.Begin(dom, bodyText);
         StartSpeculativeScriptFetches(bodyText, cancellationToken);
@@ -83,10 +81,8 @@ public sealed partial class Page
             ? dom.TextContent(id)
             : string.Empty;
 
-        Trace("first chunk");
         Dom = dom;
         InitJs();
-        Trace("initjs");
         // Committed: the response is in and the document exists. A deadline from here on
         // leaves the page as it stands instead of failing it (RunWithNavigationDeadlineAsync).
         ReachReadiness(DocumentReadiness.Committed);
@@ -109,7 +105,6 @@ public sealed partial class Page
             js.ExecutePreloadScript(source);
         }
 
-        Trace("preloads");
         var runner = new DocumentScriptRunner(this, js, parser, moduleBudgetOverride: null, cancellationToken);
         js.State.ParserWriter = runner;
         try
@@ -472,7 +467,12 @@ public sealed partial class Page
             }
 
             await ParseAsync().ConfigureAwait(false);
+
+            // The images and fonts the parsed document names start loading now, in the
+            // background. DEVIATION from crates/obscura-browser, which waited up to a second for
+            // them before running any script; Chromium does not wait for them.
             _page.SpawnPendingRenderResources();
+
 
             // The end of the input arrives as a task of its own in Chromium (the network's
             // "finished loading"), so what the last scripts queued runs before readyState
@@ -599,7 +599,15 @@ public sealed partial class Page
         {
             if (_parser is { } parser)
             {
-                return parser.Run(ParserTokenBudget, out script);
+                // Under the isolate lock (IsolateLock): page script an op completion delivers on
+                // another thread must not run while the parser changes the tree.
+                (ParserStop Stop, NodeId Script) step = _js.State.IsolateLock.Run(() =>
+                {
+                    ParserStop stop = parser.Run(ParserTokenBudget, out NodeId found);
+                    return (stop, found);
+                });
+                script = step.Script;
+                return step.Stop;
             }
 
             if (_preparsed!.TryDequeue(out script))
@@ -623,10 +631,14 @@ public sealed partial class Page
 
             try
             {
-                while (parser.Run(0, out _) != ParserStop.Finished)
+                _js.State.IsolateLock.Run(() =>
                 {
-                }
+                    while (parser.Run(0, out _) != ParserStop.Finished)
+                    {
+                    }
 
+                    return 0;
+                });
                 HandleInserted(parser.TakeInsertedNodes(), notifyRealm: true);
             }
             catch (Exception error) when (error is not OutOfMemoryException)
@@ -807,7 +819,6 @@ public sealed partial class Page
             {
                 return;
             }
-            if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[prep] {info.Kind} {info.Src} async={info.IsAsync}");
 
             switch (info.Kind)
             {
@@ -980,7 +991,6 @@ public sealed partial class Page
             ApplyLoadedSheets();
             while (!TimedOut() && _asyncLoaded.TryDequeue(out PreparedScript? ready))
             {
-                if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[async] {ready.Info.Src} {Environment.StackTrace}");
                 _asyncScripts.Remove(ready);
                 ExecuteClassic(ready, parserBlocking: false);
                 NotifyParserProgress();
@@ -1028,7 +1038,11 @@ public sealed partial class Page
                     ? dom.Descendants(id).Count
                     : 0);
             ulong shortMs = _moduleBudgetOverride ?? PageHelpers.EnvUlong("POCKETCALCULATOR_MODULE_BUDGET_MS", 3_000);
-            ulong moduleBudgetMs = _moduleBudgetOverride is not null || bodyNodes > 50 ? shortMs : _scriptDeadlineMs;
+            // While the document is still being parsed its body says nothing yet: an async module
+            // that runs then gets the short budget, as it did when the whole document was parsed
+            // before any script ran.
+            bool parsing = _parser is { IsFinished: false };
+            ulong moduleBudgetMs = _moduleBudgetOverride is not null || parsing || bodyNodes > 50 ? shortMs : _scriptDeadlineMs;
             ulong prepareBudgetMs = Math.Min(moduleBudgetMs, pageMs);
             long prepareStarted = Stopwatch.GetTimestamp();
             PreparedModule prepared;
@@ -1086,7 +1100,6 @@ public sealed partial class Page
         /// </summary>
         private async Task WaitAsync(Func<bool> ready, Task? wake)
         {
-            if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[wait] start {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} timers={_js.NextTimerDelayMs} ready={ready()}");
             while (true)
             {
                 _ct.ThrowIfCancellationRequested();
@@ -1104,7 +1117,6 @@ public sealed partial class Page
 
                 TaskCompletionSource signal = _wake;
                 bool progressed = _js.RunDueTasks();
-                if (Environment.GetEnvironmentVariable("PC_TRACE") == "1") Console.Error.WriteLine($"[wait] turn {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} progressed={progressed} timers={_js.NextTimerDelayMs}");
                 ServiceReady();
                 if (ready())
                 {
